@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_push_save_ack
+# pinned latest def: 20260921060000_production_intake_durability.sql:251 (create) 2 definition(s); latest by filename
+# verdict: IDENTICAL
+

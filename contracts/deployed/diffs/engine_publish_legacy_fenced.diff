@@ -1,0 +1,4 @@
+# normalize_diff.py --name engine_publish_legacy_fenced
+# pinned latest def: 20260921103000_server_publication_conflict_transport.sql:14 (create) 3 definition(s); latest by filename
+# verdict: IDENTICAL
+

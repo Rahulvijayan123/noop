@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_register_push_device
+# pinned latest def: 20260921060000_production_intake_durability.sql:49 (create) 1 definition(s); latest by filename
+# verdict: IDENTICAL
+

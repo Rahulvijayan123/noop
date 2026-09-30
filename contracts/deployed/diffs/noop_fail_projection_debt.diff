@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_fail_projection_debt
+# pinned latest def: 20260918040000_production_projection_debt.sql:106 (create) 1 definition(s); latest by filename
+# verdict: IDENTICAL
+

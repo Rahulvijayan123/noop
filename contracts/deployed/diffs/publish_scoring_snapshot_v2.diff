@@ -1,0 +1,4 @@
+# normalize_diff.py --name publish_scoring_snapshot_v2
+# pinned latest def: 20260918010000_production_scoring_durability.sql:228 (create) 1 definition(s); latest by filename
+# verdict: IDENTICAL
+

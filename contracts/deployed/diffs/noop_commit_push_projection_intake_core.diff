@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_commit_push_projection_intake_core
+# pinned latest def: 20260918040000_production_projection_debt.sql:153 (rename) renamed from noop_commit_push_projection (only pre-rename def) at 20260922120000_intake_service_contract.sql:237
+# verdict: IDENTICAL
+

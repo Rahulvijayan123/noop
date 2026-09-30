@@ -18,6 +18,10 @@ final class B2Storage {
     private let keyID: String
     private let applicationKey: String
     private let bucket: String
+
+    /// The bucket this worker writes derived archives into. Exposed so lanes can
+    /// pass the exact bucket to the DB completion contracts instead of hardcoding.
+    var bucketName: String { bucket }
     private let session: URLSession
     private var auth: (apiUrl: String, token: String, downloadURL: String, accountID: String, validUntil: Date)?
     private var bucketID: String?
@@ -91,7 +95,12 @@ final class B2Storage {
         if let err { throw Error(message: "b2 download \(objectKey) failed: \(err)") }
         guard let http = respOpt as? HTTPURLResponse else { throw Error(message: "b2 download: no response") }
         if http.statusCode == 404 {
-            throw Error(message: "object_missing")
+            // A typed error the lanes can classify. Previously this threw
+            // B2Storage.Error(message: "object_missing"), so the
+            // `catch let e as WorkerError { if case .objectMissing }` branches in
+            // ProjectionLane/VerificationLane were dead code and a not-yet-arrived
+            // object was reported as a generic failure.
+            throw WorkerError.objectMissing
         }
         guard http.statusCode == 200, let data = dataOpt else {
             if http.statusCode == 401 { auth = nil }

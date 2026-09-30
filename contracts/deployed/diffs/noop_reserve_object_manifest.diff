@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_reserve_object_manifest
+# pinned latest def: 20260923180000_object_representation_identity.sql:39 (create) 3 definition(s); latest by filename
+# verdict: IDENTICAL
+

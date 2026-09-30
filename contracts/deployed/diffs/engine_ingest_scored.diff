@@ -1,0 +1,4 @@
+# normalize_diff.py --name engine_ingest_scored
+# pinned latest def: 20260927020000_restore_fenced_baseline_serializer.sql:163 (create) 4 definition(s); latest by filename
+# verdict: IDENTICAL
+
