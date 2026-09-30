@@ -205,6 +205,12 @@ final class Collector {
                "Collector.ingest: threaded ParsedFrame != fresh parse (#47 parse-once invariant)")
         #endif
         recordGroundTruthImu(frame)
+        // Cloud capture at the NOTIFICATION BOUNDARY (spec F2): additive, non-throwing and
+        // non-blocking, and a no-op unless cloud mode is running. It is placed BEFORE the buffers
+        // below so the 64-frame / 30-second cadence cannot decide cloud durability, and it cannot
+        // change what this method does: a cloud failure never stops or delays collection.
+        CloudCapture.record(frame: parsed, deviceId: deviceId, clockRef: clockRef, family: family,
+                            receivedAtMs: Int(Date().timeIntervalSince1970 * 1000))
         buffer.append((frame, parsed))
         // Pre-clock only: bound memory if GET_CLOCK never lands while data keeps flowing.
         // Drop OLDEST beyond the cap (keep most recent). Post-clock this branch is skipped —
@@ -289,6 +295,12 @@ final class Collector {
     /// these carry a wall-clock `ts` directly. Auto-flushes ~every 30 readings (~30s).
     func ingestStandardHR(hr: Int, rr: [Int], contact: StandardHRContact? = nil,
                           family: DeviceFamily? = nil, at ts: Int) {
+        // Cloud capture at the notification boundary, before the 30-row buffer below. Standard
+        // 0x2A37 is the always-on stream and does NOT pass through the proprietary raw outbox, so it
+        // is journaled explicitly rather than being left to the custom-frame path.
+        CloudCapture.recordStandardHR(hr: hr, rr: rr, contact: contact, family: family, at: ts,
+                                      deviceId: deviceId,
+                                      receivedAtMs: Int(Date().timeIntervalSince1970 * 1000))
         let acceptedHR = (30...220).contains(hr) ? 1 : 0
         let acceptedRR = rr.filter { (250...3000).contains($0) }
         if acceptedHR == 1 { stdHR.append(HRSample(ts: ts, bpm: hr)) }
