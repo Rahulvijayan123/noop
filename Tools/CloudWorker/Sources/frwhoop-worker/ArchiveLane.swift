@@ -115,7 +115,7 @@ struct ArchiveLane {
         // Mark the outbox row done.
         try db.exec("""
         UPDATE public.physiology_archive_outbox
-        SET status='done', uploaded_at=now(), verified_at=now(), content_sha256='$1',
+        SET status='verified', uploaded_at=now(), verified_at=now(), content_sha256='$1',
             lease_token=NULL, lease_expires_at=NULL, last_error=NULL
         WHERE id='$2'
         """.replacingOccurrences(of: "$1", with: contentSHA).replacingOccurrences(of: "$2", with: id))
