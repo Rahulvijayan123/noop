@@ -110,7 +110,7 @@ struct ArchiveLane {
               $7::text, 'server_verified', $8::text, 'ready', 'derived', now()+interval '90 days',
               now(), now(), NULL, NULL)
             ON CONFLICT (object_key) DO NOTHING
-            """, [uid, dev, key, String(compressed.count), String(raw.count),
+            """, [uid, dev, key, period, String(compressed.count), String(raw.count),
                   wireSHA, version])
         // Mark the outbox row done.
         try db.exec("""
