@@ -82,12 +82,15 @@ struct ProjectionLane {
             // Without a verified receipt the object is not projectable yet.
             throw WorkerError.retryable("projection claim without verified receipt")
         }
+        guard let receiptKey = receipt["objectKey"] as? String else {
+            throw WorkerError.retryable("projection claim receipt without objectKey")
+        }
 
         // 2. Download + wire checksum.
         let wire = try storage.download(objectKey: objectKey)
         let wireSHA = sha256Hex(wire)
-        if let expectedWire = manifest["wire_sha256"] as? String, !expectedWire.isEmpty,
-           wireSHA != expectedWire {
+        guard let expectedWire = manifest["wire_sha256"] as? String, !expectedWire.isEmpty,
+              wireSHA == expectedWire else {
             _ = try? db.callFunctionForJSON(
                 "SELECT public.noop_fail_projection_debt($1::uuid, $2::uuid)::text",
                 [objectId, leaseToken])
@@ -109,11 +112,27 @@ struct ProjectionLane {
 
         // 4. Integrity: the decoded body must match the verified content sha.
         let computedBodySHA = sha256Hex(body)
-        if computedBodySHA != contentSha {
+        guard computedBodySHA == contentSha else {
             _ = try? db.callFunctionForJSON(
                 "SELECT public.noop_fail_projection_debt($1::uuid, $2::uuid)::text",
                 [objectId, leaseToken])
             throw WorkerError.malformed("content checksum mismatch for \(objectKey)")
+        }
+
+        // 4b. Server re-verification: objects whose receipt was published with
+        // a client-claimed digest must be re-registered server-side before the
+        // projection commit accepts them. The bytes were just re-verified
+        // above, so this re-publishes the immutable receipt with
+        // sha256_source=server_verified and a matching signal window.
+        let shaSource = (manifest["sha256_source"] as? String) ?? ""
+        if shaSource != "server_verified" {
+            let wireShaFromReceipt = receipt["wireSha256"] as? String ?? expectedWire
+            let ub = (receipt["uncompressedBytes"] as? Int) ?? body.count
+            _ = try db.callFunctionForJSON("""
+                SELECT public.noop_commit_object_receipt(
+                    $1::uuid, $2::uuid, $3::text, $4::text, $5::text, $6::bigint, $7::bigint)::text
+                """, [userId, objectId, receiptKey, wireShaFromReceipt, contentSha,
+                      String(wire.count), String(ub)])
         }
 
         let batch = try PushBatch.decode(ndjson: body)
