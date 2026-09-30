@@ -187,6 +187,125 @@ struct ActiveWorkoutIndicatorSection: View {
     }
 }
 
+
+// MARK: - Cloud server results (cloud mode)
+
+/// The server-authoritative day summary shown on Today in cloud mode.
+///
+/// In cloud mode the phone does not score: the physiological numbers come from the
+/// hosted worker and are read through `ServerScoreRepository`'s revision-aware cache
+/// (cached immediately, refreshed in the background). Freshness is labelled, never
+/// fabricated: a `noData` or `unavailable` day shows its honest status.
+struct ServerScoreTodaySection: View {
+    @EnvironmentObject var repo: Repository
+    @State private var snapshot: ServerScoreSnapshot?
+    @State private var freshness: String?
+    @State private var loadFailed = false
+
+    private var dayKey: String {
+        // The same day key Today uses (local calendar).
+        let key = snapshot?.day ?? ""
+        return key
+    }
+
+    var body: some View {
+        NoopCard(tint: StrandPalette.metricRose) {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(spacing: NoopMetrics.space2) {
+                    Circle()
+                        .fill(StrandPalette.metricRose)
+                        .frame(width: NoopMetrics.space2, height: NoopMetrics.space2)
+                        .accessibilityHidden(true)
+                    Text("SERVER RESULTS")
+                        .font(StrandFont.overline)
+                        .tracking(StrandFont.overlineTracking)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer(minLength: NoopMetrics.space2)
+                    if let freshness {
+                        Text(freshness)
+                            .font(StrandFont.overline)
+                            .tracking(StrandFont.overlineTracking)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                }
+                content
+            }
+        }
+        .task { await load() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch snapshot?.status {
+        case .populated:
+            VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                ForEach(snapshot?.features ?? [], id: \.name) { feature in
+                    HStack {
+                        Text(featureDisplayName(feature.name))
+                            .font(StrandFont.body)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Spacer(minLength: NoopMetrics.space2)
+                        Text(feature.status)
+                            .font(StrandFont.bodyNumber)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                    }
+                }
+            }
+        case .noData:
+            Text("No data yet — the server scores this day once enough verified input arrives.")
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textSecondary)
+        case .unavailable:
+            Text(loadFailed ? "Server results unavailable — showing cached data when the server is reachable."
+                            : "Server results pending.")
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textSecondary)
+        case nil:
+            Text("Server results pending.")
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textSecondary)
+        }
+    }
+
+    private func featureDisplayName(_ name: String) -> String {
+        switch name.lowercased() {
+        case "hrv", "hrv_sleep": return "HRV"
+        case "sleep": return "Sleep"
+        case "recovery", "charge": return "Recovery"
+        case "strain", "effort": return "Strain"
+        case "respiration": return "Respiration"
+        default: return name
+        }
+    }
+
+    private func load() async {
+        guard let repository = CloudPushRuntime.shared.scoreRepository(),
+              CloudPushIdentityStore.current() != nil else { return }
+        // The readback route resolves the owner's active device; the app's own
+        // device id ("my-whoop") matches what ingest registers it as.
+        let deviceId = "my-whoop"
+        let day = dayKeyForToday()
+        // Cache-first: the cached snapshot renders immediately.
+        snapshot = repository.cachedDay(day: day, deviceId: deviceId)
+        freshness = repository.freshnessLabel(for: snapshot)
+        // Then refresh from the server in the background.
+        do {
+            let fresh = try await repository.refresh(day: day, deviceId: deviceId)
+            snapshot = fresh
+            freshness = repository.freshnessLabel(for: fresh)
+        } catch {
+            loadFailed = true
+        }
+    }
+
+    private func dayKeyForToday() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+}
+
 struct TodayView: View {
     @AppStorage(DayCycleMode.storageKey) private var dayCycleModeRaw = DayCycleMode.sleepOnset.rawValue
     private var dayCycleMode: DayCycleMode { DayCycleMode.persisted(dayCycleModeRaw) }
@@ -1475,6 +1594,9 @@ struct TodayView: View {
                 // battery (right). Replaces the big title + the full-width day-nav pill (WHOOP-style).
                 todayTopBar
                 HealthAlertBanner()
+                if CloudPushSettings.isEnabled {
+                    ServerScoreTodaySection()
+                }
                 #else
                 HealthAlertBanner()
                 // Browse past days: chevrons + a date jump capped at today (no future days). Anchored to
