@@ -1,73 +1,75 @@
-# frwhoop-worker deployment
+# frwhoop-worker deployment (reproducible)
 
-One DigitalOcean Droplet (Ubuntu 24.04), one systemd service, outbound-only.
+One DigitalOcean Droplet, one systemd service, outbound-only, TLS-verified.
 
-## Provision (once)
+## Live deployment reference
 
-```bash
-# Region near the Supabase project (us-west-2 -> sfo3), 4 vCPU / 8 GB.
-doctl compute droplet create frwhoop-worker-2 \
-  --region sfo3 --size s-4vcpu-8gb --image ubuntu-24-04-x64 \
-  --ssh-keys <key-id> --ipv6 --monitoring --tag-names frwhoop,worker
+- Droplet `frwhoop-worker-2` (sfo3, 4 vCPU/8 GB, Ubuntu 24.04, IPv6)
+- Service `frwhoop-worker.service` (user `frwhoop`, `ProtectHome=true`,
+  `HOME=/var/lib/frwhoop`, restart always, SIGTERM graceful stop)
+- Code `/opt/noop` (release artifacts under `Tools/CloudWorker/.build/release`)
+- Secrets `/etc/frwhoop/worker.env` (0600 root) + `/etc/frwhoop/supabase-ca-chain.pem` (0644)
+- DB: `sslmode=verify-full` against the pinned Supabase CA chain — the worker
+  refuses plaintext (`FRWHOOP_ALLOW_INSECURE_DB=1` is local-dev only). Verified
+  live: `pg_stat_ssl` shows `TLSv1.3` for the worker's backends.
 
-# Base packages
-apt-get update && apt-get install -y \
-  build-essential clang curl unzip git pkg-config \
-  libpq-dev zlib1g-dev libssl-dev zstd python3
-
-# Swift 6 (x86_64 tarball from swift.org; pin the exact version)
-curl -fsSLo /opt/swift.tar.gz \
-  https://download.swift.org/swift-6.0.3-release/ubuntu2404/swift-6.0.3-RELEASE/swift-6.0.3-RELEASE-ubuntu24.04.tar.gz
-tar xzf /opt/swift.tar.gz -C /opt && ln -sf /opt/swift-6.0.3-RELEASE-ubuntu24.04/usr/bin/* /usr/local/bin/
-
-# Private snapshot-enabled SQLite (GRDB needs sqlite3_snapshot_*; distro builds omit it)
-mkdir -p /opt/sqlite && cd /opt/sqlite
-curl -fsSLo sqlite.zip https://sqlite.org/2026/sqlite-amalgamation-3530400.zip
-unzip -p sqlite.zip sqlite-amalgamation-3530400/sqlite3.c > sqlite3.c
-unzip -p sqlite.zip sqlite-amalgamation-3530400/sqlite3.h > sqlite3.h
-echo "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189  sqlite3.c" | sha256sum --check
-cc -shared -fPIC -DSQLITE_ENABLE_SNAPSHOT=1 sqlite3.c -o libsqlite3.so.0
-ln -sf libsqlite3.so.0 libsqlite3.so
-```
-
-## Build
+## Cold provision (run once per host)
 
 ```bash
-git clone -b cloud-worker https://github.com/Rahulvijayan123/noop.git /opt/noop
-cd /opt/noop/Tools/CloudWorker
-swift build -c release
+sudo deploy/provision.sh          # or copy step-by-step below
 ```
+
+Steps (what provision.sh automates):
+1. Packages: `build-essential clang curl unzip git pkg-config libpq-dev
+   zlib1g-dev libssl-dev libzstd-dev postgresql-client`
+2. Swift 6.0.3 (pinned tarball + sha256) from swift.org ubuntu2404 x86_64
+3. Private snapshot-enabled SQLite (GRDB needs `sqlite3_snapshot_*`;
+   distro builds omit it): pinned amalgamation 3530400 + sha256 check,
+   built with `-DSQLITE_ENABLE_SNAPSHOT=1` at `/opt/sqlite`
+4. `frwhoop` service user + `/etc/frwhoop` + `/var/lib/frwhoop` (HOME)
+5. Unit install + `systemd-analyze verify`
+
+## Build + release
+
+```bash
+# From a clean checkout of the pinned revision:
+tar czf worker.tar.gz --exclude="Tools/CloudWorker/.build" Tools/CloudWorker contracts deploy
+scp worker.tar.gz root@HOST:/opt/
+ssh root@HOST 'rm -rf /opt/noop/Tools/CloudWorker /opt/noop/contracts /opt/noop/deploy &&
+  tar xzf /opt/worker.tar.gz -C /opt/noop &&
+  chown -R frwhoop:frwhoop /opt/noop/Tools/CloudWorker &&
+  cd /opt/noop/Tools/CloudWorker &&
+  LD_LIBRARY_PATH=/opt/sqlite swift build -c release -Xcc -I/opt/sqlite -Xlinker -L/opt/sqlite &&
+  swift test -Xcc -I/opt/sqlite -Xlinker -L/opt/sqlite'
+```
+
+Versioned immutable releases (recommended): build to
+`.build/release-<git-sha>` and atomically switch a symlink; keep the previous
+artifact for rollback. `systemctl restart frwhoop-worker` only after tests pass.
 
 ## Configure
 
-```bash
-useradd -r -s /usr/sbin/nologin frwhoop
-install -m 600 /dev/null /etc/frwhoop/worker.env
-# Fill from your secret store (never commit):
-#   FRWHOOP_DB_URL=postgres://...@db.<project>.supabase.co:5432/postgres
-#   FRWHOOP_B2_KEY_ID=...
-#   FRWHOOP_B2_APPLICATION_KEY=...
-#   FRWHOOP_B2_BUCKET=FRWHOOP
-#   FRWHOOP_WORKER_NAME=frwhoop-worker-2
-#   FRWHOOP_SOURCE_REVISION=<git sha>
-#   FRWHOOP_ALGORITHM_VERSION=frwhoop-server-1
-cp deploy/frwhoop-worker.service /etc/systemd/system/
-systemctl daemon-reload && systemctl enable --now frwhoop-worker
-```
+`/etc/frwhoop/worker.env` (names-only template: `deploy/worker.env.example`):
+DB URL + `FRWHOOP_DB_SSLMODE=verify-full` + `FRWHOOP_DB_SSLROOTCERT=/etc/frwhoop/supabase-ca-chain.pem`,
+B2 key id + application key, ingest secret, worker name, source revision, lane budgets.
 
-## Operate
+## Operate / verify
 
 ```bash
 systemctl status frwhoop-worker
 journalctl -u frwhoop-worker -f
-# Heartbeat + queue depth in Postgres:
-psql "$FRWHOOP_DB_URL" -c "select * from scoring_service_heartbeats;"
-psql "$FRWHOOP_DB_URL" -c "select state, count(*) from noop_projection_debt group by 1;"
+# TLS: expect TLSv1.3 rows for the worker:
+psql "$FRWHOOP_DB_URL" -c "select pid,ssl,version from pg_stat_ssl join pg_stat_activity using (pid) where application_name like '%frwhoop%';"
+# Queues:
+psql "$FRWHOOP_DB_URL" -c "select state,count(*) from noop_projection_debt group by 1;"
 ```
 
 ## Recovery
 
-- The worker is stateless: every claim is a leased Postgres transaction; a kill
-  mid-job just expires the lease and redelivers.
-- Rebuild from the verified cloud inputs: the worker cache is disposable.
-- Rollback: `git checkout <previous-sha> && swift build -c release && systemctl restart frwhoop-worker`.
+- Stateless worker: every claim is a leased transaction; restarts are safe.
+- DB outage: the worker reconnects with capped backoff (or exits for systemd
+  restart) — see PostgresClient reconnection.
+- Rollback: `git checkout <previous-sha>` + rebuild, or restore the retained
+  previous release artifact.
+- Supabase DB backups and B2 object retention are SEPARATE concerns; a Droplet
+  snapshot is not a raw-data backup.

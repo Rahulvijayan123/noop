@@ -10,19 +10,24 @@ Group=frwhoop
 WorkingDirectory=/opt/noop/Tools/CloudWorker
 EnvironmentFile=/etc/frwhoop/worker.env
 Environment=LD_LIBRARY_PATH=/opt/sqlite
+Environment=HOME=/var/lib/frwhoop
+# Versioned immutable release: atomically switch the symlink, retain the
+# previous artifact for rollback (see deploy/README.md). The current stable
+# path is .build/release/frwhoop-worker.
 ExecStart=/opt/noop/Tools/CloudWorker/.build/release/frwhoop-worker
-# The worker is stateless and outbound-only: leases in Postgres make restarts safe.
 Restart=always
 RestartSec=5
-# Graceful stop: lanes finish the current transaction then exit.
+# Graceful stop: the worker stops claiming new work and finishes/relinquishes
+# the current claim. Kept under the DB statement timeout (120s) so a stuck
+# transaction cannot outlive the stop budget; storage waits are bounded by the
+# same deadline in-process.
 KillSignal=SIGTERM
-TimeoutStopSec=30
-# Hardening: outbound-only, no inbound sockets opened by the unit.
+TimeoutStopSec=90
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/noop/Tools/CloudWorker/.build
+ReadWritePaths=/opt/noop/Tools/CloudWorker/.build /var/lib/frwhoop
 
 [Install]
 WantedBy=multi-user.target
