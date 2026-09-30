@@ -376,6 +376,16 @@ with q as (
     from public.scoring_jobs_v2 j
    where j.completed_revision < j.input_revision and not j.dead_letter
      and j.not_before <= now() and (j.lease_until is null or j.lease_until <= now())
+     -- Same gates the claim applies (audit P1-7): invalidation-blocked and
+     -- disabled-algorithm rows are SUPPRESSED, not claimable, so they must
+     -- not count as backlog here (the previous predicate reported a false
+     -- 8.2-day backlog while every row was invalidation-suppressed).
+     and exists(select 1 from public.scoring_algorithms_v2 a
+                  where a.algorithm_version = j.algorithm_version and a.enabled)
+     and not exists(select 1 from public.scoring_invalidations_v2 i
+                  where i.user_id = j.user_id and i.device_id = j.device_id
+                    and i.algorithm_version = j.algorithm_version
+                    and j.day between i.next_day and i.through_day)
   union all
   select 'projection', count(*), min(p.not_before)
     from public.noop_projection_debt p

@@ -98,35 +98,59 @@ struct VerificationLane {
     /// Single parameterized scan for pending arrivals: uploaded-but-unverified
     /// raw objects, oldest first, bounded by the budget. Values are passed as
     /// $n parameters (never string-interpolated).
-    static let candidateSQL = """
-    SELECT id::text, user_id::text, device_id::text, object_class, object_kind,
-           provider, bucket, object_key, upload_object_key, period_day::text,
-           compressed_bytes::text, uncompressed_bytes::text, content_type, format,
-           compression, sha256, status, wire_sha256, digest_scope,
-           durability_receipt::text, sample_count::text, start_at::text,
-           end_at::text, created_at::text
-    FROM public.object_manifests
-    WHERE object_class = 'raw'
-      AND status = 'ready'
-      AND (durability_receipt IS NULL OR durability_receipt->>'state' IS DISTINCT FROM 'verified_indexed')
-      AND coalesce(compressed_bytes, 0) > 0
-      AND object_key IS NOT NULL
-      AND object_kind IS NOT NULL
-    ORDER BY created_at
-    LIMIT $1::int
-    """
+    // Cursor-parameterized scan (audit P1-6): the previous head-first scan
+    // (ORDER BY created_at, no cursor) re-served the same oldest deferred
+    // candidates forever while newer verifiable arrivals never progressed.
+    // The cursor advances past processed rows and wraps at exhaustion.
+    static func candidateSQL(afterCursor: Bool) -> String {
+        let cursorClause = afterCursor ? "AND created_at > $2::timestamptz" : ""
+        return """
+        SELECT id::text, user_id::text, device_id::text, object_class, object_kind,
+               provider, bucket, object_key, upload_object_key, period_day::text,
+               compressed_bytes::text, uncompressed_bytes::text, content_type, format,
+               compression, sha256, status, wire_sha256, digest_scope,
+               durability_receipt::text, sample_count::text, start_at::text,
+               end_at::text, created_at::text
+        FROM public.object_manifests
+        WHERE object_class = 'raw'
+          AND status = 'ready'
+          AND (durability_receipt IS NULL OR durability_receipt->>'state' IS DISTINCT FROM 'verified_indexed')
+          AND coalesce(compressed_bytes, 0) > 0
+          AND object_key IS NOT NULL
+          AND object_kind IS NOT NULL
+          \(cursorClause)
+        ORDER BY created_at
+        LIMIT $1::int
+        """
+    }
+    /// created_at watermark of the last processed page (per-process cursor).
+    private var reconcileCursor: String?
 
     mutating func reconcile(budget: Int) {
+        let afterCursor = reconcileCursor != nil
+        let params: [String] = afterCursor
+            ? [String(budget), reconcileCursor!]
+            : [String(budget)]
         let rows: [[String: String]]
         do {
-            rows = try db.query(Self.candidateSQL, [String(budget)])
+            rows = try db.query(Self.candidateSQL(afterCursor: afterCursor), params)
         } catch {
             stats.failed += 1
             stats.lastError = "reconcile scan: \(error)"
             return
         }
+        guard !rows.isEmpty else {
+            // Page exhausted: wrap the cursor so the next cycle rescans from
+            // the oldest (new arrivals + recovered deferred objects).
+            reconcileCursor = nil
+            return
+        }
         for row in rows {
             processCandidate(row)
+        }
+        // Advance the cursor to this page's last created_at.
+        if let last = rows.last?["created_at"], !last.isEmpty {
+            reconcileCursor = last
         }
     }
 

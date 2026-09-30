@@ -200,9 +200,21 @@ struct ProjectionLane {
                       String(wire.count), String(ub)])
         }
 
-        let batch = try PushBatch.decode(ndjson: body)
-        let rows = try batch.projectionRows(userId: userId, deviceId: deviceId)
-        let keepKeys = try batch.keepKeys()
+        // Decode/mapping failures must reach the bounded fail path too:
+        // otherwise a malformed batch hot-loops on the claim without the
+        // DB's failures/backoff accounting (audit P1-1: 9 rows cycling
+        // every 2 min with the DB failure counter frozen).
+        let batch: PushBatch
+        let rows: [[String: Any]]
+        let keepKeys: [String]
+        do {
+            batch = try PushBatch.decode(ndjson: body)
+            rows = try batch.projectionRows(userId: userId, deviceId: deviceId)
+            keepKeys = try batch.keepKeys()
+        } catch {
+            try? failDebt(objectId, leaseToken)
+            throw error
+        }
 
         // 5. Commit (service-role function; verifies receipt, applies rows,
         //    saves the ACK, clears WAL, completes debt). A commit rejection
