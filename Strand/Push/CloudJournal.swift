@@ -790,6 +790,35 @@ final class CloudJournalStore: @unchecked Sendable {
         try step(stmt)
     }
 
+    /// Return a blocked batch's records to the pending pool so the builder can
+    /// re-seal them. Used when a previously non-retryable rejection was fixed
+    /// builder-side (e.g. duplicate conflict keys inside one batch): the
+    /// records were never acknowledged, so they must not be lost — they go
+    /// back to `state = 0`, the sealed job row is removed, and the next seal
+    /// pass rebuilds the batch with the corrected rules. The payload file is
+    /// not referenced by any live job after this and will be pruned with the
+    /// other unreferenced files.
+    func resealBlocked(batchId: String) throws {
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            let free = try prepare("""
+            UPDATE journal_record SET batch_id = NULL, state = 0
+            WHERE batch_id = ? AND state = 1
+            """)
+            defer { sqlite3_finalize(free) }
+            sqlite3_bind_text(free, 1, batchId, -1, cloudSQLiteTransient)
+            try step(free)
+            let drop = try prepare("DELETE FROM sealed_batch WHERE batch_id = ? AND state = 'blocked'")
+            defer { sqlite3_finalize(drop) }
+            sqlite3_bind_text(drop, 1, batchId, -1, cloudSQLiteTransient)
+            try step(drop)
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+    }
+
     func sealedBatches(states: [CloudBatchState], dueBeforeMs: Int?, limit: Int) throws -> [CloudSealedBatch] {
         let placeholders = states.map { _ in "?" }.joined(separator: ",")
         var sql = """
@@ -1182,6 +1211,17 @@ public actor CloudJournal {
 
     public func markFailed(batchId: String, error: String, nextAttemptAtMs: Int?, blocked: Bool = false) async throws {
         try store?.markFailed(batchId: batchId, error: error, nextAttemptAtMs: nextAttemptAtMs, blocked: blocked)
+    }
+
+    /// Return a blocked batch's records to the pending pool for re-sealing
+    /// (see `CloudJournalStore.resealBlocked`).
+    public func resealBlocked(batchId: String) async throws {
+        try store?.resealBlocked(batchId: batchId)
+    }
+
+    /// Sealed batches in the given states (async facade over the store).
+    public func sealedBatches(states: [CloudBatchState], dueBeforeMs: Int?, limit: Int) async throws -> [CloudSealedBatch] {
+        return try store?.sealedBatches(states: states, dueBeforeMs: dueBeforeMs, limit: limit) ?? []
     }
 
     public func batches(states: [CloudBatchState], dueBeforeMs: Int? = nil, limit: Int = 16) async throws -> [CloudSealedBatch] {

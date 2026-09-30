@@ -91,16 +91,37 @@ enum CloudBatchBuilder {
         guard !entries.isEmpty else { throw BuildError.emptyBatch }
         guard let table = appendTable(for: stream) else { throw BuildError.unsupportedStream(stream) }
 
-        var rows: [PushAppendRecord] = []
-        rows.reserveCapacity(entries.count)
+        // Deduplicate by the record's natural (conflict) key before sealing. The receiver
+        // rejects a batch that contains two rows with the same conflict key
+        // (`duplicate_record_key`, 422) — and BLE legitimately delivers repeated
+        // readings inside one second (verified live: an hrSample batch with two
+        // records at ts=1790792481 was rejected whole). Rows in a batch already share
+        // owner/device/source, so the record `key` IS the conflict key; last writer
+        // wins, mirroring the receiver's own upsert semantics for a re-sent key.
+        // Keep the LAST occurrence of each key at its own position: the retained
+        // entries stay in receive order (strictly increasing rowIds), and a
+        // re-sent key wins (mirroring the receiver's upsert).
+        var lastIndexForKey: [String: Int] = [:]
+        var decoded: [(entry: CloudJournalEntry, row: PushAppendRecord)?] = []
+        decoded.reserveCapacity(entries.count)
         for entry in entries {
             do {
                 let row = try decodeRow(entry)
-                rows.append(row)
+                let identity = try PushProtocol.canonicalJsonMap(row.key)
+                if let earlier = lastIndexForKey[identity] {
+                    decoded[earlier] = nil
+                }
+                lastIndexForKey[identity] = decoded.count
+                decoded.append((entry, row))
             } catch {
                 throw BuildError.malformedRow(seq: entry.seq, underlying: String(describing: error))
             }
         }
+        let kept = decoded.compactMap { $0 }
+        var rows: [PushAppendRecord] = []
+        rows.reserveCapacity(kept.count)
+        for item in kept { rows.append(item.row) }
+        let entries = kept.map { $0.entry }
 
         let startCursor = startCursorJSON.flatMap { json -> PushCursor? in
             guard let data = json.data(using: .utf8) else { return nil }

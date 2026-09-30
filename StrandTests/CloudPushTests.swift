@@ -428,3 +428,86 @@ final class CloudPushTests: XCTestCase {
         XCTAssertEqual(skip, .notRunning)
     }
 }
+
+
+// MARK: - Duplicate conflict keys + blocked re-seal (live defect 2026-09-30)
+
+final class BatchDedupeTests: XCTestCase {
+    /// Live defect: a sealed hrSample batch containing two records at the same
+    /// ts was rejected whole by the receiver (`duplicate_record_key`, 422) and
+    /// the batch blocked. The builder must keep ONE row per natural key (last
+    /// writer wins, mirroring the receiver's upsert).
+    func testBuilderDeduplicatesRepeatedConflictKeys() throws {
+        func entry(seq: Int64, ts: Int, bpm: Int) -> CloudJournalEntry {
+            let record = CloudJournalRecord(
+                stream: .hrSample, encoding: .ndjson, provenance: .live,
+                characteristic: "2A37", family: nil, firmware: nil,
+                receivedAtMs: ts * 1000, strapTs: ts,
+                payload: try! JSONSerialization.data(withJSONObject: [
+                    "key": ["ts": ts], "data": ["bpm": bpm],
+                ]))
+            return CloudJournalEntry(seq: seq, record: record, ownerId: "o",
+                                     deviceId: "d", sourceId: "s")
+        }
+        let entries = [
+            entry(seq: 1, ts: 1790792481, bpm: 58),
+            entry(seq: 2, ts: 1790792482, bpm: 59),
+            entry(seq: 3, ts: 1790792481, bpm: 60),
+            entry(seq: 4, ts: 1790792483, bpm: 61),
+        ]
+        let plan = try CloudBatchBuilder.plan(entries: entries, stream: .hrSample,
+                                               sourceId: "s", deviceId: "d",
+                                               protocolVersion: "1.0",
+                                               startCursorJSON: nil,
+                                               maximumDecodedBytes: 1 << 20)
+        // The duplicate ts collapses to the LAST writer (bpm 60).
+        XCTAssertEqual(plan.batch.recordCount, 3)
+        XCTAssertEqual(plan.entries.count, 3)
+        let body = String(data: plan.batch.body, encoding: .utf8) ?? ""
+        XCTAssertFalse(body.contains("\"bpm\":58"), "first duplicate must be dropped")
+        XCTAssertTrue(body.contains("\"bpm\":60"), "last writer must win")
+    }
+}
+
+final class BlockedResealTests: XCTestCase {
+    func testResealBlockedReturnsRecordsToPending() async throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cloud-reseal-\(UUID().uuidString)")
+        let journal = CloudJournal(journalURL: dir.appendingPathComponent("journal.sqlite"))
+        journal.activate(configuration: .init(ownerId: "o", sourceId: "s", deviceId: "d"))
+        let store = try XCTUnwrap(journal.storeForTesting())
+        // Seed pending rows via the store-level append path used by capture.
+        for (seq, ts, bpm) in [(Int64(1), 1790792481, 58), (Int64(2), 1790792481, 60),
+                               (Int64(3), 1790792484, 62)] {
+            let record = CloudJournalRecord(
+                stream: .hrSample, encoding: .ndjson, provenance: .live,
+                characteristic: "2A37", family: nil, firmware: nil,
+                receivedAtMs: ts * 1000, strapTs: ts,
+                payload: try JSONSerialization.data(withJSONObject: [
+                    "key": ["ts": ts], "data": ["bpm": bpm],
+                ]))
+            _ = store.appendForTesting(record, monotonicSeq: seq)
+        }
+        let pending = try store.pendingEntries(deviceId: "d", stream: .hrSample, upTo: 100)
+        XCTAssertEqual(pending.count, 3)
+        let plan = try CloudBatchBuilder.plan(entries: pending, stream: .hrSample,
+                                              sourceId: "s", deviceId: "d",
+                                              protocolVersion: "1.0", startCursorJSON: nil,
+                                              maximumDecodedBytes: 1 << 20)
+        // Register the seal, block it, then reseal: records return to pending.
+        try store.markSealed(candidate: CloudSealCandidate(
+                ownerId: "o", sourceId: "s", deviceId: "d", stream: .hrSample,
+                firstSeq: plan.entries.first!.seq, lastSeq: plan.entries.last!.seq,
+                recordCount: plan.entries.count, oldestReceivedAtMs: 0, byteSize: 128,
+                windowIdentity: nil),
+            batchId: plan.batch.batchId, filePath: "unused", contentSha256: "h",
+            contentLength: 128, ownerId: "o", sourceId: "s",
+            protocolVersion: "1.0", endCursorJSON: nil, nowMs: 0)
+        try store.markFailed(batchId: plan.batch.batchId, error: "HTTP 422",
+                             nextAttemptAtMs: nil, blocked: true)
+        try store.resealBlocked(batchId: plan.batch.batchId)
+        let repending = try store.pendingEntries(deviceId: "d", stream: .hrSample, upTo: 100)
+        XCTAssertEqual(repending.count, pending.count, "records must return to the pending pool")
+        try? journal.deactivate(flushFirst: false)
+    }
+}

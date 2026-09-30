@@ -90,7 +90,25 @@ public actor CloudTransportCoordinator {
         }
         try? await reconcileTasksAtLaunch()
         try? await cleanUpAcknowledgedFiles()
+        try? await resealBlockedBatches()
         kick()
+    }
+
+    /// One-shot at start: return blocked batches' records to the pending pool
+    /// so the builder re-seals them with current rules. A blocked batch was a
+    /// non-retryable rejection; when the defect was builder-side (e.g. the
+    /// duplicate conflict-key bug), the records are still unacknowledged and
+    /// must not stay stranded. Bounded to one pass at startup so a recurring
+    /// rejection does not churn: a batch that blocks again stays blocked.
+    private func resealBlockedBatches() async {
+        do {
+            let blocked = try await journal.sealedBatches(states: [.blocked], dueBeforeMs: nil, limit: 64)
+            for batch in blocked {
+                try await journal.resealBlocked(batchId: batch.batchId)
+            }
+        } catch {
+            lastError = "reseal blocked: \(error)"
+        }
     }
 
     public func stop() async {
