@@ -42,7 +42,9 @@ struct ArchiveLane {
 
     /// Returns true when one v2 snapshot archive was uploaded.
     private func archiveOneSnapshot() throws -> Bool {
-        let rows = try db.query("select * from public.claim_scoring_archive_v2(300)", [])
+        let rows: [[String: String]]
+        do { rows = try db.query("select * from public.claim_scoring_archive_v2(300)", []) }
+        catch { throw WorkerError.retryable("v2claim: \(error)") }
         guard let r = rows.first else { return false }
         let key = r["object_key"] ?? ""
         let token = r["lease_token"] ?? ""
@@ -59,11 +61,12 @@ struct ArchiveLane {
 
     /// Returns true when one physiology outbox row was archived.
     private func archiveOneOutbox() throws -> Bool {
-        let rows = try db.query("""
+        let rows: [[String: String]]
+        do { rows = try db.query("""
             WITH claimed AS (
               SELECT id, user_id, device_id, period_day, algorithm_version, input_revision, object_key
               FROM public.physiology_archive_outbox
-              WHERE status IN ('pending','retry') AND coalesce(next_attempt_at, '-infinity'::timestamptz) <= now()
+              WHERE status IN ('pending','retry','uploading') AND coalesce(next_attempt_at, '-infinity'::timestamptz) <= now()
                 AND (lease_expires_at IS NULL OR lease_expires_at <= now())
               ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED
             )
@@ -73,7 +76,7 @@ struct ArchiveLane {
             FROM claimed WHERE o.id = claimed.id
             RETURNING o.id::text, o.lease_token::text, o.user_id::text, o.device_id::text,
                       o.period_day::text, o.algorithm_version::text, o.input_revision::text, o.object_key
-            """, [])
+            """, []) } catch { throw WorkerError.retryable("outboxclaim: \(error)") }
         guard let r = rows.first else { return false }
         let id = r["id"] ?? ""
         let key = r["object_key"] ?? ""
@@ -85,11 +88,12 @@ struct ArchiveLane {
         guard !id.isEmpty, !key.isEmpty, !uid.isEmpty, !dev.isEmpty,
               !period.isEmpty, !version.isEmpty, !revision.isEmpty else { return false }
         // Load the stored payload for this exact publication.
-        let payloadRows = try db.query("""
+        let payloadRows: [[String: String]]
+        do { payloadRows = try db.query("""
             SELECT payload::text FROM public.server_physiology_results
             WHERE user_id=$1::uuid AND device_id=$2::uuid AND period_day=$3::date
               AND algorithm_version=$4::text AND input_revision=$5::bigint
-            """, [uid, dev, period, version, revision])
+            """, [uid, dev, period, version, revision]) } catch { throw WorkerError.retryable("payloadfetch: \(error)") }
         guard let payload = payloadRows.first?["payload"], !payload.isEmpty else {
             throw WorkerError.malformed("outbox row without stored payload")
         }
@@ -99,7 +103,7 @@ struct ArchiveLane {
         let contentSHA = sha256Hex(raw)
         try storage.upload(objectKey: key, bytes: compressed, contentType: "application/json")
         // Register the derived manifest (the historical archive shape).
-        _ = try db.callFunctionForJSON("""
+        do { _ = try db.callFunctionForJSON("""
             INSERT INTO public.object_manifests
               (user_id, device_id, object_class, object_kind, provider, bucket, object_key,
                period_day, compressed_bytes, uncompressed_bytes, content_type, format, compression,
@@ -111,7 +115,7 @@ struct ArchiveLane {
               now(), now(), NULL, NULL)
             ON CONFLICT (object_key) DO NOTHING
             """, [uid, dev, key, period, String(compressed.count), String(raw.count),
-                  wireSHA, version])
+                  wireSHA, version]) } catch { throw WorkerError.retryable("manifest: \(error)") }
         // Mark the outbox row done.
         try db.exec("""
         UPDATE public.physiology_archive_outbox

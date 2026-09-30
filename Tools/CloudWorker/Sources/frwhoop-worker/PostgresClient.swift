@@ -87,7 +87,11 @@ final class PostgresClient {
         defer { PQclear(res) }
         let status = PQresultStatus(res)
         guard status == PGRES_TUPLES_OK else {
-            throw Error(message: "query failed: \(String(cString: PQresultErrorMessage(res)))")
+            var detail = String(cString: PQresultErrorMessage(res))
+            if let sqlstatePtr = PQresultErrorField(res, Int32(0x43)) /* PG_DIAG_SQLSTATE */ {
+                detail += " [sqlstate=\(String(cString: sqlstatePtr))]"
+            }
+            throw Error(message: "query failed: status=\(status) \(detail)")
         }
         let nRows = Int(PQntuples(res)), nCols = Int(PQnfields(res))
         var out: [[String: String]] = []
