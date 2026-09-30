@@ -24,12 +24,14 @@ let package = Package(
         .systemLibrary(name: "CLibPQ", pkgConfig: "libpq"),
         .systemLibrary(name: "CZlib", pkgConfig: "zlib"),
         .systemLibrary(name: "CCrypto", pkgConfig: "openssl"),
+        .systemLibrary(name: "CZstd", pkgConfig: "libzstd"),
         .executableTarget(
             name: "frwhoop-worker",
             dependencies: [
                 "CLibPQ",
                 "CZlib",
                 "CCrypto",
+                "CZstd",
                 .product(name: "StrandAnalytics", package: "StrandAnalytics"),
                 .product(name: "WhoopProtocol", package: "WhoopProtocol"),
                 .product(name: "WhoopStore", package: "WhoopStore"),

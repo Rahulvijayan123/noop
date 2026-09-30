@@ -1,13 +1,14 @@
 
 import Foundation
+import CCrypto
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
 
-/// Private object storage access (Backblaze B2 native API) for immutable raw inputs.
-///
-/// The worker only needs reads: the phone owns writes through the edge ingest
-/// path. Authorization is cached and re-established lazily on 401.
+/// Private object storage access (Backblaze B2 native API) for immutable
+/// raw inputs and derived archives. Reads for raw inputs; writes only for
+/// the derived-result archive lane. Authorization is cached and
+/// re-established lazily on expiry/401.
 final class B2Storage {
     struct Error: Swift.Error, CustomStringConvertible {
         let message: String
@@ -17,8 +18,9 @@ final class B2Storage {
     private let keyID: String
     private let applicationKey: String
     private let bucket: String
-    private var session: URLSession
-    private var auth: (apiUrl: String, token: String, downloadURL: String, validUntil: Date)?
+    private let session: URLSession
+    private var auth: (apiUrl: String, token: String, downloadURL: String, accountID: String, validUntil: Date)?
+    private var bucketID: String?
 
     init(keyID: String, applicationKey: String, bucket: String) {
         self.keyID = keyID
@@ -30,7 +32,7 @@ final class B2Storage {
         self.session = URLSession(configuration: cfg)
     }
 
-    private func authorize() throws -> (apiUrl: String, token: String, downloadURL: String, validUntil: Date) {
+    private func authorize() throws -> (apiUrl: String, token: String, downloadURL: String, accountID: String, validUntil: Date) {
         if let a = auth, a.validUntil > Date() { return a }
         let basic = Data("\(keyID):\(applicationKey)".utf8).base64EncodedString()
         var req = URLRequest(url: URL(string: "https://api.backblazeb2.com/b2api/v3/b2_authorize_account")!)
@@ -46,13 +48,35 @@ final class B2Storage {
               let storageApi = apiInfo["storageApi"] as? [String: Any],
               let apiUrl = storageApi["apiUrl"] as? String,
               let downloadURL = storageApi["downloadUrl"] as? String,
-              let token = obj["authorizationToken"] as? String else {
+              let token = obj["authorizationToken"] as? String,
+              let account = obj["accountId"] as? String else {
             throw Error(message: "b2 authorize: malformed response")
         }
         // Tokens live ~24h; refresh after 12h.
         let until = Date().addingTimeInterval(12 * 3600)
-        auth = (apiUrl, token, downloadURL, until)
-        return (apiUrl, token, downloadURL, until)
+        auth = (apiUrl, token, downloadURL, account, until)
+        return (apiUrl, token, downloadURL, account, until)
+    }
+
+    /// Resolve the bucket id once (needed for uploads).
+    private func resolveBucketID() throws -> String {
+        if let b = bucketID { return b }
+        let a = try authorize()
+        var req = URLRequest(url: URL(string: "\(a.apiUrl)/b2api/v3/b2_list_buckets")!)
+        req.httpMethod = "POST"
+        req.setValue(a.token, forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{\"accountId\":\"\(a.accountID)\",\"bucketName\":\"\(bucket)\"}".utf8)
+        let (dataOpt, respOpt, err) = session.synchronous(req)
+        if let err { throw Error(message: "b2 list_buckets failed: \(err)") }
+        guard let data = dataOpt, let http = respOpt as? HTTPURLResponse, http.statusCode == 200,
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let buckets = obj["buckets"] as? [[String: Any]], let first = buckets.first,
+              let id = first["bucketId"] as? String else {
+            throw Error(message: "b2 list_buckets: malformed response")
+        }
+        bucketID = id
+        return id
     }
 
     /// Download one object; returns the exact wire bytes.
@@ -75,6 +99,46 @@ final class B2Storage {
         }
         return data
     }
+
+    /// Upload one object as a single part.
+    func upload(objectKey: String, bytes: Data, contentType: String) throws {
+        let a = try authorize()
+        let bid = try resolveBucketID()
+        var req = URLRequest(url: URL(string: "\(a.apiUrl)/b2api/v3/b2_get_upload_url")!)
+        req.httpMethod = "POST"
+        req.setValue(a.token, forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Data("{\"bucketId\":\"\(bid)\"}".utf8)
+        let (authData, authResp, authErr) = session.synchronous(req)
+        if let authErr { throw Error(message: "b2 get_upload_url failed: \(authErr)") }
+        guard let authBody = authData, let http = authResp as? HTTPURLResponse, http.statusCode == 200,
+              let obj = (try? JSONSerialization.jsonObject(with: authBody)) as? [String: Any],
+              let uploadURL = obj["uploadUrl"] as? String,
+              let uploadToken = obj["authorizationToken"] as? String else {
+            throw Error(message: "b2 get_upload_url: malformed response")
+        }
+        var put = URLRequest(url: URL(string: uploadURL)!)
+        put.httpMethod = "POST"
+        put.setValue(uploadToken, forHTTPHeaderField: "Authorization")
+        put.setValue(String(bytes.count), forHTTPHeaderField: "Content-Length")
+        put.setValue(contentType, forHTTPHeaderField: "Content-Type")
+        put.setValue(objectKey, forHTTPHeaderField: "X-Bz-File-Name")
+        put.setValue(sha1Hex(bytes), forHTTPHeaderField: "X-Bz-Content-Sha1")
+        put.httpBody = bytes
+        let (_, putResp, putErr) = session.synchronous(put)
+        if let putErr { throw Error(message: "b2 upload failed: \(putErr)") }
+        guard let putHttp = putResp as? HTTPURLResponse, (200..<300).contains(putHttp.statusCode) else {
+            throw Error(message: "b2 upload HTTP \((putResp as? HTTPURLResponse)?.statusCode ?? -1)")
+        }
+    }
+}
+
+private func sha1Hex(_ data: Data) -> String {
+    var digest = [UInt8](repeating: 0, count: 20)
+    data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) in
+        _ = SHA1(ptr.baseAddress, ptr.count, &digest)
+    }
+    return digest.map { String(format: "%02x", $0) }.joined()
 }
 
 extension URLSession {

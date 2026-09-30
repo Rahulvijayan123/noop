@@ -111,13 +111,27 @@ struct DayScorer {
             "sleep_nights": nights,
         ]
 
+        // The v2 snapshot payload's sleep entries carry the full nightly
+        // shape: the snapshot contract requires id/start_at/end_at/stages,
+        // and the legacy refresh that republishes server_sleep_nights also
+        // reads is_nap and the minute fields from the same entries.
         var sleepSessions: [[String: Any]] = []
         for n in nights {
             var s: [String: Any] = [:]
-            if let id = n["id"] { s["id"] = id }
-            if let start = n["start_at"] { s["start_at"] = start }
-            if let end = n["end_at"] { s["end_at"] = end }
-            s["stages"] = n["stages"] ?? ([] as [String])
+            for k in ["id", "start_at", "end_at", "is_nap", "in_bed_min", "asleep_min",
+                      "awake_min", "light_min", "deep_min", "rem_min", "efficiency",
+                      "resting_hr_bpm", "hrv_rmssd_ms"] {
+                if let v = n[k] { s[k] = v }
+            }
+            if n["is_nap"] == nil { s["is_nap"] = false }
+            // The v2 snapshot contract requires `stages` as an ARRAY; the
+            // legacy night rows carry the encoded string, so decode it here.
+            var stages: [Any] = []
+            if let str = n["stages"] as? String, let data = str.data(using: .utf8),
+               let arr = (try? JSONSerialization.jsonObject(with: data)) as? [Any] {
+                stages = arr
+            }
+            s["stages"] = stages
             sleepSessions.append(s)
         }
         let coverage: [String: Any] = [

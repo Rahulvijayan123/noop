@@ -97,16 +97,24 @@ struct ProjectionLane {
             throw WorkerError.malformed("wire checksum mismatch for \(objectKey)")
         }
 
-        // 3. Decode per format (only NDJSON formats are projectable).
-        guard format.hasPrefix("ndjson") else {
-            // protobuf/zstd raw batches and bin/* research formats are
-            // archive-only: record the bounded failure and let the DB's
-            // backoff policy hold the row (the receiving registries have no
-            // target for these streams).
+        // 3. Only the push-protocol streams carry a projectable batch:
+        // the receiving registries map exactly these kinds to target tables.
+        // Research archive kinds (physiology, frames, imu_raw, events, ...)
+        // and non-NDJSON formats are archive-only: record the bounded
+        // failure and let the DB's backoff policy hold the row.
+        let projectableKinds: Set<String> = [
+            "hrSample", "rrInterval", "event", "battery", "spo2Sample",
+            "skinTempSample", "respSample", "gravitySample", "stepSample",
+            "sleepStateSample", "ppgHrSample", "standardHRReceipt",
+            "rrPacketProvenance", "dailyMetric", "journal", "sleepSession",
+            "workout",
+        ]
+        guard let kind = manifest["object_kind"] as? String, projectableKinds.contains(kind),
+              format.hasPrefix("ndjson") else {
             _ = try? db.callFunctionForJSON(
                 "SELECT public.noop_fail_projection_debt($1::uuid, $2::uuid)::text",
                 [objectId, leaseToken])
-            throw WorkerError.retryable("non-projectable format \(format)")
+            throw WorkerError.retryable("non-projectable kind/format \(manifest["object_kind"] ?? "?")/\(format)")
         }
         let body = try Inflator.gunzip(wire)
 

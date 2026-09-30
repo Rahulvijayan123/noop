@@ -84,6 +84,7 @@ signal(SIGINT) { _ in running = false }
 
 var projection = ProjectionLane(db: db, storage: storage)
 var scoring = ScoringLane(db: db, scorer: DayScorer(db: db), ingestSecret: config.ingestSecret)
+var archive = ArchiveLane(db: db, storage: storage)
 var lastHeartbeat = Date.distantPast
 
 func heartbeat(final: Bool = false) {
@@ -92,7 +93,8 @@ func heartbeat(final: Bool = false) {
         {
           "source_revision": "\(config.sourceRevision)",
           "projection": {"claimed": \(projection.stats.claimed), "completed": \(projection.stats.completed), "failed": \(projection.stats.failed)},
-          "scoring": {"claimed": \(scoring.stats.claimed), "completed": \(scoring.stats.completed), "failed": \(scoring.stats.failed)}
+          "scoring": {"claimed": \(scoring.stats.claimed), "completed": \(scoring.stats.completed), "failed": \(scoring.stats.failed)},
+          "archive": {"uploaded": \(archive.stats.uploaded), "failed": \(archive.stats.failed)}
         }
         """
         try db.exec("""
@@ -122,6 +124,13 @@ while running {
     if scoring.stats.completed > scoreBefore { didWork = true }
     if let err = scoring.stats.lastError {
         FileHandle.standardOutput.write("frwhoop-worker: scoring last error: \(err)\n".data(using: .utf8)!)
+    }
+
+    let archBefore = archive.stats.uploaded
+    archive.drain(budget: config.projectionBudget)
+    if archive.stats.uploaded > archBefore { didWork = true }
+    if let err = archive.stats.lastError {
+        FileHandle.standardOutput.write("frwhoop-worker: archive last error: \(err)\n".data(using: .utf8)!)
     }
 
     if Date().timeIntervalSince(lastHeartbeat) >= Double(config.heartbeatIntervalMS) / 1000.0 {
