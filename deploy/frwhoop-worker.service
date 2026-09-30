@@ -1,0 +1,26 @@
+[Unit]
+Description=FRWHOOP hosted compute worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frwhoop
+Group=frwhoop
+WorkingDirectory=/opt/noop/Tools/CloudWorker
+EnvironmentFile=/etc/frwhoop/worker.env
+ExecStart=/opt/noop/Tools/CloudWorker/.build/release/frwhoop-worker
+Restart=always
+RestartSec=5
+# Graceful stop: lanes finish the current transaction then exit.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# Hardening: outbound-only, no inbound sockets opened by the unit.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/noop/Tools/CloudWorker/.build
+
+[Install]
+WantedBy=multi-user.target
