@@ -85,8 +85,10 @@ final class PostgresClient {
             PQexecParams(conn, sql, Int32(buf.count), nil, buf.baseAddress, nil, nil, 0)
         }
         defer { PQclear(res) }
+        // COMMAND_OK (row-less statements like INSERT ... DO NOTHING) is a
+        // valid outcome for calls routed through here: return zero rows.
         let status = PQresultStatus(res)
-        guard status == PGRES_TUPLES_OK else {
+        guard status == PGRES_TUPLES_OK || status == PGRES_COMMAND_OK else {
             var detail = String(cString: PQresultErrorMessage(res))
             if let sqlstatePtr = PQresultErrorField(res, Int32(0x43)) /* PG_DIAG_SQLSTATE */ {
                 detail += " [sqlstate=\(String(cString: sqlstatePtr))]"
