@@ -65,7 +65,7 @@ struct ArchiveLane {
               FROM public.physiology_archive_outbox
               WHERE status IN ('pending','retry') AND coalesce(next_attempt_at, '-infinity'::timestamptz) <= now()
                 AND (lease_expires_at IS NULL OR lease_expires_at <= now())
-              ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED
+              ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED
             )
             UPDATE public.physiology_archive_outbox o
               SET status='uploading', lease_token=gen_random_uuid(),
