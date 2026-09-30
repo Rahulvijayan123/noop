@@ -173,9 +173,20 @@ func projectionJSON(from value: Any) -> ProjectionJSON {
     }
 }
 
+// The canonical boolean NSNumber singletons. JSONSerialization decodes JSON
+// true/false to these on both macOS (tagged kCFBoolean) and Linux corelibs
+// (cached singletons), while numeric fields never share their identity —
+// so identity is the portable boolean test (CFGetTypeID is macOS-only).
+private let booleanTrueNumber = NSNumber(value: true)
+private let booleanFalseNumber = NSNumber(value: false)
+
+func isBooleanNumber(_ number: NSNumber) -> Bool {
+    return number === booleanTrueNumber || number === booleanFalseNumber
+}
+
 func projectionJSON(number: NSNumber) -> ProjectionJSON {
     // Foundation reports JSON booleans as NSNumber; they must stay booleans.
-    if CFGetTypeID(number) == CFBooleanGetTypeID() {
+    if isBooleanNumber(number) {
         return .bool(number.boolValue)
     }
     let type = String(cString: number.objCType)
@@ -200,7 +211,7 @@ enum ProjectionCoercion {
     static func number(_ value: Any?) -> Double? {
         guard let value, !(value is NSNull) else { return nil }
         if let number = value as? NSNumber {
-            if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue ? 1 : 0 }
+            if isBooleanNumber(number) { return number.boolValue ? 1 : 0 }
             return number.doubleValue
         }
         if let text = value as? String {
@@ -223,7 +234,7 @@ enum ProjectionCoercion {
     /// Strict JSON number: `typeof value === 'number'`. Strings and booleans are NOT numbers.
     static func strictNumber(_ value: Any?) -> Double? {
         guard let number = value as? NSNumber else { return nil }
-        if CFGetTypeID(number) == CFBooleanGetTypeID() { return nil }
+        if isBooleanNumber(number) { return nil }
         let type = String(cString: number.objCType)
         guard type == "d" || type == "f" || type == "q" || type == "i" || type == "c" || type == "s" || type == "l" else {
             return nil
@@ -251,7 +262,7 @@ enum ProjectionCoercion {
     static func boolean(_ value: Any?) -> Bool {
         guard let value, !(value is NSNull) else { return false }
         if let number = value as? NSNumber {
-            if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+            if isBooleanNumber(number) { return number.boolValue }
             return number.doubleValue != 0
         }
         if let text = value as? String { return !text.isEmpty }
@@ -262,7 +273,7 @@ enum ProjectionCoercion {
     static func isTruthy(_ value: Any?) -> Bool {
         guard let value, !(value is NSNull) else { return false }
         if let number = value as? NSNumber {
-            if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue }
+            if isBooleanNumber(number) { return number.boolValue }
             let double = number.doubleValue
             return double != 0 && !double.isNaN
         }
@@ -482,7 +493,7 @@ func jsString(_ value: Any?) -> String {
     guard let value, !(value is NSNull) else { return "undefined" }
     if let text = value as? String { return text }
     if let number = value as? NSNumber {
-        if CFGetTypeID(number) == CFBooleanGetTypeID() { return number.boolValue ? "true" : "false" }
+        if isBooleanNumber(number) { return number.boolValue ? "true" : "false" }
         return ProjectionCoercion.numberString(number.doubleValue)
     }
     return "\(value)"
@@ -526,7 +537,7 @@ func parseJSONText(_ value: Any?) -> ProjectionJSON? {
         return projectionJSON(from: parsed)
     }
     if let number = value as? NSNumber {
-        if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
+        if isBooleanNumber(number) { return .bool(number.boolValue) }
         return numberJSON(number.doubleValue)
     }
     // An object or array is not JSON text; `JSON.parse(String(value))` throws in the receiver too.
@@ -691,7 +702,7 @@ private func mapBattery(_ args: ProjectionMapArgs) throws -> ProjectionRow? {
     ])
     if let soc = ProjectionCoercion.finiteNumber(args.data["soc"]) { row.add("soc", numberJSON(soc)) }
     if let mv = ProjectionCoercion.finiteNumber(args.data["mv"]) { row.add("mv", numberJSON(mv)) }
-    if let charging = args.data["charging"] as? NSNumber, CFGetTypeID(charging) == CFBooleanGetTypeID() {
+    if let charging = args.data["charging"] as? NSNumber, isBooleanNumber(charging) {
         row.add("charging", .bool(charging.boolValue))
     }
     return row
@@ -953,7 +964,7 @@ private func mapJournal(_ args: ProjectionMapArgs) throws -> ProjectionRow? {
 /// `value === true` — an explicit JSON boolean, never a truthy number or string.
 func isJSONTrue(_ value: Any?) -> Bool {
     guard let number = value as? NSNumber else { return false }
-    guard CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+    guard isBooleanNumber(number) else { return false }
     return number.boolValue
 }
 
@@ -1031,7 +1042,7 @@ func scalarProvenance(_ value: Any?, protocolVersion: String) throws -> Projecti
     for (key, field) in object {
         guard scalarProvenanceKeys.contains(key) else { throw invalid() }
         guard !(field is NSNull), !(field is [String: Any]), !(field is [Any]) else { throw invalid() }
-        if let number = field as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() { throw invalid() }
+        if let number = field as? NSNumber, isBooleanNumber(number) { throw invalid() }
         if scalarProvenanceIntegerKeys.contains(key) {
             guard let number = ProjectionCoercion.strictSafeInteger(field) else { throw invalid() }
             if key == "recordIndex", number < 0 || number > 4294967295 { throw invalid() }
@@ -1222,7 +1233,7 @@ func projectionWindowBounds(stream: String, projection: StreamProjection, window
     }
     func integerPart(_ value: Any?) -> Int? {
         guard let value, !(value is NSNull) else { return nil }
-        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+        if let number = value as? NSNumber, !isBooleanNumber(number) {
             let double = number.doubleValue
             guard ProjectionCoercion.isInteger(double) else { return nil }
             return Int(double)
