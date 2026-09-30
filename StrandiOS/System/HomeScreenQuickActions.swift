@@ -60,7 +60,28 @@ final class HomeScreenQuickActionAppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         HomeScreenQuickAction.install(in: application)
+        // Cloud capture must be running before the earliest restored notifications can arrive: a
+        // Bluetooth state-restoration relaunch reaches this method without creating a scene, so the
+        // runtime is started here rather than only from the foreground path. Idempotent, and a no-op
+        // unless cloud mode is enabled and an enrollment exists.
+        CloudPushRuntime.shared.startIfEnabled()
         return true
+    }
+
+    /// Background URLSession completion hand-off for the cloud upload lane.
+    ///
+    /// This is the ONLY app delegate in the target (`UIApplicationDelegateAdaptor` in
+    /// `StrandiOSApp`), and `handleEventsForBackgroundURLSession` is an app-delegate method that a
+    /// scene delegate cannot receive, so it has to live here even though the rest of the lifecycle
+    /// handling sits on the scene delegate. The handler is stored by the upload session and invoked
+    /// when its background events are finished; when cloud mode is off, the session does not exist and
+    /// the handler is called immediately, as the system requires.
+    func application(
+        _ application: UIApplication,
+        handleEventsForBackgroundURLSession identifier: String,
+        completionHandler: @escaping () -> Void
+    ) {
+        CloudPushRuntime.shared.takeBackgroundCompletionHandler(completionHandler)
     }
 
     func application(

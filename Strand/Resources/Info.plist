@@ -33,6 +33,16 @@
 	<string>public.app-category.healthcare-fitness</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>13.0</string>
+	<key>NOOPFinalHostedCompute</key>
+	<string>$(NOOP_FINAL_HOSTED_COMPUTE)</string>
+	<key>NOOPPushEndpoint</key>
+	<string>$(NOOP_PUSH_ENDPOINT)</string>
+	<key>NOOPPushToken</key>
+	<string>$(NOOP_PUSH_TOKEN)</string>
+	<key>NOOPSourceRevision</key>
+	<string>$(NOOP_SOURCE_REVISION)</string>
+	<key>NOOPSupabaseAnonKey</key>
+	<string>$(NOOP_SUPABASE_ANON_KEY)</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>

@@ -278,6 +278,12 @@ private struct DevicesContent: View {
 
             if !removedDevices.isEmpty { removedSection }
 
+            // Hosted-compute ("cloud") enrollment. Device/account-scoped, so it belongs with the
+            // devices. Shown ONLY when this build actually carries a receiver: a clean checkout has
+            // none, and offering a toggle that cannot work would be a lie. Cloud mode stays OFF until
+            // the user enrolls and enables it, so this row changes nothing by existing.
+            if CloudPushSettings.isConfigured { cloudSection }
+
             whoopFirstFooter
         }
         // Add a device — guided, branching wizard (asks the device TYPE first, then runs the right
@@ -444,6 +450,40 @@ private struct DevicesContent: View {
                     onDeleteData: { deleteDataTarget = device },
                     onForget: { forgetTarget = device })
             }
+        }
+    }
+
+    /// Entry point for the opt-in hosted-compute path. The view owns the enrollment form and the
+    /// enable/disable toggle; this only routes to it.
+    private var cloudSection: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
+            sectionHead("CLOUD", trailing: CloudPushSettings.isEnabled
+                        ? String(localized: "On")
+                        : String(localized: "Off"))
+            NavigationLink {
+                CloudEnrollmentView()
+            } label: {
+                NoopCard {
+                    HStack(spacing: NoopMetrics.gap) {
+                        Image(systemName: "arrow.up.heart")
+                            .font(.title3)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Cloud upload")
+                                .font(.headline)
+                            Text("Send measured strap data to your own hosted project so recovery, strain and sleep are computed there. Off until you enroll and enable it.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cloud upload")
         }
     }
 

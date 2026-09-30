@@ -1,0 +1,25 @@
+// Tracked wrapper so a clean checkout (no fleet credentials) still generates and builds.
+//
+// CloudPushSecrets.xcconfig is gitignored and user-created (template:
+// CloudPushSecrets.example.xcconfig). It carries the FRWHOOP hosted-compute defaults baked into
+// the app at build time:
+//   NOOP_PUSH_ENDPOINT        — the Supabase Edge Function base (…/functions/v1/push)
+//   NOOP_PUSH_TOKEN           — the fleet ingest token (opaque `noop_…`, NOT a JWT, NOT a B2 key)
+//   NOOP_SUPABASE_ANON_KEY    — Supabase anon key for authenticated score reads
+//   NOOP_SOURCE_REVISION      — the deployed worker/source revision, for diagnostics
+//   NOOP_FINAL_HOSTED_COMPUTE — YES only for a build that must run cloud-only (no local scoring)
+// When the file is absent every $(NOOP_*) reference below resolves to an empty string, so the
+// build has no receiver, `CloudPushSettings.isConfigured` is false, and the app behaves exactly
+// like offline NOOP: no endpoint, no uploads, no cloud-mode toggle.
+//
+// The fleet token is an ingest credential, not a session: it is extractable from the app bundle by
+// anyone holding the binary, and the server still requires the per-installation `noop_…` bearer
+// before it will accept an owner's data. Do not put any other secret here.
+//
+// NB: xcconfig parses "//" as a comment — a URL in a secrets file must be written as https:/$()/…
+NOOP_PUSH_ENDPOINT =
+NOOP_PUSH_TOKEN =
+NOOP_SUPABASE_ANON_KEY =
+NOOP_SOURCE_REVISION = development
+NOOP_FINAL_HOSTED_COMPUTE = NO
+#include? "CloudPushSecrets.xcconfig"

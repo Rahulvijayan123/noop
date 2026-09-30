@@ -16,3 +16,8 @@ BUNDLE_ID_PREFIX = com.noopapp
 // to stop Xcode from asking you to reselect a team after every `xcodegen generate`.
 DEVELOPMENT_TEAM =
 #include? "BundleIdSecrets.xcconfig"
+// Fleet cloud-push configuration (NOOP_PUSH_ENDPOINT / NOOP_PUSH_TOKEN / NOOP_SUPABASE_ANON_KEY /
+// NOOP_SOURCE_REVISION / NOOP_FINAL_HOSTED_COMPUTE), layered PROJECT-WIDE so both app targets can
+// bake them into their Info.plist. Empty unless Config/CloudPushSecrets.xcconfig (gitignored)
+// provides them, which is what keeps a clean checkout fully offline. See Config/CloudPush.xcconfig.
+#include? "CloudPush.xcconfig"

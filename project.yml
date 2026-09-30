@@ -125,6 +125,15 @@ targets:
         OURA_CLIENT_ID: $(OURA_CLIENT_ID)
         OURA_CLIENT_SECRET: $(OURA_CLIENT_SECRET)
         OURA_REDIRECT_URI: $(OURA_REDIRECT_URI)
+        # Hosted-compute ("cloud") configuration, baked from Config/CloudPush.xcconfig. Every value is
+        # EMPTY unless the gitignored Config/CloudPushSecrets.xcconfig provides it, which is what keeps
+        # a clean checkout offline: CloudPushSettings.isConfigured is then false and the cloud mode
+        # toggle is refused rather than pointing at nothing. Read at runtime by CloudPushSettings.
+        NOOPPushEndpoint: $(NOOP_PUSH_ENDPOINT)
+        NOOPPushToken: $(NOOP_PUSH_TOKEN)
+        NOOPSupabaseAnonKey: $(NOOP_SUPABASE_ANON_KEY)
+        NOOPSourceRevision: $(NOOP_SOURCE_REVISION)
+        NOOPFinalHostedCompute: $(NOOP_FINAL_HOSTED_COMPUTE)
         # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
         # (noop://oura/callback) reaches OuraOAuthProvider instead of bouncing off the OS.
         CFBundleURLTypes:
@@ -239,6 +248,14 @@ targets:
           - "Resources/NOOP.entitlements"
       - path: StrandiOSShared
     # Same tracked wrapper as the macOS target (Strand/Oura/ is shared, not per-platform).
+    #
+    # NB: XcodeGen takes exactly ONE xcconfig per configuration, so the cloud-push keys are not listed
+    # here. Config/CloudPush.xcconfig is reached through the PROJECT-level wrapper instead
+    # (Config/BundleId.xcconfig `#include?`s it, and project-level xcconfig layers beneath this
+    # target-level one). It is TRACKED and itself `#include?`s the gitignored
+    # Config/CloudPushSecrets.xcconfig, so a clean checkout resolves every $(NOOP_PUSH_*) reference in
+    # the Info.plist block below to an empty string: the build carries no receiver, cloud mode cannot
+    # be enabled, and the app behaves exactly like offline NOOP. See FORK_SCOPE.md.
     configFiles:
       Debug: Strand/Oura/OuraConfig.xcconfig
       Release: Strand/Oura/OuraConfig.xcconfig
@@ -305,11 +322,14 @@ targets:
           # the re-score task, which is submitted only when a re-score is OWED, and a missing strap owes
           # none, so that task would never run in the one case the warning exists for.
           - $(PRODUCT_BUNDLE_IDENTIFIER).stalebattery
-        NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data locally on your iPhone. Nothing leaves your device."
-        NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device. Nothing leaves it."
-        NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Nothing leaves your device."
+        # Cloud mode is OFF by default and opt-in, so these strings describe the default (on-device)
+        # behaviour first and name the cloud case explicitly rather than claiming nothing ever leaves the
+        # device. A build with no configured receiver cannot enable cloud mode at all (see FORK_SCOPE.md).
+        NSBluetoothAlwaysUsageDescription: "NOOP connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data. By default this stays on your iPhone. If you turn on cloud upload and enroll this device, NOOP also sends those measured readings to your own hosted project so it can compute recovery, strain, and sleep for you."
+        NSLocationWhenInUseUsageDescription: "NOOP records your route during an outdoor workout to show distance, pace, and a map, and keeps recording while the screen is off. The route stays on your device and is not uploaded by cloud mode."
+        NSHealthShareUsageDescription: "NOOP reads your own Apple Health data on-device to compute recovery, strain, and sleep. Apple Health data stays on your device."
         NSHealthUpdateUsageDescription: "NOOP writes the metrics it computes from your strap back into Apple Health, on-device and only when you allow it."
-        NSMotionUsageDescription: "NOOP reads your iPhone's step count for a walking or running workout to show steps in the activity summary. It stays on your device. Nothing leaves it."
+        NSMotionUsageDescription: "NOOP reads your iPhone's step count for a walking or running workout to show steps in the activity summary. It stays on your device and is not uploaded by cloud mode."
         # K4: Coach voice input. Speech is transcribed ON-DEVICE ONLY (requiresOnDeviceRecognition);
         # the mic button is disabled where the locale doesn't support that, never falls back to
         # server transcription. Only the resulting TEXT reaches the provider, via the same channel
@@ -332,6 +352,15 @@ targets:
         OURA_CLIENT_ID: $(OURA_CLIENT_ID)
         OURA_CLIENT_SECRET: $(OURA_CLIENT_SECRET)
         OURA_REDIRECT_URI: $(OURA_REDIRECT_URI)
+        # Hosted-compute ("cloud") configuration, baked from Config/CloudPush.xcconfig. Every value is
+        # EMPTY unless the gitignored Config/CloudPushSecrets.xcconfig provides it, which is what keeps
+        # a clean checkout offline: CloudPushSettings.isConfigured is then false and the cloud-mode
+        # toggle is refused rather than pointing at nothing. Read at runtime by CloudPushSettings.
+        NOOPPushEndpoint: $(NOOP_PUSH_ENDPOINT)
+        NOOPPushToken: $(NOOP_PUSH_TOKEN)
+        NOOPSupabaseAnonKey: $(NOOP_SUPABASE_ANON_KEY)
+        NOOPSourceRevision: $(NOOP_SOURCE_REVISION)
+        NOOPFinalHostedCompute: $(NOOP_FINAL_HOSTED_COMPUTE)
         # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
         # (noop://oura/callback) reaches OuraOAuthProvider instead of bouncing off the OS.
         CFBundleURLTypes:

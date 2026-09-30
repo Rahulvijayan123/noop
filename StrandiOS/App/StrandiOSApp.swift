@@ -347,6 +347,10 @@ struct StrandiOSApp: App {
         // safe no-op until the user opts in.
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
+                // Cloud: an active scene is an execution opportunity. Start the runtime if it is not
+                // running (a Bluetooth relaunch may have started it already), commit any staged
+                // records, and begin a pass. A no-op unless cloud mode is enabled.
+                Task { await model.cloudBecameActive() }
                 CoachBriefScheduler.activateIfEnabled { await model.coach.generateBrief() }
                 model.drainPendingIntents(router: router)
                 // iOS starts a Lift Log banner only for an app on screen, so a banner lost while NOOP was in
@@ -392,6 +396,10 @@ struct StrandiOSApp: App {
                     await watch.pushLatest(from: model)
                 }
             } else if phase == .background {
+                // Cloud: commit staged records before suspension and start the pass that will use the
+                // background URLSession if the foreground window closes. BLE capture is untouched — the
+                // journal commits are additive, and the strap keeps collecting either way.
+                Task { await model.cloudWillResignActive() }
                 // Re-submit on every transition because iOS may discard an old best-effort request.
                 HealthWritebackBackgroundScheduler.updateSchedule(
                     isAuthorized: health.auth == .authorized)

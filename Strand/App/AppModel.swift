@@ -246,6 +246,46 @@ final class AppModel: ObservableObject {
     /// Daily re-arm timer for the single-instant firmware smart alarm (see scheduleDailySmartAlarmRearm).
     private var smartAlarmRearmTimer: Timer?
 
+    /// Cloud mode replaces local physiological analysis with server work (spec F4).
+    ///
+    /// The gate lives on the CALLS rather than inside `IntelligenceEngine`, for two reasons: the engine
+    /// stays usable by the worker's parity tests, and an offline install — which is what every build
+    /// without an enabled cloud configuration is — keeps byte-for-byte its current behaviour. When the
+    /// gate is closed the local pass is skipped entirely and the phone instead uploads what it captured
+    /// and lets the server score it. There is deliberately no local-scoring fallback in cloud mode: a
+    /// hidden fallback would produce a second, differently derived number for the same day.
+    var cloudScoringIsAuthoritative: Bool { CloudPushSettings.isEnabled }
+
+    /// Called INSTEAD of a local analysis pass when the cloud is authoritative. Returns true when the
+    /// caller must not run local analysis.
+    @discardableResult
+    func routeAnalysisToCloud() -> Bool {
+        guard cloudScoringIsAuthoritative else { return false }
+        CloudPushRuntime.shared.kick()
+        return true
+    }
+
+    /// Cloud lifecycle hooks, called from the iOS scene phase.
+    ///
+    /// Going active is an execution opportunity: close the journal's ≤1 s coalescing window and start a
+    /// pass. Going to the background is the last chance to commit staged records before suspension, so
+    /// the flush happens first and the pass afterwards. Both are no-ops unless cloud mode is running.
+    func cloudBecameActive() async {
+        CloudPushRuntime.shared.setAppIsActive(true)
+        CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
+        await CloudPushRuntime.shared.flushAndKick()
+        // In cloud mode the server owns scoring, so an active scene refreshes the SERVER's changed days
+        // into the local cache instead of running a local pass. A no-op when cloud mode is off.
+        if cloudScoringIsAuthoritative {
+            await CloudPushRuntime.shared.refreshServerScores(deviceId: deviceId)
+        }
+    }
+
+    func cloudWillResignActive() async {
+        CloudPushRuntime.shared.setAppIsActive(false)
+        await CloudPushRuntime.shared.flushAndKick()
+    }
+
     init() {
         let live = LiveState()
         self.live = live
@@ -493,17 +533,25 @@ final class AppModel: ObservableObject {
             // (far-past / bogus-2027 / FUTURE) from an older build, then rescore the real days. Runs
             // BEFORE the Effort rescore + analyzeRecent loop so both operate on a cleaned DB. Persisted
             // flag → no-op on every subsequent launch; idempotent on a clean DB.
-            await self.intelligence.runTimestampHealIfNeeded()
-            // One-shot on-upgrade Effort rescore (#313): recompute strain from source across the FULL
-            // history and repair sleep rejected by unmatched WRIST_OFF in one pass. Both persisted flags
-            // describe that shared pass; either pending flag triggers it.
-            await self.intelligence.runEffortRescoreIfNeeded()
+            // Cloud mode: these repair and re-score LOCAL history. With the server authoritative they
+            // are skipped, and the pass becomes an upload kick instead (F4).
+            if !self.cloudScoringIsAuthoritative {
+                await self.intelligence.runTimestampHealIfNeeded()
+                // One-shot on-upgrade Effort rescore (#313): recompute strain from source across the FULL
+                // history and repair sleep rejected by unmatched WRIST_OFF in one pass. Both persisted flags
+                // describe that shared pass; either pending flag triggers it.
+                await self.intelligence.runEffortRescoreIfNeeded()
+            } else {
+                CloudPushRuntime.shared.kick()
+            }
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after
                 // the one-shot done flag is set, purges any pollution, and rescores the affected days , so a
                 // wandering-clock strap can't keep re-polluting. A no-op when nothing's pending.
-                await self.intelligence.runTimestampHealIfNeeded()
+                if !self.cloudScoringIsAuthoritative {
+                    await self.intelligence.runTimestampHealIfNeeded()
+                }
                 // #836: the steady-state tick is a BACKSTOP, not a data-driven refresh — every real update
                 // (sync backfill, import, edit, recalibrate, heal) already rescores via its own forced call.
                 // `force: false` skips the heavy 21-day rescore when the raw HR stream is unchanged since the
@@ -524,11 +572,17 @@ final class AppModel: ObservableObject {
                 // `live = self.live` spelled out: this is nested inside the cadence `Task`, which
                 // requires explicit `self`, so the bare-name capture shorthand used elsewhere in this
                 // type would not resolve here.
-                await RescoreBackgroundScheduler.run(owesOnDefer: false,
-                                                     log: { [live = self.live] line in
-                                                         live.append(log: line)
-                                                     }) {
-                    await self.intelligence.analyzeRecent(force: false)
+                if self.cloudScoringIsAuthoritative {
+                    // Cloud mode: the backstop's job is to make sure a day's inputs reach the server and
+                    // its result is current, not to recompute the day locally.
+                    CloudPushRuntime.shared.kick()
+                } else {
+                    await RescoreBackgroundScheduler.run(owesOnDefer: false,
+                                                         log: { [live = self.live] line in
+                                                             live.append(log: line)
+                                                         }) {
+                        await self.intelligence.analyzeRecent(force: false)
+                    }
                 }
                 // v5: recompute the skin-temp suite snapshots (cycle phase + body clock) from the
                 // freshly-scored history so the Health hub cards read a ready result.
@@ -693,6 +747,7 @@ final class AppModel: ObservableObject {
         guard repoMoved else { return }
         live.append(log: "Read spine re-pointed to active device after registry change (#814).")
         await repo.refresh()
+        if routeAnalysisToCloud() { return }
         await intelligence.analyzeRecent()
     }
 
@@ -730,6 +785,7 @@ final class AppModel: ObservableObject {
         let fromCompletedPass = RescoreBackgroundScheduler.isOwedAfterCompletedPass
         live.append(log: "re-score: resuming a pass an earlier attempt could not finish (#1538)"
                     + (fromCompletedPass ? " — debt is from a completed pass, gating on the fingerprint (#2238)" : ""))
+        if routeAnalysisToCloud() { return }
         await intelligence.analyzeRecent(skipIfUnchanged: fromCompletedPass,
                                          triggerLabel: fromCompletedPass ? "resume-gated" : "resume-forced")
         #if os(iOS)
@@ -763,6 +819,7 @@ final class AppModel: ObservableObject {
         // the #1538 report while never producing a score. Decide first whether this pass can finish here,
         // and hand it to a background-processing task when it cannot. A no-op on macOS, and on iOS a
         // foreground pass is never deferred.
+        if routeAnalysisToCloud() { return }
         await RescoreBackgroundScheduler.run(passInProgress: intelligence.computing,
                                              log: { [live] line in live.append(log: line) }) {
             await intelligence.analyzeRecent(skipIfUnchanged: true)
