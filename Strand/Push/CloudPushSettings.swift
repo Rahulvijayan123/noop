@@ -56,13 +56,36 @@ public enum CloudPushSettings {
         return raw == "true" || raw == "yes" || raw == "1"
     }
 
-    /// Master switch. Defaults to on for a configured hosted build, and is always off when the
-    /// build carries no receiver, so an accidental enable can never point at nothing.
+    /// Master switch.
+    ///
+    /// Cloud mode is OPT-IN: a build that merely carries a receiver still uploads nothing until the
+    /// user turns it on, so the existing offline behaviour is what a fresh install does. A build cut
+    /// with `NOOPFinalHostedCompute = YES` is the exception — that build is hosted-compute-only and
+    /// starts enabled. Either way, an unconfigured build can never be enabled: there is no receiver
+    /// to point at, and the toggle is refused rather than silently accepted.
     public static var isEnabled: Bool {
         guard isConfigured else { return false }
         let defaults = UserDefaults.standard
-        if defaults.object(forKey: enabledOverrideKey) == nil { return true }
-        return defaults.bool(forKey: enabledOverrideKey)
+        if defaults.object(forKey: enabledOverrideKey) != nil {
+            return defaults.bool(forKey: enabledOverrideKey)
+        }
+        return isHostedComputeBuild
+    }
+
+    /// The receiver's project origin (`https://<project>.supabase.co`), derived from the configured
+    /// receiver URL by dropping the function path.
+    ///
+    /// The durability receipt binds an owner through an `AccountScope`, whose project URL must be the
+    /// canonical origin rather than the function endpoint, so the receipt check needs this form. It
+    /// returns an empty string when no receiver is configured.
+    public static var canonicalProjectURL: String {
+        guard let url = receiverURL, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return ""
+        }
+        components.path = ""
+        components.query = nil
+        components.fragment = nil
+        return components.string ?? ""
     }
 
     public static func setEnabled(_ enabled: Bool) {
