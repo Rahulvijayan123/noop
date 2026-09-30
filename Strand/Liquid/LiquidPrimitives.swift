@@ -603,7 +603,7 @@ struct LiquidScoreGauge: View {
                 }
             }
             .foregroundStyle(numberColor)
-            .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
+            .shadow(color: StrandPalette.skyTextShadow, radius: 6, y: 1)
             .lineLimit(1)
             .minimumScaleFactor(0.6)
             .allowsHitTesting(false)

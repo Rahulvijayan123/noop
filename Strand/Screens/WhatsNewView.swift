@@ -56,11 +56,10 @@ struct WhatsNewView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("WHAT'S NEW").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("What's new").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
                 Text("NOOP \(AppChangelog.currentVersion)")
-                    .font(StrandFont.rounded(26, weight: .bold))
+                    .font(StrandFont.rounded(26, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text("Release notes").font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textSecondary)
@@ -80,8 +79,7 @@ struct WhatsNewView: View {
     private var expectationsCard: some View {
         NoopCard(tint: StrandPalette.accent) {
             VStack(alignment: .leading, spacing: 14) {
-                Text("WHAT TO EXPECT").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("What to expect").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textSecondary)
                 ForEach(AppChangelog.expectations) { e in
                     HStack(alignment: .top, spacing: 12) {

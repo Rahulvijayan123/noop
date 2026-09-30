@@ -249,12 +249,12 @@ struct LiveView: View {
     }
 
     private var connectionModeBadge: LocalizedStringKey {
-        if activeConnection && live.encryptedBond { return "FULL BOND" }
-        if activeConnection { return "LIVE HR ONLY" }
-        if ringStreaming { return "STREAMING" }
-        if live.connected { return "CONNECTING" }
-        if live.encryptedBond { return "PAIRED" }
-        return "OFFLINE"
+        if activeConnection && live.encryptedBond { return "Full bond" }
+        if activeConnection { return "Live HR only" }
+        if ringStreaming { return "Streaming" }
+        if live.connected { return "Connecting" }
+        if live.encryptedBond { return "Paired" }
+        return "Offline"
     }
 
     /// Whether to render the connection-mode SourceBadge. When fully offline the `connectionPill`
@@ -409,8 +409,7 @@ struct LiveView: View {
                     // beside it, which would leave the card asserting both at once. Reuses the "Paused"
                     // string #1533 already localized. (The Today card says "IN PROGRESS", which stays
                     // true while paused, so it keeps its label and takes the tag instead.)
-                    Text(w.isPaused ? "Paused" : "RECORDING WORKOUT").font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
+                    Text(w.isPaused ? "Paused" : "Recording workout").font(StrandFont.overline)
                         .foregroundStyle(w.isPaused ? StrandPalette.textSecondary : StrandPalette.metricRose)
                     Spacer()
                     // Re-render once a second so the elapsed clock ticks without a manual Timer.
@@ -845,7 +844,7 @@ private struct LiveHeaderStats: View {
 
     private func stat(_ title: String, _ value: String) -> some View {
         VStack(alignment: .trailing, spacing: 1) {
-            Text(title.uppercased())
+            Text(title)
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
             Text(value)
@@ -899,9 +898,8 @@ private struct LiveHeartReadout: View {
     var body: some View {
         let tint = hrTint
         return VStack(alignment: .center, spacing: NoopMetrics.space2) {
-            Text("HEART RATE")
+            Text("Heart rate")
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textSecondary)
             ZStack {
                 // The live BPM gauge: a liquid vessel that fills to the HR-zone fraction and sloshes.
@@ -925,7 +923,6 @@ private struct LiveHeartReadout: View {
                     if liveZone >= 1 {
                         Text("ZONE \(liveZone)")
                             .font(StrandFont.overline)
-                            .tracking(StrandFont.overlineTracking)
                             .foregroundStyle(tint)
                             .padding(.top, NoopMetrics.space1)
                     }
@@ -983,9 +980,8 @@ private struct LivePhysiology: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space4) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("LIVE PHYSIOLOGY")
+                    Text("Live physiology")
                         .font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
                         .foregroundStyle(StrandPalette.textSecondary)
                     Text(connectionModeDetail)
                         .font(StrandFont.headline)
@@ -1049,7 +1045,7 @@ private struct LivePhysiology: View {
     /// broken live readout. The callers pass a word ("Offline") instead of a bare em-dash in that case.
     private func proofMetric(_ label: String, _ value: String, _ tint: Color, offline: Bool = false) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(label.uppercased())
+            Text(label)
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
             Text(value)
@@ -1236,7 +1232,7 @@ private struct ActiveWorkoutLive: View {
 
     private func stat(_ title: String, _ value: String, tint: Color = StrandPalette.textPrimary) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased()).font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text(title).font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(value).font(StrandFont.number(17))
                 .foregroundStyle(tint).lineLimit(1).minimumScaleFactor(0.6)
@@ -1282,7 +1278,7 @@ private struct LiveLogCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                Text("STRAP LOG").font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                Text("Strap log").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer()
                 // Export the log so people can attach it to a bug report (issue #17 — macOS users
@@ -1423,9 +1419,8 @@ private struct SignalTrustTile: View {
                 LiquidVessel(value: tile.frac, tint: tile.tint, animated: false)
                     .frame(width: 22, height: 22)
                     .accessibilityHidden(true)
-                Text(tile.title.uppercased())
+                Text(tile.title)
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer(minLength: 0)
             }

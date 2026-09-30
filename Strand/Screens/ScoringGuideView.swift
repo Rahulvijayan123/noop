@@ -131,10 +131,9 @@ struct ScoringGuideView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("YOUR DAILY SCORES").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("Your daily scores").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
-                Text("How your scores work").font(StrandFont.rounded(26, weight: .bold))
+                Text("How your scores work").font(StrandFont.rounded(26, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text("Charge · Effort · Rest").font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textSecondary)
@@ -169,8 +168,7 @@ struct ScoringGuideView: View {
     private var introCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: 14) {
-                Text("THE THREE SCORES").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("The three scores").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Text("NOOP gives you three daily scores (Charge, Effort and Rest), each on a 0-100 scale. They're built from your strap's raw signals using published, peer-reviewed sport science, and computed entirely on your device. They are NOT WHOOP's scores: we don't have WHOOP's private algorithms and don't pretend to. They aim at the same three questions using open science, so they'll usually track WHOOP's in direction, but won't match number-for-number. And that's the point.")
                     .font(StrandFont.subhead)
@@ -218,8 +216,6 @@ struct ScoringGuideView: View {
                                 .accessibilityHidden(true)
                             Text(section.displayName)
                                 .font(StrandFont.overline)
-                                .tracking(StrandFont.overlineTracking)
-                                .textCase(.uppercase)
                                 .foregroundStyle(section.accent)
                         }
                         Text(headline).font(StrandFont.headline)
@@ -235,8 +231,6 @@ struct ScoringGuideView: View {
                 Divider().overlay(StrandPalette.hairline)
                 HStack(alignment: .top, spacing: 8) {
                     Text("vs WHOOP").font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
-                        .textCase(.uppercase)
                         .foregroundStyle(section.accent)
                         .padding(.top, 1)
                     Text(vsWhoop)
@@ -274,8 +268,6 @@ struct ScoringGuideView: View {
             )
             Text(section.displayName)
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
-                .textCase(.uppercase)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
     }

@@ -31,9 +31,9 @@ struct WatchIntervalView: View {
         case work, rest, done
         var label: String {
             switch self {
-            case .work: return String(localized: "WORK")
-            case .rest: return String(localized: "REST")
-            case .done: return String(localized: "DONE")
+            case .work: return String(localized: "Work")
+            case .rest: return String(localized: "Rest")
+            case .done: return String(localized: "Done")
             }
         }
     }
@@ -126,8 +126,7 @@ struct WatchIntervalView: View {
     /// Tinted phase pill (WORK / REST / DONE).
     private var phaseChip: some View {
         Text(phase.label)
-            .font(StrandFont.rounded(13, weight: .heavy))
-            .tracking(1.5)
+            .font(StrandFont.rounded(13, weight: .semibold))
             .foregroundStyle(phaseColor)
             .padding(.horizontal, 9)
             .padding(.vertical, 4)
@@ -183,9 +182,8 @@ struct WatchIntervalView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .contentTransition(.numericText())
-                Text(isFinished ? String(localized: "DONE") : String(localized: "SEC"))
+                Text(isFinished ? String(localized: "Done") : String(localized: "sec"))
                     .font(StrandFont.overlineScaled(9))
-                    .tracking(1.5)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .padding(.horizontal, lineWidth + 3)

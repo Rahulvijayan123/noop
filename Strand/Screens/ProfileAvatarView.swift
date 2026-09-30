@@ -44,11 +44,9 @@ struct ProfileAvatarView: View {
                 // A faint hairline ring so the photo edge reads cleanly on any card/canvas.
                 .overlay(Circle().strokeBorder(StrandPalette.hairline, lineWidth: 1))
         } else {
-            // Fallback: the NOOP loop BrandMark (the green ring + white core) instead of a generic
-            // person glyph — the default avatar is now on-brand. BrandMark is intrinsically square and
-            // sized off a single edge length, so it fills the same `size` footprint a photo / the old
-            // symbol did, keeping the header and Settings layouts unchanged.
-            BrandMark(size: size)
+            // BrandMark is intrinsically square and sized off a single edge length, so it fills the
+            // same `size` footprint a photo does, keeping the header and Settings layouts unchanged.
+            BrandMark(size: size, style: .tile)
                 .frame(width: size, height: size)
         }
     }

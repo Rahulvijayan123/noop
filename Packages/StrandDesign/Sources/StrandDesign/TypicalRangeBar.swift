@@ -175,9 +175,8 @@ public struct TypicalRangeRow: View {
 
             // Label + coloured value.
             HStack(spacing: 6) {
-                Text(label.uppercased())
+                Text(label)
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textPrimary)
                 if let valueText {
                     Text(valueText)

@@ -369,7 +369,7 @@ struct WeeklyDigestContent: View {
         let arrow = s.wowDelta > 0 ? "arrow.up" : (s.wowDelta < 0 ? "arrow.down" : "minus")
         return HStack(spacing: 3) {
             Image(systemName: arrow)
-                .font(.system(size: 9, weight: .bold))
+                .font(.system(size: 9, weight: .semibold))
                 .accessibilityHidden(true)
             Text(deltaText(s))
                 .font(StrandFont.captionNumber)
@@ -561,8 +561,6 @@ private struct DigestScoreCard: View {
             if isEmbedded {
                 Text(summary.metric.label)
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
-                    .textCase(.uppercase)
                     .foregroundStyle(domain.color)
                     .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
                     .multilineTextAlignment(.center)
@@ -619,8 +617,6 @@ private struct DigestScoreCard: View {
     private var metricLabel: some View {
         Text(summary.metric.label)
             .font(StrandFont.overline)
-            .tracking(StrandFont.overlineTracking)
-            .textCase(.uppercase)
             .foregroundStyle(domain.color)
     }
 

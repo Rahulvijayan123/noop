@@ -324,7 +324,7 @@ private struct HeartRateSection: View {
                     ("Zone", hasLiveHR ? "Z\(zone)" : "—"),
                     ("% Max", hasLiveHR ? "\(Int((fraction * 100).rounded()))%" : "—"),
                     ("Max HR", "\(profile.hrMax)"),
-                    ("State", hasLiveHR ? String(localized: "STREAMING") : String(localized: "IDLE")),
+                    ("State", hasLiveHR ? String(localized: "Streaming") : String(localized: "Idle")),
                 ])
             }
         }

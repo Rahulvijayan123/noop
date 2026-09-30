@@ -1437,7 +1437,7 @@ struct SettingsView: View {
                 // MARK: Strap log — a Settings shortcut so people don't have to hunt for it on the Live
                 // screen (#507: couldn't find it on Mac; #509: same on iPhone). Same text as the Live card.
                 HStack(spacing: 12) {
-                    Text("STRAP LOG").font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    Text("Strap log").font(StrandFont.overline)
                         .foregroundStyle(StrandPalette.textSecondary)
                     Spacer()
                     Button("Copy") { PlatformPasteboard.copy(live.exportableLogText()) }
@@ -3042,10 +3042,9 @@ struct StepsCalibrationSheet: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("STEPS ESTIMATE").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("Steps estimate").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
-                Text("Calibrate your steps").font(StrandFont.rounded(26, weight: .bold))
+                Text("Calibrate your steps").font(StrandFont.rounded(26, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text(is5MG ? "WHOOP 5.0 / MG · motion → steps" : "WHOOP 4.0 · motion → steps").font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textSecondary)

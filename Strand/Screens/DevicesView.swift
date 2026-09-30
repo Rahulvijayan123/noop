@@ -151,7 +151,7 @@ private struct DevicesContent: View {
                 .task(id: activeDevices.count) { await loadStrapCompare() }
             // UPPERCASE overline section header, matching the liquid Today. Counts the paired bands so the
             // multi-WHOOP reality reads at a glance.
-            sectionHead("YOUR BANDS", trailing: activeDevices.count == 1
+            sectionHead("Your bands", trailing: activeDevices.count == 1
                         ? String(localized: "1 paired")
                         : String(localized: "\(activeDevices.count) paired"))
             // #1300: a prominent switcher to flip which strap is active — the "switch, don't combine"
@@ -436,7 +436,7 @@ private struct DevicesContent: View {
 
     private var removedSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-            sectionHead("REMOVED", trailing: String(localized: "Data kept"))
+            sectionHead("Removed", trailing: String(localized: "Data kept"))
             ForEach(removedDevices) { device in
                 DeviceCard(
                     device: device,
@@ -637,7 +637,7 @@ private struct DevicesContent: View {
 
     private func sectionHead(_ title: LocalizedStringKey, trailing: String) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(title).font(StrandFont.overline).tracking(1.6).foregroundStyle(StrandPalette.textTertiary)
+            Text(title).font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
             Spacer()
             Text(trailing).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
         }
@@ -946,7 +946,7 @@ private struct DeviceCard: View {
                     if let hint = primaryActionHint {
                         Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                         Text(hint)
-                            .font(StrandFont.overlineScaled(10)).tracking(1.0)
+                            .font(StrandFont.overlineScaled(10))
                             .foregroundStyle(StrandPalette.accent)
                         Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(StrandPalette.accent)

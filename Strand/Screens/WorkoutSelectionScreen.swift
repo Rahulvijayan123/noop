@@ -109,7 +109,7 @@ struct WorkoutSelectionScreen: View {
     private var headerCopy: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             Text(heading)
-                .font(StrandFont.rounded(34, weight: .bold))
+                .font(StrandFont.rounded(34, weight: .semibold))
                 .foregroundStyle(StrandPalette.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(explainer)
@@ -124,7 +124,7 @@ struct WorkoutSelectionScreen: View {
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
             Text("Recent")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: NoopMetrics.space2) {
@@ -234,7 +234,7 @@ struct WorkoutSelectionCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 Image(systemName: "play.fill")
-                    .font(.system(size: 18, weight: .bold))
+                    .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(StrandPalette.goldDeepText)
                     .frame(width: 52, height: 52)
                     .background(Circle().fill(StrandPalette.accent))

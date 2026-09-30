@@ -307,7 +307,7 @@ struct InsightsView: View {
                         // WHOOP tappable-card title: UPPERCASE tracked white + trailing "›" chevron
                         // glyph (mirrors "HEALTH MONITOR ›"). The descriptive line stays beneath.
                         Text("WHAT MOVES YOU \u{203A}")
-                            .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                            .font(StrandFont.overline)
                             .foregroundStyle(StrandPalette.textPrimary)
                         Text("Ranked, lag-aware: which of your habits actually move your Charge, plus your personal alcohol/caffeine dose-response.")
                             .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
@@ -579,7 +579,7 @@ struct InsightsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 12)
-                StatePill("LOCAL ONLY", tone: .neutral, showsDot: false)
+                StatePill("Local only", tone: .neutral, showsDot: false)
             }
 
             if candidates.isEmpty {
@@ -713,7 +713,6 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             Text(title)
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textTertiary)
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -877,12 +876,12 @@ struct InsightsView: View {
                                       compliance: Double) -> ExperimentConfidence {
         let pairedCount = min(baselineCount, interventionCount)
         if pairedCount >= 10, compliance >= 0.65 {
-            return .init(label: String(localized: "STRONGER SIGNAL"), tone: .positive)
+            return .init(label: String(localized: "Stronger signal"), tone: .positive)
         }
         if pairedCount >= 5 {
-            return .init(label: String(localized: "EARLY SIGNAL"), tone: .accent)
+            return .init(label: String(localized: "Early signal"), tone: .accent)
         }
-        return .init(label: String(localized: "LOW SIGNAL"), tone: .warning)
+        return .init(label: String(localized: "Low signal"), tone: .warning)
     }
 
     private func experimentReading(_ snapshot: ExperimentSnapshot) -> String {
@@ -972,7 +971,7 @@ struct InsightsView: View {
 
         var progress: Double { min(1, Double(daysElapsed) / Double(max(durationDays, 1))) }
         var phaseLabel: String {
-            daysElapsed >= durationDays ? String(localized: "COMPLETE")
+            daysElapsed >= durationDays ? String(localized: "Complete")
                                         : String(localized: "DAY \(daysElapsed)/\(durationDays)")
         }
         var phaseTone: StrandTone { daysElapsed >= durationDays ? .positive : .accent }
@@ -1087,7 +1086,7 @@ struct InsightsView: View {
                             .foregroundStyle(StrandPalette.textPrimary)
                     }
                     Spacer()
-                    StatePill(e.significant ? "SIGNIFICANT" : "EXPLORATORY",
+                    StatePill(e.significant ? "Significant" : "Exploratory",
                               tone: e.significant ? .positive : .neutral,
                               showsDot: false)
                 }

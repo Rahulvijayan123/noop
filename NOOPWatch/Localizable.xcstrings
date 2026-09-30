@@ -1409,48 +1409,48 @@
         }
       }
     },
-    "HEART RATE": {
+    "Heart rate": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "HERZFREQUENZ"
+            "value": "Herzfrequenz"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "HEART RATE"
+            "value": "Heart rate"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "FRECUENCIA CARDÍACA"
+            "value": "Frecuencia cardíaca"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "FRÉQUENCE CARDIAQUE"
+            "value": "Fréquence cardiaque"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "FREQUENZA CARDIACA"
+            "value": "Frequenza cardiaca"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "FREQUÊNCIA CARDÍACA"
+            "value": "Frequência cardíaca"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПУЛЬС"
+            "value": "Пульс"
           }
         },
         "zh-Hans": {
@@ -1468,7 +1468,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TĘTNO"
+            "value": "Tętno"
           }
         }
       }
@@ -1665,42 +1665,42 @@
         }
       }
     },
-    "PAUSED": {
+    "Paused": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "PAUSIERT"
+            "value": "Pausiert"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "PAUSED"
+            "value": "Paused"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "EN PAUSA"
+            "value": "En pausa"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "IN PAUSA"
+            "value": "In pausa"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "PAUSADO"
+            "value": "Pausado"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПАУЗА"
+            "value": "Пауза"
           }
         },
         "zh-Hans": {
@@ -1718,13 +1718,13 @@
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "EN PAUSE"
+            "value": "En pause"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "WSTRZYMANO"
+            "value": "Wstrzymano"
           }
         }
       }
@@ -1793,42 +1793,42 @@
         }
       }
     },
-    "RECORDING": {
+    "Recording": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "AUFNAHME"
+            "value": "Aufnahme"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "RECORDING"
+            "value": "Recording"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "GRABANDO"
+            "value": "Grabando"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "REGISTRAZIONE"
+            "value": "Registrazione"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "GRAVAÇÃO"
+            "value": "Gravação"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЗАПИСЬ"
+            "value": "Запись"
           }
         },
         "zh-Hans": {
@@ -1846,13 +1846,13 @@
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "ENREGISTREMENT"
+            "value": "Enregistrement"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NAGRANIE"
+            "value": "Nagranie"
           }
         }
       }
@@ -2369,42 +2369,42 @@
         }
       }
     },
-    "SEC": {
+    "sec": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEK"
+            "value": "Sek"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEC"
+            "value": "sec"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEG"
+            "value": "Seg"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEC"
+            "value": "Sec"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEC"
+            "value": "Sec"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СЕК"
+            "value": "Сек"
           }
         },
         "zh-Hans": {
@@ -2422,13 +2422,13 @@
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEC"
+            "value": "Sec"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEK"
+            "value": "Sek"
           }
         }
       }
@@ -2753,42 +2753,42 @@
         }
       }
     },
-    "WORK": {
+    "Work": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "AKTIV"
+            "value": "Aktiv"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "WORK"
+            "value": "Work"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRABAJO"
+            "value": "Trabajo"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "LAVORO"
+            "value": "Lavoro"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRABALHO"
+            "value": "Trabalho"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "РАБОТА"
+            "value": "Работа"
           }
         },
         "zh-Hans": {
@@ -2806,13 +2806,13 @@
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRAVAIL"
+            "value": "Travail"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRACA"
+            "value": "Praca"
           }
         }
       }

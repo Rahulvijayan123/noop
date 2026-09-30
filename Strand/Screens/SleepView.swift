@@ -546,9 +546,7 @@ struct SleepView: View {
                         tint: StrandPalette.restColor,
                         diameter: 184,
                         animated: true,
-                        captionText: String(localized: "of 100"),
-                        numberColor: Color.white.opacity(0.98),
-                        captionColor: Color.white.opacity(0.52)
+                        captionText: String(localized: "of 100")
                     )
                     Text(sleepScoreWord(score))
                         .font(StrandFont.subhead.weight(.semibold))
@@ -1406,9 +1404,8 @@ struct SleepView: View {
                 .fill(color)
                 .frame(width: 12, height: 12)
                 .accessibilityHidden(true)
-            Text(stage.label.uppercased())
+            Text(stage.label)
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textPrimary)
                 .frame(width: 56, alignment: .leading)
             Text("\(percent)%")
@@ -1506,9 +1503,8 @@ struct SleepView: View {
                 Text(durationText(s.asleep))
                     .font(StrandFont.number(26))
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("HOURS OF SLEEP")
+                Text("Hours of sleep")
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textTertiary)
                 if let t = stageTypical(nil) {
                     Text("typically \(durationText(t.mean))")
@@ -1520,9 +1516,8 @@ struct SleepView: View {
                 Text(durationText(restorative))
                     .font(StrandFont.number(26))
                     .foregroundStyle(StrandPalette.sleepREM)
-                Text("RESTORATIVE SLEEP")
+                Text("Restorative sleep")
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textTertiary)
                 if let t = restorativeTypical() {
                     Text("typically \(durationText(t))")
@@ -1624,9 +1619,8 @@ struct SleepView: View {
         let dimmed = selectedStage != nil && !isSelected
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Text(stage.label.uppercased())
+                Text(stage.label)
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text("\(percent)%")
                     .font(StrandFont.captionNumber)

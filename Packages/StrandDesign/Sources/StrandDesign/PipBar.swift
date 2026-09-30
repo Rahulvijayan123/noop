@@ -200,14 +200,11 @@ public struct PipBarRow: View {
 
     public var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            // UPPERCASE label.
             Text(label)
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
-                .textCase(.uppercase)
                 .foregroundStyle(StrandPalette.textSecondary)
 
-            // Big white value + smaller-weight unit suffix.
+            // Value + smaller unit suffix.
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(valueText)
                     .font(StrandFont.number(30, weight: .bold))

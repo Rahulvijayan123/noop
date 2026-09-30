@@ -138,8 +138,7 @@ struct LiveWorkoutView: View {
                     if model.activeWorkout?.isPaused == true { Text("Paused") }
                     else { Text("Recording workout") }
                 }
-                .textCase(.uppercase)
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.metricRose)
             }
             .padding(.horizontal, NoopMetrics.space2)
@@ -158,8 +157,8 @@ struct LiveWorkoutView: View {
         Group {
             if let workout = model.activeWorkout {
                 VStack(spacing: NoopMetrics.space1) {
-                    Text("TIME")
-                        .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    Text("Time")
+                        .font(StrandFont.overline)
                         .foregroundStyle(StrandPalette.textSecondary)
                     TimelineView(.periodic(from: .now, by: 1)) { _ in
                         Text(Self.elapsed(seconds: workout.elapsed()))
@@ -177,8 +176,8 @@ struct LiveWorkoutView: View {
     private var heartRateBlock: some View {
         let tint = zone >= 1 ? StrandPalette.hrZoneColor(zone) : StrandPalette.effortColor
         return VStack(spacing: NoopMetrics.space1) {
-            Text("HEART RATE")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text("Heart rate")
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             if let bpm = model.bpm {
                 CountUpText(value: Double(bpm),
@@ -225,8 +224,8 @@ struct LiveWorkoutView: View {
             .accessibilityLabel(effortAccessibilityLabel)
             .accessibilityValue(Text(StrainGauge.stateLabel(forFraction: fraction)))
 
-            Text("EFFORT BUILDING")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text("Effort building")
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.effortColor)
             Text(StrainGauge.stateLabel(forFraction: fraction))
                 .font(StrandFont.captionNumber)
@@ -241,8 +240,8 @@ struct LiveWorkoutView: View {
         let tint = zone >= 1 ? StrandPalette.hrZoneColor(zone) : StrandPalette.effortColor
         return VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("HR ZONE")
-                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                Text("HR zone")
+                    .font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer()
                 Text(zone >= 1 ? "Zone \(zone) · \(Self.zoneName(zone))" : "Below Zone 1")
@@ -288,10 +287,10 @@ struct LiveWorkoutView: View {
                 stat(String(localized: "AVG"), (w?.avgHr ?? 0) > 0 ? "\(w!.avgHr)" : "—",
                      tint: (w?.avgHr ?? 0) > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
                 statDivider
-                stat(String(localized: "PEAK"), (w?.peakHr ?? 0) > 0 ? "\(w!.peakHr)" : "—",
+                stat(String(localized: "Peak"), (w?.peakHr ?? 0) > 0 ? "\(w!.peakHr)" : "—",
                      tint: (w?.peakHr ?? 0) > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
                 statDivider
-                stat(String(localized: "EFFORT"), UnitFormatter.effortDisplay(w?.liveStrain ?? 0, scale: effortScale),
+                stat(String(localized: "Effort"), UnitFormatter.effortDisplay(w?.liveStrain ?? 0, scale: effortScale),
                      tint: StrandPalette.strainColor(w?.liveStrain ?? 0))
             }
         }
@@ -300,7 +299,7 @@ struct LiveWorkoutView: View {
     private func stat(_ title: String, _ value: String, tint: Color = StrandPalette.textPrimary) -> some View {
         VStack(spacing: NoopMetrics.space1) {
             Text(title)
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(value)
                 .font(StrandFont.number(28))
@@ -510,13 +509,13 @@ private struct SensorRowIfPresent: View {
             let power = LiveState.formatPowerWatts(live.sensorPowerWatts)
             NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.effortColor) {
                 VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                    Text("SENSOR")
-                        .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    Text("Sensor")
+                        .font(StrandFont.overline)
                         .foregroundStyle(StrandPalette.textSecondary)
                     HStack(spacing: NoopMetrics.gap) {
-                        if let speed { stat(String(localized: "SPEED"), speed, tint: StrandPalette.effortColor) }
-                        if let cadence { stat(String(localized: "CADENCE"), "\(cadence)/min", tint: StrandPalette.effortColor) }
-                        if let power { stat(String(localized: "POWER"), "\(power) W", tint: StrandPalette.effortColor) }
+                        if let speed { stat(String(localized: "Speed"), speed, tint: StrandPalette.effortColor) }
+                        if let cadence { stat(String(localized: "Cadence"), "\(cadence)/min", tint: StrandPalette.effortColor) }
+                        if let power { stat(String(localized: "Power"), "\(power) W", tint: StrandPalette.effortColor) }
                     }
                 }
             }
@@ -529,7 +528,7 @@ private struct SensorRowIfPresent: View {
     private func stat(_ title: String, _ value: String, tint: Color = StrandPalette.textPrimary) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
             Text(title)
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(value)
                 .font(StrandFont.number(26))
@@ -570,10 +569,10 @@ private struct DistancePaceRowIfPresent: View {
                 HStack(spacing: 0) {
                     // "Distance"/"Pace" are already localized (reused from the detail view); uppercased for
                     // the caps stat grid, exactly as the detail route stats do.
-                    stat(String(localized: "Distance").uppercased(),
+                    stat(String(localized: "Distance"),
                          UnitFormatter.distanceFromMeters(recorder.distanceM, system: distanceUnitSystem))
                     statDivider
-                    stat(String(localized: "Pace").uppercased(),
+                    stat(String(localized: "Pace"),
                          UnitFormatter.paceFromSecPerKm(recorder.paceSecPerKm, system: distanceUnitSystem))
                 }
             }
@@ -583,7 +582,7 @@ private struct DistancePaceRowIfPresent: View {
     private func stat(_ title: String, _ value: String) -> some View {
         VStack(spacing: NoopMetrics.space1) {
             Text(title)
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(value)
                 .font(StrandFont.number(28))

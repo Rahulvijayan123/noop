@@ -170,7 +170,7 @@ struct AppleHealthView: View {
             case .quarter: return String(localized: "90 DAYS")
             case .half:    return String(localized: "180 DAYS")
             case .year:    return String(localized: "365 DAYS")
-            case .all:     return String(localized: "ALL TIME")
+            case .all:     return String(localized: "All time")
             }
         }
         var name: String {

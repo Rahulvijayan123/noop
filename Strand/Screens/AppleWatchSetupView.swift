@@ -69,10 +69,9 @@ struct AppleWatchSetupView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("APPLE WATCH").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("Apple Watch").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
-                Text("Use NOOP with your watch").font(StrandFont.rounded(26, weight: .bold))
+                Text("Use NOOP with your watch").font(StrandFont.rounded(26, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text(step == .intro ? "What to expect" : "Connect Apple Health")
                     .font(StrandFont.caption)
@@ -180,8 +179,7 @@ struct AppleWatchSetupView: View {
     private var goodAtCard: some View {
         NoopCard(tint: StrandPalette.statusPositive) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("WHAT IT'S GREAT AT").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("What it's great at").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.statusPositive)
                 bullet("bed.double.fill", String(localized: "Sleep & Rest"),
                        String(localized: "Apple's sleep stages are strong, and they drive your Rest score directly."))
@@ -197,8 +195,7 @@ struct AppleWatchSetupView: View {
     private var lighterCard: some View {
         NoopCard(tint: StrandPalette.statusWarning) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("WHERE IT'S LIGHTER THAN A STRAP").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("Where it's lighter than a strap").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.statusWarning)
                 bullet("heart.fill", String(localized: "Recovery takes about a week"),
                        String(localized: "A watch samples your heart-rate variability rather than streaming it all night, so your Charge score needs roughly seven nights to calibrate. Until then NOOP shows \u{201C}needs more data\u{201D}, never a guessed number."))

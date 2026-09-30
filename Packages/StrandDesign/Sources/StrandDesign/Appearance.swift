@@ -88,7 +88,7 @@ public extension View {
 /// `accent`/`accentHover`/`accentMuted`/`focusRing` accessors in `StrandPalette` branch on it. Mirror in
 /// Kotlin via `Palette.accentChoice` + `NoopPrefs.accentColor`/`accentCustomHex`.
 public enum AccentColor: String, CaseIterable, Identifiable, Sendable {
-    case mint        // the brand default (#1068 NoopVisualStyle.mint world)
+    case mint        // the brand default — Nara purple (the rawValue predates the rebrand; kept for stored prefs)
     case whoopBlue   // the classic WHOOP link blue
     case custom      // a user-picked colour (hex stored separately)
 
@@ -96,12 +96,12 @@ public enum AccentColor: String, CaseIterable, Identifiable, Sendable {
     public static let storageKey = "accent.color"
     /// The custom colour's hex, kept separate so switching away from `.custom` and back keeps the choice.
     public static let customHexKey = "accent.customHex"
-    /// Seeds the custom picker (mint) so a fresh `.custom` selection is not black.
-    public static let defaultCustomHex = "#149A78"
+    /// Seeds the custom picker (Deep Purple) so a fresh `.custom` selection is not black.
+    public static let defaultCustomHex = "#390282"
 
     public var label: String {
         switch self {
-        case .mint:      return String(localized: "Mint", bundle: .module)
+        case .mint:      return "Nara"
         case .whoopBlue: return String(localized: "WHOOP Blue", bundle: .module)
         case .custom:    return String(localized: "Custom", bundle: .module)
         }
@@ -177,7 +177,7 @@ public enum ThemePreset: String, CaseIterable, Identifiable, Sendable {
 
     public var label: String {
         switch self {
-        case .mint:     return String(localized: "Mint", bundle: .module)
+        case .mint:     return "Nara"
         case .ocean:    return String(localized: "Ocean", bundle: .module)
         case .classic:  return String(localized: "Classic", bundle: .module)
         case .midnight: return String(localized: "Midnight", bundle: .module)

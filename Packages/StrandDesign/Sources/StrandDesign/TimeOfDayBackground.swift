@@ -361,9 +361,8 @@ public extension View {
             ZStack {
                 TimeOfDayBackground(dayPart: part)
                 VStack(spacing: 4) {
-                    Text(part.rawValue.uppercased())
+                    Text(part.rawValue.sentenceCased)
                         .font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
                         .foregroundStyle(StrandPalette.textPrimary)
                     Text("88")
                         .font(StrandFont.display(44))

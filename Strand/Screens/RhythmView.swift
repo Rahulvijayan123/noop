@@ -418,7 +418,7 @@ struct RhythmView: View {
         StrandCard(padding: 18, tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("LAST NIGHT").strandOverline()
+                    Text("Last night").strandOverline()
                     Spacer()
                     ScoreStatePill(confidenceState, text: confidenceText)
                 }
@@ -454,8 +454,6 @@ struct RhythmView: View {
             HStack {
                 Text(label)
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
-                    .textCase(.uppercase)
                     .foregroundStyle(StrandPalette.textTertiary)
                 Spacer()
                 Text(percent(frac))
@@ -472,7 +470,7 @@ struct RhythmView: View {
     private var plotCard: some View {
         StrandCard(padding: 18, tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: 12) {
-                Text("BEAT-TO-BEAT SCATTER").strandOverline()
+                Text("Beat-to-beat scatter").strandOverline()
                 ZStack {
                     ScenicHeroBackground(domain: .rest, starCount: 36)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
@@ -493,33 +491,33 @@ struct RhythmView: View {
 
     private var statsCard: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("The numbers", overline: "DESCRIPTIVE STATS")
+            SectionHeader("The numbers", overline: "Descriptive stats")
             HStack(spacing: NoopMetrics.gap) {
-                StatTile(label: "SHORT AXIS",
+                StatTile(label: "Short axis",
                          value: fmt(headlineWindow?.sd1, "%.0f"),
                          caption: String(localized: "SD1 · ms"),
                          accent: StrandPalette.restBright)
-                StatTile(label: "LONG AXIS",
+                StatTile(label: "Long axis",
                          value: fmt(headlineWindow?.sd2, "%.0f"),
                          caption: String(localized: "SD2 · ms"),
                          accent: StrandPalette.restColor)
             }
             HStack(spacing: NoopMetrics.gap) {
-                StatTile(label: "CLOUD SHAPE",
+                StatTile(label: "Cloud shape",
                          value: fmt(headlineWindow?.sd1sd2, "%.2f"),
                          caption: String(localized: "SD1:SD2 ratio"),
                          accent: StrandPalette.metricCyan)
-                StatTile(label: "BEAT-TO-BEAT",
+                StatTile(label: "Beat-to-beat",
                          value: percent(headlineWindow?.normRmssd),
                          caption: String(localized: "variation index"),
                          accent: StrandPalette.metricPurple)
             }
             HStack(spacing: NoopMetrics.gap) {
-                StatTile(label: "EXTRA / SKIPPED",
+                StatTile(label: "Extra / skipped",
                          value: percent(headlineWindow?.ectopicFraction),
                          caption: String(localized: "of beats"),
                          accent: StrandPalette.restColor)
-                StatTile(label: "BEATS READ",
+                StatTile(label: "Beats read",
                          value: headlineWindow.map { "\($0.nBeats)" } ?? "—",
                          caption: String(localized: "clean intervals"),
                          accent: StrandPalette.textSecondary)

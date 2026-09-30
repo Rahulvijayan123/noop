@@ -145,7 +145,7 @@ struct NOOPWidgetView: View {
                                  ? AnyShapeStyle(StrandPalette.textTertiary)
                                  : AnyShapeStyle(HierarchicalShapeStyle.secondary))
             Text(text ?? "–")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .font(.system(size: 15, weight: .semibold))
                 .foregroundStyle(scoreStyle(hasValue: text != nil, tint: tint))
                 .minimumScaleFactor(0.7)
         }
@@ -232,7 +232,7 @@ struct NOOPWidgetView: View {
     private var headerRow: some View {
         HStack {
             Text("NOOP")
-                .font(.system(size: 13, weight: .bold))
+                .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(StrandPalette.textSecondary)
             Spacer()
             Circle()
@@ -344,7 +344,7 @@ struct NOOPWidgetView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value ?? "–")
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
+                    .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(value == nil ? StrandPalette.textTertiary : tint)
                 if let unit, value != nil {
                     Text(unit).font(.caption2).foregroundStyle(StrandPalette.textTertiary)
@@ -395,7 +395,7 @@ private struct WidgetScoreRing: View {
                         .rotationEffect(.degrees(-90))
                 }
                 Text(text ?? "–")
-                    .font(StrandFont.rounded(diameter * 0.34, weight: .bold))
+                    .font(StrandFont.rounded(diameter * 0.34, weight: .semibold))
                     .foregroundStyle(text == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
                     .monospacedDigit()
                     .lineLimit(1)

@@ -292,7 +292,7 @@ struct FullDayChartView: View {
     private var emptyState: some View {
         VStack(spacing: NoopMetrics.space2) {
             Image(systemName: "waveform.slash")
-                .font(.system(size: 26, weight: .light))
+                .font(.system(size: 26, weight: .regular))
                 .foregroundStyle(StrandPalette.textTertiary)
             Text("No \(metric.title.lowercased()) here")
                 .font(StrandFont.body)

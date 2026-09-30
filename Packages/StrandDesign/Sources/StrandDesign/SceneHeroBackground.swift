@@ -196,10 +196,9 @@ public extension View {
                 VStack(spacing: 6) {
                     Text("hour \(hr)")
                         .font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
                         .foregroundStyle(StrandPalette.textSecondary)
                     Text("88")
-                        .font(StrandFont.rounded(36, weight: .bold))
+                        .font(StrandFont.display(36))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 .frame(maxWidth: .infinity)

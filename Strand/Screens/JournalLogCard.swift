@@ -143,9 +143,8 @@ struct JournalLogCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Button { toggleCollapsed(group) } label: {
                     HStack(spacing: 6) {
-                        Text(group.title.uppercased())
+                        Text(group.title)
                             .font(StrandFont.overline)
-                            .tracking(StrandFont.overlineTracking)
                             .foregroundStyle(StrandPalette.textTertiary)
                         Text("\(groupItems.count)")
                             .font(StrandFont.caption)

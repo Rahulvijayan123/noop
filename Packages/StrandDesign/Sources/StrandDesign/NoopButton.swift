@@ -41,7 +41,7 @@ public enum NoopButtonMetrics {
     /// Spacing between a leading icon and the label.
     public static let iconSpacing: CGFloat = 8
     /// Label tracking — a hair of openness on the semibold face.
-    public static let tracking: CGFloat = 0.2
+    public static let tracking: CGFloat = 0
     /// Apple's minimum touch target. The button never reports a hit area below this.
     public static let minHitTarget: CGFloat = 44
     /// Pressed scale (spec: subtle 0.97). Reduce-Motion collapses this to 1 (dim only).

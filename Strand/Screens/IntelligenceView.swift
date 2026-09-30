@@ -322,7 +322,7 @@ struct IntelligenceView: View {
             // Scaled rather than truncated, matching how the value directly beneath is treated: "CHARG…"
             // reads worse than a slightly smaller "CHARGE". Larger Dynamic Type is where this bites, so
             // the floor has to leave room for the longest label at the widest text size.
-            Text(label.uppercased())
+            Text(label)
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .lineLimit(1)

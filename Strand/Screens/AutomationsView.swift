@@ -539,7 +539,6 @@ private struct Section2<Content: View>: View {
                         Text("Automation").strandOverline()
                         if active {
                             Text("ON").font(StrandFont.overline)
-                                .tracking(StrandFont.overlineTracking)
                                 .foregroundStyle(StrandPalette.accent)
                         }
                     }

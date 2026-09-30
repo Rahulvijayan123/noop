@@ -45,11 +45,10 @@ struct UpdatesInboxView: View {
     private var header: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("INBOX").font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
+                Text("Inbox").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
                 Text("Updates")
-                    .font(StrandFont.rounded(26, weight: .bold))
+                    .font(StrandFont.rounded(26, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text(subtitle).font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textSecondary)
@@ -84,7 +83,7 @@ struct UpdatesInboxView: View {
                         section("NEW", items: unread)
                     }
                     if !read.isEmpty {
-                        section("EARLIER", items: read)
+                        section("Earlier", items: read)
                     }
                 }
                 .padding(20)
@@ -99,7 +98,6 @@ struct UpdatesInboxView: View {
     private func section(_ label: LocalizedStringKey, items: [UpdateItem]) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             Text(label).font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textTertiary)
             ForEach(items) { item in
                 UpdateRow(item: item, onTap: { handleTap(item) }, onRestore: { restore(item) })
@@ -111,7 +109,7 @@ struct UpdatesInboxView: View {
         VStack(spacing: 12) {
             Spacer(minLength: 40)
             Image(systemName: "bell.slash")
-                .font(.system(size: 34, weight: .light))
+                .font(.system(size: 34, weight: .regular))
                 .foregroundStyle(StrandPalette.textTertiary)
                 .accessibilityHidden(true)
             Text("You're all caught up.")

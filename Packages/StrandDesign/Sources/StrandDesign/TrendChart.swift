@@ -300,7 +300,7 @@ public struct TrendChart: View {
             let point = currentSelection ?? points.last
             VStack(alignment: .leading, spacing: 3) {
                 Text(point.map { dateFormat($0.date) } ?? "—").font(.headline)
-                Text(point.map { valueFormat($0.value) } ?? "—").font(.title2.bold()).monospacedDigit()
+                Text(point.map { valueFormat($0.value) } ?? "—").font(StrandFont.number(22)).monospacedDigit()
             }
             .foregroundStyle(StrandPalette.textPrimary)
         }

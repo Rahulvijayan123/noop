@@ -48,11 +48,11 @@ final class StrandDesignTests: XCTestCase {
     }
 
     func testRecoveryStateWords() {
-        XCTAssertEqual(StrandPalette.recoveryState(10), "DEPLETED")
-        XCTAssertEqual(StrandPalette.recoveryState(40), "LOW")
-        XCTAssertEqual(StrandPalette.recoveryState(60), "MODERATE")
-        XCTAssertEqual(StrandPalette.recoveryState(80), "PRIMED")
-        XCTAssertEqual(StrandPalette.recoveryState(95), "PEAK")
+        XCTAssertEqual(StrandPalette.recoveryState(10), "Depleted")
+        XCTAssertEqual(StrandPalette.recoveryState(40), "Low")
+        XCTAssertEqual(StrandPalette.recoveryState(60), "Moderate")
+        XCTAssertEqual(StrandPalette.recoveryState(80), "Primed")
+        XCTAssertEqual(StrandPalette.recoveryState(95), "Peak")
     }
 
     func testStrainColorScaleAndEndpoints() {

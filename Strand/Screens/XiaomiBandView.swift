@@ -94,7 +94,7 @@ struct XiaomiBandView: View {
         var caption: String {
             switch self {
             case .week: return String(localized: "7 DAYS"); case .month: return String(localized: "30 DAYS"); case .quarter: return String(localized: "90 DAYS")
-            case .half: return String(localized: "180 DAYS"); case .year: return String(localized: "365 DAYS"); case .all: return String(localized: "ALL TIME")
+            case .half: return String(localized: "180 DAYS"); case .year: return String(localized: "365 DAYS"); case .all: return String(localized: "All time")
             }
         }
         var name: String {

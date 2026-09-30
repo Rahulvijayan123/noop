@@ -189,7 +189,6 @@ private struct ScoreRing: View {
                         .foregroundStyle(StrandPalette.textTertiary)
                     Text("cal")
                         .font(StrandFont.overlineScaled(8))
-                        .tracking(0.5)
                         .foregroundStyle(color)
                 }
             }

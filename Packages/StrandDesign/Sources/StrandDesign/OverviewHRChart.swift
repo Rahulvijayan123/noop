@@ -630,7 +630,7 @@ private struct WorkoutBadge: View {
     let tint: Color
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: 11, weight: .bold))
+            .font(.system(size: 11, weight: .semibold))
             .foregroundStyle(StrandPalette.textPrimary)
             .frame(width: 22, height: 22)
             .background(

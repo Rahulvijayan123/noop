@@ -278,15 +278,13 @@ private struct WelcomeStep: View {
         StepShell {
             VStack(spacing: 24) {
                 Spacer()
-                // The hero mark — the Engraved titanium BrandMark (open gold ring +
-                // core dot on a brushed-titanium tile). Clean and flat; it draws in
-                // with a calm scale + fade, no glow.
-                BrandMark(size: 120)
+                BrandMark(size: 96)
                     .scaleEffect(appear ? 1 : 0.92)
                     .opacity(appear ? 1 : 0)
-                Text("all your data, none of the cloud")
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                Text("All your data, none of the cloud")
+                    .font(StrandFont.brandDisplay(26))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .multilineTextAlignment(.center)
                     .opacity(appear ? 1 : 0)
                 Text("A private window into your recovery, sleep and strain. Read straight from your strap, kept only on \(Platform.deviceNounPhrase).")
                     .font(StrandFont.body)
@@ -505,7 +503,7 @@ private struct WearStep: View {
                         .frame(width: 130, height: 130)
                         .blur(radius: 24)
                     Image(systemName: "applewatch.side.right")
-                        .font(.system(size: 58, weight: .regular))
+                        .font(.system(size: 44, weight: .regular))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 .frame(height: 140)
@@ -692,7 +690,7 @@ private struct BondedStep: View {
                         .scaleEffect(bloom ? 1 : 0.7)
                         .opacity(bloom ? 1 : 0)
                     Image(systemName: "checkmark")
-                        .font(.system(size: 44, weight: .bold))
+                        .font(.system(size: 44, weight: .semibold))
                         .foregroundStyle(StrandPalette.statusPositive)
                         .scaleEffect(bloom ? 1 : 0.4)
                         .opacity(bloom ? 1 : 0)
@@ -701,7 +699,7 @@ private struct BondedStep: View {
 
                 VStack(spacing: 8) {
                     Text("You're connected.")
-                        .font(StrandFont.title1)
+                        .font(StrandFont.brandDisplay(28))
                         .foregroundStyle(StrandPalette.textPrimary)
                     Text(batteryLine)
                         .font(StrandFont.body)
@@ -1040,7 +1038,7 @@ private struct DoneStep: View {
                         .opacity(appear ? 0.5 : 0)
                         .blendMode(.plusLighter)
                     Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
-                        .font(.system(size: 52, weight: .light))
+                        .font(.system(size: 44, weight: .regular))
                         .foregroundStyle(
                             LinearGradient(gradient: StrandPalette.recoveryGradient,
                                            startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -1052,7 +1050,7 @@ private struct DoneStep: View {
 
                 VStack(spacing: 10) {
                     Text("Your thread starts here.")
-                        .font(StrandFont.title1)
+                        .font(StrandFont.brandDisplay(28))
                         .foregroundStyle(StrandPalette.textPrimary)
                     Text("Every beat, every night, every day, woven into one quiet picture of you. Welcome to NOOP.")
                         .font(StrandFont.body)
@@ -1085,7 +1083,7 @@ private struct AppearanceStep: View {
                   subtitle: String(localized: "Choose how NOOP looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
             VStack(spacing: 28) {
                 Image(systemName: "circle.lefthalf.filled")
-                    .font(.system(size: 56, weight: .light))
+                    .font(.system(size: 44, weight: .regular))
                     .foregroundStyle(StrandPalette.accent)
                     .frame(height: 96)
                 SegmentedPillControl(AppearanceMode.allCases, selection: binding) { $0.label }
@@ -1112,7 +1110,7 @@ private struct StepShell<Content: View>: View {
                     VStack(spacing: 8) {
                         if let title {
                             Text(title)
-                                .font(StrandFont.title1)
+                                .font(StrandFont.brandDisplay(27, weight: .semibold))
                                 .foregroundStyle(StrandPalette.textPrimary)
                                 .multilineTextAlignment(.center)
                         }
@@ -1355,7 +1353,7 @@ private struct ImportActionButton: View {
                     .font(StrandFont.subhead.weight(.semibold))
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)

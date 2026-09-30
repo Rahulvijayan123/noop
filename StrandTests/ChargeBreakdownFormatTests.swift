@@ -74,9 +74,9 @@ final class ChargeBreakdownFormatTests: XCTestCase {
     // MARK: - A3: confidence tier chip (pure presentation of the EXISTING confidence)
 
     func testTierTagMapsConfidenceToShortTag() {
-        XCTAssertEqual(ChargeBreakdownFormat.tierTag(.calibrating), "CALIBRATING")
-        XCTAssertEqual(ChargeBreakdownFormat.tierTag(.building), "EST.")
-        XCTAssertEqual(ChargeBreakdownFormat.tierTag(.solid), "REL.")
+        XCTAssertEqual(ChargeBreakdownFormat.tierTag(.calibrating), "Calibrating")
+        XCTAssertEqual(ChargeBreakdownFormat.tierTag(.building), "Est.")
+        XCTAssertEqual(ChargeBreakdownFormat.tierTag(.solid), "Rel.")
     }
 
     func testTierStateDotColorAgreesAndMapsLifecycleHues() {

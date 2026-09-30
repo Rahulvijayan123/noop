@@ -230,9 +230,8 @@ struct CoupledView: View {
                     .foregroundStyle(.white)
                     .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
             }
-            Text("RECOVERY")
+            Text("Recovery")
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(sampled)
             if let word = TodayView.readinessWord(readinessLevel) {
                 readinessPill(word)
@@ -270,9 +269,8 @@ struct CoupledView: View {
     /// Today hero pill chrome. Reuses TodayView's word + level colour so the read stays consistent.
     private func readinessPill(_ word: String) -> some View {
         let tint = readinessTint(readinessLevel)
-        return Text(word.uppercased())
+        return Text(word)
             .font(StrandFont.overline)
-            .tracking(StrandFont.overlineTracking)
             .foregroundStyle(tint)
             .padding(.horizontal, 12).padding(.vertical, 5)
             .background(Capsule(style: .continuous).fill(tint.opacity(0.12)))
@@ -356,8 +354,8 @@ struct CoupledView: View {
     /// 0–21 axis (Charge world). A calibrating / unscored day shows a dash and an empty tube.
     private var optimalStat: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("OPTIMAL")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text("Optimal")
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(Self.optimalStrainRangeText(recovery: recovery))
                 .font(StrandFont.number(20))
@@ -379,8 +377,8 @@ struct CoupledView: View {
     /// number. Reproduced here so the coupled stat stack reads identically to the Workouts hero stats.
     private func heroStat(_ title: String, _ value: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text(title)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(value).font(StrandFont.number(20))
                 .foregroundStyle(tint).lineLimit(1).minimumScaleFactor(0.6)

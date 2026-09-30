@@ -25801,42 +25801,42 @@
         }
       }
     },
-    "ALL TIME": {
+    "All time": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "GESAMTER ZEITRAUM"
+            "value": "Gesamter Zeitraum"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "HISTÓRICO"
+            "value": "Histórico"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "DEPUIS TOUJOURS"
+            "value": "Depuis toujours"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "DA SEMPRE"
+            "value": "Da sempre"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "TODOS OS TEMPOS"
+            "value": "Todos os tempos"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЗА ВСЁ ВРЕМЯ"
+            "value": "За всё время"
           }
         },
         "zh-Hans": {
@@ -25854,53 +25854,53 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "CAŁY CZAS"
+            "value": "Cały czas"
           }
         }
       }
     },
-    "ALL YOUR DATA · NONE OF THE CLOUD": {
+    "All your data · none of the cloud": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALL DEINE DATEN · NICHTS IN DER CLOUD"
+            "value": "All Deine Daten · Nichts In Der Cloud"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALL YOUR DATA · NONE OF THE CLOUD"
+            "value": "All your data · none of the cloud"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "TODOS TUS DATOS · NADA EN LA NUBE"
+            "value": "Todos tus datos · nada en la nube"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "TOUTES VOS DONNÉES · SANS LE CLOUD"
+            "value": "Toutes vos données · sans le cloud"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "TUTTI I TUOI DATI · NIENTE CLOUD"
+            "value": "Tutti i tuoi dati · niente cloud"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "TODOS OS SEUS DADOS · NENHUMA NUVEM"
+            "value": "Todos os seus dados · nenhuma nuvem"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ВСЕ ВАШИ ДАННЫЕ · НИКАКИХ ОБЛАЧНЫХ СЕРВИСОВ"
+            "value": "Все ваши данные · никаких облачных сервисов"
           }
         },
         "zh-Hans": {
@@ -25918,7 +25918,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "WSZYSTKIE TWOJE DANE · ŻADNE Z CHMURY"
+            "value": "Wszystkie twoje dane · żadne z chmury"
           }
         }
       }
@@ -26103,60 +26103,60 @@
         }
       }
     },
-    "APPLE WATCH": {
+    "Apple Watch": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "RELÓGIO DE MAÇÃ"
+            "value": "Apple Watch"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "APPLE WATCH"
+            "value": "Apple Watch"
           }
         }
       }
@@ -26277,30 +26277,30 @@
         }
       }
     },
-    "AVG/SESS": {
+    "Avg/sess": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ø/SITZUNG"
+            "value": "Ø/Sitzung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "PROM/SES"
+            "value": "Prom/ses"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "MOY/SÉANCE"
+            "value": "Moy/séance"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "MEDIA/SESS"
+            "value": "Media/sess"
           }
         },
         "pt-PT": {
@@ -26312,7 +26312,7 @@
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СРЕД/СЕС"
+            "value": "Сред/сес"
           }
         },
         "zh-Hans": {
@@ -26330,7 +26330,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "AVG/SESS"
+            "value": "Avg/sess"
           }
         }
       }
@@ -35333,42 +35333,42 @@
         }
       }
     },
-    "BANISTER TRIMP / HR ZONES": {
+    "Banister TRIMP / HR zones": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "BANISTER-TRIMP / HF-ZONEN"
+            "value": "Banister-TRIMP / HF-Zonen"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRIMP DE BANISTER / ZONAS DE FC"
+            "value": "TRIMP de banister / zonas de FC"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRIMP DE BANISTER / ZONES FC"
+            "value": "TRIMP de banister / zones FC"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "BANISTER TRIMP / ZONE FC"
+            "value": "Banister TRIMP / zone FC"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "CORRIMÃO TRIMP / ZONAS HR"
+            "value": "Corrimão TRIMP / zonas HR"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "BANISTER TRIMP / ПУЛЬСОВЫЕ ЗОНЫ"
+            "value": "Banister TRIMP / пульсовые зоны"
           }
         },
         "zh-Hans": {
@@ -35386,47 +35386,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "PODCIĘCIE PORĘCZNIKÓW / STREFY HR"
+            "value": "Podcięcie poręczników / strefy HR"
           }
         }
       }
     },
-    "BEAT-TO-BEAT": {
+    "Beat-to-beat": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SCHLAG ZU SCHLAG"
+            "value": "Schlag Zu Schlag"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "LATIDO A LATIDO"
+            "value": "Latido a latido"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "BATTEMENT PAR BATTEMENT"
+            "value": "Battement par battement"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "BATTITO PER BATTITO"
+            "value": "Battito per battito"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "BATIDA A BATIDA"
+            "value": "Batida a batida"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "МЕЖУДАРНЫЙ РИТМ"
+            "value": "Межударный ритм"
           }
         },
         "zh-Hans": {
@@ -35449,42 +35449,42 @@
         }
       }
     },
-    "BEAT-TO-BEAT SCATTER": {
+    "Beat-to-beat scatter": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SCHLAG-ZU-SCHLAG-STREUUNG"
+            "value": "Schlag-Zu-Schlag-Streuung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "DISPERSIÓN LATIDO A LATIDO"
+            "value": "Dispersión latido a latido"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "DISPERSION BATTEMENT PAR BATTEMENT"
+            "value": "Dispersion battement par battement"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "DISPERSIONE BATTITO PER BATTITO"
+            "value": "Dispersione battito per battito"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "DISPERSÃO DE BATIDA A BATIDA"
+            "value": "Dispersão de batida a batida"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДИАГРАММА РАССЕЯНИЯ МЕЖУДАРНОГО РИТМА"
+            "value": "Диаграмма рассеяния межударного ритма"
           }
         },
         "zh-Hans": {
@@ -35502,7 +35502,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "ROZMIAR Z UDERZENIA W UDERZENIE"
+            "value": "Rozmiar z uderzenia w uderzenie"
           }
         }
       }
@@ -35565,42 +35565,42 @@
         }
       }
     },
-    "BEATS READ": {
+    "Beats read": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "GELESENE SCHLÄGE"
+            "value": "Gelesene Schläge"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "LATIDOS LEÍDOS"
+            "value": "Latidos leídos"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "BATTEMENTS LUS"
+            "value": "Battements lus"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "BATTITI LETTI"
+            "value": "Battiti letti"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "BATIDAS LIDA"
+            "value": "Batidas lida"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СЧИТАНО УДАРОВ"
+            "value": "Считано ударов"
           }
         },
         "zh-Hans": {
@@ -35618,7 +35618,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "CZYTAJ BARDZO"
+            "value": "Czytaj bardzo"
           }
         }
       }
@@ -43511,42 +43511,42 @@
         }
       }
     },
-    "CADENCE": {
+    "Cadence": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "KADENZ"
+            "value": "Kadenz"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "CADENCIA"
+            "value": "Cadencia"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CADENCE"
+            "value": "Cadence"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "CADENZA"
+            "value": "Cadenza"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "CADÊNCIA"
+            "value": "Cadência"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "КАДЕНС"
+            "value": "Каденс"
           }
         },
         "zh-Hans": {
@@ -43564,7 +43564,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "RYTM"
+            "value": "Rytm"
           }
         }
       }
@@ -43627,42 +43627,42 @@
         }
       }
     },
-    "CLOUD SHAPE": {
+    "Cloud shape": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WOLKENFORM"
+            "value": "Wolkenform"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "FORMA DE LA NUBE"
+            "value": "Forma de la nube"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "FORME DU NUAGE"
+            "value": "Forme du nuage"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "FORMA DELLA NUVOLA"
+            "value": "Forma della nuvola"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "FORMA DE NUVEM"
+            "value": "Forma de nuvem"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ФОРМА ОБЛАКА"
+            "value": "Форма облака"
           }
         },
         "zh-Hans": {
@@ -43680,7 +43680,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "KSZTAŁT CHMURY"
+            "value": "Kształt chmury"
           }
         }
       }
@@ -43801,42 +43801,42 @@
         }
       }
     },
-    "CONNECTING": {
+    "Connecting": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "VERBINDE"
+            "value": "Verbinde"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONECTANDO"
+            "value": "Conectando"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONNEXION EN COURS"
+            "value": "Connexion en cours"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONNESSIONE IN CORSO"
+            "value": "Connessione in corso"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONECTANDO"
+            "value": "Conectando"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПОДКЛЮЧЕНИЕ"
+            "value": "Подключение"
           }
         },
         "zh-Hans": {
@@ -43854,7 +43854,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "ZŁĄCZONY"
+            "value": "Złączony"
           }
         }
       }
@@ -58185,42 +58185,42 @@
         }
       }
     },
-    "DESCRIPTIVE STATS": {
+    "Descriptive stats": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DESKRIPTIVE STATISTIK"
+            "value": "Deskriptive Statistik"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ESTADÍSTICAS DESCRIPTIVAS"
+            "value": "Estadísticas descriptivas"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "STATISTIQUES DESCRIPTIVES"
+            "value": "Statistiques descriptives"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "STATISTICHE DESCRITTIVE"
+            "value": "Statistiche descrittive"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "ESTATÍSTICAS DESCRITIVAS"
+            "value": "Estatísticas descritivas"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ОПИСАТЕЛЬНАЯ СТАТИСТИКА"
+            "value": "Описательная статистика"
           }
         },
         "zh-Hans": {
@@ -58238,47 +58238,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "STATYSTYKI OPISOWE"
+            "value": "Statystyki opisowe"
           }
         }
       }
     },
-    "DIAGNOSTIC TOOLS": {
+    "Diagnostic tools": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIAGNOSEWERKZEUGE"
+            "value": "Diagnosewerkzeuge"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "HERRAMIENTAS DE DIAGNÓSTICO"
+            "value": "Herramientas de diagnóstico"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "OUTILS DE DIAGNOSTIC"
+            "value": "Outils de diagnostic"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "STRUMENTI DIAGNOSTICI"
+            "value": "Strumenti diagnostici"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "FERRAMENTAS DE DIAGNÓSTICO"
+            "value": "Ferramentas de diagnóstico"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДИАГНОСТИЧЕСКИЕ ИНСТРУМЕНТЫ"
+            "value": "Диагностические инструменты"
           }
         },
         "zh-Hans": {
@@ -58296,47 +58296,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NARZĘDZIA DIAGNOSTYCZNE"
+            "value": "Narzędzia diagnostyczne"
           }
         }
       }
     },
-    "DIST": {
+    "Dist": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIST"
+            "value": "Dist"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIST"
+            "value": "Dist"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIST"
+            "value": "Dist"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIST"
+            "value": "Dist"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIST"
+            "value": "Dist"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДИСТ"
+            "value": "Дист"
           }
         },
         "zh-Hans": {
@@ -58354,7 +58354,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "ODLEGŁ"
+            "value": "Odległ"
           }
         }
       }
@@ -58475,42 +58475,42 @@
         }
       }
     },
-    "DURATION + EFFICIENCY + STAGES": {
+    "Duration + efficiency + stages": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DAUER + EFFIZIENZ + PHASEN"
+            "value": "Dauer + Effizienz + Phasen"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "DURACIÓN + EFICIENCIA + FASES"
+            "value": "Duración + eficiencia + fases"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "DURÉE + EFFICACITÉ + STADES"
+            "value": "Durée + efficacité + stades"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "DURATA + EFFICIENZA + FASI"
+            "value": "Durata + efficienza + fasi"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "DURAÇÃO + EFICIÊNCIA + ESTÁGIOS"
+            "value": "Duração + eficiência + estágios"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДЛИТЕЛЬНОСТЬ + ЭФФЕКТИВНОСТЬ + СТАДИИ"
+            "value": "Длительность + эффективность + стадии"
           }
         },
         "zh-Hans": {
@@ -58528,7 +58528,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "CZAS TRWANIA + WYDAJNOŚĆ + ETAPY"
+            "value": "Czas trwania + wydajność + etapy"
           }
         }
       }
@@ -64367,42 +64367,42 @@
         }
       }
     },
-    "EARLIER": {
+    "Earlier": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "FRÜHER"
+            "value": "Früher"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ANTES"
+            "value": "Antes"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "PLUS TÔT"
+            "value": "Plus tôt"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRIMA"
+            "value": "Prima"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "MAIS CEDO"
+            "value": "Mais cedo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "РАНЕЕ"
+            "value": "Ранее"
           }
         },
         "zh-Hans": {
@@ -64420,47 +64420,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "WCZEŚNIEJ"
+            "value": "Wcześniej"
           }
         }
       }
     },
-    "EARLY SIGNAL": {
+    "Early signal": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "FRÜHES SIGNAL"
+            "value": "Frühes Signal"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEÑAL TEMPRANA"
+            "value": "Señal temprana"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNAL PRÉCOCE"
+            "value": "Signal précoce"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEGNALE PRECOCE"
+            "value": "Segnale precoce"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SINAL ANTECIPADO"
+            "value": "Sinal antecipado"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "РАННИЙ СИГНАЛ"
+            "value": "Ранний сигнал"
           }
         },
         "zh-Hans": {
@@ -64478,7 +64478,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "WCZESNY SYGNAŁ"
+            "value": "Wczesny sygnał"
           }
         }
       }
@@ -64657,42 +64657,42 @@
         }
       }
     },
-    "EFFORT BUILDING": {
+    "Effort building": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "ANSTRENGUNG IM AUFBAU"
+            "value": "Anstrengung Im Aufbau"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ESFUERZO EN AUMENTO"
+            "value": "Esfuerzo en aumento"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "EFFORT EN COURS"
+            "value": "Effort en cours"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SFORZO IN CREAZIONE"
+            "value": "Sforzo in creazione"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONSTRUÇÃO DE ESFORÇO"
+            "value": "Construção de esforço"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "УСИЛИЕ РАСТЁТ"
+            "value": "Усилие растёт"
           }
         },
         "zh-Hans": {
@@ -64710,7 +64710,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "BUDOWANIE WYSIŁKU"
+            "value": "Budowanie wysiłku"
           }
         }
       }
@@ -64773,42 +64773,42 @@
         }
       }
     },
-    "EXPERIMENTAL ALGORITHMS": {
+    "Experimental algorithms": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXPERIMENTALGORITHMEN"
+            "value": "Experimentalgorithmen"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALGORITOS EXPERIMENTALES"
+            "value": "Algoritos experimentales"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALGORITHMES EXPERIMENTAUX"
+            "value": "Algorithmes experimentaux"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALGORITMI SPERIMENTALI"
+            "value": "Algoritmi sperimentali"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALGORITMOS EXPERIMENTAIS"
+            "value": "Algoritmos experimentais"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALGORYTMY EKSPERYMENTALNE"
+            "value": "Algorytmy eksperymentalne"
           }
         },
         "ru": {
@@ -64831,48 +64831,48 @@
         }
       }
     },
-    "EXPLORATORY": {
+    "Exploratory": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXPLORATIV"
+            "value": "Explorativ"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXPLORATORY"
+            "value": "Exploratory"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXPLORATORIO"
+            "value": "Exploratorio"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXPLORATOIRE"
+            "value": "Exploratoire"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ESPLORATIVO"
+            "value": "Esplorativo"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXPLORATÓRIO"
+            "value": "Exploratório"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЭКСПЕРИМЕНТАЛЬНО"
+            "value": "Экспериментально"
           }
         },
         "zh-Hans": {
@@ -64890,7 +64890,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "BADAWCZY"
+            "value": "Badawczy"
           }
         }
       }
@@ -64953,42 +64953,42 @@
         }
       }
     },
-    "EXTRA / SKIPPED": {
+    "Extra / skipped": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXTRA / AUSGELASSEN"
+            "value": "Extra / Ausgelassen"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXTRA / OMITIDO"
+            "value": "Extra / omitido"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXTRA / IGNORÉ"
+            "value": "Extra / ignoré"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXTRA / SALTATO"
+            "value": "Extra / saltato"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXTRA / PULADO"
+            "value": "Extra / pulado"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДОПОЛНИТЕЛЬНО / ПРОПУЩЕНО"
+            "value": "Дополнительно / пропущено"
           }
         },
         "zh-Hans": {
@@ -65006,7 +65006,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "DODATKOWE / POMINIĘTE"
+            "value": "Dodatkowe / pominięte"
           }
         }
       }
@@ -71846,42 +71846,42 @@
         }
       }
     },
-    "FULL BOND": {
+    "Full bond": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "VOLLE KOPPLUNG"
+            "value": "Volle Kopplung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "VÍNCULO COMPLETO"
+            "value": "Vínculo completo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LIAISON COMPLÈTE"
+            "value": "Liaison complète"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEGAME COMPLETO"
+            "value": "Legame completo"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "VINCULAÇÃO COMPLETA"
+            "value": "Vinculação completa"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПОЛНОЕ СОПРЯЖЕНИЕ"
+            "value": "Полное сопряжение"
           }
         },
         "zh-Hans": {
@@ -71899,7 +71899,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "PEŁNA WIĄZANIE"
+            "value": "Pełna wiązanie"
           }
         }
       }
@@ -76940,48 +76940,48 @@
         }
       }
     },
-    "HOURS OF SLEEP": {
+    "Hours of sleep": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SCHLAFSTUNDEN"
+            "value": "Schlafstunden"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "HOURS OF SLEEP"
+            "value": "Hours of sleep"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "HEURES DE SOMMEIL"
+            "value": "Heures de sommeil"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ORE DI SONNO"
+            "value": "Ore di sonno"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "HORAS DE SONO"
+            "value": "Horas de sono"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "GODZINY SNU"
+            "value": "Godziny snu"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЧАСОВ СНА"
+            "value": "Часов сна"
           }
         },
         "zh-Hans": {
@@ -77056,42 +77056,42 @@
         }
       }
     },
-    "HR ZONE": {
+    "HR zone": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "HF-ZONE"
+            "value": "HF-Zone"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ZONA DE FC"
+            "value": "Zona de FC"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "ZONE FC"
+            "value": "Zone FC"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ZONA FC"
+            "value": "Zona FC"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "ZONA RH"
+            "value": "Zona RH"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЗОНА ПУЛЬСА"
+            "value": "Зона пульса"
           }
         },
         "zh-Hans": {
@@ -77109,7 +77109,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "STREFA HR"
+            "value": "Strefa HR"
           }
         }
       }
@@ -85189,42 +85189,42 @@
         }
       }
     },
-    "INBOX": {
+    "Inbox": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "EINGANG"
+            "value": "Eingang"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "BANDEJA"
+            "value": "Bandeja"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "BOÎTE DE RÉCEPTION"
+            "value": "Boîte de réception"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "POSTA IN ARRIVO"
+            "value": "Posta in arrivo"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "CAIXA DE ENTRADA"
+            "value": "Caixa de entrada"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ВХОДЯЩИЕ"
+            "value": "Входящие"
           }
         },
         "zh-Hans": {
@@ -89596,42 +89596,42 @@
         }
       }
     },
-    "KCAL": {
+    "kcal": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "KCAL"
+            "value": "kcal"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "KCAL"
+            "value": "kcal"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "KCAL"
+            "value": "kcal"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "KCAL"
+            "value": "kcal"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "KCAL"
+            "value": "kcal"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ККАЛ"
+            "value": "ккал"
           }
         },
         "zh-Hans": {
@@ -89649,47 +89649,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "KCAL"
+            "value": "kcal"
           }
         }
       }
     },
-    "KEY METRICS": {
+    "Key metrics": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "KERNMETRIKEN"
+            "value": "Kernmetriken"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "MÉTRICAS CLAVE"
+            "value": "Métricas clave"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "MÉTRIQUES CLÉS"
+            "value": "Métriques clés"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "METRICHE CHIAVE"
+            "value": "Metriche chiave"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "MÉTRICAS PRINCIPAIS"
+            "value": "Métricas principais"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "КЛЮЧЕВЫЕ ПОКАЗАТЕЛИ"
+            "value": "Ключевые показатели"
           }
         },
         "zh-Hans": {
@@ -89707,7 +89707,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "KLUCZOWE METRYKI"
+            "value": "Kluczowe metryki"
           }
         }
       }
@@ -90460,42 +90460,42 @@
         }
       }
     },
-    "LAST WORKOUTS": {
+    "Last workouts": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "LETZTE WORKOUTS"
+            "value": "Letzte Workouts"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ÚLTIMOS ENTRENAMIENTOS"
+            "value": "Últimos entrenamientos"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "DERNIERS ENTRAÎNEMENTS"
+            "value": "Derniers entraînements"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ULTIMI ALLENAMENTI"
+            "value": "Ultimi allenamenti"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "ÚLTIMOS EXERCÍCIOS"
+            "value": "Últimos exercícios"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПОСЛЕДНИЕ ТРЕНИРОВКИ"
+            "value": "Последние тренировки"
           }
         },
         "zh-Hans": {
@@ -90513,47 +90513,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "OSTATNIE TRENINGI"
+            "value": "Ostatnie treningi"
           }
         }
       }
     },
-    "LIVE HR ONLY": {
+    "Live HR only": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NUR LIVE-HF"
+            "value": "Nur Live-HF"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SOLO FC EN VIVO"
+            "value": "Solo FC en vivo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "FC EN DIRECT UNIQUEMENT"
+            "value": "FC en direct uniquement"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SOLO FC IN DIRETTA"
+            "value": "Solo FC in diretta"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "APENAS RH AO VIVO"
+            "value": "Apenas RH ao vivo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТОЛЬКО ПУЛЬС В РЕАЛЬНОМ ВРЕМЕНИ"
+            "value": "Только пульс в реальном времени"
           }
         },
         "zh-Hans": {
@@ -90571,47 +90571,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TYLKO HR NA ŻYWO"
+            "value": "Tylko HR na żywo"
           }
         }
       }
     },
-    "LIVE PHYSIOLOGY": {
+    "Live physiology": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "LIVE-PHYSIOLOGIE"
+            "value": "Live-Physiologie"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "FISIOLOGÍA EN VIVO"
+            "value": "Fisiología en vivo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "PHYSIOLOGIE EN DIRECT"
+            "value": "Physiologie en direct"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "FISIOLOGIA IN DIRETTA"
+            "value": "Fisiologia in diretta"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "FISIOLOGIA AO VIVO"
+            "value": "Fisiologia ao vivo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ФИЗИОЛОГИЯ В РЕАЛЬНОМ ВРЕМЕНИ"
+            "value": "Физиология в реальном времени"
           }
         },
         "zh-Hans": {
@@ -90629,47 +90629,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "FIZJOLOGIA ŻYCIA"
+            "value": "Fizjologia życia"
           }
         }
       }
     },
-    "LIVE SESSION": {
+    "Live session": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "LIVE-SESSION"
+            "value": "Live-Session"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SESIÓN EN DIRECTO"
+            "value": "Sesión en directo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SÉANCE EN DIRECT"
+            "value": "Séance en direct"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SESSIONE LIVE"
+            "value": "Sessione live"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SESSÃO AO VIVO"
+            "value": "Sessão ao vivo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СЕССИЯ В РЕАЛЬНОМ ВРЕМЕНИ"
+            "value": "Сессия в реальном времени"
           }
         },
         "zh-Hans": {
@@ -90687,47 +90687,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "SESJA NA ŻYWO"
+            "value": "Sesja na żywo"
           }
         }
       }
     },
-    "LOCAL ONLY": {
+    "Local only": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NUR LOKAL"
+            "value": "Nur Lokal"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SOLO LOCAL"
+            "value": "Solo local"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LOCAL UNIQUEMENT"
+            "value": "Local uniquement"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SOLO LOCALE"
+            "value": "Solo locale"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SOMENTE LOCAL"
+            "value": "Somente local"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТОЛЬКО ЛОКАЛЬНО"
+            "value": "Только локально"
           }
         },
         "zh-Hans": {
@@ -90745,47 +90745,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TYLKO LOKALNE"
+            "value": "Tylko lokalne"
           }
         }
       }
     },
-    "LONG AXIS": {
+    "Long axis": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "LANGE ACHSE"
+            "value": "Lange Achse"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "EJE LARGO"
+            "value": "Eje largo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "GRAND AXE"
+            "value": "Grand axe"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ASSE LUNGO"
+            "value": "Asse lungo"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "EIXO LONGO"
+            "value": "Eixo longo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДЛИННАЯ ОСЬ"
+            "value": "Длинная ось"
           }
         },
         "zh-Hans": {
@@ -90803,7 +90803,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "DŁUGA OŚ"
+            "value": "Długa oś"
           }
         }
       }
@@ -90866,42 +90866,42 @@
         }
       }
     },
-    "LOW SIGNAL": {
+    "Low signal": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SCHWACHES SIGNAL"
+            "value": "Schwaches Signal"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEÑAL BAJA"
+            "value": "Señal baja"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNAL FAIBLE"
+            "value": "Signal faible"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEGNALE DEBOLE"
+            "value": "Segnale debole"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SINAL BAIXO"
+            "value": "Sinal baixo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СЛАБЫЙ СИГНАЛ"
+            "value": "Слабый сигнал"
           }
         },
         "zh-Hans": {
@@ -90919,7 +90919,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NISKI SYGNAŁ"
+            "value": "Niski sygnał"
           }
         }
       }
@@ -98777,42 +98777,42 @@
         }
       }
     },
-    "METHOD": {
+    "Method": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "METHODE"
+            "value": "Methode"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "MÉTODO"
+            "value": "Método"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "MÉTHODE"
+            "value": "Méthode"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "METODO"
+            "value": "Metodo"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "MÉTODO"
+            "value": "Método"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "МЕТОД"
+            "value": "Метод"
           }
         },
         "zh-Hans": {
@@ -98830,7 +98830,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "METODA"
+            "value": "Metoda"
           }
         }
       }
@@ -104211,42 +104211,42 @@
         }
       }
     },
-    "NES / HUNT VO2MAX": {
+    "NES / Hunt VO2max": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NES / HUNT VO2MAX"
+            "value": "NES / Hunt VO2MAX"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "VO2MAX NES / HUNT"
+            "value": "VO2MAX NES / hunt"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "VO2MAX NES / HUNT"
+            "value": "VO2MAX NES / hunt"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "VO2MAX NES / HUNT"
+            "value": "VO2MAX NES / hunt"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "NES/HUNT VO2MAX"
+            "value": "NES/hunt VO2MAX"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "NES / HUNT VO2MAX"
+            "value": "NES / hunt VO2MAX"
           }
         },
         "zh-Hans": {
@@ -104264,7 +104264,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NES / POLOWANIE VO2MAX"
+            "value": "NES / polowanie VO2MAX"
           }
         }
       }
@@ -121994,42 +121994,42 @@
         }
       }
     },
-    "POWER": {
+    "Power": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEISTUNG"
+            "value": "Leistung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "POTENCIA"
+            "value": "Potencia"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "PUISSANCE"
+            "value": "Puissance"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "POTENZA"
+            "value": "Potenza"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "PODER"
+            "value": "Poder"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "МОЩНОСТЬ"
+            "value": "Мощность"
           }
         },
         "zh-Hans": {
@@ -122047,7 +122047,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "MOC"
+            "value": "Moc"
           }
         }
       }
@@ -127977,42 +127977,42 @@
         }
       }
     },
-    "RECOVERY VITALS": {
+    "Recovery vitals": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "ERHOLUNGSWERTE"
+            "value": "Erholungswerte"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONSTANTES DE RECUPERACIÓN"
+            "value": "Constantes de recuperación"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CONSTANTES DE RÉCUPÉRATION"
+            "value": "Constantes de récupération"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "PARAMETRI DI RECUPERO"
+            "value": "Parametri di recupero"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "VITAIS DE RECUPERAÇÃO"
+            "value": "Vitais de recuperação"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПОКАЗАТЕЛИ ВОССТАНОВЛЕНИЯ"
+            "value": "Показатели восстановления"
           }
         },
         "zh-Hans": {
@@ -128030,47 +128030,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "WARTOŚCI REGENERACJI"
+            "value": "Wartości regeneracji"
           }
         }
       }
     },
-    "REL.": {
+    "Rel.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "REL."
+            "value": "Rel."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "REL."
+            "value": "Rel."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "REL."
+            "value": "Rel."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "REL."
+            "value": "Rel."
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "REL."
+            "value": "Rel."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ОТН."
+            "value": "Отн."
           }
         },
         "zh-Hans": {
@@ -128088,7 +128088,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "REL."
+            "value": "Rel."
           }
         }
       }
@@ -128331,42 +128331,42 @@
         }
       }
     },
-    "RESTING HR + SLEEP + HRV": {
+    "Resting HR + sleep + HRV": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "RUHE-HF + SCHLAF + HRV"
+            "value": "Ruhe-HF + Schlaf + HRV"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "FC EN REPOSO + SUEÑO + VFC"
+            "value": "FC en reposo + sueño + VFC"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "FC AU REPOS + SOMMEIL + VFC"
+            "value": "FC au repos + sommeil + VFC"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "FC A RIPOSO + SONNO + HRV"
+            "value": "FC a riposo + sonno + HRV"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "DESCANSO HR + SONO + HRV"
+            "value": "Descanso HR + sono + HRV"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПУЛЬС ПОКОЯ + СОН + ВСР"
+            "value": "Пульс покоя + сон + ВСР"
           }
         },
         "zh-Hans": {
@@ -128389,48 +128389,48 @@
         }
       }
     },
-    "RESTORATIVE SLEEP": {
+    "Restorative sleep": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "RESTORATIVER SCHLAF"
+            "value": "Restorativer Schlaf"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SLEEP"
+            "value": "Sleep"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SOMMEIL RÉPARATEUR"
+            "value": "Sommeil réparateur"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SONNO RIGENERANTE"
+            "value": "Sonno rigenerante"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SONO RESTAURADOR"
+            "value": "Sono restaurador"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "REGENERUJĄCY SEN"
+            "value": "Regenerujący sen"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ВОССТАНАВЛИВАЮЩИЙ СОН"
+            "value": "Восстанавливающий сон"
           }
         },
         "zh-Hans": {
@@ -128801,48 +128801,48 @@
         }
       }
     },
-    "ROUND": {
+    "Round": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "RUNDE"
+            "value": "Runde"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "ROUND"
+            "value": "Round"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "RONDA"
+            "value": "Ronda"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CYCLE"
+            "value": "Cycle"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "GIRO"
+            "value": "Giro"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "REDONDO"
+            "value": "Redondo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "РАУНД"
+            "value": "Раунд"
           }
         },
         "zh-Hans": {
@@ -128860,7 +128860,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "OKRĄGŁY"
+            "value": "Okrągły"
           }
         }
       }
@@ -140527,42 +140527,42 @@
         }
       }
     },
-    "SCORES": {
+    "Scores": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WERTE"
+            "value": "Werte"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "PUNTUACIONES"
+            "value": "Puntuaciones"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SCORES"
+            "value": "Scores"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "PUNTEGGI"
+            "value": "Punteggi"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "PONTUAÇÕES"
+            "value": "Pontuações"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПОКАЗАТЕЛИ"
+            "value": "Показатели"
           }
         },
         "zh-Hans": {
@@ -140580,7 +140580,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "WYNIKI"
+            "value": "Wyniki"
           }
         }
       }
@@ -140817,48 +140817,48 @@
         }
       }
     },
-    "SECONDS": {
+    "Seconds": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEKUNDEN"
+            "value": "Sekunden"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "SECONDS"
+            "value": "Seconds"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEGUNDOS"
+            "value": "Segundos"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SECONDES"
+            "value": "Secondes"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SECONDI"
+            "value": "Secondi"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEGUNDOS"
+            "value": "Segundos"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СЕКУНДЫ"
+            "value": "Секунды"
           }
         },
         "zh-Hans": {
@@ -140876,47 +140876,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TOWARY DRUGIEJ JAKOŚCI"
+            "value": "Towary drugiej jakości"
           }
         }
       }
     },
-    "SENSOR": {
+    "Sensor": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SENSOR"
+            "value": "Sensor"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SENSOR"
+            "value": "Sensor"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CAPTEUR"
+            "value": "Capteur"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SENSORE"
+            "value": "Sensore"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SENSOR"
+            "value": "Sensor"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ДАТЧИК"
+            "value": "Датчик"
           }
         },
         "zh-Hans": {
@@ -140934,7 +140934,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRANSDUKTOR"
+            "value": "Transduktor"
           }
         }
       }
@@ -141061,42 +141061,42 @@
         }
       }
     },
-    "SHORT AXIS": {
+    "Short axis": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "KURZE ACHSE"
+            "value": "Kurze Achse"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "EJE CORTO"
+            "value": "Eje corto"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "AXE COURT"
+            "value": "Axe court"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ASSE CORTO"
+            "value": "Asse corto"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "EIXO CURTO"
+            "value": "Eixo curto"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "КОРОТКАЯ ОСЬ"
+            "value": "Короткая ось"
           }
         },
         "zh-Hans": {
@@ -141114,53 +141114,53 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "KRÓTKA OŚ"
+            "value": "Krótka oś"
           }
         }
       }
     },
-    "SIGNIFICANT": {
+    "Significant": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNIFIKANT"
+            "value": "Signifikant"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNIFICANT"
+            "value": "Significant"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNIFICATIVO"
+            "value": "Significativo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNIFICATIF"
+            "value": "Significatif"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNIFICATIVO"
+            "value": "Significativo"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "IMPORTANTE"
+            "value": "Importante"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЗНАЧИМО"
+            "value": "Значимо"
           }
         },
         "zh-Hans": {
@@ -141178,47 +141178,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "ISTOTNE"
+            "value": "Istotne"
           }
         }
       }
     },
-    "SILENT GUARDIAN": {
+    "Silent guardian": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "STILLER WÄCHTER"
+            "value": "Stiller Wächter"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "GUARDIÁN SILENCIOSO"
+            "value": "Guardián silencioso"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "GARDIEN SILENCIEUX"
+            "value": "Gardien silencieux"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "GUARDIANO SILENZIOSO"
+            "value": "Guardiano silenzioso"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "GUARDIÃO SILENCIOSO"
+            "value": "Guardião silencioso"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТИХИЙ СТРАЖ"
+            "value": "Тихий страж"
           }
         },
         "zh-Hans": {
@@ -141236,7 +141236,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "CICHA STRONKA"
+            "value": "Cicha stronka"
           }
         }
       }
@@ -141357,42 +141357,42 @@
         }
       }
     },
-    "SPEED": {
+    "Speed": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "GESCHWINDIGKEIT"
+            "value": "Geschwindigkeit"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "VELOCIDAD"
+            "value": "Velocidad"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "VITESSE"
+            "value": "Vitesse"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "VELOCITÀ"
+            "value": "Velocità"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "VELOCIDADE"
+            "value": "Velocidade"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СКОРОСТЬ"
+            "value": "Скорость"
           }
         },
         "zh-Hans": {
@@ -141410,7 +141410,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "PRĘDKOŚĆ"
+            "value": "Prędkość"
           }
         }
       }
@@ -141531,48 +141531,48 @@
         }
       }
     },
-    "STRAP LOG": {
+    "Strap log": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "STRAP-PROTOKOLL"
+            "value": "Strap-Protokoll"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "STRAP LOG"
+            "value": "Strap log"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "REGISTRO DE LA PULSERA"
+            "value": "Registro de la pulsera"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "JOURNAL DU BRACELET"
+            "value": "Journal du bracelet"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "REGISTRO FASCIA"
+            "value": "Registro fascia"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "REGISTO DE CORREIA"
+            "value": "Registo de correia"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЖУРНАЛ БРАСЛЕТА"
+            "value": "Журнал браслета"
           }
         },
         "zh-Hans": {
@@ -141590,47 +141590,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "DZIENNIK PASKA"
+            "value": "Dziennik paska"
           }
         }
       }
     },
-    "STREAMING": {
+    "Streaming": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "STREAMT"
+            "value": "Streamt"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRANSMITIENDO"
+            "value": "Transmitiendo"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRANSMISSION"
+            "value": "Transmission"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "STREAMING"
+            "value": "Streaming"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRANSMISSÃO"
+            "value": "Transmissão"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ПОТОКОВАЯ ПЕРЕДАЧА"
+            "value": "Потоковая передача"
           }
         },
         "zh-Hans": {
@@ -141648,47 +141648,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "STRUMIENIOWANIE"
+            "value": "Strumieniowanie"
           }
         }
       }
     },
-    "STRONGER SIGNAL": {
+    "Stronger signal": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "STÄRKERES SIGNAL"
+            "value": "Stärkeres Signal"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEÑAL MÁS FUERTE"
+            "value": "Señal más fuerte"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "SIGNAL PLUS FORT"
+            "value": "Signal plus fort"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SEGNALE PIÙ FORTE"
+            "value": "Segnale più forte"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "SINAL MAIS FORTE"
+            "value": "Sinal mais forte"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "СИГНАЛ СИЛЬНЕЕ"
+            "value": "Сигнал сильнее"
           }
         },
         "zh-Hans": {
@@ -141706,7 +141706,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "SILNIEJSZY SYGNAŁ"
+            "value": "Silniejszy sygnał"
           }
         }
       }
@@ -160533,42 +160533,42 @@
         }
       }
     },
-    "TEST MODES": {
+    "Test modes": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "TESTMODI"
+            "value": "Testmodi"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "MODOS DE PRUEBA"
+            "value": "Modos de prueba"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "MODES DE TEST"
+            "value": "Modes de test"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "MODALITÀ DI TEST"
+            "value": "Modalità di test"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "MODOS DE TESTE"
+            "value": "Modos de teste"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТЕСТОВЫЕ РЕЖИМЫ"
+            "value": "Тестовые режимы"
           }
         },
         "zh-Hans": {
@@ -160586,47 +160586,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRYBY TESTOWE"
+            "value": "Tryby testowe"
           }
         }
       }
     },
-    "THE BASICS": {
+    "The basics": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIE GRUNDLAGEN"
+            "value": "Die Grundlagen"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "LO BÁSICO"
+            "value": "Lo básico"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LES BASES"
+            "value": "Les bases"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "LE BASI"
+            "value": "Le basi"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "O BÁSICO"
+            "value": "O básico"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ОСНОВЫ"
+            "value": "Основы"
           }
         },
         "zh-Hans": {
@@ -160644,47 +160644,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "PODSTAWY"
+            "value": "Podstawy"
           }
         }
       }
     },
-    "THE ONE RULE": {
+    "The one rule": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIE EINE REGEL"
+            "value": "Die Eine Regel"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "LA ÚNICA REGLA"
+            "value": "La única regla"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LA SEULE RÈGLE"
+            "value": "La seule règle"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "L'UNICA REGOLA"
+            "value": "L'unica regola"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "A ÚNICA REGRA"
+            "value": "A única regra"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ГЛАВНОЕ ПРАВИЛО"
+            "value": "Главное правило"
           }
         },
         "zh-Hans": {
@@ -160702,47 +160702,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "JEDNA ZASADA"
+            "value": "Jedna zasada"
           }
         }
       }
     },
-    "THE THREE SCORES": {
+    "The three scores": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DIE DREI WERTE"
+            "value": "Die Drei Werte"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "LAS TRES PUNTUACIONES"
+            "value": "Las tres puntuaciones"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LES TROIS SCORES"
+            "value": "Les trois scores"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "I TRE PUNTEGGI"
+            "value": "I tre punteggi"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "AS TRÊS PONTUAÇÕES"
+            "value": "As três pontuações"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТРИ ПОКАЗАТЕЛЯ"
+            "value": "Три показателя"
           }
         },
         "zh-Hans": {
@@ -160760,7 +160760,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRZY WYNIKI"
+            "value": "Trzy wyniki"
           }
         }
       }
@@ -160823,42 +160823,42 @@
         }
       }
     },
-    "TYPICAL EFFORT": {
+    "Typical effort": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "TYPISCHE ANSTRENGUNG"
+            "value": "Typische Anstrengung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ESFUERZO TÍPICO"
+            "value": "Esfuerzo típico"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "EFFORT TYPIQUE"
+            "value": "Effort typique"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "SFORZO TIPICO"
+            "value": "Sforzo tipico"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "ESFORÇO TÍPICO"
+            "value": "Esforço típico"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТИПИЧНОЕ УСИЛИЕ"
+            "value": "Типичное усилие"
           }
         },
         "zh-Hans": {
@@ -160876,7 +160876,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TYPOWY WYSIŁEK"
+            "value": "Typowy wysiłek"
           }
         }
       }
@@ -173844,42 +173844,42 @@
         }
       }
     },
-    "WHAT IT'S GREAT AT": {
+    "What it's great at": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WORIN SIE GLÄNZT"
+            "value": "Worin Sie Glänzt"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "EN QUÉ DESTACA"
+            "value": "En qué destaca"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CE EN QUOI ELLE EXCELLE"
+            "value": "Ce en quoi elle excelle"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "IN COSA ECCELLE"
+            "value": "In cosa eccelle"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "NO QUE É ÓPTIMO"
+            "value": "No que é óptimo"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "В ЧЁМ ОНИ ХОРОШИ"
+            "value": "В чём они хороши"
           }
         },
         "zh-Hans": {
@@ -173897,7 +173897,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "W CZYM JEST DOBRY"
+            "value": "W czym jest dobry"
           }
         }
       }
@@ -173960,42 +173960,42 @@
         }
       }
     },
-    "WHAT THE WATCH CAN DO": {
+    "What the watch can do": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WAS DIE UHR KANN"
+            "value": "Was Die Uhr Kann"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "QUÉ PUEDE HACER EL RELOJ"
+            "value": "Qué puede hacer el reloj"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CE QUE LA MONTRE PEUT FAIRE"
+            "value": "Ce que la montre peut faire"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "COSA PUÒ FARE L'OROLOGIO"
+            "value": "Cosa può fare l'orologio"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "O QUE PODE FAZER O RELÓGIO"
+            "value": "O que pode fazer o relógio"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЧТО МОГУТ ЧАСЫ"
+            "value": "Что могут часы"
           }
         },
         "zh-Hans": {
@@ -174013,7 +174013,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "CO MOŻE ZROBIĆ ZEGAREK"
+            "value": "Co może zrobić zegarek"
           }
         }
       }
@@ -174140,42 +174140,42 @@
         }
       }
     },
-    "WHERE IT'S LIGHTER THAN A STRAP": {
+    "Where it's lighter than a strap": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WO SIE LEICHTER IST ALS EIN STRAP"
+            "value": "Wo Sie Leichter Ist Als Ein Strap"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "DÓNDE ES MÁS LIMITADO QUE UNA PULSERA"
+            "value": "Dónde es más limitado que una pulsera"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "OÙ ELLE EST PLUS LÉGÈRE QU'UN BRACELET"
+            "value": "Où elle est plus légère qu'un bracelet"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "DOVE È PIÙ CARENTE DI UNA FASCIA"
+            "value": "Dove è più carente di una fascia"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "ONDE É MAIS LEVE QUE UMA CORREIA"
+            "value": "Onde é mais leve que uma correia"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ГДЕ ОНИ УСТУПАЮТ БРАСЛЕТУ"
+            "value": "Где они уступают браслету"
           }
         },
         "zh-Hans": {
@@ -174193,7 +174193,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "GDZIE JEST LŻEJSZY NIŻ PASEK"
+            "value": "Gdzie jest lżejszy niż pasek"
           }
         }
       }
@@ -175475,42 +175475,42 @@
         }
       }
     },
-    "WORKOUT IN PROGRESS": {
+    "Workout in progress": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WORKOUT LÄUFT"
+            "value": "Workout Läuft"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "ENTRENAMIENTO EN CURSO"
+            "value": "Entrenamiento en curso"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "ENTRAÎNEMENT EN COURS"
+            "value": "Entraînement en cours"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "ALLENAMENTO IN CORSO"
+            "value": "Allenamento in corso"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "EXERCÍCIO EM CURSO"
+            "value": "Exercício em curso"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ТРЕНИРОВКА ВЫПОЛНЯЕТСЯ"
+            "value": "Тренировка выполняется"
           }
         },
         "zh-Hans": {
@@ -175528,7 +175528,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TRENING W TOKU"
+            "value": "Trening w toku"
           }
         }
       }
@@ -183067,42 +183067,42 @@
         }
       }
     },
-    "YOUR DAILY SCORES": {
+    "Your daily scores": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DEINE TAGESWERTE"
+            "value": "Deine Tageswerte"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "TUS PUNTUACIONES DIARIAS"
+            "value": "Tus puntuaciones diarias"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "VOS SCORES QUOTIDIENS"
+            "value": "Vos scores quotidiens"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "I TUOI PUNTEGGI GIORNALIERI"
+            "value": "I tuoi punteggi giornalieri"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "AS SUAS PONTUAÇÕES DIÁRIAS"
+            "value": "As suas pontuações diárias"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ВАШИ ЕЖЕДНЕВНЫЕ ПОКАЗАТЕЛИ"
+            "value": "Ваши ежедневные показатели"
           }
         },
         "zh-Hans": {
@@ -183120,47 +183120,47 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TWOJE DZIENNE WYNIKI"
+            "value": "Twoje dzienne wyniki"
           }
         }
       }
     },
-    "YOUR READING": {
+    "Your reading": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "DEINE MESSUNG"
+            "value": "Deine Messung"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "TU LECTURA"
+            "value": "Tu lectura"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "VOTRE MESURE"
+            "value": "Votre mesure"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "LA TUA LETTURA"
+            "value": "La tua lettura"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "A SUA LEITURA"
+            "value": "A sua leitura"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ВАШЕ ПОКАЗАНИЕ"
+            "value": "Ваше показание"
           }
         },
         "zh-Hans": {
@@ -183178,7 +183178,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "TWOJE CZYTANIE"
+            "value": "Twoje czytanie"
           }
         }
       }
@@ -188851,48 +188851,48 @@
         }
       }
     },
-    "all your data, none of the cloud": {
+    "All your data, none of the cloud": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "all deine Daten, nichts in der Cloud"
+            "value": "All deine Daten, nichts in der Cloud"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "all your data, none of the cloud"
+            "value": "All your data, none of the cloud"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "todos tus datos, nada en la nube"
+            "value": "Todos tus datos, nada en la nube"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "toutes vos données, sans le cloud"
+            "value": "Toutes vos données, sans le cloud"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "tutti i tuoi dati, niente cloud"
+            "value": "Tutti i tuoi dati, niente cloud"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "todos os teus dados, nada da cloud"
+            "value": "Todos os teus dados, nada da cloud"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "все ваши данные, никаких облачных сервисов"
+            "value": "Все ваши данные, никаких облачных сервисов"
           }
         },
         "zh-Hans": {
@@ -188910,7 +188910,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "wszystkie Twoje dane, bez chmury"
+            "value": "Wszystkie Twoje dane, bez chmury"
           }
         }
       }
@@ -203928,42 +203928,42 @@
         }
       }
     },
-    "WHAT NOOP READS": {
+    "What NOOP reads": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "WAS NOOP LIEST"
+            "value": "Was NOOP Liest"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "QUÉ LEE NOOP"
+            "value": "Qué lee NOOP"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "CE QUE NOOP LIT"
+            "value": "Ce que NOOP lit"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "COSA LEGGE NOOP"
+            "value": "Cosa legge NOOP"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "O QUE O NOOP LÊ"
+            "value": "O que o NOOP lê"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ЧТО СЧИТЫВАЕТ NOOP"
+            "value": "Что считывает NOOP"
           }
         },
         "zh-Hans": {
@@ -203981,7 +203981,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "CO CZYTA NOOP"
+            "value": "Co czyta NOOP"
           }
         }
       }
@@ -204102,42 +204102,42 @@
         }
       }
     },
-    "LEGEND": {
+    "Legend": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEGENDE"
+            "value": "Legende"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEYENDA"
+            "value": "Leyenda"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "LÉGENDE"
+            "value": "Légende"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEGENDA"
+            "value": "Legenda"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEGENDA"
+            "value": "Legenda"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "ОБОЗНАЧЕНИЯ"
+            "value": "Обозначения"
           }
         },
         "zh-Hans": {
@@ -204155,7 +204155,7 @@
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "LEGENDA"
+            "value": "Legenda"
           }
         }
       }
@@ -217736,7 +217736,7 @@
         "Use NOOP's own folder (browse in Files)": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "NOOPs eigenen Ordner verwenden (in Dateien durchsuchen)"}}, "es": {"stringUnit": {"state": "translated", "value": "Usar la carpeta propia de NOOP (explorar en Archivos)"}}, "fr": {"stringUnit": {"state": "translated", "value": "Utiliser le dossier de NOOP (parcourir dans Fichiers)"}}, "it": {"stringUnit": {"state": "translated", "value": "Usa la cartella di NOOP (sfoglia in File)"}}, "pl": {"stringUnit": {"state": "translated", "value": "Użyj własnego folderu NOOP (przeglądaj w Plikach)"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "Usar a pasta própria do NOOP (explorar em Ficheiros)"}}, "ru": {"stringUnit": {"state": "translated", "value": "Использовать собственную папку NOOP (открыть в «Файлах»)"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "使用 NOOP 自己的文件夹（在“文件”中浏览）"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "使用 NOOP 自己的檔案夾（在「檔案」中瀏覽）"}}}},
         "Generate now": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Jetzt erstellen"}}, "es": {"stringUnit": {"state": "translated", "value": "Generar ahora"}}, "fr": {"stringUnit": {"state": "translated", "value": "Générer maintenant"}}, "it": {"stringUnit": {"state": "translated", "value": "Genera ora"}}, "pl": {"stringUnit": {"state": "translated", "value": "Wygeneruj teraz"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "Gerar agora"}}, "ru": {"stringUnit": {"state": "translated", "value": "Сгенерировать сейчас"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "立即生成"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "立即生成"}}}},
         "Generating…": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Wird erstellt…"}}, "es": {"stringUnit": {"state": "translated", "value": "Generando…"}}, "fr": {"stringUnit": {"state": "translated", "value": "Génération…"}}, "it": {"stringUnit": {"state": "translated", "value": "Generazione…"}}, "pl": {"stringUnit": {"state": "translated", "value": "Generowanie…"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "A gerar…"}}, "ru": {"stringUnit": {"state": "translated", "value": "Генерация…"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "生成中…"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "生成中…"}}}},
-        "YOUR BANDS": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "DEINE BÄNDER"}}, "es": {"stringUnit": {"state": "translated", "value": "TUS PULSERAS"}}, "fr": {"stringUnit": {"state": "translated", "value": "VOS BRACELETS"}}, "it": {"stringUnit": {"state": "translated", "value": "LE TUE FASCE"}}, "pl": {"stringUnit": {"state": "translated", "value": "TWOJE PASKI"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "AS TUAS BRACELETES"}}, "ru": {"stringUnit": {"state": "translated", "value": "ВАШИ БРАСЛЕТЫ"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "你的手环"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "你的手環"}}}},
+        "Your bands": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Deine Bänder"}}, "es": {"stringUnit": {"state": "translated", "value": "Tus pulseras"}}, "fr": {"stringUnit": {"state": "translated", "value": "Vos bracelets"}}, "it": {"stringUnit": {"state": "translated", "value": "Le tue fasce"}}, "pl": {"stringUnit": {"state": "translated", "value": "Twoje paski"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "As tuas braceletes"}}, "ru": {"stringUnit": {"state": "translated", "value": "Ваши браслеты"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "你的手环"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "你的手環"}}}},
         "REMOVED": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "ENTFERNT"}}, "es": {"stringUnit": {"state": "translated", "value": "ELIMINADOS"}}, "fr": {"stringUnit": {"state": "translated", "value": "RETIRÉS"}}, "it": {"stringUnit": {"state": "translated", "value": "RIMOSSI"}}, "pl": {"stringUnit": {"state": "translated", "value": "USUNIĘTE"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "REMOVIDOS"}}, "ru": {"stringUnit": {"state": "translated", "value": "УДАЛЁННЫЕ"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "已移除"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "已移除"}}}},
         "one strap": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "ein Band"}}, "es": {"stringUnit": {"state": "translated", "value": "una pulsera"}}, "fr": {"stringUnit": {"state": "translated", "value": "un bracelet"}}, "it": {"stringUnit": {"state": "translated", "value": "una fascia"}}, "pl": {"stringUnit": {"state": "translated", "value": "jeden pasek"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "uma bracelete"}}, "ru": {"stringUnit": {"state": "translated", "value": "один браслет"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "一个手环"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "一個手環"}}}},
         "Number": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Zahl"}}, "es": {"stringUnit": {"state": "translated", "value": "Número"}}, "fr": {"stringUnit": {"state": "translated", "value": "Nombre"}}, "it": {"stringUnit": {"state": "translated", "value": "Numero"}}, "pl": {"stringUnit": {"state": "translated", "value": "Liczba"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "Número"}}, "ru": {"stringUnit": {"state": "translated", "value": "Число"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "数值"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "數值"}}}},

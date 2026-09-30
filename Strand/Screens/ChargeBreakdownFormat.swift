@@ -81,9 +81,9 @@ enum ChargeBreakdownFormat {
     /// solid -> REL. (reliable). Unit-tested.
     static func tierTag(_ confidence: ScoreConfidence) -> String {
         switch confidence {
-        case .calibrating: return String(localized: "CALIBRATING")
-        case .building:    return String(localized: "EST.")
-        case .solid:       return String(localized: "REL.")
+        case .calibrating: return String(localized: "Calibrating")
+        case .building:    return String(localized: "Est.")
+        case .solid:       return String(localized: "Rel.")
         }
     }
 
@@ -242,7 +242,6 @@ struct ConfidenceTierChip: View {
                 .accessibilityHidden(true)
             Text(tag)
                 .font(StrandFont.overline)
-                .tracking(0.4)
                 .foregroundStyle(hue)
         }
         .padding(.horizontal, 10)

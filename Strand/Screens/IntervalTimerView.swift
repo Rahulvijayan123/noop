@@ -24,9 +24,9 @@ struct IntervalTimerView: View {
     private enum Phase { case work, rest, done
         var label: String {
             switch self {
-            case .work: return String(localized: "WORK")
-            case .rest: return String(localized: "REST")
-            case .done: return String(localized: "DONE")
+            case .work: return String(localized: "Work")
+            case .rest: return String(localized: "Rest")
+            case .done: return String(localized: "Done")
             }
         }
     }
@@ -214,9 +214,8 @@ struct IntervalTimerView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.5)
                     .contentTransition(.numericText())
-                Text(isFinished ? "SESSION DONE" : "SECONDS")
+                Text(isFinished ? "Session done" : "Seconds")
                     .font(StrandFont.footnote)
-                    .tracking(1.5)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .padding(.horizontal, lineWidth + 4)
@@ -229,8 +228,7 @@ struct IntervalTimerView: View {
     /// Frosted phase pill (WORK / REST / DONE) tinted to the active world.
     private var phaseChip: some View {
         Text(phase.label)
-            .font(StrandFont.rounded(15, weight: .heavy))
-            .tracking(2)
+            .font(StrandFont.rounded(15, weight: .semibold))
             .foregroundStyle(phaseColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
@@ -241,7 +239,7 @@ struct IntervalTimerView: View {
     /// Frosted round chip — "ROUND n / N".
     private var roundChip: some View {
         HStack(spacing: 6) {
-            Text("ROUND").strandOverline()
+            Text("Round").strandOverline()
             Text("\(min(currentRound, rounds))")
                 .font(StrandFont.number(18))
                 .foregroundStyle(StrandPalette.textPrimary)
@@ -317,7 +315,7 @@ struct IntervalTimerView: View {
             //
             // Not yet reported here; found by sweeping for the shape after the Intelligence card was
             // seen rendering "CHARGEEFFORT" on a device. Larger Dynamic Type is where either bites.
-            Text(label.uppercased())
+            Text(label)
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .lineLimit(1)

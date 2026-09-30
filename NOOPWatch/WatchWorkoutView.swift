@@ -132,9 +132,8 @@ struct WatchWorkoutView: View {
             Circle()
                 .fill(workout.phase == .paused ? StrandPalette.statusWarning : StrandPalette.statusCritical)
                 .frame(width: 7, height: 7)
-            Text(workout.phase == .paused ? String(localized: "PAUSED") : String(localized: "RECORDING"))
+            Text(workout.phase == .paused ? String(localized: "Paused") : String(localized: "Recording"))
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(workout.phase == .paused ? StrandPalette.statusWarning : StrandPalette.metricRose)
             Spacer()
             // Elapsed time ticks itself off the session start via a TimelineView, so we never run a manual
@@ -167,9 +166,8 @@ struct WatchWorkoutView: View {
     /// first in-session sample lands.
     private var heroHeartRate: some View {
         VStack(spacing: 1) {
-            Text("HEART RATE")
+            Text("Heart rate")
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textSecondary)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Image(systemName: "heart.fill")
@@ -196,7 +194,7 @@ struct WatchWorkoutView: View {
         HStack(spacing: 6) {
             stat("ENERGY", workout.activeKcal.map { "\($0)" } ?? "–", unit: "kcal",
                  tint: StrandPalette.effortColor)
-            stat("AVG HR", workout.avgBpm.map(String.init) ?? "–", unit: "bpm",
+            stat("Avg HR", workout.avgBpm.map(String.init) ?? "–", unit: "bpm",
                  tint: StrandPalette.metricRose)
         }
     }
@@ -205,7 +203,6 @@ struct WatchWorkoutView: View {
         VStack(spacing: 2) {
             Text(title)
                 .font(StrandFont.overlineScaled(9))
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(StrandPalette.textTertiary)
             Text(value)
                 .font(StrandFont.rounded(24, weight: .semibold))

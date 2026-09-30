@@ -73,10 +73,10 @@ struct CoachBriefWidgetView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(StrandPalette.accent)
                 Text("Coach")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer(minLength: 0)
                 if let date = entry.briefDate {
@@ -105,10 +105,10 @@ struct CoachBriefWidgetView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(StrandPalette.accent)
                 Text("Coach Brief")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer()
             }

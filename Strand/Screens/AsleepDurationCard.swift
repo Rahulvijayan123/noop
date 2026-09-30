@@ -124,7 +124,6 @@ struct AsleepDurationCard: View {
         }
         VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
             Text("Trend")
-                .textCase(.uppercase)
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
             if let deltaText {

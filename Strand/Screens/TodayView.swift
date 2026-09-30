@@ -108,16 +108,14 @@ private struct ActiveWorkoutIndicatorCard: View {
                         .fill(StrandPalette.metricRose)
                         .frame(width: NoopMetrics.space2, height: NoopMetrics.space2)
                         .accessibilityHidden(true)
-                    Text("WORKOUT IN PROGRESS")
+                    Text("Workout in progress")
                         .font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
                         .foregroundStyle(StrandPalette.metricRose)
                     // A frozen clock alone is ambiguous with a STALLED one, so say which it is. Reuses the
                     // "Paused" string #1533 already localized rather than minting new copy for a tag.
                     if model.isPaused {
                         Text("Paused")
                             .font(StrandFont.overline)
-                            .tracking(StrandFont.overlineTracking)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
                     Spacer(minLength: NoopMetrics.space2)
@@ -218,13 +216,11 @@ struct ServerScoreTodaySection: View {
                         .accessibilityHidden(true)
                     Text("SERVER RESULTS")
                         .font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
                         .foregroundStyle(StrandPalette.textSecondary)
                     Spacer(minLength: NoopMetrics.space2)
                     if let freshness {
                         Text(freshness)
                             .font(StrandFont.overline)
-                            .tracking(StrandFont.overlineTracking)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
                 }
@@ -232,6 +228,10 @@ struct ServerScoreTodaySection: View {
             }
         }
         .task(id: repo.refreshSeq) { await load() }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         if let hosted = snapshot?.hostedResult {
             hostedContent(hosted)
         } else {
@@ -293,10 +293,6 @@ struct ServerScoreTodaySection: View {
 
     @ViewBuilder
     private var contractContent: some View {
-    }
-
-    @ViewBuilder
-    private var content: some View {
         switch snapshot?.status {
         case .populated:
             VStack(alignment: .leading, spacing: NoopMetrics.space1) {
@@ -360,6 +356,10 @@ struct ServerScoreTodaySection: View {
             snapshot = fresh
             freshness = await freshnessLabel(fresh, repository: repository)
         } catch {
+            loadFailed = true
+        }
+    }
+
     /// The hosted result carries its own computed time; the contract's per-feature label would call
     /// every gated feature "missing" even while this card shows its value.
     private func freshnessLabel(_ snapshot: ServerScoreSnapshot?, repository: ServerScoreRepository) async -> String? {
@@ -370,10 +370,6 @@ struct ServerScoreTodaySection: View {
         let trimmed = computed.replacingOccurrences(of: #"(\.\d{3})\d+"#, with: "$1", options: .regularExpression)
         let age = ServerScoreRepository.relativeAge(from: trimmed, nowMs: Int(Date().timeIntervalSince1970 * 1000))
         return age.map { "computed \($0)" } ?? "Server score"
-    }
-
-            loadFailed = true
-        }
     }
 
     private func dayKeyForToday() -> String {
@@ -1500,7 +1496,7 @@ struct TodayView: View {
                 // they can change the day by swiping across or tapping here. fixedSize makes it claim its own
                 // width so a tight top bar never compresses it, and the trailing icon cluster keeps its room.
                 Text(dayNavHint ?? dayNavDateText)
-                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(dayNavHint != nil ? StrandPalette.accent : StrandPalette.textPrimary)
                     .lineLimit(1)
                     .fixedSize()
@@ -1543,7 +1539,7 @@ struct TodayView: View {
                         .overlay(alignment: .topTrailing) {
                             if updateStore.unreadCount > 0 {
                                 Text("\(min(updateStore.unreadCount, 99))")
-                                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                                    .font(.system(size: 9, weight: .semibold))
                                     .monospacedDigit()
                                     .foregroundStyle(StrandPalette.goldDeepText)
                                     .padding(.horizontal, 3.5).padding(.vertical, 1)
@@ -1559,7 +1555,7 @@ struct TodayView: View {
                 // Quick-action + (the accented primary, gold, same 36 size as the rest).
                 Button { router.requestQuickActions() } label: {
                     Image(systemName: "plus")
-                        .font(.system(size: 17, weight: .bold))
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(StrandPalette.goldDeepText)
                         .frame(width: 36, height: 36)
                         .background(Circle().fill(StrandPalette.accent))
@@ -1621,7 +1617,7 @@ struct TodayView: View {
                 .overlay(alignment: .topTrailing) {
                     if updateStore.unreadCount > 0 {
                         Text("\(min(updateStore.unreadCount, 99))")
-                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .font(.system(size: 9, weight: .semibold))
                             .monospacedDigit()
                             .foregroundStyle(StrandPalette.goldDeepText)
                             // Fixed 14pt square + Circle() = a true CIRCLE on both platforms, kept INSIDE
@@ -2187,7 +2183,7 @@ struct TodayView: View {
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
                     Spacer(minLength: NoopMetrics.space2)
-                    Text("BETA")
+                    Text("Beta")
                         .strandOverline()
                     Image(systemName: "chevron.right")
                         .font(StrandFont.caption.weight(.semibold))
@@ -2610,7 +2606,7 @@ struct TodayView: View {
                         }
                         Spacer(minLength: 8)
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
+                            .font(.system(size: 12, weight: .semibold))
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2633,7 +2629,6 @@ struct TodayView: View {
         } label: {
             Text(word)
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(readinessColor(readiness.level))
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
@@ -2665,9 +2660,8 @@ struct TodayView: View {
                     Button {
                         customizationDestination = .yourCards
                     } label: {
-                        Label(String(localized: "Edit").uppercased(), systemImage: "slider.horizontal.3")   // #492/#563: unified "EDIT"
+                        Label(String(localized: "Edit"), systemImage: "slider.horizontal.3")   // #492/#563: unified "EDIT"
                             .font(StrandFont.overline)
-                            .tracking(StrandFont.overlineTracking)
                     }
                     .buttonStyle(.plain)
                     .foregroundStyle(StrandPalette.accent)
@@ -3050,9 +3044,8 @@ struct TodayView: View {
                 .frame(width: 34, height: 34)
                 .overlay(Image(systemName: icon).font(.system(size: 15, weight: .semibold)).foregroundStyle(tint))
             VStack(alignment: .leading, spacing: 2) {
-                Text(title.uppercased())
+                Text(title)
                     .font(StrandFont.overline)
-                    .tracking(StrandFont.overlineTracking)
                     .foregroundStyle(StrandPalette.textPrimary)
                     .lineLimit(1)
                 Text(subtitle)
@@ -3266,8 +3259,6 @@ struct TodayView: View {
             // translated word in the current locale rather than baking an English "HRV"/"RESTING HR" in.
             Text(label)
                 .font(StrandFont.footnote.weight(.semibold))
-                .textCase(.uppercase)
-                .tracking(0.6)
                 .foregroundStyle(StrandPalette.textSecondary)
             Spacer(minLength: 8)
             HStack(alignment: .firstTextBaseline, spacing: 3) {
@@ -3550,18 +3541,16 @@ struct TodayView: View {
                     // plain leading-to-trailing content with no alignment-guide math, so LTR and RTL mirror
                     // identically. Hidden from VoiceOver: it is a spacer, not content.
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 9, weight: .semibold))
                         .opacity(0)
                         .accessibilityHidden(true)
                     // The CHARGE/EFFORT/REST hero label is localized: the catalog key is the natural-case
                     // domain word (Charge/Effort/Rest) and `.textCase(.uppercase)` does the uppercasing in
                     // the current locale, so a de/es/ru build shows the translated word, not the English id.
                     Text(Self.domainLabel(domain))
-                        .textCase(.uppercase)
                         .font(StrandFont.overline)
-                        .tracking(StrandFont.overlineTracking)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(.system(size: 9, weight: .semibold))
                         .opacity(0.6)
                 }
                 .foregroundStyle(StrandPalette.textSecondary)
@@ -4016,7 +4005,7 @@ struct TodayView: View {
                 Button {
                     customizationDestination = .keyMetrics
                 } label: {
-                    Label(String(localized: "Edit").uppercased(), systemImage: "slider.horizontal.3")   // #492/#563: uppercase to match
+                    Label(String(localized: "Edit"), systemImage: "slider.horizontal.3")   // #492/#563: uppercase to match
                         .font(StrandFont.footnote)
                 }
                 .buttonStyle(.plain)
@@ -4076,7 +4065,7 @@ struct TodayView: View {
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 Image(systemName: metricsExpanded ? "chevron.up" : "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(.system(size: 11, weight: .semibold))
             }
             .foregroundStyle(StrandPalette.accent)
             .frame(maxWidth: .infinity)
@@ -4428,7 +4417,7 @@ struct TodayView: View {
                                 Text("Synced from").strandOverline()
                                 Spacer()
                                 Image(systemName: "chevron.up")
-                                    .font(.system(size: 11, weight: .bold))
+                                    .font(.system(size: 11, weight: .semibold))
                                     .foregroundStyle(StrandPalette.textTertiary)
                             }
                             .contentShape(Rectangle())
@@ -4507,7 +4496,7 @@ struct TodayView: View {
                         .minimumScaleFactor(0.85)
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .bold))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

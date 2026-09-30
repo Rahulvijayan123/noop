@@ -173,7 +173,6 @@ public struct BevelGauge: View {
                 let stateSize = min(11, diameter * 0.085)
                 Text(stateText)
                     .font(StrandFont.overlineScaled(stateSize))
-                    .tracking(StrandFont.overlineTracking * stateSize / 11)
                     .foregroundStyle(tipColor)
                     .padding(.top, 2)
             }

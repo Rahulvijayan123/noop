@@ -350,7 +350,7 @@ struct WorkoutDetailView: View {
 
     private func routeStat(_ title: String, _ value: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(title.uppercased()).strandOverline()
+            Text(title).strandOverline()
             Text(value)
                 .font(StrandFont.number(15))
                 .foregroundStyle(tint)
@@ -411,7 +411,7 @@ struct WorkoutDetailView: View {
             let hi = (values.max() ?? 180) + 8
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 ChartCard(
-                    title: "HEART RATE",
+                    title: "Heart rate",
                     subtitle: String(localized: "Beats per minute across the session"),
                     trailing: row.avgHr.map { String(localized: "avg \($0)") },
                     tint: StrandPalette.effortColor

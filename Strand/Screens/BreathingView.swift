@@ -306,7 +306,7 @@ private struct BreathingContent: View {
         StrandCard(padding: 24, tint: StrandPalette.restColor) {
             VStack(spacing: 18) {
                 HStack {
-                    Text(pace.label.uppercased()).strandOverline()
+                    Text(pace.label).strandOverline()
                     Spacer()
                     Button {
                         showEdu = true
@@ -500,7 +500,6 @@ private struct BreathingContent: View {
                     }
                     Text(String(localized: "BPM"))
                         .font(StrandFont.footnote)
-                        .tracking(0.8)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
@@ -619,7 +618,7 @@ private struct BreathingContent: View {
                              accent: Color, caption: String) -> some View {
         StrandCard(padding: 14, tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: 0) {
-                Text(label.uppercased()).strandOverline()
+                Text(label).strandOverline()
                 Spacer(minLength: 6)
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text(value)
@@ -1183,7 +1182,7 @@ private struct ResonanceModeView: View {
     private func rsaCurve(_ scores: [ResonanceEngine.PaceScore]) -> some View {
         let maxRsa = scores.compactMap(\.rsaAmplitude).max() ?? 1
         return VStack(alignment: .leading, spacing: 6) {
-            Text("RSA RESPONSE BY PACE").strandOverline()
+            Text("RSA response by pace").strandOverline()
             ForEach(scores, id: \.bpm) { s in
                 HStack(spacing: 8) {
                     Text(String(format: "%.1f", s.bpm))

@@ -782,8 +782,8 @@ struct WorkoutsView: View {
         let displayValue = UnitFormatter.effortValue(avgStrain, scale: effortScale)
         let fraction = max(0, min(1, displayValue / scaleMax))
         VStack(spacing: 18) {
-            Text("TYPICAL EFFORT")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text("Typical effort")
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.effortColor)
             if hasData {
                 ZStack {
@@ -856,8 +856,8 @@ struct WorkoutsView: View {
 
     private func heroStat(_ title: String, _ value: String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text(title)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             Text(value).font(StrandFont.number(20))
                 .foregroundStyle(tint).lineLimit(1).minimumScaleFactor(0.6)
@@ -870,8 +870,8 @@ struct WorkoutsView: View {
     private func heroCountStat(_ title: String, value: Double,
                                format: @escaping (Double) -> String, tint: Color) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title.uppercased())
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+            Text(title)
+                .font(StrandFont.overline)
                 .foregroundStyle(StrandPalette.textSecondary)
             CountUpText(value: value, format: format, font: StrandFont.number(20), color: tint)
                 .lineLimit(1).minimumScaleFactor(0.6)
@@ -900,7 +900,7 @@ struct WorkoutsView: View {
                         HStack(alignment: .firstTextBaseline, spacing: 4) {
                             Text(grouped(grid.total))
                                 .font(StrandFont.number(24)).foregroundStyle(StrandPalette.textPrimary)
-                            Text(String(localized: "KCAL"))   // reuses the miniStat/colHeader unit label
+                            Text(String(localized: "kcal"))   // reuses the miniStat/colHeader unit label
                                 .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
                             Spacer(minLength: 8)
                             if grid.streak > 0 {
@@ -1081,10 +1081,10 @@ struct WorkoutsView: View {
                 Divider().overlay(StrandPalette.hairline)
                 // Identical 4-up stat strip for every card.
                 HStack(spacing: 0) {
-                    miniStat(String(localized: "SESSIONS"), "\(g.count)")
-                    miniStat(String(localized: "TIME"), String(localized: "\(oneDecimal(g.totalTimeH))h"))
-                    miniStat(String(localized: "KCAL"), grouped(g.totalKcal), tint: StrandPalette.metricAmber)
-                    miniStat(String(localized: "AVG/SESS"), String(localized: "\(Int(g.avgTimePerSessionMin.rounded()))m"))
+                    miniStat(String(localized: "Sessions"), "\(g.count)")
+                    miniStat(String(localized: "Time"), String(localized: "\(oneDecimal(g.totalTimeH))h"))
+                    miniStat(String(localized: "kcal"), grouped(g.totalKcal), tint: StrandPalette.metricAmber)
+                    miniStat(String(localized: "Avg/sess"), String(localized: "\(Int(g.avgTimePerSessionMin.rounded()))m"))
                 }
             }
         }
@@ -1366,18 +1366,18 @@ struct WorkoutsView: View {
 
     private var sessionHeaderRow: some View {
         HStack(spacing: 0) {
-            colHeader(String(localized: "DATE"), width: ColWidth.date, align: .leading)
-            colHeader(String(localized: "SPORT"), width: ColWidth.sport, align: .leading)
+            colHeader(String(localized: "Date"), width: ColWidth.date, align: .leading)
+            colHeader(String(localized: "Sport"), width: ColWidth.sport, align: .leading)
             colHeader(String(localized: "DUR"), width: ColWidth.duration, align: .trailing)
-            colHeader(String(localized: "AVG HR"), width: ColWidth.hr, align: .trailing)
-            colHeader(String(localized: "KCAL"), width: ColWidth.kcal, align: .trailing)
-            colHeader(String(localized: "DIST"), width: ColWidth.dist, align: .trailing)
+            colHeader(String(localized: "Avg HR"), width: ColWidth.hr, align: .trailing)
+            colHeader(String(localized: "kcal"), width: ColWidth.kcal, align: .trailing)
+            colHeader(String(localized: "Dist"), width: ColWidth.dist, align: .trailing)
             // #796 - per-session Effort (the stored 0-100 strain this workout contributed to the day),
             // shown on the user's selected Effort scale. Same value the Effort ring and the detail's
             // Effort card read, surfaced per row so each session's effort is visible without opening it.
-            colHeader(String(localized: "EFFORT"), width: ColWidth.effort, align: .trailing)
+            colHeader(String(localized: "Effort"), width: ColWidth.effort, align: .trailing)
             Spacer(minLength: 0)
-            colHeader(String(localized: "SOURCE"), width: ColWidth.source, align: .trailing)
+            colHeader(String(localized: "Source"), width: ColWidth.source, align: .trailing)
             // Empty header over the per-row "•••" actions menu column (keeps SOURCE aligned).
             Color.clear.frame(width: ColWidth.action)
         }

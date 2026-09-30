@@ -219,7 +219,7 @@ public struct StatTile<Accessory: View>: View {
     public var body: some View {
         // The tile borrows its accent as a faint card wash, so each metric tile reads as
         // part of its colour world while staying legible on the deep blue-black.
-        NoopCard(padding: 14, tint: accent) {
+        NoopCard(padding: 16, tint: accent) {
             VStack(alignment: .leading, spacing: 0) {
                 // Header row: the metric label, and (right-aligned) the optional accessory laid out in
                 // flow so it reserves its own space rather than floating over the value below (#495).
@@ -230,7 +230,7 @@ public struct StatTile<Accessory: View>: View {
                 }
                 Spacer(minLength: 4)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(value).font(StrandFont.number(26)).foregroundStyle(accent).lineLimit(1).minimumScaleFactor(0.6)
+                    Text(value).font(StrandFont.number(24, weight: .medium)).foregroundStyle(accent).lineLimit(1).minimumScaleFactor(0.6)
                     Spacer(minLength: 0)
                     // Trend chip — the delta as a tinted pill with a direction arrow.
                     if let delta { TrendChip(text: delta, color: deltaColor) }
@@ -297,7 +297,7 @@ public struct TrendChip: View {
     }
     public var body: some View {
         HStack(spacing: 3) {
-            if let symbol { Image(systemName: symbol).font(.system(size: 8, weight: .bold)) }
+            if let symbol { Image(systemName: symbol).font(.system(size: 9, weight: .semibold)) }
             // One line, always: a long chip (e.g. a workout's kcal) truncates rather than wraps, so
             // the pill never grows a tile past its floor. Matches Android's unconditional ellipsize (#934).
             Text(text).font(StrandFont.captionNumber).lineLimit(1)
@@ -333,7 +333,7 @@ public struct ChartCard<ChartBody: View, Footer: View>: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(title).strandOverline()
+                        Text(title).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                         if let subtitle { Text(subtitle).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary) }
                     }
                     Spacer()
@@ -358,7 +358,7 @@ public struct ChartFooter: View {
         HStack(spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(it.0).textCase(.uppercase).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    Text(it.0).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                     Text(it.1).font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -392,7 +392,7 @@ public struct InsightCard: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(category).strandOverline()
                     .padding(.trailing, titleTrailingInset)
-                Text(status).font(StrandFont.rounded(28, weight: .bold)).foregroundStyle(statusColor)
+                Text(status).font(StrandFont.title2).foregroundStyle(statusColor)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.trailing, titleTrailingInset)
                 Text(detail).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
@@ -500,7 +500,7 @@ public struct SegmentedPillControl<T: Hashable>: View {
                                             lineWidth: 0.75
                                         )
                                     )
-                                    .shadow(color: .black.opacity(0.20), radius: 4, x: 0, y: 2)
+                                    .shadow(color: NaraBrand.deepIndigo.opacity(0.12), radius: 4, x: 0, y: 1)
                             }
                         }
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -548,7 +548,7 @@ public struct SourceBadge: View {
         // `.frame(height:)` centres its content by default, so the label sits mid-capsule for free. Noted
         // because the Android twin pinned the same 18 with `heightIn` applied to the label itself, which
         // top-aligns — same number, different render. That one is matched to this, not the reverse.
-        Text(text).textCase(.uppercase).font(.system(size: 10, weight: .semibold, design: .rounded)).tracking(0.5)
+        Text(text).font(StrandFont.overlineScaled(11))
             .padding(.horizontal, 9).frame(height: NoopMetrics.sourceBadgeHeight)
             .background(tint.opacity(0.16), in: Capsule(style: .continuous))
             .foregroundStyle(tint)
@@ -597,23 +597,20 @@ public extension View {
 // CTAs. Drop in via `.buttonStyle(.noopPrimary)` etc. on any `Button`. All read off
 // the new gold tokens so they match Apple ⇄ Android. Pressed = subtle dim + scale.
 
-/// Primary call-to-action: gold-gradient fill, dark gold-deep ink (700), rounded 13.
+/// Primary call-to-action: a flat brand-purple fill with Lavender White ink (Deep Indigo on dark).
 public struct NoopPrimaryButtonStyle: ButtonStyle {
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
         return configuration.label
-            .font(StrandFont.body.weight(.bold))
+            .font(StrandFont.headline)
             .foregroundStyle(StrandPalette.goldDeepText)
-            .padding(.vertical, 11).padding(.horizontal, 18)
+            .padding(.vertical, 14).padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
             .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(LinearGradient(gradient: StrandPalette.goldGradient, startPoint: .topLeading, endPoint: .bottomTrailing))
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(StrandPalette.gold)
             )
-            // A crisp, subtle NEUTRAL elevation — the gold cast-glow read as too much against the
-            // clean design, so it's a soft dark lift now, no bloom.
-            .shadow(color: .black.opacity(pressed ? 0.08 : 0.16), radius: 6, x: 0, y: 3)
             .opacity(pressed ? 0.9 : 1)
             .scaleEffect(pressed ? 0.98 : 1)
             .animation(StrandMotion.interactive, value: pressed)
@@ -621,16 +618,16 @@ public struct NoopPrimaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Secondary: inset well + 1px white-12 border + primary text. Quieter than gold.
+/// Secondary: inset well + hairline border + primary ink. Quieter than the primary fill.
 public struct NoopSecondaryButtonStyle: ButtonStyle {
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         return configuration.label
-            .font(StrandFont.body.weight(.semibold))
+            .font(StrandFont.headline)
             .foregroundStyle(StrandPalette.textPrimary)
-            .padding(.vertical, 11).padding(.horizontal, 18)
+            .padding(.vertical, 14).padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
             .background(shape.fill(StrandPalette.surfaceInset))
             .overlay(shape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
@@ -641,16 +638,16 @@ public struct NoopSecondaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Ghost / gold: transparent + 1px gold@.3 hairline + gold text. Tertiary CTA.
+/// Ghost: transparent + accent hairline + accent text. Tertiary CTA.
 public struct NoopGhostButtonStyle: ButtonStyle {
     public init() {}
     public func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: 14, style: .continuous)
         return configuration.label
-            .font(StrandFont.body.weight(.semibold))
+            .font(StrandFont.headline)
             .foregroundStyle(StrandPalette.gold)
-            .padding(.vertical, 11).padding(.horizontal, 18)
+            .padding(.vertical, 14).padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
             .background(shape.fill(StrandPalette.gold.opacity(pressed ? 0.10 : 0)))
             .overlay(shape.strokeBorder(StrandPalette.gold.opacity(0.3), lineWidth: 1))
@@ -719,7 +716,6 @@ public struct ScoreStatePill: View {
             PulseDot(color: hue, pulsing: state.pulsing, size: 7)
             Text(text ?? state.label)
                 .font(StrandFont.overline)
-                .tracking(0.4)
                 .foregroundStyle(hue)
         }
         .padding(.horizontal, 10).padding(.vertical, 5)

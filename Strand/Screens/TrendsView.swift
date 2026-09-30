@@ -171,7 +171,6 @@ struct TrendsView: View {
                 // Match the neighbouring ChartFooter columns so the delta is self-describing instead
                 // of appearing as an unlabeled pill at the edge of the statistics row.
                 Text("Trend")
-                    .textCase(.uppercase)
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                 TrendChip(text: deltaText, color: color)
@@ -489,8 +488,6 @@ struct TrendsView: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             Text(label)
                 .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
-                .textCase(.uppercase)
                 .foregroundStyle(StrandPalette.textSecondary)
             HStack(spacing: NoopMetrics.space3) {
                 // Static (posed) vessel — a small liquid gauge, not a live 60fps canvas, so the three
@@ -499,7 +496,7 @@ struct TrendsView: View {
                     .frame(width: 30, height: 30)
                     .accessibilityHidden(true)
                 CountUpText(value: value, format: format,
-                            font: StrandFont.number(30, weight: .bold),
+                            font: StrandFont.number(30, weight: .semibold),
                             color: StrandPalette.textPrimary)
             }
             PipBar(value: value, range: range, tint: tint)

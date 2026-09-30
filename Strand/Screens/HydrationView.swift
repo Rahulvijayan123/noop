@@ -105,7 +105,7 @@ struct HydrationView: View {
                     VStack(spacing: 2) {
                         CountUpText(value: HydrationGoal.litres(fromML: totalML),
                                     format: { String(format: "%.1f", $0) },
-                                    font: StrandFont.rounded(40, weight: .bold),
+                                    font: StrandFont.rounded(40, weight: .semibold),
                                     color: StrandPalette.textPrimary)
                             .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
                         Text(String(localized: "of \(String(format: "%.1f", HydrationGoal.litres(fromML: Double(goalML)))) L"))
@@ -454,7 +454,7 @@ private struct HydrationAmountSheet: View {
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer()
                 Text("\(ml) ml")
-                    .font(StrandFont.rounded(28, weight: .bold))
+                    .font(StrandFont.rounded(28, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                     .monospacedDigit()
             }
