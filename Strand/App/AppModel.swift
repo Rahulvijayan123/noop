@@ -274,10 +274,34 @@ final class AppModel: ObservableObject {
         CloudPushRuntime.shared.setAppIsActive(true)
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
         await CloudPushRuntime.shared.flushAndKick()
+        await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene refreshes the SERVER's changed days
         // into the local cache instead of running a local pass. A no-op when cloud mode is off.
         if cloudScoringIsAuthoritative {
             await CloudPushRuntime.shared.refreshServerScores(deviceId: deviceId)
+        }
+    }
+
+    /// One-shot per serial: link this installation's provisional device to the
+    /// wearer's canonical `whoop-<serial>` device via the deployed
+    /// `/wearables/confirm` route. Until this succeeds the scores readback route
+    /// honestly reports `device_registration_pending`, so the Today server-results
+    /// card would stay empty. No-op when cloud mode is off, when the strap serial
+    /// is not yet known, or after a successful confirm for that serial.
+    private func confirmWearableLinkIfNeeded() async {
+        guard cloudScoringIsAuthoritative else { return }
+        guard let serial = ble.cloudLinkSerial, !serial.isEmpty else { return }
+        let key = "cloud.wearableConfirmed.serial"
+        if UserDefaults.standard.string(forKey: key) == serial { return }
+        let client = CloudEnrollmentClient()
+        do {
+            let deviceId = try await client.confirmWearable(provisionalExternalDeviceId: deviceId, serial: serial)
+            if !deviceId.isEmpty {
+                UserDefaults.standard.set(serial, forKey: key)
+            }
+        } catch {
+            // A failed confirm is surfaced through the transport's lastError path,
+            // retried on the next scene-active opportunity.
         }
     }
 

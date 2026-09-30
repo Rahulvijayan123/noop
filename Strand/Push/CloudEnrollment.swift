@@ -1,5 +1,6 @@
 import Foundation
 import NoopPush
+import CryptoKit
 
 /// Which OS this installation is enrolling from. The receiver only accepts `ios`, `macos` (and
 /// `android`, which this app never sends); anything else is rejected server-side with
@@ -334,6 +335,45 @@ public struct CloudEnrollmentClient: Sendable {
     /// the typed `.unsupportedVersion`. The returned userId/sourceId MUST match the stored identity;
     /// a mismatch is `.ownershipMismatch` (an ownership failure, never transient), and the caller
     /// must not proceed. On success the negotiated protocol version is cached per owner.
+    /// Confirm the provisional device for this installation against the strap's
+    /// real Device Information serial, so the server can link this source to
+    /// the wearer's canonical `whoop-<serial>` device. Without this the score
+    /// readback route honestly reports `device_registration_pending`.
+    /// Wire contract (deployed edge, verified live): POST <base>/wearables/confirm
+    /// with Bearer installation token + fleet header; body {provisionalExternalDeviceId,
+    /// evidence{method, serial, receiptSha256}}; 200 {userId, sourceId, deviceId, state:"confirmed"}.
+    public func confirmWearable(provisionalExternalDeviceId: String, serial: String) async throws -> String {
+        guard let base = enrollmentURL()?.deletingLastPathComponent() else { throw CloudEnrollmentError.notConfigured }
+        guard let url = URL(string: base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/wearables/confirm") else { throw CloudEnrollmentError.notConfigured }
+        guard let identity = CloudPushIdentityStore.current() else { throw CloudEnrollmentError.unauthorized }
+        let witness = "device_information_serial_v1:\(identity.sourceId):\(provisionalExternalDeviceId):\(serial)"
+        let digest = SHA256.hash(data: Data(witness.utf8)).map { String(format: "%02x", $0) }.joined()
+        let body: [String: Any] = [
+            "provisionalExternalDeviceId": provisionalExternalDeviceId,
+            "evidence": [
+                "method": "device_information_serial_v1",
+                "serial": serial,
+                "receiptSha256": digest,
+            ],
+        ]
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.cachePolicy = URLRequest.CachePolicy.reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
+        request.setValue(resolvedFleetToken(), forHTTPHeaderField: "x-noop-fleet-token")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["state"] as? String == "confirmed",
+              (object["userId"] as? String)?.lowercased() == identity.ownerId else {
+            throw CloudEnrollmentError.failed
+        }
+        return object["deviceId"] as? String ?? ""
+    }
+
     public func negotiateCapabilities() async throws -> CloudCapabilities {
         guard let identity = CloudPushIdentityStore.current() else {
             throw CloudEnrollmentError.unauthorized

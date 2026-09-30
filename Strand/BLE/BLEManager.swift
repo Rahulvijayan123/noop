@@ -5246,6 +5246,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// The serial this pairing may adopt: the 5/MG's DIS read, or a 4.0's twice-seen hello serial.
     private var adoptableSerial: String? { disSerial ?? harvardSerialConfirmed }
 
+    /// The strap's Device Information serial (0x2A25), for the cloud wearable-link path.
+    /// nil until the DIS read completes (or the Harvard fallback observes it).
+    public var cloudLinkSerial: String? { adoptableSerial }
+
     /// #1193: a 4.0 hello serial arrived. Adopt only on the SECOND sighting of the same value — see
     /// `harvardSerialCandidate` for why a single sighting is not enough to act on destructively.
     private func noteHarvardSerial(_ serial: String) {
