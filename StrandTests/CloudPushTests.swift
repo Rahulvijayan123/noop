@@ -1,5 +1,7 @@
 import XCTest
 import NoopPush
+import WhoopProtocol
+import WhoopStore
 @testable import Strand
 
 
@@ -427,6 +429,221 @@ final class CloudPushTests: XCTestCase {
                                                  deviceId: "my-whoop", receivedAtMs: 1_700_000_000_000)
         XCTAssertEqual(skip, .notRunning)
     }
+
+    // MARK: - blocked re-seal
+
+    func testResealBlockedReturnsRecordsToPending() async throws {
+        let journal = try await makeJournal()
+        journal.submit([hrRecord(ts: 1_700_000_000, bpm: 58), hrRecord(ts: 1_700_000_001, bpm: 60),
+                        hrRecord(ts: 1_700_000_002, bpm: 62)])
+        _ = await journal.flush()
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let candidate = try await journal.sealCandidates(nowMs: now)[0]
+        let entries = try await journal.entries(for: candidate)
+        let plan = try CloudBatchBuilder.plan(entries: entries, stream: .hrSample,
+                                             sourceId: candidate.sourceId, deviceId: candidate.deviceId,
+                                             protocolVersion: "1.1", startCursorJSON: nil)
+        try await journal.registerSeal(candidate, batchId: plan.batch.batchId, filePath: "unused",
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: 128, protocolVersion: "1.1", endCursorJSON: nil)
+        try await journal.markFailed(batchId: plan.batch.batchId, error: "HTTP 422",
+                                     nextAttemptAtMs: nil, blocked: true)
+        try await journal.resealBlocked(batchId: plan.batch.batchId)
+        let resealable = try await journal.sealCandidates(nowMs: now)
+        XCTAssertEqual(resealable.first?.recordCount, 3, "records must return to the pending pool")
+    }
+
+    func testCappedSealTakesTheOldestRecordsAndLeavesTheRestPending() async throws {
+        let journal = try await makeJournal()
+        journal.submit((0..<5).map { hrRecord(ts: 1_700_000_000 + $0, bpm: 60 + $0) })
+        _ = await journal.flush()
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let candidate = try await journal.sealCandidates(nowMs: now)[0]
+        XCTAssertEqual(candidate.recordCount, 5)
+
+        let entries = try await journal.entries(for: candidate, limit: 2)
+        XCTAssertEqual(entries.map(\.seq), [candidate.firstSeq, candidate.firstSeq + 1])
+        let plan = try CloudBatchBuilder.plan(entries: entries, stream: .hrSample,
+                                             sourceId: candidate.sourceId, deviceId: candidate.deviceId,
+                                             protocolVersion: "1.1", startCursorJSON: nil)
+        XCTAssertEqual(plan.entries.count, 2)
+        let covered = CloudSealCandidate(ownerId: candidate.ownerId, sourceId: candidate.sourceId,
+                                         deviceId: candidate.deviceId, stream: candidate.stream,
+                                         firstSeq: plan.entries.first!.seq, lastSeq: plan.entries.last!.seq,
+                                         recordCount: plan.entries.count,
+                                         oldestReceivedAtMs: candidate.oldestReceivedAtMs,
+                                         byteSize: 128, windowIdentity: candidate.windowIdentity)
+        try await journal.registerSeal(covered, batchId: plan.batch.batchId, filePath: "unused",
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: 128, protocolVersion: "1.1", endCursorJSON: nil)
+
+        let remaining = try await journal.sealCandidates(nowMs: now)
+        XCTAssertEqual(remaining.first?.recordCount, 3)
+        XCTAssertEqual(remaining.first?.firstSeq, candidate.firstSeq + 2)
+    }
+
+    func testRescheduleFailedMakesBackedOffBatchesDueButKeepsTheirAttempts() async throws {
+        let journal = try await makeJournal()
+        journal.submit([hrRecord(ts: 1_700_000_000, bpm: 60)])
+        _ = await journal.flush()
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let candidate = try await journal.sealCandidates(nowMs: now)[0]
+        let plan = try CloudBatchBuilder.plan(entries: try await journal.entries(for: candidate), stream: .hrSample,
+                                             sourceId: candidate.sourceId, deviceId: candidate.deviceId,
+                                             protocolVersion: "1.1", startCursorJSON: nil)
+        try await journal.registerSeal(candidate, batchId: plan.batch.batchId, filePath: "unused",
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: 128, protocolVersion: "1.1", endCursorJSON: nil)
+        try await journal.markFailed(batchId: plan.batch.batchId, error: "HTTP 503",
+                                     nextAttemptAtMs: now + 3_600_000)
+        let beforeReschedule = try await journal.batches(states: [.failed], dueBeforeMs: now)
+        XCTAssertTrue(beforeReschedule.isEmpty)
+
+        try await journal.rescheduleFailed(dueAtMs: now)
+        let due = try await journal.batches(states: [.failed], dueBeforeMs: now)
+        XCTAssertEqual(due.map(\.batchId), [plan.batch.batchId])
+        XCTAssertEqual(due.first?.attempts, 1, "the attempt cap must still count the failed attempt")
+    }
+
+    // MARK: - stale payload paths
+
+    func testResealMissingPayloadFreesUnsentWorkButNeverReservedWork() async throws {
+        let journal = try await makeJournal()
+        journal.submit([hrRecord(ts: 1_700_000_000, bpm: 60), hrRecord(ts: 1_700_000_001, bpm: 61)])
+        _ = await journal.flush()
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let candidate = try await journal.sealCandidates(nowMs: now)[0]
+        let entries = try await journal.entries(for: candidate)
+        let plan = try CloudBatchBuilder.plan(entries: entries, stream: .hrSample,
+                                             sourceId: candidate.sourceId, deviceId: candidate.deviceId,
+                                             protocolVersion: "1.1", startCursorJSON: nil)
+        try await journal.registerSeal(candidate, batchId: plan.batch.batchId,
+                                       filePath: "/var/mobile/Containers/Data/Application/STALE/payload.ndjson.gz",
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: 6, protocolVersion: "1.1", endCursorJSON: nil)
+
+        // A reserved batch is owned by a live task; a missing-file reseal must not touch it.
+        try await journal.markReserved(batchId: plan.batch.batchId, taskId: "7", taskKind: "background",
+                                       authExpiresAtMs: nil)
+        try await journal.resealMissingPayload(batchId: plan.batch.batchId)
+        let reservedState = try await journal.batchState(plan.batch.batchId)
+        XCTAssertEqual(reservedState, .reserved)
+        let stillSealed = try await journal.sealCandidates(nowMs: now)
+        XCTAssertTrue(stillSealed.isEmpty)
+
+        // An unsent batch whose file is gone goes back to the pool instead of staying the queue head.
+        try await journal.markFailed(batchId: plan.batch.batchId, error: "task no longer present",
+                                     nextAttemptAtMs: nil)
+        try await journal.resealMissingPayload(batchId: plan.batch.batchId)
+        let goneState = try await journal.batchState(plan.batch.batchId)
+        XCTAssertNil(goneState)
+        let resealable = try await journal.sealCandidates(nowMs: now)
+        XCTAssertEqual(resealable.first?.recordCount, 2)
+    }
+
+    // MARK: - strap history offload
+
+    func testHistoryRowsCarryBandSleepStateAndDropRowsOutsideTheWireContract() throws {
+        let streams = Streams(steps: [StepSample(ts: 1_790_748_000, counter: 12, activityClass: 1),
+                                      StepSample(ts: 1_790_748_001, counter: 70_000)],
+                              sleepState: [SleepStateSample(ts: 1_790_748_000, state: 2, rawByte: 0x20),
+                                           SleepStateSample(ts: 1_790_748_001, state: 1),
+                                           SleepStateSample(ts: 1_790_748_002, state: 1, rawByte: 0x30),
+                                           SleepStateSample(ts: 1_790_748_003, state: 5)])
+        let records = CloudCapture.rows(from: streams, provenance: .history, family: .whoop4,
+                                        wallClockRef: nil, deviceClockRef: nil, receivedAtMs: 0,
+                                        characteristic: nil, deviceId: "my-whoop")
+        XCTAssertEqual(records.filter { $0.stream == .stepSample }.count, 1)
+        let sleep = records.filter { $0.stream == .sleepStateSample }
+        XCTAssertEqual(sleep.map(\.strapTs), [1_790_748_000, 1_790_748_001])
+        XCTAssertTrue(records.allSatisfy { $0.provenance == .history })
+
+        XCTAssertEqual(CloudBatchBuilder.appendTable(for: .sleepStateSample), .sleepStateSample)
+        let rows = try sleep.enumerated().map { index, record in
+            try CloudBatchBuilder.decodeRow(CloudJournalEntry(seq: Int64(index + 1), record: record,
+                                                              ownerId: "o", deviceId: "d", sourceId: "s"))
+        }
+        XCTAssertNoThrow(try PushProtocol.appendBatch(table: .sleepStateSample,
+                                                      sourceId: "22222222-2222-4222-8222-222222222222",
+                                                      deviceId: "my-whoop", startCursor: nil,
+                                                      records: rows, protocolVersion: "1.1"))
+    }
+
+    // MARK: - hosted worker result
+
+    private func hostedEnvelope(daily: [String: Any], revision: Any = "42") -> [String: Any] {
+        ["server_scoring": ["hosted_snapshot": [
+            "algorithm_version": "frwhoop-server-1", "result_revision": revision, "input_revision": "7",
+            "computed_at": "2026-09-30T14:00:00.123456+00:00", "pending": true, "status": "partial",
+            "status_reasons": ["gravity_empty"], "daily": daily,
+            "sleep": [
+                ["id": "s1", "start_at": "2026-09-30T06:00:00Z", "end_at": "2026-09-30T13:30:00Z",
+                 "is_nap": false, "efficiency": 0.91, "resting_hr_bpm": 52, "hrv_rmssd_ms": 61.2,
+                 "stages": [["start": 1_790_748_000, "end": 1_790_775_000, "stage": "light"]]],
+                ["id": "bad", "start_at": "not a time", "end_at": "2026-09-30T13:30:00Z"],
+            ],
+        ] as [String: Any]]]
+    }
+
+    func testHostedResultReadsTheWorkerSnapshotWithoutInventingValues() throws {
+        let daily: [String: Any] = ["sleep_total_min": 431.5, "sleep_efficiency": 0.91, "resting_hr_bpm": 52,
+                                    "hrv_rmssd_ms": 61.2, "strain": 8.4, "restScore": 82, "steps": 4120,
+                                    "sleepHrOnly": false, "exerciseCount": true]
+        let snapshot = ServerScoreRepository.snapshot(day: "2026-09-30", deviceId: "my-whoop",
+                                                      envelope: hostedEnvelope(daily: daily), fetchedAtMs: 0)
+        let result = try XCTUnwrap(snapshot.hostedResult)
+        XCTAssertEqual(result.daily.day, "2026-09-30")
+        XCTAssertEqual(result.daily.totalSleepMin, 431.5)
+        XCTAssertEqual(result.daily.restingHr, 52)
+        XCTAssertEqual(result.daily.strain, 8.4)
+        XCTAssertEqual(result.daily.steps, 4120)
+        XCTAssertEqual(result.daily.sleepHrOnly, false)
+        // No baseline yet: Charge stays absent, never zero. A JSON boolean is not a count.
+        XCTAssertNil(result.daily.recovery)
+        XCTAssertNil(result.daily.exerciseCount)
+        XCTAssertEqual(result.restScore, 82)
+        XCTAssertEqual(result.resultRevision, "42")
+        XCTAssertTrue(result.pending)
+        XCTAssertEqual(result.statusReasons, ["gravity_empty"])
+        XCTAssertEqual(result.sleep.count, 1, "an unparseable night is dropped, not guessed")
+        let night = try XCTUnwrap(result.sleep.first)
+        XCTAssertEqual([night.startTs, night.endTs], [1_790_748_000, 1_790_775_000])
+        XCTAssertEqual(night.restingHr, 52)
+        XCTAssertEqual(night.efficiency, 0.91)
+        XCTAssertNotNil(night.stagesJSON)
+
+        let unrevisioned = ServerScoreRepository.snapshot(day: "2026-09-30", deviceId: "my-whoop",
+                                                          envelope: hostedEnvelope(daily: daily, revision: 42),
+                                                          fetchedAtMs: 0)
+        XCTAssertNil(unrevisioned.hostedResult)
+    }
+
+    func testMaterializedHostedDayReplacesADriftedNightInsteadOfDoublingIt() async throws {
+        let store = try await WhoopStore.inMemory()
+        let computedId = HostedResultMaterializer.computedId(for: "my-whoop")
+        // An earlier server pass keyed the same night 20 minutes later.
+        _ = try await store.upsertSleepSessions([CachedSleepSession(startTs: 1_790_749_200, endTs: 1_790_775_000,
+                                                                    efficiency: 0.8, restingHr: 55, avgHrv: 50,
+                                                                    stagesJSON: nil)],
+                                                deviceId: computedId)
+        let snapshot = ServerScoreRepository.snapshot(
+            day: "2026-09-30", deviceId: "my-whoop",
+            envelope: hostedEnvelope(daily: ["recovery": 64, "strain": 8.4, "restScore": 82]), fetchedAtMs: 0)
+        try await HostedResultMaterializer.persist(try XCTUnwrap(snapshot.hostedResult), store: store,
+                                                   deviceId: "my-whoop")
+
+        let days = try await store.dailyMetrics(deviceId: computedId, from: "2026-09-30", to: "2026-09-30")
+        XCTAssertEqual(days.first?.recovery, 64)
+        XCTAssertEqual(days.first?.strain, 8.4)
+        let nights = try await store.sleepSessions(deviceId: computedId, from: 0, to: .max, limit: 10)
+        XCTAssertEqual(nights.map(\.startTs), [1_790_748_000])
+        let rest = try await store.metricSeries(deviceId: computedId, key: "sleep_performance",
+                                                from: "2026-09-30", to: "2026-09-30")
+        XCTAssertEqual(rest.map(\.value), [82])
+        let source = try await store.scoreInputSource(deviceId: computedId, day: "2026-09-30", key: "recovery")
+        XCTAssertEqual(source, "my-whoop")
+    }
+
 }
 
 
@@ -440,14 +657,14 @@ final class BatchDedupeTests: XCTestCase {
     func testBuilderDeduplicatesRepeatedConflictKeys() throws {
         func entry(seq: Int64, ts: Int, bpm: Int) -> CloudJournalEntry {
             let record = CloudJournalRecord(
-                stream: .hrSample, encoding: .ndjson, provenance: .live,
-                characteristic: "2A37", family: nil, firmware: nil,
+                stream: .hrSample, encoding: .jsonRow, provenance: .live,
+                characteristic: "2A37", family: nil,
                 receivedAtMs: ts * 1000, strapTs: ts,
                 payload: try! JSONSerialization.data(withJSONObject: [
                     "key": ["ts": ts], "data": ["bpm": bpm],
                 ]))
-            return CloudJournalEntry(seq: seq, record: record, ownerId: "o",
-                                     deviceId: "d", sourceId: "s")
+            return CloudJournalEntry(seq: seq, record: record, ownerId: "11111111-1111-4111-8111-111111111111",
+                                     deviceId: "d", sourceId: "22222222-2222-4222-8222-222222222222")
         }
         let entries = [
             entry(seq: 1, ts: 1790792481, bpm: 58),
@@ -456,7 +673,7 @@ final class BatchDedupeTests: XCTestCase {
             entry(seq: 4, ts: 1790792483, bpm: 61),
         ]
         let plan = try CloudBatchBuilder.plan(entries: entries, stream: .hrSample,
-                                               sourceId: "s", deviceId: "d",
+                                               sourceId: "22222222-2222-4222-8222-222222222222", deviceId: "d",
                                                protocolVersion: "1.0",
                                                startCursorJSON: nil,
                                                maximumDecodedBytes: 1 << 20)
@@ -467,47 +684,5 @@ final class BatchDedupeTests: XCTestCase {
         XCTAssertFalse(body.contains("\"bpm\":58"), "first duplicate must be dropped")
         XCTAssertTrue(body.contains("\"bpm\":60"), "last writer must win")
     }
-}
 
-final class BlockedResealTests: XCTestCase {
-    func testResealBlockedReturnsRecordsToPending() async throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("cloud-reseal-\(UUID().uuidString)")
-        let journal = CloudJournal(journalURL: dir.appendingPathComponent("journal.sqlite"))
-        journal.activate(configuration: .init(ownerId: "o", sourceId: "s", deviceId: "d"))
-        let store = try XCTUnwrap(journal.storeForTesting())
-        // Seed pending rows via the store-level append path used by capture.
-        for (seq, ts, bpm) in [(Int64(1), 1790792481, 58), (Int64(2), 1790792481, 60),
-                               (Int64(3), 1790792484, 62)] {
-            let record = CloudJournalRecord(
-                stream: .hrSample, encoding: .ndjson, provenance: .live,
-                characteristic: "2A37", family: nil, firmware: nil,
-                receivedAtMs: ts * 1000, strapTs: ts,
-                payload: try JSONSerialization.data(withJSONObject: [
-                    "key": ["ts": ts], "data": ["bpm": bpm],
-                ]))
-            _ = store.appendForTesting(record, monotonicSeq: seq)
-        }
-        let pending = try store.pendingEntries(deviceId: "d", stream: .hrSample, upTo: 100)
-        XCTAssertEqual(pending.count, 3)
-        let plan = try CloudBatchBuilder.plan(entries: pending, stream: .hrSample,
-                                              sourceId: "s", deviceId: "d",
-                                              protocolVersion: "1.0", startCursorJSON: nil,
-                                              maximumDecodedBytes: 1 << 20)
-        // Register the seal, block it, then reseal: records return to pending.
-        try store.markSealed(candidate: CloudSealCandidate(
-                ownerId: "o", sourceId: "s", deviceId: "d", stream: .hrSample,
-                firstSeq: plan.entries.first!.seq, lastSeq: plan.entries.last!.seq,
-                recordCount: plan.entries.count, oldestReceivedAtMs: 0, byteSize: 128,
-                windowIdentity: nil),
-            batchId: plan.batch.batchId, filePath: "unused", contentSha256: "h",
-            contentLength: 128, ownerId: "o", sourceId: "s",
-            protocolVersion: "1.0", endCursorJSON: nil, nowMs: 0)
-        try store.markFailed(batchId: plan.batch.batchId, error: "HTTP 422",
-                             nextAttemptAtMs: nil, blocked: true)
-        try store.resealBlocked(batchId: plan.batch.batchId)
-        let repending = try store.pendingEntries(deviceId: "d", stream: .hrSample, upTo: 100)
-        XCTAssertEqual(repending.count, pending.count, "records must return to the pending pool")
-        try? journal.deactivate(flushFirst: false)
-    }
 }

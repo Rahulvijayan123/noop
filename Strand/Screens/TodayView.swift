@@ -231,7 +231,68 @@ struct ServerScoreTodaySection: View {
                 content
             }
         }
-        .task { await load() }
+        .task(id: repo.refreshSeq) { await load() }
+        if let hosted = snapshot?.hostedResult {
+            hostedContent(hosted)
+        } else {
+            contractContent
+        }
+    }
+
+    /// The hosted worker's own numbers for the day. A value the server could not compute is labelled
+    /// with why, never shown as zero.
+    @ViewBuilder
+    private func hostedContent(_ hosted: HostedDayResult) -> some View {
+        let daily = hosted.daily
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            valueRow("Charge", daily.recovery.map { "\(Int($0.rounded()))%" }
+                ?? (daily.totalSleepMin != nil ? "Calibrating" : "Needs a night"))
+            valueRow("Effort", daily.strain.map { String(format: "%.1f", $0) } ?? "—")
+            valueRow("Sleep", daily.totalSleepMin.map { minutes in
+                let total = Int(minutes.rounded())
+                let efficiency = daily.efficiency.map { " · \(Int(($0 * 100).rounded()))%" } ?? ""
+                return "\(total / 60)h \(total % 60)m\(efficiency)"
+            } ?? "No night detected")
+            valueRow("Rest", hosted.restScore.map { "\(Int($0.rounded()))" } ?? "—")
+            valueRow("Resting HR", daily.restingHr.map { "\($0) bpm" } ?? "—")
+            valueRow("HRV", daily.avgHrv.map { "\(Int($0.rounded())) ms" } ?? "—")
+            if let note = hostedNote(hosted) {
+                Text(note)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func valueRow(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+            Spacer(minLength: NoopMetrics.space2)
+            Text(value)
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(StrandPalette.textPrimary)
+        }
+    }
+
+    private func hostedNote(_ hosted: HostedDayResult) -> String? {
+        var parts: [String] = []
+        let reasons: [String: String] = [
+            "no_sleep_session": "no night found yet",
+            "gravity_empty": "no motion data yet",
+            "rr_empty": "no beat-to-beat data yet",
+            "hr_too_sparse": "not enough heart-rate data yet",
+        ]
+        let missing = hosted.statusReasons.compactMap { reasons[$0] }
+        if !missing.isEmpty { parts.append("Partial: " + missing.joined(separator: ", ") + ".") }
+        if hosted.pending { parts.append("Newer data is being scored.") }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
+    }
+
+    @ViewBuilder
+    private var contractContent: some View {
     }
 
     @ViewBuilder
@@ -286,14 +347,31 @@ struct ServerScoreTodaySection: View {
         let deviceId = "my-whoop"
         let day = dayKeyForToday()
         // Cache-first: the cached snapshot renders immediately.
-        snapshot = repository.cachedDay(day: day, deviceId: deviceId)
-        freshness = repository.freshnessLabel(for: snapshot)
-        // Then refresh from the server in the background.
+        snapshot = await repository.cachedDay(day: day, deviceId: deviceId)
+        freshness = await freshnessLabel(snapshot, repository: repository)
+        // The app model refreshes this day whenever it writes server results (which bumps
+        // `refreshSeq` and re-runs this), so a cache read that recent needs no second request.
+        if let cached = snapshot, cached.fetchedAtMs > 0,
+           Int(Date().timeIntervalSince1970 * 1000) - cached.fetchedAtMs < 60_000 {
+            return
+        }
         do {
             let fresh = try await repository.refresh(day: day, deviceId: deviceId)
             snapshot = fresh
-            freshness = repository.freshnessLabel(for: fresh)
+            freshness = await freshnessLabel(fresh, repository: repository)
         } catch {
+    /// The hosted result carries its own computed time; the contract's per-feature label would call
+    /// every gated feature "missing" even while this card shows its value.
+    private func freshnessLabel(_ snapshot: ServerScoreSnapshot?, repository: ServerScoreRepository) async -> String? {
+        guard let computed = snapshot?.hostedResult?.computedAt else {
+            return await repository.freshnessLabel(for: snapshot)
+        }
+        // Postgres writes microseconds; the ISO parser takes at most milliseconds.
+        let trimmed = computed.replacingOccurrences(of: #"(\.\d{3})\d+"#, with: "$1", options: .regularExpression)
+        let age = ServerScoreRepository.relativeAge(from: trimmed, nowMs: Int(Date().timeIntervalSince1970 * 1000))
+        return age.map { "computed \($0)" } ?? "Server score"
+    }
+
             loadFailed = true
         }
     }

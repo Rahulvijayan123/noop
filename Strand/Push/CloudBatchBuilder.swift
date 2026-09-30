@@ -76,6 +76,7 @@ enum CloudBatchBuilder {
         case .respSample: return .respSample
         case .gravitySample: return .gravitySample
         case .stepSample: return .stepSample
+        case .sleepStateSample: return .sleepStateSample
         case .standardHRReceipt: return .standardHRReceipt
         case .journal, .sleepSession, .workout, .dailyMetric, .rawBatch: return nil
         }

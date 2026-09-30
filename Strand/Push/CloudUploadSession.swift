@@ -74,7 +74,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
     private lazy var foregroundSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.waitsForConnectivity = false
-        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForRequest = 90
         config.timeoutIntervalForResource = 120
         return URLSession(configuration: config)
     }()
@@ -159,7 +159,9 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         // The sealed file IS the wire body (gzip applied at seal time), so what we hash, what we
         // upload and what we later delete are the same bytes.
         request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
-        request.timeoutInterval = 30
+        // The receiver keeps working after a client gives up, and the retry then lands on top of the
+        // unfinished attempt; waiting out a slow commit is cheaper for it than a duplicate.
+        request.timeoutInterval = 90
         do {
             let (data, response) = try await foregroundSession.upload(for: request, fromFile: fileURL)
             guard let http = response as? HTTPURLResponse else {

@@ -857,6 +857,9 @@ final class Backfiller {
             do {
                 counts = try await store.insert(decoded, deviceId: deviceId)
                 onBankedOffload(counts)
+                // Cloud mode only (a no-op otherwise): journal the rows now that they are banked. It never
+                // throws and never decides the ack; the local store stays the copy the strap is trimmed on.
+                await CloudCapture.recordHistory(decoded, deviceId: deviceId, family: family, clockRef: ref)
             } catch {
                 // Diag (#601): the decoded rows couldn't be written — this is the "history stalls but live HR
                 // works" class. We return WITHOUT acking so the strap keeps this chunk and re-sends it next

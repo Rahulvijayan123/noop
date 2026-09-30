@@ -23,6 +23,8 @@ public enum CloudStreamKind: String, CaseIterable, Sendable {
     case respSample
     case gravitySample
     case stepSample
+    /// The strap's own per-record band sleep state, banked only by the history offload.
+    case sleepStateSample
     /// The standard 0x2A37 measurement, receipted separately from the proprietary realtime lane.
     case standardHRReceipt
     // Replace-window streams: the receiver assembles every part of a window before it supersedes
@@ -657,18 +659,22 @@ final class CloudJournalStore: @unchecked Sendable {
     }
 
     /// Every pending record of one (device, stream) up to the group's last committed sequence.
-    func pendingEntries(deviceId: String, stream: CloudStreamKind, upTo lastSeq: Int64) throws -> [CloudJournalEntry] {
+    func pendingEntries(deviceId: String, stream: CloudStreamKind, upTo lastSeq: Int64,
+                        limit: Int? = nil) throws -> [CloudJournalEntry] {
         let stmt = try prepare("""
         SELECT seq, owner_id, source_id, device_id, stream, encoding, provenance, characteristic,
                family, firmware, received_at_ms, strap_ts, wall_ref, device_ref, window_identity, payload
         FROM journal_record
         WHERE state = 0 AND device_id = ? AND stream = ? AND seq <= ?
         ORDER BY seq ASC
+        LIMIT ?
         """)
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, deviceId, -1, cloudSQLiteTransient)
         sqlite3_bind_text(stmt, 2, stream.rawValue, -1, cloudSQLiteTransient)
         sqlite3_bind_int64(stmt, 3, lastSeq)
+        // SQLite treats a negative LIMIT as "no limit".
+        sqlite3_bind_int64(stmt, 4, Int64(limit ?? -1))
         var out: [CloudJournalEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let streamRaw = text(stmt, 4), let kind = CloudStreamKind(rawValue: streamRaw),
@@ -790,6 +796,19 @@ final class CloudJournalStore: @unchecked Sendable {
         try step(stmt)
     }
 
+    /// Bring every failed batch's next attempt forward to `dueAtMs`; a batch already due earlier keeps
+    /// its schedule. Attempt counts are untouched, so the attempt cap still applies.
+    func rescheduleFailed(dueAtMs: Int) throws {
+        let stmt = try prepare("""
+        UPDATE sealed_batch SET next_attempt_at_ms = ?
+        WHERE state = 'failed' AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms > ?)
+        """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(dueAtMs))
+        sqlite3_bind_int64(stmt, 2, Int64(dueAtMs))
+        try step(stmt)
+    }
+
     /// Return a blocked batch's records to the pending pool so the builder can
     /// re-seal them. Used when a previously non-retryable rejection was fixed
     /// builder-side (e.g. duplicate conflict keys inside one batch): the
@@ -819,7 +838,34 @@ final class CloudJournalStore: @unchecked Sendable {
         }
     }
 
-    func sealedBatches(states: [CloudBatchState], dueBeforeMs: Int?, limit: Int) throws -> [CloudSealedBatch] {
+    /// Return an unsent batch's records to the pending pool when its payload file can no longer be
+    /// found, so the next seal pass rebuilds the same batch. Only `sealed`/`failed` rows qualify: a
+    /// batch that is reserved, uploaded or acknowledged is owned by a live task or a receipt.
+    func resealMissingPayload(batchId: String) throws {
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            let free = try prepare("""
+            UPDATE journal_record SET batch_id = NULL, state = 0
+            WHERE batch_id = ? AND state = 1
+              AND EXISTS (SELECT 1 FROM sealed_batch WHERE batch_id = ? AND state IN ('sealed','failed'))
+            """)
+            defer { sqlite3_finalize(free) }
+            sqlite3_bind_text(free, 1, batchId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(free, 2, batchId, -1, cloudSQLiteTransient)
+            try step(free)
+            let drop = try prepare("DELETE FROM sealed_batch WHERE batch_id = ? AND state IN ('sealed','failed')")
+            defer { sqlite3_finalize(drop) }
+            sqlite3_bind_text(drop, 1, batchId, -1, cloudSQLiteTransient)
+            try step(drop)
+            try exec("COMMIT;")
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+    }
+
+    func sealedBatches(states: [CloudBatchState], dueBeforeMs: Int?, limit: Int,
+                       newestFirst: Bool = false) throws -> [CloudSealedBatch] {
         let placeholders = states.map { _ in "?" }.joined(separator: ",")
         var sql = """
         SELECT batch_id, owner_id, source_id, device_id, stream, first_seq, last_seq, record_count,
@@ -827,7 +873,8 @@ final class CloudJournalStore: @unchecked Sendable {
         FROM sealed_batch WHERE state IN (\(placeholders))
         """
         if dueBeforeMs != nil { sql += " AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)" }
-        sql += " ORDER BY created_at_ms ASC, batch_id ASC LIMIT ?"
+        sql += newestFirst ? " ORDER BY created_at_ms DESC, batch_id DESC LIMIT ?"
+                           : " ORDER BY created_at_ms ASC, batch_id ASC LIMIT ?"
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var idx: Int32 = 1
@@ -1016,8 +1063,16 @@ public actor CloudJournal {
     private var drainTask: Task<Void, Never>?
     private var lastError: String?
     private var consecutiveFailures = 0
+    private var commitObserver: (@Sendable (Int) -> Void)?
 
     public init() {}
+
+    /// Called after every commit that made records durable, so the transport can seal and send while
+    /// data is still fresh instead of waiting for a lifecycle event. Kept as a plain callback so the
+    /// journal does not depend on the transport.
+    public func setCommitObserver(_ observer: (@Sendable (Int) -> Void)?) {
+        commitObserver = observer
+    }
 
     // MARK: notification boundary (nonisolated, never throws, never blocks)
 
@@ -1131,6 +1186,7 @@ public actor CloudJournal {
             consecutiveFailures = 0
             lastError = nil
             staging.clearError()
+            if n > 0 { commitObserver?(n) }
             return n
         } catch {
             // Put them back at the front, in order, so a retry preserves arrival order. Anything that
@@ -1171,10 +1227,10 @@ public actor CloudJournal {
         }
     }
 
-    public func entries(for candidate: CloudSealCandidate) async throws -> [CloudJournalEntry] {
+    public func entries(for candidate: CloudSealCandidate, limit: Int? = nil) async throws -> [CloudJournalEntry] {
         guard let store else { return [] }
         return try store.pendingEntries(deviceId: candidate.deviceId, stream: candidate.stream,
-                                              upTo: candidate.lastSeq)
+                                              upTo: candidate.lastSeq, limit: limit)
     }
 
     /// Register an immutable payload file as a durable job and mark exactly its membership sealed.
@@ -1202,6 +1258,12 @@ public actor CloudJournal {
         try store?.setMeta("cursor.\(deviceId.lowercased()).\(stream.rawValue)", endCursorJSON)
     }
 
+    /// Persist a transport diagnostic so a stalled upload loop can be explained after the fact from
+    /// the journal alone (the in-memory `lastError` is gone once the process is).
+    public func recordTransportDiagnostic(_ key: String, _ value: String) async {
+        try? store?.setMeta("transport.\(key)", value)
+    }
+
     public func markReserved(batchId: String, taskId: String, taskKind: String, authExpiresAtMs: Int?) async throws {
         try store?.markReserved(batchId: batchId, taskId: taskId, taskKind: taskKind,
                                       authExpiresAtMs: authExpiresAtMs)
@@ -1213,10 +1275,20 @@ public actor CloudJournal {
         try store?.markFailed(batchId: batchId, error: error, nextAttemptAtMs: nextAttemptAtMs, blocked: blocked)
     }
 
+    public func rescheduleFailed(dueAtMs: Int) async throws {
+        try store?.rescheduleFailed(dueAtMs: dueAtMs)
+    }
+
     /// Return a blocked batch's records to the pending pool for re-sealing
     /// (see `CloudJournalStore.resealBlocked`).
     public func resealBlocked(batchId: String) async throws {
         try store?.resealBlocked(batchId: batchId)
+    }
+
+    /// Return an unsent batch whose payload file is gone to the pending pool for re-sealing
+    /// (see `CloudJournalStore.resealMissingPayload`).
+    public func resealMissingPayload(batchId: String) async throws {
+        try store?.resealMissingPayload(batchId: batchId)
     }
 
     /// Sealed batches in the given states (async facade over the store).
@@ -1224,9 +1296,11 @@ public actor CloudJournal {
         return try store?.sealedBatches(states: states, dueBeforeMs: dueBeforeMs, limit: limit) ?? []
     }
 
-    public func batches(states: [CloudBatchState], dueBeforeMs: Int? = nil, limit: Int = 16) async throws -> [CloudSealedBatch] {
+    public func batches(states: [CloudBatchState], dueBeforeMs: Int? = nil, limit: Int = 16,
+                        newestFirst: Bool = false) async throws -> [CloudSealedBatch] {
         guard let store else { return [] }
-        return try store.sealedBatches(states: states, dueBeforeMs: dueBeforeMs, limit: limit)
+        return try store.sealedBatches(states: states, dueBeforeMs: dueBeforeMs, limit: limit,
+                                       newestFirst: newestFirst)
     }
 
     public func batchState(_ batchId: String) async throws -> CloudBatchState? {

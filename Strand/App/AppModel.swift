@@ -245,6 +245,12 @@ final class AppModel: ObservableObject {
     private var readSpineCancellable: AnyCancellable?
     /// Daily re-arm timer for the single-instant firmware smart alarm (see scheduleDailySmartAlarmRearm).
     private var smartAlarmRearmTimer: Timer?
+    /// Cloud mode: foreground poll for the hosted worker's results, and the one-time history seed.
+    private var hostedRefreshTask: Task<Void, Never>?
+    private var historySeedTask: Task<Void, Never>?
+    private var hostedSyncInFlight = false
+    /// Result revision last written per day, so an unchanged server result is not rewritten.
+    private var hostedWrittenRevision: [String: String] = [:]
 
     /// Cloud mode replaces local physiological analysis with server work (spec F4).
     ///
@@ -275,10 +281,69 @@ final class AppModel: ObservableObject {
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
         await CloudPushRuntime.shared.flushAndKick()
         await confirmWearableLinkIfNeeded()
-        // In cloud mode the server owns scoring, so an active scene refreshes the SERVER's changed days
-        // into the local cache instead of running a local pass. A no-op when cloud mode is off.
-        if cloudScoringIsAuthoritative {
-            await CloudPushRuntime.shared.refreshServerScores(deviceId: deviceId)
+        // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
+        // dashboard store instead of running a local pass. A no-op when cloud mode is off.
+        guard cloudScoringIsAuthoritative else { return }
+        startHistorySeedIfNeeded()
+        await syncHostedResults()
+        startHostedRefreshLoop()
+    }
+
+    /// Cloud mode: fetch the hosted worker's results for yesterday, today and any day the server reports
+    /// changed, and write each where the dashboard reads computed scores, so the existing cards show the
+    /// server's numbers. Returns how many days were written.
+    @discardableResult
+    func syncHostedResults(now: Date = Date()) async -> Int {
+        guard cloudScoringIsAuthoritative, !hostedSyncInFlight,
+              let scores = CloudPushRuntime.shared.scoreRepository(),
+              let store = await repo.storeHandle() else { return 0 }
+        hostedSyncInFlight = true
+        defer { hostedSyncInFlight = false }
+        var days = [Repository.localDayKey(now.addingTimeInterval(-86_400)), Repository.localDayKey(now)]
+        if let changed = try? await scores.pollChangedDays(deviceId: deviceId) {
+            for change in changed.prefix(8) where !days.contains(change.day) { days.append(change.day) }
+        }
+        let dismissed = repo.dismissedSleepWindows()
+        var written = 0
+        for day in days {
+            guard let result = (try? await scores.refresh(day: day, deviceId: deviceId))?.hostedResult,
+                  hostedWrittenRevision[day] != result.resultRevision else { continue }
+            do {
+                try await HostedResultMaterializer.persist(result, store: store, deviceId: deviceId,
+                                                           skipWindows: dismissed)
+                hostedWrittenRevision[day] = result.resultRevision
+                written += 1
+            } catch {
+                live.append(log: "Cloud: could not store the server result for \(day): \(error)")
+            }
+        }
+        if written > 0 { await repo.refresh() }
+        return written
+    }
+
+    /// While the app is in the foreground, re-read the server's results every two minutes so a night the
+    /// server finishes scoring appears without a relaunch.
+    private func startHostedRefreshLoop() {
+        guard cloudScoringIsAuthoritative, hostedRefreshTask == nil else { return }
+        hostedRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 120 * 1_000_000_000)
+                guard !Task.isCancelled, let self else { return }
+                await self.syncHostedResults()
+            }
+        }
+    }
+
+    /// Upload the strap history this install banked before its offload was journaled (one-time, resumable).
+    private func startHistorySeedIfNeeded() {
+        guard cloudScoringIsAuthoritative, historySeedTask == nil else { return }
+        historySeedTask = Task { [weak self] in
+            guard let self, let store = await self.repo.storeHandle() else { return }
+            let committed = await CloudHistorySeeder.runIfNeeded(store: store, deviceId: self.deviceId, family: nil)
+            if committed > 0 {
+                self.live.append(log: "Cloud: queued \(committed) banked history records for upload")
+            }
+            self.historySeedTask = nil
         }
     }
 
@@ -306,6 +371,8 @@ final class AppModel: ObservableObject {
     }
 
     func cloudWillResignActive() async {
+        hostedRefreshTask?.cancel()
+        hostedRefreshTask = nil
         CloudPushRuntime.shared.setAppIsActive(false)
         await CloudPushRuntime.shared.flushAndKick()
     }
@@ -600,6 +667,7 @@ final class AppModel: ObservableObject {
                     // Cloud mode: the backstop's job is to make sure a day's inputs reach the server and
                     // its result is current, not to recompute the day locally.
                     CloudPushRuntime.shared.kick()
+                    await self.syncHostedResults()
                 } else {
                     await RescoreBackgroundScheduler.run(owesOnDefer: false,
                                                          log: { [live = self.live] line in

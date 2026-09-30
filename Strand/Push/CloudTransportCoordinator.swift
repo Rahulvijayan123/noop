@@ -19,6 +19,9 @@ public actor CloudTransportCoordinator {
     public struct Policy: Sendable {
         /// At most this many uploads in flight. Two is the spec's measured starting point.
         public var maxInFlight: Int = 2
+        /// At most this many of the in-flight uploads may be backlog; the rest stay free for fresh
+        /// data. A strap-history backlog sent at full concurrency overloaded the receiver's database.
+        public var maxBacklogInFlight: Int = 1
         /// A batch older than this is "backlog" rather than "fresh"; one of each is admitted per pass
         /// so a long backlog can never starve newly captured data (and vice versa).
         public var freshWindowSeconds: Int = 30
@@ -27,6 +30,10 @@ public actor CloudTransportCoordinator {
         public var maxAttempts: Int = 12
         /// Bounded per pass, so one pass cannot turn into an unbounded drain.
         public var maxSealsPerPass: Int = 4
+        /// Stop sealing new files while this many are already waiting to be sent. Sealing every couple
+        /// of seconds makes tiny files; when the receiver is slower than that, the records are better
+        /// left in the journal, where they merge into fewer, larger files and nothing is lost.
+        public var sealBackpressureBatches: Int = 8
         public var sealMaxRecords: Int = 2_000
         public var sealMaxBytes: Int = 1 << 20
         public var acceptedRetentionSeconds: Int = 7 * 24 * 3600
@@ -57,11 +64,22 @@ public actor CloudTransportCoordinator {
     private let random: @Sendable () -> Double
 
     private var inFlight = 0
+    /// Prompt-lane uploads in flight, keyed by batch id; the value says whether the batch is backlog.
+    /// The prompt lane does not reserve its batch in the journal, so this is what stops a later pass
+    /// from sending the same batch again while the first upload is still waiting on the receiver.
+    private var promptLaneBatches: [String: Bool] = [:]
     private var cycleScheduled = false
     private var active = false
     private var negotiatedProtocolVersion: String?
-    private var lastError: String?
+    private var lastError: String? {
+        didSet {
+            guard let lastError, lastError != oldValue else { return }
+            let stamp = "\(now() * 1000) \(lastError)"
+            Task { await journal.recordTransportDiagnostic("lastError", stamp) }
+        }
+    }
     private var lastOutcomeAtMs: Int?
+    private var lastHeartbeatAtSeconds = 0
 
     public init(journal: CloudJournal, session: CloudUploadSession, payloadDirectory: URL,
                 projectURL: String, identity: @escaping @Sendable () -> CloudPushIdentity?,
@@ -86,11 +104,14 @@ public actor CloudTransportCoordinator {
         await protectPayloadDirectory()
         session.onOutcome = { [weak self] outcome in
             guard let self else { return }
-            Task { await self.handle(outcome: outcome) }
+            Task { await self.handleBackgroundOutcome(outcome) }
         }
         try? await reconcileTasksAtLaunch()
         try? await cleanUpAcknowledgedFiles()
         try? await resealBlockedBatches()
+        // A launch is a fresh attempt: a batch that failed while the receiver was down must not sit
+        // out a backoff that grew toward the hour cap, holding the seal backpressure closed meanwhile.
+        try? await journal.rescheduleFailed(dueAtMs: now() * 1000)
         kick()
     }
 
@@ -136,14 +157,29 @@ public actor CloudTransportCoordinator {
             lastError = "no installation identity"
             return
         }
+        var stage = "negotiate"
         do {
             try await adoptNegotiatedVersionIfNeeded(identity: identity)
+            stage = "reconcile"
             try await reconcileTasksAtLaunch()
+            stage = "seal"
             try await sealReady(identity: identity)
+            stage = "send"
             try await sendEligible(identity: identity)
+            stage = "done"
         } catch {
-            lastError = String(describing: error)
+            lastError = "cycle failed at \(stage): \(error)"
         }
+        recordHeartbeat(stage: stage)
+    }
+
+    /// At most one diagnostic write per 30 s: proves the loop is alive and where its last pass ended.
+    private func recordHeartbeat(stage: String) {
+        let seconds = now()
+        guard seconds - lastHeartbeatAtSeconds >= 30 else { return }
+        lastHeartbeatAtSeconds = seconds
+        let summary = "\(seconds * 1000) stage=\(stage) inFlight=\(inFlight) protocol=\(negotiatedProtocolVersion ?? "nil")"
+        Task { await journal.recordTransportDiagnostic("lastCycle", summary) }
     }
 
     // MARK: - sealing
@@ -155,13 +191,16 @@ public actor CloudTransportCoordinator {
     /// payload, and a re-seal after a crash lands on the same name because the batch id is derived
     /// from the batch's identity and lines.
     private func sealReady(identity: CloudPushIdentity) async throws {
+        let unsent = try await journal.batches(states: [.sealed, .failed], dueBeforeMs: nil,
+                                               limit: policy.sealBackpressureBatches)
+        guard unsent.count < policy.sealBackpressureBatches else { return }
         let candidates = try await journal.sealCandidates(limit: policy.maxSealsPerPass)
         for candidate in candidates {
             guard CloudBatchBuilder.appendTable(for: candidate.stream) != nil else {
                 // Replace-window / archive streams are not authored by the phone in cloud mode.
                 continue
             }
-            let entries = try await journal.entries(for: candidate)
+            let entries = try await journal.entries(for: candidate, limit: policy.sealMaxRecords)
             guard !entries.isEmpty else { continue }
             let protocolVersion = try negotiatedVersion(for: candidate.stream)
             let startCursorJSON = await journal.appendCursorJSON(deviceId: candidate.deviceId,
@@ -232,21 +271,30 @@ public actor CloudTransportCoordinator {
     /// Fill the in-flight budget with eligible batches, one backlog item and one fresh item per pass.
     private func sendEligible(identity: CloudPushIdentity) async throws {
         guard inFlight < policy.maxInFlight else { return }
-        let due = try await journal.batches(states: [.sealed, .failed], dueBeforeMs: now() * 1000,
-                                            limit: max(policy.maxInFlight * 4, 8))
-        guard !due.isEmpty else { return }
         let nowMs = now() * 1000
+        let notInFlight: (CloudSealedBatch) -> Bool = { [promptLaneBatches] in promptLaneBatches[$0.batchId] == nil }
+        let due = try await journal.batches(states: [.sealed, .failed], dueBeforeMs: nowMs,
+                                            limit: max(policy.maxInFlight * 4, 8)).filter(notInFlight)
+        guard !due.isEmpty else { return }
+        // The oldest rows alone would never include a fresh batch while a backlog is longer than the
+        // page, so the newest rows are read separately: a long backlog cannot starve live data.
+        let newest = try await journal.batches(states: [.sealed, .failed], dueBeforeMs: nowMs,
+                                               limit: policy.maxInFlight + promptLaneBatches.count,
+                                               newestFirst: true).filter(notInFlight)
         let freshCutoff = nowMs - policy.freshWindowSeconds * 1000
         let backlog = due.filter { $0.createdAtMs < freshCutoff }
-        let fresh = due.filter { $0.createdAtMs >= freshCutoff }
+        let fresh = newest.filter { $0.createdAtMs >= freshCutoff }
+        let backlogHasRoom = promptLaneBatches.values.filter { $0 }.count < policy.maxBacklogInFlight
         var queue: [CloudSealedBatch] = []
-        if let oldestBacklog = backlog.first { queue.append(oldestBacklog) }
-        if let newestFresh = fresh.last { queue.append(newestFresh) }
-        if queue.isEmpty { queue = Array(due.prefix(1)) }
+        if backlogHasRoom, let oldestBacklog = backlog.first { queue.append(oldestBacklog) }
+        if let newestFresh = fresh.first, !queue.contains(where: { $0.batchId == newestFresh.batchId }) {
+            queue.append(newestFresh)
+        }
+        if queue.isEmpty, backlogHasRoom { queue = Array(due.prefix(1)) }
 
         for batch in queue {
             guard inFlight < policy.maxInFlight else { break }
-            guard FileManager.default.fileExists(atPath: batch.filePath) else {
+            guard let fileURL = payloadFileURL(for: batch) else {
                 // The file is gone but the records are not acknowledged: re-seal instead of dropping.
                 try await releaseForReseal(batch)
                 continue
@@ -254,10 +302,10 @@ public actor CloudTransportCoordinator {
             inFlight += 1
             let appIsActive = CloudTransportCoordinator.applicationIsActive()
             if appIsActive {
-                Task { await self.uploadOnForegroundLane(batch, identity: identity) }
+                promptLaneBatches[batch.batchId] = batch.createdAtMs < freshCutoff
+                Task { await self.uploadOnForegroundLane(batch, fileURL: fileURL, identity: identity) }
             } else {
-                let taskId = session.enqueueBackground(batchId: batch.batchId,
-                                                       fileURL: URL(fileURLWithPath: batch.filePath))
+                let taskId = session.enqueueBackground(batchId: batch.batchId, fileURL: fileURL)
                 try await journal.markReserved(batchId: batch.batchId, taskId: String(taskId),
                                                taskKind: "background", authExpiresAtMs: nil)
             }
@@ -265,11 +313,13 @@ public actor CloudTransportCoordinator {
     }
 
     /// Prompt lane: the app is executing, so send now and apply the receipt as soon as it lands.
-    private func uploadOnForegroundLane(_ batch: CloudSealedBatch, identity: CloudPushIdentity) async {
-        defer { inFlight = max(0, inFlight - 1) }
+    private func uploadOnForegroundLane(_ batch: CloudSealedBatch, fileURL: URL, identity: CloudPushIdentity) async {
+        defer {
+            inFlight = max(0, inFlight - 1)
+            promptLaneBatches[batch.batchId] = nil
+        }
         do {
-            let outcome = try await session.uploadForeground(batchId: batch.batchId,
-                                                            fileURL: URL(fileURLWithPath: batch.filePath))
+            let outcome = try await session.uploadForeground(batchId: batch.batchId, fileURL: fileURL)
             await handle(outcome: outcome)
         } catch {
             await handleFailure(batch: batch, error: String(describing: error))
@@ -278,11 +328,17 @@ public actor CloudTransportCoordinator {
 
     // MARK: - outcomes
 
+    /// The background lane's only completion path, so it releases the in-flight slot here; the prompt
+    /// lane releases its own slot when its upload returns.
+    private func handleBackgroundOutcome(_ outcome: CloudUploadSession.Outcome) async {
+        inFlight = max(0, inFlight - 1)
+        await handle(outcome: outcome)
+    }
+
     /// Apply a transfer outcome. A 200 body is the receiver's acknowledgement; anything else is a
     /// failure with its own retry treatment.
     private func handle(outcome: CloudUploadSession.Outcome) async {
         guard active else { return }
-        inFlight = max(0, inFlight - 1)
         lastOutcomeAtMs = now() * 1000
         guard let batch = try? await journal.batches(states: [.sealed, .reserved, .uploaded, .failed],
                                                     dueBeforeMs: nil, limit: 256)
@@ -461,8 +517,7 @@ public actor CloudTransportCoordinator {
     private func cleanUpAcknowledgedFiles() async throws {
         let acked = try await journal.batches(states: [.acked], dueBeforeMs: nil, limit: 64)
         for batch in acked {
-            let url = URL(fileURLWithPath: batch.filePath)
-            if FileManager.default.fileExists(atPath: url.path) {
+            if let url = payloadFileURL(for: batch) {
                 try? FileManager.default.removeItem(at: url)
             }
         }
@@ -471,8 +526,20 @@ public actor CloudTransportCoordinator {
     /// A sealed batch whose file vanished before acknowledgement: release it so its records are
     /// re-sealed on the next pass. The records themselves were never released, so nothing is lost.
     private func releaseForReseal(_ batch: CloudSealedBatch) async throws {
-        try await journal.markFailed(batchId: batch.batchId,
-                                     error: "payload file missing; will re-seal", nextAttemptAtMs: nil)
+        try await journal.resealMissingPayload(batchId: batch.batchId)
+    }
+
+    /// Where a sealed batch's payload lives NOW.
+    ///
+    /// The journal stores the absolute path the file had when it was sealed, but the app's data
+    /// container path changes across reinstalls and restores, so a stored path goes stale while the
+    /// file itself survives. Payload files are always named `<batchId>.ndjson.gz` inside the current
+    /// payload directory, so that location is authoritative and the stored path is only a fallback.
+    private func payloadFileURL(for batch: CloudSealedBatch) -> URL? {
+        let current = payloadDirectory.appendingPathComponent("\(batch.batchId).ndjson.gz")
+        if FileManager.default.fileExists(atPath: current.path) { return current }
+        let stored = URL(fileURLWithPath: batch.filePath)
+        return FileManager.default.fileExists(atPath: stored.path) ? stored : nil
     }
 
     // MARK: - deletion
@@ -484,8 +551,7 @@ public actor CloudTransportCoordinator {
         guard (try await journal.batchState(batch.batchId)) == .acked else { return }
         let outstanding = await session.outstandingTasks()
         if outstanding.contains(where: { $0.batchId == batch.batchId }) { return }
-        let url = URL(fileURLWithPath: batch.filePath)
-        if FileManager.default.fileExists(atPath: url.path) {
+        if let url = payloadFileURL(for: batch) {
             try? FileManager.default.removeItem(at: url)
         }
     }
@@ -512,9 +578,9 @@ public actor CloudTransportCoordinator {
 
     private func negotiatedVersion(for stream: CloudStreamKind) throws -> String {
         let version = negotiatedProtocolVersion ?? PushProtocol.objectVersion
-        // Scalar-extension streams (stepSample) and the receipt streams need at least 1.1; the package
-        // enforces the same rule and would throw, so fail here with a clearer message.
-        if stream == .stepSample, version == PushProtocol.version {
+        // Scalar-extension streams (stepSample, sleepStateSample) and the receipt streams need at least
+        // 1.1; the package enforces the same rule and would throw, so fail here with a clearer message.
+        if [.stepSample, .sleepStateSample].contains(stream), version == PushProtocol.version {
             throw CoordinatorError.sealFailed("\(stream.rawValue) requires a negotiated protocol >= 1.1")
         }
         return version

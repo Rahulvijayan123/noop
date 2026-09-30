@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import WhoopStore
 
 /// One day that the server says has changed, from the pull-based invalidation channel.
 public struct ServerScoreChange: Sendable, Equatable {
@@ -407,4 +408,142 @@ public actor ServerScoreRepository {
 
 private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+// MARK: - hosted worker result
+
+extension ServerScoreSnapshot {
+    /// The hosted worker's own published result for this day, when the scores route attached one.
+    public var hostedResult: HostedDayResult? {
+        (rawObject?["hosted_snapshot"] as? [String: Any]).flatMap { HostedDayResult(day: day, object: $0) }
+    }
+}
+
+/// The hosted worker's published day result, in the shapes the dashboard already stores.
+///
+/// The worker runs the app's own `AnalyticsEngine.analyzeDay`, so each field maps one-to-one onto what
+/// a local scoring pass would have persisted. Nothing here derives a value: a key the worker left out
+/// stays nil, and a Charge the worker could not compute yet (no baseline) stays nil rather than zero.
+public struct HostedDayResult: Equatable {
+    public let day: String
+    public let resultRevision: String
+    public let computedAt: String?
+    /// The server holds newer input for the day than this result was computed from.
+    public let pending: Bool
+    public let status: String?
+    public let statusReasons: [String]
+    public let daily: DailyMetric
+    /// The Rest composite (0–100), which the local engine stores as the `sleep_performance` series.
+    public let restScore: Double?
+    public let sleep: [CachedSleepSession]
+
+    init?(day: String, object: [String: Any]) {
+        guard let daily = object["daily"] as? [String: Any],
+              let revision = object["result_revision"] as? String, !revision.isEmpty else { return nil }
+        func number(_ key: String) -> Double? { Self.number(daily[key]) }
+        func integer(_ key: String) -> Int? { number(key).map { Int($0.rounded()) } }
+        self.day = day
+        self.resultRevision = revision
+        self.computedAt = object["computed_at"] as? String
+        self.pending = object["pending"] as? Bool ?? false
+        self.status = object["status"] as? String
+        self.statusReasons = (object["status_reasons"] as? [Any])?.compactMap { $0 as? String } ?? []
+        self.daily = DailyMetric(
+            day: day,
+            totalSleepMin: number("sleep_total_min"), efficiency: number("sleep_efficiency"),
+            deepMin: number("sleep_deep_min"), remMin: number("sleep_rem_min"),
+            lightMin: number("sleep_light_min"), disturbances: integer("disturbances"),
+            restingHr: integer("resting_hr_bpm"), avgHrv: number("hrv_rmssd_ms"),
+            recovery: number("recovery"), strain: number("strain"),
+            exerciseCount: integer("exerciseCount"),
+            spo2Pct: number("spo2_pct"), skinTempDevC: number("skin_temp_dev_c"),
+            respRateBpm: number("resp_rate_bpm"), steps: integer("steps"),
+            activeKcalEst: number("activeKcalEst"), spo2Red: integer("spo2Red"),
+            spo2Ir: integer("spo2Ir"), avgSdnn: number("hrv_sdnn_ms"),
+            skinTempC: number("skin_temp_c"), sleepHrOnly: daily["sleepHrOnly"] as? Bool)
+        self.restScore = number("restScore")
+        self.sleep = ((object["sleep"] as? [Any]) ?? []).compactMap { entry -> CachedSleepSession? in
+            guard let night = entry as? [String: Any],
+                  night["is_nap"] as? Bool != true,
+                  let start = Self.unixSeconds(night["start_at"]),
+                  let end = Self.unixSeconds(night["end_at"]), end > start else { return nil }
+            let stages = (night["stages"] as? [Any]).flatMap { segments -> String? in
+                guard !segments.isEmpty,
+                      let data = try? JSONSerialization.data(withJSONObject: segments, options: [.sortedKeys])
+                else { return nil }
+                return String(data: data, encoding: .utf8)
+            }
+            return CachedSleepSession(startTs: start, endTs: end,
+                                      efficiency: Self.number(night["efficiency"]),
+                                      restingHr: Self.number(night["resting_hr_bpm"]).map { Int($0.rounded()) },
+                                      avgHrv: Self.number(night["hrv_rmssd_ms"]),
+                                      stagesJSON: stages)
+        }
+    }
+
+    /// A finite JSON number. JSON booleans decode as NSNumber too and are rejected here.
+    static func number(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let double = number.doubleValue
+        return double.isFinite ? double : nil
+    }
+
+    static func unixSeconds(_ value: Any?) -> Int? {
+        guard let text = value as? String else { return nil }
+        let formatter = ISO8601DateFormatter()
+        if let date = formatter.date(from: text) { return Int(date.timeIntervalSince1970) }
+        formatter.formatOptions.insert(.withFractionalSeconds)
+        return formatter.date(from: text).map { Int($0.timeIntervalSince1970) }
+    }
+}
+
+/// Writes hosted results where the dashboard reads computed scores.
+///
+/// The dashboard unions the local engine's computed namespace (`<device>-noop`) into every card. In
+/// cloud mode the local engine does not run, so writing the server's rows there is what lets the
+/// existing Charge / Effort / Rest / sleep surfaces show the server's numbers with no second
+/// presentation path.
+public enum HostedResultMaterializer {
+    public static func computedId(for deviceId: String) -> String { deviceId + "-noop" }
+
+    /// Persist one hosted day. `skipWindows` are nights the user deleted; a hosted session overlapping
+    /// one (or a hand-edited night) is not written, the same guard a local pass applies.
+    public static func persist(_ result: HostedDayResult,
+                               store: WhoopStore,
+                               deviceId: String,
+                               skipWindows: [(start: Int, end: Int)] = []) async throws {
+        let computedId = computedId(for: deviceId)
+        let day = result.day
+        let points = result.restScore.map { [MetricPoint(day: day, key: "sleep_performance", value: $0)] } ?? []
+        var provenance: [ScoreInputProvenanceRow] = []
+        if result.daily.recovery != nil { provenance.append(.init(day: day, key: "recovery", sourceId: deviceId)) }
+        if result.daily.strain != nil { provenance.append(.init(day: day, key: "strain", sourceId: deviceId)) }
+        if result.restScore != nil {
+            provenance.append(.init(day: day, key: "sleep_performance", sourceId: deviceId))
+        }
+        try await store.persistComputedScores(dailyMetrics: [result.daily], metricPoints: points,
+                                              provenance: provenance, deviceId: computedId,
+                                              from: day, to: day, replaceMetricKeys: ["sleep_performance"])
+
+        guard let earliest = result.sleep.map(\.startTs).min(),
+              let latest = result.sleep.map(\.endTs).max() else { return }
+        func overlaps(_ a: (start: Int, end: Int), _ b: (start: Int, end: Int)) -> Bool {
+            a.start < b.end && b.start < a.end
+        }
+        let existing = try await store.sleepSessions(deviceId: computedId, from: earliest - 86_400,
+                                                     to: latest, limit: 64)
+        let protected = existing.filter(\.userEdited).map { (start: $0.effectiveStartTs, end: $0.endTs) }
+            + skipWindows
+        let kept = result.sleep.filter { night in
+            !protected.contains { overlaps($0, (night.startTs, night.endTs)) }
+        }
+        // A re-computed night can move its detected onset as more of the night arrives. The row keyed by
+        // the old onset would otherwise stay beside the new one and the day would count the night twice.
+        let keys = Set(kept.map(\.startTs))
+        for old in existing where !old.userEdited && !keys.contains(old.startTs)
+            && kept.contains(where: { overlaps(($0.startTs, $0.endTs), (old.startTs, old.endTs)) }) {
+            _ = try await store.deleteSleepSession(deviceId: computedId, startTs: old.startTs)
+        }
+        if !kept.isEmpty { _ = try await store.upsertSleepSessions(kept, deviceId: computedId) }
+    }
 }

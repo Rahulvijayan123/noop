@@ -88,6 +88,33 @@ public enum CloudCapture {
         return nil
     }
 
+    // MARK: - strap history offload
+
+    /// Journal rows the strap's history offload banked.
+    ///
+    /// The offload is the only source of the overnight record (per-second HR with motion, skin
+    /// temperature, steps and band sleep state); live notifications never carry it. Callers pass rows
+    /// that are ALREADY durable in the local store, so the store stays the source of truth and a chunk
+    /// the strap re-sends after a failed insert is never journaled before it is banked.
+    ///
+    /// One chunk can hold more rows than the staging buffer, so rows are encoded off the main actor and
+    /// committed in bounded slices. Returns the number of records the journal committed.
+    @discardableResult
+    public static func recordHistory(_ streams: Streams,
+                                     deviceId: String,
+                                     family: DeviceFamily?,
+                                     clockRef: ClockRef?) async -> Int {
+        guard let runtime = CloudPushRuntime.sharedIfRunning else { return 0 }
+        let receivedAtMs = Int(Date().timeIntervalSince1970 * 1000)
+        let records = await Task.detached(priority: .utility) {
+            rows(from: streams, provenance: .history, family: family,
+                 wallClockRef: clockRef?.wall, deviceClockRef: clockRef?.device,
+                 receivedAtMs: receivedAtMs, characteristic: nil, deviceId: deviceId)
+        }.value
+        guard !records.isEmpty else { return 0 }
+        return await runtime.submitDurably(records)
+    }
+
     // MARK: - row encoding
 
     /// Encode decoded streams as journal records.
@@ -183,12 +210,26 @@ public enum CloudCapture {
                 out.append(record)
             }
         }
-        for step in streams.steps {
+        // Scalar-extension rows are range-checked by the wire package when a batch is sealed, and one
+        // out-of-range row fails the whole batch. A row the decoder produced outside the contract is left
+        // out here instead of wedging every later row of its stream.
+        for step in streams.steps where (0...65535).contains(step.counter)
+            && step.activityClass.map({ (0...2).contains($0) }) ?? true {
             let data: [String: PushJSONValue] = [
                 "counter": .int(Int64(step.counter)),
                 "activityClass": step.activityClass.map { .int(Int64($0)) } ?? .null,
             ]
             if let record = make(.stepSample, ["ts": .int(Int64(step.ts))], data, strapTs: step.ts) {
+                out.append(record)
+            }
+        }
+        for sample in streams.sleepState where (0...3).contains(sample.state)
+            && sample.rawByte.map({ (0...255).contains($0) && ($0 >> 4) & 3 == sample.state }) ?? true {
+            let data: [String: PushJSONValue] = [
+                "state": .int(Int64(sample.state)),
+                "rawByte": sample.rawByte.map { .int(Int64($0)) } ?? .null,
+            ]
+            if let record = make(.sleepStateSample, ["ts": .int(Int64(sample.ts))], data, strapTs: sample.ts) {
                 out.append(record)
             }
         }
@@ -286,6 +327,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
         _deviceId = deviceId.lowercased()
         lock.unlock()
         Task {
+            await journal.setCommitObserver { [weak coordinator] _ in coordinator?.kick() }
             do {
                 try await journal.activate(configuration: configuration, policy: policy)
             } catch {
@@ -406,6 +448,23 @@ public final class CloudPushRuntime: @unchecked Sendable {
         journal.submit(records)
     }
 
+    /// Stage and commit a bulk set of records one bounded slice at a time, so a large history chunk can
+    /// never overrun the staging buffer. Returns how many records the journal committed.
+    @discardableResult
+    public func submitDurably(_ records: [CloudJournalRecord], sliceSize: Int = 2_000) async -> Int {
+        guard let journal = journalIfRunning, sliceSize > 0 else { return 0 }
+        var committed = 0
+        var start = records.startIndex
+        while start < records.endIndex {
+            let end = records.index(start, offsetBy: sliceSize, limitedBy: records.endIndex) ?? records.endIndex
+            journal.submit(Array(records[start..<end]))
+            committed += await journal.flush()
+            start = end
+        }
+        coordinatorIfRunning?.kick()
+        return committed
+    }
+
     public func noteSkippedPreClock(_ count: Int) {
         lock.lock()
         skippedPreClock += count
@@ -428,5 +487,86 @@ public final class CloudPushRuntime: @unchecked Sendable {
     public func stats() async -> CloudJournalStats {
         guard let journal = journalIfRunning else { return .empty }
         return await journal.stats()
+    }
+}
+
+/// One-time cloud upload of strap history that was banked locally before the offload was journaled.
+///
+/// Earlier builds kept the overnight offload only in the local store, so the server never received a
+/// night to score. This replays a bounded recent span of those rows through the same history encoding
+/// the Backfiller now uses, oldest hour first, and persists its cursor per owner and device so an
+/// interrupted pass resumes where it stopped. Re-sending a row is harmless: the receiver keys rows by
+/// identity, so a row the Backfiller already journaled is a no-op the second time.
+public enum CloudHistorySeeder {
+    static let lookbackSeconds = 48 * 3600
+    static let windowSeconds = 3600
+
+    struct Progress: Codable, Equatable {
+        var cursor: Int
+        var until: Int
+    }
+
+    static func defaultsKey(ownerId: String, deviceId: String) -> String {
+        "noop.cloud.historySeed.v1.\(ownerId.lowercased()).\(deviceId.lowercased())"
+    }
+
+    /// Replay what is left of the seed span. Returns the number of records the journal committed on
+    /// this pass; 0 once the span is done. A window whose rows the journal did not take is retried on
+    /// the next call rather than skipped.
+    @discardableResult
+    public static func runIfNeeded(store: WhoopStore,
+                                   deviceId: String,
+                                   family: DeviceFamily?,
+                                   defaults: UserDefaults = .standard,
+                                   now: Int = Int(Date().timeIntervalSince1970)) async -> Int {
+        guard CloudPushRuntime.sharedIfRunning != nil,
+              let ownerId = CloudPushIdentityStore.current()?.ownerId else { return 0 }
+        let key = defaultsKey(ownerId: ownerId, deviceId: deviceId)
+        var progress = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Progress.self, from: $0) }
+            ?? Progress(cursor: now - lookbackSeconds, until: now)
+        var committed = 0
+        while progress.cursor < progress.until, !Task.isCancelled {
+            let from = progress.cursor
+            let to = min(from + windowSeconds, progress.until)
+            guard let streams = await readWindow(store: store, deviceId: deviceId, from: from, to: to - 1) else {
+                break
+            }
+            if rowCount(streams) > 0 {
+                let taken = await CloudCapture.recordHistory(streams, deviceId: deviceId, family: family,
+                                                            clockRef: nil)
+                guard taken > 0 else { break }
+                committed += taken
+            }
+            progress.cursor = to
+            if let data = try? JSONEncoder().encode(progress) { defaults.set(data, forKey: key) }
+        }
+        return committed
+    }
+
+    /// Every stream the offload banks, for one inclusive window. Nil when the heart-rate read itself
+    /// fails, so an unreadable window is retried instead of being recorded as empty.
+    static func readWindow(store: WhoopStore, deviceId: String, from: Int, to: Int) async -> Streams? {
+        let limit = 200_000
+        guard let hr = try? await store.hrSamples(deviceId: deviceId, from: from, to: to, limit: limit) else {
+            return nil
+        }
+        var streams = Streams()
+        streams.hr = hr
+        streams.rr = (try? await store.rrIntervals(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.events = (try? await store.events(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.battery = (try? await store.batterySamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.spo2 = (try? await store.spo2Samples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.skinTemp = (try? await store.skinTempSamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.resp = (try? await store.respSamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.gravity = (try? await store.gravitySamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.steps = (try? await store.stepSamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
+        streams.sleepState = (try? await store.sleepStateSamples(deviceId: deviceId, from: from, to: to,
+                                                                 limit: limit)) ?? []
+        return streams
+    }
+
+    static func rowCount(_ s: Streams) -> Int {
+        s.hr.count + s.rr.count + s.events.count + s.battery.count + s.spo2.count + s.skinTemp.count
+            + s.resp.count + s.gravity.count + s.steps.count + s.sleepState.count
     }
 }
