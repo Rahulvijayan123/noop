@@ -48,7 +48,7 @@ export const DELETION_TABLES = [
   'physiology_buckets', 'daily_physiology_series', 'ingest_gaps', 'measurements',
   'sleep_details', 'events', 'sessions', 'daily_metrics', 'metric_runs', 'object_manifests',
   'sensor_objects', 'derived_objects', 'live_windows', 'sleep_nights', 'coach_messages',
-  'coach_sessions', 'coach_memories', 'user_documents', 'algorithm_results', 'user_settings',
+  'coach_sessions', 'coach_memories', 'coach_memory_items', 'coach_usage', 'user_documents', 'algorithm_results', 'user_settings',
   'integration_connections', 'user_sync_state', 'devices', 'profiles',
 ] as const;
 

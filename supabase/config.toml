@@ -49,6 +49,10 @@ enabled = true
 [functions.push]
 verify_jwt = false
 
+# In-app coach relay. Does its own installation + fleet bearer auth (same as push), so gateway JWT verification stays off.
+[functions.coach]
+verify_jwt = false
+
 # Scheduled workers + ops diagnostics use WORKER_SECRET or service-role bearer auth in-function.
 [functions.retention-sweep]
 verify_jwt = false
