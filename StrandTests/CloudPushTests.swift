@@ -618,6 +618,31 @@ final class CloudPushTests: XCTestCase {
         XCTAssertNil(unrevisioned.hostedResult)
     }
 
+    func testHostedResultReadsTheIntradayHrvSeriesAndDropsMalformedPoints() throws {
+        let points: [Any] = [
+            [1_790_870_700, 70.5, 612] as [Any],
+            [1_790_869_800, 64.0, 480] as [Any],
+            [1_790_871_600, "bad", 300] as [Any],
+            [1_790_872_500, 0, 300] as [Any],
+            [1_790_873_400, 55.0] as [Any],
+            [true, 55.0, 100] as [Any],
+        ]
+        let daily: [String: Any] = ["hrv_rmssd_ms": 61.2, "hrv_series": ["slot_s": 900, "points": points] as [String: Any]]
+        let snapshot = ServerScoreRepository.snapshot(day: "2026-09-30", deviceId: "my-whoop",
+                                                      envelope: hostedEnvelope(daily: daily), fetchedAtMs: 0)
+        let result = try XCTUnwrap(snapshot.hostedResult)
+        XCTAssertEqual(result.hrvSeries.map(\.startTs), [1_790_869_800, 1_790_870_700],
+                       "oldest first; a non-numeric, non-positive, short or boolean point is dropped")
+        XCTAssertEqual(result.hrvSeries.map(\.rmssd), [64.0, 70.5])
+        XCTAssertEqual(result.hrvSeries.first?.cleanBeats, 480)
+        XCTAssertEqual(result.hrvSlotSeconds, 900)
+
+        let none = ServerScoreRepository.snapshot(day: "2026-09-30", deviceId: "my-whoop",
+                                                  envelope: hostedEnvelope(daily: ["hrv_rmssd_ms": 61.2]),
+                                                  fetchedAtMs: 0)
+        XCTAssertEqual(try XCTUnwrap(none.hostedResult).hrvSeries, [], "no series published is empty, not invented")
+    }
+
     func testMaterializedHostedDayReplacesADriftedNightInsteadOfDoublingIt() async throws {
         let store = try await WhoopStore.inMemory()
         let computedId = HostedResultMaterializer.computedId(for: "my-whoop")

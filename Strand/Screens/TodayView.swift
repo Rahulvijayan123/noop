@@ -256,6 +256,10 @@ struct ServerScoreTodaySection: View {
             valueRow("Rest", hosted.restScore.map { "\(Int($0.rounded()))" } ?? "—")
             valueRow("Resting HR", daily.restingHr.map { "\($0) bpm" } ?? "—")
             valueRow("HRV", daily.avgHrv.map { "\(Int($0.rounded())) ms" } ?? "—")
+            if hosted.hrvSeries.count >= 2 {
+                HrvSeriesChart(points: hosted.hrvSeries, slotSeconds: hosted.hrvSlotSeconds)
+                    .padding(.top, NoopMetrics.space1)
+            }
             if let note = hostedNote(hosted) {
                 Text(note)
                     .font(StrandFont.caption)

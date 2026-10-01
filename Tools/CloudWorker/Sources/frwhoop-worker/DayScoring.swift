@@ -151,6 +151,73 @@ struct DayScorer {
         return (light, deep, rem)
     }
 
+    // MARK: - R-R transport selection + intraday HRV
+
+    /// Transports that can be scored on their own. A strap writes the SAME heartbeats through several of
+    /// them and the typed table keeps every copy: WHOOP 5/MG strap history (5) and live BLE (7); WHOOP 4.0
+    /// type-47 history (8), type-40 live (9) and standard BLE (10).
+    private static let scorableTransports: Set<RRSourceChannel> =
+        [.whoop5Historical, .whoop5Standard, .whoop4Historical, .whoop4Realtime, .whoop4Standard]
+
+    /// Keeps ONE strap transport per UTC hour, the fuller one (ties go to the lower channel number).
+    ///
+    /// Reading every transport sums each beat twice, so the night's beat-time is ~2x the wall clock and the
+    /// #1118 over-count gate (`SleepStager.sessionHrvOverCounted`) withholds the night's RMSSD, which keeps
+    /// the HRV baseline, and with it Charge, from ever calibrating. The app avoids this in
+    /// `WhoopStore.rrIntervals` by pinning the whole window to the lowest transport present. This is the
+    /// same rule per hour: the strap-history transport trails the live one by minutes to an hour until the
+    /// next offload, so a whole-window pin would drop the freshest beats, which only the live transport has.
+    ///
+    /// Hours with no strap transport at all (Oura rings, unlabelled legacy rows) pass through untouched.
+    /// In an hour that has one, unlabelled rows are dropped as copies of it, and a type-40 live (6) beat
+    /// never scores alone, both as in the app.
+    static func oneTransportPerHour(_ rr: [RRInterval]) -> [RRInterval] {
+        var counts: [Int: [RRSourceChannel: Int]] = [:]
+        for beat in rr {
+            guard let ch = beat.srcChannel, scorableTransports.contains(ch) || ch == .whoop5Realtime else { continue }
+            counts[beat.ts / 3_600, default: [:]][ch, default: 0] += 1
+        }
+        let keep: [Int: RRSourceChannel?] = counts.mapValues { byChannel in
+            byChannel.filter { scorableTransports.contains($0.key) }
+                .max { ($0.value, -$0.key.rawValue) < ($1.value, -$1.key.rawValue) }?.key
+        }
+        return rr.filter { beat in
+            guard let pick = keep[beat.ts / 3_600] else { return true }
+            return pick != nil && beat.srcChannel == pick
+        }
+    }
+
+    /// Width of one intraday HRV slot, in seconds. The worker re-scores a day within minutes of new beats
+    /// arriving, so a slot is filled in as soon as its data is uploaded.
+    static let hrvSlotSeconds = 900
+
+    /// Clean beats a slot needs to publish: about a minute. `HRVAnalyzer.minBeats` (20) alone would let a
+    /// slot still filling, or one that is nearly all dropout, publish an RMSSD built from seconds of data.
+    static let hrvSlotMinCleanBeats = 60
+
+    /// One RMSSD per `hrvSlotSeconds` of `[from, to)`: `[slotStartUnix, rmssdMs, cleanBeats]`, oldest first.
+    /// A slot with too little data, too much noise, or more beat-time than wall clock (a duplicated feed)
+    /// is left out rather than published as a number nobody can trust.
+    ///
+    /// RMSSD is the same gap-aware statistic as the nightly value, with the spot reading's noise gate
+    /// (`defaultSpotMaxRejectedFraction`). It is a short-window reading taken whenever the wearer happens
+    /// to be, not a resting baseline: wrist R-R is much noisier awake than asleep (posture, motion, talking),
+    /// so it must not feed Charge or the nightly baseline, and `cleanBeats` is there so a reader can weigh it.
+    static func hrvSlots(rr: [RRInterval], from: Int, to: Int) -> [[Any]] {
+        var bySlot: [Int: [RRInterval]] = [:]
+        for beat in rr where beat.ts >= from && beat.ts < to {
+            bySlot[beat.ts / hrvSlotSeconds, default: []].append(beat)
+        }
+        return bySlot.keys.sorted().compactMap { slot -> [Any]? in
+            let beats = bySlot[slot] ?? []
+            let ms = beats.map { Double($0.rrMs) }
+            guard HRVAnalyzer.rrCoverage(tsSec: beats.map(\.ts), rrMs: ms) <= HRVAnalyzer.coveragePlausibleCeiling else { return nil }
+            let r = HRVAnalyzer.analyze(rawRR: ms, maxRejectedFraction: HRVAnalyzer.defaultSpotMaxRejectedFraction)
+            guard let rmssd = r.rmssd, r.nClean >= hrvSlotMinCleanBeats else { return nil }
+            return [slot * hrvSlotSeconds, (rmssd * 10).rounded() / 10, r.nClean]
+        }
+    }
+
     // MARK: - Score one claimed day
 
     /// Score one claimed day: load inputs, compute, and return both the
@@ -288,7 +355,12 @@ struct DayScorer {
         let status = Self.classifyStatus(hrCount: hr.count, rrCount: rr.count, respCount: resp.count,
                                          gravityCount: gravity.count, detectedSessionCount: result.sleepSessions.count)
         let daily = legacyDaily(from: result, claim: claim, computedAt: computedAt)
-        let snapshotDaily = self.snapshotDaily(from: result, claim: claim, computedAt: computedAt)
+        var snapshotDaily = self.snapshotDaily(from: result, claim: claim, computedAt: computedAt)
+        // Free-form snapshot jsonb only: the legacy daily row has no slot for it.
+        let slots = Self.hrvSlots(rr: rr, from: dayStart, to: dayEnd)
+        if !slots.isEmpty {
+            snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots] as [String: Any]
+        }
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
@@ -493,15 +565,18 @@ struct DayScorer {
                    coalesce("srcChannel"::text,'') as ch
             from public.noop_rr_intervals
             where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint and ts < $4::bigint
+              and ("srcChannel" is null or "srcChannel" <> \(RRSourceChannel.spo2Ibi.rawValue))
+              and ("tsSuspect" is null or "tsSuspect" <> 1)
             order by ts, seq
             """, [userId, deviceId, String(from), String(to)])
-        return rows.compactMap { r in
+        let beats: [RRInterval] = rows.compactMap { r in
             guard let ts = Int64(r["ts"] ?? ""), let rrMs = Int(r["rrMs"] ?? "") else { return nil }
             let ch = Int(r["ch"] ?? "").flatMap { RRSourceChannel(rawValue: $0) }
             let seq = Int(r["seq"] ?? "") ?? 0
             let ord = Int(r["ord"] ?? "")
             return RRInterval(ts: Int(ts), rrMs: rrMs, srcChannel: ch, ord: ord, seq: seq)
         }
+        return Self.oneTransportPerHour(beats)
     }
 
     private func loadResp(userId: String, deviceId: String, from: Int, to: Int) throws -> [RespSample] {

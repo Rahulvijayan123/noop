@@ -185,4 +185,84 @@ final class DayScoringAdapterTests: XCTestCase {
         XCTAssertEqual(rem, 30, accuracy: 0.001)
         XCTAssertEqual(DayScorer.stageMinutes([]).light, 0)
     }
+
+    // MARK: - R-R transport selection + intraday HRV
+
+    /// `seconds` of 60 bpm beats from `start`, alternating 975/1025 ms so every successive difference is 50 ms
+    /// and the RMSSD is exactly 50. Timestamps advance one whole second per beat.
+    private func beats(from start: Int, seconds: Int, channel: RRSourceChannel?) -> [RRInterval] {
+        (0..<seconds).map { RRInterval(ts: start + $0, rrMs: $0 % 2 == 0 ? 975 : 1_025, srcChannel: channel, seq: $0) }
+    }
+
+    private func coverage(_ rr: [RRInterval]) -> Double {
+        HRVAnalyzer.rrCoverage(tsSec: rr.map(\.ts), rrMs: rr.map { Double($0.rrMs) })
+    }
+
+    func testBothWhoop5TransportsOverCountAndOneTransportRestoresCoverage() {
+        let start = 1_790_000_000 - 1_790_000_000 % 3_600
+        let both = beats(from: start, seconds: 3_000, channel: .whoop5Historical)
+            + beats(from: start, seconds: 3_000, channel: .whoop5Standard)
+        XCTAssertGreaterThan(coverage(both), HRVAnalyzer.coveragePlausibleCeiling)   // what the worker used to feed the HRV gate
+
+        let one = DayScorer.oneTransportPerHour(both)
+        XCTAssertEqual(one.count, 3_000)
+        XCTAssertEqual(Set(one.compactMap(\.srcChannel)), [.whoop5Historical])       // tie: the lower channel, as the app
+        XCTAssertLessThanOrEqual(coverage(one), HRVAnalyzer.coveragePlausibleCeiling)
+    }
+
+    func testFreshestHourKeepsTheLiveTransportWhileOffloadTrails() {
+        let h0 = 1_790_000_000 - 1_790_000_000 % 3_600
+        // Hour 0: both transports. Hour 1: the offload has only reached 10 minutes in, live has 30.
+        let rr = beats(from: h0, seconds: 3_000, channel: .whoop5Historical)
+            + beats(from: h0, seconds: 3_000, channel: .whoop5Standard)
+            + beats(from: h0 + 3_600, seconds: 600, channel: .whoop5Historical)
+            + beats(from: h0 + 3_600, seconds: 1_800, channel: .whoop5Standard)
+        let one = DayScorer.oneTransportPerHour(rr)
+        XCTAssertEqual(one.filter { $0.ts < h0 + 3_600 }.count, 3_000)
+        let fresh = one.filter { $0.ts >= h0 + 3_600 }
+        XCTAssertEqual(fresh.count, 1_800)
+        XCTAssertEqual(Set(fresh.compactMap(\.srcChannel)), [.whoop5Standard])
+    }
+
+    func testWhoop4HourPicksOneTransportAndDropsUnlabelledCopies() {
+        let h0 = 1_790_000_000 - 1_790_000_000 % 3_600
+        let rr = beats(from: h0, seconds: 1_000, channel: .whoop4Historical)
+            + beats(from: h0, seconds: 900, channel: .whoop4Standard)
+            + beats(from: h0, seconds: 900, channel: nil)
+        let one = DayScorer.oneTransportPerHour(rr)
+        XCTAssertEqual(one.count, 1_000)
+        XCTAssertEqual(Set(one.compactMap(\.srcChannel)), [.whoop4Historical])
+    }
+
+    func testHoursWithoutAStrapTransportAndLiveOnlyType40AreHandledLikeTheApp() {
+        let h0 = 1_790_000_000 - 1_790_000_000 % 3_600
+        let unlabelled = beats(from: h0, seconds: 600, channel: nil)
+        let oura = beats(from: h0 + 3_600, seconds: 600, channel: .greenQuality)
+        XCTAssertEqual(DayScorer.oneTransportPerHour(unlabelled + oura), unlabelled + oura)
+        // Type-40 live on a 5/MG never scores on its own.
+        XCTAssertTrue(DayScorer.oneTransportPerHour(beats(from: h0, seconds: 600, channel: .whoop5Realtime)).isEmpty)
+    }
+
+    func testHrvSlotsGiveOneRmssdPerFifteenMinutes() {
+        let day = 1_790_000_000 - 1_790_000_000 % 900
+        let rr = beats(from: day, seconds: 3_600, channel: .whoop5Standard)   // four slots
+        let slots = DayScorer.hrvSlots(rr: rr, from: day, to: day + 86_400)
+        XCTAssertEqual(slots.count, 4)
+        XCTAssertEqual(slots.map { $0[0] as? Int }, [day, day + 900, day + 1_800, day + 2_700])
+        for s in slots {
+            XCTAssertEqual(s[1] as? Double ?? 0, 50, accuracy: 0.1)
+            XCTAssertGreaterThanOrEqual(s[2] as? Int ?? 0, DayScorer.hrvSlotMinCleanBeats)
+        }
+    }
+
+    func testHrvSlotsSkipThinOverCountedAndOutOfDaySlots() {
+        let day = 1_790_000_000 - 1_790_000_000 % 900
+        let thin = beats(from: day, seconds: 40, channel: .whoop5Standard)                     // slot 0: seconds of data
+        let doubled = beats(from: day + 900, seconds: 800, channel: .whoop5Standard)
+            + beats(from: day + 900, seconds: 800, channel: .whoop5Historical)                 // slot 1: both transports
+        let good = beats(from: day + 1_800, seconds: 800, channel: .whoop5Standard)            // slot 2
+        let before = beats(from: day - 900, seconds: 800, channel: .whoop5Standard)           // previous day
+        let slots = DayScorer.hrvSlots(rr: before + thin + doubled + good, from: day, to: day + 86_400)
+        XCTAssertEqual(slots.map { $0[0] as? Int }, [day + 1_800])
+    }
 }

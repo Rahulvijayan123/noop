@@ -419,6 +419,15 @@ extension ServerScoreSnapshot {
     }
 }
 
+/// One 15-minute HRV reading from the hosted worker's intraday series.
+public struct HrvSeriesPoint: Equatable, Sendable {
+    /// Slot start, unix seconds.
+    public let startTs: Int
+    public let rmssd: Double
+    /// Clean beats behind the reading; a thin slot is a weaker reading.
+    public let cleanBeats: Int
+}
+
 /// The hosted worker's published day result, in the shapes the dashboard already stores.
 ///
 /// The worker runs the app's own `AnalyticsEngine.analyzeDay`, so each field maps one-to-one onto what
@@ -436,6 +445,10 @@ public struct HostedDayResult: Equatable {
     /// The Rest composite (0–100), which the local engine stores as the `sleep_performance` series.
     public let restScore: Double?
     public let sleep: [CachedSleepSession]
+    /// Intraday HRV, one reading per slot of the local day, oldest first. Empty when the worker has not
+    /// published one. Informational only: it is not what Charge or the baselines use.
+    public let hrvSeries: [HrvSeriesPoint]
+    public let hrvSlotSeconds: Int
 
     init?(day: String, object: [String: Any]) {
         guard let daily = object["daily"] as? [String: Any],
@@ -462,6 +475,16 @@ public struct HostedDayResult: Equatable {
             spo2Ir: integer("spo2Ir"), avgSdnn: number("hrv_sdnn_ms"),
             skinTempC: number("skin_temp_c"), sleepHrOnly: daily["sleepHrOnly"] as? Bool)
         self.restScore = number("restScore")
+        let series = daily["hrv_series"] as? [String: Any]
+        let slot = Self.number(series?["slot_s"]).flatMap { Int(exactly: $0) } ?? 900
+        self.hrvSlotSeconds = (60...3_600).contains(slot) ? slot : 900
+        self.hrvSeries = ((series?["points"] as? [Any]) ?? []).compactMap { entry -> HrvSeriesPoint? in
+            guard let point = entry as? [Any], point.count >= 3,
+                  let start = Self.number(point[0]).flatMap({ Int(exactly: $0) }),
+                  let rmssd = Self.number(point[1]), rmssd > 0,
+                  let beats = Self.number(point[2]).flatMap({ Int(exactly: $0) }) else { return nil }
+            return HrvSeriesPoint(startTs: start, rmssd: rmssd, cleanBeats: beats)
+        }.sorted { $0.startTs < $1.startTs }
         self.sleep = ((object["sleep"] as? [Any]) ?? []).compactMap { entry -> CachedSleepSession? in
             guard let night = entry as? [String: Any],
                   night["is_nap"] as? Bool != true,
