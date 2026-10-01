@@ -74,12 +74,9 @@ struct CoachThinkingTrace: View {
         } label: {
             HStack(spacing: 8) {
                 if isThinking {
-                    CoachTypingDots()
-                    CoachElapsedLabel(base: phaseLabel.isEmpty ? "Coach is thinking…" : phaseLabel)
+                    ThinkingOrb(state: .searching, size: 24)
+                    CoachElapsedLabel(base: phaseLabel.isEmpty ? "Sana is thinking…" : phaseLabel)
                 } else {
-                    Image(systemName: "sparkles")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
                     Text(completedLabel)
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textSecondary)

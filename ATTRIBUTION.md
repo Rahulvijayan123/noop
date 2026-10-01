@@ -6,6 +6,10 @@ identify the hardware the app interoperates with.
 
 NOOP builds on prior community reverse-engineering and interoperability work:
 
+## Thinking animation
+- **`thinking-orbs`** (MIT, Jakub Antalík) — the dotted "thinking" orbs. `StrandiOS/Coach/ThinkingOrb.swift`
+  is a native Swift port of its geometry, used as the Sana chat's thinking indicator.
+
 ## WHOOP 4.0 protocol + Swift packages
 - **`johnmiddleton12/my-whoop`** — the `WhoopProtocol` and `WhoopStore` Swift packages
   (vendored under `Packages/`), the WHOOP 4.0 BLE framing/command/decode work, and the

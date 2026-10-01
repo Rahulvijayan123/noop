@@ -27,15 +27,15 @@ enum CoachAPIError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .notConfigured:
-            return "Coach runs through your cloud project. Turn on cloud mode in Settings to use it."
+            return "Sana runs through your cloud project. Turn on cloud mode in Settings to use it."
         case .unauthorized:
             return "This device isn't signed in to your cloud yet. Re-enroll it in Settings, then try again."
         case .dailyLimit:
-            return "You've reached today's coach limit. It resets tomorrow."
+            return "You've reached today's Sana limit. It resets tomorrow."
         case .tooLarge:
             return "That message or photo is too large to send."
         case .unavailable:
-            return "Coach is temporarily unavailable. Please try again in a moment."
+            return "Sana is temporarily unavailable. Please try again in a moment."
         }
     }
 }

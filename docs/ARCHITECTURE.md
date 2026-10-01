@@ -96,7 +96,7 @@ foreground.
 
 ## 6. Coach
 
-The Coach tab is a chat that runs through the backend as well. The phone sends the question to
+The Sana tab (the health assistant chat) runs through the backend as well. The phone sends the question to
 `supabase/functions/coach/index.ts`, which checks the same installation and fleet credentials as
 `push`, takes one unit of the user's daily quota, and streams the model's answer back. The model
 cannot see the database. When it needs numbers it asks the app for them through a tool call, and

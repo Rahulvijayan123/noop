@@ -42,7 +42,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .today: return "Today"
         case .intelligence: return "Intelligence"
         case .insightsHub: return "What Moves You"
-        case .coach: return "Coach"
+        case .coach: return "Sana"
         case .live: return "Live"
         case .breathe: return "Breathe"
         case .intervals: return "Intervals"
@@ -86,7 +86,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .today: return String(localized: "Today")
         case .intelligence: return String(localized: "Intelligence")
         case .insightsHub: return String(localized: "What Moves You")
-        case .coach: return String(localized: "Coach")
+        case .coach: return "Sana"
         case .live: return String(localized: "Live")
         case .breathe: return String(localized: "Breathe")
         case .intervals: return String(localized: "Intervals")

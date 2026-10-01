@@ -111,6 +111,15 @@ final class CoachHarnessTests: XCTestCase {
         XCTAssertTrue(CoachPrompt.system(memories: [], imageContext: "", userAge: nil, now: noon).contains("2026-09-30"))
     }
 
+    func testFollowUpsFollowTheTopicAndFallBackToGeneral() {
+        XCTAssertEqual(CoachFollowUps.forAnswer("You slept 7h 12m last night.").first, "What would help me sleep better tonight?")
+        XCTAssertEqual(CoachFollowUps.forAnswer("Your HRV held at 84 ms.").first, "What's behind that change?")
+        XCTAssertEqual(CoachFollowUps.forAnswer("Happy to help with that.").first, "What should I focus on this week?")
+        for text in ["sleep", "hrv", "stress", "protein", "workout", "anything else"] {
+            XCTAssertEqual(CoachFollowUps.forAnswer(text).count, 2)
+        }
+    }
+
     func testEffortIsAdaptive() {
         XCTAssertEqual(CoachPrompt.reasoningEffort(forUserText: "how did I sleep", isToolRound: true, deep: false), "none")
         XCTAssertEqual(CoachPrompt.reasoningEffort(forUserText: "how did I sleep", isToolRound: false, deep: false), "low")

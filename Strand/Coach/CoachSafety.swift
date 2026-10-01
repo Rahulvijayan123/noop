@@ -23,11 +23,11 @@ enum CoachSafety {
         var refusal: String {
             switch self {
             case .medicalDiagnosis:
-                return "I'm your coach, not a doctor — I can't diagnose conditions, interpret symptoms, or recommend treatments. "
+                return "I'm your health assistant, not a doctor — I can't diagnose conditions, interpret symptoms, or recommend treatments. "
                     + "Pain, injuries, or health symptoms need a licensed healthcare provider who can properly assess you. "
                     + "I'm here to help with your training, recovery, and sleep once you're cleared."
             case .promptInjection:
-                return "I'm your recovery and performance coach — I'm here to help with your charge, effort, sleep, training, and nutrition. "
+                return "I'm Sana, your health assistant — I'm here to help with your charge, effort, sleep, training, and nutrition. "
                     + "Let's keep it about your goals. What would you like to work on?"
             case .pedSteroid:
                 return "I can't provide advice on performance-enhancing drugs, steroids, or related substances. "

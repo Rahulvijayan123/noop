@@ -12,8 +12,6 @@ struct CoachChatView: View {
     @EnvironmentObject private var profile: ProfileStore
     @StateObject private var vm = CoachChatViewModel()
     @FocusState private var inputFocused: Bool
-    @State private var showClearConfirm = false
-    @State private var showMemories = false
     /// True while the list should chase new content. Only the wearer dragging the list upward turns it off:
     /// content that grows past the viewport also hides the bottom marker, so visibility alone can't tell
     /// "I scrolled away" from "the reply just got taller".
@@ -40,75 +38,22 @@ struct CoachChatView: View {
             vm.attach(repo: repo, engine: coachEngine, profile: profile)
             vm.send(prompt)
         }
-        .sheet(isPresented: $showMemories) { CoachMemorySheet(vm: vm) }
-        .confirmationDialog("Clear this conversation?", isPresented: $showClearConfirm, titleVisibility: .visible) {
-            Button("Clear", role: .destructive) { Task { await vm.clearConversation() } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This deletes the saved conversation. What Coach remembers about you is kept.")
-        }
+        #if DEBUG
+        .onAppear { if CommandLine.arguments.contains("--coach-focus") { inputFocused = true } }
+        #endif
     }
 
     // MARK: Header
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Coach").font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
-                HStack(spacing: 5) {
-                    Circle().fill(connectionColor).frame(width: 6, height: 6)
-                    Text(connectionLabel).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                }
-                .accessibilityElement(children: .combine)
-            }
-            Spacer()
-            Button {
-                withAnimation(.easeInOut(duration: 0.15)) { vm.deepMode.toggle() }
-            } label: {
-                HStack(spacing: 5) {
-                    Image(systemName: "brain.head.profile").font(.system(size: 12, weight: .semibold))
-                    Text("Deep").font(StrandFont.captionNumber)
-                }
-                .foregroundStyle(vm.deepMode ? StrandPalette.goldDeepText : StrandPalette.textSecondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 7)
-                .background(vm.deepMode ? StrandPalette.accent : StrandPalette.surfaceInset, in: Capsule())
-                .overlay(Capsule().strokeBorder(StrandPalette.hairline, lineWidth: vm.deepMode ? 0 : 1))
-            }
-            .buttonStyle(.plain)
-            .disabled(vm.isGenerating)
-            .accessibilityLabel("Deep mode")
-            .accessibilityValue(vm.deepMode ? "On" : "Off")
-            .accessibilityHint("Slower, more thorough answers")
-
-            Menu {
-                Button { showMemories = true } label: { Label("What Coach remembers", systemImage: "brain") }
-                Button(role: .destructive) { showClearConfirm = true } label: { Label("Clear conversation", systemImage: "trash") }
-                    .disabled(vm.messages.isEmpty)
-            } label: {
-                Image(systemName: "ellipsis.circle").font(StrandFont.headline).foregroundStyle(StrandPalette.textSecondary)
-            }
-            .accessibilityLabel("Coach options")
+        VStack(alignment: .leading, spacing: 3) {
+            Text("Sana").font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
+            Text("Your health assistant").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, NoopMetrics.screenPadding)
         .padding(.top, 14)
         .padding(.bottom, 8)
-    }
-
-    private var connectionColor: Color {
-        switch vm.connection {
-        case .online: return StrandPalette.chargeColor
-        case .offline: return StrandPalette.statusCritical
-        case .checking: return StrandPalette.statusWarning
-        }
-    }
-
-    private var connectionLabel: String {
-        switch vm.connection {
-        case .online: return vm.deepMode ? "Deep mode" : "Connected"
-        case .offline: return "Not connected"
-        case .checking: return "Checking…"
-        }
     }
 
     // MARK: Empty state
@@ -116,16 +61,11 @@ struct CoachChatView: View {
     private var welcome: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 18) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(StrandPalette.accent)
-                    .frame(width: 64, height: 64)
-                    .background(Circle().fill(StrandPalette.accent.opacity(0.12)))
-                    .overlay(Circle().strokeBorder(StrandPalette.accent.opacity(0.22), lineWidth: 0.5))
+                BrandMark(size: 64, style: .tile)
                     .padding(.top, 8)
                     .accessibilityHidden(true)
 
-                Text("Your recovery and performance coach")
+                Text("Hi, I'm Sana, your health assistant")
                     .font(StrandFont.title2)
                     .foregroundStyle(StrandPalette.textPrimary)
                     .multilineTextAlignment(.center)
@@ -145,13 +85,12 @@ struct CoachChatView: View {
     }
 
     private var suggestions: [String] {
-        let contextual = coachEngine.suggestions
-        return Array((contextual.isEmpty ? CoachPrompts.suggestions : contextual).prefix(4))
+        Array(CoachPrompts.suggestions.prefix(4))
     }
 
     private var disclaimer: some View {
         Label {
-            Text("Coach gives general wellness and training information, not medical advice. Talk to a healthcare professional about health concerns.")
+            Text("Sana gives general wellness information, not medical advice. Talk to a healthcare professional about health concerns.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -166,7 +105,7 @@ struct CoachChatView: View {
     private func offlineCard(_ reason: String) -> some View {
         VStack(spacing: 10) {
             Image(systemName: "wifi.slash").font(.system(size: 24)).foregroundStyle(StrandPalette.textTertiary)
-            Text("Coach unavailable").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+            Text("Sana unavailable").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
             Text(reason)
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
@@ -199,7 +138,10 @@ struct CoachChatView: View {
                         CoachBubble(message: message,
                                     phase: message.isStreaming ? vm.phase : .idle,
                                     phaseLabel: message.isStreaming ? vm.phase.label : "",
-                                    onRetry: message.didStall ? { vm.retryStalled() } : nil)
+                                    onRetry: message.didStall ? { vm.retryStalled() } : nil,
+                                    followUps: message.id == vm.messages.last?.id && !vm.isGenerating
+                                        ? CoachFollowUps.forAnswer(message.content) : [],
+                                    onFollowUp: { vm.send($0) })
                             .id(message.id)
                     }
                     Color.clear.frame(height: 1).id("bottom")
@@ -369,7 +311,7 @@ private struct CoachComposer: View {
     }
 
     private var field: some View {
-        TextField("Ask Coach about your data…", text: $text, axis: .vertical)
+        TextField("Ask Sana anything…", text: $text, axis: .vertical)
             .textFieldStyle(.plain)
             .font(StrandFont.body)
             .foregroundStyle(StrandPalette.textPrimary)
@@ -384,6 +326,13 @@ private struct CoachComposer: View {
                 .strokeBorder(focused.wrappedValue ? StrandPalette.focusRing : StrandPalette.hairline, lineWidth: 1))
             .accessibilityIdentifier("coachMessageField")
             .accessibilityLabel("Question")
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button { focused.wrappedValue = false } label: { Image(systemName: "keyboard.chevron.compact.down") }
+                        .accessibilityLabel("Hide keyboard")
+                }
+            }
     }
 
     @ViewBuilder

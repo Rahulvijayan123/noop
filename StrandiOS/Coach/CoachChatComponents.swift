@@ -83,6 +83,8 @@ struct CoachBubble: View {
     let phase: CoachThinkingPhase
     let phaseLabel: String
     var onRetry: (() -> Void)?
+    var followUps: [String] = []
+    var onFollowUp: (String) -> Void = { _ in }
     @State private var containerWidth: CGFloat = 560
 
     private var maxBubbleWidth: CGFloat { min(containerWidth * 0.82, 560) }
@@ -117,6 +119,7 @@ struct CoachBubble: View {
                     }
                 }
                 if !isUser, message.didStall, let onRetry { retryButton(onRetry) }
+                if !isUser, !message.isStreaming, !message.didStall, hasText, !followUps.isEmpty { followUpList }
             }
 
             if !isUser { Spacer(minLength: 0) }
@@ -128,13 +131,37 @@ struct CoachBubble: View {
     }
 
     private var avatar: some View {
-        Image(systemName: "sparkles")
-            .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(StrandPalette.accent)
-            .frame(width: 26, height: 26)
-            .background(Circle().fill(StrandPalette.accent.opacity(0.16)))
+        BrandMark(size: 26, style: .tile)
             .padding(.top, 2)
             .accessibilityHidden(true)
+    }
+
+    private var followUpList: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Follow-ups").strandOverline()
+            ForEach(followUps, id: \.self) { prompt in
+                Button { onFollowUp(prompt) } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "arrow.turn.down.right")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                        Text(prompt)
+                            .font(StrandFont.caption)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Follow-up question: \(prompt)")
+            }
+        }
+        .frame(maxWidth: maxBubbleWidth, alignment: .leading)
+        .padding(.top, 2)
     }
 
     @ViewBuilder
@@ -180,7 +207,7 @@ struct CoachBubble: View {
             ShareLink(item: message.content) { Label("Share", systemImage: "square.and.arrow.up") }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(isUser ? "You said: \(message.content)" : "Coach said: \(message.content)")
+        .accessibilityLabel(isUser ? "You said: \(message.content)" : "Sana said: \(message.content)")
     }
 
     private func retryButton(_ action: @escaping () -> Void) -> some View {
@@ -199,31 +226,6 @@ struct CoachBubble: View {
 private struct CoachBubbleWidthKey: PreferenceKey {
     static var defaultValue: CGFloat = 560
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
-}
-
-struct CoachTypingDots: View {
-    @State private var active = 0
-    @State private var timer: Timer?
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        HStack(spacing: 5) {
-            ForEach(0..<3, id: \.self) { i in
-                Circle()
-                    .fill(StrandPalette.accent)
-                    .frame(width: 7, height: 7)
-                    .scaleEffect(active == i ? (reduceMotion ? 1.15 : 1.35) : 0.85)
-                    .opacity(active == i ? 1 : 0.3)
-                    .animation(.easeInOut(duration: 0.22), value: active)
-            }
-        }
-        .frame(height: 11)
-        .accessibilityHidden(true)
-        .onAppear {
-            timer = Timer.scheduledTimer(withTimeInterval: 0.28, repeats: true) { _ in active = (active + 1) % 3 }
-        }
-        .onDisappear { timer?.invalidate(); timer = nil }
-    }
 }
 
 /// Long answers can take a minute or two; a single static label reads as a hang, so the wording keeps moving.
@@ -259,7 +261,7 @@ struct CoachSuggestionStack: View {
     let prompts: [String]
     let onSend: (String) -> Void
 
-    private static let icons = ["heart.text.square", "figure.run", "moon.zzz", "chart.xyaxis.line", "bolt.heart"]
+    private static let icons = ["moon.zzz", "waveform.path.ecg", "bolt.heart", "heart.text.square", "chart.xyaxis.line"]
 
     var body: some View {
         VStack(spacing: 8) {
@@ -295,61 +297,6 @@ struct CoachSuggestionStack: View {
                 }
             }
             .frostedCardSurface(cornerRadius: 16)
-        }
-    }
-}
-
-// MARK: - Memory
-
-struct CoachMemorySheet: View {
-    @ObservedObject var vm: CoachChatViewModel
-    @Environment(\.dismiss) private var dismiss
-    @State private var confirmForgetAll = false
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if vm.memories.isEmpty {
-                    VStack(spacing: 8) {
-                        Image(systemName: "brain").font(.system(size: 30)).foregroundStyle(StrandPalette.textTertiary)
-                        Text("Nothing remembered yet").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                        Text("Tell Coach about your goals, injuries, or routines and it will remember them for next time.")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .multilineTextAlignment(.center)
-                    }
-                    .padding(32)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else {
-                    List {
-                        ForEach(vm.memories) { memory in
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(memory.content).font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
-                                Text(memory.topic.capitalized).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                            }
-                            .listRowBackground(StrandPalette.surfaceRaised)
-                            .swipeActions {
-                                Button(role: .destructive) { Task { await vm.forget(memory) } } label: { Label("Forget", systemImage: "trash") }
-                            }
-                        }
-                    }
-                    .scrollContentBackground(.hidden)
-                }
-            }
-            .background(StrandPalette.surfaceBase.ignoresSafeArea())
-            .navigationTitle("What Coach remembers")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    if !vm.memories.isEmpty { Button("Forget all", role: .destructive) { confirmForgetAll = true } }
-                }
-                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
-            }
-            .confirmationDialog("Forget everything Coach remembers about you?", isPresented: $confirmForgetAll, titleVisibility: .visible) {
-                Button("Forget all", role: .destructive) { Task { await vm.forgetAllMemories() } }
-                Button("Cancel", role: .cancel) {}
-            }
-            .task { await vm.refreshMemories() }
         }
     }
 }

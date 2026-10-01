@@ -64,10 +64,10 @@ app then uploads its strap history and shows the scores the backend computes. Se
 
 ## Coach
 
-The **Coach** tab (`StrandiOS/Coach/`) is the chat, and `Strand/Coach/` holds the prompt, safety checks
+The **Sana** tab (`StrandiOS/Coach/`) is the health assistant chat. Each launch starts a fresh conversation, the thinking indicator is a port of `thinking-orbs` (see [ATTRIBUTION.md](../ATTRIBUTION.md)), and `Strand/Coach/` holds the prompt, safety checks
 and data tools it shares with the macOS app. It needs cloud sync to be on, because the model key lives
 in the backend's `coach` function. Debug builds can open it directly with
-`--demo-screen coach`, and `--coach-prompt "<question>"` asks that question on launch.
+`--demo-screen coach`; `--coach-prompt "<question>"` asks that question on launch and `--coach-focus` opens the keyboard.
 
 ## Tests
 

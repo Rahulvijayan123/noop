@@ -46,7 +46,7 @@ enum CoachThinkingPhase {
         case .idle: return ""
         case .analyzingImage: return "Analyzing image…"
         case .lookingUpData: return "Looking up your data…"
-        case .generating: return "Coach is thinking…"
+        case .generating: return "Sana is thinking…"
         }
     }
 }
@@ -111,10 +111,6 @@ final class CoachChatViewModel: ObservableObject {
         started = true
         await checkConnection()
         guard connection == .online else { started = false; return }
-        if let stored = try? await api.messages(limit: 60) {
-            let known = Set(messages.map(\.id))
-            messages.insert(contentsOf: stored.compactMap(Self.message(from:)).filter { !known.contains($0.id) }, at: 0)
-        }
         await refreshMemories()
         await flushUnsaved()
     }
@@ -476,20 +472,9 @@ final class CoachChatViewModel: ObservableObject {
         return f
     }()
 
-    private static func message(from stored: CoachStoredMessage) -> CoachChatMessage? {
-        guard let id = UUID(uuidString: stored.clientId), let role = CoachChatMessage.Role(rawValue: stored.role) else { return nil }
-        var m = CoachChatMessage(id: id, role: role, content: stored.content)
-        m.hadImage = stored.meta?.hadImage ?? false
-        m.toolNames = stored.meta?.toolNames ?? []
-        m.viz = stored.meta?.viz
-        m.vizPhase = m.viz == nil ? .none : .ready
-        m.createdAt = iso.date(from: stored.createdAt) ?? Date()
-        return m
-    }
-
     private static func userFacing(_ error: Error) -> String {
         if let known = error as? CoachAPIError { return known.errorDescription ?? "" }
-        if (error as NSError).domain == NSURLErrorDomain { return "Couldn't reach Coach. Check your connection and try again." }
+        if (error as NSError).domain == NSURLErrorDomain { return "Couldn't reach Sana. Check your connection and try again." }
         return CoachAPIError.unavailable.errorDescription ?? ""
     }
 }

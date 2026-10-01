@@ -44,7 +44,7 @@ struct CoachLauncherSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
-            .navigationTitle(Text("Coach"))
+            .navigationTitle(Text("Sana"))
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
