@@ -361,6 +361,19 @@ final class CoachAPI: @unchecked Sendable {
         _ = try await send(try request("memories", method: "DELETE"))
     }
 
+    // MARK: Profile
+
+    /// The owner's saved profile, or nil before anything has been saved.
+    func profile() async throws -> CloudProfile? {
+        struct Reply: Decodable { let profile: CloudProfile? }
+        return try JSONDecoder().decode(Reply.self, from: try await send(try request("profile", timeout: 15))).profile
+    }
+
+    func saveProfile(_ profile: CloudProfile) async throws {
+        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(profile))
+        _ = try await send(try request("profile", method: "PUT", body: body, timeout: 15))
+    }
+
     // MARK: Conversation
 
     func messages(limit: Int = 60) async throws -> [CoachStoredMessage] {

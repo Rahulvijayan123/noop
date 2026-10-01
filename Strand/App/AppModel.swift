@@ -60,6 +60,8 @@ final class AppModel: ObservableObject {
     let repo: Repository
     /// User profile (age/sex/body/HR-max) for zones, calories, baselines.
     let profile = ProfileStore()
+    /// Mirrors the Settings profile to the cloud `profiles` row (cloud mode only).
+    private(set) lazy var profileSync = ProfileCloudSync(profile: profile)
     /// Behaviour settings: double-tap action, wear automation, zone coaching, smart alarm, illness watch.
     let behavior = BehaviorStore()
     /// On-device WHOOP-style recovery/strain/sleep computation from raw strap streams.
@@ -280,6 +282,7 @@ final class AppModel: ObservableObject {
         CloudPushRuntime.shared.setAppIsActive(true)
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
         await CloudPushRuntime.shared.flushAndKick()
+        Task { await profileSync.reconcile() }
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.

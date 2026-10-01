@@ -28,7 +28,7 @@ and checking each part.
 | --- | --- | --- |
 | `push` | the app | Receives upload batches and object-lane uploads, writes rows and receipts. |
 | `scores` | the app | Returns published score snapshots and the changed-days feed. Also handles enrollment-time device registration and sleep edits. |
-| `coach` | the app | Relays Coach questions to the language model and stores the conversation and the coach's memory. Authenticates like `push` (installation bearer plus the fleet token). |
+| `coach` | the app | Relays Coach questions to the language model and stores the conversation, the coach's memory and the Settings profile (`/profile`). Authenticates like `push` (installation bearer plus the fleet token). |
 | `ingest-verify` | operators | Checks the ingest pipeline end to end. |
 | `reconcile` | scheduled | Reconciles the object manifest against storage. |
 | `retention-sweep` | scheduled (pg_cron) | Deletes expired objects and manifests. |
@@ -59,6 +59,16 @@ URL, the model names and the daily call limit per user). Each request is counted
 through the `coach_take_quota` function, and the conversation and memory live in `coach_sessions`,
 `coach_messages`, `coach_memories` and `coach_memory_items`. All five are created by
 `supabase/migrations/20260930235900_coach_harness.sql`, and deleting an account removes them.
+
+#### Profile
+
+`GET` and `PUT /functions/v1/coach/profile` read and write the owner's row in `profiles`: name
+(`display_name`), date of birth, sex (`sex_model`: `male`, `female` or `nonbinary`), height and weight.
+It is the same row the scoring worker reads for age, sex and body size, and a trigger re-queues scoring
+only when one of those values actually changes. Values are range-checked in `profileInput()`, and a
+`PUT` writes only the keys it carries. The app uploads a couple of seconds after an edit and adopts the
+stored profile when it becomes active (`Strand/Data/ProfileCloudSync.swift`), in cloud mode only.
+No migration is involved: the table and its deletion handling already existed.
 
 The function tests run with Deno from `supabase/functions/`. Some of them need fixtures that are not
 in this repository, such as `EDGE_TEST_ARTIFACTS` or the old `infra/vps` scripts.

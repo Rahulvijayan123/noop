@@ -279,6 +279,78 @@ async function messagesRoute(req: Request, userId: string, { rest }: Deps): Prom
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
 }
 
+const PROFILE_SEXES = new Set(['male', 'female', 'nonbinary']);
+const PROFILE_COLUMNS = 'display_name,date_of_birth,sex_model,height_cm,weight_kg,updated_at';
+
+export function ageOn(dob: string, now: Date): number {
+  const [y, m, d] = dob.split('-').map(Number);
+  const birthdayPassed = now.getUTCMonth() + 1 > m || (now.getUTCMonth() + 1 === m && now.getUTCDate() >= d);
+  return now.getUTCFullYear() - y - (birthdayPassed ? 0 : 1);
+}
+
+function profileNumber(v: unknown, min: number, max: number): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < min || v > max) throw fail('invalid_profile', 400);
+  return v;
+}
+
+/** Only the keys the client sent are written, so a partial update never blanks the rest of the row. */
+function profileInput(body: any): Record<string, unknown> {
+  if (!isObject(body)) throw fail('invalid_profile', 400);
+  const row: Record<string, unknown> = {};
+  if ('displayName' in body) {
+    const name = typeof body.displayName === 'string' ? body.displayName.trim() : '';
+    if (typeof body.displayName !== 'string' || name.length > 80) throw fail('invalid_profile', 400);
+    row.display_name = name;
+  }
+  if ('dateOfBirth' in body) {
+    const dob = body.dateOfBirth;
+    const t = typeof dob === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dob) ? Date.parse(`${dob}T00:00:00Z`) : NaN;
+    // The round trip rejects dates the parser silently rolls over (2026-02-31).
+    if (!Number.isFinite(t) || new Date(t).toISOString().slice(0, 10) !== dob || dob < '1900-01-01' || t > Date.now()) {
+      throw fail('invalid_profile', 400);
+    }
+    row.date_of_birth = dob;
+    // The Kotlin scorer reads age from `reported_age_years` (CHECK 18..90) rather than the birth date.
+    // Outside that range the column is cleared so a stale age can never outlive the date it came from.
+    const age = ageOn(dob, new Date());
+    row.reported_age_years = age >= 18 && age <= 90 ? age : null;
+  }
+  if ('sex' in body) {
+    if (typeof body.sex !== 'string' || !PROFILE_SEXES.has(body.sex)) throw fail('invalid_profile', 400);
+    row.sex_model = body.sex;
+  }
+  if ('heightCm' in body) row.height_cm = profileNumber(body.heightCm, 50, 260);
+  if ('weightKg' in body) row.weight_kg = profileNumber(body.weightKg, 20, 350);
+  if (!Object.keys(row).length) throw fail('invalid_profile', 400);
+  return row;
+}
+
+/** null until the owner has saved something: the row exists from sign-up with every field empty. */
+function publicProfile(r: any) {
+  if (!r || (!r.display_name && r.date_of_birth == null && r.sex_model == null && r.height_cm == null && r.weight_kg == null)) return null;
+  const num = (v: unknown) => (v == null ? null : Number(v));
+  return {
+    displayName: r.display_name ?? '', dateOfBirth: r.date_of_birth ?? null, sex: r.sex_model ?? null,
+    heightCm: num(r.height_cm), weightKg: num(r.weight_kg), updatedAt: r.updated_at ?? null,
+  };
+}
+
+// The same `profiles` row the scoring worker reads for age, sex and body size, so what the owner enters in
+// Settings is also what server-side scoring uses. Its update trigger re-queues scoring only when one of
+// those values actually changes.
+async function profileRoute(req: Request, userId: string, { rest }: Deps): Promise<Response> {
+  if (req.method === 'GET') {
+    const [row] = await rest.select('profiles', `id=eq.${userId}&select=${PROFILE_COLUMNS}`);
+    return Response.json({ profile: publicProfile(row) });
+  }
+  if (req.method === 'PUT') {
+    const row = profileInput(await readJson(req));
+    const [saved] = await rest.upsert('profiles', { id: userId, ...row, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    return Response.json({ profile: publicProfile(saved) });
+  }
+  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+}
+
 interface Deps { rest: SupabaseRest; cfg: CoachConfig; fetchImpl: typeof fetch }
 
 /** Runs after the answer has streamed. `route_only` returns just the routing decision so the app can show its placeholder. */
@@ -331,6 +403,7 @@ export async function handleCoachRequest(req: Request, deps: { rest: SupabaseRes
     if (route === 'visual' && req.method === 'POST') return await visualRoute(req, identity.id, d);
     if (route === 'memories') return await memoriesRoute(req, identity.id, sub, d);
     if (route === 'messages') return await messagesRoute(req, identity.id, d);
+    if (route === 'profile') return await profileRoute(req, identity.id, d);
     return Response.json({ error: 'not_found' }, { status: 404 });
   } catch (err: any) {
     if (err instanceof IdentityError) return Response.json({ error: err.code }, { status: err.status || 401 });

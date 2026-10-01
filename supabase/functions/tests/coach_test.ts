@@ -1,5 +1,5 @@
 import { assert, assertEquals } from 'jsr:@std/assert';
-import { coachConfig, handleCoachRequest, normalizeSseChunk } from '../_shared/coach.ts';
+import { ageOn, coachConfig, handleCoachRequest, normalizeSseChunk } from '../_shared/coach.ts';
 import { hashIngestToken } from '../_shared/tokens.ts';
 import { makeMemRest } from './helpers.ts';
 
@@ -20,7 +20,7 @@ async function fixture() {
   ]);
   await base.upsert('noop_app_installations', [{ user_id: USER, source_id: SOURCE }, { user_id: OTHER, source_id: OTHER_SOURCE }]);
 
-  const coach = new Map<string, any[]>([['coach_memory_items', []], ['coach_messages', []]]);
+  const coach = new Map<string, any[]>([['coach_memory_items', []], ['coach_messages', []], ['profiles', []]]);
   const usage = new Map<string, number>();
   const query = (table: string, q = '') => {
     const params = new URLSearchParams(q);
@@ -61,12 +61,15 @@ async function fixture() {
     },
     async upsert(table: string, rows: any, opts: any = {}) {
       if (!coach.has(table)) return base.upsert(table, rows, opts);
-      for (const r of rows) {
+      const saved: any[] = [];
+      for (const r of Array.isArray(rows) ? rows : [rows]) {
         const list = coach.get(table)!;
-        const i = list.findIndex((x) => x.user_id === r.user_id && x.client_id === r.client_id);
+        const i = list.findIndex((x) => opts.onConflict === 'id' ? x.id === r.id : x.user_id === r.user_id && x.client_id === r.client_id);
         if (i >= 0) list[i] = { ...list[i], ...r };
         else list.push({ id: crypto.randomUUID(), ...r });
+        saved.push(i >= 0 ? list[i] : list[list.length - 1]);
       }
+      return saved;
     },
     async rpc(name: string, args: any) {
       assertEquals(name, 'coach_take_quota');
@@ -314,4 +317,75 @@ Deno.test('coach: unknown routes and provider-side surprises do not leak', async
   const res = await handleCoachRequest(call('memories'), { rest, cfg });
   assertEquals(res.status, 502);
   assertEquals(await res.json(), { error: 'coach_unavailable' });
+});
+
+Deno.test('coach profile: saved fields read back, partial updates keep the rest, owners are isolated', async () => {
+  const { rest } = await fixture();
+  const deps = { rest, cfg };
+  const empty = await (await handleCoachRequest(call('profile'), deps)).json();
+  assertEquals(empty, { profile: null });
+
+  const put = await handleCoachRequest(call('profile', {
+    method: 'PUT',
+    body: { displayName: '  Rahul ', dateOfBirth: '1990-04-12', sex: 'male', heightCm: 180.5, weightKg: 77.1107 },
+  }), deps);
+  assertEquals(put.status, 200);
+  const saved = (await put.json()).profile;
+  assertEquals({ ...saved, updatedAt: null }, {
+    displayName: 'Rahul', dateOfBirth: '1990-04-12', sex: 'male', heightCm: 180.5, weightKg: 77.1107, updatedAt: null,
+  });
+
+  await handleCoachRequest(call('profile', { method: 'PUT', body: { weightKg: 80 } }), deps);
+  const after = (await (await handleCoachRequest(call('profile'), deps)).json()).profile;
+  assertEquals([after.displayName, after.dateOfBirth, after.sex, after.heightCm, after.weightKg], ['Rahul', '1990-04-12', 'male', 180.5, 80]);
+
+  const other = await (await handleCoachRequest(call('profile', { token: 'noop_other' }), deps)).json();
+  assertEquals(other, { profile: null });
+  assertEquals((rest as any).coach.get('profiles').map((r: any) => r.id), [USER]);
+});
+
+Deno.test('coach profile: the scorer age follows the birth date and stays inside its 18..90 range', async () => {
+  const { rest } = await fixture();
+  const deps = { rest, cfg };
+  const year = new Date().getUTCFullYear();
+  const stored = () => (rest as any).coach.get('profiles')[0].reported_age_years;
+  const save = (dateOfBirth: string) => handleCoachRequest(call('profile', { method: 'PUT', body: { dateOfBirth } }), deps);
+
+  await save(`${year - 40}-01-01`);
+  assertEquals(stored(), 40);
+  await save(`${year - 10}-01-01`);
+  assertEquals(stored(), null);
+  await save(`${year - 95}-01-01`);
+  assertEquals(stored(), null);
+
+  assertEquals(ageOn('1990-06-15', new Date('2026-06-14T12:00:00Z')), 35);
+  assertEquals(ageOn('1990-06-15', new Date('2026-06-15T00:00:00Z')), 36);
+  assertEquals(ageOn('1990-06-15', new Date('2026-12-31T00:00:00Z')), 36);
+});
+
+Deno.test('coach profile: invalid values are rejected without touching the stored row', async () => {
+  const { rest } = await fixture();
+  const deps = { rest, cfg };
+  const bad: [string, unknown][] = [
+    ['empty body', {}],
+    ['not an object', [1]],
+    ['unknown sex', { sex: 'robot' }],
+    ['future birth date', { dateOfBirth: '2999-01-01' }],
+    ['rolled-over date', { dateOfBirth: '2026-02-31' }],
+    ['ancient birth date', { dateOfBirth: '1800-01-01' }],
+    ['malformed date', { dateOfBirth: '12/04/1990' }],
+    ['weight too small', { weightKg: 5 }],
+    ['weight not a number', { weightKg: '80' }],
+    ['height too large', { heightCm: 400 }],
+    ['name too long', { displayName: 'x'.repeat(81) }],
+    ['name not a string', { displayName: 7 }],
+  ];
+  for (const [label, body] of bad) {
+    const res = await handleCoachRequest(call('profile', { method: 'PUT', body }), deps);
+    assertEquals(res.status, 400, label);
+    await res.body?.cancel();
+  }
+  assertEquals((rest as any).coach.get('profiles').length, 0);
+  assertEquals((await handleCoachRequest(call('profile', { method: 'DELETE' }), deps)).status, 405);
+  assertEquals((await handleCoachRequest(call('profile', { token: '' }), deps)).status, 401);
 });

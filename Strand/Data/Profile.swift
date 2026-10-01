@@ -17,11 +17,18 @@ final class ProfileStore: ObservableObject {
             // change to the cross-platform backup contract. `BackupSettings.apply` clears
             // `profile.dateOfBirth` on restore so a restored Int age re-derives the DOB here.
             d.set(age, forKey: K.legacyAge)
+            if dateOfBirth != oldValue { markCloudDirty() }
         }
     }
-    @Published var sex: String { didSet { d.set(sex, forKey: K.sex) } }          // "male" | "female" | "nonbinary"
-    @Published var weightKg: Double { didSet { d.set(weightKg, forKey: K.weight) } }
-    @Published var heightCm: Double { didSet { d.set(heightCm, forKey: K.height) } }
+    @Published var sex: String {                                                  // "male" | "female" | "nonbinary"
+        didSet { d.set(sex, forKey: K.sex); if sex != oldValue { markCloudDirty() } }
+    }
+    @Published var weightKg: Double {
+        didSet { d.set(weightKg, forKey: K.weight); if weightKg != oldValue { markCloudDirty() } }
+    }
+    @Published var heightCm: Double {
+        didSet { d.set(heightCm, forKey: K.height); if heightCm != oldValue { markCloudDirty() } }
+    }
     /// Optional waist circumference (cm); 0 = not set. Only used to ALSO show an estimated VO₂max
     /// alongside Fitness Age — the Fitness Age itself does not need it (the body term cancels).
     @Published var waistCm: Double { didSet { d.set(waistCm, forKey: K.waist) } }
@@ -79,9 +86,13 @@ final class ProfileStore: ObservableObject {
         }
     }
 
-    /// What Today's greeting calls the user. Optional and device-local like the rest of the profile.
+    /// What Today's greeting calls the user. Optional; stored on this device and, in cloud mode, in the
+    /// cloud profile with the other fields Settings edits (see ``ProfileCloudSync``).
     @Published var displayName: String {
-        didSet { d.set(displayName.trimmingCharacters(in: .whitespacesAndNewlines), forKey: K.displayName) }
+        didSet {
+            d.set(displayName.trimmingCharacters(in: .whitespacesAndNewlines), forKey: K.displayName)
+            if displayName != oldValue { markCloudDirty() }
+        }
     }
 
     private let d = UserDefaults.standard
@@ -103,6 +114,7 @@ final class ProfileStore: ObservableObject {
         static let stepsManualCoeff = "profile.stepsManualCoefficient"
         static let stepsHasMotion = "profile.stepsHasBankedMotion"
         static let avatar = "profile.avatarImageData"
+        static let cloudDirty = "profile.cloudDirty"
     }
 
     init() {
@@ -144,6 +156,59 @@ final class ProfileStore: ObservableObject {
         stepsManualCoefficient = max(0, d.object(forKey: K.stepsManualCoeff) as? Double ?? 0)
         stepsHasBankedMotion = d.object(forKey: K.stepsHasMotion) as? Bool ?? false
         avatarImageData = d.data(forKey: K.avatar)
+    }
+
+    // MARK: - Cloud profile
+
+    /// True while a synced field (name, date of birth, sex, height, weight) has been edited and the cloud
+    /// has not accepted it yet. Persisted so an edit made offline is still uploaded after a relaunch.
+    var cloudDirty: Bool {
+        get { d.bool(forKey: K.cloudDirty) }
+        set { d.set(newValue, forKey: K.cloudDirty) }
+    }
+
+    /// Set while ``applyCloud(_:)`` writes server values, so loading the profile never reads as a user edit.
+    private var applyingCloud = false
+
+    private func markCloudDirty() { if !applyingCloud { cloudDirty = true } }
+
+    /// The synced fields exactly as they would be uploaded.
+    var cloudSnapshot: CloudProfile {
+        CloudProfile(displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
+                     dateOfBirth: Self.dayString(dateOfBirth), sex: sex, heightCm: heightCm, weightKg: weightKg)
+    }
+
+    /// Whether this device holds profile values the user entered before cloud sync existed. Name, sex,
+    /// height and weight are only written to storage once set; an age other than the 30 a new install
+    /// starts at is the equivalent signal for date of birth. Defaults alone are never uploaded.
+    var hasStoredCloudFields: Bool {
+        let named = !(d.string(forKey: K.displayName) ?? "").isEmpty
+        return named || [K.sex, K.weight, K.height].contains { d.object(forKey: $0) != nil } || age != 30
+    }
+
+    /// Adopt the cloud profile. Fields the cloud has not stored keep their local value.
+    func applyCloud(_ remote: CloudProfile) {
+        applyingCloud = true
+        defer { applyingCloud = false }
+        if let dob = remote.dateOfBirth.flatMap(Self.day(from:)) { dateOfBirth = dob }
+        if let remoteSex = remote.sex, ["male", "female", "nonbinary"].contains(remoteSex) { sex = remoteSex }
+        if let height = remote.heightCm { heightCm = height }
+        if let weight = remote.weightKg { weightKg = weight }
+        if !remote.displayName.isEmpty { displayName = remote.displayName }
+        cloudDirty = false
+    }
+
+    /// `yyyy-MM-dd` in the user's calendar, so the day they picked is the day the cloud stores.
+    nonisolated static func dayString(_ date: Date) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+    }
+
+    /// Inverse of ``dayString(_:)``, anchored at noon so a DST shift can't move it to another day.
+    nonisolated static func day(from string: String) -> Date? {
+        let parts = string.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        return Calendar.current.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2], hour: 12))
     }
 
     // MARK: - Profile picture

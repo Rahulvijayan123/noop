@@ -105,6 +105,10 @@ step 5, so the coach quotes the scores the backend published instead of recomput
 app saves the conversation and the coach's memory through the same function. Charts and tables are
 drawn by a second model pass on the server, which fact-checks them against the figures in the answer.
 
+The same function stores the Settings profile (name, date of birth, sex, height, weight) in the owner's
+`profiles` row, the row server-side scoring reads. The phone uploads an edit shortly after it is made and
+loads the stored profile when the app opens, so the values survive a reinstall and a second device.
+
 ## What each score needs
 
 - **Strain, sleep, resting heart rate, steps and calories** appear once a day's readings are in.
