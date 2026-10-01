@@ -9,8 +9,7 @@ import Foundation
 // The longitudinal view, rebuilt on the locked Noop component system so every
 // surface, height and gap is identical: one SegmentedPillControl for the range,
 // a hero recovery ChartCard, a uniform grid of HRV / Resting HR / Day Strain
-// ChartCards (all NoopMetrics.chartHeight tall), and the whole history as a
-// recovery YearHeatStrip in a NoopCard. No hand-sized cards anywhere.
+// ChartCards (all NoopMetrics.chartHeight tall). No hand-sized cards anywhere.
 
 struct TrendsView: View {
     @EnvironmentObject var repo: Repository
@@ -44,10 +43,6 @@ struct TrendsView: View {
     }
 
     @State private var range: Range = .quarter
-
-    // #436 — shareable offline trends report (PDF over a date range). The sheet owns its
-    // own range picker; this just presents it with the loaded history.
-    @State private var showingReport = false
     /// Current appearance, passed into the off-screen recap render so the shared PNG matches the app.
     @Environment(\.colorScheme) private var colorScheme
 
@@ -70,16 +65,6 @@ struct TrendsView: View {
     // and value-ramp bars. Read here at the screen root so a Settings change re-renders on return.
     @AppStorage(UnitPrefs.trendChartStyleKey) private var trendChartStyleRaw = TrendChartStyle.line.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
-
-    // yyyy-MM-dd → Date (en_US_POSIX, UTC), per task spec.
-    private static let dayParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-    private func date(_ day: String) -> Date? { Self.dayParser.date(from: day) }
 
     // MARK: Window selection (relative to the LATEST day, with auto-expand)
 
@@ -282,17 +267,9 @@ struct TrendsView: View {
                         // chart behind an honest "needs N more days" state until enough history exists.
                         TrainingLoadCard(days: repo.days)
                             .staggeredAppear(index: 5)
-                        yearStrip
-                            .staggeredAppear(index: 6)
-                        exportReportRow
-                            .staggeredAppear(index: 7)
                     }
                 }
             }
-        }
-        // #436 — present the offline trends-report exporter (range picker + PDF export).
-        .sheet(isPresented: $showingReport) {
-            TrendsReportSheet(days: repo.days)
         }
         // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
         // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
@@ -507,36 +484,6 @@ struct TrendsView: View {
         .accessibilityValue(Text(format(value)))
     }
 
-    // MARK: Export trends report (#436)
-
-    /// A footer entry that opens the shareable-report sheet. Flat WHOOP card with a blue accent
-    /// action — the icon, label and "Export" CTA all read in the accent (blue) world, no gold.
-    private var exportReportRow: some View {
-        NoopCard(tint: StrandPalette.accent) {
-            HStack(spacing: NoopMetrics.space3) {
-                Image(systemName: "doc.richtext")
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.accent)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                    Text("Export trends report").strandOverline()
-                    Text("A shareable one-page PDF of recovery, sleep, HRV, resting HR and strain over a range, saved on your \(Platform.deviceNoun).")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: NoopMetrics.space2)
-                // The card's call-to-action — routed through the unified button system (secondary kind:
-                // a quiet raised capsule that reads as the card action, not the one primary on the page).
-                NoopButton("Export", systemImage: "square.and.arrow.up", kind: .secondary) {
-                    showingReport = true
-                }
-                .fixedSize()
-            }
-        }
-        .accessibilityElement(children: .contain)
-    }
-
     // MARK: Range control
 
     private func rangeBar(recovery: ResolvedMetric) -> some View {
@@ -724,52 +671,6 @@ struct TrendsView: View {
     }
 
     // MARK: Year heat-strip
-
-    private var yearStrip: some View {
-        // Always show at least a full year for context; expand to all history on ALL.
-        let stripDays = max(range.days ?? repo.days.count, 365)
-        let recent = repo.days.suffix(stripDays)
-        let recoveryDays: [RecoveryDay] = recent.compactMap { d in
-            guard let dt = date(d.day) else { return nil }
-            return RecoveryDay(date: dt, score: d.recovery)
-        }
-        let title = (range == .all && repo.days.count > 365) ? String(localized: "Charge (all history)") : String(localized: "Charge (past year)")
-        return NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                SectionHeader("\(title)", overline: "Calendar", trailing: String(localized: "\(recoveryDays.filter { $0.score != nil }.count) days"))
-                if recoveryDays.isEmpty {
-                    sparsePlaceholder.frame(height: 120)
-                } else {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        YearHeatStrip(days: recoveryDays).padding(.vertical, NoopMetrics.space1 / 2)
-                    }
-                    Divider().overlay(StrandPalette.hairline)
-                    legend
-                }
-            }
-        }
-    }
-
-    private var legend: some View {
-        HStack(spacing: NoopMetrics.space2) {
-            Text("Depleted")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize()
-            LinearGradient(gradient: StrandPalette.recoveryGradient, startPoint: .leading, endPoint: .trailing)
-                .frame(maxWidth: .infinity)
-                .frame(height: NoopMetrics.indicatorTrackHeight)
-                .clipShape(Capsule())
-                .accessibilityHidden(true)
-            Text("Peaked")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize()
-        }
-        .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Charge scale, depleted to peaked")
-    }
 
     // MARK: Shared bits
 

@@ -109,7 +109,6 @@ struct SleepView: View {
     /// True while the hero's "why this is your main sleep" popover is open. The reason text comes
     /// straight from the foundation `MainNightReason` for the displayed night's blocks — never
     /// re-derived here — so the explainer says exactly what the selector decided. (spec 2026-06-20 C1)
-    @State private var showMainSleepWhy = false
     /// The stable detected key of the nap whose "why this is a nap" popover is open, or nil. Keyed by
     /// the nap's own `startTs` so one popover shows at a time even with several nap rows. (C1)
     @State private var napWhyStartTs: Int?
@@ -134,7 +133,6 @@ struct SleepView: View {
     // Android SleepLayoutPrefs keys. Reordered via the Arrange sheet; display-only, no metric changes.
     @AppStorage(SleepLayoutPrefs.orderKey) private var sleepSectionOrderRaw = ""
     @AppStorage(SleepLayoutPrefs.hiddenKey) private var sleepHiddenSectionsRaw = ""
-    @State private var showSleepCustomize = false
 
     /// The analytical cards to render, in saved order minus the hidden set.
     private var sleepVisibleSections: [SleepSection] {
@@ -177,8 +175,7 @@ struct SleepView: View {
                         }
                         // Bleed past ScreenScaffold's 16/24 gutters so the hero column is edge-to-edge
                         // in the upper band; the night scene itself is the fixed topBackground.
-                        // Customize sits at the end of the hero (not floating in a blank band).
-                        restHero(resolved)
+                                        restHero(resolved)
                             .padding(.horizontal, -16)
                             .padding(.top, -24)
                             .staggeredAppear(index: 0)
@@ -292,12 +289,6 @@ struct SleepView: View {
             // Manually add a missed nap (#508): same picker, but the chosen window is staged from raw and
             // stored as its OWN separate session — never folded into main sleep (which would mislabel the
             // awake daytime gap as light sleep).
-            .sheet(isPresented: $showSleepCustomize) {
-                SleepCustomizationSheet(
-                    sectionOrderRaw: $sleepSectionOrderRaw,
-                    hiddenSectionsRaw: $sleepHiddenSectionsRaw
-                )
-            }
             .sheet(item: $addNap) { seed in
                 SleepTimeEditor(bedTs: seed.bedTs, wakeTs: seed.wakeTs,
                                 title: "Add a nap",
@@ -507,22 +498,6 @@ struct SleepView: View {
         return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60.0
     }
 
-    /// The compact "Customize" affordance above the arrangeable cards — opens the Arrange sheet. Mirrors
-    /// the Today tab's arrange entry and the Android Sleep affordance.
-    private var sleepArrangeAffordance: some View {
-        HStack(spacing: 0) {
-            Spacer()
-            Button {
-                showSleepCustomize = true
-            } label: {
-                Label("Customize", systemImage: "slider.horizontal.3")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
     /// Immersive Rest-world hero: compact Bevel-like hierarchy — centered "Sleep", muted circular
     /// performance ring, state word, source badge. Night scene lives on ScreenScaffold.topBackground
     /// (fixed under the status bar); this column only owns the readable content. Presentation-only.
@@ -572,19 +547,8 @@ struct SleepView: View {
                 .padding(.bottom, 4)
                 .accessibilityElement(children: .combine)
             }
-
-            SourceBadge(
-                score != nil ? heroSource(for: night) : (repo.activeDeviceIsOura ? "Oura" : "On-device"),
-                tint: StrandPalette.restColor
-            )
-            .padding(.top, 8)
-
-            // Subtle Customize at the hero foot — functional, not competing with the gauge.
-            sleepArrangeAffordance
-                .padding(.horizontal, 16)
-                .padding(.top, 6)
-                .padding(.bottom, 6)
         }
+        .padding(.bottom, 14)
         .frame(maxWidth: .infinity)
     }
 
@@ -606,36 +570,6 @@ struct SleepView: View {
         case ..<85:  return String(localized: "Good")
         default:     return String(localized: "Optimal")
         }
-    }
-
-    /// Whether a SPECIFIC night's sleep-performance score is WHOOP's own imported figure, an Oura
-    /// ring-provided figure, or NOOP's on-device approximation — so the hero is honest about provenance,
-    /// like Today's badges. Keyed by the night's wake-day (matching `performanceScore(for:)`) so a
-    /// navigated night's badge tracks ITS OWN score's provenance, not last night's.
-    private func heroSource(for night: Night) -> LocalizedStringKey {
-        let wakeDay = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(night.session.endTs)))
-        if repo.importedSleep[wakeDay]?.performancePct != nil { return "Whoop" }
-        return repo.activeDeviceIsOura ? "Oura" : "On-device"
-    }
-
-    // MARK: - Provenance for the displayed night (COMPONENT 4, spec 2026-06-20)
-
-    /// The REAL per-day merge winner for the DISPLAYED night's sleep numbers, as the same brand wording the
-    /// By-Day badge / Today / Intelligence use ("On-device" / "Whoop"). A WHOOP export covering the night's
-    /// wake-day wins the dashboard merge (imports win field-by-field, Repository.mergeDaily), so the badge
-    /// says "Whoop"; otherwise the night was scored on-device by NOOP. Keyed by the night's LOCAL wake-day
-    /// (the `mergeSleep` / importer convention, sleep is filed under the day you woke), so a navigated past
-    /// night reads its OWN provenance, not last night's. Honest: never a blanket "on-device". Apple Health
-    /// carries no sleep into `importedSleep`, so the sleep merge winner is only ever Whoop vs on-device. (C4)
-    private func nightSource(_ night: Night) -> String {
-        let wakeDay = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(night.session.endTs)))
-        if repo.importedSleep[wakeDay] != nil { return String(localized: "Whoop") }
-        // An Oura ring PROVIDES the night's stages (its own SleepNet hypnogram, banked as the imported
-        // session that wins the merge), so name it "Oura" — not the generic "On-device" that implies a
-        // NOOP computation. WHOOP import still wins above; only a night surfaced under a live Oura strap
-        // reaches here as "Oura".
-        if repo.activeDeviceIsOura { return String(localized: "Oura") }
-        return String(localized: "On-device")
     }
 
     // MARK: - 0b. SLEEP MARKS — tap to log "going to sleep" / "I'm awake" (#461, Phase 1)
@@ -707,30 +641,23 @@ struct SleepView: View {
             .sorted { $0.effectiveStartTs < $1.effectiveStartTs }
         let mainMin = night.stages.total
         let napMin = naps.reduce(0.0) { $0 + Double($1.endTs - $1.effectiveStartTs) / 60.0 }
-        NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                HStack {
-                    SectionHeader("Naps", overline: "Daytime sleep", trailing: nil)
-                    Spacer(minLength: 8)
-                    Button { addNap = AddNapSeed(forNight: night) } label: {
-                        Label("Add nap", systemImage: "plus.circle.fill")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.restColor)
+        if !naps.isEmpty {
+            NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.restColor) {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    HStack {
+                        SectionHeader("Naps", overline: "Daytime sleep", trailing: nil)
+                        Spacer(minLength: 8)
+                        Button { addNap = AddNapSeed(forNight: night) } label: {
+                            Label("Add nap", systemImage: "plus.circle.fill")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.restColor)
+                        }
+                        .buttonStyle(LiquidPressStyle())
+                        .accessibilityLabel("Add a nap")
                     }
-                    .buttonStyle(LiquidPressStyle())
-                    .accessibilityLabel("Add a nap")
-                }
-                // Daily split (#518): only meaningful once the day has a nap; a single-night day reads
-                // exactly as before. Total = main + naps, the time that drives the day's Rest.
-                if !naps.isEmpty {
+                    // Daily split (#518): Total = main + naps, the time that drives the day's Rest.
                     napSummaryRow(mainMin: mainMin, napMin: napMin)
                     Divider().overlay(StrandPalette.hairline)
-                }
-                if naps.isEmpty {
-                    Text("No naps recorded for this day.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                } else {
                     ForEach(naps, id: \.startTs) { nap in
                         napRow(nap)
                         if nap.startTs != naps.last?.startTs {
@@ -833,12 +760,12 @@ struct SleepView: View {
     private func stageCard(_ night: Night, intervals: [SleepInterval]) -> some View {
         let s = night.stages
         let isPersisted = (night.realSegments?.count ?? 0) >= 2
-        // An Oura night's stages are the ring's RAW on-device SleepNet classification (decoded off the 0x49
-        // phase stream), NOT a NOOP approximation — so it gets its own honest caption instead of the
-        // "stages approximate (on-device)" one that describes NOOP's own sparse-motion staging.
+        // An Oura night's stages are the ring's RAW SleepNet classification (decoded off the 0x49 phase
+        // stream), NOT a NOOP approximation — so it gets its own honest caption instead of the
+        // "stages approximate" one that describes NOOP's own sparse-motion staging.
         let stageCaption = repo.activeDeviceIsOura
-            ? String(localized: "raw on-device stages")
-            : String(localized: "stages approximate (on-device)")
+            ? String(localized: "raw stages")
+            : String(localized: "stages approximate")
         let subtitle = isPersisted
             ? String(localized: "\(durationText(night.timeInBed)) in bed · \(efficiencyText(night)) efficiency · \(stageCaption)")
             : String(localized: "\(durationText(night.timeInBed)) in bed · \(efficiencyText(night)) efficiency")
@@ -1192,44 +1119,6 @@ struct SleepView: View {
                     wakeEditButton(night)
                 }
                 .frame(maxWidth: .infinity)
-                // Provenance (C4) + the "why this is your main sleep" explainer (C1). The badge names the
-                // REAL per-day merge winner; the info button reveals the foundation reason for the pick.
-                Divider().overlay(StrandPalette.hairline)
-                mainSleepFooter(night)
-            }
-        }
-    }
-
-    /// The hero's footer: the night's provenance badge (the real merge winner) next to a tappable "why
-    /// this is your main sleep" affordance. Tapping reveals the foundation `MainNightReason` copy in a
-    /// popover, so the pick is explainable on the spot without leaving the hero. (spec 2026-06-20 C1/C4)
-    @ViewBuilder
-    private func mainSleepFooter(_ night: Night) -> some View {
-        HStack(spacing: 10) {
-            // C4 — provenance. Dynamic String into the badge slot, so wrap in "\()" (the
-            // String vs LocalizedStringKey SwiftUI footgun) to show it verbatim, not as a lookup key.
-            SourceBadge("\(nightSource(night))", tint: StrandPalette.restColor)
-            Spacer(minLength: 8)
-            if mainSleepReasonText(night) != nil {
-                Button { showMainSleepWhy.toggle() } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: "info.circle")
-                        Text("Why this sleep?")
-                    }
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.restColor)
-                    // This is a compact metadata footer inside an already surfaced card. A forced
-                    // 44-point label made the WHOOP / Why row look vertically padded despite having
-                    // only one line of content.
-                    .frame(minHeight: NoopMetrics.compactMetadataMinHeight)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(LiquidPressStyle())
-                .help("Why this is your main sleep")
-                .accessibilityLabel("Why this is your main sleep")
-                .popover(isPresented: $showMainSleepWhy, arrowEdge: .bottom) {
-                    whyPopover(text: mainSleepReasonText(night) ?? "", napSuffix: false)
-                }
             }
         }
     }
@@ -1980,30 +1869,6 @@ struct SleepView: View {
     static func isNap(_ s: CachedSleepSession, main: CachedSleepSession?) -> Bool {
         guard let main else { return false }
         return s.startTs != main.startTs
-    }
-
-    // MARK: - Why-this-is-your-main-sleep explainer (COMPONENT 1, spec 2026-06-20)
-
-    /// The verbatim reason copy for the displayed night, with {DUR} filled as "Xh Ym" from the chosen
-    /// block's asleep duration — driven entirely by the foundation `MainNightReason`, so the explainer
-    /// states exactly what the selector decided (never a re-derived guess). Resolved over the day's blocks
-    /// via the same `mainNightSelection` API the analytics pick uses, with the SAME learned habitual the
-    /// hero used, so the words match the block the hero shows. nil only when the day has no blocks. (C1)
-    private func mainSleepReasonText(_ night: Night) -> String? {
-        guard let sel = SleepStageTotals.mainNightSelection(
-            night.sourceBlocks.map { SleepStageTotals.NightBlock(start: $0.effectiveStartTs, end: $0.endTs) },
-            offsetSec: SleepView.tzOffsetSec, habitualMidsleepSec: habitualMidsleepSec) else { return nil }
-        let dur = durationText(sel.asleepMinutes)
-        switch sel.reason {
-        case .onlyBlock:
-            return String(localized: "This is your only sleep block today.")
-        case .longest:
-            return String(localized: "Picked as your main sleep because it was your longest block (\(dur)).")
-        case .longestNearUsual:
-            return String(localized: "Picked as your main sleep because it was your longest block (\(dur)), near your usual bedtime.")
-        case .alignedToUsual:
-            return String(localized: "Picked as your main sleep because it started near your usual sleep time.")
-        }
     }
 
     // `mergeDay` / `nightOnsetTs` / the fragment-level `isPreOnsetAwakeStub(_:)` moved to

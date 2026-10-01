@@ -18,6 +18,9 @@ import Foundation
 // changes unless `--demo-sync` is present: `active` stays false and LiquidBatteryButton reads LiveState
 // exactly as before, so the shipped control is untouched. Everything here is SYNTHETIC — this is not a
 // real battery reading and no strap is contacted.
+//
+// NOTE: the Today header control no longer morphs while syncing, so only the synthetic battery below still
+// has an effect; the burst cycle and chunk tally are unused.
 
 enum DemoSyncHarness {
 

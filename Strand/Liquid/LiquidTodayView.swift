@@ -52,8 +52,6 @@ struct LiquidTodayView: View {
 
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
-    /// Input providers for the three scores, keyed by recovery / strain / sleep_performance.
-    @State private var heroProviderByMetric: [String: ScoreInputProvider] = [:]
     @State private var stress: Double?             // StressModel(...).score, 0–3
     @State private var fitnessAge: Double?         // exploreSeries("fitness_age").last
     @State private var vo2max: Double?             // exploreSeries("vo2max_est").last (#1391)
@@ -575,27 +573,12 @@ struct LiquidTodayView: View {
                         .frame(minWidth: 320, minHeight: 360)
                         .liquidPopoverAdaptation()
                 }
-                // Long names fade beneath the trailing controls while an expanded transient control
-                // participates in layout and pushes its preceding siblings left. The reserve is the
-                // cluster's MEASURED width, not a constant: a constant is only ever right for the exact
-                // set of controls it was written against, and this row has already gained one (Customize,
-                // #1207) since. Measuring also means the fade tracks the sync capsule as it expands,
-                // which is the push-left behaviour rather than a separate approximation of it.
+                // Long names fade beneath the trailing controls. The reserve is the cluster's MEASURED
+                // width, not a constant: a constant is only ever right for the exact set of controls it
+                // was written against.
                 .headerTrailingControlFadeMask(reserving: headerControlsWidth)
                 HStack(spacing: headerClusterSpacing) {
                     LiquidBatteryButton()
-                    // One entry point for section order/visibility and both nested card editors.
-                    Button { customizationDestination = .today } label: {
-                        Image(systemName: "slider.horizontal.3")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .frame(
-                                width: NoopMetrics.compactControlSize,
-                                height: NoopMetrics.compactControlSize
-                            )
-                    }
-                    .nativeLiquidGlassHeaderButton()
-                    .accessibilityLabel("Customize Today")
                 }
                 .background(
                     GeometryReader { proxy in
@@ -682,17 +665,6 @@ struct LiquidTodayView: View {
             HeroScoreCell(label: String(localized: "Rest"), score: restScore, tint: StrandPalette.restColor,
                           animated: dataLoaded, onGuide: { guideSection = .rest },
                           detailRoute: .metric(HeroRingMetric.rest))
-                .overlay(alignment: .top) {
-                    if let sourceLabel = heroSourceLabel {
-                        SourceBadge("\(sourceLabel)", tint: StrandPalette.textSecondary)
-                            // Match the badge's trailing edge to the Rest vessel and centre it on the card border.
-                            .fixedSize()
-                            .frame(width: HeroScoreCell.vesselDiameter, alignment: .trailing)
-                            .offset(y: -(NoopMetrics.space4 + NoopMetrics.sourceBadgeHeight / 2))
-                            .allowsHitTesting(false)
-                            .accessibilityLabel(Text("Source: \(sourceLabel)"))
-                    }
-                }
         }
         .padding(.vertical, NoopMetrics.space4)
         .padding(.horizontal, NoopMetrics.space3)
@@ -1536,24 +1508,12 @@ struct LiquidTodayView: View {
     private var dataSourcesSection: some View {
         VStack(spacing: 8) {
             sectionHead("Data sources", trailing: "Provenance")
-            NavigationLink(value: TabRoute.dataSources) {
-                card {
-                    VStack(spacing: 12) {
-                        HStack {
-                            Text("Synced from").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                            Spacer()
-                            HStack(spacing: 4) {
-                                Text("View sources").font(StrandFont.subhead).foregroundStyle(StrandPalette.textTertiary)
-                                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(StrandPalette.textTertiary)
-                            }
-                        }
-                        LiquidStrapBatteryRow()
-                        LiquidSyncStatusRow()
-                    }
+            card {
+                VStack(spacing: 12) {
+                    LiquidStrapBatteryRow()
+                    LiquidSyncStatusRow()
                 }
             }
-            .buttonStyle(LiquidPressStyle())
         }
     }
 
@@ -1679,18 +1639,6 @@ struct LiquidTodayView: View {
         async let appleA = repo.appleDailyRows()
         async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
-        // Ask the same cross-source resolver the Classic Today view uses which source actually won each
-        // displayed score. Include the exact carried-Charge day; a fixed relative lookback can miss a
-        // legitimately old carried score.
-        let sourceDayKey = selectedDayKey
-        let sourceFromDay = min(sourceDayKey, priorScored?.day ?? sourceDayKey)
-        async let chargeSourceA = repo.resolvedSeries(key: "recovery", source: Repository.whoopSource,
-                                                      from: sourceFromDay, to: sourceDayKey)
-        async let effortSourceA = repo.resolvedSeries(key: "strain", source: Repository.whoopSource,
-                                                      from: sourceDayKey, to: sourceDayKey)
-        async let restSourceA = repo.resolvedSeries(key: "sleep_performance", source: Repository.whoopSource,
-                                                    from: sourceDayKey, to: sourceDayKey)
-
         let restSeries = await restA
         let stepsSeries = await stepsA
         let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
@@ -1789,29 +1737,6 @@ struct LiquidTodayView: View {
         hrSegments = hrGapSegments(bucketTs: hrBuckets.map { $0.ts }, bucketSeconds: 300)
         workouts = (await wkA).filter { $0.startTs >= from && $0.startTs < to }
 
-        let (chargeSource, effortSource, restSource) = await (chargeSourceA, effortSourceA, restSourceA)
-        let sourceResolutions = [
-            ("recovery", chargeSource),
-            ("strain", effortSource),
-            ("sleep_performance", restSource),
-        ]
-        var providers: [String: ScoreInputProvider] = [:]
-        for (metric, resolution) in sourceResolutions {
-            let selectedPoint = resolution.points.last(where: { $0.day == sourceDayKey })
-            let winner = selectedPoint
-                ?? (metric == "recovery"
-                    ? priorScored.flatMap { prior in resolution.points.last(where: { $0.day == prior.day }) }
-                    : nil)
-            if let winner {
-                providers[metric] = await repo.scoreInputProvider(
-                    resolvedSource: winner.source,
-                    day: winner.day,
-                    metricKey: metric
-                )
-            }
-        }
-        heroProviderByMetric = providers
-
         // #today-hosted-cards: build the shared SleepModel that backs the hosted sleep cards, but ONLY when
         // at least one sleep-origin card is actually hosted — otherwise Today pays no extra Repository cost.
         // The inputs (allSleepSessions / habitualMidsleepSec / sessionMotions) are loaded exactly as the
@@ -1857,13 +1782,6 @@ struct LiquidTodayView: View {
     /// before the first load() populates the cache.
     private var readiness: ReadinessEngine.Readiness {
         cachedReadiness ?? ReadinessEngine.evaluate(days: repo.days, today: cachedDisplayDay?.day)
-    }
-
-    /// One card-level provenance label. Identical winners collapse to one name; mixed scores show at most
-    /// two distinct winners in Charge / Effort / Rest order so the compact badge stays readable.
-    private var heroSourceLabel: String? {
-        Self.heroSourceLabel(
-            providers: ["recovery", "strain", "sleep_performance"].compactMap { heroProviderByMetric[$0] })
     }
 
     /// Pure aggregation seam for the Liquid hero. The provider mapper names the sensors/imports that
@@ -2253,10 +2171,9 @@ private struct HeroScoreCell: View {
 /// It used to ALSO hold itself up for the whole of `live.backfilling`, because `ble.syncNow()` kicks off a
 /// BLE history offload that far outlives the local `refreshing` flag (which flips false ~350ms after the
 /// pull releases), and at the time the only other feedback was the easy-to-miss header `SyncStatusChip`.
-/// `LiquidBatteryButton` is now that feedback — an ambient, always-on-screen signal that carries a live
-/// chunk count — so the long tail belongs there and the vessel hands off to it instead of shadowing it.
-/// Two surfaces reporting one signal is what this replaces: a 64pt banner AND a morphing header, both
-/// running their own 60Hz clock (`LiquidVessel` has one too) for the same multi-hour offload.
+/// The Data sources card (`LiquidSyncStatusRow`) is now that feedback, with a live chunk count, so the long
+/// tail belongs there and the vessel hands off to it instead of shadowing it. The header battery stays a
+/// battery while syncing; two surfaces reporting one signal is what this avoids.
 ///
 /// No longer reads LiveState at all, so it is no longer an isolated leaf — there is nothing left to
 /// isolate it from.
@@ -2291,57 +2208,8 @@ private struct LiquidRefreshIndicator: View {
     }
 }
 
-/// The ONE debounce for the raw "a sync is happening" signal, for any surface that reflects it.
-///
-/// `live.backfilling` toggles false→true between EVERY offload chunk (`exitBackfilling` at each
-/// HISTORY_END → auto-continue re-kick → `beginBackfill`), with a real BLE round-trip gap in between, and
-/// a deep backlog is up to ~24 chunks in ONE connection (#594 raised the auto-continue cap 6→24). Bound
-/// straight to that signal, an indicator strobes in and out on every chunk boundary. (The MenuBar header
-/// pins a constant height for the same reason — see MenuBarContent.)
-///
-/// Rises INSTANTLY, and falls only after riding out `syncIndicatorSignalDebounceNanoseconds` with no new
-/// chunk. Written once on purpose: this existed as two hand-rolled copies with the delay spelled two
-/// different ways, and the failure mode of letting them drift — an indicator that flickers only against a
-/// strap carrying hours of history — is not reproducible at a desk.
-private struct DebouncedSyncSignal: ViewModifier {
-    let raw: Bool
-    @Binding var debounced: Bool
-    @State private var hideTask: Task<Void, Never>?
-
-    func body(content: Content) -> some View {
-        content
-            .onAppear { apply(raw) }
-            .onChangeCompat(of: raw) { apply($0) }
-            .onDisappear { hideTask?.cancel() }
-    }
-
-    private func apply(_ raw: Bool) {
-        hideTask?.cancel()
-        guard !raw else {
-            debounced = true                        // a sync is active — show at once
-            return
-        }
-        guard debounced else { return }
-        // Might just be the gap between two chunks — wait it out; a new chunk cancels this.
-        hideTask = Task { @MainActor in
-            try? await Task.sleep(
-                nanoseconds: StrandMotion.syncIndicatorSignalDebounceNanoseconds
-            )
-            guard !Task.isCancelled else { return }
-            debounced = false
-        }
-    }
-}
-
-private extension View {
-    /// Drive `debounced` from the raw sync signal through the shared debounce above.
-    func debouncedSyncSignal(_ raw: Bool, into debounced: Binding<Bool>) -> some View {
-        modifier(DebouncedSyncSignal(raw: raw, debounced: debounced))
-    }
-}
-
 /// Carries the trailing header cluster's measured width out to the day title's fade mask, so the reserve
-/// is whatever the controls actually occupy — including the sync capsule mid-expansion.
+/// is whatever the controls actually occupy.
 private struct HeaderControlsWidthKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
@@ -2349,9 +2217,7 @@ private struct HeaderControlsWidthKey: PreferenceKey {
     }
 }
 
-/// Gap between the round Today-header controls. iOS tightens it so the sync capsule has room to expand
-/// on a phone-width header without crowding the day title; macOS has the window width to spare, so it
-/// opens the cluster up instead of paying for space it does not need.
+/// Gap between the round Today-header controls.
 #if os(iOS)
 private let headerClusterSpacing = NoopMetrics.space1
 #else
@@ -2783,35 +2649,11 @@ extension LiquidTodayView {
 }
 
 /// Active-device battery ring: the strap's charge under an active strap, the ring's own under an active
-/// ring. At sync start it briefly expands within the trailing control row, then settles into an in-place
-/// spinner; the layered header keeps either state from moving the Today content. Tap → Devices.
+/// ring. It always reads as the battery, including while history syncs; sync progress lives in the Data
+/// sources card and the pull-to-refresh label. Tap → Devices.
 private struct LiquidBatteryButton: View {
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var router: NavRouter
-
-    /// Debounced by `debouncedSyncSignal` below, so a per-chunk `backfilling` gap cannot flash the
-    /// indicator back to the battery reading in the middle of one logical sync.
-    @State private var syncing = false
-    #if DEBUG
-    /// Driven only by the `--demo-sync` harness; ignored entirely when that flag is absent.
-    @State private var demoSyncing = false
-    /// Synthetic chunk tally for the harness, so the expanded read-out is exercised without a strap.
-    /// Kept local rather than written into LiveState — a demo aid must not touch real collector state.
-    @State private var demoChunks = 0
-    #endif
-
-    /// The raw, confirmed "strap history is syncing" signal.
-    ///
-    /// Pull-to-refresh is not evidence of an offload: `syncNow()` can still decline after its
-    /// connected/bonded gate when the connection handshake or backing store is not ready. A successful
-    /// `beginBackfill()` publishes `live.backfilling` synchronously, so that state is both prompt and the
-    /// only honest source for the header and its VoiceOver label.
-    private var syncingRaw: Bool {
-        #if DEBUG
-        if DemoSyncHarness.active { return demoSyncing }
-        #endif
-        return live.backfilling
-    }
 
     private var batteryDisplay: LiquidTodayView.StrapBatteryDisplay {
         #if DEBUG
@@ -2859,86 +2701,15 @@ private struct LiquidBatteryButton: View {
             EmptyView()
         } else {
             Button { router.openDevices() } label: {
-                ChargeSyncIndicator(
-                    batteryState: indicatorState,
-                    syncing: syncing,
-                    chunks: syncChunks
-                )
+                ChargeSyncIndicator(batteryState: indicatorState, syncing: false, chunks: 0)
             }
             .nativeLiquidGlassSyncButton()
             .accessibilityLabel(batteryAccessibility)
-            .debouncedSyncSignal(syncingRaw, into: $syncing)
-            // DEBUG-gated at the CALL SITE too, not just in the body: in Release the harness must cost
-            // literally nothing, rather than an async task created and immediately returned per appearance.
-            #if DEBUG
-            .task { await runDemoSyncCycleIfNeeded() }
-            #endif
         }
-    }
-
-    /// DEBUG `--demo-sync` only: loop the syncing signal so the charge→sync morph plays in both
-    /// directions without a strap. Returns immediately in Release and whenever the flag is absent, and
-    /// `.task` cancels it on disappear.
-    private func runDemoSyncCycleIfNeeded() async {
-        #if DEBUG
-        guard DemoSyncHarness.active else { return }
-        while !Task.isCancelled {
-            try? await Task.sleep(
-                nanoseconds: UInt64(DemoSyncHarness.idleSeconds * 1_000_000_000)
-            )
-            guard !Task.isCancelled else { return }
-            demoChunks = 0
-            demoSyncing = true
-            // Tick the tally the way an offload does, so the expanded label is watched changing rather
-            // than appearing once and holding.
-            for tick in 1...DemoSyncHarness.chunkTicks {
-                try? await Task.sleep(
-                    nanoseconds: UInt64(DemoSyncHarness.chunkIntervalSeconds * 1_000_000_000)
-                )
-                guard !Task.isCancelled else { return }
-                demoChunks = tick
-            }
-            demoSyncing = false
-        }
-        #endif
-    }
-
-    /// Chunks acked this session, shown inside the spinner where the battery percentage sits. The
-    /// expanded label stays "Syncing" — this is the numeric read-out, not the caption.
-    private var syncChunks: Int {
-        #if DEBUG
-        if DemoSyncHarness.active { return demoChunks }
-        #endif
-        return live.syncChunksThisSession
     }
 
     /// Never "Strap battery" alone for a no-reading state — that was indistinguishable from a real one.
     private var batteryAccessibility: String {
-        if syncing {
-            // `syncChunks` is a COUNT, not an index, so it reads "3 chunks" — the phrasing the Android
-            // twin and `SyncStatusChip` already use. Reusing that exact key also means this read-out
-            // inherits its existing translations rather than adding an untranslated variant.
-            //
-            // The SAME accessor the ring draws from, not `live.syncChunksThisSession` directly: in
-            // Release the two are identical, but under `--demo-sync` reading LiveState here would have
-            // VoiceOver announcing a real count while the ring showed the synthetic one — i.e. the
-            // harness could not be used to check the read-out it exists to exercise.
-            let n = syncChunks
-            guard n > 0 else { return String(localized: "Syncing strap history") }
-            // #689/#815: the connect-time ring backlog, when the strap reported one. Zero is dropped by
-            // `SyncChipState.resolve`, and dropped here for the same reason: "0 pages behind" beside a
-            // running sync contradicts itself. Both counts inflect — the phrase is built from its own
-            // entry and joined through a template, so "1 chunk" and "1 page" read correctly and the
-            // joining punctuation stays inside the translated template rather than being concatenated.
-            let behind = live.pagesBehindAtConnect
-                .flatMap { $0 > 0 ? $0 : nil }
-                .map { String(localized: "\($0) pages behind at connect") }
-            if let behind {
-                return String(localized: "Syncing strap history, \(n) chunks, \(behind)")
-            }
-            return String(localized: "Syncing strap history, \(n) chunks")
-        }
-
         switch batteryDisplay {
         case .notActiveDevice:
             return ""          // not drawn; the label is unreachable and must not claim anything
