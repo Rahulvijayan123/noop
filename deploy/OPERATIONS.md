@@ -2,8 +2,13 @@
 
 Live deployment: droplet `frwhoop-worker-2` (sfo3, 4 vCPU/8 GB, 143.198.62.4),
 systemd unit `frwhoop-worker.service`, runs as user `frwhoop`, code at
-`/opt/noop` (branch `cloud-worker`), private SQLite at `/opt/sqlite`,
+`/opt/noop` (this repository's `Tools/CloudWorker`, `contracts` and `deploy`; the deployed revision
+is in `FRWHOOP_SOURCE_REVISION`), private SQLite at `/opt/sqlite`,
 secrets in `/etc/frwhoop/worker.env` (0600, root-owned).
+
+Production runs with the projection lane off
+(`/etc/systemd/system/frwhoop-worker.service.d/no-projection-replay.conf`). See
+[docs/BACKEND.md](../docs/BACKEND.md) for why, and for the health-check queries.
 
 ## Queue contracts the worker drains
 

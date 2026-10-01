@@ -1,0 +1,657 @@
+// Deno mirror of the portable cases in the retired Node receiver — the object-lane
+// state machine running on the PORTED modules (objects.ts, manifests.ts, s3.ts, keys.ts). The
+// reader/decode cases stay in Node with verifyObjectDigest; what is pinned here is the housing:
+// intents, resumes, refusals, coverage accounting.
+import assert from 'node:assert/strict';
+import { createPushObjects, windowCoverage } from '../_shared/objects.ts';
+import { noopDeviceId, uuidFromParts } from '../_shared/keys.ts';
+import { PushProtocolError } from '../_shared/registry.ts';
+import { ingestProtocolErrorResponse, PushIngestFailure, unexpectedIngestDiagnostic } from '../_shared/pushDiagnostics.ts';
+import { createUploadReceiptStore } from '../_shared/receipts.ts';
+import { makeFakeB2, makeMemRest, compressFor, sha256Hex, B2_BUCKET } from './helpers.ts';
+
+const USER = '11111111-1111-4111-8111-111111111111';
+const OTHER_USER = '22222222-2222-4222-8222-222222222222';
+const STRAP = 'strap-local-01';
+const SECOND = 1_780_000_000; // inside a UTC hour, deliberately not on the boundary
+const CFG: any = {
+  b2KeyId: 'k',
+  b2ApplicationKey: 's',
+  b2Bucket: B2_BUCKET,
+  rawStore: 'b2',
+};
+
+function harness({ now = () => new Date('2026-09-07T18:30:00.000Z') } = {}) {
+  const b2 = makeFakeB2({ now });
+  const rest = makeMemRest();
+  const receiptStore = createUploadReceiptStore({ rest: rest as any, now });
+  const objects = createPushObjects({
+    cfg: CFG,
+    rest: rest as any,
+    raw: b2.s3,
+    upsertRows: (table: string, rows: unknown[], opts: { onConflict: string }) => rest.upsert(table, rows, opts),
+    ensureDevice: (row: Record<string, unknown>) => rest.upsert('devices', row, { onConflict: 'id' }),
+    receiptStore,
+    now,
+  });
+  return { b2, rest, objects, now };
+}
+
+/** A stand-in payload: the lane cares about bytes and counts, not signal content. */
+function payloadOf(seconds: number): Uint8Array {
+  const body = new Uint8Array(seconds * 64);
+  for (let i = 0; i < body.length; i += 1) body[i] = (i * 31 + seconds) % 251;
+  return body;
+}
+
+/** Builds the manifest the device computes before it uploads anything. */
+function manifestFor({ stream, payload, startTs, endTs, sampleCount, compression, objectId }: {
+  stream: string;
+  payload: Uint8Array;
+  startTs: number;
+  endTs: number;
+  sampleCount: number;
+  compression: string;
+  objectId: string;
+}) {
+  const wire = compressFor(compression, payload);
+  return {
+    manifest: {
+      type: 'binaryObject',
+      protocolVersion: '1.2',
+      batchId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      sourceId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      deviceId: STRAP,
+      stream,
+      objectId,
+      startTs,
+      endTs,
+      sampleCount,
+      uncompressedBytes: payload.length,
+      compressedBytes: wire.length,
+      contentSha256: sha256Hex(payload),
+      contentEncoding: compression,
+    },
+    wire,
+  };
+}
+
+/** Full device round: intent, PUT straight to the bucket with the signed URL, then complete. */
+async function shipObject(h: ReturnType<typeof harness>, spec: any) {
+  const { manifest, wire } = manifestFor(spec);
+  const intent = await h.objects.createIntent({ userId: USER, manifest });
+  assert.ok(intent.uploadUrl, 'intent must return a presigned upload url');
+  h.b2.putViaPresignedUrl(intent.uploadUrl, wire, {
+    contentType: intent.requiredHeaders!['content-type'],
+  });
+  const ack = await h.objects.completeObject({ userId: USER, objectId: manifest.objectId });
+  return { manifest, wire, intent, ack };
+}
+
+Deno.test('housing: a PPG object round-trips through a presigned PUT byte-for-byte', async () => {
+  const h = harness();
+  const payload = payloadOf(10);
+  const objectId = '1a1a1a1a-1a1a-4a1a-8a1a-1a1a1a1a1a1a';
+  const { intent, wire, ack } = await shipObject(h, {
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 10,
+    sampleCount: 10,
+    compression: 'gzip',
+    objectId,
+  });
+
+  assert.equal(ack.status, 'ready');
+  assert.equal(ack.deviceId, noopDeviceId(USER, STRAP));
+  assert.equal(ack.duplicate, false);
+  const stored = h.b2.objects.get(intent.objectKey!);
+  assert.ok(stored, 'object must be in the bucket');
+  assert.deepEqual(stored.body, wire, 'bucket bytes must be the uploaded bytes');
+  assert.ok(intent.objectKey!.startsWith(`v3/research/users/${USER}/`));
+  assert.ok(intent.objectKey!.endsWith('.bin.gz'));
+
+  const row = h.rest.manifests.get(objectId);
+  assert.equal(row.status, 'ready');
+  assert.equal(row.sha256_source, 'server_verified');
+  assert.equal(ack.durabilityReceipt.state, 'verified_indexed');
+  assert.equal(ack.durabilityReceipt.contentSha256, sha256Hex(payload));
+  assert.equal(row.compressed_bytes, wire.length);
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+  const [receipt] = h.rest.tables.get('noop_upload_receipts')!;
+  assert.equal(receipt.user_id, USER);
+  assert.equal(receipt.source_id, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+  assert.equal(receipt.device_id, noopDeviceId(USER, STRAP));
+  assert.equal(receipt.stream, 'ppgWaveformSample');
+  assert.equal(receipt.lane, 'object');
+  assert.equal(receipt.auth_mode, 'legacy_fleet');
+  assert.equal(receipt.accepted_status, 'ready');
+});
+
+Deno.test('housing: a truncated upload is refused and never reaches ready', async () => {
+  const h = harness();
+  const payload = payloadOf(10);
+  const objectId = '4d4d4d4d-4d4d-4d4d-8d4d-4d4d4d4d4d4d';
+  const { manifest, wire } = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 10,
+    sampleCount: 10,
+    compression: 'gzip',
+    objectId,
+  });
+
+  const intent = await h.objects.createIntent({ userId: USER, manifest });
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, wire.subarray(0, wire.length - 8));
+
+  await assert.rejects(
+    () => h.objects.completeObject({ userId: USER, objectId }),
+    (err: any) => err.code === 'size_mismatch' && err.status === 409,
+  );
+  assert.equal(h.rest.manifests.get(objectId).status, 'failed');
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 0, 'a failed object must not be catalogued');
+});
+
+Deno.test('housing: completing before the upload lands is refused as object_missing', async () => {
+  const h = harness();
+  const payload = payloadOf(4);
+  const objectId = '5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e';
+  const { manifest } = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 4,
+    sampleCount: 4,
+    compression: 'gzip',
+    objectId,
+  });
+  await h.objects.createIntent({ userId: USER, manifest });
+
+  await assert.rejects(
+    () => h.objects.completeObject({ userId: USER, objectId }),
+    (err: any) => err.code === 'object_missing' && err.status === 409,
+  );
+  assert.equal(h.rest.manifests.get(objectId).status, 'failed');
+});
+
+Deno.test('housing: a manifest rejects a client-chosen key, PII, and a mismatched encoding', async () => {
+  const h = harness();
+  const payload = payloadOf(4);
+  const base = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 4,
+    sampleCount: 4,
+    compression: 'gzip',
+    objectId: '8b8b8b8b-8b8b-4b8b-8b8b-8b8b8b8b8b8b',
+  }).manifest;
+
+  const cases: [string, any][] = [
+    ['objectKey', { ...base, objectKey: 'v3/research/users/x/anything' }],
+    ['deviceId', { ...base, deviceId: 'patient@example.com' }],
+    ['contentEncoding', { ...base, contentEncoding: 'zstd' }],
+    ['contentSha256', { ...base, contentSha256: base.contentSha256.toUpperCase() }],
+    ['stream', { ...base, stream: 'hrSample' }],
+    ['endTs', { ...base, endTs: base.startTs }],
+  ];
+  for (const [field, manifest] of cases) {
+    await assert.rejects(
+      () => h.objects.createIntent({ userId: USER, manifest }),
+      (err: any) => err.code === 'invalid_object_manifest' && err.fields.includes(field),
+      `expected ${field} to be refused`,
+    );
+  }
+  assert.equal(h.rest.manifests.size, 0);
+});
+
+Deno.test('housing: replaying an object is idempotent and writes one manifest row', async () => {
+  const h = harness();
+  const payload = payloadOf(30);
+  const objectId = '9c9c9c9c-9c9c-4c9c-8c9c-9c9c9c9c9c9c';
+  const spec = {
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 30,
+    sampleCount: 30,
+    compression: 'gzip',
+    objectId,
+  };
+
+  const first = await shipObject(h, spec);
+  assert.equal(first.ack.duplicate, false);
+
+  const { manifest } = manifestFor(spec);
+  const replay = await h.objects.createIntent({ userId: USER, manifest });
+  assert.equal(replay.duplicate, true);
+  assert.equal(replay.uploadUrl, undefined, 'a completed object must not be re-signed for upload');
+
+  const secondAck = await h.objects.completeObject({ userId: USER, objectId });
+  assert.equal(secondAck.duplicate, true);
+  assert.equal(secondAck.status, 'ready');
+  assert.equal(secondAck.deviceId, noopDeviceId(USER, STRAP));
+  assert.equal(h.rest.manifests.size, 1);
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+});
+
+Deno.test('housing: projection failure never acknowledges ready and identical completion retries', async () => {
+  const h = harness();
+  const { manifest, wire } = manifestFor({ stream: 'ppgWaveformSample', payload: payloadOf(10),
+    startTs: SECOND, endTs: SECOND + 10, sampleCount: 10, compression: 'gzip',
+    objectId: '1a2a3a4a-1a1a-4a1a-8a1a-1a1a1a1a1a1a' });
+  const intent = await h.objects.createIntent({ userId: USER, manifest });
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, wire, { contentType: intent.requiredHeaders!['content-type'] });
+  const rpc = h.rest.rpc.bind(h.rest);
+  let reject = true;
+  h.rest.rpc = async (name, args) => {
+    if (name === 'noop_commit_object_receipt' && reject) throw new Error('synthetic_projection_failure');
+    return rpc(name, args);
+  };
+  await assert.rejects(() => h.objects.completeObject({ userId: USER, objectId: manifest.objectId }),
+    (error: unknown) => {
+      assert.ok(error instanceof PushIngestFailure);
+      const diagnostic = unexpectedIngestDiagnostic(error, '1.2');
+      assert.equal(diagnostic.protocolVersion, '1.2');
+      assert.equal(diagnostic.stream, 'ppgWaveformSample');
+      assert.equal(diagnostic.stage, 'archive_verify');
+      for (const secret of [USER, STRAP, manifest.objectId, 'synthetic_projection_failure']) {
+        assert.ok(!JSON.stringify(diagnostic).includes(secret));
+      }
+      return true;
+    });
+  assert.equal(h.rest.manifests.get(manifest.objectId).status, 'pending');
+  assert.equal(h.rest.manifests.get(manifest.objectId).durability_receipt, undefined);
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 0);
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 0);
+  reject = false;
+  const ack = await h.objects.completeObject({ userId: USER, objectId: manifest.objectId });
+  assert.equal(ack.status, 'ready');
+  assert.equal(ack.deviceId, noopDeviceId(USER, STRAP));
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+  assert.deepEqual(h.b2.objects.get(intent.objectKey!)!.body, wire);
+});
+
+Deno.test('housing: intent retry repairs a failed durable receipt before duplicate ACK', async () => {
+  const h = harness();
+  const { manifest, wire } = manifestFor({ stream: 'ppgWaveformSample', payload: payloadOf(10),
+    startTs: SECOND, endTs: SECOND + 10, sampleCount: 10, compression: 'gzip',
+    objectId: '1a2a3a4a-1a1a-4a1a-8a1a-1a1a1a1a1a1b' });
+  const intent = await h.objects.createIntent({ userId: USER, manifest });
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, wire);
+  const upsert = h.rest.upsert.bind(h.rest);
+  let reject = true;
+  h.rest.upsert = async (table, rows, options) => {
+    if (table === 'noop_upload_receipts' && reject) throw new Error('synthetic_receipt_failure');
+    return upsert(table, rows, options);
+  };
+  await assert.rejects(() => h.objects.completeObject({ userId: USER, objectId: manifest.objectId }));
+  assert.equal(h.rest.manifests.get(manifest.objectId).status, 'ready');
+  const durabilityReceipt = structuredClone(h.rest.manifests.get(manifest.objectId).durability_receipt);
+  await assert.rejects(() => h.objects.createIntent({ userId: USER, manifest }));
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 0);
+  reject = false;
+  await assert.rejects(() => h.objects.createIntent({ userId: OTHER_USER, manifest }),
+    (error: any) => error.code === 'forbidden' && error.status === 403);
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 0, 'an unauthorized retry cannot repair another owner receipt');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const retry = await h.objects.createIntent({ userId: USER, manifest });
+    assert.equal(retry.duplicate, true);
+    assert.deepEqual(retry.durabilityReceipt, durabilityReceipt);
+    assert.equal(retry.uploadUrl, undefined);
+  }
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 1);
+  assert.equal(h.rest.rowCount('noop_push_acks'), 0, 'object acceptance is not an inline projection ACK');
+  assert.deepEqual(h.b2.objects.get(durabilityReceipt.objectKey)!.body, wire);
+});
+
+Deno.test('housing: post-commit index metadata failure preserves durable bytes and retries without duplicate rows', async () => {
+  const h = harness();
+  const { manifest, wire } = manifestFor({ stream: 'ppgWaveformSample', payload: payloadOf(10),
+    startTs: SECOND, endTs: SECOND + 10, sampleCount: 10, compression: 'gzip',
+    objectId: '1a2a3a4a-1a1a-4a1a-8a1a-1a1a1a1a1a1c' });
+  const intent = await h.objects.createIntent({ userId: USER, manifest });
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, wire);
+  const upsert = h.rest.upsert.bind(h.rest);
+  let reject = true;
+  h.rest.upsert = async (table, rows, options) => {
+    if (table === 'noop_signal_windows' && reject) throw new Error('synthetic_metadata_failure');
+    return upsert(table, rows, options);
+  };
+  await assert.rejects(() => h.objects.completeObject({ userId: USER, objectId: manifest.objectId }),
+    (error: unknown) => error instanceof PushIngestFailure && error.stage === 'projection');
+  const saved = h.rest.manifests.get(manifest.objectId);
+  const receipt = structuredClone(saved.durability_receipt);
+  assert.equal(saved.status, 'ready', 'the atomic durability commit already succeeded');
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+  assert.equal(h.rest.rowCount('noop_push_acks'), 0);
+  reject = false;
+  const ack = await h.objects.completeObject({ userId: USER, objectId: manifest.objectId });
+  assert.equal(ack.duplicate, true);
+  assert.deepEqual(ack.durabilityReceipt, receipt);
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 1);
+  assert.deepEqual(h.b2.objects.get(receipt.objectKey)!.body, wire);
+});
+
+Deno.test('housing: scoring gate refusal keeps object unacknowledged and retries the same archived bytes', async () => {
+  const h = harness();
+  const { manifest, wire } = manifestFor({ stream: 'ppgWaveformSample', payload: payloadOf(10),
+    startTs: SECOND, endTs: SECOND + 10, sampleCount: 10, compression: 'gzip',
+    objectId: '8a2a3a4a-1a1a-4a1a-8a1a-1a1a1a1a1a1a' });
+  const intent = await h.objects.createIntent({ userId: USER, manifest });
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, wire, { contentType: intent.requiredHeaders!['content-type'] });
+  const rpc = h.rest.rpc.bind(h.rest);
+  let busy = true;
+  h.rest.rpc = async (name, args) => {
+    if (name === 'noop_commit_object_receipt' && busy) {
+      const error = new Error('private SQL detail') as Error & { receiverCode: string };
+      error.receiverCode = 'scoring_input_gate_busy';
+      throw error;
+    }
+    return rpc(name, args);
+  };
+  await assert.rejects(() => h.objects.completeObject({ userId: USER, objectId: manifest.objectId }),
+    (error: unknown) => {
+      assert.ok(error instanceof PushProtocolError);
+      const response = ingestProtocolErrorResponse(error, '1.2');
+      assert.equal(response.status, 503);
+      assert.equal(response.headers.get('retry-after'), '2');
+      return error.code === 'scoring_input_gate_busy';
+    });
+  assert.equal(h.rest.manifests.get(manifest.objectId).status, 'pending');
+  assert.equal(h.rest.manifests.get(manifest.objectId).durability_receipt, undefined);
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 0);
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 0);
+  assert.deepEqual(h.b2.objects.get(intent.objectKey!)!.body, wire);
+  busy = false;
+  const ack = await h.objects.completeObject({ userId: USER, objectId: manifest.objectId });
+  assert.equal(ack.status, 'ready');
+  assert.equal(ack.objectId, manifest.objectId);
+  assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+  assert.equal(h.rest.manifests.size, 1);
+});
+
+Deno.test('housing: retries repair legacy ready manifests with missing projections before acknowledging', async () => {
+  for (const retryIntent of [false, true]) {
+    const h = harness();
+    const spec = { stream: 'ppgWaveformSample', payload: payloadOf(10), startTs: SECOND, endTs: SECOND + 10,
+      sampleCount: 10, compression: 'gzip', objectId: '1b2a3a4a-1a1a-4a1a-8a1a-1a1a1a1a1a1a' };
+    const first = await shipObject(h, spec);
+    h.rest.tables.set('noop_signal_windows', []); // Reproduce the old ready-before-projection boundary.
+    assert.equal(h.rest.manifests.get(first.manifest.objectId).status, 'ready');
+    const ack = retryIntent
+      ? await h.objects.createIntent({ userId: USER, manifest: first.manifest })
+      : await h.objects.completeObject({ userId: USER, objectId: first.manifest.objectId });
+    assert.equal(ack.duplicate, true);
+    assert.equal(h.rest.rowCount('noop_signal_windows'), 1);
+    const window = h.rest.tables.get('noop_signal_windows')![0];
+    assert.equal(window.device_id, noopDeviceId(USER, STRAP));
+    assert.equal(window.user_id, USER);
+    assert.equal(window.object_id, first.manifest.objectId);
+  }
+});
+
+Deno.test('housing: an interrupted upload resumes onto the same key', async () => {
+  const h = harness();
+  const payload = payloadOf(8);
+  const objectId = 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1';
+  const spec = {
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 8,
+    sampleCount: 8,
+    compression: 'gzip',
+    objectId,
+  };
+
+  const first = await h.objects.createIntent({ userId: USER, manifest: manifestFor(spec).manifest });
+  const resumed = await h.objects.createIntent({ userId: USER, manifest: manifestFor(spec).manifest });
+  assert.equal(resumed.objectKey, first.objectKey, 'a retry must not mint a second key');
+  assert.ok(resumed.uploadUrl, 'a pending object must still be uploadable');
+  assert.equal(h.rest.manifests.size, 1);
+});
+
+Deno.test('housing: reusing an object id for different bytes is a conflict, not an overwrite', async () => {
+  const h = harness();
+  const objectId = 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2';
+  await shipObject(h, {
+    stream: 'ppgWaveformSample',
+    payload: payloadOf(10),
+    startTs: SECOND,
+    endTs: SECOND + 10,
+    sampleCount: 10,
+    compression: 'gzip',
+    objectId,
+  });
+
+  const different = payloadOf(11);
+  const { manifest } = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload: different,
+    startTs: SECOND,
+    endTs: SECOND + 10,
+    sampleCount: 10,
+    compression: 'gzip',
+    objectId,
+  });
+
+  await assert.rejects(
+    () => h.objects.createIntent({ userId: USER, manifest }),
+    (err: any) => err.code === 'object_id_conflict' && err.status === 409,
+  );
+});
+
+Deno.test('housing: one user cannot reuse a batch id for different decoded content', async () => {
+  const h = harness();
+  const first = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload: payloadOf(5),
+    startTs: SECOND,
+    endTs: SECOND + 5,
+    sampleCount: 5,
+    compression: 'gzip',
+    objectId: 'b3b3b3b3-b3b3-4b3b-8b3b-b3b3b3b3b3b3',
+  });
+  await h.objects.createIntent({ userId: USER, manifest: first.manifest });
+
+  const second = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload: payloadOf(6),
+    startTs: SECOND,
+    endTs: SECOND + 6,
+    sampleCount: 6,
+    compression: 'gzip',
+    objectId: 'b4b4b4b4-b4b4-4b4b-8b4b-b4b4b4b4b4b4',
+  });
+  await assert.rejects(
+    () => h.objects.createIntent({ userId: USER, manifest: second.manifest }),
+    (err: any) => err.code === 'batch_id_conflict' && err.status === 409,
+  );
+  assert.equal(h.rest.manifests.size, 1);
+  assert.equal(h.rest.rowCount('noop_upload_receipts'), 0);
+});
+
+Deno.test('housing: exact decoded representations preserve separate object audit receipts and old receipt IDs', async () => {
+  const h = harness();
+  const first = await shipObject(h, {
+    stream: 'ppgWaveformSample', payload: payloadOf(5), startTs: SECOND, endTs: SECOND + 5,
+    sampleCount: 5, compression: 'gzip', objectId: crypto.randomUUID(),
+  });
+  const prior = h.rest.tables.get('noop_upload_receipts')![0];
+  // Simulate an actual pre-migration audit row without changing the durability receipt.
+  prior.id = uuidFromParts([USER, 'upload-receipt', 'object', first.manifest.batchId]);
+  const originalAudit = structuredClone(prior);
+  const second = { ...first.manifest, objectId: crypto.randomUUID() };
+  const intent = await h.objects.createIntent({ userId: USER, manifest: second });
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, first.wire);
+  const ack = await h.objects.completeObject({ userId: USER, objectId: second.objectId });
+  assert.notEqual(ack.durabilityReceipt.receiptId, first.ack.durabilityReceipt.receiptId);
+  assert.equal(ack.durabilityReceipt.objectId, second.objectId);
+  await h.objects.completeObject({ userId: USER, objectId: first.manifest.objectId });
+  const audits = h.rest.tables.get('noop_upload_receipts')!;
+  assert.equal(audits.length, 2);
+  assert.deepEqual(audits.find((r) => r.id === originalAudit.id), originalAudit);
+  assert.equal(new Set(audits.map((r) => r.object_id)).size, 2);
+});
+
+Deno.test('housing: matching decoded digest cannot cross source, device, time, count or format binding', async () => {
+  const h = harness();
+  const first = manifestFor({ stream: 'ppgWaveformSample', payload: payloadOf(5), startTs: SECOND,
+    endTs: SECOND + 5, sampleCount: 5, compression: 'gzip', objectId: crypto.randomUUID() });
+  await h.objects.createIntent({ userId: USER, manifest: first.manifest });
+  for (const patch of [{ sourceId: crypto.randomUUID() }, { deviceId: 'other-strap' },
+    { startTs: SECOND - 1 }, { sampleCount: 6 }, { uncompressedBytes: 999 }, { protocolVersion: '1.3' }]) {
+    await assert.rejects(h.objects.createIntent({ userId: USER,
+      manifest: { ...first.manifest, ...patch, objectId: crypto.randomUUID() } }),
+    (err: any) => err.code === 'batch_id_conflict');
+  }
+  assert.equal(h.rest.manifests.size, 1);
+});
+
+Deno.test('housing: one subject cannot complete or read another subject object', async () => {
+  const h = harness();
+  const payload = payloadOf(6);
+  const objectId = 'c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3';
+  await shipObject(h, {
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 6,
+    sampleCount: 6,
+    compression: 'gzip',
+    objectId,
+  });
+
+  await assert.rejects(
+    () => h.objects.completeObject({ userId: OTHER_USER, objectId }),
+    (err: any) => err.code === 'forbidden' && err.status === 403,
+  );
+
+  // Keys are minted per subject, so the other subject's prefix cannot even name this object.
+  const row = h.rest.manifests.get(objectId);
+  assert.ok(row.object_key.includes(`/users/${USER}/`));
+  assert.ok(!row.object_key.includes(OTHER_USER));
+});
+
+Deno.test('housing: object retries and completion are bound to the authenticated source', async () => {
+  const h = harness();
+  const payload = payloadOf(6);
+  const objectId = 'f6f6f6f6-f6f6-4f6f-8f6f-f6f6f6f6f6f6';
+  const first = manifestFor({
+    stream: 'ppgWaveformSample',
+    payload,
+    startTs: SECOND,
+    endTs: SECOND + 6,
+    sampleCount: 6,
+    compression: 'gzip',
+    objectId,
+  });
+  const sourceA = first.manifest.sourceId;
+  const sourceB = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+  const rpc=h.rest.rpc.bind(h.rest);
+  h.rest.rpc=async(name,args)=>{
+    if(name==='authorize_noop_object_put') {
+      assert.equal(args.p_user,USER);assert.equal(args.p_source,sourceA);assert.equal(args.p_object,objectId);
+      return new Date(h.now().getTime()-120_000).toISOString();
+    }
+    return rpc(name,args);
+  };
+  const intent = await h.objects.createIntent({
+    userId: USER,
+    sourceId: sourceA,
+    tokenId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    authMode: 'installation',
+    manifest: first.manifest,
+  });
+  assert.equal(intent.expiresAt,new Date(h.now().getTime()-120_000+900_000).toISOString());
+
+  await assert.rejects(
+    () => h.objects.createIntent({
+      userId: USER,
+      sourceId: sourceB,
+      tokenId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      authMode: 'installation',
+      manifest: { ...first.manifest, sourceId: sourceB },
+    }),
+    (err: any) => err.code === 'forbidden' && err.status === 403,
+  );
+
+  h.b2.putViaPresignedUrl(intent.uploadUrl!, first.wire, {
+    contentType: intent.requiredHeaders!['content-type'],
+  });
+  await assert.rejects(
+    () => h.objects.completeObject({
+      userId: USER,
+      sourceId: sourceB,
+      tokenId: 'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      authMode: 'installation',
+      objectId,
+    }),
+    (err: any) => err.code === 'forbidden' && err.status === 403,
+  );
+  assert.equal(h.rest.manifests.get(objectId).status, 'pending');
+});
+
+Deno.test('housing: raw member count cannot fabricate dropout duration or interpolate', async () => {
+  const h = harness();
+  const objectId = 'd4d4d4d4-d4d4-4d4d-8d4d-d4d4d4d4d4d4';
+  // 3180 memberships in an hour may include same-second origins. Gaps need qualified timing.
+  const received = 3180;
+  await shipObject(h, {
+    stream: 'rawImuSession',
+    payload: payloadOf(received),
+    startTs: SECOND,
+    endTs: SECOND + 3600,
+    sampleCount: received,
+    compression: 'zstd',
+    objectId,
+  });
+
+  const [window] = h.rest.tables.get('noop_signal_windows')!;
+  assert.equal(window.expected_records, null);
+  assert.equal(window.received_records, 3180);
+  assert.equal(window.missing_records, null);
+  assert.equal(window.interpolated_records, 0);
+  assert.equal(window.coverage, null);
+});
+
+Deno.test('windowCoverage retains counts but leaves all raw temporal coverage unqualified', () => {
+  for (const stream of ['ppgWaveformSample', 'rawImuSession', 'v18AuxSample', 'rawBatch']) {
+    const coverage = windowCoverage({ stream, startTs: 100, endTs: 160, sampleCount: 12 });
+    assert.equal(coverage.expectedRecords, null);
+    assert.equal(coverage.coverage, null);
+    assert.equal(coverage.missingRecords, null);
+    assert.equal(coverage.receivedRecords, 12);
+  }
+});
+
+Deno.test('housing: duplicate memberships never turn counter density into full time coverage', () => {
+  const over = windowCoverage({ stream: 'rawImuSession', startTs: 100, endTs: 110, sampleCount: 40 });
+  assert.equal(over.coverage, null);
+  assert.equal(over.missingRecords, null);
+  assert.equal(over.receivedRecords, 40);
+});
+
+Deno.test('housing: an archived object lands under the research prefix for its subject and hour', async () => {
+  const h = harness();
+  const device = noopDeviceId(USER, STRAP);
+  const objectId = 'e5e5e5e5-e5e5-4e5e-8e5e-e5e5e5e5e5e5';
+  const { intent } = await shipObject(h, {
+    stream: 'rawImuSession',
+    payload: payloadOf(4),
+    startTs: SECOND,
+    endTs: SECOND + 4,
+    sampleCount: 4,
+    compression: 'zstd',
+    objectId,
+  });
+  const start = new Date(SECOND * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  const expectPrefix = `v3/research/users/${USER}/devices/${device}/rawImuSession/`
+    + `${start.getUTCFullYear()}/${p(start.getUTCMonth() + 1)}/${p(start.getUTCDate())}/${p(start.getUTCHours())}/`;
+  assert.ok(intent.objectKey!.startsWith(expectPrefix), `${intent.objectKey} must be under ${expectPrefix}`);
+  assert.ok(intent.objectKey!.endsWith('.bin.zst'));
+});

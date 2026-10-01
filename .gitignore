@@ -121,3 +121,7 @@ tools/linux-capture/captures/
 
 # Local cloud push credentials (never commit)
 Config/CloudPushSecrets.xcconfig
+
+# Supabase CLI local state (linked project ref, branches)
+supabase/.temp/
+supabase/.branches/
