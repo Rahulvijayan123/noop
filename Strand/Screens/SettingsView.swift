@@ -88,7 +88,9 @@ struct SettingsView: View {
                 FormRow(label: "Name") {
                     TextField("Your name", text: $profile.displayName)
                         .multilineTextAlignment(.trailing)
+                        #if os(iOS)
                         .textContentType(.givenName)
+                        #endif
                         .submitLabel(.done)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .accessibilityLabel("Name shown in your greeting")
