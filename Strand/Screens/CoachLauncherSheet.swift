@@ -21,11 +21,20 @@ struct CoachLauncherSheet: View {
 
     @State private var draft = ""
 
+    /// iOS Coach runs through the cloud relay, so there is no provider key to connect first.
+    private var launcherReady: Bool {
+        #if os(iOS)
+        true
+        #else
+        coach.isConfigured
+        #endif
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    if coach.isConfigured {
+                    if launcherReady {
                         configured
                     } else {
                         unconfigured

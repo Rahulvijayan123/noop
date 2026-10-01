@@ -73,6 +73,8 @@
 	</dict>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Nara connects directly to your WHOOP strap over Bluetooth to read heart rate, R-R intervals, battery, and sensor data. By default this stays on your iPhone. If you turn on cloud sync, Nara also sends those measured readings to the Nara backend, which computes your recovery, strain, and sleep.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Nara uses the camera only when you take a photo to show the coach, such as a meal or your exercise form. The photo is sent with your question and is not saved to your library.</string>
 	<key>NSHealthShareUsageDescription</key>
 	<string>Nara reads your own Apple Health data on-device to compute recovery, strain, and sleep. Apple Health data stays on your device.</string>
 	<key>NSHealthUpdateUsageDescription</key>
