@@ -2,6 +2,7 @@ import PhotosUI
 import StrandDesign
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Holds the streaming-scroll timestamp as a class so updating it never invalidates the view body.
 private final class CoachScrollThrottle { var last: TimeInterval = 0 }
@@ -46,11 +47,14 @@ struct CoachChatView: View {
     // MARK: Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text("Sana").font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
-            Text("Your health assistant").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Sana").font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
+                Text("Your health assistant").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+            }
+            Spacer(minLength: 0)
+            BrandMark(size: 40, style: .tile)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, NoopMetrics.screenPadding)
         .padding(.top, 14)
         .padding(.bottom, 8)
@@ -59,47 +63,35 @@ struct CoachChatView: View {
     // MARK: Empty state
 
     private var welcome: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 18) {
-                BrandMark(size: 64, style: .tile)
-                    .padding(.top, 8)
-                    .accessibilityHidden(true)
-
-                Text("Hi, I'm Sana, your health assistant")
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textPrimary)
+        GeometryReader { geo in
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 46) {
+                    VStack(spacing: 8) {
+                        Text("Hi, I'm Sana")
+                            .font(StrandFont.rounded(24))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("Ask me anything about your health.")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
                     .multilineTextAlignment(.center)
-                    .fixedSize(horizontal: false, vertical: true)
 
-                disclaimer
+                    if case .offline(let reason) = vm.connection { offlineCard(reason) }
 
-                if case .offline(let reason) = vm.connection { offlineCard(reason) }
-
-                CoachSuggestionStack(prompts: suggestions) { vm.send($0) }
+                    CoachSuggestionStack(prompts: suggestions) { vm.send($0) }
+                }
+                .padding(.horizontal, NoopMetrics.screenPadding)
+                .padding(.top, 12)
+                .padding(.bottom, 84)
+                .frame(maxWidth: .infinity, minHeight: geo.size.height)
             }
-            .padding(.horizontal, NoopMetrics.screenPadding)
-            .padding(.bottom, 12)
+            .scrollBounceBehavior(.basedOnSize)
+            .scrollDismissesKeyboard(.immediately)
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .scrollDismissesKeyboard(.immediately)
     }
 
     private var suggestions: [String] {
         Array(CoachPrompts.suggestions.prefix(4))
-    }
-
-    private var disclaimer: some View {
-        Label {
-            Text("Sana gives general wellness information, not medical advice. Talk to a healthcare professional about health concerns.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        } icon: {
-            Image(systemName: "info.circle").foregroundStyle(StrandPalette.statusWarning)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func offlineCard(_ reason: String) -> some View {
@@ -230,12 +222,12 @@ private struct CoachComposer: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var showLibrary = false
     @State private var showCamera = false
-    @StateObject private var voice = CoachVoiceInput()
+    @State private var showFiles = false
 
     private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pendingImage != nil }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 6) {
             if wasScrubbed {
                 Label("Personal details were anonymized before sending", systemImage: "lock.shield")
                     .font(StrandFont.caption)
@@ -243,22 +235,24 @@ private struct CoachComposer: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 6)
             }
-            if let data = pendingImage, let image = CoachImage.thumbnail(for: data, maxDimension: 56) {
-                attachment(image)
+            VStack(spacing: 8) {
+                if let data = pendingImage, let image = CoachImage.thumbnail(for: data, maxDimension: 56) {
+                    attachment(image)
+                }
+                HStack(alignment: .bottom, spacing: 4) {
+                    photoMenu
+                    field
+                    sendOrStop
+                }
             }
-            HStack(alignment: .bottom, spacing: 8) {
-                photoMenu
-                field
-                if voice.isRecording || !isGenerating { micButton }
-                sendOrStop
-            }
+            .padding(6)
+            .background(NoopPanelSurface(cornerRadius: 26))
+            .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(focused.wrappedValue ? StrandPalette.focusRing : StrandPalette.hairline, lineWidth: 1))
             Text("General wellness info, not medical advice.")
                 .font(.system(size: 10, design: .rounded))
                 .foregroundStyle(StrandPalette.textTertiary)
         }
-        .padding(8)
-        .background(NoopPanelSurface(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).strokeBorder(StrandPalette.hairline, lineWidth: 1))
         .padding(.horizontal, 10)
         .padding(.bottom, 4)
         .onChange(of: photoItem) { _, item in
@@ -269,6 +263,11 @@ private struct CoachComposer: View {
             }
         }
         .photosPicker(isPresented: $showLibrary, selection: $photoItem, matching: .images)
+        .fileImporter(isPresented: $showFiles, allowedContentTypes: [.image]) { result in
+            guard case .success(let url) = result, url.startAccessingSecurityScopedResource() else { return }
+            defer { url.stopAccessingSecurityScopedResource() }
+            if let data = try? Data(contentsOf: url) { vm.pendingImage = CoachImage.prepare(data) }
+        }
         .fullScreenCover(isPresented: $showCamera) {
             CoachCameraPicker { image in vm.pendingImage = image.jpegData(compressionQuality: 1).flatMap(CoachImage.prepare) }
                 .ignoresSafeArea()
@@ -300,14 +299,15 @@ private struct CoachComposer: View {
                 Button { showCamera = true } label: { Label("Take Photo", systemImage: "camera") }
             }
             Button { showLibrary = true } label: { Label("Choose from Library", systemImage: "photo.on.rectangle") }
+            Button { showFiles = true } label: { Label("Choose from Files", systemImage: "folder") }
         } label: {
             Image(systemName: pendingImage != nil ? "photo.fill" : "photo")
                 .font(.system(size: 18))
                 .foregroundStyle(pendingImage != nil ? StrandPalette.accent : StrandPalette.textSecondary)
-                .frame(width: 36, height: 38)
+                .frame(width: 38, height: 38)
         }
         .disabled(isGenerating)
-        .accessibilityLabel("Attach photo")
+        .accessibilityLabel("Attach image")
     }
 
     private var field: some View {
@@ -319,11 +319,7 @@ private struct CoachComposer: View {
             .focused(focused)
             .submitLabel(.send)
             .onSubmit(commit)
-            .padding(.horizontal, 12)
             .padding(.vertical, 9)
-            .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(focused.wrappedValue ? StrandPalette.focusRing : StrandPalette.hairline, lineWidth: 1))
             .accessibilityIdentifier("coachMessageField")
             .accessibilityLabel("Question")
             .toolbar {
@@ -342,8 +338,8 @@ private struct CoachComposer: View {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 44, height: 38)
-                    .background(StrandPalette.statusCritical, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .frame(width: 38, height: 38)
+                    .background(StrandPalette.statusCritical, in: Circle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Stop generating")
@@ -351,10 +347,9 @@ private struct CoachComposer: View {
             Button(action: commit) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(StrandPalette.goldDeepText)
-                    .frame(width: 44, height: 38)
-                    .background(canSend ? StrandPalette.accent : StrandPalette.accent.opacity(0.35),
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(NoopVisualStyle.mintDeep.opacity(canSend ? 1 : 0.55), in: Circle())
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
@@ -365,39 +360,6 @@ private struct CoachComposer: View {
 
     /// Clears the draft only when the view model accepted it, so text survives a send that was refused.
     private func commit() {
-        if voice.isRecording { voice.stopTranscribing { _ in } }
         if vm.send(text) { text = "" }
-    }
-
-    // MARK: Voice
-
-    private var micButton: some View {
-        Button(action: toggleVoice) {
-            Image(systemName: voice.isRecording ? "stop.circle.fill" : "mic.fill")
-                .font(.system(size: voice.isRecording ? 18 : 15, weight: .semibold))
-                .foregroundStyle(voice.isRecording ? StrandPalette.statusCritical
-                                 : voice.canUseVoice ? StrandPalette.textSecondary : StrandPalette.textTertiary)
-                .frame(width: 36, height: 38)
-                .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        }
-        .buttonStyle(.plain)
-        .disabled(!(voice.canUseVoice || voice.authorization == .notDetermined))
-        .accessibilityLabel(voice.isRecording ? "Stop voice input" : "Voice input")
-        .accessibilityHint(voice.statusMessage ?? "Transcribes your question on-device")
-    }
-
-    private func toggleVoice() {
-        if voice.isRecording {
-            voice.stopTranscribing { final in
-                let spoken = final.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !spoken.isEmpty { text = text.isEmpty ? spoken : "\(text) \(spoken)" }
-            }
-        } else if voice.authorization == .notDetermined {
-            voice.requestAuthorization { state in
-                if state == .authorized { voice.startTranscribing { text = $0 } }
-            }
-        } else {
-            voice.startTranscribing { text = $0 }
-        }
     }
 }

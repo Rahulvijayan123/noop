@@ -261,42 +261,35 @@ struct CoachSuggestionStack: View {
     let prompts: [String]
     let onSend: (String) -> Void
 
-    private static let icons = ["moon.zzz", "waveform.path.ecg", "bolt.heart", "heart.text.square", "chart.xyaxis.line"]
+    private static let icons = ["moon", "waveform.path.ecg", "heart", "chart.bar"]
 
     var body: some View {
-        VStack(spacing: 8) {
-            Text("Suggested").strandOverline()
-            VStack(spacing: 0) {
-                ForEach(Array(prompts.enumerated()), id: \.offset) { index, prompt in
-                    Button { onSend(prompt) } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: Self.icons[index % Self.icons.count])
-                                .font(.system(size: 12))
-                                .foregroundStyle(StrandPalette.accent)
-                                .frame(width: 24)
-                            Text(prompt)
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.leading)
-                            Spacer(minLength: 4)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 13)
-                        .contentShape(Rectangle())
+        VStack(spacing: 10) {
+            ForEach(Array(prompts.enumerated()), id: \.offset) { index, prompt in
+                Button { onSend(prompt) } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: Self.icons[index % Self.icons.count])
+                            .font(.system(size: 16))
+                            .foregroundStyle(StrandPalette.accent)
+                            .frame(width: 24)
+                        Text(prompt)
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        Spacer(minLength: 4)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
                     }
-                    .buttonStyle(LiquidPressStyle())
-                    .accessibilityLabel("Suggested prompt: \(prompt)")
-
-                    if index < prompts.count - 1 {
-                        Divider().overlay(StrandPalette.hairline).padding(.leading, 48)
-                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 16)
+                    .contentShape(Rectangle())
+                    .frostedCardSurface(cornerRadius: 16)
                 }
+                .buttonStyle(LiquidPressStyle())
+                .accessibilityLabel("Suggested prompt: \(prompt)")
             }
-            .frostedCardSurface(cornerRadius: 16)
         }
     }
 }
