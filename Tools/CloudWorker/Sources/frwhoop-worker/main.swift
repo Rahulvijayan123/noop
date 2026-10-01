@@ -546,7 +546,7 @@ func heartbeat(final: Bool = false) {
             INSERT INTO public.physiology_worker_heartbeats
               (worker_instance_id, process_instance_id, source_revision, algorithm_version,
                started_at, last_poll_at, last_score_at, last_error)
-            VALUES ($1::uuid, $2::uuid, $3::text, $4::text, clock_timestamp(), clock_timestamp(),
+            VALUES ($1::uuid, $2::uuid, $3::text, $4::text, $7::timestamptz, clock_timestamp(),
                     NULLIF($5::text,'')::timestamptz, NULLIF($6::text,''))
             ON CONFLICT (worker_instance_id, process_instance_id) DO UPDATE SET
               source_revision = EXCLUDED.source_revision,
@@ -560,6 +560,10 @@ func heartbeat(final: Bool = false) {
                 "frwhoop-server-1",
                 scoring.stats.lastScoreAt.map { ISO8601DateFormatter().string(from: $0) } ?? "",
                 sanitizedHealthError(firstLaneError ?? dbError) ?? "",  // '' -> NULL below
+                // The table CHECKs last_score_at >= started_at on the proposed row, before the conflict
+                // path runs. A started_at of "now" made every heartbeat after the first score fail, so
+                // the process start (whole seconds, never later than a score) is what must be sent.
+                ISO8601DateFormatter().string(from: startedAt),
             ])
     } catch {
         FileHandle.standardError.write("frwhoop-worker: heartbeat (per-instance) failed: \(error)\n".data(using: .utf8)!)
