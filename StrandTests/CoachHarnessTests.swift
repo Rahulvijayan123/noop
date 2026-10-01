@@ -102,6 +102,15 @@ final class CoachHarnessTests: XCTestCase {
 
     // MARK: Harness
 
+    func testSystemPromptCarriesTheUsersLocalDate() {
+        let tz = TimeZone(identifier: "America/Los_Angeles")!
+        let noon = Date(timeIntervalSince1970: 1_790_812_800)  // 2026-10-01 00:00 UTC, still Sep 30 in Los Angeles
+        let line = CoachPrompt.dateContext(now: noon, timeZone: tz)
+        XCTAssertTrue(line.contains("2026-09-30"))
+        XCTAssertTrue(line.contains("America/Los_Angeles"))
+        XCTAssertTrue(CoachPrompt.system(memories: [], imageContext: "", userAge: nil, now: noon).contains("2026-09-30"))
+    }
+
     func testEffortIsAdaptive() {
         XCTAssertEqual(CoachPrompt.reasoningEffort(forUserText: "how did I sleep", isToolRound: true, deep: false), "none")
         XCTAssertEqual(CoachPrompt.reasoningEffort(forUserText: "how did I sleep", isToolRound: false, deep: false), "low")

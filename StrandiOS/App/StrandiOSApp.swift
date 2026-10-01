@@ -573,6 +573,17 @@ private struct iOSRootView: View {
 }
 
 #if DEBUG
+/// Opens the coach chat and, when `--coach-prompt <text>` is passed, asks that question on launch.
+private struct CoachDemoHost: View {
+    @EnvironmentObject private var engine: AICoachEngine
+    var body: some View {
+        CoachChatView().onAppear {
+            let args = CommandLine.arguments
+            if let i = args.firstIndex(of: "--coach-prompt"), i + 1 < args.count { engine.pendingPrompt = args[i + 1] }
+        }
+    }
+}
+
 /// DEBUG-only screenshot harness. Maps `--demo-screen <name>` to a single screen so a seeded
 /// simulator build can be captured deterministically (verification + marketing). Stripped from Release.
 enum DemoScreens {
@@ -597,6 +608,7 @@ enum DemoScreens {
         case "explore":  return AnyView(MetricExplorerView())
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
+        case "coach":    return AnyView(CoachDemoHost())
         case "chargebreakdown": return AnyView(ChargeBreakdownDemoHost())
         case "devices":  return AnyView(DevicesView())
         case "devicescatalog": return AnyView(DeviceCardCatalog())

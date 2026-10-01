@@ -57,8 +57,17 @@ enum CoachPrompt {
     achievements, routines). Use `get_memories` if you need context from past sessions that isn't already listed below.
     """
 
-    static func system(memories: [CoachMemory], imageContext: String, userAge: Int?) -> String {
-        var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint]
+    /// The user's local date, so "today" and "last night" resolve against the same calendar the day keys use.
+    static func dateContext(now: Date = Date(), timeZone: TimeZone = .current) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = timeZone
+        f.dateFormat = "EEEE yyyy-MM-dd HH:mm"
+        return "TODAY: It is \(f.string(from: now)) in the user's timezone (\(timeZone.identifier)). Day keys in their data use this local calendar; \"today\" is that date, and today's sleep and charge belong to last night."
+    }
+
+    static func system(memories: [CoachMemory], imageContext: String, userAge: Int?, now: Date = Date()) -> String {
+        var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint, dateContext(now: now)]
         if !memories.isEmpty {
             let lines = memories.prefix(8).map { "• [\($0.topic)] \($0.content)" }.joined(separator: "\n")
             parts.append("""
