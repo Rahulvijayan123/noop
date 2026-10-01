@@ -77,7 +77,7 @@ struct NoopLimitationsView: View {
     ]
 
     var body: some View {
-        ScreenScaffold(title: "NOOP Limitations", subtitle: "What each WHOOP can read") {
+        ScreenScaffold(title: "Nara Limitations", subtitle: "What each WHOOP can read") {
             tableCard
             legendCard
         }
