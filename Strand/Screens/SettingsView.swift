@@ -85,6 +85,15 @@ struct SettingsView: View {
             VStack(spacing: 0) {
                 profilePhotoRow
                 rowDivider
+                FormRow(label: "Name") {
+                    TextField("Your name", text: $profile.displayName)
+                        .multilineTextAlignment(.trailing)
+                        .textContentType(.givenName)
+                        .submitLabel(.done)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .accessibilityLabel("Name shown in your greeting")
+                }
+                rowDivider
                 FormRow(label: "Date of birth") {
                     HStack(spacing: 12) {
                         Text("\(profile.age)")

@@ -79,8 +79,14 @@ final class ProfileStore: ObservableObject {
         }
     }
 
+    /// What Today's greeting calls the user. Optional and device-local like the rest of the profile.
+    @Published var displayName: String {
+        didSet { d.set(displayName.trimmingCharacters(in: .whitespacesAndNewlines), forKey: K.displayName) }
+    }
+
     private let d = UserDefaults.standard
     private enum K {
+        static let displayName = "profile.displayName"
         static let dateOfBirth = "profile.dateOfBirth"
         /// Pre-#146 age key. No longer the source of truth; kept mirrored from `dateOfBirth` so the
         /// cross-platform `.noopbak` whitelist keeps round-tripping an Int age unchanged.
@@ -121,6 +127,7 @@ final class ProfileStore: ObservableObject {
         // forbids reading before every stored property is initialized).
         d.set(resolvedDOB, forKey: K.dateOfBirth)
         d.set(Self.years(from: resolvedDOB, to: Date()), forKey: K.legacyAge)
+        displayName = d.string(forKey: K.displayName) ?? ""
         sex = d.string(forKey: K.sex) ?? "male"
         weightKg = d.object(forKey: K.weight) as? Double ?? 75
         heightCm = d.object(forKey: K.height) as? Double ?? 178

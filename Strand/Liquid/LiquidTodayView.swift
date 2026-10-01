@@ -251,7 +251,7 @@ struct LiquidTodayView: View {
         // system UI (tab bar etc.) was another language. "Today"/"Yesterday" go through String(localized:)
         // (matching the classic TodayView.dayNavLabel), and the weekday name is formatted in the user's
         // locale, not the en_US_POSIX one used only for machine day-keys.
-        case 0: return String(localized: "Today")
+        case 0: return greetingTitle
         case 1: return String(localized: "Yesterday")
         default:
             return selectedLogicalDay.formatted(.dateTime.weekday(.wide).locale(AppLanguage.activeLocale))
@@ -354,7 +354,7 @@ struct LiquidTodayView: View {
                         switch section {
                         case .hero: heroCard
                         case .liveSession: if liveSessionsBeta { liveSessionStartRow }
-                        case .synthesis: synthesisSection
+                        case .synthesis: EmptyView()
                         case .keyMetrics: keyMetricsSection
                         case .workouts: lastWorkoutsSection
                         case .heartRate: heartRateSection
@@ -554,10 +554,12 @@ struct LiquidTodayView: View {
                             .font(StrandFont.title1)
                             .foregroundStyle(StrandPalette.textPrimary)
                             .shadow(color: StrandPalette.skyTextShadow, radius: 10, y: 1)
-                        Text(dateLine)
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .shadow(color: StrandPalette.skyTextShadow, radius: 8, y: 1)
+                        if selectedDayOffset != 0 {
+                            Text(dateLine)
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                                .shadow(color: StrandPalette.skyTextShadow, radius: 8, y: 1)
+                        }
                     }
                     .contentShape(Rectangle())
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -581,26 +583,6 @@ struct LiquidTodayView: View {
                 // which is the push-left behaviour rather than a separate approximation of it.
                 .headerTrailingControlFadeMask(reserving: headerControlsWidth)
                 HStack(spacing: headerClusterSpacing) {
-                    // Profile pic (the one set in Settings) → opens Settings, matching the classic Today.
-                    Button { showSettings = true } label: {
-                        Color.clear.frame(
-                            width: NoopMetrics.compactControlSize,
-                            height: NoopMetrics.compactControlSize
-                        )
-                    }
-                    .nativeLiquidGlassHeaderButton()
-                    .overlay {
-                        GeometryReader { proxy in
-                            let diameter = min(proxy.size.width, proxy.size.height)
-                            ProfileAvatarView(imageData: profile.avatarImageData, size: diameter)
-                                .frame(width: diameter, height: diameter)
-                                .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
-                        }
-                        .allowsHitTesting(false)
-                    }
-                    .nativeLiquidGlassPhotoFinish()
-                    .accessibilityLabel("Profile and settings")
-                    LiquidAddButton()
                     LiquidBatteryButton()
                     // One entry point for section order/visibility and both nested card editors.
                     Button { customizationDestination = .today } label: {
@@ -1353,10 +1335,6 @@ struct LiquidTodayView: View {
                     ktileFor(metric, hrv: hrv, rhr: rhr)
                 }
             }
-            NavigationLink(value: TabRoute.metricExplorer) {
-                LiquidFullWidthNavigationAction("Show all metrics")
-            }
-            .buttonStyle(LiquidPressStyle())
         }
     }
 
@@ -1931,6 +1909,12 @@ struct LiquidTodayView: View {
         case .rundown: return String(localized: "Several recovery signals are down. Prioritise rest today.")
         case .insufficient: return String(localized: "Still learning your baseline. A few more nights and this fills in.")
         }
+    }
+
+    /// "Good evening, Alex" (or just "Good evening" until a name is set in Settings).
+    private var greetingTitle: String {
+        let name = profile.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? greeting : "\(greeting), \(name)"
     }
 
     private var greeting: String {
