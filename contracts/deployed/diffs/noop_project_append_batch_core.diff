@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_project_append_batch_core
+# pinned latest def: 20260921070000_production_append_stream_compatibility.sql:130 (rename) renamed from noop_project_append_batch (latest pre-rename def) at 20260921111000_wearable_lifecycle.sql:89
+# verdict: IDENTICAL
+

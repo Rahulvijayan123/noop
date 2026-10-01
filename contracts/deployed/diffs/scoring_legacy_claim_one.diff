@@ -1,0 +1,4 @@
+# normalize_diff.py --name scoring_legacy_claim_one
+# pinned latest def: 20260923140000_legacy_snapshot_progress.sql:96 (create) 2 definition(s); latest by filename
+# verdict: IDENTICAL
+

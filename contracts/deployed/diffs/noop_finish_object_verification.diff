@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_finish_object_verification
+# pinned latest def: 20260922020000_async_object_verification.sql:174 (create) 1 definition(s); latest by filename
+# verdict: IDENTICAL
+

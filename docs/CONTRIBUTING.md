@@ -1,0 +1,773 @@
+# Contributing to NOOP
+
+NOOP is a standalone, fully **offline** companion app for WHOOP straps (4.0 and 5.0). It pairs
+directly with the strap over Bluetooth Low Energy, stores everything on-device in SQLite, imports
+WHOOP CSV exports and Apple Health exports, and computes recovery / strain / HRV / sleep locally —
+no cloud, no account. This document explains how the repository is laid out, how to
+build and test it, the conventions every change is expected to follow, and the safety rules that are
+non-negotiable (especially on the Bluetooth path).
+
+> **Not affiliated with WHOOP, and not a medical device.** "WHOOP" is used only to identify the
+> hardware this software interoperates with. NOOP reads **your own data** off **your own device**;
+> it contains no WHOOP code, firmware, or assets and performs no DRM circumvention. Every derived
+> metric (HR, HRV, recovery, strain, sleep, SpO₂, temperature) is an **approximation** and is **not**
+> clinically validated. See [`../DISCLAIMER.md`](../DISCLAIMER.md) and
+> [`../ATTRIBUTION.md`](../ATTRIBUTION.md). Before proposing a WHOOP-parity feature, check
+> [`SCOPE.md`](SCOPE.md) — some WHOOP-app features (diagnostic-style alerts, social/community
+> features, cloud-dependent parity) are out of scope by design, not by oversight.
+
+---
+
+## Table of contents
+
+- [Ground rules](#ground-rules)
+- [Contributor roles & the issue/PR workflow](#contributor-roles--the-issuepr-workflow)
+- [Repository layout](#repository-layout)
+  - [The parity ledger](#the-parity-ledger-one-sided-declarations)
+- [Build & test](#build--test)
+- [The design system is the law](#the-design-system-is-the-law)
+- [Coding conventions](#coding-conventions)
+- [The BLE safety contract](#the-ble-safety-contract-read-this-before-touching-bluetooth)
+- [How to add things safely](#how-to-add-things-safely)
+  - [Add a new metric](#add-a-new-metric)
+  - [Add a new screen](#add-a-new-screen)
+  - [Add a new BLE command](#add-a-new-ble-command)
+  - [Add a database column or table](#add-a-database-column-or-table)
+- [Tests & fixtures](#tests--fixtures)
+- [Commit & PR conventions](#commit--pr-conventions)
+- [Roadmap](#roadmap)
+
+---
+
+## Ground rules
+
+A few principles run through the whole codebase. Internalize them before opening a PR.
+
+1. **Offline by design.** There is no NOOP server, telemetry, or account, and **nothing about you
+   leaves the device unless you explicitly switch on a feature that sends it.** Strap data, imports,
+   and computed metrics live in a local SQLite database.
+   The app makes exactly four network requests, all documented in
+   [docs/PRIVACY_SECURITY.md §1.1](PRIVACY_SECURITY.md): the opt-in AI Coach, the
+   compile-time-optional Oura history import, the update check (a read of a public version number,
+   on by default, switchable off), and Android's default-off Experimental one-way export to a
+   user-owned endpoint. Adding a fifth needs a very good reason and the same treatment: named in the
+   privacy doc, and switchable off. New hosted services or undisclosed network calls do not belong
+   here; see [Scope](SCOPE.md).
+2. **Interoperability, not impersonation.** NOOP talks to a strap the user already owns. It does not
+   log into a WHOOP account, bypass a paywall, or ship WHOOP's proprietary code/firmware/assets/logos.
+   Keep contributions on the right side of that line, and keep all WHOOP references *nominative*
+   (used only to name the hardware). Some WHOOP-app features stay out of scope on the same grounds —
+   see [`SCOPE.md`](SCOPE.md) for the specific list (diagnostic-style alerts, social/community
+   features, cloud-dependent parity) before opening a PR that tries to match one of them.
+3. **Never destructive on the wire.** The strap is real hardware on the user's wrist. The app only
+   ever sends a curated, reversible command set. See
+   [The BLE safety contract](#the-ble-safety-contract-read-this-before-touching-bluetooth).
+4. **Transparent math.** Analytics are approximations of published methods, documented file by file.
+   No black boxes, no claims of clinical accuracy, no reproduction of any proprietary model.
+5. **Credit upstream.** The protocol work is built on prior community reverse-engineering —
+   `johnmiddleton12/my-whoop` (WHOOP 4.0) and `b-nnett/goose` (WHOOP 5.0). Preserve those credits in
+   code comments and in [`../ATTRIBUTION.md`](../ATTRIBUTION.md).
+
+---
+
+## Contributor roles & the issue/PR workflow
+
+### Community help vs. maintainer decisions
+
+Community members may help triage issues, answer setup questions, test fixes, or point to existing
+documentation — that participation is welcome and valuable. Unless explicitly stated by the
+repository maintainer, those replies are **community help, not official maintainer decisions**.
+Official project decisions, release calls, security ownership, and merge decisions remain with the
+maintainer.
+
+### How issues and PRs are handled here
+
+NOOP runs a **lightweight, maintainer-judgment workflow**, not a strict issue-first gate. Concretely,
+that means:
+
+- There are no dedicated triage/approval labels (e.g. `needs-triage`, `confirmed-bug`,
+  `approved-feature`, `approved-enhancement`, `needs-review`) and no requirement that a PR link a
+  pre-approved issue via `Closes`/`Fixes`/`Resolves #N` before work can start.
+- Issues and PRs are reviewed and merged at the maintainer's discretion, weighed against the ground
+  rules and safety contracts in this document, rather than moved through a formal multi-stage gate.
+- A PR opened without a matching issue, or an issue without a triage label, is **not** by itself a
+  process violation in this repo. Contributors and any external review or automated check (including
+  strict-gate-style audits) should not treat the absence of gate labels as a contribution failure —
+  it reflects how this project currently runs, not an oversight.
+
+This is a deliberate choice for a small, anonymous, offline project; it may change as the project
+grows, in which case this section and the issue/PR templates will be updated together. Until then,
+opening an issue first to coordinate on anything non-trivial (as this guide recommends throughout) is
+still the best way to avoid wasted work — it's just not an enforced gate.
+
+---
+
+## Repository layout
+
+The codebase is split into reusable, cross-platform Swift packages plus a thin platform-specific app
+layer. The **macOS app is the reference implementation**; **Android ships as a full app** under
+`android/`, and **iOS was folded into `main` in v1.94** and is a **build-from-source-only target**
+(`NOOPiOS` / `NOOPiOSWidgets`) — no App Store/TestFlight, to keep the project anonymous (see
+[`IOS.md`](IOS.md)). All reuse the same packages where they can.
+
+```
+Strand/
+├── project.yml                 # XcodeGen project definition — source of truth for the macOS project
+├── Strand.xcodeproj/           # Generated by `xcodegen generate` — do NOT hand-edit (gitignored)
+├── Strand/                     # macOS SwiftUI app target (product name: NOOP)
+│   ├── App/                    # StrandApp, AppModel, RootView, ContentView
+│   ├── BLE/                    # CoreBluetooth manager, frame router, command set, live state
+│   ├── Collect/                # Backfiller, Collector, clock correlation, prune/store paths
+│   ├── Data/                   # Repository, importers, MetricCatalog, profile, notification settings
+│   ├── Screens/                # SwiftUI screens (Today, Sleep, Trends, MetricExplorer, …)
+│   ├── MenuBar/                # MenuBarExtra content (glanceable live HR)
+│   ├── System/                 # MacActions (lock screen, run Shortcut), ProjectInfo
+│   └── Resources/              # Info.plist, Strand.entitlements, Assets.xcassets (AppIcon)
+├── StrandTests/                # macOS app unit tests
+├── Packages/
+│   ├── WhoopProtocol/          # BLE frame parsing, CRC, command/event/packet decode
+│   │                           #   (also builds the `whoop-decode` CLI — runs on Linux)
+│   ├── WhoopStore/             # GRDB/SQLite persistence (migrations, streams, caches)
+│   ├── StrandAnalytics/        # HRV / recovery / strain / sleep / correlation math
+│   ├── StrandImport/           # WHOOP CSV + Apple Health importers
+│   └── StrandDesign/           # SwiftUI design system (palette, components, charts)
+├── Tools/
+│   ├── Backfill/               # `swift run backfill` — re-runs importers into the on-device DB
+│   └── linux-capture/          # Headless Linux capture workbench (Python/bleak + whoop-decode)
+├── Fixtures/                   # Sample WHOOP export used by tests
+└── android/                    # Android client — full shipped app (Kotlin/Gradle, separate module)
+```
+
+### Where logic belongs
+
+| If your change is about… | It belongs in… | Notes |
+|---|---|---|
+| Decoding strap bytes, CRC, framing, packet/event types | `Packages/WhoopProtocol` | **Platform-pure — no CoreBluetooth.** Runs in tests/CLI unchanged. |
+| Persisting decoded data, migrations, caches, reads | `Packages/WhoopStore` | GRDB/SQLite only. |
+| Computing recovery / strain / HRV / sleep / correlations | `Packages/StrandAnalytics` | Pure, database-free analyzers. |
+| Parsing WHOOP CSV or Apple Health `export.xml` | `Packages/StrandImport` | Header-name-driven CSV; streaming SAX XML. |
+| Colors, fonts, motion, cards, charts | `Packages/StrandDesign` | No external UI deps; bridges AppKit/UIKit. |
+| CoreBluetooth, bonding, offload, live state | `Strand/BLE`, `Strand/Collect` | macOS-app layer — wraps the pure packages. |
+| A screen, sidebar item, menu-bar UI, automation | `Strand/Screens`, `Strand/App`, `Strand/System` | App layer. |
+| Capturing strap frames on Linux for protocol RE | `Tools/linux-capture` | Python/bleak capture → `whoop-decode`; no Mac/CoreBluetooth. See its [README](../Tools/linux-capture/README.md). |
+
+**Rule of thumb:** the more "wire-level" or "math-level" a change is, the deeper into `Packages/` it
+should live, and the more it should be covered by a `swift test` suite that runs without an app, a
+strap, or CoreBluetooth.
+
+### Cross-platform discipline
+
+Every package declares **both** `.iOS(.v16)` and `.macOS(.v13)` so the protocol, storage, analytics,
+import, and design layers compile and run unmodified on iOS once an app target exists. Any
+framework-specific code must be guarded:
+
+```swift
+#if canImport(AppKit)
+let ns = NSColor(self).usingColorSpace(.sRGB) ?? NSColor(self)
+// …
+#elseif canImport(UIKit)
+let ui = UIColor(self)
+// …
+#endif
+```
+
+Do **not** add `import AppKit`/`import UIKit`/`import CoreBluetooth` to any file under `Packages/` —
+that is what breaks the cross-platform contract. CoreBluetooth lives only in the macOS app's
+`Strand/BLE`.
+
+### The parity ledger (one-sided declarations)
+
+The discipline above is also enforced mechanically. `Tools/parity_ledger.py` pairs declarations across
+the two platforms and `Tools/parity_ratchet.py` refuses new **one-sided** ones that carry no typed
+reason. It reads exactly these roots and nothing else:
+
+| platform | in scope |
+| --- | --- |
+| Swift | `Packages/{StrandAnalytics,StrandImport,WhoopStore,WhoopProtocol,OuraProtocol}/Sources/**` |
+| Kotlin | `android/app/src/main/java/com/noop/{analytics,ingest,data,protocol,oura}/**` |
+
+Note the asymmetry, because it will bite you: the **app targets are out of Swift scope** (`Strand/`,
+`StrandiOS/`), but `com/noop/data/**` is *in* Kotlin scope. So a Kotlin declaration can be in scope
+while the Swift twin it genuinely has lives in an app target the scanner never reads. That gap is
+tracked in #2567.
+
+If you add, rename or delete a declaration under those roots, refresh the derived snapshots:
+
+```bash
+python3 Tools/parity_ledger.py --refresh-derived
+```
+
+This rewrites them only if the ratchet accepts the result, so a refusal is information, not an
+obstacle to route around. One refusal in particular is **not yours to absorb**: if the *base* is
+already stale, because some earlier PR moved product source without the gate running, add
+
+```bash
+python3 Tools/parity_ledger.py --refresh-derived --repair-stale-base
+```
+
+which is accepted only when product source, finding identities, counters and typed dispositions all
+match the exact base. By construction it can only ever produce a metadata-only commit. Do **not**
+reach for `--migrate-authority` instead: it waives base-manifest reproducibility, and choosing to
+lose that is a maintainer call, not a way to get a red branch green.
+
+If your declaration is legitimately one-sided, register it in `Tools/parity_dispositions.json`. Key
+sets are exact, extras and omissions are both errors:
+
+| `type` | extra keys | when |
+| --- | --- | --- |
+| `experimental` | `issue`, `reason`, `expires_on` | temporary, and it must name an issue and a date |
+| `platform_specific` | `rationale` | the other platform genuinely cannot carry it |
+| `out_of_scope_twin` | `rationale`, `twin_path` | the twin exists, but outside the roots above |
+
+All three also need exact `kind`, `identity`, `identity_sha256` and `platform`, with a rationale of
+real substance (a length floor is enforced, but write for the next reader, not the validator).
+`kind` is limited to `add-unpaired-{file,function,property,constant}`: a disposition can never waive
+a **shared-parity regression or a pair removal**, so if the ratchet names one of those, the answer is
+to fix the code.
+
+Two sharp edges on `out_of_scope_twin`: it is **Kotlin-only**, and its `twin_path` must both exist on
+disk and match `Strand/…/*.swift`. A twin under `StrandiOS/` does **not** match today, since the
+pattern wants a `/` directly after `Strand`, so ask a maintainer rather than mislabelling it
+`platform_specific`.
+
+Finally, know what CI does *not* promise you here. `parity-governance.yml` is path-filtered to
+`Tools/parity_*`, yet what it measures is the declaration graph in **product** source, so it may not
+run on the very PR that moves it. The repository-acceptance suite runs unfiltered on `tools-python`
+to cover that, and the workflow additionally runs on a daily schedule against `main` so drift is
+found there rather than on the next contributor's PR. Neither closes the window completely: a green
+PR can still sit on a base that has since drifted, so rebase before you conclude anything from a
+green run, and if `parity-governance` is red on `main` against a commit that changed none of it, that
+is the schedule doing its job and a maintainer's repair to make.
+
+---
+
+## Build & test
+
+This is a condensed reference; [`BUILD.md`](BUILD.md) is the full guide (signing, sandbox,
+pairing, re-importing into the on-device DB).
+
+### Prerequisites
+
+| Tool | Notes |
+|---|---|
+| macOS 13+ | Deployment target is macOS 13.0. |
+| Xcode 15+ (Swift 5.9 toolchain) | Provides `xcodebuild` + the macOS SDK. |
+| XcodeGen | Generates `Strand.xcodeproj` from `project.yml` (`brew install xcodegen`). |
+
+The packages themselves only need a Swift toolchain — they build and test with plain `swift build` /
+`swift test`, no Xcode project required.
+
+### Per-package iteration (fastest loop)
+
+Most contributions live inside one package. Build and test it in isolation — it's far faster than
+the whole app and needs no strap:
+
+```bash
+cd Packages/WhoopProtocol && swift build && swift test
+cd Packages/WhoopStore     && swift build && swift test
+cd Packages/StrandAnalytics && swift build && swift test
+cd Packages/StrandImport   && swift build && swift test
+cd Packages/StrandDesign   && swift build && swift test
+```
+
+### Linux (protocol RE)
+
+The pure packages build and test on Linux with the standard Swift toolchain (no Apple frameworks).
+`WhoopProtocol` also produces a `whoop-decode` CLI used by the Linux capture workbench:
+
+```bash
+cd Packages/WhoopProtocol
+swift build && swift test                 # decoder + its tests, on Linux
+swift build --product whoop-decode        # the decode CLI → .build/debug/whoop-decode
+
+cd ../../Tools/linux-capture
+python3 -m unittest -v                     # framing/reassembly tests (stdlib only, no bleak)
+```
+
+Capturing from a real strap on Linux is documented in
+[`../Tools/linux-capture/README.md`](../Tools/linux-capture/README.md).
+
+### macOS app
+
+The Xcode project is **generated**, not committed. `project.yml` is the source of truth; re-run
+generation whenever you add/remove source files or edit `project.yml`:
+
+```bash
+xcodegen generate
+
+# fast syntax/type check (no signing, no bundle):
+xcodebuild -project Strand.xcodeproj -scheme Strand \
+  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO build
+
+# full app + integration tests:
+xcodebuild -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' test
+```
+
+The scheme is `Strand`; the built product is `NOOP.app` (`project.yml` sets `PRODUCT_NAME: NOOP`,
+bundle id `com.noopapp.noop`). The app is **sandboxed** with the Bluetooth and
+user-selected-files entitlements and is **ad-hoc signed** — no Apple Developer account needed for a
+personal build. See [`BUILD.md`](BUILD.md) for the signed-bundle recipe and pairing notes.
+
+### Before you push
+
+- `swift test` passes in every package you touched (and the app's `StrandTests` if you touched the
+  app layer).
+- `xcodegen generate` has been run if you added or removed files, **but do not commit
+  `Strand.xcodeproj/`** — it's gitignored and regenerated from `project.yml`.
+- No new third-party dependency unless it's discussed first. Today the only ones are **GRDB.swift**
+  (SQLite) and **ZIPFoundation** (export unzip), both via SwiftPM.
+
+### What CI gates — and what it deliberately doesn't
+
+NOOP runs a **deliberately lean CI**: fast, no-hardware checks guard the point of merge, while heavier
+and hardware-dependent verification runs at release time or on demand. This is a choice for an
+anonymous, offline, sideloaded project — not a gap to fill with more gates.
+
+- **On every PR (required):** `source-hygiene`, `tools-python` and `i18n-coverage` have no path
+  filter, so all three run on everything. (`tools-python`'s Windows leg is a separate workflow and IS
+  filtered, to `Tools/linux-capture/**`: it re-runs only those tests under legacy console encodings,
+  and they read nothing outside their own package.) `swift-packages` (`swift test` for `Packages/**`) and
+  `android` (`assembleFullDebug` + `testFullDebugUnitTest`) are **path-filtered** — they run when you
+  touch what they cover, which is most substantive PRs. Between them these catch the regressions that
+  matter most (protocol/analytics math, storage, i18n) without a device or an app build. The check
+  names you see are JOB names and do not resemble the workflow names; the table in the root
+  [CONTRIBUTING.md](../CONTRIBUTING.md#what-ci-checks) maps them.
+- **Disabled by design — you build the app yourself:** `app-build.yml` (app-target compile, iOS needs
+  `macos-26`) is **off**. So a compile error in **app-target** code (SwiftUI Views, `BLEManager`,
+  `Repository`, a Compose screen) passes every default check — `android.yml` builds and unit-tests the
+  Android app but nothing compiles the Apple app target. Before you push app-layer changes, compile
+  locally — `xcodebuild … build` / `./gradlew compileFullDebugKotlin` — or dispatch `app-build.yml`
+  on demand.
+- **Gated at release, not per PR:** Android release lint (`lintVitalFullRelease`) runs inside
+  `assembleFullRelease` in the staging/release builds, so lint-fatal issues (e.g. an
+  `ExtraTranslation` in a `values-<lang>` file) surface there. Run `./gradlew lintVitalFullRelease`
+  locally before a release if you touched `res/`.
+- **On demand:** `app-build.yml` also runs the `StrandTests` macOS integration suite; dispatch it when
+  you change app-target Swift that no package test covers.
+- **Absent on purpose:** dependency/vuln scanning and Android instrumentation/connected tests. The
+  dependency set is small and pinned, there is no server or telemetry, and BLE/offload behavior is
+  validated **on a real strap** — compile-success proves nothing about connection behavior.
+
+---
+
+## The design system is the law
+
+`StrandDesign` is the single source of visual truth. **Every screen composes only its tokens and
+components.** Do not hardcode colors, sizes, fonts, or invent ad-hoc cards.
+
+### Color — `StrandPalette` only
+
+Never write a raw hex value or a system color in a screen. Pull from
+`Packages/StrandDesign/Sources/StrandDesign/Palette.swift`:
+
+```swift
+// ✅ correct
+.foregroundStyle(StrandPalette.textPrimary)
+.background(StrandPalette.surfaceRaised)
+let tint = StrandPalette.recoveryColor(score)      // gradient-sampled, 0...100
+let strain = StrandPalette.strainColor(value)      // 0...21 scale
+
+// ❌ wrong
+.foregroundStyle(Color(hex: "#F4F7F5"))
+.background(Color(red: 0.05, green: 0.08, blue: 0.07))
+```
+
+The palette is dark-only and instrument-grade. Semantic tokens exist for surfaces
+(`surfaceBase`/`surfaceRaised`/`surfaceOverlay`/`surfaceInset`), text
+(`textPrimary`/`textSecondary`/`textTertiary`), `hairline`/`hairlineStrong` borders, the `accent`
+chrome green, status colors (`statusPositive`/`statusWarning`/`statusCritical`), the recovery and
+strain gradients, sleep-stage colors, and HR zones. There are sampling helpers
+(`recoveryColor`, `strainColor`, `sleepStageColor`, `hrZoneColor`) — use them rather than picking a
+stop by hand. If a screen needs a color that isn't in the palette, the answer is almost always "use
+an existing token", and otherwise "add the token to the palette", never "inline a hex".
+
+### Type — `StrandFont` only
+
+From `Typography.swift`. Use the named scale (`title1`, `title2`, `headline`, `body`, `caption`,
+`overline`, `mono`, …). **All live/numeric values use tabular digits** so they don't reflow — use
+`StrandFont.number(_:)`, `bodyNumber`, `captionNumber`, or `display(_:)`. For ALL-CAPS overline
+labels, use the `Text.strandOverline()` helper rather than styling by hand.
+
+### Components — compose, don't reinvent
+
+From `Components.swift` and the chart files. The locked surface is **`NoopCard`** (one radius,
+border, fill, and hover behavior). Build screens from the shared pieces:
+
+| Component | Use |
+|---|---|
+| `NoopCard` | The one card surface. Every card is this. |
+| `StatTile` | Uniform fixed-height metric tile (`NoopMetrics.tileHeight`), with optional sparkline + delta. |
+| `ChartCard` / `ChartFooter` | Header + fixed-height chart body + optional footer stats. |
+| `SectionHeader` | Overline + title + optional trailing. |
+| `InsightCard` | Category / status / detail insight block. |
+| `SegmentedPillControl` | The one range/segmented control (used everywhere). |
+| `SourceBadge` | "MY-WHOOP" / "APPLE HEALTH" provenance chip. |
+| `RecoveryRing`, `StrainGauge`, `Hypnogram`, `Sparkline`, `TrendChart`, `YearHeatStrip`, `StatePill` | Charts/indicators. |
+
+Spacing and sizing come from `NoopMetrics` (`cardRadius`, `cardPadding`, `gap`, `sectionGap`,
+`screenPadding`, `tileHeight`, `chartHeight`) and animation from `StrandMotion`
+(`interactive`, `gentle`, `hero`, …). Do not introduce magic numbers for these.
+
+**If you find yourself writing a one-off card, gradient, font size, or animation in a screen, stop**
+— either it already exists in `StrandDesign`, or it should be added there (with a `#Preview`) and
+then used. Screens stay thin; the system stays canonical.
+
+---
+
+## Coding conventions
+
+- **Swift, four-space indent, no trailing whitespace.** Match the surrounding file.
+- **Public API is intentional.** `public` only what a consumer package or the app actually needs.
+  Internal helpers stay internal. Types crossing concurrency boundaries are `Sendable` where it makes
+  sense (e.g. `DeviceFamily`, `AnalyticsEngine.ProfileBaselines`).
+- **Document the "why", and cite sources.** Protocol and analytics code carries comments that explain
+  *where a fact came from* — e.g. `crc16Modbus` is annotated "Ported verbatim from the Goose
+  reverse-engineering"; the safe command list cites the upstream `CommandNumber` table; analyzers
+  cite Task Force 1996 (HRV), Karvonen (%HRR), Edwards/Banister (TRIMP), Tanaka (HRmax). Preserve and
+  extend these citations; they are how we keep the math transparent and the protocol auditable.
+- **Pure where possible.** `WhoopProtocol` decode functions, `StrandAnalytics` analyzers, and
+  `FrameRouter` are deliberately free of side effects and frameworks so they're unit-testable. Keep
+  new logic in that pure style and let the app layer do the I/O.
+- **`@MainActor` for UI-touching state.** `FrameRouter` and live-state types are main-actor isolated;
+  `CBCentralManager` is created on `.main` so delegate callbacks land on the main actor. Don't move
+  CoreBluetooth work off-main without a very good reason.
+- **No anonymous magic.** Reach for an existing constant/enum (`NoopMetrics`, `StrandPalette`,
+  `WhoopCommand`, `MetricCatalog`) before introducing a literal.
+- **Validate before you trust.** Any data coming off the wire is gated on the **full integrity
+  verdict** *and* range-checked before it can drive state (see `FrameRouter.handle` rejecting every
+  frame with `parsed.ok == false` and clamping HR to 30…220). New inbound paths follow the same
+  pattern.
+
+---
+
+## The BLE safety contract (read this before touching Bluetooth)
+
+The strap is real hardware on someone's wrist. The Bluetooth path is the highest-stakes code in the
+repo, and it has a small number of **hard rules**. A PR that violates any of them will not be merged.
+
+### 1. Never add destructive commands
+
+The app's outbound command set lives in `Strand/BLE/Commands.swift` as `WhoopCommand`. It is
+**intentionally a curated subset** of the strap's command space. The file says so explicitly:
+
+```swift
+/// Curated, SAFE WHOOP command set for *sending* to the strap.
+///
+/// This is intentionally a *subset*: DESTRUCTIVE commands that wipe data or brick the strap
+/// (firmware load/DFU, force-trim, ship-mode, power-cycle, fuel-gauge reset) stay deliberately
+/// EXCLUDED so the in-app command sender can never form those bytes. The ONE exception is
+/// `rebootStrap` (a plain, non-destructive restart), sent only from a user-initiated, confirmed action.
+```
+
+Every other command in the enum is **safe and reversible** — toggle realtime HR, read clock /
+battery / version / data range, run/stop a haptic pattern, arm/read/cancel the firmware alarm,
+enter/exit high-frequency sync, start/stop raw data. **Do not add firmware/DFU,
+ship-mode/power-cycle, force-trim, fuel-gauge reset, or any command that can brick, wipe, or
+permanently alter the device.** The lone reboot exception is deliberate and narrow: a restart keeps
+all stored data and NOOP already reboots the strap via rename — it is confirmation-gated and never
+sent automatically (#166). If you believe another non-trivial command is genuinely needed, open an
+issue first, justify why it's reversible, and document its payload and on-device verification before
+any code.
+
+### 2. Gate on the full integrity verdict
+
+Frames are only acted on after the **whole** envelope checks out — header checksum, payload CRC32
+and the structural size rules ([frame integrity verdict](PROTOCOL_IMPLEMENTATION.md#frame-integrity-verdict))
+together. Outbound frames are
+built with the correct CRCs; inbound frames are rejected if any part of that verdict fails.
+
+- **Outbound:** `WhoopCommand.frame(seq:payload:)` builds
+  `[0xAA][len u16 LE][crc8(len)][type=35][seq][cmd][payload…][crc32 LE]`, computing `crc8` over the
+  length bytes and the zlib `crc32` over the inner bytes. The WHOOP 4.0 and 5.0 envelopes differ
+  (WHOOP 4 uses a CRC8 header; WHOOP 5 / the "goose" path uses a CRC16-Modbus header) — see
+  `Packages/WhoopProtocol/Sources/WhoopProtocol/Framing.swift` (`verifyFrame`, `verifyFrame(_:family:)`).
+- **Inbound:** `FrameRouter.handle(parsed:frame:)` decodes with `parseFrame` and **rejects any frame
+  whose `parsed.ok` is false** before it can touch `LiveState`. Bad bytes never drive state. New
+  inbound paths must do the same — one condition, the verdict:
+
+  ```swift
+  let parsed = parseFrame(frame, family: family)
+  guard parsed.ok else { return }
+  ```
+
+  One condition, and it is `ok`. Do **not** write a second, weaker step beside it that asks only
+  whether the payload CRC32 was *demonstrably* wrong — that two-step form is the specific mistake
+  this rule exists to stop, and `ok` already subsumes it. It lets through a frame whose header checksum or declared length
+  is broken while its payload CRC32 is fine, and a frame whose payload CRC32 could not be computed
+  at all. `parsed.rejectReason` carries the cause, so a rejection can be counted and reported
+  without verifying the frame a second time — do that instead of letting the path go quiet.
+
+**Evidence-preserving readers are the documented exception**, and there is a reason to be careful
+here rather than mechanical: the reader that decides whether a raw history frame must be archived
+before the trim ack is asked the *opposite* question, and a negative verdict there is a reason to
+keep the frame, not to drop it. Tightening it the wrong way would delete the only durable copy of
+exactly the frames the strap is about to release. Check the direction of a gate before you flip it.
+
+Never short-circuit a CRC check "to make a capture work". If a real frame fails, the bug is in
+the framing/decoding, not in the check.
+
+### 3. Keep the BLE path stable
+
+The connect/bond/offload state machine in `Strand/BLE/BLEManager.swift` (plus `Strand/Collect/`) is
+load-bearing and was hardened against real failure modes that are documented in the comments
+(racing `SEND_HISTORICAL` ahead of the handshake, straps left parked in high-freq sync, a type-43
+realtime-raw flood that dominated flash). Treat it as stable infrastructure:
+
+- **Don't reorder the connect handshake.** Offload is deliberately gated on
+  `connectHandshakeDone`; `SET_CLOCK` (cmd 10) must precede arming the firmware alarm so the strap
+  RTC is UTC-correct.
+- **Don't `ENTER` high-frequency sync.** The app no longer enters it and sends `exitHighFreqSync`
+  defensively on connect to release straps parked there by older builds.
+- **Prefer `.withoutResponse` writes** (the `send(_:payload:writeType:)` default); use
+  `.withResponse` only where an ack is genuinely required (e.g. `historicalDataResult`), matching the
+  existing call sites.
+- **Verify on real hardware.** Anything that changes what bytes go out, or when, must be tested
+  against an actual strap and the result noted in the PR. The existing comments do exactly this
+  (e.g. "Verified on-device: 2.1/s → 0/s, and it persists across reconnect").
+
+> The decode core (`WhoopProtocol`) and the router (`FrameRouter`) are pure and unit-tested, so you
+> can iterate on parsing and routing logic with `swift test` and captured frames *without* a strap.
+> Reserve on-device testing for the connection/command behavior that genuinely needs it.
+
+---
+
+## How to add things safely
+
+### Add a new metric
+
+A "metric" is a named daily/series value that flows from an importer or analyzer into SQLite and out
+to the Explore / Compare / tile UI. The catalog is the contract.
+
+1. **Write the series.** An importer (`Packages/StrandImport`) or analyzer
+   (`Packages/StrandAnalytics`) produces points; they're persisted via
+   `WhoopStore.upsertMetricSeries(_:deviceId:)` into the `metricSeries` table. **The series `key`
+   must match exactly** what the catalog expects.
+2. **Register it in the catalog.** Add a `MetricDescriptor` row in
+   `Strand/Data/MetricCatalog.swift` via the `d(...)` helper:
+
+   ```swift
+   d("resp_rate", "Respiratory Rate", "Recovery", "rpm", "my-whoop", "lungs", 1, nil),
+   //  key          title                category     unit   source      sf-symbol   decimals  higherIsBetter
+   ```
+
+   - `key` — the exact `metricSeries` key the importer/analyzer writes.
+   - `category` — one of `MetricCatalog.categories` (`Heart`, `Recovery`, `Sleep`, `Strain`,
+     `Health`); add a new category only if it's genuinely needed.
+   - `source` — `"my-whoop"` (strap/CSV) or `"apple-health"`; drives the `SourceBadge`.
+   - `higherIsBetter` — `true`/`false`/`nil`; controls delta tinting. Use `nil` when "better" is
+     ambiguous (e.g. respiratory rate).
+
+3. **That's it for the UI.** Metric Explorer and Compare are *built from the catalog*, so a correctly
+   registered metric with data behind it appears automatically. No screen edits required.
+4. **Add a test.** If a new importer/analyzer produces the series, cover the parse/compute in that
+   package's test suite.
+5. **Refresh the parity ledger.** Step 1 lands in a scanned root (step 4 does not, since `Tests/`
+   is outside them), so run
+   `python3 Tools/parity_ledger.py --refresh-derived` and read
+   [The parity ledger](#the-parity-ledger-one-sided-declarations) if it refuses. Watch step 2 in
+   particular: `MetricCatalog.swift` sits in `Strand/`, which is *outside* Swift scope, while a
+   Kotlin catalog twin under `com/noop/data/**` is inside Kotlin scope. That pairing is the exact
+   asymmetry described there, not a real parity gap.
+
+> **Verify the key in three places** before you push: what the importer/analyzer *writes*, the
+> `MetricCatalog` `key`, and any SQL `WHERE key = …`. Mismatched keys are a known class of bug here —
+> a metric that silently shows no data is almost always a key typo.
+
+### Add a new screen
+
+1. **Build it from `StrandDesign`.** Compose `NoopCard`, `StatTile`, `ChartCard`, `SectionHeader`,
+   etc.; pull every color/font/size from `StrandPalette` / `StrandFont` / `NoopMetrics`. Use the
+   shared `ScreenScaffold` for the standard screen chrome (see existing screens in `Strand/Screens`).
+2. **Register it in the sidebar.** `Strand/App/RootView.swift` drives navigation from the `NavItem`
+   enum:
+   - add a `case` to `NavItem` (its `rawValue` is the sidebar label),
+   - add an SF Symbol in the `icon` switch,
+   - add the `case` to the `detail` view-builder switch that maps `NavItem` → your `View`.
+3. **Keep state where it belongs.** Read through `AppModel` / `Repository`; don't reach into
+   CoreBluetooth or SQLite directly from a view.
+4. **Optional features default OFF.** Anything that takes a Mac action, fires a notification, or
+   automates behavior is opt-in and toggleable, matching the existing Automations/Notifications
+   screens.
+
+### Add a new BLE command
+
+Only after re-reading [The BLE safety contract](#the-ble-safety-contract-read-this-before-touching-bluetooth).
+
+1. **Confirm it is safe and reversible.** If it can brick, wipe, reflash, ship-mode, or permanently
+   alter the strap, it does not go in. No exceptions.
+2. **Add the case to `WhoopCommand`** in `Strand/BLE/Commands.swift` with its on-wire raw value, a
+   `label`, and a comment documenting the payload, what it does, why it's safe/reversible, and how it
+   was verified on-device.
+3. **Add a payload builder if needed** (cf. `setAlarmPayload(epochSec:)`), keeping the byte layout
+   documented.
+4. **Send it through the existing path** — `BLEManager.send(_:payload:writeType:)` — which frames the
+   command (correct CRC8 + CRC32) and writes to the command characteristic. Don't build raw writes
+   by hand.
+5. **Verify on a real strap** and record the result in the PR.
+
+### Add a database column or table
+
+Schema lives in `Packages/WhoopStore/Sources/WhoopStore/Database.swift` as a **versioned GRDB
+`DatabaseMigrator`** (currently through `v9`).
+
+- **Never edit an existing migration.** They've already run on users' on-device databases. Add a
+  **new** `migrator.registerMigration("vN") { db in … }` block.
+- The early migrations create the durable decoded-stream tables (`hrSample`, `rrInterval`,
+  `spo2Sample`, `skinTempSample`, `respSample`, the raw outbox) keyed by `(deviceId, ts)`; later ones
+  add metric caches (`sleepSession`, `dailyMetric`, `metricSeries`), cursors, and more. Follow the
+  same shape and naming.
+- Add a `MigrationTests` case proving the migration applies cleanly on top of the prior version.
+- **Update `schema_oracle.json` in the same PR.** Room (Android) and GRDB (iOS) must agree on the
+  resulting schema, and that agreement is pinned by a shared fixture committed in two byte-identical
+  copies (`Packages/WhoopStore/Tests/WhoopStoreTests/Resources/` and `android/app/src/test/resources/`).
+  `SchemaOracleTests.swift` compares it to GRDB's `PRAGMA table_info`; `SchemaOracleTest.kt` compares it
+  to the schema Room's KSP processor exports. Both fail on a column added to one side only, a column
+  ORDER difference, a type/nullability/DEFAULT change, a primary-key change, an index change, or a new
+  unpinned table — so a migration cannot land until the twin lands with it. A divergence that is
+  deliberate must be written into the fixture's `divergenceReasons` with the reason and what closing it
+  would cost; the suites also fail on a ledger entry that has stopped being true, so the list can only
+  shrink on purpose. Extend the oracle rather than adding a parallel mechanism (same idiom as
+  `decoder_oracle.json`).
+- **GRDB migration identifiers are `v<N>[-slug]`, strictly sequential.** GRDB keys migrations by NAME
+  and applies them in registration order, so two open PRs that both add a `v31` produce two migrations
+  claiming one number (and an exact name collision makes GRDB silently skip the second body). The
+  oracle test asserts the numbers run 1…N with no gaps or repeats: renumber when you rebase.
+
+---
+
+## Tests & fixtures
+
+- **Each package owns its tests** under `Packages/<Name>/Tests/…`; run them with `swift test`.
+  Coverage already includes framing/CRC parity, reassembly, schema, stream decode, store
+  insert/read/migration/prune, the analyzers (HRV, recovery, strain, sleep, correlation, baselines,
+  workout detection), and the CSV / Apple Health importers (including real-export tests).
+- **`Fixtures/`** holds a sample WHOOP export for the import tests; `StrandImport` test resources are
+  bundled via the package's `Package.swift`.
+- **The golden decoder oracle is where cross-platform decode parity is pinned.** `decoder_oracle.json`
+  lives in two byte-identical copies (`Packages/WhoopProtocol/Tests/WhoopProtocolTests/Resources/`
+  and `android/app/src/test/resources/`) and both `DecoderOracleTests.swift` and `DecoderOracleTest.kt`
+  run the *same* assertions against it: decoded field VALUES per fixture frame, and the assembled
+  `Streams`/`StreamBatch` shape (per-stream row counts + the emptiness verdict) per fixture batch.
+  Pinning values rather than bytes is the point — the wire bytes are identical on both platforms, so
+  a 32-vs-64-bit or signedness split is invisible to a per-platform fixture-hex test. **Extend the
+  oracle rather than adding a parallel mechanism**; a `coverage` manifest in the file makes silently
+  dropping an assertion a test failure, so adding one means listing it there too.
+- **Frame integrity is pinned by the same idiom.** Cross-platform agreement on *whether a frame is
+  intact* is not a matter of reading `Framing.swift` and `Framing.kt` side by side — it is pinned by
+  `frame_integrity_oracle.json`, which lives in the same two byte-identical copies and lists, per
+  frame, the verdict, the reject reason **and** the historical-metadata classification. No generator
+  is retained in this repository: update both copies together, then run
+  `FrameIntegrityOracleTests.swift` and `FrameIntegrityOracleTest.kt`, which each assert every row and
+  all three fields. Changing a bound, a reason or a classification on one platform then fails the
+  other suite. Extend that oracle rather than adding a per-platform test that can only drift.
+- **Prefer pure tests.** Because `WhoopProtocol`, `StrandAnalytics`, and `FrameRouter` are
+  framework-free, you can (and should) cover new decode/routing/math with captured frames and
+  fixtures rather than requiring a strap.
+- **`StrandTests`** is the macOS-app integration suite (run via `xcodebuild … test`).
+
+---
+
+## Commit & PR conventions
+
+- **Generated artifacts stay out of git.** `Strand.xcodeproj/`, `build/`, `.build/`, `*.app`, and
+  DerivedData are gitignored; commit `project.yml`, not the generated project. `Package.resolved` is
+  fine to commit.
+- **One concern per PR.** Keep a protocol change, a schema migration, and a UI change in separate
+  commits/PRs where practical.
+- **Show your verification.** For anything on the BLE path, state what you tested on real hardware.
+  For analytics, cite the method and add a test. For UI, confirm it uses only `StrandDesign` tokens.
+- **Scoring changes follow the validation protocol.** Any change to a scored output — sleep stages,
+  recovery, strain, HRV — is governed by [`VALIDATION_PROTOCOL.md`](VALIDATION_PROTOCOL.md): the
+  prediction is pre-registered before measuring, the self-comparison audit gates the reference set,
+  every number ships with the command that regenerates it, and the headline figure comes from a
+  temporal held-out window. Paste its checklist into the PR.
+- **Anonymous, project-voice.** Documentation and comments are written in a neutral, third-person
+  project voice. Keep upstream credits (`my-whoop`, `goose`, `GRDB.swift`, `ZIPFoundation`) intact.
+- **No proprietary material.** Don't add WHOOP firmware, decompiled app code, logos, or assets, and
+  don't introduce DRM circumvention. Keep contributions to clean-room interoperability with hardware
+  the user owns.
+- **Facts vs code — the line that actually gets tested.** The rule above is about *code*: verbatim or
+  transcribed implementations, string literals, and assets stay out however correct they are. A
+  **protocol fact** — a byte offset, a field width, an enum value — is an observation about the wire,
+  and this project's practice is that it may be reimplemented, *provided* it is attributed and lands as an **unvalidated candidate**: decoded and
+  logged, never backing a shipped metric, until independent captures clear it. `spo2_candidate_82`
+  (v18 byte `@82`) is the worked example — sourced from a decompile, attributed as such in
+  `Interpreter.swift`, gated by a test that stops it ever writing `spo2Pct`, and still a candidate
+  because the cross-device evidence is split. See [`ATTRIBUTION.md`](../ATTRIBUTION.md).
+
+  This matters because third-party WHOOP projects are frequently decompile-derived. "It came from a
+  decompile" doesn't by itself rule a finding out; **copying their implementation does**, and so does
+  shipping a metric on an unvalidated one.
+- **Licensing.** By opening a pull request you agree your contribution is licensed under the same
+  [PolyForm Noncommercial License 1.0.0](../LICENSE) as the rest of NOOP. Forks and personal,
+  non-commercial use are welcome under those terms.
+
+---
+
+## Versioning
+
+NOOP follows [Semantic Versioning](https://semver.org) — `MAJOR.MINOR.PATCH`:
+
+- **PATCH** (e.g. `2.0.1`) — bug fixes, diagnostics, small tweaks.
+- **MINOR** (e.g. `2.1.0`) — a new, backwards-compatible feature.
+- **MAJOR** (e.g. `3.0.0`) — a milestone, redesign, or a change that breaks an existing setup or data.
+
+The three parts are independent counters, **not** decimals: `2.0.10` follows `2.0.9`, and there's no
+"next number after `1.99`" — a new feature line is `2.1.0`, not `1.100`. The marketing version lives
+in `project.yml` (`MARKETING_VERSION`) and `android/app/build.gradle.kts` (`versionName`); the build
+numbers (`CFBundleVersion` / `versionCode`) increment independently on every release.
+
+---
+
+## Roadmap
+
+NOOP's logic already lives in cross-platform packages, so most platform work is app-layer wiring
+rather than rewrites of the core. Today the **macOS app is the working reference implementation**
+and **Android ships as a full app**; the items below are planned, experimental, or deferred.
+Contributions toward these are welcome — open an issue to coordinate first.
+
+### Other platforms
+
+- **Windows app (planned).** A native desktop client for Windows. The protocol facts in
+  `WhoopProtocol/Resources/whoop_protocol.json` and the framing/CRC rules are language-agnostic, so
+  the wire behavior is portable; the work is a Windows BLE stack + UI re-implementation that matches
+  the shared packages' behavior.
+- **Android (shipped).** A full, native Kotlin/Gradle client lives under `android/`, re-implementing
+  the same wire protocol against Android's BLE stack — it pairs, offloads, persists and scores
+  on-device, and imports WHOOP / Apple Health / Health Connect. Pre-built APKs are in
+  [Releases](https://github.com/ryanbr/noop/releases). Continued real-hardware testing across more devices is always welcome
+  (an emulator can't reach a physical strap).
+- **iOS (build-from-source target on `main`).** iOS was folded into `main` in v1.94 as a first-class
+  build-from-source target — the `NOOPiOS` and `NOOPiOSWidgets` schemes (app target plus widgets, a
+  Live Activity, and HealthKit), built against current code in Xcode, with CI compiling both macOS and
+  iOS on every change. It is **build-it-yourself only, intentionally not shipped:** iOS has no
+  anonymous distribution path (the App Store and TestFlight both require a real Apple Developer
+  identity), which is at odds with NOOP staying anonymous, so there are no pre-built downloads. Every
+  package declares `.iOS(.v16)` and guards UI-framework code with `#if canImport(UIKit)/AppKit`, so
+  the shared core and analytics run unmodified — results match macOS. It is newer and less
+  battle-tested than macOS/Android (live BLE on a real iPhone isn't fully validated yet), so
+  on-hardware testing is especially welcome; [`IOS.md`](IOS.md) is the detailed guide.
+
+### Deferred ideas
+
+These are scoped but intentionally not built yet. They're listed so contributors know the direction
+(and the open questions) before investing time:
+
+- **Live PPG scope.** Surface the strap's raw optical (PPG) stream as a live waveform/diagnostic
+  view. The raw-data plumbing exists (`startRawData`/`stopRawData`, the type-43 realtime-raw control,
+  `enableOpticalData`), but a stable, useful live scope is deferred.
+- **Steps via IMU.** Derive step count on-device from the strap's accelerometer/IMU
+  (`toggleIMUMode`) instead of relying on the imported Apple Health `steps` series.
+- **Notification-watcher helper.** A small, opt-in helper to mirror selected macOS notifications to a
+  haptic cue on the strap. Strictly local, off by default, and bounded — no general-purpose
+  notification scraping.
+
+> Roadmap items don't change the ground rules. Everything above still holds: offline-only, no
+> destructive BLE commands, CRC-gated, design-system-only UI, transparent and clearly-non-clinical
+> math, and credit to the upstream reverse-engineering work.
+
+---
+
+*NOOP is an independent, unofficial, non-commercial interoperability project, not affiliated with,
+endorsed by, or connected to WHOOP, Inc., and is not a medical device. See
+[`../DISCLAIMER.md`](../DISCLAIMER.md).*

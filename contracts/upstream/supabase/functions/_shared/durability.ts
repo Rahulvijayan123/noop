@@ -1,0 +1,259 @@
+import { createHash } from 'node:crypto';
+import { Decompress } from 'npm:fzstd@0.1.1';
+import type { SupabaseRest } from './rest.ts';
+import type { S3Store } from './s3.ts';
+import { PushProtocolError } from './registry.ts';
+import { MAX_OBJECT_LANE_BYTES } from './retention.ts';
+import { ZstdBounds } from './zstdBounds.ts';
+import { AuxiliaryIdentityValidator } from './auxiliaryIdentity.ts';
+import { assertIntakeScope, intakeAdmissionArguments, isIntakeAdmissionError, type IntakeAdmission } from './intakeAdmission.ts';
+
+// Streaming verification bounds output even when the compressed input is small.
+export const MAX_DECODED_OBJECT_BYTES = 512 * 1024 * 1024;
+
+export interface DurabilityReceipt {
+  version: 1;
+  state: 'verified_indexed';
+  receiptId: string;
+  ownerUserId: string;
+  deviceId: string;
+  objectId: string;
+  batchId: string | null;
+  sourceId: string | null;
+  stream: string;
+  schemaVersion: number;
+  objectKey: string;
+  contentSha256: string;
+  wireSha256: string;
+  compressedBytes: number;
+  uncompressedBytes: number;
+  verifiedAt: string;
+  indexedAt: string;
+}
+
+// Do not expose storage, SQL, or authentication response bodies to callers or logs.
+export function intakeError(err: unknown): never {
+  const message = err instanceof Error ? err.message : '';
+  for (const code of ['device_owner_conflict', 'object_owner_conflict']) {
+    if (message.includes(code)) throw new PushProtocolError(code, 403);
+  }
+  for (const code of ['batch_id_conflict', 'object_id_conflict', 'receipt_immutable', 'device_registration_conflict', 'object_unavailable']) {
+    if (message.includes(code)) throw new PushProtocolError(code, 409);
+  }
+  throw err;
+}
+
+export async function registerDevice(rest: SupabaseRest, row: Record<string, unknown>) {
+  try {
+    return await rest.rpc('noop_register_push_device', {
+      p_user_id: row.user_id, p_device_id: row.id, p_external_device_id: row.external_device_id,
+    });
+  } catch (err) { intakeError(err); }
+}
+
+export async function reserveManifest(rest: SupabaseRest, row: Record<string, unknown>) {
+  try { return await rest.rpc('noop_reserve_object_manifest', { p_manifest: row }); }
+  catch (err) { intakeError(err); }
+}
+
+function mismatch(code: string): never { throw new PushProtocolError(code, 409); }
+
+/** Reads the snapshot, not the mutable presigned PUT target. No whole-object buffering. */
+export async function verifyStoredObject(raw: S3Store, row: any, key: string) {
+  const expectedWire = Number(row.compressed_bytes);
+  const expectedDecoded = row.uncompressed_bytes == null ? null : Number(row.uncompressed_bytes);
+  if (!Number.isSafeInteger(expectedWire) || expectedWire <= 0 || expectedWire > MAX_OBJECT_LANE_BYTES ||
+      (expectedDecoded != null && (!Number.isSafeInteger(expectedDecoded) || expectedDecoded <= 0 ||
+        expectedDecoded > MAX_DECODED_OBJECT_BYTES))) mismatch('invalid_object_size');
+  const response = await raw.getObjectStream(key);
+  if (!response?.body) mismatch('object_missing');
+  const wireHash = createHash('sha256');
+  const contentHash = createHash('sha256');
+  let compressedBytes = 0;
+  let uncompressedBytes = 0;
+  const auxiliary = row.object_kind === 'v18AuxSample' && row.push_protocol_version === '1.4'
+    ? new AuxiliaryIdentityValidator(Number(row.sample_count), Date.parse(row.start_at) / 1000, Date.parse(row.end_at) / 1000) : null;
+  const countWire = new TransformStream<Uint8Array, Uint8Array>({
+    transform(chunk, controller) {
+      compressedBytes += chunk.length;
+      if (compressedBytes > Math.min(expectedWire,row.recovery_max_wire_bytes ?? expectedWire)) mismatch('size_mismatch');
+      wireHash.update(chunk);
+      controller.enqueue(chunk);
+    },
+  });
+  // Observe source I/O before the decompressor: a timeout/socket interruption is
+  // retryable, while a complete malformed compressed object is a data failure.
+  let sourceReadFailed = false;
+  let sourceReadError: unknown;
+  const reader = response.body.getReader();
+  const observedBody = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const next = await reader.read();
+        if (next.done) { controller.close(); reader.releaseLock(); }
+        else controller.enqueue(next.value);
+      } catch (error) {
+        sourceReadFailed = true;
+        sourceReadError = error;
+        controller.error(error);
+        reader.releaseLock();
+      }
+    },
+    async cancel(reason) {
+      try { await reader.cancel(reason); } finally { reader.releaseLock(); }
+    },
+  });
+  const wire = observedBody.pipeThrough(countWire);
+  let decoded: ReadableStream<Uint8Array>;
+  if (row.compression === 'gzip') {
+    decoded = wire.pipeThrough(new DecompressionStream('gzip') as ReadableWritablePair<Uint8Array, Uint8Array>);
+  } else if (row.compression === 'zstd') {
+    let decoder: Decompress;
+    const bounds = new ZstdBounds(Math.min(expectedDecoded ?? MAX_DECODED_OBJECT_BYTES,
+      row.recovery_max_decoded_bytes ?? MAX_DECODED_OBJECT_BYTES));
+    decoded = wire.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      start(controller) {
+        decoder = new Decompress((chunk) => {
+          // Count in this callback, before enqueueing; a highly compressible input chunk may
+          // synchronously produce many output chunks before the downstream reader runs.
+          uncompressedBytes += chunk.length;
+          if (uncompressedBytes > Math.min(expectedDecoded ?? MAX_DECODED_OBJECT_BYTES,
+            row.recovery_max_decoded_bytes ?? MAX_DECODED_OBJECT_BYTES)) mismatch('decoded_size_mismatch');
+          contentHash.update(chunk);
+          controller.enqueue(new Uint8Array(0));
+        });
+      },
+      transform(chunk) { bounds.push(chunk); decoder.push(chunk); },
+      flush() { bounds.finish(); decoder.push(new Uint8Array(0), true); },
+    }));
+  } else { await wire.cancel(); mismatch('unsupported_compression'); }
+  try {
+    for await (const chunk of decoded) {
+      if (row.compression === 'zstd') continue;
+      uncompressedBytes += chunk.length;
+      if (uncompressedBytes > Math.min(expectedDecoded ?? MAX_DECODED_OBJECT_BYTES,
+        row.recovery_max_decoded_bytes ?? MAX_DECODED_OBJECT_BYTES)) mismatch('decoded_size_mismatch');
+      contentHash.update(chunk);
+      auxiliary?.push(chunk);
+    }
+  } catch (err) {
+    if (sourceReadFailed) throw sourceReadError;
+    if (err instanceof PushProtocolError) throw err;
+    mismatch('invalid_compressed_object');
+  }
+  if (compressedBytes !== expectedWire) mismatch('size_mismatch');
+  if (expectedDecoded != null && uncompressedBytes !== expectedDecoded) mismatch('decoded_size_mismatch');
+  const wireSha256 = wireHash.digest('hex');
+  const contentSha256 = contentHash.digest('hex');
+  // Old inline manifests recorded the gzip digest; old binary manifests recorded decoded SHA.
+  const scope = row.digest_scope ?? (String(row.format).startsWith('ndjson') ? 'wire' : 'decoded');
+  if ((scope === 'wire' ? wireSha256 : contentSha256) !== String(row.sha256).toLowerCase()) mismatch('digest_mismatch');
+  return { compressedBytes, uncompressedBytes, wireSha256, contentSha256,
+    auxiliaryValidation: auxiliary?.finish(),
+    ...(response.headers.get('x-amz-version-id') ? { storageVersionId: response.headers.get('x-amz-version-id')! } : {}) };
+}
+
+export async function completeDurableObject({ rest, raw, row, verificationToken, admission, onStage }: {
+  rest: SupabaseRest; raw: S3Store; row: any; verificationToken?: string; admission?: IntakeAdmission;
+  onStage?: (stage: 'head' | 'copy' | 'download_verify' | 'receipt', milliseconds: number) => void;
+}): Promise<DurabilityReceipt> {
+  async function measured<T>(stage: 'head' | 'copy' | 'download_verify' | 'receipt', work: () => Promise<T>): Promise<T> {
+    const start=performance.now();
+    try { return await work(); } finally { onStage?.(stage,Math.round(performance.now()-start)); }
+  }
+  assertIntakeScope(row, admission);
+  if (['deleted', 'deleting', 'expired'].includes(row.status)) mismatch('object_unavailable');
+  const owner = await rest.select('devices', `id=eq.${row.device_id}&user_id=eq.${row.user_id}&select=id`);
+  if (!owner.length) throw new PushProtocolError('device_owner_conflict', 403);
+  let prior = row.durability_receipt as DurabilityReceipt | null;
+  // Reserve a unique server-only key durably before COPY. An ambiguous outcome remains tracked;
+  // only the leased receipt transaction may publish it and only the sweeper may retire it.
+  const uploadKey = row.upload_object_key || row.object_key;
+  let intent: any = null;
+  if (!prior) {
+    try {
+      const reserved = await rest.rpc('noop_reserve_copy_intent', { p_user_id: row.user_id, p_object_id: row.id,
+        ...(verificationToken ? { p_verification_token: verificationToken } : {}),
+      });
+      if (reserved?.receipt) prior = reserved.receipt;
+      else {
+        if (!reserved?.id || !reserved.lease_token || !reserved.verified_key || reserved.upload_key !== uploadKey) {
+          throw new Error('invalid_copy_intent');
+        }
+        intent = reserved;
+      }
+    } catch (err) {
+      if (err instanceof Error && err.message.includes('copy_attempt_limit')) {
+        throw new PushProtocolError('copy_attempt_limit', 503);
+      }
+      if (err instanceof Error && err.message.includes('async_verification_required')) {
+        throw new PushProtocolError('async_verification_required', 503);
+      }
+      intakeError(err);
+    }
+  }
+  const verifiedKey = prior?.objectKey || intent.verified_key;
+  let failureCode = 'copy_failed';
+  try {
+    if (!prior) {
+      const head = await measured('head',()=>raw.head(uploadKey));
+      if (!head?.exists || (head.contentLength != null && Number(head.contentLength) !== Number(row.compressed_bytes))) {
+        mismatch(!head?.exists ? 'object_missing' : 'size_mismatch');
+      }
+      await measured('copy',()=>raw.copyObject(uploadKey, verifiedKey));
+    }
+    failureCode = 'verification_failed';
+    const started = performance.now();
+    const verified = await measured('download_verify',()=>verifyStoredObject(raw, row, verifiedKey));
+    failureCode = 'receipt_failed';
+    const verifiedArgs = {
+      p_wire_sha256: verified.wireSha256, p_content_sha256: verified.contentSha256,
+      p_compressed_bytes: verified.compressedBytes, p_uncompressed_bytes: verified.uncompressedBytes,
+    };
+    const receipt: DurabilityReceipt = await measured('receipt',async()=>admission?.mode === 'canary'
+      ? await rest.rpc('noop_intake_canary_commit_receipt', {
+        p_user: admission.ownerId, p_device: admission.deviceId, p_object: row.id,
+        p_intent: intent?.id ?? null, p_lease: intent?.lease_token ?? null, p_verified_key: verifiedKey,
+        ...verifiedArgs, p_verification_ms: Math.max(0, Math.round(performance.now() - started)),
+        p_validation: verified.auxiliaryValidation ?? null,
+      })
+      : intent
+      ? await rest.rpc('noop_commit_copy_receipt', {
+        p_intent_id: intent.id, p_lease_token: intent.lease_token, ...verifiedArgs,
+        p_verification_ms: Math.max(0, Math.round(performance.now() - started)),
+        p_validation: verified.auxiliaryValidation ?? null,
+      })
+      : await rest.rpc(verified.auxiliaryValidation ? 'noop_commit_aux_object_receipt' : 'noop_commit_object_receipt', {
+        p_user_id: row.user_id, p_object_id: row.id, p_verified_key: verifiedKey, ...verifiedArgs,
+        ...(verified.auxiliaryValidation ? { p_validation: verified.auxiliaryValidation } : {}),
+      }));
+    if (receipt.version !== 1 || receipt.state !== 'verified_indexed') throw new Error('invalid_durability_receipt');
+    return receipt;
+  } catch (err) {
+    if (isIntakeAdmissionError(err)) throw err;
+    if (intent) await rest.rpc('noop_abandon_copy_intent', {
+      p_intent_id: intent.id, p_lease_token: intent.lease_token, p_failure_code: failureCode,
+    }).catch(() => {});
+    // Publication failure is retry debt, not evidence that verified bytes became invalid.
+    // Keep a pending manifest retryable and never demote a concurrent successful receipt.
+    if (!prior && failureCode !== 'receipt_failed') await rest.request(`object_manifests?id=eq.${row.id}&durability_receipt=is.null`, {
+      method: 'PATCH', body: { status: 'failed' },
+    }).catch(() => {});
+    intakeError(err);
+  }
+}
+
+/** The DB cursor persists across stateless worker invocations and wraps after the last page. */
+export async function reconcileIntake(rest: SupabaseRest, raw: S3Store, limit = 16, admission?: IntakeAdmission) {
+  const rows = await rest.rpc(admission?.mode === 'canary' ? 'noop_intake_reconcile_page_scoped' : 'noop_intake_reconcile_page', {
+    ...intakeAdmissionArguments(admission), p_limit: limit });
+  // Validate the entire returned page before touching any object in it.
+  for (const row of rows) assertIntakeScope(row, admission);
+  const report = { scanned: 0, verifiedIndexed: 0, deferred: 0 };
+  for (const row of rows) {
+    report.scanned++;
+    try { await completeDurableObject({ rest, raw, row, admission }); report.verifiedIndexed++; }
+    catch (error) { if (isIntakeAdmissionError(error)) throw error; report.deferred++; }
+  }
+  return report;
+}

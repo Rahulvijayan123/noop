@@ -1,0 +1,4 @@
+# normalize_diff.py --name noop_project_append_batch
+# pinned latest def: 20260928011000_append_projection_qualified_row.sql:6 (create) 8 definition(s); latest by filename
+# verdict: IDENTICAL
+
