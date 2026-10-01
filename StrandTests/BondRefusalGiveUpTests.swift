@@ -89,4 +89,18 @@ final class BondRefusalGiveUpTests: XCTestCase {
         XCTAssertTrue(g.recordRefusal())
     }
 
+    /// A refused 5/MG link that stays up must be dropped so the reconnect retries; otherwise the streak never
+    /// reaches the pairing hint and history silently stops syncing.
+    func testDropsARefusedLinkUntilTheGiveUpLatches() {
+        XCTAssertTrue(BLEManager.shouldDropRefusedLink(whoop5: true, insufficient: true, bonded: false, gaveUp: false))
+        XCTAssertFalse(BLEManager.shouldDropRefusedLink(whoop5: true, insufficient: true, bonded: false, gaveUp: true),
+                       "after the give-up the link stays up for live HR under the paused hint")
+        XCTAssertFalse(BLEManager.shouldDropRefusedLink(whoop5: true, insufficient: true, bonded: true, gaveUp: false),
+                       "a refusal after a genuine bond is not this case")
+        XCTAssertFalse(BLEManager.shouldDropRefusedLink(whoop5: true, insufficient: false, bonded: false, gaveUp: false),
+                       "only an auth refusal")
+        XCTAssertFalse(BLEManager.shouldDropRefusedLink(whoop5: false, insufficient: true, bonded: false, gaveUp: false),
+                       "4.0 bonds through its own handshake")
+    }
+
 }

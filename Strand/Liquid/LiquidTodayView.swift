@@ -2807,6 +2807,10 @@ private struct LiquidSyncStatusRow: View {
     var body: some View {
         if live.backfilling {
             row(String(localized: "Strap history"), value: chunks, tone: StrandPalette.accent)
+        } else if live.connected, live.pairingHint != nil {
+            // The bond was refused: history can't sync until the strap is re-paired (how-to on the Devices card).
+            row(String(localized: "Strap history"),
+                value: String(localized: "Not syncing · re-pair strap"), tone: StrandPalette.statusWarning)
         } else if let ts = live.lastSyncedAt {
             row(String(localized: "Strap history"),
                 value: String(localized: "Synced \(relativeAgo(ts))"), tone: StrandPalette.textPrimary)

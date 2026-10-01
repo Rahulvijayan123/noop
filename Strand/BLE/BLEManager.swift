@@ -1995,6 +1995,14 @@ public final class BLEManager: NSObject, ObservableObject {
         preferredPeripheralUUID = resolved
     }
 
+    /// A 5/MG strap that refuses the bond usually keeps the link up, serving plain heart rate, so on iOS
+    /// nothing retried: the pairing hint (2nd refusal) and the give-up (5th) were unreachable and backfill
+    /// waited forever with no error shown. Dropping the link makes the reconnect retry, on the pinned strap
+    /// when launch had landed on another one first. Once the give-up latches, the link stays up for live HR.
+    nonisolated static func shouldDropRefusedLink(whoop5: Bool, insufficient: Bool, bonded: Bool, gaveUp: Bool) -> Bool {
+        whoop5 && insufficient && !bonded && !gaveUp
+    }
+
     /// True when `p` is the strap we're pinned to — or when no pin is set (the single-WHOOP default, so
     /// any WHOOP is acceptable and the legacy first-found behaviour is preserved byte-for-byte). The
     /// attach/reconnect paths consult this so they can never adopt the WRONG already-connected strap on a
@@ -6729,6 +6737,15 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // This one change repairs the pairing hint (streak>=2), the #747 give-up (5) AND the #52
             // stale-pin handoff below for non-English devices, which all key off this same flag.
             let insufficient = BLEManager.isInsufficientAuthError(error)
+            // willRestoreState assumes a restored link was bonded, but an auth refusal proves it never
+            // encrypted. iOS keeps such a link up across relaunches, so trusting the assumption hid the
+            // refusal from everything below for as long as the link lived.
+            if insufficient, didBond, selectedModel.deviceFamily == .whoop5 {
+                log("WHOOP 5/MG: restored link was never encrypted — treating it as unbonded")
+                didBond = false
+                state.encryptedBond = false
+                if lastBondedPeripheralUUID == peripheral.identifier { lastBondedPeripheralUUID = nil }
+            }
             // Connection test mode: surface the failed-encrypt / "held by another central" hint as an
             // upfront tagged line (the strap is still bonded to the official WHOOP app or a stale OS
             // pairing, so the just-works bond is refused). Gated zero-cost; diagnostic only.
@@ -6778,13 +6795,22 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // it). Count consecutive refusals on the PINNED peripheral; after `pinBondRefusalLimit`, hand
             // the pin off to the live-bonding strap so the registry re-adopts it (handoff republishes the
             // working uuid on the connectedPeripheralUUID seam SourceCoordinator already observes).
+            var handedOff = false
             if insufficient, !didBond,
                let pinned = preferredPeripheralUUID, peripheral.identifier == pinned {
                 pinnedBondRefusals += 1
                 if pinnedBondRefusals >= pinBondRefusalLimit,
                    let working = lastBondedPeripheralUUID, working != pinned {
                     readoptWorkingStrap(working, awayFrom: pinned)
+                    handedOff = true
                 }
+            }
+            if !handedOff,
+               Self.shouldDropRefusedLink(whoop5: selectedModel.deviceFamily == .whoop5, insufficient: insufficient,
+                                          bonded: didBond, gaveUp: bondGiveUp.gaveUp) {
+                let elsewhere = preferredPeripheralUUID.map { $0 != peripheral.identifier } ?? false
+                log("WHOOP 5/MG: dropping the refused link so the reconnect retries\(elsewhere ? " on the registered strap" : "")")
+                central.cancelPeripheralConnection(peripheral)
             }
             return
         }
