@@ -681,14 +681,12 @@ private struct DeviceSyncStatusCard: View {
 
     var body: some View {
         switch SyncChipState.resolve(live: live) {
-        case .syncing(let chunks, _):
+        case .syncing:
             statusCard(
                 systemImage: "arrow.triangle.2.circlepath",
-                detail: chunks > 0
-                    ? String(localized: "Syncing… \(chunks) chunks")
-                    : String(localized: "Syncing…"),
+                detail: String(localized: "Syncing…"),
                 tint: StrandPalette.accent,
-                accessibility: String(localized: "Syncing strap history, \(chunks) chunks")
+                accessibility: String(localized: "Syncing strap history")
             )
         case .synced(let agoText):
             statusCard(

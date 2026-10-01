@@ -513,15 +513,21 @@ public enum CloudHistorySeeder {
     /// Replay what is left of the seed span. Returns the number of records the journal committed on
     /// this pass; 0 once the span is done. A window whose rows the journal did not take is retried on
     /// the next call rather than skipped.
+    ///
+    /// `cloudDeviceId` replays the rows stored under `deviceId` as another device's uploads. The server
+    /// scores each uploaded device on its own, so once a strap adopts its serial id, the hours banked
+    /// under the earlier id must be sent under the new one or that day's totals only cover the hours since.
     @discardableResult
     public static func runIfNeeded(store: WhoopStore,
                                    deviceId: String,
+                                   cloudDeviceId: String? = nil,
                                    family: DeviceFamily?,
                                    defaults: UserDefaults = .standard,
                                    now: Int = Int(Date().timeIntervalSince1970)) async -> Int {
         guard CloudPushRuntime.sharedIfRunning != nil,
               let ownerId = CloudPushIdentityStore.current()?.ownerId else { return 0 }
-        let key = defaultsKey(ownerId: ownerId, deviceId: deviceId)
+        let uploadId = cloudDeviceId ?? deviceId
+        let key = defaultsKey(ownerId: ownerId, deviceId: uploadId)
         var progress = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Progress.self, from: $0) }
             ?? Progress(cursor: now - lookbackSeconds, until: now)
         var committed = 0
@@ -532,7 +538,7 @@ public enum CloudHistorySeeder {
                 break
             }
             if rowCount(streams) > 0 {
-                let taken = await CloudCapture.recordHistory(streams, deviceId: deviceId, family: family,
+                let taken = await CloudCapture.recordHistory(streams, deviceId: uploadId, family: family,
                                                             clockRef: nil)
                 guard taken > 0 else { break }
                 committed += taken

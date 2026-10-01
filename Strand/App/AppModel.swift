@@ -292,6 +292,11 @@ final class AppModel: ObservableObject {
         startHostedRefreshLoop()
     }
 
+    private var hostedReadDeviceId: String {
+        let active = (deviceRegistry?.activeDeviceId ?? "").trimmingCharacters(in: .whitespaces)
+        return active.isEmpty ? deviceId : active
+    }
+
     /// Cloud mode: fetch the hosted worker's results for yesterday, today and any day the server reports
     /// changed, and write each where the dashboard reads computed scores, so the existing cards show the
     /// server's numbers. Returns how many days were written.
@@ -302,14 +307,18 @@ final class AppModel: ObservableObject {
               let store = await repo.storeHandle() else { return 0 }
         hostedSyncInFlight = true
         defer { hostedSyncInFlight = false }
+        // Uploads are stamped with the strap's own id (the stable serial id once adopted), so that is the
+        // device the server scores. Reading the fixed "my-whoop" id would return the frozen result of the
+        // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
+        let readId = hostedReadDeviceId
         var days = [Repository.localDayKey(now.addingTimeInterval(-86_400)), Repository.localDayKey(now)]
-        if let changed = try? await scores.pollChangedDays(deviceId: deviceId) {
+        if let changed = try? await scores.pollChangedDays(deviceId: readId) {
             for change in changed.prefix(8) where !days.contains(change.day) { days.append(change.day) }
         }
         let dismissed = repo.dismissedSleepWindows()
         var written = 0
         for day in days {
-            guard let result = (try? await scores.refresh(day: day, deviceId: deviceId))?.hostedResult,
+            guard let result = (try? await scores.refresh(day: day, deviceId: readId))?.hostedResult,
                   hostedWrittenRevision[day] != result.resultRevision else { continue }
             do {
                 try await HostedResultMaterializer.persist(result, store: store, deviceId: deviceId,
@@ -345,6 +354,14 @@ final class AppModel: ObservableObject {
             let committed = await CloudHistorySeeder.runIfNeeded(store: store, deviceId: self.deviceId, family: nil)
             if committed > 0 {
                 self.live.append(log: "Cloud: queued \(committed) banked history records for upload")
+            }
+            let readId = self.hostedReadDeviceId
+            if readId != self.deviceId {
+                let moved = await CloudHistorySeeder.runIfNeeded(store: store, deviceId: self.deviceId,
+                                                                 cloudDeviceId: readId, family: nil)
+                if moved > 0 {
+                    self.live.append(log: "Cloud: queued \(moved) earlier history records under the strap's permanent id")
+                }
             }
             self.historySeedTask = nil
         }

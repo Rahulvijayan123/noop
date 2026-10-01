@@ -2806,7 +2806,7 @@ private struct LiquidSyncStatusRow: View {
     @EnvironmentObject var live: LiveState
     var body: some View {
         if live.backfilling {
-            row(String(localized: "Strap history"), value: chunks, tone: StrandPalette.accent)
+            row(String(localized: "Strap history"), value: String(localized: "Syncing…"), tone: StrandPalette.accent)
         } else if live.connected, live.pairingHint != nil {
             // The bond was refused: history can't sync until the strap is re-paired (how-to on the Devices card).
             row(String(localized: "Strap history"),
@@ -2815,15 +2815,6 @@ private struct LiquidSyncStatusRow: View {
             row(String(localized: "Strap history"),
                 value: String(localized: "Synced \(relativeAgo(ts))"), tone: StrandPalette.textPrimary)
         }
-    }
-
-    /// "Syncing…" alone reads as a spinner that might be stuck; the chunk count is the cheapest available
-    /// proof that the drain is actually moving. Suppressed at zero — a session that has pulled nothing yet
-    /// should not claim "0 chunks pulled" as if that were progress.
-    private var chunks: String {
-        live.syncChunksThisSession > 0
-            ? String(localized: "Syncing… \(live.syncChunksThisSession) chunks")
-            : String(localized: "Syncing…")
     }
 
     private func row(_ label: String, value: String, tone: Color) -> some View {
