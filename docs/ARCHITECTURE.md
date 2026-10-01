@@ -94,6 +94,17 @@ provenance tables) that the cards already read. `AppModel.syncHostedResults()` p
 and any changed days when the app becomes active, then every two minutes while it stays in the
 foreground.
 
+## 6. Coach
+
+The Coach tab is a chat that runs through the backend as well. The phone sends the question to
+`supabase/functions/coach/index.ts`, which checks the same installation and fleet credentials as
+`push`, takes one unit of the user's daily quota, and streams the model's answer back. The model
+cannot see the database. When it needs numbers it asks the app for them through a tool call, and
+`Strand/Coach/CoachTools.swift` answers from the days the phone has already read from the server in
+step 5, so the coach quotes the scores the backend published instead of recomputing anything. The
+app saves the conversation and the coach's memory through the same function. Charts and tables are
+drawn by a second model pass on the server, which fact-checks them against the figures in the answer.
+
 ## What each score needs
 
 - **Strain, sleep, resting heart rate, steps and calories** appear once a day's readings are in.

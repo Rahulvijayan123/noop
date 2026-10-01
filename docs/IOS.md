@@ -62,6 +62,13 @@ In the app, open **Settings → Nara account**, enter the enrollment code, and t
 app then uploads its strap history and shows the scores the backend computes. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for what happens next.
 
+## Coach
+
+The **Coach** tab (`StrandiOS/Coach/`) is the chat, and `Strand/Coach/` holds the prompt, safety checks
+and data tools it shares with the macOS app. It needs cloud sync to be on, because the model key lives
+in the backend's `coach` function. Debug builds can open it directly with
+`--demo-screen coach`, and `--coach-prompt "<question>"` asks that question on launch.
+
 ## Tests
 
 ```bash

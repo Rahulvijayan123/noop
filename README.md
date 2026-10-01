@@ -33,7 +33,7 @@ flowchart LR
 | `Packages/` | Swift packages: `StrandAnalytics` (scoring), `WhoopProtocol` (strap protocol), `WhoopStore` (SQLite store), `StrandDesign` (UI kit), `NoopPush` (upload wire format) and others |
 | `Tools/CloudWorker/` | `frwhoop-worker`, the VPS service that computes scores |
 | `deploy/` | VPS provisioning script, systemd unit and worker runbooks |
-| `supabase/` | Edge functions and Postgres migrations for the hosted backend |
+| `supabase/` | Edge functions (including the `coach` model relay) and Postgres migrations for the hosted backend |
 | `contracts/` | Pinned copies of the receiver contract the app and worker are tested against |
 | `android/` | The Android app (not yet rebranded or simplified) |
 | `Config/` | Build settings. The `*Secrets.xcconfig` files are gitignored; copy the `.example` files |
@@ -53,7 +53,7 @@ Nothing secret belongs in this repository. Keep these out of git:
 
 - `Config/CloudPushSecrets.xcconfig` (upload endpoint, ingest token, anon key) and
   `Config/BundleIdSecrets.xcconfig`
-- `.env` files and anything passed to `supabase secrets set`
+- `.env` files and anything passed to `supabase secrets set`, including `FIREWORKS_AI_API_KEY` for Coach
 - the worker's `/etc/frwhoop/worker.env` on the VPS (database URL, B2 keys, ingest secret)
 
 The `.example` files in `Config/` and `deploy/worker.env.example` list the names without values.

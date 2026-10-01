@@ -28,6 +28,7 @@ and checking each part.
 | --- | --- | --- |
 | `push` | the app | Receives upload batches and object-lane uploads, writes rows and receipts. |
 | `scores` | the app | Returns published score snapshots and the changed-days feed. Also handles enrollment-time device registration and sleep edits. |
+| `coach` | the app | Relays Coach questions to the language model and stores the conversation and the coach's memory. Authenticates like `push` (installation bearer plus the fleet token). |
 | `ingest-verify` | operators | Checks the ingest pipeline end to end. |
 | `reconcile` | scheduled | Reconciles the object manifest against storage. |
 | `retention-sweep` | scheduled (pg_cron) | Deletes expired objects and manifests. |
@@ -44,6 +45,20 @@ supabase link --project-ref <project-ref>
 supabase functions deploy scores
 supabase secrets set WORKER_SECRET=<value>   # only when rotating it
 ```
+
+### Coach
+
+The `coach` function holds the model key, so the app never does. It needs one function secret:
+
+```bash
+supabase secrets set FIREWORKS_AI_API_KEY=<value>
+```
+
+Optional overrides are read by `coachConfig()` in `supabase/functions/_shared/coach.ts` (the upstream
+URL, the model names and the daily call limit per user). Each request is counted in `coach_usage`
+through the `coach_take_quota` function, and the conversation and memory live in `coach_sessions`,
+`coach_messages`, `coach_memories` and `coach_memory_items`. All five are created by
+`supabase/migrations/20260930235900_coach_harness.sql`, and deleting an account removes them.
 
 The function tests run with Deno from `supabase/functions/`. Some of them need fixtures that are not
 in this repository, such as `EDGE_TEST_ARTIFACTS` or the old `infra/vps` scripts.
