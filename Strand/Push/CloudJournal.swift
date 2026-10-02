@@ -35,6 +35,9 @@ public enum CloudStreamKind: String, CaseIterable, Sendable {
     case dailyMetric
     /// Immutable raw archive lane (protobuf/binary objects). Never feeds the scorer on its own.
     case rawBatch
+    /// Immutable raw IMU archive lane (NPB1 binary objects, zstd). Same rules as rawBatch: never
+    /// NDJSON-sealed, never projected by the phone. Uploaded through the object lane only.
+    case rawImuSession
 
     /// Streams whose delivery mode is replace-window rather than append. The sealer uses this to
     /// decide whether a batch must carry its full window identity.
@@ -46,7 +49,7 @@ public enum CloudStreamKind: String, CaseIterable, Sendable {
     }
 
     /// The archive lane carries original bytes rather than a projected scalar row.
-    public var isArchive: Bool { self == .rawBatch }
+    public var isArchive: Bool { self == .rawBatch || self == .rawImuSession }
 }
 
 /// Where a record came from, which the receiver keeps as provenance evidence. Live notifications
@@ -625,14 +628,16 @@ final class CloudJournalStore: @unchecked Sendable {
         SELECT device_id, stream, MIN(seq), MAX(seq), COUNT(*), MIN(received_at_ms), SUM(LENGTH(payload)),
                MIN(created_at_ms), MIN(window_identity)
         FROM journal_record
-        WHERE state = 0 AND stream != ?
+        WHERE state = 0 AND stream != ? AND stream != ?
         GROUP BY device_id, stream
         ORDER BY MIN(seq) ASC
         LIMIT ?
         """)
         defer { sqlite3_finalize(stmt) }
+        // The object lane owns rawBatch and rawImuSession; the NDJSON sealer must never touch them.
         sqlite3_bind_text(stmt, 1, CloudStreamKind.rawBatch.rawValue, -1, cloudSQLiteTransient)
-        sqlite3_bind_int(stmt, 2, Int32(limit))
+        sqlite3_bind_text(stmt, 2, CloudStreamKind.rawImuSession.rawValue, -1, cloudSQLiteTransient)
+        sqlite3_bind_int(stmt, 3, Int32(limit))
         var out: [CloudSealCandidate] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let deviceId = text(stmt, 0) ?? ""
