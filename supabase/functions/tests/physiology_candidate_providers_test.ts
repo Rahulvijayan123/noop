@@ -288,7 +288,12 @@ Deno.test('candidate provider lane: SQL contract on a disposable local PostgreSQ
       assertEquals(await sql(`select count(*) from pg_class where relnamespace='public'::regnamespace and relname in ('${CANDIDATE_TABLES.join("','")}') and relrowsecurity`), '5');
       assertEquals(await sql(`select count(*) from public.physiology_candidate_results`), '0');
       assertEquals(await sql(`select count(*) from public.physiology_backfill_jobs`), '0');
-      assertEquals(await sql(`select string_agg(p.proname,',' order by p.proname) from pg_proc p where p.pronamespace='public'::regnamespace and p.proname in ('physiology_candidate_activation','physiology_candidate_feature','physiology_selected_provider','physiology_record_candidate_result','physiology_candidate_debt_read','physiology_backfill_claim','physiology_backfill_advance','physiology_backfill_finish')`), 'physiology_backfill_advance,physiology_backfill_claim,physiology_backfill_finish,physiology_candidate_activation,physiology_candidate_debt_read,physiology_candidate_feature,physiology_record_candidate_result,physiology_selected_provider');
+      assertEquals(await sql(`select string_agg(p.proname,',' order by p.proname) from pg_proc p where p.pronamespace='public'::regnamespace and p.proname in ('physiology_candidate_activation','physiology_candidate_feature','physiology_selected_provider','physiology_record_candidate_result','physiology_candidate_debt_read','physiology_backfill_claim','physiology_backfill_advance','physiology_backfill_finish','physiology_candidate_dirty','physiology_candidate_stage_at')`), 'physiology_backfill_advance,physiology_backfill_claim,physiology_backfill_finish,physiology_candidate_activation,physiology_candidate_debt_read,physiology_candidate_dirty,physiology_candidate_feature,physiology_candidate_stage_at,physiology_record_candidate_result,physiology_selected_provider');
+      // Audit F2: the dormancy guard runs once per statement on 13 streams, so the selection tables
+      // carry partial indexes over the non-off rows. Without them the guard is a sequential scan on
+      // physiology_provider_overrides, whose size grows with the fleet.
+      assertEquals(await sql(`select string_agg(indexname,',' order by indexname) from pg_indexes where schemaname='public' and tablename in ('physiology_provider_defaults','physiology_provider_overrides')`), 'physiology_provider_defaults_enabled_idx,physiology_provider_defaults_pkey,physiology_provider_overrides_enabled_idx,physiology_provider_overrides_pkey');
+      assertEquals(await sql(`select count(*) from pg_indexes where schemaname='public' and indexname in ('physiology_provider_defaults_enabled_idx','physiology_provider_overrides_enabled_idx') and indexdef like '%WHERE (mode <> ''off''::text)%'`), '2');
     });
 
     await t.step('the staleness trigger family covers every input stream', async () => {
@@ -497,6 +502,22 @@ Deno.test('candidate provider lane: SQL contract on a disposable local PostgreSQ
       assertEquals(await sql(`set role service_role; select count(*) from public.physiology_provider_defaults`), '4');
     });
 
+    await t.step('a caller-supplied p_user is refused when the JWT subject names another owner', async () => {
+      // Audit F4: the definer functions take p_user from the caller, so they carry an explicit
+      // authorization check. Service-role calls carry no subject and are unaffected; a present
+      // subject must match the owner, so a future grant to a client role cannot cross users.
+      const foreign = `set request.jwt.claim.sub=${lit(USER_B)}; `;
+      assertEquals(await pg.sqlError(`${foreign}select public.physiology_candidate_debt_read(${lit(USER_A)},${lit(DEV_A)},${lit(DAY)})::text`), 'ERROR:  cross_user_caller');
+      assertEquals(await pg.sqlError(`${foreign}select public.physiology_selected_provider(${lit(USER_A)},'hrv')::text`), 'ERROR:  cross_user_caller');
+      assertEquals(await pg.sqlError(`${foreign}select public.physiology_candidate_activation(${lit(USER_A)},'hrv')::text`), 'ERROR:  cross_user_caller');
+      assertEquals(await pg.sqlError(`${foreign}${recordCandidate({ p_input_revision: '1' })}`), 'ERROR:  cross_user_caller');
+      // A matching subject is allowed, and a subjectless (service-role) call is allowed.
+      assertStringIncludes(await sql(`set request.jwt.claim.sub=${lit(USER_A)}; select public.physiology_selected_provider(${lit(USER_A)},'hrv')::text`), 'mode');
+      assertStringIncludes(await sql(`select public.physiology_selected_provider(${lit(USER_A)},'hrv')::text`), 'mode');
+      // Under a client role the same call is still refused one layer earlier, at the privilege.
+      assertStringIncludes(String(await pg.sqlError(`set role authenticated; set request.jwt.claim.sub=${lit(USER_A)}; select public.physiology_candidate_debt_read(${lit(USER_A)},${lit(DEV_A)},${lit(DAY)})::text`)), 'permission denied for function');
+    });
+
     await t.step('an active mode without a live promotion approval is demoted and refused', async () => {
       await sql(`insert into auth.users(id) values (${lit(USER_E)}) on conflict (id) do nothing`);
       await sql(`insert into public.devices(id,user_id,source_kind) values (${lit(DEV_E)},${lit(USER_E)},'strap') on conflict (id) do nothing`);
@@ -617,7 +638,12 @@ Deno.test('candidate provider lane: SQL contract on a disposable local PostgreSQ
       assertStringIncludes(String(await pg.sqlError(`select public.physiology_backfill_advance(${lit(applyId)},${lit(applyToken)},1)`)), 'backfill_lease_lost');
     });
 
-    await t.step('backfill rollback fences in-flight candidate writes', async () => {
+    await t.step('rollback raises advisory debt, and the REVISION guard refuses the stale write', async () => {
+      // Audit F1: the debt row is an ADVISORY signal, not a database-enforced fence. What actually
+      // refuses an in-flight candidate write is the p_input_revision guard, because rollback's
+      // enqueue_scoring_v2 bumps scoring_jobs_v2.input_revision for the restored days. This step
+      // asserts that real mechanism, not the debt row.
+      const staleRevision = await sql(`select max(input_revision)::text from public.scoring_jobs_v2 where user_id=${lit(USER_C)} and day=${lit(DAY)}`);
       const jobId = await sql(`insert into public.physiology_backfill_jobs(mode,metric,to_provider_id,to_provider_version,scope_user,scope_from_day,scope_through_day,max_users) values ('rollback','hrv',${lit(PROVIDER.id)},${lit(PROVIDER.version)},${lit(USER_C)},'2026-09-29','2026-10-01',1) returning job_id`);
       const claimed = await sql(`select job_id||'|'||lease_token from public.physiology_backfill_claim(300,'tester')`);
       const [claimedId, token] = claimed.split('|');
@@ -625,8 +651,17 @@ Deno.test('candidate provider lane: SQL contract on a disposable local PostgreSQ
       const advanced = await sql(`select public.physiology_backfill_advance(${lit(jobId)},${lit(token)},5)::text`);
       assertStringIncludes(advanced, '"mode": "rollback"');
       assertStringIncludes(advanced, '"enqueued": 1');
+      // The advisory debt signal exists and is readable.
       assertEquals(await sql(`select count(*) from public.physiology_candidate_debt where user_id=${lit(USER_C)} and device_id=${lit(DEV_C)} and day=${lit(DAY)}`), '1');
       assertStringIncludes(await sql(`select public.physiology_candidate_debt_read(${lit(USER_C)},${lit(DEV_C)},${lit(DAY)})::text`), '"debt": true');
+      // The AUTHORITATIVE fence: rollback bumped the canonical revision, so a worker still holding
+      // the pre-rollback revision is refused even though the debt row is only a hint.
+      const bumpedRevision = await sql(`select max(input_revision)::text from public.scoring_jobs_v2 where user_id=${lit(USER_C)} and day=${lit(DAY)}`);
+      assert(Number(bumpedRevision) > Number(staleRevision), 'rollback must bump the canonical input revision');
+      assertEquals(await sql(recordCandidate({ p_user: lit(USER_C), p_device: lit(DEV_C), p_input_revision: staleRevision, p_input_sha256: lit('8'.repeat(64)) })), 'null', 'a pre-rollback revision must be refused by the revision guard');
+      // ...and the same write succeeds once the caller presents the current revision, proving the
+      // refusal above came from the revision and not from an unrelated guard.
+      assertMatch(await sql(recordCandidate({ p_user: lit(USER_C), p_device: lit(DEV_C), p_input_revision: bumpedRevision, p_input_sha256: lit('8'.repeat(64)) })), /^[0-9a-f-]{36}$/);
     });
 
     await t.step('backfill advance is bounded per call and resumes from its cursor', async () => {
@@ -698,6 +733,11 @@ Deno.test('candidate provider lane: SQL contract on a disposable local PostgreSQ
       await sql(`delete from auth.users where id=${lit(USER_A)}`);
       assertEquals(await sql(`select count(*) from public.physiology_candidate_results where user_id=${lit(USER_A)}`), '0');
       assertEquals(await sql(`select count(*) from public.physiology_candidate_debt where user_id=${lit(USER_A)}`), '0');
+      // Audit F6: the backfill job row is deliberately NOT preserved. A NULL scope_user means
+      // "all eligible users" in physiology_backfill_advance, so keeping the row would silently
+      // widen a single-owner job to the whole fleet; losing the operator audit row on account
+      // deletion is the safer trade (documented on the column).
+      assertEquals(await sql(`select count(*) from public.physiology_backfill_jobs where scope_user=${lit(USER_A)}`), '0');
       assert(Number(await sql(`select count(*) from public.physiology_candidate_results where user_id<>${lit(USER_A)}`)) > 0);
       assertEquals(await sql(recordCandidate()), 'null');
     });

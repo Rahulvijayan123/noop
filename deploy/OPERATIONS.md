@@ -67,7 +67,7 @@ systemctl show frwhoop-inference -p MemoryCurrent -p MemoryPeak
 ```
 
 The worker reports sidecar readiness and candidate counters in the EXISTING
-heartbeat payload (`physiology_worker_heartbeats.meta -> inference`), so no new
+heartbeat payload (`scoring_service_heartbeats.meta -> inference`), so no new
 monitoring surface is needed:
 
 ```bash

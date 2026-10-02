@@ -341,7 +341,12 @@ class Context:
 
 @dataclass(frozen=True)
 class HrvInput:
-    """Validated HRV payload."""
+    """Validated HRV payload.
+
+    ``aggregation`` keeps the caller's spelling (see ``HRV_AGGREGATIONS``);
+    ``is_session_aggregation`` is the predicate that decides whether it selects
+    the session mean over usable windows.
+    """
 
     beats: tuple[Beat, ...]
     windows: tuple[Window, ...]
@@ -542,11 +547,81 @@ def _finite_number(value: Any, field_name: str) -> float:
     return out
 
 
+#: Aggregation spellings accepted on the wire.
+#:
+#: ``mean_over_windows`` is the Swift worker's spelling of the nightly session
+#: value (``DayScoring.hrvConfig()["aggregation"]``, and, after the S-1 repair,
+#: also top-level ``input.aggregation``): the plain mean over the session's
+#: USABLE windows. ``session`` is the legacy alias for exactly the same
+#: arithmetic and is still accepted, so no earlier caller breaks. ``day`` is the
+#: duration-weighted mean across sessions.
+HRV_AGGREGATIONS = ("window", "mean_over_windows", "session", "day")
+
+#: The spellings that select "plain mean over the session's usable windows".
+SESSION_HRV_AGGREGATIONS = ("mean_over_windows", "session")
+
+
+def is_session_aggregation(aggregation: str) -> bool:
+    """True when ``aggregation`` selects the session mean over usable windows.
+
+    ``mean_over_windows`` (the worker's spelling) and ``session`` (the legacy
+    alias) are the same arithmetic. Both providers ask this one predicate, so
+    they can never disagree about which spellings select the session path.
+    """
+    return aggregation in SESSION_HRV_AGGREGATIONS
+
+
+def _resolve_hrv_aggregation(raw: Mapping[str, Any], *, has_windows: bool) -> str:
+    """Resolve ``input.aggregation``, mirroring ``input.config.aggregation``.
+
+    The Swift worker states its intent inside ``input.config``
+    (``"aggregation": "mean_over_windows"``, ``DayScoring.hrvConfig()``) and used
+    to send no top-level ``aggregation`` at all. The parser ignored the config
+    copy and defaulted to ``"window"``, so the candidate value was the FIRST
+    5-minute window's RMSSD instead of the whole-night session mean (audit S-1).
+
+    A top-level ``aggregation`` wins. The config copy is read as a back-compat
+    mirror so a payload from an un-rebuilt worker still aggregates the night. An
+    unknown spelling is refused rather than silently downgraded to ``"window"``,
+    because a payload/parser mismatch of this class must not pass unnoticed.
+    """
+    config = raw.get("config")
+    mirrored = config.get("aggregation") if isinstance(config, Mapping) else None
+    if raw.get("aggregation") is not None:
+        chosen: Any = raw.get("aggregation")
+        field = "input.aggregation"
+    elif mirrored is not None:
+        chosen = mirrored
+        field = "input.config.aggregation"
+    else:
+        # Back-compat default: a caller that supplied windows wanted them
+        # aggregated; a caller that supplied none gets the single window the
+        # provider derives from the context interval.
+        return "session" if has_windows else "window"
+    if not isinstance(chosen, str):
+        raise ContractError("invalid_input", f"{field} must be a string", field=field)
+    if chosen not in HRV_AGGREGATIONS:
+        raise ContractError(
+            "invalid_input",
+            f"{field} must be one of {'|'.join(HRV_AGGREGATIONS)} "
+            "('mean_over_windows' is the session mean over usable windows)",
+            field=field,
+        )
+    return chosen
+
+
 def parse_hrv_input(raw: Any, context: Context) -> HrvInput:
     """Validate an HRV payload.
 
     ``input.beats`` is required. ``input.windows`` is optional; when absent the
     single window is the context interval.
+
+    ``input.aggregation`` selects the result: ``window`` scores the first (and,
+    with supplied windows, only) window, ``mean_over_windows`` scores the plain
+    mean over the session's usable windows, ``session`` is the legacy alias for
+    it, and ``day`` is the duration-weighted mean across sessions. When the key
+    is absent the value is mirrored from ``input.config.aggregation`` and, failing
+    that, defaults to ``session`` with supplied windows and ``window`` without.
     """
     if not isinstance(raw, Mapping):
         raise ContractError("invalid_input", "input must be an object", field="input")
@@ -667,11 +742,7 @@ def parse_hrv_input(raw: Any, context: Context) -> HrvInput:
         if not windows:
             raise ContractError("blocked_input", "input.windows is empty", field="input.windows")
 
-    aggregation = raw.get("aggregation", "session" if windows else "window")
-    if aggregation not in ("window", "session", "day"):
-        raise ContractError("invalid_input",
-                            "input.aggregation must be one of window|session|day",
-                            field="input.aggregation")
+    aggregation = _resolve_hrv_aggregation(raw, has_windows=bool(windows))
     # The single-window rule applies only when the caller SUPPLIED windows: with
     # no windows the provider derives them from the context interval, and the
     # "window" aggregation then means "the one window that covers the interval".

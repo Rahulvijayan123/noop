@@ -39,8 +39,45 @@ A faithful port of the shipped engine
    day value = duration-weighted mean of session means,
 9. valid pairs and coverage reported **separately** from the beat floor.
 
+**Input aggregation** (`input.aggregation`, mirrored from `input.config.aggregation`
+when the top-level key is absent - the pre-repair worker stated its intent only in
+`config`):
+
+* `mean_over_windows` (the spelling `DayScoring.hrvConfig()` emits) and its legacy
+  alias `session` score the **plain mean over the session's USABLE windows**, so a
+  window the 20-interval floor refuses - *including the first one* - does not
+  withhold the night; a session with no usable window left withholds, naming its
+  reason.
+* `window` scores **one** window. With `input.windows` the contract requires exactly
+  one; with no `input.windows` it means the FIRST window the provider derives from
+  the context interval and ignores the rest. That back-compat path is retained for
+  an explicit caller, and it is exactly why the worker states `mean_over_windows`.
+* `day` is the duration-weighted mean of session means.
+* An unknown spelling is refused (400 `invalid_input`), never silently downgraded.
+
 Withholding is explicit and machine-readable (`insufficient_coverage`,
-`artifact_fraction`, ...) with a finer `diagnostics.withheld_detail`.
+`artifact_fraction`, ...) with a finer `diagnostics.withheld_detail`. Two caveats,
+recorded rather than implied: `low_coverage` and `high_rejected_fraction` fire only
+when a caller tunes `min_coverage` / `max_rejected_fraction` away from their shipped
+defaults (`0.0` / `None`), and the shipped engine has no nightly artifact gate, so
+`artifact_fraction` is reachable today only through the over-count path.
+
+### Spec section 5 vs the shipped code
+
+Spec section 5 lists provisional thresholds "subject to current-code verification".
+Four of them are **not** in the shipped Swift code, and this port is faithful to the
+shipped code. The divergences are recorded here so no reader assumes the spec's
+numbers are in force:
+
+| Spec section 5 (provisional) | Shipped code / this port | Evidence |
+| --- | --- | --- |
+| minimum 30 clean intervals | `min_clean_beats = 20` | `HRVAnalyzer.swift:33` (`minBeats = 20`) |
+| maximum 20 % artifact fraction | no nightly artifact gate (`max_rejected_fraction = None`, `min_coverage = 0.0`); the gate exists but is off unless tuned | `HRVAnalyzer.swift` exposes no such constant |
+| minimum 3 usable windows | no such floor; a session with one usable window is scored | `SleepStager.swift:2958-2973` |
+| median-window aggregation | plain mean over windows | `SleepStager.sessionAvgHRV` (`:2958-2973`) |
+
+A stricter gate for the candidate lane is a deliberate divergence and must be set in
+that lane's tuning and recorded as such.
 
 ### `neurokit2.shadow.v1` (comparison only, never publishable)
 
@@ -67,7 +104,10 @@ Environment: `FRWHOOP_MANIFEST`, `FRWHOOP_MODEL_ROOT`,
 
 * No network access at inference time. Weights are cached and sha256-verified at
   deploy-prep; the sidecar verifies the manifest at startup and reports
-  `ready: false` with a reason when a required artifact is missing or mismatched.
+  `ready: false` with a reason when a required artifact is missing, mismatched, or
+  **has no published `sha256`** (a `verify_at_startup` entry with no digest fails
+  closed - audit DD-4). Only `verify_at_startup: false` entries are skipped by
+  design, as the non-blocking `not_verified` status.
 * Every loop and retry is bounded; a provider that exceeds the per-request
   wall-clock budget yields `withheld` + `timeout`, never a hung request.
 * Bad input never crashes the server: 400 with a JSON error body, 404 for an

@@ -8,6 +8,11 @@ This module never downloads anything. It reads ``models/manifest.json``, checks
 the sha256 of every artifact marked ``verify_at_startup`` against the bytes in
 the artifact root, and reports a per-artifact verdict. Entries marked
 ``required_for_readiness`` gate the process readiness flag.
+
+An entry marked ``verify_at_startup`` that publishes NO ``sha256`` is a failure
+(``no_sha256``), not a by-design skip: without a digest the bytes can never be
+verified, so readiness must fail closed (audit DD-4). Only ``verify_at_startup:
+false`` entries report the non-blocking ``not_verified`` status.
 """
 
 from __future__ import annotations
@@ -31,7 +36,7 @@ CHECK_STATUSES = (
     "sha256_mismatch",   # present, wrong bytes
     "size_mismatch",     # present, right hash claimed but the size disagrees
     "not_verified",      # this entry is not verified at startup by design
-    "no_sha256",         # no digest published for this artifact
+    "no_sha256",         # no digest published for a verify_at_startup artifact (a failure)
 )
 
 READ_HASH_CHUNK = 1024 * 1024
@@ -51,7 +56,13 @@ class ArtifactCheck:
 
     @property
     def failed(self) -> bool:
-        return self.status in ("missing", "sha256_mismatch", "size_mismatch")
+        # ``no_sha256`` is a FAILURE, not a by-design skip: the entry is marked
+        # ``verify_at_startup`` but publishes no digest, so the bytes can never be
+        # verified and readiness must not depend on them being present. A manifest
+        # edited to drop a digest therefore fails closed instead of letting a
+        # provider run unverified weights (audit DD-4). Only ``not_verified``
+        # (``verify_at_startup: false``) is non-blocking by design.
+        return self.status in ("missing", "sha256_mismatch", "size_mismatch", "no_sha256")
 
     def to_wire(self) -> dict[str, Any]:
         return {

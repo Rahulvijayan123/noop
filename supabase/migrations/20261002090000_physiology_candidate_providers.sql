@@ -71,6 +71,12 @@ comment on column public.physiology_candidate_results.input_sha256 is
   'Hash of the validated input snapshot the provider consumed; part of the replay dedup key.';
 comment on column public.physiology_candidate_results.withheld_reason is
   'Machine-readable reason from the sidecar contract; null only when status=''ok''.';
+comment on column public.physiology_candidate_results.device_id is
+  'Owning device id as text. ACCEPTED RISK: there is no foreign key to public.devices, so deleting '
+  'a device leaves candidate rows with a dangling device id. Ownership is enforced on every write by '
+  'physiology_record_candidate_result (the device must belong to the user) and user deletion still '
+  'cascades through user_id, so no cross-user read path exists; the orphan is a stale row, not an '
+  'authorization hole.';
 
 -- ---------------------------------------------------------------------------
 -- 2. Per-metric provider selection (off / shadow / active)
@@ -94,6 +100,15 @@ create table if not exists public.physiology_provider_overrides (
   updated_at timestamptz not null default clock_timestamp(),
   primary key (user_id, metric)
 );
+
+-- The dormancy guard in physiology_candidate_dirty() runs once per statement on each of the 13
+-- covered stream tables, so it must not scan either selection table. These partial indexes hold
+-- only the non-off rows (normally none), so the guard is an index probe rather than a sequential
+-- scan, and their size tracks enabled metrics rather than fleet size.
+create index if not exists physiology_provider_defaults_enabled_idx
+  on public.physiology_provider_defaults (metric) where mode <> 'off';
+create index if not exists physiology_provider_overrides_enabled_idx
+  on public.physiology_provider_overrides (metric) where mode <> 'off';
 
 -- Seeded off, and never re-seeded over an operator change.
 insert into public.physiology_provider_defaults(metric,provider_id,provider_version,config_version,mode)
@@ -138,6 +153,12 @@ declare
   requested text; src text; pid text; pver text; cver text; v_feature text;
   approved boolean:=false; reason text:=null;
 begin
+  -- Explicit caller authorization (spec S14). Service-role calls carry no JWT subject and are
+  -- unaffected; if a subject is present it must match the requested owner, so a future grant to a
+  -- client role cannot expose another user's selection.
+  if auth.uid() is not null and auth.uid() is distinct from p_user then
+    raise exception 'cross_user_caller' using errcode='22023';
+  end if;
   if p_metric is null or p_metric not in ('hrv','sleep_boundary','sleep_stage','respiration') then
     raise exception 'invalid_candidate_metric' using errcode='22023';
   end if;
@@ -202,6 +223,10 @@ create or replace function public.physiology_selected_provider(p_user uuid, p_me
 returns jsonb language plpgsql stable security invoker set search_path='' as $$
 declare act jsonb;
 begin
+  -- Explicit caller authorization (spec S14); the inner activation re-checks it too.
+  if auth.uid() is not null and auth.uid() is distinct from p_user then
+    raise exception 'cross_user_caller' using errcode='22023';
+  end if;
   act:=public.physiology_candidate_activation(p_user,p_metric);
   return jsonb_build_object('provider_id',act->'provider_id','provider_version',act->'provider_version',
     'config_version',act->'config_version','mode',act->>'mode','source',act->>'source');
@@ -223,15 +248,25 @@ create table if not exists public.physiology_candidate_debt (
 -- The primary key dedups the any-device row ('') exactly like a real device row.
 
 comment on table public.physiology_candidate_debt is
-  'Newest input change per user/device/day for the candidate lane. The worker skips a candidate '
-  'write whose claim is older than invalidated_at. Never drives canonical publication. A '
-  'device_id='''' row is debt for every device of that owner.';
+  'Newest input change per user/device/day for the candidate lane. ADVISORY ONLY: the database does '
+  'not enforce it. The authoritative fence against a stale candidate write is the p_input_revision '
+  'check inside physiology_record_candidate_result, which compares the caller claim with the current '
+  'scoring_jobs_v2.input_revision for that user/day. A worker is expected to read '
+  'physiology_candidate_debt_read() and skip a write whose claim is older than invalidated_at, which '
+  'saves the wasted inference but is not a correctness boundary. Never drives canonical publication. '
+  'A device_id='''' row is debt for every device of that owner.';
+comment on column public.physiology_candidate_debt.device_id is
+  'Owning device id as text, or '''' for an any-device row (an owner with no device). ACCEPTED RISK: '
+  'no foreign key to public.devices, so a deleted device can leave a stale debt row; the write RPC '
+  'checks device ownership and user deletion cascades through user_id.';
 
 create or replace function public.physiology_candidate_dirty() returns trigger
 language plpgsql security definer set search_path='' as $$
 declare r record; d date; query text; source_sql text; ts_field text:=TG_ARGV[0]; span_end date;
 begin
-  -- Dormant lane: with every metric off this trigger returns immediately and costs one scan.
+  -- Dormant lane: with every metric off this trigger returns immediately. The guard is one index
+  -- probe per selection table against the partial indexes physiology_provider_*_enabled_idx, which
+  -- hold only non-off rows, so the cost does not grow with fleet size or override count.
   if not exists(select 1 from public.physiology_provider_defaults where mode<>'off'
       union all select 1 from public.physiology_provider_overrides where mode<>'off') then
     return null;
@@ -278,8 +313,12 @@ end $$;
 do $$
 declare t text; ts_col text; end_col text; missing text;
 begin
+  -- Degradation is visible, never silent: on a partial lineage this migration still applies (the
+  -- repository's own test harness applies curated subsets), but it WARNs so the missing debt signal
+  -- is visible in the migration log instead of disappearing. On the real lineage all 13 tables and
+  -- scoring_local_day_v2 exist, so no warning is emitted.
   if to_regprocedure('public.scoring_local_day_v2(text,text)') is null then
-    raise notice 'physiology_candidate_providers: scoring_local_day_v2 absent; candidate staleness triggers not attached';
+    raise warning 'physiology_candidate_providers: scoring_local_day_v2 absent; candidate staleness triggers NOT attached for any stream';
     return;
   end if;
   -- Table-driven mapping of the ACTUAL start/end time column of each covered stream. Ten
@@ -303,7 +342,10 @@ begin
       ('sessions','start_at','end_at')
     ) mapped(table_name,start_column,end_column)
   loop
-    if to_regclass('public.'||t) is null then continue; end if;
+    if to_regclass('public.'||t) is null then
+      raise warning 'physiology_candidate_providers: stream table % absent; candidate staleness triggers NOT attached for it', t;
+      continue;
+    end if;
     select string_agg(v.c,',' order by v.c) into missing
       from (values (ts_col),(end_col)) v(c)
      where not exists(select 1 from pg_attribute a
@@ -323,8 +365,14 @@ begin
 end $$;
 
 create or replace function public.physiology_candidate_debt_read(p_user uuid, p_device text, p_day date)
-returns jsonb language sql stable security definer set search_path='' as $$
-  select coalesce(
+returns jsonb language plpgsql stable security definer set search_path='' as $$
+begin
+  -- Explicit caller authorization (spec S14): this function returns another owner's staleness
+  -- state for any uuid, so it must never be reachable by a client role with a foreign subject.
+  if auth.uid() is not null and auth.uid() is distinct from p_user then
+    raise exception 'cross_user_caller' using errcode='22023';
+  end if;
+  return coalesce(
     (select jsonb_build_object('debt',true,'invalidated_at',max(d.invalidated_at))
        from public.physiology_candidate_debt d
       where d.user_id=p_user and d.day=p_day
@@ -332,8 +380,8 @@ returns jsonb language sql stable security definer set search_path='' as $$
         -- if the column is ever made nullable.
         and (d.device_id='' or d.device_id is null or d.device_id=p_device)
       having count(*)>0),
-    jsonb_build_object('debt',false,'invalidated_at',null))
-$$;
+    jsonb_build_object('debt',false,'invalidated_at',null));
+end $$;
 
 -- ---------------------------------------------------------------------------
 -- 4. Candidate write RPC
@@ -381,6 +429,12 @@ declare
   v_reasons text[]:=array['blocked_input','blocked_artifact','blocked_license','unverified',
     'insufficient_coverage','artifact_fraction','provider_error','timeout','not_ready'];
 begin
+  -- Explicit caller authorization (spec S14). Service-role calls carry no JWT subject and are
+  -- unaffected; a present subject must match the owner being written, so a future grant to a client
+  -- role could not record a candidate for another user.
+  if auth.uid() is not null and auth.uid() is distinct from p_user then
+    raise exception 'cross_user_caller' using errcode='22023';
+  end if;
   -- Shape. A malformed candidate is a caller defect and raises; a failed guard returns null.
   if p_metric is null or p_metric not in ('hrv','sleep_boundary','sleep_stage','respiration') then
     raise exception 'invalid_candidate_metric' using errcode='22023';
@@ -572,6 +626,12 @@ create table if not exists public.physiology_backfill_jobs (
   from_provider_version text,
   to_provider_id text not null,
   to_provider_version text not null,
+  -- DELIBERATE CASCADE (audit F6): deleting an account removes its backfill job rows, consistent
+  -- with every other user-scoped table in this lane (results, overrides, debt). Keeping the row via
+  -- "on delete set null" was rejected because a NULL scope_user means "all eligible users" in
+  -- physiology_backfill_advance, so a preserved job would silently widen from one owner to the
+  -- whole fleet. Losing the operator audit row on account deletion is the safer trade; durable
+  -- account-deletion audit lives in the deletion path, not here.
   scope_user uuid references auth.users(id) on delete cascade,
   scope_device text,
   scope_from_day date not null,
@@ -687,7 +747,10 @@ begin
       end loop;
       rows:=rows+1;
       if j.mode='rollback' then
-        -- Fence in-flight candidate writes for the restored days before the canonical recompute lands.
+        -- Fence in-flight candidate writes for the restored days. The debt row below is the
+        -- ADVISORY signal a worker reads; the authoritative refusal is the p_input_revision check
+        -- in physiology_record_candidate_result, which the enqueue_scoring_v2 calls above already
+        -- invalidate for these days.
         insert into public.physiology_candidate_debt(user_id,device_id,day,invalidated_at)
         select c.user_id, c.device_id, c.period_day, clock_timestamp()
           from public.physiology_candidate_results c
@@ -786,8 +849,10 @@ comment on function public.physiology_candidate_feature(text) is
   'Metric to signed-promotion feature map: hrv->hrv, sleep_boundary->sleep, sleep_stage->sleep, '
   'respiration->respiration.';
 comment on function public.physiology_candidate_debt_read(uuid,text,date) is
-  'Staleness debt for one user/device/day. An any-device row (device_id='''') counts as debt for '
-  'every device of that owner. Returns {debt, invalidated_at}.';
+  'ADVISORY staleness signal for one user/device/day; the database does not enforce it. An '
+  'any-device row (device_id='''') counts as debt for every device of that owner. Returns '
+  '{debt, invalidated_at}. The authoritative fence against a stale write is the p_input_revision '
+  'check in physiology_record_candidate_result.';
 
 notify pgrst,'reload schema';
 commit;

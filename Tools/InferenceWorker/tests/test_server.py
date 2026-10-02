@@ -414,7 +414,18 @@ def test_server_survives_a_burst_of_bad_requests(live_server):
 # -- readiness / 503 --------------------------------------------------------
 
 
-def _write_manifest(tmp_path, *, sha256: str, required: bool, provider_id: str | None = None):
+def _write_manifest(tmp_path, *, sha256: str | None = None, required: bool,
+                    provider_id: str | None = None):
+    """A one-entry manifest. ``sha256=None`` omits the digest entirely (audit DD-4)."""
+    artifact = {
+        "name": "weights.bin",
+        "path": "test/rev1/weights.bin",
+        "url": "file:///dev/null",
+        "size_bytes": 4,
+        "verify_at_startup": True,
+    }
+    if sha256 is not None:
+        artifact["sha256"] = sha256
     manifest = {
         "manifest_version": "test",
         "entries": [{
@@ -428,14 +439,7 @@ def _write_manifest(tmp_path, *, sha256: str, required: bool, provider_id: str |
             "status": "eligible",
             "input_contract": "n/a",
             "required_for_readiness": required,
-            "artifacts": [{
-                "name": "weights.bin",
-                "path": "test/rev1/weights.bin",
-                "url": "file:///dev/null",
-                "size_bytes": 4,
-                "sha256": sha256,
-                "verify_at_startup": True,
-            }],
+            "artifacts": [artifact],
         }],
     }
     path = tmp_path / "manifest.json"
@@ -469,6 +473,50 @@ def test_missing_required_artifact_makes_the_server_not_ready(tmp_path, live_ser
     # the ungated provider still answers
     status, body = server.post("/v1/infer", _body(provider_id="neurokit2.shadow.v1"))
     assert status == 200
+
+
+def test_required_artifact_without_a_digest_makes_the_server_not_ready(tmp_path, live_server):
+    """Audit DD-4: a ``verify_at_startup`` entry with no published sha256 fails CLOSED.
+
+    Nothing can verify the bytes, so readiness must not be granted on the strength of
+    the file merely being absent-or-present. Before the repair ``no_sha256`` was not a
+    failure, so a manifest edited to drop one digest let the provider report ready.
+    """
+    model_root = tmp_path / "models"
+    model_root.mkdir()
+    manifest_path = _write_manifest(tmp_path, sha256=None, required=True,
+                                    provider_id="production.runs.v1")
+    server = live_server(manifest_path=manifest_path, model_root=str(model_root))
+
+    status, health = server.get("/healthz")
+    assert status == 200
+    assert health["manifest"]["ok"] is False
+    assert health["manifest"]["failed_checks"][0]["status"] == "no_sha256"
+    assert "no_sha256" in health["manifest"]["reason"]
+    assert health["providers"]["production.runs.v1"]["ready"] is False
+    assert "blocked_artifact" in health["providers"]["production.runs.v1"]["reason"]
+    assert health["providers"]["neurokit2.shadow.v1"]["ready"] is True
+    assert health["ready"] is False
+
+    status, body = server.post("/v1/infer", _body())
+    assert status == 503
+    assert body["error"]["code"] == "provider_not_ready"
+
+
+def test_optional_artifact_without_a_digest_does_not_block_readiness(tmp_path, live_server):
+    """The same entry, not required: it is reported as a failed optional check only."""
+    model_root = tmp_path / "models"
+    model_root.mkdir()
+    manifest_path = _write_manifest(tmp_path, sha256=None, required=False)
+    server = live_server(manifest_path=manifest_path, model_root=str(model_root))
+
+    status, health = server.get("/healthz")
+    assert status == 200
+    assert health["manifest"]["ok"] is True
+    # the failed check is REPORTED, but it gates no provider because the entry is optional
+    assert [c["status"] for c in health["manifest"]["failed_checks"]] == ["no_sha256"]
+    assert "no_sha256" in health["manifest"]["reason"]
+    assert "optional artifacts failed verification" in health["manifest"]["reason"]
 
 
 def test_mismatched_required_artifact_makes_the_server_not_ready(tmp_path, live_server):

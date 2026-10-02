@@ -56,7 +56,9 @@ final class CandidateStageTests: XCTestCase {
 
     private func inputs(beats: [RRInterval], intervalStart: Int = 1_772_006_400,
                         intervalEnd: Int = 1_772_035_200,
-                        claimSealedAt: Date = Date()) -> DayScorer.CandidateInputs {
+                        claimSealedAt: Date = Date(),
+                        enabled: Set<String> = ["hrv"],
+                        hr: [HRSample] = []) -> DayScorer.CandidateInputs {
         let deduped = DayScorer.dedupByObservationIdentity(beats)
         return DayScorer.CandidateInputs(
             userId: "11111111-1111-5111-8111-111111111111",
@@ -65,10 +67,15 @@ final class CandidateStageTests: XCTestCase {
             intervalStart: intervalStart, intervalEnd: intervalEnd,
             claimSealedAt: claimSealedAt, status: "available",
             canonicalAvgHrv: 48.0, canonicalSdnn: 61.0,
-            profileVersion: nil, correctionsVersion: nil,
+            profileVersion: "profile1:abc", correctionsVersion: "none",
+            enabledMetrics: enabled, assembled: true,
             hrvBeats: DayScorer.candidateBeats(deduped),
             hrvInputRows: beats.count,
-            hrvTimestampResolution: "whole_seconds")
+            hrvTimestampResolution: "whole_seconds",
+            hrSamples: DayScorer.candidateHRSamples(hr),
+            rrRows: DayScorer.candidateRRRows(deduped),
+            sleepWindowStart: intervalStart, sleepWindowEnd: intervalEnd,
+            sleepEdits: [], age: 34, gender: 1)
     }
 
     private func claim() -> DayScorer.Claim {
@@ -550,6 +557,140 @@ final class CandidateStageTests: XCTestCase {
         subject.run(claim: claim(), inputs: inputs(beats: sampleBeats()))
         XCTAssertEqual(subject.stats.writeFailures, 1)
         XCTAssertEqual(subject.stats.recorded, 0)
+    }
+
+    // MARK: - Sleep metrics: mode-gated send
+
+    private static let sleepStageOkBody = """
+        {"status":"ok","metric":"sleep_stage","provider_id":"sleepecg.wrn-gru-mesa.v1",
+         "versions":{"adapter":"a/1","preprocessing":"p/1","dependency":"d/1","config":"c/1","model":null},
+         "result":{"stages":[1,2,3],"label_space":"wake/rem/nrem"},"runtime_ms":12}
+        """
+
+    func testSleepBoundaryIsSentWhenItsModeIsShadow() throws {
+        let server = StubHTTPServer { _ in .json("""
+            {"status":"withheld","metric":"sleep_boundary",
+             "provider_id":"hypnospy.hr-boundary.v1","withheld_reason":"insufficient_coverage"}
+            """) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["sleep_boundary"] = selection("shadow", provider: "hypnospy.hr-boundary.v1")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(),
+                    inputs: inputs(beats: [], enabled: ["sleep_boundary"],
+                                   hr: [HRSample(ts: 1_772_006_400, bpm: 58)]))
+
+        XCTAssertEqual(server.requestCount, 1, "an enabled sleep metric must reach the sidecar")
+        let served = try XCTUnwrap(server.servedRequests.first)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: served.body) as? [String: Any])
+        XCTAssertEqual(body["metric"] as? String, "sleep_boundary")
+        let payload = try XCTUnwrap(body["input"] as? [String: Any])
+        XCTAssertNotNil(payload["hr"], "the boundary adapter requires input.hr")
+        XCTAssertNotNil(payload["window"])
+        let record = try XCTUnwrap(store.recorded.first)
+        XCTAssertEqual(record.metric, "sleep_boundary")
+        XCTAssertEqual(record.withheldReason, "insufficient_coverage")
+        XCTAssertEqual(subject.stats.runs, 1)
+    }
+
+    func testSleepStageIsSentWhenItsModeIsShadow() throws {
+        let server = StubHTTPServer { _ in .json(CandidateStageTests.sleepStageOkBody) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["sleep_stage"] = selection("shadow", provider: "sleepecg.wrn-gru-mesa.v1")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(),
+                    inputs: inputs(beats: sampleBeats(), enabled: ["sleep_stage"]))
+
+        XCTAssertEqual(server.requestCount, 1)
+        let served = try XCTUnwrap(server.servedRequests.first)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: served.body) as? [String: Any])
+        XCTAssertEqual(body["metric"] as? String, "sleep_stage")
+        let payload = try XCTUnwrap(body["input"] as? [String: Any])
+        XCTAssertNotNil(payload["rr"], "the stage adapter requires input.rr")
+        // A stage result carries stages + a label space, and no scalar value.
+        let record = try XCTUnwrap(store.recorded.first)
+        XCTAssertEqual(record.status, "ok")
+        XCTAssertNotNil(record.stages)
+        XCTAssertEqual(record.labelSpace, "wake/rem/nrem")
+        XCTAssertNil(record.value)
+    }
+
+    func testSleepMetricsAreNotSentWhenTheirModeIsOff() {
+        let server = StubHTTPServer { _ in .json(CandidateStageTests.sleepStageOkBody) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["sleep_stage"] = selection("off", provider: "sleepecg.wrn-gru-mesa.v1")
+        store.selection["sleep_boundary"] = selection("off", provider: "hypnospy.hr-boundary.v1")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(),
+                    inputs: inputs(beats: sampleBeats(), enabled: ["sleep_stage"],
+                                   hr: [HRSample(ts: 1_772_006_400, bpm: 58)]))
+        XCTAssertEqual(server.requestCount, 0, "mode=off must not call the sidecar")
+        XCTAssertTrue(store.recorded.isEmpty)
+        XCTAssertEqual(subject.stats.skippedOff, 4)
+    }
+
+    func testUnassembledMetricIsSkippedWithoutCalling() {
+        // Enabled in the selection but NOT assembled (the day had no HR), so the
+        // stage must skip it rather than send an empty payload the adapter rejects.
+        let server = StubHTTPServer { _ in .json(CandidateStageTests.sleepStageOkBody) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["sleep_boundary"] = selection("shadow", provider: "hypnospy.hr-boundary.v1")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(), inputs: inputs(beats: [], enabled: []))
+        XCTAssertEqual(server.requestCount, 0)
+        XCTAssertEqual(subject.stats.skippedNoInput, 1)
+    }
+
+    // MARK: - DD-5: a deferred active promotion must be visible in the row
+
+    func testActiveModeRowStatesThatItWasNotPublished() throws {
+        let server = StubHTTPServer { _ in .json(CandidateStageTests.okBody) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["hrv"] = selection("active")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(), inputs: inputs(beats: sampleBeats()))
+        let record = try XCTUnwrap(store.recorded.first)
+        XCTAssertEqual(record.mode, "active")
+        XCTAssertEqual(record.diagnostics?.member("active_promotion_deferred"), .bool(true))
+        XCTAssertEqual(record.diagnostics?.member("canonical_published"), .bool(false))
+    }
+
+    func testShadowModeRowDoesNotClaimAnActivePromotion() throws {
+        let server = StubHTTPServer { _ in .json(CandidateStageTests.okBody) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["hrv"] = selection("shadow")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(), inputs: inputs(beats: sampleBeats()))
+        let record = try XCTUnwrap(store.recorded.first)
+        XCTAssertNil(record.diagnostics?.member("active_promotion_deferred"))
+        XCTAssertNil(record.diagnostics?.member("canonical_published"))
+    }
+
+    func testWithheldActiveRowIsNotMarkedAsAPendingPromotion() throws {
+        let server = StubHTTPServer { _ in .json("""
+            {"status":"withheld","metric":"hrv","withheld_reason":"artifact_fraction"}
+            """) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["hrv"] = selection("active")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(), inputs: inputs(beats: sampleBeats()))
+        let record = try XCTUnwrap(store.recorded.first)
+        // No value was produced, so there is nothing to promote.
+        XCTAssertNil(record.diagnostics?.member("active_promotion_deferred"))
+        XCTAssertNil(record.diagnostics?.member("canonical_published"))
     }
 
     // MARK: - R4: bounded stage wall time and backoff

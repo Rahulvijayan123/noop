@@ -473,3 +473,38 @@ days and their dependent baselines must be recomputed with the legacy method in 
   rule are required (findings/deployment-do.md §0.2, §b5). Confirming the host firewall state is
   still an operator task, and it cannot be done from this repository
   (findings/deployment-do.md §e.1).
+
+
+## Audit addendum (2026-10-02, tied to HEAD f813a687 and the repair round after it)
+
+Known, accepted properties recorded by the final audit:
+
+- **Candidate lane is at-most-once per revision.** The candidate write happens after the
+  canonical snapshot commits; a crash between the two loses that candidate for that
+  revision, and only new input re-enqueues it (the pre-existing invalidation family, not
+  the candidate-debt trigger). This is accepted for shadow evaluation; it is not a
+  durability guarantee.
+- **The candidate-debt trigger is advisory.** The authoritative staleness fence is the
+  `p_input_revision` guard inside `physiology_record_candidate_result`; the debt rows are
+  an operator hint (`physiology_candidate_debt_read`).
+- **Day-cursor scope revision.** The iOS day cursor's `scope_revision` does not include the
+  new selection tables (`result_day_pagination.sql:63-71`). Bounded: republishes bump the
+  per-day `change_revision`, so promoted days re-walk anyway. Wire the selection state into
+  the scope revision when the active republish path is enabled.
+- **Shadow HRV config is the shipped engine's config.** 20 clean intervals per 5-minute
+  window, plain mean over windows — the spec's stricter 30/20%/3-window/median numbers do
+  not match the shipped code (20 beats, plain mean; see the discovery report's
+  discrepancies section). The candidate is faithful to the shipped engine; the stricter
+  gates are a promotion-time decision, predeclared before any benchmarking.
+- **Worker-side metric coverage.** The candidate lane sends `hrv` requests; the repair round
+  extends the worker to assemble and send `sleep_boundary` and `sleep_stage` inputs when
+  their modes are not `off`. Until then, flipping a sleep metric to `shadow` produces no
+  candidate rows without a backfill or worker update.
+
+- **Deploy the sidecar package before or with the worker.** The worker's candidate payloads
+  carry the top-level `aggregation` field and mapped `gender` values that the repaired
+  sidecar parser accepts; an older sidecar build rejects them with `invalid_input`. Ship
+  `Tools/InferenceWorker` (sidecar) first, then the worker; both live in this branch, so a
+  normal branch rollout applies them together. A worker-only update against an old sidecar
+  makes every HRV candidate request fail closed (withheld `provider_error`), never a
+  canonical change.

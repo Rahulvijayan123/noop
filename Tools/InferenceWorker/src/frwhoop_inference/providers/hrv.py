@@ -30,6 +30,72 @@ Both follow the hard rules recorded in
 In addition this adapter applies the spec-section-5 requirements the shipped
 engine does not: retransmission is removed by *observation identity*, and a
 withheld result always carries a machine-readable reason.
+
+Aggregation seam (audit S-1 / S-2)
+----------------------------------
+``input.aggregation`` decides the result:
+
+``window``
+    Score the first window. With SUPPLIED windows the contract requires exactly
+    one, so this is unambiguous. With DERIVED windows (no ``input.windows``) a
+    multi-window interval scores its FIRST 5 minutes and ignores the rest. That
+    is retained only as back-compat for an explicit caller; the Swift worker
+    states ``mean_over_windows`` instead.
+``mean_over_windows``
+    The nightly session value: the plain mean over the session's USABLE windows
+    (``score_session``, the port of ``SleepStager.sessionAvgHRV``), with the
+    over-count gate applied at SESSION level, withholding only when no usable
+    window is left. A window the floor refused - including the first one - does
+    not withhold the night (this is the S-2 repair).
+``session``
+    The legacy alias for ``mean_over_windows`` (same arithmetic). Kept so no
+    earlier caller breaks; ``contract.is_session_aggregation`` is the single
+    predicate both providers ask.
+``day``
+    Duration-weighted mean of session means.
+
+``contract._resolve_hrv_aggregation`` reads a top-level ``input.aggregation``
+first and mirrors ``input.config.aggregation`` (the only place the pre-repair
+worker stated its intent, ``DayScoring.hrvConfig()``) when the top-level key is
+absent. Before that repair the parser ignored the config copy and defaulted to
+``window``, so the candidate value was the first window's RMSSD rather than the
+session mean (audit S-1); an unknown spelling is now refused, not downgraded.
+
+Spec section 5 vs the shipped code (verified divergences)
+---------------------------------------------------------
+Spec section 5 asks for "minimum 30 clean intervals, maximum 20 % artifact
+fraction, minimum three usable windows, and median-window aggregation, subject
+to current-code verification". The shipped Swift code does not implement those
+numbers, and this port is faithful to the SHIPPED CODE, not to the spec's
+provisional list. The divergences are recorded here so no reader assumes the
+spec's thresholds are in force:
+
+===========================  ==========================  ==========================
+Spec section 5 (provisional)  Shipped code / this port    Evidence
+===========================  ==========================  ==========================
+minimum 30 clean intervals    ``min_clean_beats = 20``    ``HRVAnalyzer.swift:33``
+                                                          (``minBeats = 20``)
+maximum 20 % artifact         no nightly artifact gate    ``HRVAnalyzer.swift``
+fraction                      (``max_rejected_fraction    exposes no such
+                              = None``, ``min_coverage     constant; the port's
+                              = 0.0``); the gate exists    defaults keep both
+                              and is reachable only by     gates off, so
+                              explicit tuning              ``artifact_fraction``
+                                                          is reachable only via
+                                                          the over-count path
+minimum three usable windows  no such floor; a session    ``SleepStager.swift``
+                              with one usable window is    ``:2958-2973``
+                              scored
+median-window aggregation     plain mean over windows     ``SleepStager.swift``
+                                                          ``sessionAvgHRV``
+                                                          (:2958-2973)
+===========================  ==========================  ==========================
+
+Consequence: the README's list of machine-readable withheld reasons is honest
+about the vocabulary, but ``low_coverage`` and ``high_rejected_fraction`` fire
+only when a caller tunes ``min_coverage`` / ``max_rejected_fraction`` away from
+their shipped defaults. A stricter shadow gate, if wanted, belongs in the
+candidate lane's tuning and must be recorded as a deliberate divergence.
 """
 
 from __future__ import annotations
@@ -48,6 +114,7 @@ from ..contract import (
     ProviderResult,
     Window,
     WithheldReason,
+    is_session_aggregation,
     pooled_rmssd,
 )
 
@@ -83,9 +150,17 @@ class HrvTuning:
     """
 
     window_sec: int = 300
+    #: 20, not the spec's provisional 30: ``HRVAnalyzer.swift:33`` (``minBeats``).
     min_clean_beats: int = 20
     min_pairs: int = 1
+    #: 0.0 (off), because the shipped analyzer has no nightly coverage floor. The
+    #: ``low_coverage`` withheld branch is therefore reachable only when a caller
+    #: tunes this away from its default (audit S-3).
     min_coverage: float = 0.0
+    #: None (off), for the same reason: the shipped analyzer has no nightly
+    #: artifact-fraction gate, so ``high_rejected_fraction`` needs explicit tuning
+    #: and ``artifact_fraction`` is otherwise reachable only via the over-count
+    #: path (audit S-3).
     max_rejected_fraction: float | None = None
     splice_tolerance_s: float = 3.0
     rr_min_ms: float = 300.0
@@ -775,7 +850,7 @@ class HrvProductionProvider:
             "publishable": True,
             "eligibility": {"state": self.eligibility_state, "reason": self.eligibility_reason},
             "versions": self.versions(),
-            "aggregations": ["window", "session", "day"],
+            "aggregations": ["window", "mean_over_windows", "session", "day"],
             "thresholds": self.tuning.to_wire(),
         }
 
@@ -835,7 +910,12 @@ class HrvProductionProvider:
         coverage = _pooled_summary(outcomes)
         coverage["verdict"] = diagnostics["coverage_verdict"]
 
-        # Window-level result.
+        # Window-level result. With SUPPLIED windows the contract has already
+        # required exactly one, so ``outcomes[0]`` is that window. With DERIVED
+        # windows a "window" request scores the first of them and silently ignores
+        # the rest of the interval; that back-compat behaviour is retained (an
+        # explicit caller asks for it) and is the reason the worker states
+        # ``mean_over_windows``. See the module docstring's spec-vs-code table.
         if payload.aggregation == "window":
             outcome = outcomes[0]
             diagnostics["sdnn_ms"] = None if outcome.sdnn_ms is None else round(outcome.sdnn_ms, 3)
@@ -865,7 +945,12 @@ class HrvProductionProvider:
         coverage["session_coverage"] = (
             round(min(1.0, coverage["clean_beat_ms"] / float(span_ms)), 6) if span_ms else 0.0)
 
-        if payload.aggregation == "session":
+        # ``mean_over_windows`` (the worker's spelling) and ``session`` (the legacy
+        # alias) are the same arithmetic: the plain mean over the session's USABLE
+        # windows, with the over-count gate applied at session level. A window the
+        # floor refused therefore does NOT withhold the night (audit S-2) - only a
+        # session with no usable window left withholds, and it names its reason.
+        if is_session_aggregation(payload.aggregation):
             if len(sessions) != 1:
                 diagnostics["withheld_detail"] = "multiple_sessions_with_session_aggregation"
                 return ProviderResult(
@@ -1102,7 +1187,7 @@ class HrvNeurokitShadowProvider:
             "accuracy_label": "unverified_accuracy",
             "eligibility": {"state": self.eligibility_state, "reason": self.eligibility_reason},
             "versions": self.versions(),
-            "aggregations": ["window", "session", "day"],
+            "aggregations": ["window", "mean_over_windows", "session", "day"],
             "thresholds": self.tuning.to_wire(),
         }
 
@@ -1306,7 +1391,7 @@ class HrvNeurokitShadowProvider:
             })
         diagnostics["sessions"] = session_wire
 
-        if payload.aggregation == "session":
+        if is_session_aggregation(payload.aggregation):
             if len(grouped) != 1:
                 return withheld("multiple_sessions_with_session_aggregation")
             if session_values:

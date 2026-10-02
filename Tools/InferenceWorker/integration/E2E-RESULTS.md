@@ -29,7 +29,11 @@ bash scripts/e2e_candidate_roundtrip.sh   # exit 0
 | Run | Result | Transcript |
 | --- | --- | --- |
 | `e2e_sidecar_http.sh` | **61 passed, 0 failed, 0 skipped**, exit 0 | `/tmp/frwhoop-physiology/sc-run4.out` (run dir `e2e/sidecar-http-*`) |
-| `e2e_candidate_roundtrip.sh` | **62 passed, 0 failed, 0 skipped**, exit 0 | `/tmp/frwhoop-physiology/rt-run2.out` (run dir `e2e/candidate-roundtrip-65638`) |
+| `e2e_candidate_roundtrip.sh` | **81 passed, 0 failed, 0 skipped**, exit 0 | `/tmp/frwhoop-physiology/e2e-roundtrip-run2.txt` (run dir `e2e/candidate-roundtrip-48912`) |
+
+Counts were 62 assertions before the S-1 repair; section H (below) adds 19, and the
+pre-repair run recorded 80 passed / 1 failed only because one new assertion compared
+`20` to jq's `20.0` text — the value assertion itself passed in both runs.
 
 Both scripts are rerunnable. They allocate a fresh run directory under
 `$E2E_ROOT` (default `/tmp/frwhoop-physiology/e2e`, always outside the checkout),
@@ -168,7 +172,7 @@ parameter list (assertion A0 below).
 - `PASS  the CLI exits 2 for a non-loopback host`
 - `PASS  and says loopback only`
 
-### 4.2 `scripts/e2e_candidate_roundtrip.sh` — 62 passed / 0 failed
+### 4.2 `scripts/e2e_candidate_roundtrip.sh` — 81 passed / 0 failed
 
 **A. Swift leg: build the worker from THIS worktree and run its candidate suites**
 
@@ -274,7 +278,38 @@ parameter list (assertion A0 below).
 - `PASS  a device the user does not own is refused (NULL)`
 - `PASS  row count is still 3`
 
-**H. scope statement (what this run does and does not prove)**
+**H. multi-window night (audit S-1): the candidate value is the session mean**
+
+- `PASS  6480 night beats seeded`
+- `PASS  the night has a current input revision`
+- `PASS  the night request is built from every seeded night beat`
+- `PASS  the worker payload states its intent ONLY in input.config`
+- `PASS  and sends NO top-level input.aggregation (the pre-repair worker shape)`
+- `PASS  the sidecar answers 200`
+- `PASS  status is ok`
+- `PASS  the parser mirrored input.config and took the session aggregation`
+- `PASS  all 108 windows were scored`
+- `PASS  and the interval really is a 108-window night`
+- `PASS  the first window's OWN RMSSD is the 20 ms the pre-repair code returned`
+- `PASS  the sidecar value equals the independent session mean over windows` (59.44444444444444)
+- `PASS  and it is NOT the first window's value (S-1 regression guard)`
+- `PASS  the multi-window candidate is recorded`
+- `PASS  the RECORDED candidate value equals the session mean over windows`
+- `PASS  and the recorded value is not the first window's 20 ms`
+- `PASS  the recorded interval is the night the beats describe`
+- `PASS  the stored coverage reports all 108 windows usable`
+- `PASS  the night row is stored ok with a value`
+
+The expectation (59.44444444444444 ms) is computed in the script from the fixture's own
+arithmetic — every window's RR alternates `+a`/`-a`, so its RMSSD is exactly `2a`, and
+`a = 10 + (window % 5) * 10` — never from the provider's aggregation. The 108-window
+night is seeded as 60 beats per window (one per second for the first 60 s of it) rather
+than 300: the first full-density attempt (32,400 rows) passed every assertion but made
+the statement-level invalidation triggers spend minutes on one INSERT, which is a bad
+trade for an e2e script. Window count, per-window floor clearance and the analytic
+expectation are unchanged.
+
+**I. scope statement (what this run does and does not prove)**
 
 
 ### 4.3 The bound statement (extracted from `CandidateStage.swift`, verbatim)
@@ -325,17 +360,29 @@ withheld reason and no stage payload.
 
 ## 5. Integration seams and observations (not blockers)
 
-1. **`input.window` and `input.config` are ignored by the sidecar.**
+1. **`input.window` is ignored; `input.config.aggregation` is MIRRORED (audit S-1, repaired).**
    `contract.parse_hrv_input` reads `input.beats`, optional `input.windows` and
-   `input.aggregation`. The worker sends `input.window` (`start_sec`/`end_sec`) and a
-   full `input.config` block; both are accepted and ignored. In practice the window is
-   still honoured because `CandidateStage.runOne` sets
-   `context.interval_start_utc`/`interval_end_utc` from the same
-   `CandidateInputs.intervalStart/End`, and the provider derives its single window from
-   the context interval — the run above proves that path end to end. `input.config` is
-   silently replaced by the provider's own defaults, which the README states match the
-   shipped rules. Worth a one-line reconciliation (either the provider reads `config`,
-   or the worker stops sending it) but it does not change the result today.
+   `input.aggregation`. The worker sends `input.window` (`start_sec`/`end_sec`), which is
+   accepted and ignored; the window is still honoured because `CandidateStage.runOne`
+   sets `context.interval_start_utc`/`interval_end_utc` from the same
+   `CandidateInputs.intervalStart/End`, and the provider derives its windows from the
+   context interval — the run above proves that path end to end.
+
+   `input.config.aggregation` is no longer ignored. The pre-repair parser read neither
+   the config copy nor a top-level key, defaulted to `window` and scored `outcomes[0]`,
+   so the candidate HRV value was the **FIRST 5-minute window's** RMSSD while
+   `coverage` described the whole night (audit S-1, P1). `contract._resolve_hrv_aggregation`
+   now reads a top-level `input.aggregation` first and mirrors `input.config.aggregation`
+   when the top-level key is absent, so a worker that states `mean_over_windows` only in
+   its config — the shape `scripts/build_hrv_request.py` reproduces and section H drives —
+   gets the session mean over usable windows. A withheld or floor-refused window
+   (including the first one) no longer withholds the night (audit S-2). Section H is the
+   regression test: it asserts the RECORDED value equals an independently computed
+   session mean (59.44 ms) and not the first window's 20 ms.
+
+   `input.aggregation` now accepts `window | mean_over_windows | session | day`
+   (`session` is the legacy alias for `mean_over_windows`); an unknown spelling is
+   refused with 400 `invalid_input` instead of being silently downgraded to `window`.
 2. **`versions.dependency` differs per provider by design**: `production.runs.v1` reports
    `numpy==2.5.3` (the numeric stack it actually uses) and `neurokit2.shadow.v1` reports
    `neurokit2==0.2.13`. The manifest pins both.
@@ -345,6 +392,34 @@ withheld reason and no stage payload.
 4. **`physiology_record_candidate_result` requires the SELECTED triple.** The stored
    `provider_version` is the selection's (`1.0.0`), never the response's echo, matching
    `CandidateStage`'s documented rule. G3 proves a moved generation is refused.
+
+### 5.1 Recorded divergences and fail-closed repairs (audit S-3/S-4/S-5, DD-4)
+
+**Spec section 5 thresholds vs the shipped code (S-3/S-4).** The spec's provisional
+numbers are NOT implemented, because the shipped Swift code does not implement them and
+this port is faithful to the shipped code. Recorded here, and in the provider module
+docstring and `README.md`, so no reader assumes otherwise:
+
+| Spec section 5 (provisional) | Shipped code / this port | Evidence |
+| --- | --- | --- |
+| minimum 30 clean intervals | `min_clean_beats = 20` | `HRVAnalyzer.swift:33` (`minBeats = 20`) |
+| maximum 20 % artifact fraction | no nightly gate (`max_rejected_fraction = None`, `min_coverage = 0.0`) | `HRVAnalyzer.swift` has no such constant |
+| minimum 3 usable windows | no floor; a one-window session is scored | `SleepStager.swift:2958-2973` |
+| median-window aggregation | plain mean over windows | `SleepStager.sessionAvgHRV` |
+
+Consequence recorded rather than implied: `low_coverage` and `high_rejected_fraction`
+fire only when a caller tunes `min_coverage` / `max_rejected_fraction` away from their
+shipped defaults, so `artifact_fraction` is reachable today only through the over-count
+path. The aggregation seam itself is described in `README.md` and in
+`scripts/build_hrv_request.py` (S-5).
+
+**Artifact readiness fails closed on a missing digest (DD-4, package half).**
+`ArtifactCheck.failed` now includes `no_sha256`, so a manifest entry that is marked
+`verify_at_startup` but publishes no `sha256` FAILS readiness when its entry is
+`required_for_readiness`, and is surfaced as a failed optional check otherwise.
+`not_verified` (`verify_at_startup: false`) stays non-blocking by design. The deploy
+half of DD-4 (`provision.sh` aborting instead of printing `SKIP`) belongs to the deploy
+owner and is not touched here.
 
 ## 6. Blockers
 

@@ -189,6 +189,48 @@ def test_optional_artifact_failure_does_not_block_readiness(tmp_path):
     assert "optional artifacts failed verification" in state.reason
 
 
+def test_required_artifact_without_a_digest_fails_readiness(tmp_path):
+    """Audit DD-4: ``verify_at_startup`` with no ``sha256`` is a failure, not a skip.
+
+    Before the repair the entry produced ``no_sha256``, ``failed`` was False, and the
+    provider reported ready with bytes nothing had ever verified.
+    """
+    manifest = {"manifest_version": "1", "entries": [{
+        "id": "a", "required_for_readiness": True,
+        "artifacts": [{"name": "w.bin", "path": "a/r1/w.bin", "size_bytes": 1,
+                       "verify_at_startup": True}]}]}
+    state = verify_manifest(manifest, str(tmp_path))
+    assert state.checks[0].status == "no_sha256"
+    assert state.checks[0].failed is True
+    assert state.ok is False
+    assert "blocked_artifact" in state.reason
+    assert "no_sha256" in state.reason
+
+
+def test_optional_artifact_without_a_digest_is_reported_but_not_blocking(tmp_path):
+    manifest = {"manifest_version": "1", "entries": [{
+        "id": "a", "required_for_readiness": False,
+        "artifacts": [{"name": "w.bin", "path": "a/r1/w.bin", "size_bytes": 1,
+                       "verify_at_startup": True}]}]}
+    state = verify_manifest(manifest, str(tmp_path))
+    assert state.ok is True
+    assert state.checks[0].failed is True
+    assert "optional artifacts failed verification" in state.reason
+
+
+def test_not_verified_entries_stay_non_blocking(tmp_path):
+    """``verify_at_startup: false`` is a by-design skip and never a failure (DD-4)."""
+    manifest = {"manifest_version": "1", "entries": [{
+        "id": "a", "required_for_readiness": True,
+        "artifacts": [{"name": "w.bin", "path": "a/r1/w.bin", "size_bytes": 1,
+                       "verify_at_startup": False}]}]}
+    state = verify_manifest(manifest, str(tmp_path))
+    assert state.checks[0].status == "not_verified"
+    assert state.checks[0].failed is False
+    assert state.ok is True
+    assert state.reason is None
+
+
 def test_broken_manifest_shapes_are_rejected(tmp_path):
     for payload in ("[]", "{}", '{"entries": []}', '{"entries": [1]}', '{"entries": [{}]}'):
         path = tmp_path / "m.json"

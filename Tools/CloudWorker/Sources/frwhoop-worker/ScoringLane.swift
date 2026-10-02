@@ -239,7 +239,9 @@ struct ScoringLane {
         throws -> (finished: Bool, candidates: DayScorer.CandidateInputs?) {
         try db.beginTransaction(.repeatableRead)
         do {
-            let payloads = try scorer.scoreAndBuildPayloads(claim: claim)
+            // `candidateLane` gates the candidate input assembly (audit DD-2):
+            // with no client there is no selection read and no per-stream work.
+            let payloads = try scorer.scoreAndBuildPayloads(claim: claim, candidateLane: candidate != nil)
             let legacyData = try jsonText(payloads.legacy)
             try db.exec("SELECT set_config('request.jwt.claims', '{\"role\":\"service_role\"}', true)")
             _ = try db.callFunctionForJSONRaw(
@@ -362,7 +364,7 @@ struct ScoringLane {
                 measurementRevision: 0
             )
             let started = Date()
-            let payloads = try scorer.scoreAndBuildPayloads(claim: claim)
+            let payloads = try scorer.scoreAndBuildPayloads(claim: claim, candidateLane: candidate != nil)
             let snapshotData = try jsonText(payloads.snapshot)
             let durationMS = Int(Date().timeIntervalSince(started) * 1000)
             let publishJSON = try db.callFunctionForJSONRaw(

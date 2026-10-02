@@ -20,11 +20,22 @@ Usage:
 Notes / seams (recorded, not hidden):
   * the sidecar's ``parse_hrv_input`` reads ``input.beats`` and (optionally)
     ``input.windows`` + ``input.aggregation``. It does NOT read ``input.window``
-    or ``input.config``, so the window the worker intends comes from
-    ``context.interval_start_utc``/``interval_end_utc`` (which is exactly what the
-    worker sets from ``CandidateInputs.intervalStart/End``) and the provider uses
-    its own config defaults. The keys are still sent verbatim, because that is
-    what the worker sends.
+    (``start_sec``/``end_sec``), so the window the worker intends comes from
+    ``context.interval_start_utc``/``interval_end_utc`` - which is exactly what
+    the worker sets from ``CandidateInputs.intervalStart/End``.
+  * This file emits the CURRENT worker key set. ``DayScoring.hrvInput`` sends the
+    aggregation BOTH top-level (``"aggregation": DayScoring.hrvAggregation``,
+    ``DayScoring.swift``) and mirrored inside ``input.config``. The sidecar reads
+    the top-level key first and falls back to the config copy (audit S-1), so
+    either shape aggregates the night as the plain mean over the session's usable
+    windows (``mean_over_windows``). Before that repair the parser read neither,
+    defaulted to ``"window"`` and reported the FIRST 5-minute window's RMSSD as
+    the nightly value. A payload carrying only the config copy (the pre-repair
+    worker shape) is still accepted through the mirror; an unknown spelling is
+    refused (400 ``invalid_input``) rather than downgraded.
+  * Other ``input.config`` keys are still ignored (the provider's own tuning
+    defaults match them; see the provider module docstring for the verified
+    spec-vs-code divergences).
 """
 
 from __future__ import annotations
@@ -36,6 +47,11 @@ from datetime import datetime, timezone
 
 # DayScorer.observationBucketSeconds
 OBSERVATION_BUCKET_SECONDS = 1
+
+#: ``DayScoring.hrvAggregation``. The worker sends this BOTH top-level and inside
+#: ``config``, because the provider reads the top-level key first and mirrors
+#: ``config.aggregation`` for a payload from an un-rebuilt worker.
+HRV_AGGREGATION = "mean_over_windows"
 
 
 def iso(ts: int) -> str:
@@ -116,7 +132,8 @@ def hrv_config() -> dict:
         "beat_accuracy_tolerance_s": 0.5,
         "beat_accuracy_min_fraction": 0.5,
         "max_rejected_fraction": None,
-        "aggregation": "mean_over_windows",
+        # The mirrored copy the worker also sends; the top-level key above wins.
+        "aggregation": HRV_AGGREGATION,
         "pooling": "sum_sq_and_pairs",
     }
 
@@ -180,6 +197,8 @@ def main() -> int:
         "input": {
             "beats": beats,
             "window": {"start_sec": interval_start, "end_sec": interval_end, "inclusive": True},
+            # TOP-LEVEL, so the provider cannot fall back to its "window" default.
+            "aggregation": HRV_AGGREGATION,
             "config": hrv_config(),
             "timestamp_convention": "interval_end_seconds",
             "timestamp_resolution": "whole_seconds",

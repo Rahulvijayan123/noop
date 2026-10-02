@@ -469,6 +469,14 @@ struct CandidateStage {
         diagnostics["input_rows"] = .int(inputs.hrvInputRows)
         diagnostics["deduped_rows"] = .int(inputs.inputRowCount)
         diagnostics["mode"] = .string(selection.mode)
+        // Audit DD-5: an `active` provider result is recorded with mode='active',
+        // but this worker does NOT publish it as canonical (promotion needs a fresh
+        // canonical republish, which is parent-gated). Without these keys the row
+        // would claim an active value that no consumer can see, so state it.
+        if selection.isActive && status == "ok" {
+            diagnostics["active_promotion_deferred"] = .bool(true)
+            diagnostics["canonical_published"] = .bool(false)
+        }
         // The record RPC DROPS the row when the provider triple differs from the
         // current selection, so the triple written is always the SELECTION's. If
         // the response echoes a different provider/config, keep it as evidence
