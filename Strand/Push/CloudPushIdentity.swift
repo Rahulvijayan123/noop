@@ -74,6 +74,10 @@ public enum CloudPushIdentityStore {
     /// their pending inputs can resume when they sign back in.
     public static func signOutCurrentOwner() {
         UserDefaults.standard.removeObject(forKey: ownerIdKey)
+        // A signed-out install must not re-arm raw-IMU capture on the next
+        // connect: the durable capture intent belongs to the collector session,
+        // which is user-scoped (see RawDataSessionStore.clearPersistedCaptureIntent).
+        RawDataSessionStore.clearPersistedCaptureIntent()
     }
 
     /// Irreversible removal, for an explicit account deletion.

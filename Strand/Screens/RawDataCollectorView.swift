@@ -13,6 +13,7 @@ struct RawDataCollectorView: View {
     @State private var confirmDeleteAll = false
     @State private var exportError: String?
     @State private var deleteError: String?
+    @State private var captureError: String?
     @State private var imuCoverage: [String: String] = [:]
     @State private var historicalFrom = Date().addingTimeInterval(-3_600)
     @State private var historicalTo = Date()
@@ -23,6 +24,8 @@ struct RawDataCollectorView: View {
         let sessionId: String
         let markerId: String?
         var at: Date
+        // C8 Fix F: interval end (used only when `type` is an interval label).
+        var end: Date
         var type: String
         var text: String
     }
@@ -79,6 +82,14 @@ struct RawDataCollectorView: View {
         )) {
             Button("OK", role: .cancel) { deleteError = nil }
         } message: { Text(deleteError ?? "Unknown error") }
+        // C8 Fix C: a session start that can't record raw IMU (e.g. WHOOP 4.0's 1917-byte
+        // REALTIME_RAW_DATA) is rolled back and surfaced here — never a silent "recording" that
+        // stores nothing.
+        .alert("Couldn't start raw-data session", isPresented: Binding(
+            get: { captureError != nil }, set: { if !$0 { captureError = nil } }
+        )) {
+            Button("OK", role: .cancel) { captureError = nil }
+        } message: { Text(captureError ?? "Unknown error") }
         .sheet(item: $markerDraft) { draft in markerSheet(draft) }
     }
 
@@ -197,6 +208,26 @@ struct RawDataCollectorView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                // C8 Fix F: duration-bearing activity intervals (walking/running/sitting/standing/
+                // other_movement), added beside instant markers and exported with provenance.
+                NoopButton("Add activity interval", systemImage: "figure.walk", kind: .secondary,
+                           fullWidth: true) { editInterval(nil, in: session) }
+                let intervals = session.events.filter { $0.kind == "activityInterval" }
+                    .sorted { $0.atMs < $1.atMs }
+                ForEach(intervals) { interval in
+                    Button { editInterval(interval, in: session) } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                                (Text(Self.markerLabel(interval.markerType))
+                                    + Text(verbatim: " · \(Self.time(interval.atMs))–\(Self.time(interval.endAtMs ?? interval.atMs))"))
+                                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(StrandPalette.textTertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
                 NoopButton(exportingId == session.id ? "Building export…" : "Export session",
                            systemImage: "square.and.arrow.up", kind: .secondary, fullWidth: true) {
                     Task { await export(session) }
@@ -214,43 +245,57 @@ struct RawDataCollectorView: View {
             if let binding = Binding($markerDraft) {
                 let session = store.sessions.first(where: { $0.id == binding.wrappedValue.sessionId })
                 Form {
-                    Section {
-                        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                            let current = Self.markerCurrentTime(session: session, now: timeline.date)
-                            Text("Marker: \(binding.wrappedValue.at.formatted(date: .omitted, time: .standard))")
-                            Text("Current time: \(current.formatted(date: .omitted, time: .standard))")
-                                .foregroundStyle(.secondary)
-                            HStack {
-                                Button { binding.wrappedValue.at.addTimeInterval(-10) } label: { Text(verbatim: "−10 s") }
-                                Spacer()
-                                Button("0") {
-                                    binding.wrappedValue.at = Self.markerCurrentTime(session: session, now: Date())
+                    if Self.isIntervalLabel(binding.wrappedValue.type) {
+                        // C8 Fix F: duration-bearing interval — from/to pickers instead of the
+                        // single instant-marker time control.
+                        Section("Interval") {
+                            DatePicker("From", selection: binding.at)
+                            DatePicker("To", selection: binding.end, in: binding.wrappedValue.at...)
+                        }
+                    } else {
+                        Section {
+                            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                                let current = Self.markerCurrentTime(session: session, now: timeline.date)
+                                Text("Marker: \(binding.wrappedValue.at.formatted(date: .omitted, time: .standard))")
+                                Text("Current time: \(current.formatted(date: .omitted, time: .standard))")
+                                    .foregroundStyle(.secondary)
+                                HStack {
+                                    Button { binding.wrappedValue.at.addTimeInterval(-10) } label: { Text(verbatim: "−10 s") }
+                                    Spacer()
+                                    Button("0") {
+                                        binding.wrappedValue.at = Self.markerCurrentTime(session: session, now: Date())
+                                    }
+                                    Spacer()
+                                    Button { binding.wrappedValue.at.addTimeInterval(10) } label: { Text(verbatim: "+10 s") }
                                 }
-                                Spacer()
-                                Button { binding.wrappedValue.at.addTimeInterval(10) } label: { Text(verbatim: "+10 s") }
                             }
                         }
                     }
-                    Section("Marker type") {
-                        Picker("Marker type", selection: binding.type) {
+                    Section("Type") {
+                        Picker("Type", selection: binding.type) {
                             ForEach(RawDataSessionStore.markerTypes, id: \.self) { type in
                                 Text(Self.markerLabel(type)).tag(type)
                             }
+                            ForEach(RawDataSessionStore.intervalLabels, id: \.self) { label in
+                                Text(Self.markerLabel(label)).tag(label)
+                            }
                         }.pickerStyle(.segmented)
                     }
-                    Section("Marker note") {
-                        TextField("Marker note", text: binding.text, axis: .vertical).lineLimit(2...4)
+                    Section("Note") {
+                        TextField("Note", text: binding.text, axis: .vertical).lineLimit(2...4)
                     }
                     if let markerId = binding.wrappedValue.markerId {
                         Section {
-                            Button("Delete marker", role: .destructive) {
+                            Button("Delete", role: .destructive) {
                                 store.deleteMarker(sessionId: binding.wrappedValue.sessionId, markerId: markerId)
                                 markerDraft = nil
                             }
                         }
                     }
                 }
-                .navigationTitle(initial.markerId == nil ? "Add marker" : "Edit marker")
+                .navigationTitle(Self.isIntervalLabel(binding.wrappedValue.type)
+                    ? (initial.markerId == nil ? "Add activity interval" : "Edit activity interval")
+                    : (initial.markerId == nil ? "Add marker" : "Edit marker"))
                 .toolbar {
                     ToolbarItem(placement: .cancellationAction) { Button("Cancel") { markerDraft = nil } }
                     ToolbarItem(placement: .confirmationAction) {
@@ -263,13 +308,38 @@ struct RawDataCollectorView: View {
 
     private func editMarker(_ marker: RawDataSessionStore.Event?, in session: RawDataSessionStore.Session) {
         let currentMs = session.endedAtMs ?? Int64(Date().timeIntervalSince1970 * 1_000)
+        let endMs = marker?.endAtMs ?? marker?.atMs ?? currentMs
         markerDraft = MarkerDraft(sessionId: session.id, markerId: marker?.markerId,
                                   at: Date(timeIntervalSince1970: Double(marker?.atMs ?? currentMs) / 1_000),
+                                  end: Date(timeIntervalSince1970: Double(endMs) / 1_000),
                                   type: marker?.markerType ?? "moment", text: marker?.text ?? "")
     }
 
+    /// C8 Fix F: open the sheet for a NEW or EXISTING duration-bearing activity interval
+    /// (presets the interval label type and a sensible default from/to window).
+    private func editInterval(_ interval: RawDataSessionStore.Event?, in session: RawDataSessionStore.Session) {
+        let currentMs = session.endedAtMs ?? Int64(Date().timeIntervalSince1970 * 1_000)
+        let defaultFrom = max(session.startedAtMs, currentMs - 300_000)
+        let startMs = interval?.atMs ?? defaultFrom
+        let endMs = interval?.endAtMs ?? currentMs
+        markerDraft = MarkerDraft(sessionId: session.id, markerId: interval?.markerId,
+                                  at: Date(timeIntervalSince1970: Double(startMs) / 1_000),
+                                  end: Date(timeIntervalSince1970: Double(endMs) / 1_000),
+                                  type: interval?.markerType ?? "walking", text: "")
+    }
+
     private func saveMarker(_ draft: MarkerDraft) {
-        if let markerId = draft.markerId {
+        if Self.isIntervalLabel(draft.type) {
+            // C8 Fix F: duration-bearing interval — never touches a predicted label; the record is
+            // a separate "user_confirmed" local overlay (RawDataSessionStore.intervalProvenance).
+            if let intervalId = draft.markerId {
+                store.updateIntervalLabel(sessionId: draft.sessionId, intervalId: intervalId,
+                                          from: draft.at, to: draft.end, label: draft.type)
+            } else {
+                store.addIntervalLabel(sessionId: draft.sessionId, from: draft.at, to: draft.end,
+                                       label: draft.type)
+            }
+        } else if let markerId = draft.markerId {
             store.updateMarker(sessionId: draft.sessionId, markerId: markerId,
                                at: draft.at, type: draft.type, text: draft.text)
         } else {
@@ -280,8 +350,19 @@ struct RawDataCollectorView: View {
 
     private func start() {
         guard let session = store.start(deviceId: model.ble.deviceId) else { return }
-        guard model.ble.startGroundTruthRawCapture(sessionId: session.id) else {
-            store.stop(); store.removeMetadata(session.id); return
+        // C8 Fix C: the BLE layer now reports WHY a session can't start (unsupported family,
+        // not connected, another capture in flight) instead of a bare Bool. On anything other
+        // than `.started` the session is rolled back and the reason is shown — a WHOOP 4.0
+        // session never silently records nothing while the UI claims recording.
+        let result = model.ble.startGroundTruthRawCapture(sessionId: session.id)
+        guard result == .started else {
+            captureError = Self.captureErrorMessage(result)
+            // `.unsupportedDeviceFamily` latched `rawCaptureInFlight` to let the legacy writes
+            // through — release it so the next start isn't blocked.
+            Task { await model.ble.stopGroundTruthRawCapture() }
+            store.stop()
+            store.removeMetadata(session.id)
+            return
         }
     }
 
@@ -352,8 +433,11 @@ struct RawDataCollectorView: View {
             let from = session.capturedStartedAtMs == nil ? bounds.from : max(bounds.from, first ?? bounds.from)
             let expected = max(0, bounds.to - from + 1)
             let bytes = ByteCountFormatter.string(fromByteCount: stats.bytes, countStyle: .file)
-            let readiness = expected > 0 && stats.coveredSeconds == expected ? "ready" : "incomplete"
-            imuCoverage[session.id] = "\(stats.coveredSeconds)/\(expected) s · \(bytes) · \(readiness)"
+            // C8 Fix E: readiness is judged on DURABLE seconds only — the RAM-only pending tail is
+            // shown separately as "buffered" and never counts as covered/ready.
+            let readiness = expected > 0 && stats.diskSeconds == expected ? "ready" : "incomplete"
+            let buffered = stats.pendingSeconds > 0 ? " · +\(stats.pendingSeconds) s buffered" : ""
+            imuCoverage[session.id] = "\(stats.diskSeconds)/\(expected) s\(buffered) · \(bytes) · \(readiness)"
         }
     }
 
@@ -384,7 +468,32 @@ struct RawDataCollectorView: View {
         case "start": "Start"
         case "end": "End"
         case "issue": "Issue"
+        case "walking": "Walking"
+        case "running": "Running"
+        case "sitting": "Sitting"
+        case "standing": "Standing"
+        case "other_movement": "Other movement"
         default: "Moment"
+        }
+    }
+
+    /// C8 Fix F: whether a picker value is a duration-bearing interval label (vs an instant marker).
+    private static func isIntervalLabel(_ type: String) -> Bool {
+        RawDataSessionStore.intervalLabels.contains(type)
+    }
+
+    /// C8 Fix C: user-facing reason a raw-data session could not start. Every failure path rolls
+    /// the session back, so a WHOOP 4.0 (1917-byte REALTIME_RAW_DATA) can never appear to record.
+    private static func captureErrorMessage(_ result: BLEManager.GroundTruthCaptureStart) -> String {
+        switch result {
+        case .unsupportedDeviceFamily:
+            return "This WHOOP family doesn't provide the 100 Hz raw IMU stream this collector records (WHOOP 4.0's REALTIME_RAW_DATA is the 1917-byte variant, which the IMU store can't accept). No raw IMU was recorded and the session was rolled back — use a WHOOP 5/MG for raw capture."
+        case .alreadyInFlight:
+            return "Another raw-data capture is already running, so this session was rolled back."
+        case .notConnected:
+            return "The band isn't connected, so the capture could not start. The session was rolled back; it re-arms automatically on the next connection."
+        case .started:
+            return ""
         }
     }
 
