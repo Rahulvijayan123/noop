@@ -1,0 +1,9 @@
+# ActivityContext — local/runtime artifacts (never commit weights).
+__pycache__/
+*.pyc
+.venv/
+.venv-hart/
+checkpoint/
+*.part
+*.egg-info/
+.pytest_cache/
