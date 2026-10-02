@@ -1,0 +1,305 @@
+{
+  "manifest_version": "1.0.0",
+  "generated_utc": "2026-10-01T00:00:00Z",
+  "generated_by": "W-A impl-inference-hrv",
+  "artifact_root": "/opt/frwhoop-models",
+  "notes": [
+    "Every entry records the pinned revision, artifact URL/size/sha256, license, rights verdict, input contract and eligibility status.",
+    "verify_at_startup=true means the sidecar hashes the cached bytes under the artifact root at startup; a missing or mismatched file is reported in GET /healthz and GET /v1/providers.",
+    "required_for_readiness=true means the process readiness flag is false when that artifact fails verification. No model artifact is required for the HRV providers: the production provider is pure numpy, and the shadow provider's dependency (neurokit2) is installed from uv.lock and checked by import + version at startup.",
+    "Nothing in this manifest is downloaded at inference time. Deploy-prep stages and verifies bytes; the sidecar only reads.",
+    "Conditional models (wav2sleep, no-eeg-sleep-staging, RR_Estimation) are recorded with eligibility states and are NOT wired as live providers.",
+    "Hashes and sizes were measured from the pinned bytes (findings/conditional-models.md, findings/sleep-boundary-stager.md, findings/hrv-neurokit.md) and re-verified locally against /tmp/frwhoop-physiology/ckpt/.",
+    "Sleep candidates (2026-10-01, W-D): sleepecg_wrn_gru_mesa is now wired as sleepecg.wrn-gru-mesa.v1 with its two artifacts required_for_readiness=true (a wired model artifact gates readiness); hypnospy is wired as hypnospy.hr-boundary.v1 from an in-repo vendored copy and therefore has no artifact and required_for_readiness=false."
+  ],
+  "entries": [
+    {
+      "id": "neurokit2",
+      "kind": "python_package",
+      "name": "neurokit2",
+      "revision": "0.2.13",
+      "source_url": "https://github.com/neuropsychology/NeuroKit",
+      "tag_commit": "ff419d983568ef492eb8d229af643c0ef0100b32",
+      "license": "MIT",
+      "license_evidence": "PyPI info.license = 'MIT License'; bundled LICENSE first line 'MIT License'; LICENSE sha256 89a0c90cb8331319e1baea34b004fd6121247e89d132c3fcd01c86353aac8733",
+      "rights_verdict": "clear",
+      "status": "eligible",
+      "status_reason": "permissive license, no weights, pinned wheel hash verified from PyPI",
+      "provider_id": "neurokit2.shadow.v1",
+      "wired": true,
+      "input_contract": "dict {RRI: milliseconds, RRI_Time: interval END seconds}; never a bare list, never START times, never whole-second store timestamps",
+      "artifacts": [
+        {
+          "name": "neurokit2-0.2.13-py3-none-any.whl",
+          "path": "neurokit2/0.2.13/neurokit2-0.2.13-py3-none-any.whl",
+          "url": "https://files.pythonhosted.org/packages/0f/ff/ae9c9be371b3a80b970be811a0bd223a28c6259d0530763aee09bf6a9219/neurokit2-0.2.13-py3-none-any.whl",
+          "size_bytes": 688906,
+          "sha256": "25f1414214e832341312b8f0deeaeeefb6d01e9b14d8723b71c67e99e0430c4c",
+          "verify_at_startup": false,
+          "note": "installed from uv.lock by uv sync at deploy-prep; readiness checks import + version instead of hashing site-packages"
+        },
+        {
+          "name": "neurokit2-0.2.13.tar.gz",
+          "path": "neurokit2/0.2.13/neurokit2-0.2.13.tar.gz",
+          "url": "https://files.pythonhosted.org/packages/28/66/15d042e6100e07d52929ae8aeb04b4b9db6f943ed0dd554befac7da8cf01/neurokit2-0.2.13.tar.gz",
+          "size_bytes": 92069588,
+          "sha256": "e0a3831e939444855c8350f01322d3ecece1faf8a290c179d730697930f10046",
+          "verify_at_startup": false,
+          "note": "sdist recorded for provenance; the wheel is what is installed"
+        }
+      ],
+      "required_for_readiness": false
+    },
+    {
+      "id": "hypnospy",
+      "kind": "python_source",
+      "name": "HypnosPy",
+      "revision": "3b6c825d1568158cbf0058de50495e5308117d17",
+      "source_url": "https://github.com/HypnosPy/HypnosPy",
+      "license": "MIT",
+      "license_evidence": "LICENSE file is MIT (Copyright (c) 2020 Ignacio Perez-Pozuelo, University of Cambridge & The Alan Turing Institute; Joao Palotti; Marius Posa); setup.py line 20 says license='BSD'; GitHub API reports NOASSERTION",
+      "rights_verdict": "unverified_license_metadata",
+      "status": "shadow_eligible",
+      "status_reason": "the HR boundary algorithm was executed (2026-10-01) from an in-repo vendored copy at the pinned revision; the upstream revision does not run on the installed stack (4 pandas-3 incompatibilities plus a DST re-localisation failure), so the vendored copy carries a documented patch set (10 detector sites + 1 misc site) plus a minimal Wearable rewrite with three recorded deviations, with upstream/vendored sha256s and the full unified diff in src/frwhoop_inference/frwhoop_sleep/hypnospy_vendored/{PROVENANCE.md,UPSTREAM_DIFF.json}; no independent accuracy reference was used (unverified_accuracy). License metadata is still inconsistent (LICENSE=MIT, setup.py=BSD, GitHub=NOASSERTION), so promotion to active requires reconciliation",
+      "provider_id": "hypnospy.hr-boundary.v1",
+      "wired": true,
+      "input_contract": "heart rate resampled to a fixed grid with explicit gap masking; day bounds must be supplied by FRWHOOP because HypnosPy has no IANA timezone concept",
+      "artifacts": [],
+      "required_for_readiness": false,
+      "accuracy_label": "unverified_accuracy",
+      "vendored": {
+        "in_repo_path": "src/frwhoop_inference/frwhoop_sleep/hypnospy_vendored",
+        "pinned_commit": "3b6c825d1568158cbf0058de50495e5308117d17",
+        "upstream_sleep_boundary_detector_sha256": "e89a22c43f8c1b62a2a37c76d3fe6d18d62fa4d51c6b6a747ff9be3dca595f36",
+        "vendored_sleep_boundary_detector_sha256": "228c2b8f6474fc8e42fb85886b19fba2e29cc13ba1fbe803ba535a5f19f8c67c",
+        "upstream_misc_sha256": "30349fb846dc350f9679c8edeb4f9e3c52449b1ec98fa21f699a4af2d15ea923",
+        "vendored_misc_sha256": "0389cea0e7ce4f853fd1aae4aeb6190bf5ea1e5b9df0da8d636d5f9d1c7cda6f",
+        "provenance": "hypnospy_vendored/PROVENANCE.md",
+        "unified_diff": "hypnospy_vendored/UPSTREAM_DIFF.json",
+        "detector_patch_sites": 10,
+        "misc_patch_sites": 1,
+        "wearable_minimal_rewrite": {
+          "upstream_path": "hypnospy/wearable.py",
+          "upstream_sha256": "74abb515fa7f8cc663d616c6a6fc9764d4fb3d0881ce5c0cdbffc56ea7635cc0",
+          "vendored_sha256": "4e100b202117dc6fae080317794cea6875647abc6ccb86ac09c146d5647f950f",
+          "deviations": [
+            "no_frequency_inference",
+            "constructor_signature",
+            "timedelta_instead_of_dateoffset"
+          ]
+        }
+      },
+      "artifact_note": "vendored source ships in-repo, so there is no artifact to stage or hash at startup"
+    },
+    {
+      "id": "sleepecg_wrn_gru_mesa",
+      "kind": "model_checkpoint",
+      "name": "SleepECG wrn-gru-mesa",
+      "revision": "sleepecg==0.5.9",
+      "source_url": "https://github.com/credt/sleepecg",
+      "license": "BSD-3-Clause",
+      "license_evidence": "BSD 3-clause header on every source file, e.g. sleepecg/classification.py:1-3",
+      "rights_verdict": "clear",
+      "status": "shadow_eligible",
+      "status_reason": "real pinned inference executed (2026-10-01): the bundled wrn-gru-mesa.zip was loaded with sha256 verification and Keras 3 + torch (no TensorFlow), and produced 36-feature -> 4-class softmax output with row sums 1.0 on a real toy-ECG record and on synthetic nights; no independent accuracy reference was used, so accuracy stays unverified_accuracy and the provider is wired as a non-publishable shadow candidate",
+      "provider_id": "sleepecg.wrn-gru-mesa.v1",
+      "wired": true,
+      "input_contract": "RR intervals only (SleepRecord.heartbeat_times in seconds); label space wake-rem-nrem; 36 features = hrv-time (26) + hrv-frequency (7) + recording_start_time + age + gender; mask_value -1",
+      "artifacts": [
+        {
+          "name": "wrn-gru-mesa.zip",
+          "path": "sleepecg/0.5.9/wrn-gru-mesa.zip",
+          "url": "bundled in the sleepecg 0.5.9 wheel (sleepecg/classifiers/wrn-gru-mesa.zip)",
+          "size_bytes": 59765,
+          "sha256": "5622a858c855b0090e1fbcbdc35334ea459707c830eae1a26a4375e33091e869",
+          "verify_at_startup": true,
+          "required_for_readiness": true,
+          "note": "wired model artifact: process readiness is false when this hash does not verify"
+        },
+        {
+          "name": "classifier.keras",
+          "path": "sleepecg/0.5.9/wrn-gru-mesa/classifier.keras",
+          "url": "inner entry of wrn-gru-mesa.zip",
+          "size_bytes": 113583,
+          "sha256": "0b392209aff8d72383de4d1fdb1e41e85ab060b65a3facb2835e262aa0f6ffd8",
+          "verify_at_startup": true,
+          "required_for_readiness": true,
+          "note": "wired model artifact: process readiness is false when this hash does not verify"
+        }
+      ],
+      "required_for_readiness": true,
+      "accuracy_label": "unverified_accuracy",
+      "runtime_note": "_nanpsd raises ValueError instead of withholding when no 270 s analysis window is free of out-of-range RR intervals; the adapter counts NaN-free windows first and withholds",
+      "loader": "keras 3 direct load of classifiers/wrn-gru-mesa.zip (KERAS_BACKEND pinned)"
+    },
+    {
+      "id": "wav2sleep",
+      "kind": "model_checkpoint",
+      "name": "wav2sleep",
+      "revision": "278e30463c8149c4e6899b8784da492fec695bd9",
+      "revision_date": "2026-07-16",
+      "source_url": "https://huggingface.co/joncarter/wav2sleep",
+      "license": "MIT",
+      "license_evidence": "model card and code both MIT",
+      "rights_verdict": "clear",
+      "status": "blocked_input",
+      "status_reason": "requires a raw ECG/PPG waveform at 1024 samples per 30 s epoch (34.133 Hz); the product stores only derived ppg_hr_samples (bpm, confidence) on the default path",
+      "provider_id": "sleep_stage",
+      "wired": false,
+      "input_contract": "1024-sample ECG/PPG epoch per 30 s with modality masking; requires the companion hydra config.yaml",
+      "artifacts": [
+        {
+          "name": "state_dict.pth",
+          "path": "wav2sleep/278e3046/state_dict.pth",
+          "url": "https://huggingface.co/joncarter/wav2sleep/resolve/main/state_dict.pth",
+          "size_bytes": 9666562,
+          "sha256": "ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc",
+          "verify_at_startup": true
+        },
+        {
+          "name": "config.yaml",
+          "path": "wav2sleep/278e3046/config.yaml",
+          "url": "https://huggingface.co/joncarter/wav2sleep/resolve/main/config.yaml",
+          "size_bytes": 749,
+          "sha256": "b92f4e26f3290f5207b53be343d82a4e338968b54782718f13429e800f114509",
+          "verify_at_startup": true
+        }
+      ],
+      "required_for_readiness": false
+    },
+    {
+      "id": "no_eeg_sleep_staging",
+      "kind": "model_checkpoint",
+      "name": "no-eeg-sleep-staging",
+      "revision": "97d4ef193f5d61abedc6d7726ce4067a59ee4f6a",
+      "revision_date": "2026-09-06",
+      "source_url": "https://github.com/akaneriya1/no-eeg-sleep-staging",
+      "license": "MIT",
+      "license_evidence": "repository LICENSE is MIT",
+      "rights_verdict": "clear",
+      "status": "unverified",
+      "status_reason": "HR side matches the product signal and a frozen probe ran, but the motion side needs ~50-65 Hz 3-axis acceleration while the product exposes a 1 Hz gravity summary; the adaptation is unvalidated and the model is retrospective-only",
+      "provider_id": "sleep_stage",
+      "wired": false,
+      "input_contract": "42 features in the exact order of deploy/model/meta.json (HR-derived plus motion and demographics); stage-4 or stage-2 lightgbm bundle",
+      "artifacts": [
+        {
+          "name": "lgbm_stage4.txt",
+          "path": "no_eeg/97d4ef19/lgbm_stage4.txt",
+          "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/model/lgbm_stage4.txt",
+          "size_bytes": 2855930,
+          "sha256": "fe2f8f4c68a28a0a0c75b4f32f2bf2027f21b6e4527d7a2e0108fe7d75767700",
+          "verify_at_startup": true
+        },
+        {
+          "name": "lgbm_stage2.txt",
+          "path": "no_eeg/97d4ef19/lgbm_stage2.txt",
+          "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/model/lgbm_stage2.txt",
+          "size_bytes": 716937,
+          "sha256": "b13c96be3be99dd24f6ca339143b1e5166b53908c71d16cc160ee91a150bd323",
+          "verify_at_startup": true
+        },
+        {
+          "name": "meta.json",
+          "path": "no_eeg/97d4ef19/meta.json",
+          "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/model/meta.json",
+          "size_bytes": 3154,
+          "sha256": "d9394903d2a422e988289a4745d23a479bd1147aa786f40c3cc3d3893737e568",
+          "verify_at_startup": true
+        },
+        {
+          "name": "sample_night.csv",
+          "path": "no_eeg/97d4ef19/sample_night.csv",
+          "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/sample_night.csv",
+          "size_bytes": 820816,
+          "sha256": "b6aba12579cfa03738aff224fdf414383a0d3f956ed3ea194b18c48f5a46f2bd",
+          "verify_at_startup": false,
+          "note": "reference fixture, not a model artifact"
+        }
+      ],
+      "required_for_readiness": false
+    },
+    {
+      "id": "rr_estimation",
+      "kind": "model_checkpoint",
+      "name": "RR_Estimation",
+      "revision": "e429f1cc7fa25b56c2bd8d6674d7c25be25764b1",
+      "revision_date": "2024-10-28",
+      "source_url": "https://github.com/kazemikianoosh/RR_Estimation",
+      "license": "MIT",
+      "license_evidence": "repository LICENSE is MIT (code and in-repo weights)",
+      "rights_verdict": "clear",
+      "status": "blocked_input",
+      "status_reason": "needs raw PPG plus synchronised 3-axis acceleration at 64 Hz; the product has neither by default, and the required input normalisation is absent from the source",
+      "provider_id": "respiration",
+      "wired": false,
+      "input_contract": "example input shape (2048, 4); timebase must be established from source, not assumed; output scale requires source inspection",
+      "artifacts": [
+        {
+          "name": "RR_Estimation_Model.h5",
+          "path": "rr_estimation/e429f1cc/RR_Estimation_Model.h5",
+          "url": "https://raw.githubusercontent.com/kazemikianoosh/RR_Estimation/main/RR_Estimation_Model.h5",
+          "size_bytes": 66191240,
+          "sha256": "78fbddd1dbe23a23909c438fe33efa0fb45e2fd4044715705ef912d64b95d2af",
+          "verify_at_startup": true
+        }
+      ],
+      "required_for_readiness": false
+    },
+    {
+      "id": "stepcount",
+      "kind": "python_source",
+      "name": "OxWearables stepcount",
+      "revision": "d7bc0c6eeaa4c552a6e8c5ee690e03651acd2764",
+      "revision_date": "2026-09-27",
+      "source_url": "https://github.com/OxWearables/stepcount",
+      "license": "Academic Use Licence",
+      "license_evidence": "repository licence limits use to academic research and excludes use 'in connection with' a product; no internal-research carve-out for a company",
+      "rights_verdict": "blocked",
+      "status": "blocked_license",
+      "status_reason": "academic-use-only licence excludes both product and shadow execution",
+      "provider_id": null,
+      "wired": false,
+      "input_contract": "raw ~100 Hz 3-axis acceleration (not available on the default product path)",
+      "artifacts": [],
+      "required_for_readiness": false
+    },
+    {
+      "id": "cnn_wrist_model_freeliving",
+      "kind": "model_checkpoint",
+      "name": "cnn-wrist-model-freeliving",
+      "revision": "9ca77ea104074ad82c648ec75c3a48e2bd82deeb",
+      "revision_date": "2020-04-14",
+      "source_url": "https://github.com/razmik/cnn-wrist-model-freeliving",
+      "license": "none",
+      "license_evidence": "no licence file exists in the repository at all; therefore no grant of rights to use, copy, modify or distribute",
+      "rights_verdict": "blocked",
+      "status": "blocked_license",
+      "status_reason": "unlicensed; product and shadow use both excluded",
+      "provider_id": null,
+      "wired": false,
+      "input_contract": "raw wrist acceleration windows (not available on the default product path)",
+      "artifacts": [
+        {
+          "name": "best_model.013-0.28.h5",
+          "path": "cnn_wrist/9ca77ea1/best_model.013-0.28.h5",
+          "url": "https://github.com/razmik/cnn-wrist-model-freeliving/blob/master/pre-trained-models/regression/window-6000-overlap-3000/best_model.013-0.28.h5",
+          "size_bytes": 17524696,
+          "sha256": null,
+          "verify_at_startup": false,
+          "note": "hash not computed: the artifact is unlicensed and was not staged"
+        },
+        {
+          "name": "best_model.007-0.36.h5",
+          "path": "cnn_wrist/9ca77ea1/best_model.007-0.36.h5",
+          "url": "https://github.com/razmik/cnn-wrist-model-freeliving/blob/master/pre-trained-models/regression/window-6000-overlap-3000/best_model.007-0.36.h5",
+          "size_bytes": 17530824,
+          "sha256": null,
+          "verify_at_startup": false,
+          "note": "hash not computed: the artifact is unlicensed and was not staged"
+        }
+      ],
+      "required_for_readiness": false
+    }
+  ]
+}

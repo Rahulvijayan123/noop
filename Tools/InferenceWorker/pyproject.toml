@@ -1,0 +1,43 @@
+[project]
+name = "frwhoop-inference"
+version = "0.1.0"
+description = "FRWHOOP physiology inference sidecar: loopback-only HTTP, versioned providers, checksum-verified artifacts."
+readme = "README.md"
+requires-python = "==3.12.*"
+license = { text = "Proprietary" }
+dependencies = [
+    # Pinned scientific stack. neurokit2 is the audited HRV dependency (MIT, 0.2.13).
+    # numpy/scipy/pandas are pinned to the exact versions installed by `uv sync`.
+    "neurokit2==0.2.13",
+    "numpy==2.5.3",
+    "pandas==2.3.3",
+    "scipy==1.18.1",
+    # Sleep-staging candidate: SleepECG 0.5.9 ships the wrn-gru-mesa checkpoint inside the
+    # wheel; keras loads it directly with a pinned backend, so TensorFlow is NOT required.
+    "sleepecg==0.5.9",
+    "keras==3.15.1",
+    "torch==2.14.1",
+    # read directly by the stager's checkpoint loader (sleepecg also depends on it)
+    "PyYAML==6.0.3",
+]
+
+[project.scripts]
+frwhoop-inference = "frwhoop_inference.server:main"
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-timeout==2.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/frwhoop_inference"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+timeout = 300
