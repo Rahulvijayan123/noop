@@ -218,12 +218,259 @@ struct DayScorer {
         }
     }
 
+    // MARK: - Candidate (shadow/active) input assembly
+    //
+    // The candidate lane needs the day's inputs, but it must call the sidecar with
+    // NO transaction open (see CandidateStage.swift). So the input snapshot is
+    // assembled here, while the inputs are already in memory, and handed to the
+    // stage after the canonical transaction has committed.
+
+    /// The bucket width of an observation's identity. Store timestamps are whole
+    /// unix seconds (WhoopProtocol/Streams.swift:89), so the bucket IS the second.
+    static let observationBucketSeconds = 1
+
+    /// One heartbeat as a candidate provider receives it.
+    struct CandidateBeat {
+        /// The stored interval timestamp (whole unix seconds).
+        let ts: Int
+        let rrMs: Int
+        /// Packet order within the observation, when the row carries one.
+        let seq: Int
+        let ord: Int?
+        let srcChannel: Int?
+        /// Interval END under the "`ts` is the interval start" convention.
+        let tsEndSeconds: Double
+        /// Best-effort sub-second END, reconstructed by accumulating within one
+        /// same-second observation bucket. INFORMATIONAL: the authoritative
+        /// production path uses run-based adjacency on the whole-second `ts`, so a
+        /// provider must not treat this as the store's truth.
+        let tsEndReconstructedSeconds: Double
+
+        var json: JSONValue {
+            var obj: [String: JSONValue] = [
+                "ts": .int(ts),
+                "rr_ms": .int(rrMs),
+                "seq": .int(seq),
+                "ts_end_seconds": .double(tsEndSeconds),
+                "ts_end_reconstructed_seconds": .double(tsEndReconstructedSeconds),
+            ]
+            if let ord { obj["ord"] = .int(ord) }
+            if let srcChannel { obj["src_channel"] = .int(srcChannel) }
+            return .object(obj)
+        }
+    }
+
+    /// Everything the candidate lane needs for one claimed day.
+    struct CandidateInputs {
+        let userId: String
+        let deviceId: String
+        let day: String
+        let inputRevision: Int64
+        /// The interval the candidate covers (unix seconds): the main sleep
+        /// session when one was detected (that is the span the canonical nightly
+        /// HRV is computed over), otherwise the claimed calendar day.
+        let intervalStart: Int
+        let intervalEnd: Int
+        /// When this claim's snapshot was sealed. Candidate debt newer than this
+        /// means new input arrived while the claim was being scored.
+        let claimSealedAt: Date
+        let status: String
+        let canonicalAvgHrv: Double?
+        let canonicalSdnn: Double?
+        let profileVersion: String?
+        let correctionsVersion: String?
+        /// Observation-identity-deduped beats, ordered by (ts, seq, ord).
+        let hrvBeats: [CandidateBeat]
+        /// RR rows read before dedup (diagnostics only).
+        let hrvInputRows: Int
+        /// True when the beats' timestamps are whole seconds only.
+        let hrvTimestampResolution: String
+
+        /// Rows the provider actually receives (diagnostics).
+        var inputRowCount: Int { hrvBeats.count }
+
+        /// The metrics this day has a usable input payload for.
+        var metrics: [String] { hrvBeats.isEmpty ? [] : ["hrv"] }
+
+        /// The metric-specific `input` object for `POST /v1/infer`, or nil when no
+        /// payload can be built (the stage then skips the metric without calling).
+        func input(for metric: String) -> JSONValue? {
+            switch metric {
+            case "hrv":
+                guard !hrvBeats.isEmpty else { return nil }
+                return DayScorer.hrvInput(beats: hrvBeats, windowStart: intervalStart,
+                                          windowEnd: intervalEnd, inputRows: hrvInputRows,
+                                          timestampResolution: hrvTimestampResolution)
+            default:
+                return nil
+            }
+        }
+    }
+
+    /// Deduplicate retransmitted beats by PHYSICAL OBSERVATION IDENTITY, never by
+    /// RR value alone (spec section 5): the key is the 1 s bucket of `ts` plus the
+    /// interval, packet sequence, in-packet order and source channel. Two genuine
+    /// beats in the same second with the same interval therefore survive as two
+    /// rows, while a byte-identical retransmission collapses to one. The first
+    /// occurrence wins, so the order is stable.
+    static func dedupByObservationIdentity(_ beats: [RRInterval]) -> [RRInterval] {
+        var seen = Set<String>()
+        var out: [RRInterval] = []
+        out.reserveCapacity(beats.count)
+        for beat in beats {
+            let bucket = beat.ts / observationBucketSeconds
+            let key = "\(bucket)|\(beat.rrMs)|\(beat.seq)|\(beat.ord.map(String.init) ?? "-")|"
+                + "\(beat.srcChannel.map { String($0.rawValue) } ?? "-")"
+            if seen.insert(key).inserted { out.append(beat) }
+        }
+        return out
+    }
+
+    /// Map RR rows to provider beats, ordered by (ts, seq, ord) — the original
+    /// series order the gap-aware adjacency rule depends on.
+    static func candidateBeats(_ beats: [RRInterval]) -> [CandidateBeat] {
+        let ordered = beats.enumerated().sorted { lhs, rhs in
+            let a = lhs.element, b = rhs.element
+            if a.ts != b.ts { return a.ts < b.ts }
+            if a.seq != b.seq { return a.seq < b.seq }
+            return (a.ord ?? Int.min) < (b.ord ?? Int.min)
+        }.map { $0.element }
+
+        // Sub-second END reconstruction: within one (bucket, channel) group, the
+        // first interval ends at ts + rr, and each next interval ends where the
+        // previous one did plus its own rr. Purely informational (see CandidateBeat).
+        var reconstructed: [Double] = []
+        reconstructed.reserveCapacity(ordered.count)
+        var previousEnd: Double?
+        var previousKey: String?
+        for beat in ordered {
+            let key = "\(beat.ts / observationBucketSeconds)|\(beat.srcChannel?.rawValue ?? -1)"
+            let end: Double
+            if key == previousKey, let prev = previousEnd {
+                end = prev + Double(beat.rrMs) / 1000.0
+            } else {
+                end = Double(beat.ts) + Double(beat.rrMs) / 1000.0
+            }
+            reconstructed.append(end)
+            previousEnd = end
+            previousKey = key
+        }
+
+        return ordered.enumerated().map { index, beat in
+            CandidateBeat(ts: beat.ts, rrMs: beat.rrMs, seq: beat.seq, ord: beat.ord,
+                          srcChannel: beat.srcChannel?.rawValue,
+                          tsEndSeconds: Double(beat.ts) + Double(beat.rrMs) / 1000.0,
+                          tsEndReconstructedSeconds: reconstructed[index])
+        }
+    }
+
+    /// The HRV provider's `config` block. Defaults are the SHIPPED production
+    /// rules (hrv-neurokit findings section 5a/5d), so a shadow comparison is
+    /// apples-to-apples with the canonical nightly value; the spec's alternative
+    /// rule set is selectable by changing these values, not by changing the code.
+    static func hrvConfig() -> [String: JSONValue] {
+        [
+            "window_sec": .int(300),                 // SleepStager.swift:3012 (tumbling)
+            "min_clean_beats": .int(HRVAnalyzer.minBeats),          // 20 (HRVAnalyzer.swift:33)
+            "min_pairs": .int(1),
+            "min_coverage": .double(0.0),
+            "splice_tolerance_s": .double(3.0),      // IntradaySeries.Tuning.spliceToleranceSeconds
+            "rr_min_ms": .double(300),               // HRVAnalyzer.rrMinMs
+            "rr_max_ms": .double(2000),              // HRVAnalyzer.rrMaxMs
+            "malik_threshold": .double(HRVAnalyzer.ectopicThreshold),   // 0.20
+            "malik_radius": .int(HRVAnalyzer.ectopicWindowRadius),      // 2
+            "coverage_floor": .double(HRVAnalyzer.coveragePlausibleFloor),
+            "coverage_ceiling": .double(HRVAnalyzer.coveragePlausibleCeiling),
+            "beat_accuracy_tolerance_s": .double(HRVAnalyzer.beatAccuracyToleranceS),
+            "beat_accuracy_min_fraction": .double(HRVAnalyzer.beatAccuracyMinFraction),
+            "max_rejected_fraction": .null,          // no nightly gate in shipped code
+            "aggregation": .string("mean_over_windows"),   // SleepStager.swift:2972 (not median)
+            "pooling": .string("sum_sq_and_pairs"),        // spec section 5
+        ]
+    }
+
+    /// The exact `input` object the `hrv` provider expects (plan "Sidecar HTTP
+    /// contract" + hrv-neurokit findings section 6b).
+    static func hrvInput(beats: [CandidateBeat], windowStart: Int, windowEnd: Int,
+                         inputRows: Int, timestampResolution: String) -> JSONValue {
+        .object([
+            "beats": .array(beats.map { $0.json }),
+            "window": .object([
+                "start_sec": .int(windowStart),
+                "end_sec": .int(windowEnd),
+                "inclusive": .bool(true),   // matches HRVAnalyzer.analyze(_:windowStart:windowEnd:)
+            ]),
+            "config": .object(hrvConfig()),
+            "timestamp_convention": .string("interval_end_seconds"),
+            "timestamp_resolution": .string(timestampResolution),
+            "observation_identity": .object([
+                "dedup_key": .array([.string("ts_bucket_1s"), .string("rr_ms"), .string("seq"),
+                                     .string("ord"), .string("src_channel")]),
+                "input_rows": .int(inputRows),
+                "deduped_rows": .int(beats.count),
+                "bucket_seconds": .int(observationBucketSeconds),
+            ]),
+        ])
+    }
+
+    // MARK: - ACTIVE PROMOTION PLUMBING (pure; unreachable while defaults are `off`)
+
+    /// Replace the canonical nightly HRV with an `active`-mode provider value and
+    /// record its provenance in the snapshot payload.
+    ///
+    /// `snapshot` is free-form jsonb (`publish_scoring_snapshot_v2` stores it
+    /// verbatim), so the provenance lands there; the legacy daily row keeps its
+    /// column contract and only `hrv_rmssd_ms` changes. A nil substitution returns
+    /// both payloads UNCHANGED — which is what every shipped configuration does,
+    /// because `physiology_provider_defaults` seeds all four metrics `off`.
+    static func applyActiveHrvSubstitution(
+        snapshot: [String: Any], legacy: [String: Any],
+        substitution: CandidateStage.ActiveHrvSubstitution?
+    ) -> (snapshot: [String: Any], legacy: [String: Any]) {
+        guard let substitution else { return (snapshot, legacy) }
+        var snapshot = snapshot
+        var legacy = legacy
+        var snapshotDaily = (snapshot["daily"] as? [String: Any]) ?? [:]
+        var legacyDaily = (legacy["daily_metrics"] as? [[String: Any]])?.first ?? [:]
+        snapshotDaily["hrv_rmssd_ms"] = substitution.value
+        legacyDaily["hrv_rmssd_ms"] = substitution.value
+        snapshotDaily["hrv_provenance"] = [
+            "mode": substitution.mode,
+            "provider_id": substitution.providerId,
+            "provider_version": substitution.providerVersion,
+            "adapter_version": substitution.adapterVersion,
+            "config_version": substitution.configVersion,
+            "input_sha256": substitution.inputSHA256,
+            "canonical_source": "provider",
+            "fallback": "legacy_hrv_analyzer",
+        ] as [String: Any]
+        snapshot["daily"] = snapshotDaily
+        if var metrics = legacy["daily_metrics"] as? [[String: Any]], !metrics.isEmpty {
+            metrics[0] = legacyDaily
+            legacy["daily_metrics"] = metrics
+        }
+        return (snapshot, legacy)
+    }
+
     // MARK: - Score one claimed day
+
+    /// One scored day: both canonical payloads plus the candidate-lane inputs.
+    /// `candidates` is always present; the candidate stage decides whether to use
+    /// it (it is unused whenever FRWHOOP_INFERENCE_URL is unset).
+    struct ScoredDay {
+        let legacy: [String: Any]
+        let snapshot: [String: Any]
+        let candidates: CandidateInputs
+    }
 
     /// Score one claimed day: load inputs, compute, and return both the
     /// legacy payload (engine_publish_legacy_fenced) and the v2 snapshot
-    /// payload (publish_scoring_snapshot_v2) built from the same DayResult.
-    func scoreAndBuildPayloads(claim: Claim) throws -> (legacy: [String: Any], snapshot: [String: Any]) {
+    /// payload (publish_scoring_snapshot_v2) built from the same DayResult,
+    /// plus the candidate-lane input snapshot.
+    func scoreAndBuildPayloads(claim: Claim) throws -> ScoredDay {
+        // The claim's snapshot was sealed just before this call, so "now" is the
+        // claim's input revision time for the candidate-debt freshness check.
+        let claimSealedAt = Date()
         let tz = TimeZone(identifier: claim.timezoneId) ?? TimeZone(identifier: "UTC")!
 
         // Calendar-correct day bounds (DST-safe). dayStart/dayEnd are local
@@ -335,7 +582,18 @@ struct DayScorer {
             if status != "available" {
                 snapshot["statusReasons"] = ["hr_too_sparse"]
             }
-            return (legacy, snapshot)
+            let deduped = Self.dedupByObservationIdentity(rr)
+            let sparseCandidates = CandidateInputs(
+                userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+                inputRevision: claim.inputRevision,
+                intervalStart: dayStart, intervalEnd: dayEnd,
+                claimSealedAt: claimSealedAt, status: status,
+                canonicalAvgHrv: nil, canonicalSdnn: nil,
+                profileVersion: nil, correctionsVersion: nil,
+                hrvBeats: Self.candidateBeats(deduped),
+                hrvInputRows: rr.count,
+                hrvTimestampResolution: "whole_seconds")
+            return ScoredDay(legacy: legacy, snapshot: snapshot, candidates: sparseCandidates)
         }
 
         let result = AnalyticsEngine.analyzeDay(
@@ -409,7 +667,30 @@ struct DayScorer {
                                                             gravityCount: gravity.count,
                                                             detectedSessionCount: result.sleepSessions.count)
         }
-        return (legacy, snapshot)
+
+        // Candidate-lane inputs. The interval is the MAIN sleep session when one
+        // was detected — that is the span the canonical nightly HRV aggregates
+        // over — and the claimed calendar day otherwise. The beats are the same
+        // transport-filtered rows the canonical path scored, deduplicated by
+        // observation identity (spec section 5).
+        let candidateInterval: (start: Int, end: Int)
+        if let main = Self.mainSleepSession(result.sleepSessions), main.end > main.start {
+            candidateInterval = (main.start, main.end)
+        } else {
+            candidateInterval = (dayStart, dayEnd)
+        }
+        let dedupedRR = Self.dedupByObservationIdentity(rr)
+        let candidates = CandidateInputs(
+            userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+            inputRevision: claim.inputRevision,
+            intervalStart: candidateInterval.start, intervalEnd: candidateInterval.end,
+            claimSealedAt: claimSealedAt, status: status,
+            canonicalAvgHrv: result.daily.avgHrv, canonicalSdnn: result.daily.avgSdnn,
+            profileVersion: nil, correctionsVersion: nil,
+            hrvBeats: Self.candidateBeats(dedupedRR),
+            hrvInputRows: rr.count,
+            hrvTimestampResolution: "whole_seconds")
+        return ScoredDay(legacy: legacy, snapshot: snapshot, candidates: candidates)
     }
 
     // MARK: - Payload shaping

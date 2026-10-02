@@ -91,6 +91,48 @@ To apply a new migration to production:
 For local development, `supabase db start` followed by `supabase db reset --yes` builds a fresh
 database from the migrations.
 
+
+### Candidate provider lane (20261002090000_physiology_candidate_providers.sql)
+
+The candidate lane records versioned provider results without changing any canonical value.
+It ships dormant: `physiology_provider_defaults` has one row per metric, all `mode='off'`, so
+no candidate is computed, no candidate row is written and the staleness trigger does no work.
+Do not change a mode in production without the rollout plan.
+
+Apply with the normal applied-by-SQL procedure (`psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f
+supabase/migrations/20261002090000_physiology_candidate_providers.sql`, then `supabase
+migration repair --status applied 20261002090000`). The file is idempotent-friendly: every
+object is `if not exists`/`create or replace`, the seed is `on conflict do nothing`, and
+re-running it preserves operator state.
+
+Objects: `physiology_candidate_results` (interval-granular provider results with status,
+withheld reason, stages, coverage and diagnostics), `physiology_provider_defaults` /
+`physiology_provider_overrides` plus `physiology_selected_provider(user, metric)`,
+`physiology_candidate_debt` (third, candidate-only invalidation family),
+`physiology_backfill_jobs` plus `physiology_backfill_claim/advance/finish`. All five tables
+have RLS enabled with **no** policy: deny by default, service role only. No client role has
+any table or function privilege.
+
+`physiology_record_candidate_result(...)` validates shape, bounds and finiteness, requires the
+selected generation to still match, requires the caller's current input revision, and inserts
+`on conflict do nothing`. It returns the new `candidate_id` or `null`; it never silently
+accepts a stale or off-mode write. The worker should call
+`physiology_candidate_debt_read(user, device, day)` and skip a write whose claim is older than
+`invalidated_at`.
+
+`mode='active'` is gated on a live signed promotion approval. `physiology_selected_provider()`
+reports such a metric as `mode='shadow'` with `source` ending `_demoted_unapproved`, and an
+active write is refused with `null`. Read `physiology_candidate_activation(user, metric)` to
+explain the decision; its `approval.reason` is `promotion_approval_required` (or
+`promotion_gate_unavailable` when the signed-promotion objects are missing). The gate is
+read-only against `physiology_promotion_approvals`, its revocations and
+`internal.physiology_approval_valid`; no signed-promotion object is modified. `off` and
+`shadow` are never gated.
+
+Backfill is operator-driven and bounded per call: `dry_run` writes nothing, `apply` enqueues
+the existing canonical recompute through `enqueue_scoring_v2`, `rollback` does the same and
+additionally fences in-flight candidate writes. No job mutates a selection table.
+
 ## The VPS worker
 
 [deploy/README.md](../deploy/README.md) covers provisioning, building and releasing the worker.

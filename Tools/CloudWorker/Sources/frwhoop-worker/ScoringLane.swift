@@ -47,6 +47,17 @@ struct ScoringLane {
     var publishAttempts: Int = 3
     var v2AlgorithmVersion: String = "frwhoop-server-1"
 
+    /// The candidate (shadow/active) stage. nil — the shipped default, because
+    /// FRWHOOP_INFERENCE_URL is unset — means the lane behaves EXACTLY as before:
+    /// no sidecar call, no extra transaction, no extra SQL.
+    ///
+    /// The stage runs only AFTER the canonical transaction has committed (both the
+    /// fleet and the v2 path), never inside it. See CandidateStage.swift for why
+    /// that boundary is not negotiable.
+    var candidate: CandidateStage?
+    /// Candidate runs per drain (`FRWHOOP_INFERENCE_BUDGET`, default 2).
+    var candidateBudget: Int = 2
+
     struct Stats {
         var claimed = 0
         var completed = 0
@@ -66,6 +77,10 @@ struct ScoringLane {
         var lastScoreAt: Date?
         var lastError: String?
         var lastErrorKind: PGErrorKind?
+        /// `active`-mode promotions this process produced but did NOT publish.
+        /// A promotion needs a fresh canonical republish, which is parent-gated
+        /// and deliberately not wired in this pass (see ScoringLane.runCandidateStage).
+        var activePromotionsDeferred = 0
     }
     var stats = Stats()
 
@@ -74,6 +89,9 @@ struct ScoringLane {
     var consecutiveFailures = 0
 
     mutating func drain(budget: Int) {
+        // Reset the candidate lane's per-drain run budget. A no-op when the
+        // candidate stage is off.
+        candidate?.beginDrain(budget: candidateBudget)
         for _ in 0..<max(1, budget) {
             // Reconnect only at this safe boundary: no transaction is open here.
             do {
@@ -188,8 +206,12 @@ struct ScoringLane {
             attempt += 1
             let started = Date()
             do {
-                let finished = try publishAndFinishFleet(claim, started: started)
-                return finished ? .completed : .superseded
+                let outcome = try publishAndFinishFleet(claim, started: started)
+                guard outcome.finished else { return .superseded }
+                // The publish transaction has COMMITTED and is closed. Only now
+                // may the candidate stage call the sidecar (CandidateStage.swift).
+                runCandidateStage(claim: claim, inputs: outcome.candidates)
+                return .completed
             } catch {
                 let kind = (error as? PostgresClient.Error)?.kind ?? .other
                 if kind == .serialization || kind == .stale {
@@ -209,10 +231,12 @@ struct ScoringLane {
         }
     }
 
-    /// Returns true when the queue accepted the completion. False means the claim
-    /// was superseded, in which case the transaction is rolled back so nothing is
-    /// published for a claim the queue no longer owns.
-    private func publishAndFinishFleet(_ claim: DayScorer.Claim, started: Date) throws -> Bool {
+    /// Returns whether the queue accepted the completion, plus the candidate-lane
+    /// inputs assembled during scoring. False means the claim was superseded, in
+    /// which case the transaction is rolled back so nothing is published for a
+    /// claim the queue no longer owns (and no candidate is computed).
+    private func publishAndFinishFleet(_ claim: DayScorer.Claim, started: Date)
+        throws -> (finished: Bool, candidates: DayScorer.CandidateInputs?) {
         try db.beginTransaction(.repeatableRead)
         do {
             let payloads = try scorer.scoreAndBuildPayloads(claim: claim)
@@ -232,10 +256,31 @@ struct ScoringLane {
             } else {
                 db.rollbackTransaction()
             }
-            return finished
+            return (finished, finished ? payloads.candidates : nil)
         } catch {
             db.rollbackTransaction()
             throw error
+        }
+    }
+
+    /// Run the candidate lane for one committed day. Called ONLY after the
+    /// canonical transaction has committed and closed, so the sidecar call happens
+    /// with no transaction open and the candidate write gets its own fresh one.
+    private mutating func runCandidateStage(claim: DayScorer.Claim, inputs: DayScorer.CandidateInputs?) {
+        guard let inputs, candidate != nil else { return }
+        candidate?.run(claim: claim, inputs: inputs)
+        // ACTIVE PROMOTION SEAM (parent-gated, unreachable while every metric is
+        // `off`). An `active` ok result must republish the canonical snapshot to
+        // become the canonical value; the transform is implemented and unit-tested
+        // (`DayScorer.applyActiveHrvSubstitution`) but the republish is NOT wired
+        // here, so this records the deferral instead of silently changing nothing.
+        if let substitution = candidate?.lastActiveSubstitution {
+            self.stats.activePromotionsDeferred += 1
+            FileHandle.standardError.write(
+                ("frwhoop-worker: active hrv substitution deferred (provider="
+                 + "\(substitution.providerId) value=\(substitution.value) "
+                 + "input_sha256=\(substitution.inputSHA256.prefix(12))); canonical republish is parent-gated\n")
+                    .data(using: .utf8)!)
         }
     }
 
@@ -326,6 +371,9 @@ struct ScoringLane {
             let revision = Int64(publishJSON ?? "")
             if let revision, revision > 0 {
                 try db.commitTransaction()
+                // The snapshot transaction is committed and closed. The candidate
+                // stage may now call the sidecar with no transaction open.
+                runCandidateStage(claim: claim, inputs: payloads.candidates)
                 return .completed
             }
             // NULL (or a non-positive revision) means the publication did NOT
