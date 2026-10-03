@@ -316,7 +316,7 @@ var activity = ActivityLane(
         pythonBin: config.activityPython,
         activityHome: config.activityHome,
         modelDir: config.activityModelDir,
-        serveArgs: ["-m", "activity_context.serve"],
+        serveArgs: ActivityPythonService.Config.serveArgs(modelDir: config.activityModelDir),
         requestTimeoutSeconds: config.activityTimeoutSeconds,
         maxRequestBytes: 64 * 1024 * 1024,
         maxResponseLineBytes: 16 * 1024 * 1024,
@@ -436,8 +436,23 @@ if activityState.read().enabled {
 
 // MARK: - Heartbeat
 
-/// The age and depth of every claimable queue. Aggregate only: no user data.
-let queueAgeSQL = """
+/// Compose the heartbeat queue-age query. Aggregate only: no user data.
+///
+/// The activity entry is a STATIC reference to `public.activity_context_jobs`,
+/// which fails the WHOLE query at parse time when the table does not exist
+/// yet (deploy order: worker first, migration later) — a `to_regclass` guard
+/// in a WHERE clause cannot help because Postgres resolves relation names
+/// during analysis. The caller probes `to_regclass` and includes the entry
+/// only when the table is present, so the heartbeat stays green pre/post
+/// migration (audit P3-1).
+///
+/// The SQL fragments are LOCAL constants inside this function, never module
+/// globals: globals in an executable target's main.swift are initialized by
+/// that target's `main`, so a test bundle that never runs `main` reads
+/// uninitialized storage (crash/garbage). Keeping the composition pure makes
+/// the pre/post-migration behavior directly unit-testable.
+func queueAgeQuery(includeActivity: Bool) -> String {
+    let base = """
 with q as (
   select 'scoring_legacy' as lane, count(*) as n, min(w.next_attempt_at) as oldest
     from public.scoring_work_items w
@@ -481,21 +496,27 @@ with q as (
     from public.noop_object_verification_debt v
    where v.state in ('pending','retry','leased') and v.next_attempt_at <= now()
      and (v.state <> 'leased' or v.lease_until <= now())
+"""
+    let activity = """
   union all
-  -- Activity jobs: same eligibility gates the claim applies (not dead-lettered,
-  -- not_before reached, lease expired, completed < input revision). Suppressed
-  -- rows (invalidation-blocked or disabled algorithm) are not claimable, so
-  -- they must not count as backlog, mirroring the scoring_v2 entry above.
+  -- Activity jobs: same eligibility gates the claim applies (not
+  -- dead-lettered, not_before reached, lease expired, completed < input
+  -- revision).
   select 'activity', count(*), min(j.not_before)
     from public.activity_context_jobs j
    where j.completed_revision < j.input_revision and not j.dead_letter
      and j.not_before <= now() and (j.lease_until is null or j.lease_until <= now())
+"""
+    let closing = """
 )
 select lane, n::text as n,
        case when oldest is null then ''
             else greatest(0, extract(epoch from (now() - oldest))::bigint)::text end as age_seconds
   from q
 """
+    return base + (includeActivity ? activity : "") + closing
+}
+
 
 struct QueueAge {
     var counts: [String: Int] = [:]
@@ -504,7 +525,14 @@ struct QueueAge {
 }
 
 func queueAge() throws -> QueueAge {
-    let rows = try dbHeartbeat.query(queueAgeSQL, [])
+    // Pre-migration (deploy order: worker first, migration later) the
+    // activity tables do not exist; a static reference to them would fail the
+    // whole heartbeat query at parse time. Probe to_regclass and append the
+    // activity entry only when the table is present (audit P3-1).
+    let activityTablePresent = (try? dbHeartbeat.query(
+        "select to_regclass('public.activity_context_jobs') is not null as present", []))?
+        .first?["present"] == "t"
+    let rows = try dbHeartbeat.query(queueAgeQuery(includeActivity: activityTablePresent), [])
     var out = QueueAge()
     for row in rows {
         let lane = row["lane"] ?? ""

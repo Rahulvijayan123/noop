@@ -43,16 +43,34 @@ final class ActivityPythonService {
             let home = env["FRWHOOP_ACTIVITY_HOME"]
                 .flatMap { $0.isEmpty ? nil : $0 }
                 ?? FileManager.default.currentDirectoryPath + "/Tools/ActivityContext"
+            let modelDir = env["FRWHOOP_ACTIVITY_MODEL_DIR"].flatMap { $0.isEmpty ? nil : $0 }
             return Config(
                 pythonBin: env["FRWHOOP_ACTIVITY_PYTHON"] ?? "python3",
                 activityHome: home,
-                modelDir: env["FRWHOOP_ACTIVITY_MODEL_DIR"].flatMap { $0.isEmpty ? nil : $0 },
-                serveArgs: ["-m", "activity_context.serve"],
+                modelDir: modelDir,
+                serveArgs: serveArgs(modelDir: modelDir),
                 requestTimeoutSeconds: Double(env["FRWHOOP_ACTIVITY_TIMEOUT_SECONDS"] ?? "60") ?? 60,
                 maxRequestBytes: 64 * 1024 * 1024,
                 maxResponseLineBytes: 16 * 1024 * 1024,
                 restartCap: Int(env["FRWHOOP_ACTIVITY_RESTART_CAP"] ?? "8") ?? 8,
                 restartCooldownSeconds: 30)
+        }
+
+        /// Build the `serve` module arguments for the persistent child.
+        /// serve.py reads `--manifest`/`--checkpoint` from argv ONLY (never
+        /// the environment), so a model dir that is merely placed in the
+        /// child's env boots the BASELINE manifest while the lane would stamp
+        /// 'hart-activity-1' — the HART model is then unreachable and the
+        /// provenance is wrong (audit P1-3). With a model dir the manifest +
+        /// checkpoint are passed explicitly; without one the child loads the
+        /// baseline manifest and the lane falls back to the versions serve
+        /// reports for baseline.
+        static func serveArgs(module: [String] = ["-m", "activity_context.serve"],
+                              modelDir: String?) -> [String] {
+            guard let modelDir, !modelDir.isEmpty else { return module }
+            let manifest = URL(fileURLWithPath: modelDir)
+                .appendingPathComponent("manifest.json").path
+            return module + ["--manifest", manifest, "--checkpoint", modelDir]
         }
     }
 
@@ -148,6 +166,9 @@ final class ActivityPythonService {
     /// builds it.
     private(set) var reportedModelVersion: String?
     private(set) var reportedPreprocessingVersion: String?
+    /// Last `echo` object from an infer response (stub diagnostic mirror of
+    /// the request shape), used by tests to pin the wire contract.
+    private(set) var lastEcho: [String: Any]?
     private var sequence = 0
 
     init(config: Config) {
@@ -336,6 +357,14 @@ final class ActivityPythonService {
     }
 
     func infer(run: RunRequest) throws -> InferResult {
+        // head_b64/tail_b64 are sent in BOTH the top-level C10 shape AND
+        // inside `run`: serve.py reads them from `run` (its original and
+        // current placement — CONTRACTS put them top-level, and the deployed
+        // child reads the run-internal copy), so a worker that only sends the
+        // top-level copy would silently lose all boundary filter state (the
+        // child would crop ~1 s at every chunk edge and never apply overlap).
+        // Sending both makes the worker correct against either serve.py
+        // variant; the duplicate payload is at most 6 base64 seconds.
         var request: [String: Any] = [
             "op": "infer",
             "run": [
@@ -345,6 +374,8 @@ final class ActivityPythonService {
                 "channels_order": ["ax", "ay", "az", "gx", "gy", "gz"],
                 "units": ["accel": "g", "gyro": "deg/s"],
                 "columns_b64": run.columnsB64,
+                "head_b64": run.headB64,
+                "tail_b64": run.tailB64,
             ],
             "head_b64": run.headB64,
             "tail_b64": run.tailB64,
@@ -356,6 +387,7 @@ final class ActivityPythonService {
         lock.lock()
         defer { lock.unlock() }
         let result = Self.parseInfer(obj)
+        if let echo = obj["echo"] as? [String: Any] { lastEcho = echo }
         if result.ok {
             if let mv = result.modelVersion, !mv.isEmpty { reportedModelVersion = mv }
             if let pv = result.preprocessingVersion, !pv.isEmpty { reportedPreprocessingVersion = pv }

@@ -189,6 +189,36 @@ final class WorkerHardeningTests: XCTestCase {
         XCTAssertNil(sanitizedHealthError("((((("))
     }
 
+    // MARK: - Heartbeat queue-age composition (audit P3-1)
+
+    /// The activity queue entry is a STATIC reference to
+    /// public.activity_context_jobs. When the worker is deployed before the
+    /// migration (deploy order) the table does not exist, and a static
+    /// reference fails the whole query at parse time — so the entry must be
+    /// appended only when to_regclass says the table is present. A to_regclass
+    /// guard in a WHERE clause cannot help (relations resolve at parse time).
+    func testQueueAgeQueryIncludesActivityOnlyWhenPresent() {
+        let withActivity = queueAgeQuery(includeActivity: true)
+        XCTAssertTrue(withActivity.contains("public.activity_context_jobs"))
+        XCTAssertTrue(withActivity.contains("'activity'"))
+        XCTAssertTrue(withActivity.contains("from q"))
+        // Both variants share the same CTE base and closing select.
+        let withoutActivity = queueAgeQuery(includeActivity: false)
+        XCTAssertFalse(withoutActivity.contains("activity_context_jobs"))
+        XCTAssertFalse(withoutActivity.contains("'activity'"))
+        XCTAssertTrue(withoutActivity.contains("from q"))
+        // The base lanes are present in both.
+        for lane in ["scoring_legacy", "scoring_v2", "projection", "archive_v2", "verification"] {
+            XCTAssertTrue(withActivity.contains("'\(lane)'"))
+            XCTAssertTrue(withoutActivity.contains("'\(lane)'"))
+        }
+        // Structural: base + select close the CTE exactly once each.
+        XCTAssertEqual(withoutActivity.components(separatedBy: "with q as (").count, 2)
+        XCTAssertEqual(withoutActivity.components(separatedBy: "from q").count, 2)
+        XCTAssertEqual(withActivity.components(separatedBy: "union all").count,
+                       withoutActivity.components(separatedBy: "union all").count + 1)
+    }
+
     // MARK: - Lane independence plumbing
 
     func testLaneSnapshotIsReadableAcrossThreads() {

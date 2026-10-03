@@ -47,6 +47,21 @@ struct ActivityLane {
     /// Extra seconds before/after a run sent to Python for resample filter
     /// state (C10 serve protocol: up to 3).
     static let boundarySeconds = 3
+    /// Bounded body per serve request (seconds). The request line is
+    /// ~1603 B per base64 second, so the service's 64 MiB request cap admits
+    /// ~11.6 h of contiguous seconds in ONE request; a full-day contiguous run
+    /// would exceed it and fail `requestTooLarge` -> dead-letter (audit P1-2).
+    /// Chunks of 3600 s keep every request far below the cap while the serve
+    /// protocol bounds head/tail to 3 s each.
+    static let maxRequestBodySeconds = 3600
+    /// Model/preprocessing versions serve reports when no HART manifest is
+    /// configured (baseline classifier: `default_manifest(model_version:
+    /// "baseline-v0")`, `preprocessing_version` = package "1.0.0"). These are
+    /// the fallbacks when the child has not reported yet — never a hard-coded
+    /// 'hart-activity-1', which matches no manifest and no DB fingerprint
+    /// constant (audit P1-3/P3-6).
+    static let baselineModelVersion = "baseline-v0"
+    static let baselinePreprocessingVersion = "1.0.0"
 
     struct Stats {
         var claimed = 0
@@ -143,6 +158,14 @@ struct ActivityLane {
                 stats.lastErrorKind = "model_unavailable"
                 return
             }
+            // Reconcile missed enqueue events first (idempotent, bounded to
+            // the last 7 days by the RPC): a trigger race or a pre-trigger
+            // verification can leave a verified rawImuSession object without
+            // its activity job. Best effort — a transient failure must not
+            // block claiming.
+            _ = try? db.callFunctionForJSON(
+                "SELECT public.reconcile_activity_context($1::interval)::text",
+                ["'7 days'::interval"])
             do {
                 switch try cycle() {
                 case .empty:
@@ -270,25 +293,14 @@ struct ActivityLane {
         }
 
         // 2. Download, verify the decoded digest, decompress, decode NPB1.
-        var records: [Npb1ImuDecoder.Record] = []
-        for object in objects {
-            let wire: Data
-            do {
-                wire = try storage.download(objectKey: object.key)
-            } catch {
-                if VerificationLane.isMissingObject(error) {
-                    throw ActivityError.retryable("object_missing: \(object.id)")
-                }
-                throw ActivityError.retryable("object_download_failed: \(object.id): \(error)")
-            }
-            let decoded = try VerificationLane.zstdDecompress(wire)
-            let actual = sha256Hex(decoded)
-            guard actual == object.digest else {
-                throw ActivityError.deterministic(
-                    "digest_mismatch: object \(object.id) expected \(object.digest) got \(actual)")
-            }
-            records.append(contentsOf: try Npb1ImuDecoder.decode(decoded))
-        }
+        // The lease is renewed BEFORE each object's download: a long B2
+        // download/decode phase can outlive the 300 s lease, and an expired
+        // lease makes the later publish return NULL — a wasted full-day
+        // recompute (audit P3-4).
+        let records = try Self.loadObjects(
+            objects: objects,
+            renew: { try self.renewLease(job: job) },
+            download: { key in try storage.download(objectKey: key) })
 
         // 3. Timeline + contiguous runs (never fill gaps).
         let timeline = try Self.buildTimeline(records: records)
@@ -310,30 +322,38 @@ struct ActivityLane {
         //    through the shared policy in step 6 (see
         //    `ActivityLane.activityDocument` for why the fold is one call).
         var windows: [ActivityPythonService.WindowPrediction] = []
-        var modelVersion = service.reportedModelVersion ?? "hart-activity-1"
-        var preprocessingVersion = service.reportedPreprocessingVersion ?? "activity-preprocess-1"
+        var versions = Self.resolvedVersions(
+            reportedModel: service.reportedModelVersion,
+            reportedPreprocessing: service.reportedPreprocessingVersion)
+        // One request per bounded body chunk (audit P1-2): a contiguous run
+        // longer than maxRequestBodySeconds is split at second boundaries and
+        // each chunk carries its own head/tail filter state. serve.py emits
+        // windows only inside the chunk's [start_ts, end_ts), so no window is
+        // duplicated in the single day fold below; the only loss is the
+        // protocol's single 4-s straddle per interior boundary.
         for run in runs {
-            let renewed = isTrue(try db.callFunctionForJSON(
-                "SELECT public.renew_activity_context_v2($1::uuid, $2::integer)::text",
-                [job.leaseToken, String(leaseSeconds)]))
-            guard renewed else {
-                throw PostgresClient.Error(message: "activity lease lost during inference",
-                                           sqlstate: "55000", kind: .stale)
-            }
-            let request = Self.runRequest(timeline: timeline, run: run)
-            let result = try service.infer(run: request)
-            guard result.ok else {
-                let kind = result.errorKind ?? "inference"
-                if kind == "model_missing" {
-                    stats.modelUnavailable += 1
-                    throw ActivityError.retryable("model_unavailable: \(result.error ?? "")")
+            for request in Self.runRequests(timeline: timeline, run: run) {
+                let renewed = isTrue(try db.callFunctionForJSON(
+                    "SELECT public.renew_activity_context_v2($1::uuid, $2::integer)::text",
+                    [job.leaseToken, String(leaseSeconds)]))
+                guard renewed else {
+                    throw PostgresClient.Error(message: "activity lease lost during inference",
+                                               sqlstate: "55000", kind: .stale)
                 }
-                throw ActivityError.retryable("inference_\(kind): \(result.error ?? "")")
+                let result = try service.infer(run: request)
+                guard result.ok else {
+                    let kind = result.errorKind ?? "inference"
+                    if kind == "model_missing" {
+                        stats.modelUnavailable += 1
+                        throw ActivityError.retryable("model_unavailable: \(result.error ?? "")")
+                    }
+                    throw ActivityError.retryable("inference_\(kind): \(result.error ?? "")")
+                }
+                if let mv = result.modelVersion, !mv.isEmpty { versions.model = mv }
+                if let pv = result.preprocessingVersion, !pv.isEmpty { versions.preprocessing = pv }
+                windows.append(contentsOf: result.windows)
+                stats.windowsInferred += result.windows.count
             }
-            if let mv = result.modelVersion, !mv.isEmpty { modelVersion = mv }
-            if let pv = result.preprocessingVersion, !pv.isEmpty { preprocessingVersion = pv }
-            windows.append(contentsOf: result.windows)
-            stats.windowsInferred += result.windows.count
         }
 
         // 6. Build the C10 document from the SHARED StrandAnalytics policy
@@ -347,8 +367,8 @@ struct ActivityLane {
             exerciseIntervals: exercise,
             dayStart: dayBounds.start, dayEnd: dayBounds.end,
             inputRevision: job.inputRevision,
-            modelVersion: modelVersion,
-            preprocessingVersion: preprocessingVersion,
+            modelVersion: versions.model,
+            preprocessingVersion: versions.preprocessing,
             dataThrough: dataThrough)
         // The publish RPC validates `p_payload ->> 'day'` against the job's
         // day (20261003120000_activity_context.sql), so the C10 document is
@@ -409,24 +429,86 @@ struct ActivityLane {
 
     /// Release a lease whose publication did not complete (there is no bare
     /// release RPC): renew to confirm the lease is still ours, then fail with
-    /// the row's CURRENT revision so an unchanged revision counts one honest
-    /// backoff and a moved revision resets the counters (the clean release).
+    /// the CLAIMED revision. The fenced fail RPC
+    /// (`fail_activity_context_v2`, 20261003120000_activity_context.sql)
+    /// treats a revision MISMATCH (the queue moved past us — a newer object
+    /// arrived mid-inference) as a CLEAN release: counters reset, no backoff,
+    /// no dead-letter. An UNCHANGED revision counts one honest backoff.
+    /// Passing the row's CURRENT revision instead recorded a failure + backoff
+    /// against a revision that was never processed (audit P2-2, reproduced
+    /// live: after one supersede, consecutive_failures=1 and not_before pushed
+    /// forward despite the "clean release" comment).
     private mutating func releaseLease(job: ActivityJob) throws {
         let renewed = isTrue(try db.callFunctionForJSON(
             "SELECT public.renew_activity_context_v2($1::uuid, $2::integer)::text",
             [job.leaseToken, String(leaseSeconds)]))
         guard renewed else { return }
-        let rows = try db.query(
-            "select input_revision::text as rev from public.activity_context_jobs where lease_token=$1::uuid",
-            [job.leaseToken])
-        guard let current = rows.first?["rev"], !current.isEmpty else { return }
+        let failure = Self.releaseFailure(claimedRevision: job.inputRevision)
         _ = try db.callFunctionForJSON(
             "SELECT public.fail_activity_context_v2($1::uuid, $2::bigint, $3::text)::text",
-            [job.leaseToken, current,
-             "activity_publish_not_completed:claimed_revision=\(job.inputRevision)"])
+            [job.leaseToken, String(failure.revision), failure.error])
+    }
+
+    /// The `fail_activity_context_v2` call for a lease released without a
+    /// completed publish. `p_revision` is ALWAYS the claimed revision: when
+    /// the queue has moved past us the RPC sees a mismatch and releases the
+    /// lease cleanly (no failure accounting, no backoff — audit P2-2); when
+    /// nothing changed it counts one honest backoff. The current row revision
+    /// is never passed, so a never-processed revision is never failed.
+    static func releaseFailure(claimedRevision: Int64) -> (revision: Int64, error: String) {
+        (claimedRevision,
+         "activity_publish_not_completed:claimed_revision=\(claimedRevision)")
+    }
+
+    // MARK: - Lease renew (injected so the per-object placement is testable)
+
+    /// Renew the claimed job's lease; false when the lease is no longer ours
+    /// (expired or moved). Called around long work: before every B2 object
+    /// download (audit P3-4) and before every run's inference.
+    private func renewLease(job: ActivityJob) throws -> Bool {
+        isTrue(try db.callFunctionForJSON(
+            "SELECT public.renew_activity_context_v2($1::uuid, $2::integer)::text",
+            [job.leaseToken, String(leaseSeconds)]))
     }
 
     // MARK: - Input loading
+
+    /// Download, digest-verify and NPB1-decode every verified input object.
+    /// The lease is renewed BEFORE each object's download — a long B2
+    /// download/decode phase must not outlive the lease (audit P3-4) — and a
+    /// lost lease aborts deterministically as `.stale` (the queue owns the
+    /// job again; nothing is failed). `renew`/`download` are injected so the
+    /// per-object renewal placement is unit-testable without a database or
+    /// B2.
+    static func loadObjects(objects: [(id: String, digest: String, key: String)],
+                            renew: () throws -> Bool,
+                            download: (String) throws -> Data) throws -> [Npb1ImuDecoder.Record] {
+        var records: [Npb1ImuDecoder.Record] = []
+        for object in objects {
+            let renewed = try renew()
+            guard renewed else {
+                throw PostgresClient.Error(message: "activity lease lost during download",
+                                           sqlstate: "55000", kind: .stale)
+            }
+            let wire: Data
+            do {
+                wire = try download(object.key)
+            } catch {
+                if VerificationLane.isMissingObject(error) {
+                    throw ActivityError.retryable("object_missing: \(object.id)")
+                }
+                throw ActivityError.retryable("object_download_failed: \(object.id): \(error)")
+            }
+            let decoded = try VerificationLane.zstdDecompress(wire)
+            let actual = sha256Hex(decoded)
+            guard actual == object.digest else {
+                throw ActivityError.deterministic(
+                    "digest_mismatch: object \(object.id) expected \(object.digest) got \(actual)")
+            }
+            records.append(contentsOf: try Npb1ImuDecoder.decode(decoded))
+        }
+        return records
+    }
 
     private func loadIntervals(kindClause: String, user: String, device: String,
                                dayStart: Int, dayEnd: Int) throws -> [(start: Int, end: Int)] {
@@ -560,10 +642,37 @@ struct ActivityLane {
         return runs
     }
 
-    /// Build the C10 serve-protocol request for one run. `head_b64`/`tail_b64`
-    /// carry up to three seconds before start / after end from the merged
-    /// timeline for resample filter state; they are empty when the run is at
-    /// the data edge (the Python side crops transients then).
+    /// Build the C10 serve-protocol requests for one contiguous run, splitting
+    /// runs longer than `maxBodySeconds` into bounded body chunks at second
+    /// boundaries (audit P1-2: a full-day contiguous run would otherwise build
+    /// one request whose JSON line exceeds the service's 64 MiB cap and fail
+    /// `requestTooLarge` -> dead-letter). Each chunk's body is `[start, end)`;
+    /// serve.py emits windows only inside that body range, so no window is
+    /// ever duplicated. The one 4-s window straddling a boundary has data in
+    /// two chunks and is dropped by both (serve's full-containment rule —
+    /// verified empirically); that single straddle per interior boundary is
+    /// the only coverage loss the protocol allows.
+    static func runRequests(timeline: ImuTimeline, run: Run,
+                            maxBodySeconds: Int = ActivityLane.maxRequestBodySeconds)
+        -> [ActivityPythonService.RunRequest] {
+        guard maxBodySeconds > 0 else { return [] }
+        var requests: [ActivityPythonService.RunRequest] = []
+        var chunkStart = run.start
+        while chunkStart < run.end {
+            let chunkEnd = min(chunkStart + Int64(maxBodySeconds), run.end)
+            requests.append(runRequest(timeline: timeline,
+                                       run: Run(start: chunkStart, end: chunkEnd)))
+            chunkStart = chunkEnd
+        }
+        return requests
+    }
+
+    /// Build the C10 serve-protocol request for one body chunk. `head_b64`/
+    /// `tail_b64` carry up to three seconds before start / after end from the
+    /// merged timeline for resample filter state; they are empty when the
+    /// chunk is at the data edge (the Python side crops transients then) and
+    /// never cross a data gap (audit P3-5: boundary seconds are never
+    /// fabricated).
     static func runRequest(timeline: ImuTimeline,
                            run: Run) -> ActivityPythonService.RunRequest {
         var columnsB64: [String] = []
@@ -578,24 +687,51 @@ struct ActivityLane {
                 t += 1
             }
         }
-        let head = boundarySeconds(timeline: timeline, from: run.start - Int64(Self.boundarySeconds), to: run.start)
-        let tail = boundarySeconds(timeline: timeline, from: run.end, to: run.end + Int64(Self.boundarySeconds))
+        let head = headBoundary(timeline: timeline, runStart: run.start)
+        let tail = tailBoundary(timeline: timeline, runEnd: run.end)
         return ActivityPythonService.RunRequest(
             startTs: Int(run.start), endTs: Int(run.end),
             columnsB64: columnsB64, headB64: head, tailB64: tail)
     }
 
-    /// Up to `boundarySeconds` seconds of [from, to) present in the timeline,
-    /// chronological.
-    static func boundarySeconds(timeline: ImuTimeline, from: Int64, to: Int64) -> [String] {
+    /// Up to `boundarySeconds` seconds immediately before `runStart` that
+    /// actually exist AND are contiguous with the run edge (runStart-1,
+    /// runStart-2, ...). A missing second ends the chain: boundary context is
+    /// never fabricated across a gap (audit P3-5), so a chunk abutting a gap
+    /// carries no head.
+    static func headBoundary(timeline: ImuTimeline, runStart: Int64) -> [String] {
         var out: [String] = []
-        guard let index = lowerBound(timeline.seconds, from) else { return out }
-        var i = index
-        while i < timeline.seconds.count, timeline.seconds[i] < to {
-            out.append(base64Columns(timeline, index: i))
-            i += 1
+        var expected = runStart - 1
+        while out.count < Self.boundarySeconds {
+            guard let idx = exactIndex(timeline.seconds, expected), timeline.seconds[idx] == expected else { break }
+            out.append(base64Columns(timeline, index: idx))
+            expected -= 1
         }
         return out
+    }
+
+    /// Up to `boundarySeconds` seconds immediately after `runEnd` that
+    /// actually exist AND are contiguous with the run edge (runEnd,
+    /// runEnd+1, ...). A missing second ends the chain: boundary context is
+    /// never fabricated across a gap (audit P3-5), so a chunk abutting a gap
+    /// carries no tail.
+    static func tailBoundary(timeline: ImuTimeline, runEnd: Int64) -> [String] {
+        var out: [String] = []
+        var expected = runEnd
+        while out.count < Self.boundarySeconds {
+            guard let idx = exactIndex(timeline.seconds, expected), timeline.seconds[idx] == expected else { break }
+            out.append(base64Columns(timeline, index: idx))
+            expected += 1
+        }
+        return out
+    }
+
+    /// Index of `target` in a sorted `values` array, or nil when absent.
+    static func exactIndex(_ values: [Int64], _ target: Int64) -> Int? {
+        guard let lo = lowerBound(values, target), lo < values.count, values[lo] == target else {
+            return nil
+        }
+        return lo
     }
 
     private static func base64Columns(_ timeline: ImuTimeline, index: Int) -> String {
@@ -622,6 +758,22 @@ struct ActivityLane {
     }
 
     // MARK: - C10 document build (SHARED StrandAnalytics policy)
+
+    /// Resolve the model/preprocessing versions stamped into the C10 document.
+    /// The child's reported versions (from ping/infer) win; the fallbacks
+    /// match what serve reports for the baseline manifest (`baseline-v0` /
+    /// `1.0.0`) — never a hard-coded 'hart-activity-1', which matches no
+    /// manifest and no DB fingerprint constant (audit P1-3/P3-6). The HART
+    /// path always reports from the loaded manifest, so a healthy HART child
+    /// stamps the true manifest versions.
+    static func resolvedVersions(reportedModel: String?,
+                                 reportedPreprocessing: String?)
+        -> (model: String, preprocessing: String) {
+        let model = (reportedModel?.isEmpty == false) ? reportedModel! : baselineModelVersion
+        let preprocessing = (reportedPreprocessing?.isEmpty == false)
+            ? reportedPreprocessing! : baselinePreprocessingVersion
+        return (model, preprocessing)
+    }
 
     /// Map one Python service window to the shared `ActivityWindowPrediction`
     /// (ActivityContextTypes.swift:139 — init `startTs`/`endTs` are Int
@@ -743,6 +895,13 @@ struct ActivityLane {
     /// `attachActivityContext`), so the live lane and the scoring snapshot
     /// share one assembly path. Encode via the shared `ActivityContextDocument`
     /// Codable (exact C10 keys) then to a plain dictionary.
+    ///
+    /// `hrvSlots` (when non-nil) pins the `contexts.hrv_slots` to exactly
+    /// those 15-min slot starts — the scoring attach path passes only slots
+    /// with a PUBLISHED HRV point, so a slot with activity epochs but no HRV
+    /// result is never emitted (audit P3-2; C10 payload bloat). The live lane
+    /// (nil) keeps the epoch-overlap heuristic. An empty array emits no
+    /// hrv_slots.
     static func activityDocument(epochs: [ActivityEpoch],
                                  sleepIntervals: [(start: Int, end: Int)],
                                  dayStart: Int, dayEnd: Int,
@@ -750,12 +909,12 @@ struct ActivityLane {
                                  modelVersion: String,
                                  preprocessingVersion: String,
                                  dataThrough: Int,
+                                 hrvSlots: [Int]? = nil,
                                  ontologyVersion: String = "v1") throws -> [String: Any] {
         let summary = ActivityContextPolicy.daySummary(epochs: epochs)
         let (status, reasons) = ActivityContextPolicy.snapshotStatus(epochs: epochs)
-        let hrv = ActivityContextJoin.hrvSlotContexts(
-            slots: Self.hrvSlotStarts(dayStart: dayStart, dayEnd: dayEnd, epochs: epochs),
-            epochs: epochs)
+        let slots = hrvSlots ?? Self.hrvSlotStarts(dayStart: dayStart, dayEnd: dayEnd, epochs: epochs)
+        let hrv = ActivityContextJoin.hrvSlotContexts(slots: slots, epochs: epochs)
         let clipped = sleepIntervals.compactMap { iv -> (start: Int, end: Int)? in
             let s = max(iv.start, dayStart)
             let e = min(iv.end, dayEnd)

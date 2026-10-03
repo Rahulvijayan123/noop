@@ -51,6 +51,49 @@ final class ActivityPythonServiceTests: XCTestCase {
             startTs: start, endTs: end, columnsB64: [], headB64: [], tailB64: [])
     }
 
+    // MARK: - Serve argv (HART wiring, audit P1-3)
+
+    /// serve.py reads `--manifest`/`--checkpoint` from argv ONLY (never the
+    /// environment), so a model dir that is merely placed in the child's env
+    /// boots the BASELINE manifest while the lane stamps 'hart-activity-1' —
+    /// the HART model is then unreachable and provenance is wrong. With a
+    /// model dir the manifest + checkpoint MUST be part of the launched argv.
+    func testServeArgsIncludeManifestAndCheckpointWithModelDir() {
+        let args = ActivityPythonService.Config.serveArgs(
+            modelDir: "/opt/frwhoop/activity/hart")
+        XCTAssertEqual(args, [
+            "-m", "activity_context.serve",
+            "--manifest", "/opt/frwhoop/activity/hart/manifest.json",
+            "--checkpoint", "/opt/frwhoop/activity/hart",
+        ])
+    }
+
+    /// Without a model dir the child keeps the bare module launch (baseline
+    /// manifest); the lane then stamps the versions serve reports for
+    /// baseline, never a hard-coded 'hart-activity-1'.
+    func testServeArgsStayBaselineWithoutModelDir() {
+        XCTAssertEqual(ActivityPythonService.Config.serveArgs(modelDir: nil),
+                       ["-m", "activity_context.serve"])
+        XCTAssertEqual(ActivityPythonService.Config.serveArgs(modelDir: ""),
+                       ["-m", "activity_context.serve"])
+    }
+
+    /// fromEnvironment derives the argv from FRWHOOP_ACTIVITY_MODEL_DIR so a
+    /// deployed worker cannot accidentally drop the HART args.
+    func testFromEnvironmentDerivesServeArgsFromModelDir() {
+        let env = ["FRWHOOP_ACTIVITY_MODEL_DIR": "/var/lib/activity/model"]
+        let config = ActivityPythonService.Config.fromEnvironment(env)
+        XCTAssertEqual(config.modelDir, "/var/lib/activity/model")
+        XCTAssertTrue(config.serveArgs.contains("--manifest"))
+        XCTAssertTrue(config.serveArgs.contains("/var/lib/activity/model/manifest.json"))
+        XCTAssertTrue(config.serveArgs.contains("--checkpoint"))
+        XCTAssertTrue(config.serveArgs.contains("/var/lib/activity/model"))
+
+        let noModel = ActivityPythonService.Config.fromEnvironment([:])
+        XCTAssertNil(noModel.modelDir)
+        XCTAssertEqual(noModel.serveArgs, ["-m", "activity_context.serve"])
+    }
+
     // MARK: - Protocol
 
     func testPingReportsLoadedModel() throws {
@@ -87,6 +130,28 @@ final class ActivityPythonServiceTests: XCTestCase {
         XCTAssertFalse(window.baseline)
         XCTAssertEqual(service.reportedModelVersion, "stub-model")
         XCTAssertEqual(service.reportedPreprocessingVersion, "stub-preprocess")
+    }
+
+    /// The real serve.py reads head_b64/tail_b64 from INSIDE `run` (its
+    /// original placement), while the C10 contract puts them top-level. A
+    /// worker that only sends the top-level copy would silently lose all
+    /// boundary filter state. The worker sends BOTH so it is correct against
+    /// either serve.py variant.
+    func testInferSendsHeadTailBothTopLevelAndInsideRun() throws {
+        service = try makeService()
+        _ = try service.ping()
+        let request = ActivityPythonService.RunRequest(
+            startTs: 100, endTs: 103,
+            columnsB64: ["a", "b", "c"],
+            headB64: ["h1", "h2", "h3"], tailB64: ["t1", "t2"])
+        _ = try service.infer(run: request)
+        // The stub echoes both placements; assert the worker sent both.
+        // (Exposed via a stub-managed last-echo; see stub_activity_service.py.)
+        let lastEcho = service.lastEcho
+        XCTAssertEqual(lastEcho?["n_head"] as? Int, 3, "top-level head_b64 present")
+        XCTAssertEqual(lastEcho?["n_tail"] as? Int, 2, "top-level tail_b64 present")
+        XCTAssertEqual(lastEcho?["n_head_run"] as? Int, 3, "run.head_b64 present")
+        XCTAssertEqual(lastEcho?["n_tail_run"] as? Int, 2, "run.tail_b64 present")
     }
 
     func testInferModelMissingIsReportedAndRemembersModelState() throws {

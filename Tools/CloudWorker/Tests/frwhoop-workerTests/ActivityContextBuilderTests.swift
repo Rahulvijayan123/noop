@@ -327,4 +327,96 @@ final class ActivityLaneDocumentTests: XCTestCase {
         XCTAssertEqual(sessions.count, 1)
         XCTAssertEqual(sessions[0]["start"] as? Int, dayStart)
     }
+
+    // MARK: - Model version provenance (audit P1-3 / P3-6)
+
+    /// The child's reported model/preprocessing versions must flow into the
+    /// C10 document exactly; the baseline fallback (what serve reports when
+    /// no HART manifest is configured) is stamped only when nothing was
+    /// reported — never a hard-coded 'hart-activity-1'.
+    func testReportedModelVersionFlowsIntoDocument() throws {
+        let windows = serviceWindows(label: "stationary", probs: stationaryProbs(),
+                                     start: dayStart, end: dayStart + 60)
+        let versions = ActivityLane.resolvedVersions(
+            reportedModel: "hart-activity-v1",
+            reportedPreprocessing: "hart-activity-preprocess-v1")
+        let doc = try ActivityLane.activityDocument(
+            windows: windows,
+            sleepIntervals: [], exerciseIntervals: [],
+            dayStart: dayStart, dayEnd: dayStart + 60,
+            inputRevision: 9,
+            modelVersion: versions.model,
+            preprocessingVersion: versions.preprocessing,
+            dataThrough: dayStart + 60)
+        XCTAssertEqual(doc["model_version"] as? String, "hart-activity-v1")
+        XCTAssertEqual(doc["preprocessing_version"] as? String, "hart-activity-preprocess-v1")
+    }
+
+    // MARK: - hrv_slots restricted to published HRV points (audit P3-2)
+
+    private func storedEpochs(_ from: Int, _ to: Int) -> [ActivityEpoch] {
+        var out: [ActivityEpoch] = []
+        var t = from
+        while t < to {
+            out.append(ActivityEpoch(
+                startTs: t, endTs: min(t + 30, to),
+                motion: .stationary, posture: .unknown, exercise: .unknown,
+                sleepState: .awake, exertion: .unknown, wear: .unknown,
+                confidence: 0.9, observedS: 30, validS: 30))
+            t += 30
+        }
+        return out
+    }
+
+    /// The scoring attach path pins `contexts.hrv_slots` to exactly the slots
+    /// that have a PUBLISHED HRV point. A slot with activity epochs but no HRV
+    /// result must not be emitted (payload bloat; the app would have to
+    /// cross-reference).
+    func testHrvSlotsPinnedToPublishedHrvPoints() throws {
+        // Two 15-min slots of activity, but only slot [dayStart, +900) has an
+        // HRV point.
+        let epochs = storedEpochs(dayStart, dayStart + 1_800)
+        let doc = try ActivityLane.activityDocument(
+            epochs: epochs, sleepIntervals: [],
+            dayStart: dayStart, dayEnd: dayStart + 1_800,
+            inputRevision: 7,
+            modelVersion: "hart-activity-1",
+            preprocessingVersion: "activity-preprocess-1",
+            dataThrough: dayStart + 1_800,
+            hrvSlots: [dayStart])
+        let contexts = try XCTUnwrap(doc["contexts"] as? [String: Any])
+        let slots = try XCTUnwrap(contexts["hrv_slots"] as? [[String: Any]])
+        XCTAssertEqual(slots.count, 1, "only the slot with a published HRV point is emitted")
+        XCTAssertEqual(slots[0]["slot_s"] as? Int, dayStart)
+    }
+
+    /// No published HRV points at all -> `contexts.hrv_slots` is empty, even
+    /// though activity epochs cover the whole day (absent/empty, never
+    /// activity-covered slots).
+    func testHrvSlotsEmptyWhenNoPublishedHrvPoints() throws {
+        let epochs = storedEpochs(dayStart, dayStart + 1_800)
+        let doc = try ActivityLane.activityDocument(
+            epochs: epochs, sleepIntervals: [],
+            dayStart: dayStart, dayEnd: dayStart + 1_800,
+            inputRevision: 7,
+            modelVersion: "hart-activity-1",
+            preprocessingVersion: "activity-preprocess-1",
+            dataThrough: dayStart + 1_800,
+            hrvSlots: [])
+        let contexts = try XCTUnwrap(doc["contexts"] as? [String: Any])
+        let slots = try XCTUnwrap(contexts["hrv_slots"] as? [[String: Any]])
+        XCTAssertTrue(slots.isEmpty)
+        // Default (lane path, no HRV knowledge) keeps the epoch-overlap
+        // heuristic — every covered slot is still emitted.
+        let defaultDoc = try ActivityLane.activityDocument(
+            epochs: epochs, sleepIntervals: [],
+            dayStart: dayStart, dayEnd: dayStart + 1_800,
+            inputRevision: 7,
+            modelVersion: "hart-activity-1",
+            preprocessingVersion: "activity-preprocess-1",
+            dataThrough: dayStart + 1_800)
+        let defaultContexts = try XCTUnwrap(defaultDoc["contexts"] as? [String: Any])
+        let defaultSlots = try XCTUnwrap(defaultContexts["hrv_slots"] as? [[String: Any]])
+        XCTAssertEqual(defaultSlots.count, 2)
+    }
 }

@@ -218,6 +218,14 @@ struct DayScorer {
         }
     }
 
+    /// The 15-min slot starts that actually have a PUBLISHED HRV point, from
+    /// the `hrvSlots` points `[slotStartUnix, rmssdMs, cleanBeats]` (audit
+    /// P3-2: the attach path must emit `contexts.hrv_slots` only where an HRV
+    /// result exists — never every activity-covered slot).
+    static func hrvSlotStarts(fromPoints points: [[Any]]) -> Set<Int> {
+        Set(points.compactMap { $0.first as? Int })
+    }
+
     // MARK: - Score one claimed day
 
     /// Score one claimed day: load inputs, compute, and return both the
@@ -365,10 +373,13 @@ struct DayScorer {
         // activity epochs beside hrv_series. Missing/partial activity NEVER
         // fails scoring: absent key == old behavior (spec §10 "Preserve old
         // clients and snapshots with no activity_context field").
+        // hrv_slots are pinned to the slots that actually PUBLISHED an HRV
+        // point (audit P3-2) — never every epoch-covered slot.
         Self.attachActivityContext(to: &snapshotDaily, db: db,
                                    userId: claim.userId, deviceId: claim.deviceId,
                                    day: claim.day,
-                                   dayStart: dayStart, dayEnd: dayEnd)
+                                   dayStart: dayStart, dayEnd: dayEnd,
+                                   hrvSlotStarts: Self.hrvSlotStarts(fromPoints: slots))
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
@@ -526,7 +537,8 @@ struct DayScorer {
                                       db: PostgresClient,
                                       userId: String, deviceId: String,
                                       day: String,
-                                      dayStart: Int, dayEnd: Int) {
+                                      dayStart: Int, dayEnd: Int,
+                                      hrvSlotStarts: Set<Int>? = nil) {
         let rows: [[String: String]]
         do {
             rows = try db.query("""
@@ -618,6 +630,7 @@ struct DayScorer {
             modelVersion: modelVersion,
             preprocessingVersion: preprocessingVersion,
             dataThrough: maxEnd,
+            hrvSlots: (hrvSlotStarts ?? []).sorted(),
             ontologyVersion: ontologyVersion) else {
             FileHandle.standardError.write(
                 "day \(day): activity attach skipped (document build failed)\n".data(using: .utf8)!)

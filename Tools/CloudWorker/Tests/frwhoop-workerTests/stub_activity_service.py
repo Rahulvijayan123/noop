@@ -87,6 +87,11 @@ def main():
                         "n_columns": len(run.get("columns_b64") or []),
                         "n_head": len(req.get("head_b64") or []),
                         "n_tail": len(req.get("tail_b64") or []),
+                        # The real serve.py reads head/tail from INSIDE run;
+                        # the C10 contract puts them top-level. The worker
+                        # sends both; echo both so a test can pin the shape.
+                        "n_head_run": len(run.get("head_b64") or []),
+                        "n_tail_run": len(run.get("tail_b64") or []),
                     },
                 }
         elif op == "shutdown":

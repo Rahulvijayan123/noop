@@ -265,4 +265,21 @@ final class DayScoringAdapterTests: XCTestCase {
         let slots = DayScorer.hrvSlots(rr: before + thin + doubled + good, from: day, to: day + 86_400)
         XCTAssertEqual(slots.map { $0[0] as? Int }, [day + 1_800])
     }
+
+    // MARK: - hrv_slots pinning for the attach path (audit P3-2)
+
+    func testHrvSlotStartsFromPublishedPoints() {
+        // points are [slotStartUnix, rmssdMs, cleanBeats] as in hrvSlots().
+        let day = 1_790_000_000 - 1_790_000_000 % 900
+        let points: [[Any]] = [
+            [day, 45.3, 300],
+            [day + 900, 52.1, 450],
+            [day + 1_800, 38.9, 210],
+        ]
+        XCTAssertEqual(DayScorer.hrvSlotStarts(fromPoints: points),
+                       Set([day, day + 900, day + 1_800]))
+        XCTAssertEqual(DayScorer.hrvSlotStarts(fromPoints: []), Set<Int>())
+        // Non-numeric first elements (malformed) are ignored, never crash.
+        XCTAssertEqual(DayScorer.hrvSlotStarts(fromPoints: [["nope", 1.0, 2]]), Set<Int>())
+    }
 }
