@@ -166,7 +166,7 @@ public final class ImuSessionFileStore {
         for window in windows { flushSession(window.id) }
         var rows: [Record] = []
         for window in windows {
-            for url in segmentFiles(window.id) {
+            for url in segmentFiles(window.id, overlapping: fromTs, toTs) {
                 rows += decode((try? Data(contentsOf: url)) ?? Data())
                     .filter { Int64($0.ts) >= fromTs && Int64($0.ts) <= toTs }
             }
@@ -249,7 +249,8 @@ public final class ImuSessionFileStore {
     public private(set) var lastReadQuality: [ImuReadQualityNote] = []
 
     private func readRecords(_ id: String, from: Int, to: Int, includePending: Bool) -> [Record] {
-        var rows = segmentFiles(id).flatMap { decode((try? Data(contentsOf: $0)) ?? Data()) }
+        var rows = segmentFiles(id, overlapping: Int64(from), Int64(to))
+            .flatMap { decode((try? Data(contentsOf: $0)) ?? Data()) }
             .filter { $0.ts >= from && $0.ts <= to }
         if includePending { rows += pending.filter { $0.key.hasPrefix("\(id)/") }.values.flatMap { $0 }
             .filter { $0.ts >= from && $0.ts <= to } }
@@ -360,17 +361,30 @@ public final class ImuSessionFileStore {
         try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: header(bucket)) }
         guard let handle = try? FileHandle(forWritingTo: url) else { pending[key] = records; return }
+        // A block never holds more than `blockSeconds` records: `decode` stops at the first one that
+        // does, which would hide it and everything after it in the file. A run of failed flushes
+        // leaves a backlog bigger than that, so it goes out in pieces.
+        var written = 0, failed = false
         do {
-            try handle.seekToEnd(); try handle.write(contentsOf: block(records)); try handle.close()
-            // Durable now: only here do the records count as seen. A failed write above keeps them
-            // in `pending` and OUT of `seen`, so the next cadence retries them (never marked handled
-            // before durable — spec §6).
-            var onDisk = seen[url.path] ?? scan(url)
-            for record in records { onDisk.insert(record.ts) }
-            seen[url.path] = onDisk
+            try handle.seekToEnd()
+            while written < records.count {
+                let end = min(written + Self.blockSeconds, records.count)
+                try handle.write(contentsOf: block(Array(records[written..<end])))
+                written = end
+            }
+            try handle.close()
         } catch {
-            try? handle.close(); pending[key] = records
+            try? handle.close(); failed = true
         }
+        // Durable now: only here do the records count as seen. What a failed write left behind stays
+        // in `pending` and OUT of `seen`, so the next cadence retries it (never marked handled before
+        // durable — spec §6).
+        if written > 0 {
+            var onDisk = seen[url.path] ?? scan(url)
+            for record in records[..<written] { onDisk.insert(record.ts) }
+            seen[url.path] = onDisk
+        }
+        if failed { pending[key] = Array(records[written...]) }
     }
     private func header(_ bucket: Int64) -> Data {
         var data = Self.magic; data.appendBigEndian(bucket); data.appendBigEndian(Int32(Self.sampleRate)); data.appendBigEndian(Int32(Self.axes)); return data
@@ -391,6 +405,17 @@ public final class ImuSessionFileStore {
     private func sessionDirectory(_ id: String) -> URL { directory.appendingPathComponent(id, isDirectory: true) }
     private func segmentFile(_ id: String, _ bucket: Int64) -> URL { sessionDirectory(id).appendingPathComponent("imu-\(Self.utcName(bucket)).imus") }
     private func segmentFiles(_ id: String) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: sessionDirectory(id), includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "imus" }.sorted { $0.lastPathComponent < $1.lastPathComponent } }
+    /// The segment files of a session that can hold a second inside `[from, to]`. A file's 30-minute
+    /// bucket is in its 24-byte header, so a file outside the range costs a header read instead of a
+    /// decode of every record in it. These reads run on the main actor, once per upload pass, so
+    /// decoding the whole store each time is what makes the app stutter after a few hours of capture.
+    /// A file whose header cannot be read is kept: better a wasted decode than a lost second.
+    private func segmentFiles(_ id: String, overlapping from: Int64, _ to: Int64) -> [URL] {
+        segmentFiles(id).filter { url in
+            guard let bucket = Self.segmentBucket(url) else { return true }
+            return bucket + Self.segmentSeconds > from && bucket <= to
+        }
+    }
     /// The 30-minute bucket start a segment file belongs to, read from its 24-byte NOOPIMU2 header
     /// (magic 8 + bucket 8 + rate 4 + axes 4) — a cheap constant-time probe for eviction.
     private static func segmentBucket(_ url: URL) -> Int64? {

@@ -125,6 +125,16 @@ final class ImuObjectLaneTests: XCTestCase {
         func set(_ newValue: Int64) { lock.lock(); seconds = newValue; lock.unlock() }
     }
 
+    private final class CloudSwitch: @unchecked Sendable {
+        private let lock = NSLock()
+        private var on: Bool
+        init(_ on: Bool) { self.on = on }
+        var isOn: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return on }
+            set { lock.lock(); on = newValue; lock.unlock() }
+        }
+    }
+
     private static let sessionStart: Int64 = 1_758_000_000
 
     private func makeSource(store: FakeImuStore, clock: TestClock) -> ImuObjectSource {
@@ -150,6 +160,31 @@ final class ImuObjectLaneTests: XCTestCase {
         let first = try await nextRows(source, after: start - 301)
         XCTAssertEqual(first.count, 300)
         return (clock, store, source, start - 1)
+    }
+
+    func testSwitchingCloudOffStopsRawMotionUploadWithoutLosingTheUsersPlace() async throws {
+        // Turning Cloud off only flips a setting; the runtime keeps running. The source is the last
+        // line of defence, so while the switch is off it hands out nothing and does not even read.
+        let start = Self.sessionStart
+        let clock = TestClock(start + 400)
+        let store = FakeImuStore(records: records(ts: start...(start + 299)))
+        let cloud = CloudSwitch(true)
+        let source = ImuObjectSource(store: store, deviceId: { "dev" }, now: { clock.value },
+                                     uploadAllowed: { cloud.isOn })
+
+        cloud.isOn = false
+        let readsBefore = store.reads
+        for _ in 0..<5 {
+            clock.advance(45)
+            let rows = try await nextRows(source, after: start - 1)
+            XCTAssertTrue(rows.isEmpty, "raw motion was offered while Cloud was off")
+        }
+        XCTAssertEqual(store.reads, readsBefore, "a switched-off lane must not read the store either")
+
+        cloud.isOn = true
+        let resumed = try await nextRows(source, after: start - 1)
+        XCTAssertEqual(firstTs(resumed), start, "switching Cloud back on must resume from the same place")
+        XCTAssertEqual(resumed.count, 300)
     }
 
     func testDataCapturedAfterIdlePassesStillUploads() async throws {

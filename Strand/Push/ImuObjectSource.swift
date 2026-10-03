@@ -95,6 +95,10 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     private let store: any ImuObjectReading
     private let deviceIdProvider: @Sendable () -> String?
     private let now: @Sendable () -> Int64
+    /// Asked on every page. Raw motion is the most sensitive thing this app uploads, and switching
+    /// Cloud off does not stop the runtime, so the source itself refuses to hand anything out while
+    /// the switch is off. Nothing is consumed: the cursor and the scan position stay where they were.
+    private let uploadAllowed: @Sendable () -> Bool
     /// How far back the first-ever (cursor-less) scan looks for the store's oldest records.
     /// Continuous capture is bounded by the NOOPIMU retention policy; this horizon only needs to
     /// cover that retention. Scanning older data would require a per-call scan state.
@@ -109,11 +113,13 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     public init(store: any ImuObjectReading,
                 deviceId: @escaping @Sendable () -> String?,
                 now: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
-                lookbackSeconds: Int64 = 14 * 24 * 3600) {
+                lookbackSeconds: Int64 = 14 * 24 * 3600,
+                uploadAllowed: @escaping @Sendable () -> Bool = { true }) {
         self.store = store
         self.deviceIdProvider = deviceId
         self.now = now
         self.lookbackSeconds = lookbackSeconds
+        self.uploadAllowed = uploadAllowed
     }
 
     // MARK: PushSnapshotSource
@@ -124,7 +130,7 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
 
     public func binaryPage(table: PushBinaryTable, deviceId: String, afterRowId: Int64,
                            limit: Int, limits: PushSourceReadLimits) async throws -> PushBinaryPage {
-        guard table == .rawImuSession else { return .init(rows: [], hasMore: false) }
+        guard table == .rawImuSession, uploadAllowed() else { return .init(rows: [], hasMore: false) }
         guard limits.shouldContinue() else { throw PushSourceReadError.deferred }
         let window = try await nextWindow(deviceId: deviceId, afterRowId: afterRowId, limits: limits)
         guard limits.shouldContinue() else { throw PushSourceReadError.deferred }

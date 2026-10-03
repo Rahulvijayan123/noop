@@ -481,7 +481,8 @@ public final class CloudPushRuntime: @unchecked Sendable {
                                                  fleetToken: CloudPushSettings.fleetToken,
                                                  identity: { CloudPushIdentityStore.current() })
         let objectSource = ImuObjectSource(store: ImuSessionFileStoreReader(),
-                                           deviceId: { [weak self] in self?._deviceId })
+                                           deviceId: { [weak self] in self?._deviceId },
+                                           uploadAllowed: { CloudPushSettings.isEnabled })
         lock.lock()
         _journal = journal
         _coordinator = coordinator
@@ -660,7 +661,8 @@ public final class CloudPushRuntime: @unchecked Sendable {
     }
 
     private func runObjectLanePass() async {
-        guard isRunning else { return }
+        // `disableCloud()` only flips the setting; nothing stops the runtime, so ask on every pass.
+        guard isRunning, CloudPushSettings.isEnabled else { return }
         lock.lock()
         let transport = _objectTransport
         let progress = _objectProgress

@@ -288,6 +288,70 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
         XCTAssertEqual(sortedTs, sortedTs.sorted())
     }
 
+    func testAStretchOfFailedFlushesDoesNotLeaveAnUnreadableOversizeBlock() throws {
+        let store = ImuSessionFileStore.shared
+        let sessionId = "stall-\(UUID().uuidString)"
+        let deviceId = "stall-dev-\(UUID().uuidString)"
+        let base = 1_758_000_000
+        let support = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
+                                                  appropriateFor: nil, create: true)
+        let sessionDirectory = support.appendingPathComponent("OpenWhoop/RawImuSessions/\(sessionId)", isDirectory: true)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sessionDirectory.path)
+            _ = store.deleteFiles(sessionId); store.remove(id: sessionId)
+        }
+        store.start(id: sessionId, deviceId: deviceId, fromMs: Int64(base) * 1_000)
+
+        // The folder stops accepting files, as it does when the disk is full or protected data is locked.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: sessionDirectory.path)
+        for i in 0..<75 {
+            XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: base + i),
+                                        receivedAtMs: 1_000 + Int64(i) * 1_000), 1)
+        }
+        XCTAssertEqual(store.stats(sessionId, from: base, to: base + 74).diskSeconds, 0,
+                       "the folder was read-only, so nothing can be on disk yet")
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: sessionDirectory.path)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: base + 75),
+                                    receivedAtMs: 100_000), 1)
+        store.complete(id: sessionId, toMs: Int64(base + 80) * 1_000)
+
+        // 76 seconds are waiting by now. Written as ONE block, the reader rejects it (a block holds at
+        // most 30) and the whole backlog, plus everything after it in the file, goes unreadable.
+        let records = store.readRecords(deviceId: deviceId, fromTs: Int64(base), toTs: Int64(base + 80))
+        XCTAssertEqual(records.map(\.ts), (0..<76).map { Int64(base + $0) },
+                       "a backlog written as one oversize block is unreadable")
+        XCTAssertTrue(store.lastReadQuality.isEmpty)
+    }
+
+    func testRangedReadSkipsOtherBucketsButKeepsEveryBoundarySecond() throws {
+        let store = ImuSessionFileStore.shared
+        let sessionId = "ranged-\(UUID().uuidString)"
+        let deviceId = "ranged-dev-\(UUID().uuidString)"
+        defer { _ = store.deleteFiles(sessionId); store.remove(id: sessionId) }
+        // 1_757_998_800 is a multiple of 1800, so these four seconds straddle three 30-minute files:
+        // the last second of the first, the first and last of the second, the first of the third.
+        let bucket = 1_757_998_800
+        store.start(id: sessionId, deviceId: deviceId, fromMs: Int64(bucket) * 1_000)
+        for offset in [1_799, 1_800, 3_599, 3_600] {
+            XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: bucket + offset),
+                                        receivedAtMs: 1_000 + Int64(offset)), 1)
+        }
+        store.complete(id: sessionId, toMs: Int64(bucket + 4_000) * 1_000)
+
+        func read(_ from: Int, _ to: Int) -> [Int] {
+            store.readRecords(deviceId: deviceId, fromTs: Int64(from), toTs: Int64(to)).map { Int($0.ts) - bucket }
+        }
+        XCTAssertEqual(read(bucket + 1_800, bucket + 3_599), [1_800, 3_599], "exactly the middle file")
+        XCTAssertEqual(read(bucket + 1_799, bucket + 1_800), [1_799, 1_800], "across the first boundary")
+        XCTAssertEqual(read(bucket + 3_599, bucket + 3_600), [3_599, 3_600], "across the second boundary")
+        XCTAssertEqual(read(bucket + 3_600, bucket + 9_999), [3_600], "the last file only")
+        XCTAssertEqual(read(bucket, bucket + 1_798), [], "before the first second")
+        XCTAssertEqual(read(bucket + 10_000, bucket + 20_000), [], "after everything")
+        XCTAssertEqual(read(bucket, bucket + 10_000), [1_799, 1_800, 3_599, 3_600])
+        XCTAssertEqual(store.stats(sessionId, from: bucket + 1_800, to: bucket + 3_599).diskSeconds, 2)
+    }
+
     func testImuStoreConflictingDuplicatesDropBothAndReportQuality() throws {
         let store = ImuSessionFileStore.shared
         let idA = "conflict-a-\(UUID().uuidString)"

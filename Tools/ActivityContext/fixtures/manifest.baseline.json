@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "model_version": "baseline-v0",
+  "preprocessing_version": "1.0.0",
+  "model_kind": "baseline",
+  "checkpoint": {},
+  "scaler": {},
+  "class_map": [
+    "stationary",
+    "walking",
+    "running",
+    "other_movement",
+    "unknown"
+  ],
+  "thresholds": {
+    "max_prob": 0.8,
+    "margin": 0.15
+  },
+  "units": {
+    "input_accel": "g",
+    "input_gyro": "deg/s",
+    "train_accel": "g",
+    "train_gyro": "deg/s"
+  },
+  "window": {
+    "samples": 120,
+    "hop": 60,
+    "hz": 30
+  },
+  "label_mapping": {
+    "A": "walking",
+    "B": "running",
+    "C": "other_movement",
+    "D": "stationary",
+    "E": "stationary",
+    "F": "stationary",
+    "G": "other_movement",
+    "H": "other_movement",
+    "I": "other_movement",
+    "J": "other_movement",
+    "K": "other_movement",
+    "L": "other_movement",
+    "M": "other_movement",
+    "O": "other_movement",
+    "P": "other_movement",
+    "Q": "stationary",
+    "R": "stationary",
+    "S": "stationary"
+  },
+  "seed": 0,
+  "deps": {
+    "numpy": "2.2.6"
+  }
+}
