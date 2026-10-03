@@ -79,8 +79,12 @@ extension DayStateSegment {
             return workoutSport.map { String(localized: "From a logged workout: \($0)") }
                 ?? String(localized: "From a logged workout")
         case .strapActivityClass:
-            let pct = Int(((locomotionShare ?? 0) * 100).rounded())
-            return String(localized: "The strap labelled \(pct)% of its readings as walking or running")
+            let verb = state == .running ? String(localized: "running") : String(localized: "walking")
+            guard let ticks = stepTicks, durationSeconds > 0 else {
+                return String(localized: "The strap labelled this \(verb)")
+            }
+            let rate = String(format: "%.1f", Double(ticks) / Double(durationSeconds))
+            return String(localized: "The strap labelled this \(verb) and its step counter ticked \(ticks) times, about \(rate) a second")
         case .motion:
             let g = motionG.map { String(format: "%.2f", $0) } ?? "–"
             return String(localized: "Wrist motion averaged \(g) g")
@@ -139,10 +143,10 @@ struct DayStateTimelineSection: View {
 
     private var laneCard: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-            Chart(segments) { seg in
+            Chart(laneSegments) { seg in
                 RectangleMark(
-                    xStart: .value("Start", seg.startDate),
-                    xEnd: .value("End", seg.endDate),
+                    xStart: .value("Start", laneRange(seg).lowerBound),
+                    xEnd: .value("End", laneRange(seg).upperBound),
                     yStart: .value("Bottom", 0.0),
                     yEnd: .value("Top", 1.0)
                 )
@@ -168,6 +172,22 @@ struct DayStateTimelineSection: View {
         }
         .padding(NoopMetrics.space3)
         .background(NoopPanelSurface(cornerRadius: 20))
+    }
+
+    /// Longest first, so a short burst is drawn last and stays visible on top of the stretch around it.
+    private var laneSegments: [DayStateSegment] {
+        segments.sorted { $0.durationSeconds > $1.durationSeconds }
+    }
+
+    /// A 16 second walk is a fraction of a point wide on a whole-day lane. Widen anything under 0.6% of the
+    /// visible window, centred, so it still shows as a tick. Zooming in shows its true width.
+    private func laneRange(_ seg: DayStateSegment) -> ClosedRange<Date> {
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        let minWidth = span * 0.006
+        let width = Double(seg.durationSeconds)
+        guard width < minWidth else { return seg.startDate...seg.endDate }
+        let mid = seg.startDate.addingTimeInterval(width / 2)
+        return mid.addingTimeInterval(-minWidth / 2)...mid.addingTimeInterval(minWidth / 2)
     }
 
     private var legend: some View {
@@ -237,7 +257,8 @@ struct DayStateTimelineSection: View {
     private func episodeBox(_ seg: DayStateSegment) -> some View {
         let color = seg.state.color
         return Button {
-            let pad: TimeInterval = max(300, Double(seg.durationSeconds) * 0.15)
+            let dur = Double(seg.durationSeconds)
+            let pad: TimeInterval = dur < 600 ? max(90, dur * 2) : dur * 0.15
             onSelect(seg.startDate.addingTimeInterval(-pad)...seg.endDate.addingTimeInterval(pad))
         } label: {
             HStack(alignment: .top, spacing: 12) {
@@ -259,7 +280,7 @@ struct DayStateTimelineSection: View {
                             .foregroundStyle(StrandPalette.textPrimary)
                             .monospacedDigit()
                     }
-                    Text("\(Self.clock(seg.startDate)) – \(Self.clock(seg.endDate))")
+                    Text("\(Self.clock(seg.startDate, seconds: seg.durationSeconds < 300)) – \(Self.clock(seg.endDate, seconds: seg.durationSeconds < 300))")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .monospacedDigit()
@@ -290,7 +311,7 @@ struct DayStateTimelineSection: View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Sitting and standing look the same from the wrist, so both show as Still.",
                   systemImage: "info.circle")
-            Text("Off wrist comes from the strap's own wrist on and off events. A single stray minute is folded into the stretch around it.")
+            Text("Walking and running show up from 10 seconds, when the strap labels it and its step counter agrees. Still and Moving are judged by the minute, and off wrist comes from the strap's own wrist on and off events.")
         }
         .font(StrandFont.footnote)
         .foregroundStyle(StrandPalette.textTertiary)
@@ -298,13 +319,17 @@ struct DayStateTimelineSection: View {
     }
 
     static func duration(_ seconds: Int) -> String {
-        let m = max(0, seconds) / 60
+        let s = max(0, seconds)
+        if s < 60 { return String(localized: "\(s) s") }
+        let m = s / 60
+        if m < 10, s % 60 != 0 { return String(localized: "\(m) min \(s % 60) s") }
         if m < 60 { return String(localized: "\(m) min") }
         let h = m / 60, r = m % 60
         return r == 0 ? String(localized: "\(h) h") : String(localized: "\(h) h \(r) m")
     }
 
-    static func clock(_ d: Date) -> String {
-        d.formatted(.dateTime.hour().minute())
+    /// Short stretches show seconds, since "2:23 PM – 2:23 PM" says nothing about a 16 second walk.
+    static func clock(_ d: Date, seconds: Bool = false) -> String {
+        seconds ? d.formatted(.dateTime.hour().minute().second()) : d.formatted(.dateTime.hour().minute())
     }
 }

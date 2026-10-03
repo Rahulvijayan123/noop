@@ -79,13 +79,83 @@ final class DayStateTimelineTests: XCTestCase {
         XCTAssertEqual(segs.map(\.state), [.workout])
     }
 
-    func testShortBlipIsFoldedIntoNeighbour() {
-        let segs = build(20, hr: hr(0, 20), gravity: gravity(0, 20, delta: 0.01), steps: steps(10, 11, cls: 1))
+    /// Whole-day step stream: `cls` and a counter ticking `perSecond` inside [from, to) seconds, still and flat
+    /// elsewhere, so the stream is continuous like the strap's.
+    private func stepStream(_ minutes: Int, burst from: Int, _ to: Int, cls: Int = 1, perSecond: Int = 2,
+                            classOnly: Bool = false) -> [StepSample] {
+        var counter = 0
+        return (0 ..< minutes * 60).map { s in
+            let inBurst = s >= from && s < to
+            if inBurst && !classOnly { counter += perSecond }
+            return StepSample(ts: t0 + s, counter: counter, activityClass: inBurst ? cls : 0)
+        }
+    }
+
+    func testSixteenSecondWalkInsideStillMinutesGetsItsOwnBox() {
+        let burst = 20 * 60 + 7
+        let segs = build(40, hr: hr(0, 40), gravity: gravity(0, 40, delta: 0.01),
+                         steps: stepStream(40, burst: burst, burst + 16))
+        XCTAssertEqual(segs.map(\.state), [.still, .walking, .still])
+        XCTAssertEqual(segs[1].start, t0 + burst)
+        XCTAssertEqual(segs[1].durationSeconds, 16)
+        XCTAssertEqual(segs[1].basis, .strapActivityClass)
+        XCTAssertEqual(segs[1].stepTicks, 32)
+    }
+
+    func testBurstBridgesShortDropoutsButNotLongOnes() {
+        let first = stepStream(40, burst: 1200, 1210)
+        let second = stepStream(40, burst: 1215, 1225)
+        let merged = zip(first, second).map { a, b in StepSample(ts: a.ts, counter: a.counter + b.counter,
+                                                              activityClass: max(a.activityClass ?? 0, b.activityClass ?? 0)) }
+        let segs = build(40, hr: hr(0, 40), gravity: gravity(0, 40, delta: 0.01), steps: merged)
+        XCTAssertEqual(segs.filter { $0.state == .walking }.count, 1)
+        XCTAssertEqual(segs.first { $0.state == .walking }?.durationSeconds, 25)
+
+        let far = stepStream(40, burst: 1200, 1210)
+        let farSecond = stepStream(40, burst: 1230, 1240)
+        let apart = zip(far, farSecond).map { a, b in StepSample(ts: a.ts, counter: a.counter + b.counter,
+                                                                 activityClass: max(a.activityClass ?? 0, b.activityClass ?? 0)) }
+        let two = build(40, hr: hr(0, 40), gravity: gravity(0, 40, delta: 0.01), steps: apart)
+        XCTAssertEqual(two.filter { $0.state == .walking }.count, 2)
+    }
+
+    func testBurstTooShortOrWithoutStepTicksIsIgnored() {
+        let tooShort = build(30, hr: hr(0, 30), gravity: gravity(0, 30, delta: 0.01),
+                             steps: stepStream(30, burst: 900, 906))
+        XCTAssertEqual(tooShort.map(\.state), [.still])
+
+        let labelOnly = build(30, hr: hr(0, 30), gravity: gravity(0, 30, delta: 0.01),
+                              steps: stepStream(30, burst: 900, 930, classOnly: true))
+        XCTAssertEqual(labelOnly.map(\.state), [.still])
+    }
+
+    func testRunBurstIsRunning() {
+        let segs = build(30, hr: hr(0, 30, bpm: 150), gravity: gravity(0, 30, delta: 0.01),
+                         steps: stepStream(30, burst: 600, 660, cls: 2, perSecond: 3))
+        XCTAssertEqual(segs.map(\.state), [.still, .running, .still])
+    }
+
+    func testBurstNeverSplitsSleepOrOffWrist() {
+        let steps = stepStream(30, burst: 600, 640)
+        let asleep = build(30, hr: hr(0, 30), gravity: gravity(0, 30, delta: 0.01), steps: steps,
+                           sleep: [DayStateSpan(start: t0, end: t0 + 1800)])
+        XCTAssertEqual(asleep.map(\.state), [.sleeping])
+
+        let off = build(30, hr: hr(0, 30), gravity: gravity(0, 30, delta: 0.01), steps: steps,
+                        offWrist: [DayStateSpan(start: t0, end: t0 + 1800)])
+        XCTAssertEqual(off.map(\.state), [.offWrist])
+    }
+
+    func testSingleMovingMinuteIsFoldedIntoNeighbour() {
+        var x = 0.0
+        var g: [GravitySample] = []
+        for s in 0 ..< 20 * 60 {
+            x += (s / 60 == 10) ? 0.5 : 0.01
+            g.append(GravitySample(ts: t0 + s, x: x, y: 0, z: 1))
+        }
+        let segs = build(20, hr: hr(0, 20), gravity: g)
         XCTAssertEqual(segs.map(\.state), [.still])
         XCTAssertEqual(segs[0].durationSeconds, 1200)
-
-        let twoMinutes = build(20, hr: hr(0, 20), gravity: gravity(0, 20, delta: 0.01), steps: steps(10, 12, cls: 1))
-        XCTAssertEqual(twoMinutes.map(\.state), [.still, .walking, .still])
     }
 
     func testHeartRateWithoutMotionDataIsWornUnknown() {

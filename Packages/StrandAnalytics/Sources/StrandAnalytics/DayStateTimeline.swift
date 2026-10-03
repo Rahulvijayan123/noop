@@ -56,6 +56,8 @@ public struct DayStateSegment: Equatable, Sendable, Identifiable {
     public let motionG: Double?
     /// Share of the strap's per-second activity labels that said walk or run. nil when it labelled nothing.
     public let locomotionShare: Double?
+    /// Step-counter ticks over the stretch, when the strap reported a counter. About two a second is a walk.
+    public let stepTicks: Int?
     public let workoutSport: String?
 
     public var id: Int { start }
@@ -63,38 +65,58 @@ public struct DayStateSegment: Equatable, Sendable, Identifiable {
 
     public init(state: DayState, basis: DayStateBasis, start: Int, end: Int,
                 avgHr: Int?, minHr: Int?, maxHr: Int?, motionG: Double?,
-                locomotionShare: Double?, workoutSport: String?) {
+                locomotionShare: Double?, stepTicks: Int? = nil, workoutSport: String?) {
         self.state = state; self.basis = basis; self.start = start; self.end = end
         self.avgHr = avgHr; self.minHr = minHr; self.maxHr = maxHr
-        self.motionG = motionG; self.locomotionShare = locomotionShare
+        self.motionG = motionG; self.locomotionShare = locomotionShare; self.stepTicks = stepTicks
         self.workoutSport = workoutSport
     }
 }
 
-/// Builds a one-day state timeline from stored strap data, in whole minutes.
+/// Builds a one-day state timeline from stored strap data.
 ///
-/// Every label is derived from a real signal and carries its `basis`. Precedence per minute:
-/// logged sleep, explicit wrist-off span, no pulse (strap still recording, so likely off wrist), logged
-/// workout, the strap's own walk/run labels, then gravity motion. Runs shorter than `minRunMinutes` are
-/// folded into their longer neighbour so one stray minute does not fragment the day.
+/// Every label is derived from a real signal and carries its `basis`. Two layers:
+///
+/// 1. Minutes. Precedence per minute: logged sleep, explicit wrist-off span, no pulse (strap still recording,
+///    so likely off wrist), logged workout, then gravity motion (moving or still). Runs shorter than
+///    `minRunMinutes` are folded into their longer neighbour so one stray minute does not fragment the day.
+/// 2. Seconds. The strap labels each reading still, walk or run, and its step counter ticks about twice a
+///    second while walking. Stretches of walk or run labels backed by counter ticks become bursts as short as
+///    `minBurstSeconds`, laid over the still and moving minutes. Sleep, off wrist and logged workouts are
+///    never split.
 public enum DayStateTimeline {
     public static let binSeconds = 60
     public static let minHrSecondsPerBin = 6
     public static let minRunMinutes = 2
-    /// Seconds of walk/run strap labels in a minute before the minute counts as walking or running. Real
-    /// indoor walking arrives as scattered bursts (a day on the author's strap: 80 bursts, mostly 10 to 19 s
-    /// per minute), so a stricter gate would call nearly all of it still.
-    public static let minLocomotionSecondsPerBin = 10
     /// Mean gravity delta above which a minute counts as moving. Matches `WorkoutDetector`'s threshold.
     public static let movingDeltaG = 0.20
     public static let validHr = 30...220
 
+    /// Non-walking seconds a burst may bridge. The strap's label drops out for a second or two mid-walk.
+    public static let burstBridgeSeconds = 8
+    public static let minBurstSeconds = 10
+    /// A burst needs the step counter to back the label: at least this many ticks per second on average.
+    public static let minBurstTicksPerSecond = 0.5
+    /// After bursts are laid over the minutes, any run shorter than this folds into its neighbour.
+    public static let minRunSeconds = 10
+
     struct Bin {
-        var hrN = 0, hrSum = 0, hrMin = Int.max, hrMax = 0
+        var hrN = 0
         var gravN = 0
         var deltaN = 0
         var deltaSum = 0.0
-        var stepN = 0, stillN = 0, walkN = 0, runN = 0
+        var stepN = 0
+    }
+
+    /// One slot per second of the day.
+    struct Seconds {
+        var bpm: [Int]
+        var delta: [Double]
+        var cls: [Int]
+        var ticks: [Int]
+        var hasGravity: [Bool]
+        var hasStep: [Bool]
+        var count: Int { bpm.count }
     }
 
     public static func build(dayStart: Int,
@@ -106,55 +128,117 @@ public enum DayStateTimeline {
                              workouts: [DayStateWorkout],
                              offWrist: [DayStateSpan] = []) -> [DayStateSegment] {
         guard dayEnd > dayStart else { return [] }
-        let count = (dayEnd - dayStart + binSeconds - 1) / binSeconds
-        var bins = [Bin](repeating: Bin(), count: count)
+        let n = dayEnd - dayStart
+        var sec = Seconds(bpm: [Int](repeating: 0, count: n),
+                          delta: [Double](repeating: .nan, count: n),
+                          cls: [Int](repeating: -1, count: n),
+                          ticks: [Int](repeating: 0, count: n),
+                          hasGravity: [Bool](repeating: false, count: n),
+                          hasStep: [Bool](repeating: false, count: n))
 
-        func index(_ ts: Int) -> Int? {
-            guard ts >= dayStart, ts < dayEnd else { return nil }
-            return (ts - dayStart) / binSeconds
-        }
-
-        for s in hr where validHr.contains(s.bpm) {
-            guard let i = index(s.ts) else { continue }
-            bins[i].hrN += 1
-            bins[i].hrSum += s.bpm
-            bins[i].hrMin = min(bins[i].hrMin, s.bpm)
-            bins[i].hrMax = max(bins[i].hrMax, s.bpm)
+        for s in hr where validHr.contains(s.bpm) && s.ts >= dayStart && s.ts < dayEnd {
+            sec.bpm[s.ts - dayStart] = s.bpm
         }
 
         let g = gravity.sorted { $0.ts < $1.ts }
-        for (k, s) in g.enumerated() {
-            guard let i = index(s.ts) else { continue }
-            bins[i].gravN += 1
+        for (k, s) in g.enumerated() where s.ts >= dayStart && s.ts < dayEnd {
+            let i = s.ts - dayStart
+            sec.hasGravity[i] = true
             guard k > 0 else { continue }
             let p = g[k - 1]
             let dt = s.ts - p.ts
             guard dt >= 1, dt <= 2 else { continue }
             let dx = s.x - p.x, dy = s.y - p.y, dz = s.z - p.z
-            bins[i].deltaSum += (dx * dx + dy * dy + dz * dz).squareRoot()
-            bins[i].deltaN += 1
+            sec.delta[i] = (dx * dx + dy * dy + dz * dz).squareRoot()
         }
 
-        for s in steps {
-            guard let i = index(s.ts) else { continue }
-            bins[i].stepN += 1
-            switch s.activityClass {
-            case 0: bins[i].stillN += 1
-            case 1: bins[i].walkN += 1
-            case 2: bins[i].runN += 1
-            default: break
+        let st = steps.sorted { $0.ts < $1.ts }
+        for (k, s) in st.enumerated() where s.ts >= dayStart && s.ts < dayEnd {
+            let i = s.ts - dayStart
+            sec.hasStep[i] = true
+            if let c = s.activityClass { sec.cls[i] = c }
+            guard k > 0 else { continue }
+            let p = st[k - 1]
+            let dt = s.ts - p.ts
+            let d = (s.counter - p.counter) & 0xFFFF
+            if dt >= 1, dt <= 2, d < StepsCounter.maxStepDelta { sec.ticks[i] = d }
+        }
+
+        let minutes = (n + binSeconds - 1) / binSeconds
+        var bins = [Bin](repeating: Bin(), count: minutes)
+        for i in 0..<n {
+            let b = i / binSeconds
+            if sec.bpm[i] > 0 { bins[b].hrN += 1 }
+            if sec.hasGravity[i] { bins[b].gravN += 1 }
+            if sec.hasStep[i] { bins[b].stepN += 1 }
+            if !sec.delta[i].isNaN { bins[b].deltaN += 1; bins[b].deltaSum += sec.delta[i] }
+        }
+
+        var minuteKeys: [Key] = []
+        minuteKeys.reserveCapacity(minutes)
+        for b in 0..<minutes {
+            let mid = dayStart + b * binSeconds + binSeconds / 2
+            let c = classify(bin: bins[b], mid: mid, sleep: sleep, workouts: workouts, offWrist: offWrist)
+            minuteKeys.append(Key(state: c.0, basis: c.1, sport: c.2))
+        }
+
+        let minuteRuns = foldShortRuns(minuteKeys, minLength: minRunMinutes)
+        var secKey = [Key](repeating: minuteKeys[0], count: n)
+        for run in minuteRuns {
+            let lo = run.start * binSeconds
+            let hi = min(n, (run.start + run.length) * binSeconds)
+            for i in lo..<hi { secKey[i] = run.key }
+        }
+        var earned = (0..<n).map { minuteKeys[$0 / binSeconds] }
+
+        for burst in bursts(sec) {
+            let key = Key(state: burst.running ? .running : .walking, basis: .strapActivityClass, sport: nil)
+            for i in burst.start..<burst.end where overlayable.contains(secKey[i].state) {
+                secKey[i] = key
+                earned[i] = key
             }
         }
 
-        var labels: [(DayState, DayStateBasis, String?)] = []
-        labels.reserveCapacity(count)
-        for i in 0..<count {
-            let mid = dayStart + i * binSeconds + binSeconds / 2
-            labels.append(classify(bin: bins[i], mid: mid, sleep: sleep, workouts: workouts, offWrist: offWrist))
-        }
+        let runs = foldShortRuns(secKey, minLength: minRunSeconds)
+        return runs.map { segment($0, sec: sec, earned: earned, dayStart: dayStart) }
+    }
 
-        let runs = foldShortRuns(labels.map { Key(state: $0.0, basis: $0.1, sport: $0.2) })
-        return segments(from: runs, bins: bins, rawStates: labels.map(\.0), dayStart: dayStart, dayEnd: dayEnd)
+    /// States a walk or run burst may replace. Sleep, off wrist, no data and logged workouts stand.
+    static let overlayable: Set<DayState> = [.still, .active, .wornUnknown]
+
+    struct Burst {
+        let start: Int
+        let end: Int
+        let running: Bool
+    }
+
+    /// Stretches of one walk or run label, bridged across short dropouts and backed by step-counter ticks.
+    static func bursts(_ sec: Seconds) -> [Burst] {
+        var out: [Burst] = []
+        let n = sec.count
+        var i = 0
+        while i < n {
+            let c = sec.cls[i]
+            guard c == 1 || c == 2 else { i += 1; continue }
+            var last = i
+            var k = i + 1
+            while k < n, k - last <= burstBridgeSeconds + 1 {
+                if sec.cls[k] == c {
+                    last = k
+                } else if sec.cls[k] == 1 || sec.cls[k] == 2 {
+                    break
+                }
+                k += 1
+            }
+            let end = last + 1
+            let duration = end - i
+            let ticks = sec.ticks[i..<end].reduce(0, +)
+            if duration >= minBurstSeconds, Double(ticks) >= minBurstTicksPerSecond * Double(duration) {
+                out.append(Burst(start: i, end: end, running: c == 2))
+            }
+            i = end
+        }
+        return out
     }
 
     static func classify(bin: Bin, mid: Int, sleep: [DayStateSpan], workouts: [DayStateWorkout],
@@ -174,8 +258,6 @@ public enum DayStateTimeline {
             if sport.contains("walk") || sport.contains("hik") { return (.walking, .loggedWorkout, w.sport) }
             return (.workout, .loggedWorkout, w.sport)
         }
-        if bin.runN >= minLocomotionSecondsPerBin { return (.running, .strapActivityClass, nil) }
-        if bin.walkN + bin.runN >= minLocomotionSecondsPerBin { return (.walking, .strapActivityClass, nil) }
         guard bin.deltaN > 0 else { return (.wornUnknown, .noMotionData, nil) }
         let mean = bin.deltaSum / Double(bin.deltaN)
         return (mean >= movingDeltaG ? .active : .still, .motion, nil)
@@ -186,31 +268,31 @@ public enum DayStateTimeline {
         let basis: DayStateBasis
         let sport: String?
 
-        /// Adjacent minutes merge on state and sport; the first minute's basis stands for the run.
+        /// Adjacent slots merge on state and sport; the first slot's basis stands for the run.
         static func == (a: Key, b: Key) -> Bool { a.state == b.state && a.sport == b.sport }
     }
 
     struct Run {
         var key: Key
-        var startBin: Int
+        var start: Int
         var length: Int
     }
 
-    static func foldShortRuns(_ keys: [Key]) -> [Run] {
+    /// Run-length encode `keys`, then fold every run shorter than `minLength` (sleep excepted) into its
+    /// longer neighbour, shortest first, until none remain.
+    static func foldShortRuns(_ keys: [Key], minLength: Int) -> [Run] {
         var runs: [Run] = []
         for (i, k) in keys.enumerated() {
             if var last = runs.last, last.key == k {
                 last.length += 1
                 runs[runs.count - 1] = last
             } else {
-                runs.append(Run(key: k, startBin: i, length: 1))
+                runs.append(Run(key: k, start: i, length: 1))
             }
         }
-        var changed = true
-        while changed, runs.count > 1 {
-            changed = false
+        while runs.count > 1 {
             guard let shortIdx = runs.indices
-                .filter({ runs[$0].length < minRunMinutes && runs[$0].key.state != .sleeping })
+                .filter({ runs[$0].length < minLength && runs[$0].key.state != .sleeping })
                 .min(by: { runs[$0].length < runs[$1].length }) else { break }
             let prev = shortIdx > 0 ? shortIdx - 1 : nil
             let next = shortIdx + 1 < runs.count ? shortIdx + 1 : nil
@@ -223,7 +305,7 @@ public enum DayStateTimeline {
             }
             let absorbed = runs[shortIdx]
             runs[target].length += absorbed.length
-            runs[target].startBin = min(runs[target].startBin, absorbed.startBin)
+            runs[target].start = min(runs[target].start, absorbed.start)
             runs.remove(at: shortIdx)
             var merged: [Run] = []
             for r in runs {
@@ -235,37 +317,37 @@ public enum DayStateTimeline {
                 }
             }
             runs = merged
-            changed = true
         }
         return runs
     }
 
-    /// Stats come from the minutes that earned the run's label. Minutes folded in from a neighbour set the
+    /// Stats come from the seconds that earned the run's label. Seconds folded in from a neighbour set the
     /// run's edges but would otherwise leak their heart rate into, say, an off-wrist box.
-    static func segments(from runs: [Run], bins: [Bin], rawStates: [DayState],
-                         dayStart: Int, dayEnd: Int) -> [DayStateSegment] {
-        runs.map { run in
-            let range = run.startBin..<(run.startBin + run.length)
-            let own = range.filter { rawStates[$0] == run.key.state }
-            let slice = (own.isEmpty ? Array(range) : own).map { bins[$0] }
-            let hrN = slice.reduce(0) { $0 + $1.hrN }
-            let hrSum = slice.reduce(0) { $0 + $1.hrSum }
-            let lo = slice.filter { $0.hrN > 0 }.map(\.hrMin).min()
-            let hi = slice.filter { $0.hrN > 0 }.map(\.hrMax).max()
-            let dN = slice.reduce(0) { $0 + $1.deltaN }
-            let dSum = slice.reduce(0.0) { $0 + $1.deltaSum }
-            let classed = slice.reduce(0) { $0 + $1.stillN + $1.walkN + $1.runN }
-            let loco = slice.reduce(0) { $0 + $1.walkN + $1.runN }
-            let start = dayStart + run.startBin * binSeconds
-            let end = min(dayEnd, dayStart + (run.startBin + run.length) * binSeconds)
-            return DayStateSegment(
-                state: run.key.state, basis: run.key.basis, start: start, end: end,
-                avgHr: hrN > 0 ? Int((Double(hrSum) / Double(hrN)).rounded()) : nil,
-                minHr: lo, maxHr: hi,
-                motionG: dN > 0 ? dSum / Double(dN) : nil,
-                locomotionShare: classed > 0 ? Double(loco) / Double(classed) : nil,
-                workoutSport: run.key.sport)
+    static func segment(_ run: Run, sec: Seconds, earned: [Key], dayStart: Int) -> DayStateSegment {
+        let range = run.start..<(run.start + run.length)
+        let own = range.filter { earned[$0].state == run.key.state }
+        let idx = own.isEmpty ? Array(range) : own
+        var hrN = 0, hrSum = 0, lo = Int.max, hi = 0
+        var dN = 0, dSum = 0.0, classed = 0, loco = 0, ticks = 0, stepN = 0
+        for i in idx {
+            let b = sec.bpm[i]
+            if b > 0 { hrN += 1; hrSum += b; lo = min(lo, b); hi = max(hi, b) }
+            if !sec.delta[i].isNaN { dN += 1; dSum += sec.delta[i] }
+            if sec.cls[i] >= 0 {
+                classed += 1
+                if sec.cls[i] >= 1 { loco += 1 }
+            }
+            if sec.hasStep[i] { stepN += 1; ticks += sec.ticks[i] }
         }
+        return DayStateSegment(
+            state: run.key.state, basis: run.key.basis,
+            start: dayStart + run.start, end: dayStart + run.start + run.length,
+            avgHr: hrN > 0 ? Int((Double(hrSum) / Double(hrN)).rounded()) : nil,
+            minHr: hrN > 0 ? lo : nil, maxHr: hrN > 0 ? hi : nil,
+            motionG: dN > 0 ? dSum / Double(dN) : nil,
+            locomotionShare: classed > 0 ? Double(loco) / Double(classed) : nil,
+            stepTicks: stepN > 0 ? ticks : nil,
+            workoutSport: run.key.sport)
     }
 
     /// Total seconds per state, for the summary tiles.
