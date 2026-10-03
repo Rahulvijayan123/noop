@@ -1,4 +1,5 @@
 import SwiftUI
+import StrandAnalytics
 import StrandDesign
 import WhoopStore
 
@@ -31,10 +32,18 @@ struct FullDayChartView: View {
     /// an explicit day, in which case we never override it). Stops the jump from fighting manual navigation.
     @State private var didLandOnLatest: Bool
 
-    init(dayStart: Date? = nil) {
+    /// True for the Heart rate day page: heart rate only, with the inferred-activity timeline beneath it.
+    /// False keeps the multi-metric Deep Timeline exactly as it was.
+    private let showsActivityTimeline: Bool
+
+    init(dayStart: Date? = nil, showsActivityTimeline: Bool = false) {
         _dayStart = State(initialValue: dayStart ?? Repository.logicalDayStart(Date()))
         _didLandOnLatest = State(initialValue: dayStart != nil)
+        self.showsActivityTimeline = showsActivityTimeline
     }
+
+    @State private var dayStates: [DayStateSegment] = []
+    @State private var dayStatesLoading = false
 
     @State private var metric: Repository.TimelineMetric = .hr
     // Imperial/Metric temperature preference (#101) — mirrors MetricExplorerView so skin temp here
@@ -84,15 +93,45 @@ struct FullDayChartView: View {
     private var visibleWindow: ClosedRange<Date> { zoomDomain ?? dayBounds }
 
     var body: some View {
-        ScreenScaffold(title: "Deep Timeline", subtitle: "Every second of your day, zoomable.") {
-            metricPills
+        ScreenScaffold(title: showsActivityTimeline ? "Heart rate" : "Deep Timeline",
+                       subtitle: showsActivityTimeline ? "Your whole day, and what you were doing."
+                                                       : "Every second of your day, zoomable.") {
+            if !showsActivityTimeline { metricPills }
             dayNav
-            sourcePill
+            if !showsActivityTimeline { sourcePill }
             chartCard
             zoomHint
+            if showsActivityTimeline {
+                DayStateTimelineSection(
+                    segments: dayStates,
+                    loading: dayStatesLoading,
+                    window: visibleWindow,
+                    axisLabelPlaceholder: valueRange(displayPoints).upperBound >= 99.5 ? "000" : "00",
+                    onSelect: { range in withAnimation(StrandMotion.interactive) { zoomDomain = range } }
+                )
+                NavigationLink(value: TabRoute.fullDayChart) {
+                    HStack {
+                        Text("Other metrics in the Deep Timeline")
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                    }
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.accent)
+                    .padding(.horizontal, NoopMetrics.space1)
+                }
+                .buttonStyle(.plain)
+            }
         }
         .task(id: taskKey) { await reload() }
         .task(id: annotationKey) { await reloadAnnotations() }
+        .task(id: annotationKey) {
+            guard showsActivityTimeline else { return }
+            dayStatesLoading = true
+            let result = await repo.dayStateTimeline(dayStart: dayStart)
+            guard !Task.isCancelled else { return }
+            dayStates = result
+            dayStatesLoading = false
+        }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
         .task(id: repo.deviceId) { sourceName = repo.activeDeviceDisplayName() }

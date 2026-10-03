@@ -684,7 +684,7 @@ struct LiquidTodayView: View {
         VStack(spacing: 12) {
             // #979: the whole-day HR trend (Deep Timeline) still exists but was buried behind Metrics →
             // Show all → Deep Timeline. The whole live HR card remains a one-tap route into it.
-            NavigationLink(value: TabRoute.fullDayChart) {
+            NavigationLink(value: TabRoute.heartRateDay) {
                 card {
                     // Isolated leaf: it observes LiveState so the ~1 Hz HR notifies re-render ONLY
                     // this card, never the whole Today. Shows the current bpm live with a rolling
@@ -695,7 +695,7 @@ struct LiquidTodayView: View {
                 }
             }
             .buttonStyle(LiquidPressStyle())
-            .accessibilityHint("Opens the full-day heart rate timeline")
+            .accessibilityHint("Opens the full-day heart rate graph with an activity timeline")
             .background {
                 GeometryReader { geometry in
                     Color.clear.preference(key: LiquidHeartRateCardFrameKey.self,
@@ -2466,6 +2466,7 @@ private struct LiquidLiveHR: View {
                     .padding(.vertical, 24)
             }
             footer
+            fullDayPrompt
         }
         .onAppear { if samples.isEmpty, let hr = live.heartRate, hr > 0 { samples = [Double(hr)] } }
         .onChangeCompat(of: live.heartRate) { hr in
@@ -2504,6 +2505,21 @@ private struct LiquidLiveHR: View {
                 }
             }
         }
+    }
+
+    private var fullDayPrompt: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 12, weight: .semibold))
+            Text("Full day and activity timeline")
+                .font(StrandFont.caption.weight(.semibold))
+            Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(tint)
+        .padding(.top, 2)
+        .accessibilityHidden(true)
     }
 
     private var footer: some View {
