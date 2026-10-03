@@ -30,12 +30,28 @@ final class SleepAwareStepCounterTests: XCTestCase {
     }
 
     func testDiagnosticRejectionReasonsAreSeparated() {
+        // +25 in one second is neither gait nor a bout block; +7 across two seconds is a block.
         let count = SleepAwareStepCounter.count([
-            sample(0, 100, 0), sample(1, 102, 1), sample(2, 110, 1),
-            sample(4, 117, 2), sample(5, 120, 0)
+            sample(0, 100, 0), sample(1, 102, 1), sample(2, 127, 1),
+            sample(4, 134, 2), sample(5, 137, 0)
         ], sleepSessions: [])
         XCTAssertEqual(count.totalTicks, 9)
         XCTAssertEqual(count.rejectedActivityClassTicks, 3)
-        XCTAssertEqual(count.rejectedImplausibleTicks, 8)
+        XCTAssertEqual(count.rejectedImplausibleTicks, 25)
+    }
+
+    func testBoutBlockCountsOutsideSleepWhateverItsLabel() {
+        let samples = [sample(0, 100, 0), sample(1, 106, 0)]
+        XCTAssertEqual(SleepAwareStepCounter.stepsInWindow(samples, sleepSessions: []), 6)
+        XCTAssertEqual(SleepAwareStepCounter.stepsInWindow(samples, sleepSessions: []),
+                       StepsCounter.stepsInWindow(samples))
+        XCTAssertEqual(SleepAwareStepCounter.count(samples, sleepSessions: []).rejectedActivityClassTicks, 0)
+    }
+
+    func testIsolatedBoutBlockInsideScoredSleepIsStillRejected() {
+        let count = SleepAwareStepCounter.count([sample(0, 100, 0), sample(1, 106, 0)],
+                                                sleepSessions: [sleep()])
+        XCTAssertEqual(count.totalTicks, 0)
+        XCTAssertEqual(count.rejectedIsolatedSleepTicks, 6)
     }
 }

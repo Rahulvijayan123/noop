@@ -17,16 +17,31 @@ class SleepAwareStepCounterTest {
         val samples = listOf(
             step(0, 100, 0),
             step(1, 102, 1),
-            step(2, 110, 1), // impossible 8 ticks/s: rejected by StepsCounter too
-            step(4, 117, 2),
-            step(5, 120, 0),
+            step(2, 127, 1), // 25 ticks in one second: neither gait nor a bout block, rejected by StepsCounter too
+            step(4, 134, 2), // +7 across two seconds is a bout block
+            step(5, 137, 0),
         )
 
         assertEquals(StepsCounter.stepsInWindow(samples), SleepAwareStepCounter.stepsInWindow(samples, emptyList()))
         assertEquals(9, SleepAwareStepCounter.stepsInWindow(samples, emptyList()))
         val detail = SleepAwareStepCounter.count(samples, emptyList())
         assertEquals(3, detail.rejectedActivityClassTicks)
-        assertEquals(8, detail.rejectedImplausibleTicks)
+        assertEquals(25, detail.rejectedImplausibleTicks)
+    }
+
+    @Test fun boutBlockCountsOutsideSleepWhateverItsLabel() {
+        val samples = listOf(step(0, 100, 0), step(1, 106, 0))
+
+        assertEquals(6, SleepAwareStepCounter.stepsInWindow(samples, emptyList()))
+        assertEquals(StepsCounter.stepsInWindow(samples), SleepAwareStepCounter.stepsInWindow(samples, emptyList()))
+        assertEquals(0, SleepAwareStepCounter.count(samples, emptyList()).rejectedActivityClassTicks)
+    }
+
+    @Test fun isolatedBoutBlockInsideScoredSleepIsStillRejected() {
+        val detail = SleepAwareStepCounter.count(listOf(step(0, 100, 0), step(1, 106, 0)), listOf(sleep(0, 100)))
+
+        assertEquals(0, detail.totalTicks)
+        assertEquals(6, detail.rejectedIsolatedSleepTicks)
     }
 
     @Test fun awakeGapInsideSleepCountsWithNormalRules() {
