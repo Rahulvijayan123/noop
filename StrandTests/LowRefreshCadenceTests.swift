@@ -66,4 +66,67 @@ final class LowRefreshCadenceTests: XCTestCase {
                 historyEmpty: true),
             BLEManager.lowRefreshBackfillIntervalSeconds)
     }
+
+    // MARK: - Fresh data (minute cadence)
+
+    func testFreshSyncMakesTheBaseOneMinute() {
+        XCTAssertEqual(BLEManager.baseBackfillInterval(lowRefresh: false, freshSync: true),
+                       BLEManager.freshBackfillIntervalSeconds)
+        XCTAssertEqual(BLEManager.freshBackfillIntervalSeconds, 60)
+    }
+
+    /// The user's hourly cadence is the more deliberate request, so it wins over the minute cadence.
+    func testLowRefreshOutranksFreshSync() {
+        XCTAssertEqual(BLEManager.baseBackfillInterval(lowRefresh: true, freshSync: true),
+                       BLEManager.lowRefreshBackfillIntervalSeconds)
+    }
+
+    /// Every power lever composes with `max`, so a low strap battery still pushes the minute cadence out
+    /// to 45 min, and a charged strap keeps the minute.
+    func testPowerLeversStillStretchTheFreshCadence() {
+        let base = BLEManager.baseBackfillInterval(lowRefresh: false, freshSync: true)
+        let low = max(base, BLEManager.lowBatteryBackfillIntervalSeconds)
+        XCTAssertEqual(BLEManager.offloadInterval(baseSeconds: base, lowSeconds: low,
+                                                  batteryPct: 10, charging: false, thresholdPct: 20),
+                       BLEManager.lowBatteryBackfillIntervalSeconds)
+        XCTAssertEqual(BLEManager.offloadInterval(baseSeconds: base, lowSeconds: low,
+                                                  batteryPct: 90, charging: false, thresholdPct: 20),
+                       BLEManager.freshBackfillIntervalSeconds)
+        XCTAssertEqual(BLEManager.whoop5EmptyHistoryBackfillInterval(baseSeconds: base, lowSeconds: low,
+                                                                     historyEmpty: true),
+                       BLEManager.lowBatteryBackfillIntervalSeconds)
+    }
+
+    /// Only the minute timer lowers the periodic floor; the 15-min, hourly and stretched cadences keep 15 min.
+    func testOnlyTheMinuteCadenceLowersThePeriodicFloor() {
+        XCTAssertEqual(BLEManager.periodicBackfillFloor(forInterval: BLEManager.freshBackfillIntervalSeconds),
+                       BackfillPolicy.freshPeriodicFloorSeconds)
+        for seconds in [BLEManager.backfillIntervalSeconds, BLEManager.lowBatteryBackfillIntervalSeconds,
+                        BLEManager.lowRefreshBackfillIntervalSeconds] {
+            XCTAssertEqual(BLEManager.periodicBackfillFloor(forInterval: seconds),
+                           BackfillPolicy.periodicFloorSeconds)
+        }
+    }
+
+    func testPeriodicTickRunsAtTheFreshFloorAndNotBefore() {
+        let floor = BackfillPolicy.freshPeriodicFloorSeconds
+        XCTAssertTrue(BackfillPolicy.shouldRun(trigger: .periodic, now: 1_000 + floor, lastBackfillAt: 1_000,
+                                               periodicFloor: floor))
+        XCTAssertFalse(BackfillPolicy.shouldRun(trigger: .periodic, now: 1_000 + floor - 1, lastBackfillAt: 1_000,
+                                                periodicFloor: floor))
+        // Unchanged default: a 60 s old sync still blocks a plain 15-min periodic tick.
+        XCTAssertFalse(BackfillPolicy.shouldRun(trigger: .periodic, now: 1_060, lastBackfillAt: 1_000))
+    }
+
+    /// An off-wrist or caught-up strap that banks nothing must not be polled every minute: the empty-streak
+    /// backoff stretches the minute floor exactly as it stretches the 15-min one.
+    func testEmptyStreakStillBacksOffTheFreshFloor() {
+        let floor = BackfillPolicy.freshPeriodicFloorSeconds
+        XCTAssertFalse(BackfillPolicy.shouldRun(trigger: .periodic, now: 1_000 + floor * 2 - 1, lastBackfillAt: 1_000,
+                                                emptyStreak: BackfillPolicy.emptyBackoffThreshold,
+                                                periodicFloor: floor))
+        XCTAssertTrue(BackfillPolicy.shouldRun(trigger: .periodic, now: 1_000 + floor * 2, lastBackfillAt: 1_000,
+                                               emptyStreak: BackfillPolicy.emptyBackoffThreshold,
+                                               periodicFloor: floor))
+    }
 }

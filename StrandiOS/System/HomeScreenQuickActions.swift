@@ -64,6 +64,11 @@ final class HomeScreenQuickActionAppDelegate: NSObject, UIApplicationDelegate {
         // Bluetooth state-restoration relaunch reaches this method without creating a scene, so the
         // runtime is started here rather than only from the foreground path. Idempotent, and a no-op
         // unless cloud mode is enabled and an enrollment exists.
+        //
+        // A relaunch for Bluetooth never gets a scene, so nothing would otherwise tell the runtime that
+        // the app is off screen. Seed it from the launch state; the scene corrects it on activation.
+        CloudPushRuntime.shared.setAppIsActive(application.applicationState == .active)
+        CloudTransportCoordinator.executionAssertion = CloudUploadExecutionAssertion.begin
         CloudPushRuntime.shared.startIfEnabled()
         return true
     }

@@ -281,6 +281,7 @@ final class AppModel: ObservableObject {
     func cloudBecameActive() async {
         CloudPushRuntime.shared.setAppIsActive(true)
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
+        applyPowerSaving()   // cloud mode may have been enabled since launch; the minute cadence follows it
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         await confirmWearableLinkIfNeeded()
@@ -311,6 +312,7 @@ final class AppModel: ObservableObject {
         // device the server scores. Reading the fixed "my-whoop" id would return the frozen result of the
         // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
         let readId = hostedReadDeviceId
+        IntradaySeriesStore.shared.readDeviceId = readId
         var days = [Repository.localDayKey(now.addingTimeInterval(-86_400)), Repository.localDayKey(now)]
         if let changed = try? await scores.pollChangedDays(deviceId: readId) {
             for change in changed.prefix(8) where !days.contains(change.day) { days.append(change.day) }
@@ -333,13 +335,16 @@ final class AppModel: ObservableObject {
         return written
     }
 
-    /// While the app is in the foreground, re-read the server's results every two minutes so a night the
-    /// server finishes scoring appears without a relaunch.
+    /// While the app is in the foreground, re-read the server's results every half minute so the day's
+    /// steps and calories, and a night the server finishes scoring, appear without a relaunch. The worker
+    /// republishes the current day about once a minute, so a faster read would only find the same revision.
+    static let hostedRefreshSeconds: UInt64 = 30
+
     private func startHostedRefreshLoop() {
         guard cloudScoringIsAuthoritative, hostedRefreshTask == nil else { return }
         hostedRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 120 * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: AppModel.hostedRefreshSeconds * 1_000_000_000)
                 guard !Task.isCancelled, let self else { return }
                 await self.syncHostedResults()
             }
@@ -362,6 +367,17 @@ final class AppModel: ObservableObject {
                 if moved > 0 {
                     self.live.append(log: "Cloud: queued \(moved) earlier history records under the strap's permanent id")
                 }
+            }
+            // The strap's SpO₂ estimates banked before they were journaled: a few hundred per night. Rows stored
+            // under the strap's own id go up as that device; any the provisional namespace still holds are sent
+            // as the strap too, since the server scores and reads only the strap's device.
+            var spo2Queued = await CloudSpo2Seeder.runIfNeeded(store: store, deviceId: readId, family: nil)
+            if readId != self.deviceId {
+                spo2Queued += await CloudSpo2Seeder.runIfNeeded(store: store, deviceId: self.deviceId,
+                                                               cloudDeviceId: readId, family: nil)
+            }
+            if spo2Queued > 0 {
+                self.live.append(log: "Cloud: queued \(spo2Queued) banked SpO₂ strap-estimate readings for upload")
             }
             self.historySeedTask = nil
         }
@@ -719,6 +735,8 @@ final class AppModel: ObservableObject {
         let on = PuffinExperiment.powerSavingEnabled
         // Sub-option: only in effect while the Power-saving master is on, like the HRV-pause lever below.
         ble.setLowRefreshMode(on && PuffinExperiment.lowRefreshEnabled)
+        // The minute cadence only matters when the server is what reads the strap's history back.
+        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative)
         ble.setLowBatteryOffloadThrottle(on ? PuffinExperiment.powerSavingBatteryPct : 0)
         // HRV pause is battery-%-aware like the offload lever — pass the same threshold.
         ble.setPauseCaptureOnPowerSave(on && PuffinExperiment.pauseHrvOnPowerSaveEnabled,

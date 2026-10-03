@@ -35,6 +35,12 @@ enum TabRoute: Hashable {
     case health
     case hydration
     case coupled
+    case medication
+    case watchdog
+    /// One event, with the full list so its Recovery card can open the cross-event view.
+    case event(HealthEvent, history: [HealthEvent])
+    case allEvents([HealthEvent])
+    case recoveryDetails(HealthEvent, history: [HealthEvent])
 }
 
 extension View {
@@ -71,6 +77,11 @@ extension View {
             case .health: HealthView()
             case .hydration: HydrationView()
             case .coupled: CoupledView()
+            case .medication: ComingSoonScreen(title: "Medication")
+            case .watchdog: WatchdogView()
+            case .event(let event, let history): EventDetailView(event: event, history: history)
+            case .allEvents(let events): AllEventsView(events: events)
+            case .recoveryDetails(let event, let history): RecoveryDetailsView(event: event, history: history)
             }
         }
     }

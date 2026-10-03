@@ -68,6 +68,33 @@ export async function readHostedSnapshot({ rest, userId, deviceId, day }: {
   };
 }
 
+/** Series names `server_metric_series` accepts (its CHECK constraint, and `server_metric_series_read`). */
+export const SERIES_METRICS = ['hrv_rmssd_ms', 'resting_hr_bpm', 'resp_rate_bpm', 'steps', 'calories_kcal'] as const;
+const SERIES_MAX_RANGE_SECONDS = 3 * 86_400;
+
+/**
+ * `GET /series?from=<unix>&to=<unix>[&metrics=a,b]`: a half-open range of at most three days (the RPC's own
+ * limit, and about 4,300 rows) over the user's dense intraday series. Anything malformed is rejected before the
+ * database is asked.
+ */
+export function parseSeriesQuery(params: URLSearchParams) {
+  const from = params.get('from');
+  const to = params.get('to');
+  if (from == null || to == null || !/^\d{1,10}$/.test(from) || !/^\d{1,10}$/.test(to)) throw fail('invalid_range', 400);
+  const start = Number(from);
+  const end = Number(to);
+  if (end <= start || end - start > SERIES_MAX_RANGE_SECONDS) throw fail('invalid_range', 400);
+  let metrics: string[] | null = null;
+  const raw = params.get('metrics');
+  if (raw != null) {
+    metrics = raw.split(',');
+    if (new Set(metrics).size !== metrics.length || metrics.some((m) => !(SERIES_METRICS as readonly string[]).includes(m))) {
+      throw fail('invalid_metrics', 400);
+    }
+  }
+  return { from: new Date(start * 1000).toISOString(), to: new Date(end * 1000).toISOString(), metrics };
+}
+
 async function boundedBody(req: Request): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
   if (bytes.length > 8192) throw fail('payload_too_large', 413);
@@ -104,12 +131,13 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const route = url.pathname.replace(/^\/functions\/v1/, '').replace(/^\/scores/, '') || '/';
   const isRead = req.method === 'GET' && route === '/';
   const isDays = req.method === 'GET' && route === '/days';
+  const isSeries = req.method === 'GET' && route === '/series';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
   const isRegister = req.method === 'POST' && route === '/devices';
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
   const isComputeSubmit = req.method === 'POST' && route === '/compute-requests';
   const isComputeRead = req.method === 'GET' && route === '/compute-requests';
-  if (!isRead && !isDays && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit && !isComputeRead) {
+  if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit && !isComputeRead) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -143,8 +171,9 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
     }
-    const requestBody = isRead || isDays || isDiagnostics || isComputeRead ? null : await boundedBody(req);
-    const externalDeviceId = isRead || isDays || isDiagnostics || isComputeRead ? url.searchParams.get('deviceId') : requestBody?.deviceId;
+    const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead ? null : await boundedBody(req);
+    const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead
+      ? url.searchParams.get('deviceId') : requestBody?.deviceId;
     if (!isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     const deviceId = isRegister
@@ -164,6 +193,14 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       const page = await rest.rpc('server_result_days_page', { p_user: user.id, p_device: deviceId,
         p_source: user.sourceId, p_after: Number(cursor), p_limit: Number(limit), p_scope_revision: scope });
       return Response.json({ ...page, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isSeries) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseSeriesQuery(url.searchParams);
+      const series = await rest.rpc('server_metric_series_read', {
+        p_user: user.id, p_from: query.from, p_to: query.to, ...(query.metrics ? { p_metrics: query.metrics } : {}),
+      });
+      return Response.json({ series, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isComputeSubmit || isComputeRead) {
       if (!deviceId) throw fail('device_registration_pending',409);

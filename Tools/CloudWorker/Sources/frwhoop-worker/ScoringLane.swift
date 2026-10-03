@@ -46,6 +46,33 @@ struct ScoringLane {
     /// Publish attempts before a serialization/stale race is given up on.
     var publishAttempts: Int = 3
     var v2AlgorithmVersion: String = "frwhoop-server-1"
+    /// Build and publish the dense intraday series after each v2 snapshot. Off via `FRWHOOP_DISABLE_LANES=series`.
+    var publishesSeries: Bool = true
+    /// Legacy work items whose owner uploaded within this many seconds are left for a quieter moment. The
+    /// legacy queue claims an item a couple of seconds after the first arrival and that claim is revoked by the
+    /// next arrival, so while a phone streams uploads every few seconds every legacy attempt is a full day
+    /// computation that can only be thrown away, and the legacy queue is served before v2. 0 restores the
+    /// original behaviour (claim whatever is oldest, immediately).
+    var legacyQuietSeconds: Int = ScoringLane.defaultLegacyQuietSeconds
+    /// An item that has waited this long is claimed even while uploads continue (at most once per this many
+    /// seconds per item), so legacy results cannot lag by more than this plus one computation.
+    var legacyMaxDeferSeconds: Int = ScoringLane.defaultLegacyMaxDeferSeconds
+    /// When this process last claimed each legacy item, keyed by `LegacyCandidate.key`. The queue cannot supply
+    /// this: `next_attempt_at` stays at the first arrival for as long as the item keeps being re-queued, so it
+    /// says how long the item has waited, not when it was last tried.
+    var legacyLastClaimed: [String: Date] = [:]
+    /// How long the v2 lane keeps trying to take its owner's scoring-input gate before it claims without it.
+    /// Uploads take that advisory lock exclusively and only then update the job row. A scoring pass used to
+    /// claim (lock) the job row first and ask for the shared side of the gate at publication, the opposite
+    /// order, so an upload committing during the ~7 s computation deadlocked with the publication: the pass
+    /// lost and was recomputed in full, or the upload was killed. Holding the gate from before the claim
+    /// restores one lock order. 0 keeps the original order (claim first).
+    var v2InputGateSeconds: Int = ScoringLane.defaultV2InputGateSeconds
+
+    static let defaultLegacyQuietSeconds = 20
+    static let defaultLegacyMaxDeferSeconds = 1800
+    static let defaultV2InputGateSeconds = 10
+    static let inputGatePollSeconds = 0.1
 
     struct Stats {
         var claimed = 0
@@ -56,12 +83,28 @@ struct ScoringLane {
         var superseded = 0
         /// v2 publications that returned NULL (not complete).
         var notCompleted = 0
+        /// Cycles in which the legacy queue had work but every item belonged to an owner who was still
+        /// uploading, so the cycle went to v2 instead (see `legacyQuietSeconds`).
+        var legacyDeferred = 0
+        /// v2 passes that held their owner's input gate from before the claim, and the milliseconds (summed) they
+        /// spent polling for it. `gateSkipped` counts passes that gave up polling and claimed without it.
+        var gateTaken = 0
+        var gateWaitMillis = 0
+        var gateSkipped = 0
         /// `scoring_legacy_finish_work(...,'failed',...)` returned true: the
         /// failure is durably accounted for.
         var failuresPersisted = 0
         /// The failure could not be settled (unreachable database, or the lease
         /// moved on). The lease expiry recovers the row.
         var failuresUnsettled = 0
+        /// Dense-series writes (`publish_metric_series_v1`) after a committed v2 snapshot. They are derived
+        /// data on a side channel: none of these counters, and no series error, changes a day's outcome.
+        var seriesPublished = 0
+        /// Rows the published series actually changed (upserts plus deletes); unchanged buckets cost nothing.
+        var seriesRowsWritten = 0
+        /// The database declined: another device is canonical for the day, or the day has no snapshot yet.
+        var seriesSkipped = 0
+        var seriesFailed = 0
         var failureKinds: [String: Int] = [:]
         var lastScoreAt: Date?
         var lastError: String?
@@ -133,7 +176,7 @@ struct ScoringLane {
 
     /// Claim one work item and seal its input snapshot, committed on its own so a
     /// later failure can still be settled through the fenced contract.
-    private func claimAndSealFleet() throws -> DayScorer.Claim? {
+    private mutating func claimAndSealFleet() throws -> DayScorer.Claim? {
         try db.beginTransaction(.repeatableRead)
         do {
             guard let claim = try legacyClaim() else {
@@ -149,10 +192,97 @@ struct ScoringLane {
         }
     }
 
-    private func legacyClaim() throws -> DayScorer.Claim? {
-        let rows = try db.query(
-            "select * from public.scoring_legacy_claim_one($1::integer, $2::integer)",
-            [String(leaseSeconds), String(maxFailures)])
+    struct LegacyCandidate: Equatable {
+        let user: String
+        let device: String
+        let day: String
+
+        var key: String { "\(user)|\(device)|\(day)" }
+    }
+
+    /// The legacy queue's eligible items, oldest first, each with whether its owner is quiet (has not uploaded
+    /// for `$2` seconds) and how long the item has waited. The eligibility predicate is the one
+    /// `scoring_legacy_claim_one` applies; the claim function is still what takes the item, so a candidate that
+    /// has since been claimed elsewhere simply yields nothing. The cap on deferral is applied in
+    /// `partitionLegacyCandidates`, which knows when each item was last tried.
+    ///
+    /// The upload probe is `now()`-based on purpose: `now()` is stable, so the planner can use it as an index
+    /// bound on `(user_id, accepted_at)` (a 0.05 ms probe) where `clock_timestamp()` forced a scan of the
+    /// owner's whole receipt history (~200 ms).
+    static let legacyCandidatesSQL = """
+        select w.user_id::text as user_id, w.device_id::text as device_id, w.day::text as day,
+               (not exists (select 1 from public.noop_upload_receipts u
+                             where u.user_id = w.user_id
+                               and u.accepted_at > now() - make_interval(secs => $2::integer))) as quiet,
+               greatest(0, extract(epoch from (now() - w.next_attempt_at)))::bigint as waited_seconds
+          from public.scoring_work_items w
+          join public.devices d on d.id = w.device_id and d.user_id = w.user_id and d.is_active
+         where w.done_at is null
+           and w.next_attempt_at <= clock_timestamp()
+           and (w.lease_expires_at is null or w.lease_expires_at <= clock_timestamp())
+           and (w.failure_revision <> w.input_revision or w.consecutive_failures < $1::integer)
+           and not exists (select 1 from public.noop_account_retirements r where r.user_id = w.user_id)
+         order by w.next_attempt_at, w.dirty_at, w.user_id, w.device_id, w.day
+         limit 32
+        """
+
+    /// Split candidate rows into the ones that may be claimed now (in queue order) and a count of the rest.
+    /// An item is ready when its owner is quiet, or when it has waited `maxDeferSeconds` and this process has
+    /// not tried it within that long (`lastClaimed`), so a phone that never stops uploading still gets a
+    /// legacy attempt per item per `maxDeferSeconds` rather than none.
+    static func partitionLegacyCandidates(
+        _ rows: [[String: String]], now: Date = Date(), maxDeferSeconds: Int = defaultLegacyMaxDeferSeconds,
+        lastClaimed: [String: Date] = [:]
+    ) -> (ready: [LegacyCandidate], deferred: Int) {
+        var ready: [LegacyCandidate] = []
+        var deferred = 0
+        for r in rows {
+            let user = r["user_id"] ?? ""
+            let device = r["device_id"] ?? ""
+            let day = r["day"] ?? ""
+            guard !user.isEmpty, !device.isEmpty, !day.isEmpty else { continue }
+            let candidate = LegacyCandidate(user: user, device: device, day: day)
+            let waited = Int(r["waited_seconds"] ?? "") ?? 0
+            let triedRecently = lastClaimed[candidate.key].map { now.timeIntervalSince($0) < Double(maxDeferSeconds) } ?? false
+            if isTrue(r["quiet"]) || (waited >= maxDeferSeconds && !triedRecently) {
+                ready.append(candidate)
+            } else {
+                deferred += 1
+            }
+        }
+        return (ready, deferred)
+    }
+
+    /// Candidates tried per cycle. The claim function skips an item whose advisory locks an upload holds, so
+    /// the first ready candidate is not always the one that can be taken.
+    private static let legacyClaimTries = 8
+
+    private mutating func legacyClaim() throws -> DayScorer.Claim? {
+        guard legacyQuietSeconds > 0 else {
+            return try legacyClaimRow(
+                "select * from public.scoring_legacy_claim_one($1::integer, $2::integer)",
+                [String(leaseSeconds), String(maxFailures)])
+        }
+        let rows = try db.query(ScoringLane.legacyCandidatesSQL, [String(maxFailures), String(legacyQuietSeconds)])
+        let now = Date()
+        let (ready, deferred) = ScoringLane.partitionLegacyCandidates(
+            rows, now: now, maxDeferSeconds: legacyMaxDeferSeconds, lastClaimed: legacyLastClaimed)
+        for candidate in ready.prefix(ScoringLane.legacyClaimTries) {
+            let claim = try legacyClaimRow(
+                "select * from public.scoring_legacy_claim_one($1::integer, $2::integer, $3::uuid, $4::uuid, $5::date)",
+                [String(leaseSeconds), String(maxFailures), candidate.user, candidate.device, candidate.day])
+            if let claim {
+                legacyLastClaimed = legacyLastClaimed.filter { now.timeIntervalSince($0.value) < Double(2 * legacyMaxDeferSeconds) }
+                legacyLastClaimed[candidate.key] = now
+                return claim
+            }
+        }
+        if ready.isEmpty && deferred > 0 { stats.legacyDeferred += 1 }
+        return nil
+    }
+
+    private func legacyClaimRow(_ sql: String, _ arguments: [String]) throws -> DayScorer.Claim? {
+        let rows = try db.query(sql, arguments)
         guard let r = rows.first else { return nil }
         let uid = r["user_id"] ?? ""
         let dev = r["device_id"] ?? ""
@@ -192,11 +322,17 @@ struct ScoringLane {
                 return finished ? .completed : .superseded
             } catch {
                 let kind = (error as? PostgresClient.Error)?.kind ?? .other
-                if kind == .serialization || kind == .stale {
-                    // A concurrent writer won the race. Retry with jitter; if it
-                    // keeps losing, the queue already owns the newer revision, so
-                    // do NOT record a failure against this day.
-                    if attempt < publishAttempts {
+                if kind == .stale {
+                    // The fenced lease moved on: the queue owns the newer work and re-running this claim cannot
+                    // succeed (PGErrorKind.stale: never retry the same claim). Each retry is a whole day of
+                    // computation, so do not spend one.
+                    return .superseded
+                }
+                if kind == .serialization {
+                    // A concurrent writer won the race. Retry with jitter while this claim still stands; once
+                    // an upload has revoked it (its lease is cleared) every retry fails the same way. Either
+                    // way the queue already owns the newer revision, so do NOT record a failure against this day.
+                    if attempt < publishAttempts, (try? claimStillHeld(claim)) == true {
                         jitterSleep(attempt: attempt)
                         continue
                     }
@@ -209,13 +345,24 @@ struct ScoringLane {
         }
     }
 
+    /// Whether the work item still carries this claim's lease. An upload re-queues the day by clearing it.
+    private func claimStillHeld(_ claim: DayScorer.Claim) throws -> Bool {
+        let rows = try db.query("""
+            select 1 as held from public.scoring_work_items
+             where user_id=$1::uuid and device_id=$2::uuid and day=$3::date
+               and lease_token=$4::uuid and run_id=$5::uuid
+               and status='running' and lease_expires_at > clock_timestamp()
+            """, [claim.userId, claim.deviceId, claim.day, claim.leaseToken, claim.runId])
+        return !rows.isEmpty
+    }
+
     /// Returns true when the queue accepted the completion. False means the claim
     /// was superseded, in which case the transaction is rolled back so nothing is
     /// published for a claim the queue no longer owns.
     private func publishAndFinishFleet(_ claim: DayScorer.Claim, started: Date) throws -> Bool {
         try db.beginTransaction(.repeatableRead)
         do {
-            let payloads = try scorer.scoreAndBuildPayloads(claim: claim)
+            let payloads = try scorer.scoreAndBuildPayloads(claim: claim, buildSeries: false)
             let legacyData = try jsonText(payloads.legacy)
             try db.exec("SELECT set_config('request.jwt.claims', '{\"role\":\"service_role\"}', true)")
             _ = try db.callFunctionForJSONRaw(
@@ -291,6 +438,22 @@ struct ScoringLane {
     /// One v2 job inside a single REPEATABLE READ transaction: the claim, the
     /// input reads and the publication all share one snapshot.
     private mutating func runV2Once() throws -> Cycle {
+        var heldGate: String?
+        if v2InputGateSeconds > 0 {
+            guard let owner = try peekV2Owner() else { return .empty }
+            if try takeInputGate(owner: owner) {
+                heldGate = owner
+            } else {
+                stats.gateSkipped += 1
+            }
+        }
+        func dropGate() {
+            guard let owner = heldGate else { return }
+            heldGate = nil
+            releaseInputGate(owner: owner)
+        }
+        defer { dropGate() }
+
         try db.beginTransaction(.repeatableRead)
         do {
             let rows = try db.query(
@@ -317,7 +480,7 @@ struct ScoringLane {
                 measurementRevision: 0
             )
             let started = Date()
-            let payloads = try scorer.scoreAndBuildPayloads(claim: claim)
+            let payloads = try scorer.scoreAndBuildPayloads(claim: claim, buildSeries: publishesSeries)
             let snapshotData = try jsonText(payloads.snapshot)
             let durationMS = Int(Date().timeIntervalSince(started) * 1000)
             let publishJSON = try db.callFunctionForJSONRaw(
@@ -326,6 +489,8 @@ struct ScoringLane {
             let revision = Int64(publishJSON ?? "")
             if let revision, revision > 0 {
                 try db.commitTransaction()
+                dropGate()
+                publishSeries(payloads.series, claim: claim, scoringVersion: algorithmVersion)
                 return .completed
             }
             // NULL (or a non-positive revision) means the publication did NOT
@@ -338,6 +503,89 @@ struct ScoringLane {
         } catch {
             db.rollbackTransaction()
             throw error
+        }
+    }
+
+    /// `pg_try_advisory_lock_shared` on the key every upload takes exclusively and `publish_scoring_snapshot_v2`
+    /// takes shared (`hashtextextended('scoring-inputs-v2:' || owner, 0)`). Session level, so it outlives the
+    /// transaction that opens after it and the transaction's snapshot is taken only once the gate is held.
+    static let inputGateTrySQL = """
+        select pg_try_advisory_lock_shared(hashtextextended('scoring-inputs-v2:' || $1::text, 0))::text as acquired
+        """
+    static let inputGateReleaseSQL = """
+        select pg_advisory_unlock_shared(hashtextextended('scoring-inputs-v2:' || $1::text, 0))::text as released
+        """
+    /// A dry-run claim: the owner whose job `claim_scoring_v2` would take next. The claim is rolled back, so
+    /// no lease is left behind and the cooldown clock is untouched.
+    static let v2OwnerProbeSQL = "select user_id::text as user_id from public.claim_scoring_v2($1::text, $2::integer)"
+
+    private func peekV2Owner() throws -> String? {
+        try db.beginTransaction(.readCommitted)
+        defer { db.rollbackTransaction() }
+        let rows = try db.query(ScoringLane.v2OwnerProbeSQL, [v2AlgorithmVersion, String(leaseSeconds)])
+        guard let owner = rows.first?["user_id"], !owner.isEmpty else { return nil }
+        return owner
+    }
+
+    /// Poll for the gate instead of queueing for it. A queued request would sit ahead of every upload that
+    /// arrives afterwards, so each of them would wait out the whole computation as well as the queue ahead of
+    /// it, and the uploads that wait longest hit the API's statement timeout. Polling only ever takes the gate
+    /// at an instant when no upload holds it or waits for it. Returns false when it stays busy for
+    /// `v2InputGateSeconds`; the pass then claims without it (the original order), so a phone that never stops
+    /// uploading cannot starve scoring.
+    private mutating func takeInputGate(owner: String) throws -> Bool {
+        let started = Date()
+        let deadline = started.addingTimeInterval(TimeInterval(v2InputGateSeconds))
+        while true {
+            let rows = try db.query(ScoringLane.inputGateTrySQL, [owner])
+            if isTrue(rows.first?["acquired"]) {
+                stats.gateTaken += 1
+                stats.gateWaitMillis += Int(Date().timeIntervalSince(started) * 1000)
+                return true
+            }
+            if Date() >= deadline { return false }
+            Thread.sleep(forTimeInterval: ScoringLane.inputGatePollSeconds)
+        }
+    }
+
+    /// Release the gate once the snapshot transaction is over. Called only after a commit or rollback: inside an
+    /// aborted transaction the unlock would fail and the lock would stay held, stalling every upload for the
+    /// owner. A closed connection drops its session locks, so a failed unlock here can only mean the
+    /// connection is already gone; `pg_advisory_unlock_all` is the backstop for anything else.
+    private func releaseInputGate(owner: String) {
+        let released = (try? db.query(ScoringLane.inputGateReleaseSQL, [owner]))?.first?["released"]
+        if !isTrue(released) {
+            _ = try? db.query("select pg_advisory_unlock_all()::text as released", [])
+        }
+    }
+
+    /// Write the day's dense intraday series. It runs only after the snapshot transaction has committed, as
+    /// its own statement, and it never throws:
+    ///   * the series is derived data, so a failure here must not fail, retry or delay the day's scoring;
+    ///   * it must stay out of the snapshot transaction: that one holds the job-row and scoring-inputs locks
+    ///     uploads already deadlock against (docs/BACKEND.md, known issues), and lengthening it makes it worse;
+    ///   * every pass recomputes the whole day, so a write that is missed is repaired by the next one.
+    /// The database accepts the write only for the day's canonical device (`selected_scoring_device_v2`) and
+    /// leaves unchanged buckets untouched. That choice is made on the SCORING algorithm's jobs and snapshots, so
+    /// `scoringVersion` is the claimed job's version; the series' own version travels inside the payload.
+    private mutating func publishSeries(_ series: [String: Any]?, claim: DayScorer.Claim, scoringVersion: String) {
+        guard let series else { return }
+        do {
+            let reply = try db.callFunctionForJSON(
+                "SELECT public.publish_metric_series_v1($1::uuid,$2::uuid,$3::date,$4::text,$5::jsonb)::text",
+                [claim.userId, claim.deviceId, claim.day, scoringVersion, try jsonText(series)])
+            let outcome = reply.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
+            guard (outcome?["applied"] as? Bool) == true else {
+                stats.seriesSkipped += 1
+                return
+            }
+            stats.seriesPublished += 1
+            stats.seriesRowsWritten += (outcome?["upserted"] as? Int ?? 0) + (outcome?["deleted"] as? Int ?? 0)
+        } catch {
+            stats.seriesFailed += 1
+            FileHandle.standardError.write(
+                "frwhoop-worker: series publish failed day=\(claim.day) device=\(claim.deviceId.prefix(8)): \(error)\n"
+                    .data(using: .utf8)!)
         }
     }
 

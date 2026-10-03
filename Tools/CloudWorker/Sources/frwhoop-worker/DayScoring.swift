@@ -151,6 +151,20 @@ struct DayScorer {
         return (light, deep, rem)
     }
 
+    // MARK: - SpO₂ strap estimate
+
+    /// The snapshot `daily` keys for the strap's own SpO₂ estimate: the app's gated nightly mean over the
+    /// readings that fall inside the detected sleep (`AnalyticsEngine.nightlySpo2CandidateMean`, so the
+    /// phone and the server cannot disagree), and how many readings it rests on. Empty when no in-band
+    /// reading lies inside a session.
+    ///
+    /// Always under its own keys, never `spo2_pct`: the strap reports a percentage-like byte that
+    /// independent checks do not agree on, so it is a labelled estimate, not a calibrated blood-oxygen value.
+    static func spo2EstimateKeys(sessions: [SleepSession], readings: [V18AuxSample]) -> [String: Any] {
+        guard let night = AnalyticsEngine.nightlySpo2CandidateMean(sessions, aux: readings) else { return [:] }
+        return ["spo2_candidate_pct": night.mean, "spo2_candidate_samples": night.samples]
+    }
+
     // MARK: - R-R transport selection + intraday HRV
 
     /// Transports that can be scored on their own. A strap writes the SAME heartbeats through several of
@@ -223,7 +237,13 @@ struct DayScorer {
     /// Score one claimed day: load inputs, compute, and return both the
     /// legacy payload (engine_publish_legacy_fenced) and the v2 snapshot
     /// payload (publish_scoring_snapshot_v2) built from the same DayResult.
-    func scoreAndBuildPayloads(claim: Claim) throws -> (legacy: [String: Any], snapshot: [String: Any]) {
+    ///
+    /// `series` is the day's dense intraday series (`IntradaySeries`) in the shape
+    /// `publish_metric_series_v1` takes, computed from the streams already loaded for the snapshot. It is
+    /// nil when the day has too little heart rate to score or `buildSeries` is false. It is derived data
+    /// for a separate table and never part of the snapshot.
+    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true)
+        throws -> (legacy: [String: Any], snapshot: [String: Any], series: [String: Any]?) {
         let tz = TimeZone(identifier: claim.timezoneId) ?? TimeZone(identifier: "UTC")!
 
         // Calendar-correct day bounds (DST-safe). dayStart/dayEnd are local
@@ -252,6 +272,8 @@ struct DayScorer {
         let skinTemp = try loadSkinTemp(userId: claim.userId, deviceId: claim.deviceId, from: nightStart, to: nightEnd)
         let spo2 = try loadSpo2(userId: claim.userId, deviceId: claim.deviceId, from: nightStart, to: nightEnd)
         let events = try loadEvents(userId: claim.userId, deviceId: claim.deviceId, from: nightStart, to: nightEnd)
+        let spo2Estimates = try loadSpo2Estimates(userId: claim.userId, deviceId: claim.deviceId,
+                                                  from: nightStart, to: nightEnd)
         // The strap's OWN band sleep_state, the same raw stream the phone's
         // primary path reads (store.sleepStateSamples, IntelligenceEngine.swift:1428).
         let sleepState = try loadSleepState(userId: claim.userId, deviceId: claim.deviceId, from: nightStart, to: nightEnd)
@@ -278,11 +300,12 @@ struct DayScorer {
 
         // Real coverage numbers for EVERY stream loaded (not just hr/rr), and
         // dataThrough derived from the OBSERVED inputs (never a future bound).
-        let coverage = coverageJSON(hr: hr.count, rr: rr.count, resp: resp.count, gravity: gravity.count,
+        var coverage = coverageJSON(hr: hr.count, rr: rr.count, resp: resp.count, gravity: gravity.count,
                                     skinTemp: skinTemp.count, spo2: spo2.count, events: events.count,
                                     sleepState: sleepState.count, steps: steps.count,
                                     dayHr: dayHr.count, daySteps: daySteps.count, dayGravity: dayGravity.count,
                                     nightWindow: (nightStart, nightEnd))
+        coverage["spo2StrapEstimate"] = ["received": spo2Estimates.count]
         var observedTs: [Int] = []
         observedTs.append(contentsOf: hr.map { $0.ts })
         observedTs.append(contentsOf: rr.map { $0.ts })
@@ -335,7 +358,7 @@ struct DayScorer {
             if status != "available" {
                 snapshot["statusReasons"] = ["hr_too_sparse"]
             }
-            return (legacy, snapshot)
+            return (legacy, snapshot, nil)
         }
 
         let result = AnalyticsEngine.analyzeDay(
@@ -361,6 +384,7 @@ struct DayScorer {
         if !slots.isEmpty {
             snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots] as [String: Any]
         }
+        snapshotDaily.merge(Self.spo2EstimateKeys(sessions: result.sleepSessions, readings: spo2Estimates)) { _, new in new }
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
@@ -409,7 +433,16 @@ struct DayScorer {
                                                             gravityCount: gravity.count,
                                                             detectedSessionCount: result.sleepSessions.count)
         }
-        return (legacy, snapshot)
+
+        var series: [String: Any]?
+        if buildSeries {
+            // The night-window streams run past the day on both sides; the builder keeps `[dayStart, dayEnd)`.
+            let built = IntradaySeries.build(IntradaySeries.Inputs(
+                dayStart: dayStart, dayEnd: dayEnd, hr: dayHr, rr: rr, gravity: dayGravity, steps: daySteps,
+                profile: profile, restingHR: result.daily.restingHr))
+            series = IntradaySeries.payload(dayStart: dayStart, dayEnd: dayEnd, series: built)
+        }
+        return (legacy, snapshot, series)
     }
 
     // MARK: - Payload shaping
@@ -634,12 +667,15 @@ struct DayScorer {
         }
     }
 
+    /// The strap's event log. The SpO₂ strap-estimate readings share the table (one row per second, a few
+    /// hundred a night) and are read by `loadSpo2Estimates`; they are not events the scorer should see.
     private func loadEvents(userId: String, deviceId: String, from: Int, to: Int) throws -> [WhoopEvent] {
         let rows = try db.query("""
             select ts::text, kind, "payloadJSON" from public.noop_events
             where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint and ts < $4::bigint
+              and kind <> $5
             order by ts
-            """, [userId, deviceId, String(from), String(to)])
+            """, [userId, deviceId, String(from), String(to), Spo2StrapEstimate.eventKind])
         return rows.compactMap { r in
             guard let ts = Int64(r["ts"] ?? ""), let kind = r["kind"], !kind.isEmpty else { return nil }
             var payload: [String: ParsedValue] = [:]
@@ -669,6 +705,22 @@ struct DayScorer {
         return rows.compactMap { r in
             guard let ts = Int64(r["ts"] ?? ""), let state = Int(r["state"] ?? "") else { return nil }
             return (ts: Int(ts), state: state)
+        }
+    }
+
+    /// The strap's SpO₂ estimate readings the phone journaled as event rows (`Spo2StrapEstimate`), as the aux
+    /// samples the nightly gate reduces. A row whose payload is not an in-band whole percent is dropped.
+    private func loadSpo2Estimates(userId: String, deviceId: String, from: Int, to: Int) throws -> [V18AuxSample] {
+        let rows = try db.query("""
+            select ts::text, "payloadJSON" from public.noop_events
+            where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint and ts < $4::bigint
+              and kind = $5
+            order by ts
+            """, [userId, deviceId, String(from), String(to), Spo2StrapEstimate.eventKind])
+        return rows.compactMap { r in
+            guard let ts = Int64(r["ts"] ?? ""), let json = r["payloadJSON"],
+                  let percent = Spo2StrapEstimate.percent(fromPayloadJSON: json) else { return nil }
+            return V18AuxSample(ts: Int(ts), auxByte82: percent)
         }
     }
 

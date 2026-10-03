@@ -22,7 +22,14 @@ import FoundationNetworking
 //   FRWHOOP_ARCHIVE_BUDGET       archive jobs per wake (default 8)
 //   FRWHOOP_VERIFY_BUDGET        verification debt items per wake (default 4)
 //   FRWHOOP_RECONCILE_BUDGET     pending-object arrival reconciliations per wake (default 4)
-//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify)
+//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify);
+//                                "series" keeps scoring but stops building and writing the dense intraday series
+//   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
+//                                (default 20; 0 claims them immediately, as the queue did originally)
+//   FRWHOOP_LEGACY_MAX_DEFER_SECONDS a legacy item is claimed regardless once it has waited this long (default 1800)
+//   FRWHOOP_V2_INPUT_GATE_SECONDS the v2 scoring lane polls this long for its owner's scoring-input gate before
+//                                claiming a job, so it takes locks in the order uploads do (default 10; 0 claims
+//                                first, as the lane did originally)
 //   FRWHOOP_POLL_INTERVAL_MS     idle poll interval (default 1000)
 //   FRWHOOP_HEARTBEAT_INTERVAL_MS heartbeat interval (default 15000)
 //   FRWHOOP_MAX_RUNTIME_SECONDS  exit after N seconds (0 = run forever; for scripted tests)
@@ -50,6 +57,9 @@ struct WorkerConfig {
     let verifyBudget: Int
     let reconcileBudget: Int
     let disabledLanes: Set<String>
+    let legacyQuietSeconds: Int
+    let legacyMaxDeferSeconds: Int
+    let v2InputGateSeconds: Int
     let pollIntervalMS: Int
     let heartbeatIntervalMS: Int
     let maxRuntimeSeconds: Double
@@ -81,6 +91,12 @@ struct WorkerConfig {
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
                 .filter { !$0.isEmpty })
+        self.legacyQuietSeconds = max(0, Int(environment["FRWHOOP_LEGACY_QUIET_SECONDS"] ?? "")
+            ?? ScoringLane.defaultLegacyQuietSeconds)
+        self.legacyMaxDeferSeconds = max(1, Int(environment["FRWHOOP_LEGACY_MAX_DEFER_SECONDS"] ?? "")
+            ?? ScoringLane.defaultLegacyMaxDeferSeconds)
+        self.v2InputGateSeconds = max(0, Int(environment["FRWHOOP_V2_INPUT_GATE_SECONDS"] ?? "")
+            ?? ScoringLane.defaultV2InputGateSeconds)
         self.pollIntervalMS = Int(environment["FRWHOOP_POLL_INTERVAL_MS"] ?? "1000") ?? 1000
         self.heartbeatIntervalMS = Int(environment["FRWHOOP_HEARTBEAT_INTERVAL_MS"] ?? "15000") ?? 15000
         self.maxRuntimeSeconds = Double(environment["FRWHOOP_MAX_RUNTIME_SECONDS"] ?? "0") ?? 0
@@ -273,7 +289,11 @@ func runLane(_ state: LaneState,
 }
 
 var projection = ProjectionLane(db: dbProjection, storage: storage)
-var scoring = ScoringLane(db: dbScoring, scorer: DayScorer(db: dbScoring), ingestSecret: config.ingestSecret)
+var scoring = ScoringLane(db: dbScoring, scorer: DayScorer(db: dbScoring), ingestSecret: config.ingestSecret,
+                          publishesSeries: laneEnabled("series"),
+                          legacyQuietSeconds: config.legacyQuietSeconds,
+                          legacyMaxDeferSeconds: config.legacyMaxDeferSeconds,
+                          v2InputGateSeconds: config.v2InputGateSeconds)
 var archive = ArchiveLane(db: dbArchive, storage: storage)
 var verify = VerificationLane(db: dbVerify, storage: storage)
 
@@ -310,8 +330,16 @@ if laneEnabled("scoring") {
                     "failed": scoring.stats.failed,
                     "superseded": scoring.stats.superseded,
                     "not_completed": scoring.stats.notCompleted,
+                    "legacy_deferred": scoring.stats.legacyDeferred,
+                    "gate_taken": scoring.stats.gateTaken,
+                    "gate_wait_ms": scoring.stats.gateWaitMillis,
+                    "gate_skipped": scoring.stats.gateSkipped,
                     "failures_persisted": scoring.stats.failuresPersisted,
                     "failures_unsettled": scoring.stats.failuresUnsettled,
+                    "series_published": scoring.stats.seriesPublished,
+                    "series_rows_written": scoring.stats.seriesRowsWritten,
+                    "series_skipped": scoring.stats.seriesSkipped,
+                    "series_failed": scoring.stats.seriesFailed,
                 ]
                 $0.lastError = scoring.stats.lastError
                 $0.lastErrorKind = scoring.stats.lastErrorKind?.rawValue

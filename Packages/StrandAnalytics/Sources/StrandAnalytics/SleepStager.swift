@@ -2087,7 +2087,7 @@ public enum SleepStager {
     /// costs far more data than it saves, and both medians (over intervals, then over windows) dilute a
     /// single spurious peak among a five-minute window's worth.
     /// Returns NaN when too few intervals survive (honest no-data).
-    static func respRateFromRR(_ rr: [RRInterval], start: Int, end: Int) -> Double {
+    public static func respRateFromRR(_ rr: [RRInterval], start: Int, end: Int) -> Double {
         let nan = Double.nan
         if end <= start { return nan }
 

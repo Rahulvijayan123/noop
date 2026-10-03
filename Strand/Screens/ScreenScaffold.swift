@@ -261,3 +261,15 @@ extension EnvironmentValues {
         set { self[ScrollToTopSignalKey.self] = newValue }
     }
 }
+
+/// Placeholder body for screens whose UI is still to come.
+struct ComingSoonScreen: View {
+    let title: LocalizedStringKey
+    var body: some View {
+        ScreenScaffold(title: title) {
+            Text("Coming soon")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+        }
+    }
+}

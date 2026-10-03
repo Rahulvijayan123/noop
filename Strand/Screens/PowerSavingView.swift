@@ -19,6 +19,8 @@ struct PowerSavingView: View {
     /// Stored INVERTED so the default (absent = false) reads as "HRV pause on". The toggle shows `!this`.
     @AppStorage(PuffinExperiment.pauseHrvDisabledKey) private var pauseHrvDisabled = false
     @AppStorage(PuffinExperiment.lowRefreshKey) private var lowRefreshEnabled = false
+    /// Default ON, matching `PuffinExperiment.freshSyncEnabled` (an absent key reads as on).
+    @AppStorage(PuffinExperiment.freshSyncKey) private var freshSyncEnabled = true
 
     var body: some View {
         ScreenScaffold(title: "Power saving",
@@ -97,6 +99,24 @@ struct PowerSavingView: View {
                                 .foregroundStyle(StrandPalette.textTertiary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                    }
+                }
+
+                NoopCard {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Fresh data").strandOverline()
+                        Toggle(isOn: $freshSyncEnabled) {
+                            Text("Sync every minute")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                        }
+                        .toggleStyle(.switch)
+                        .tint(StrandPalette.accent)
+                        .onChangeCompat(of: freshSyncEnabled) { _ in model.applyPowerSaving() }
+                        Text("With cloud scoring on, a WHOOP 5.0 or MG hands NOOP its history about once a minute, so steps, calories and respiratory rate stay current instead of arriving in batches every few minutes. Live heart rate is unaffected either way. Low refresh overrides this, and Power saving slows it while the strap's battery is low. Nothing is lost if you turn it off: the strap banks everything and hands it over later.")
+                            .font(StrandFont.caption)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }

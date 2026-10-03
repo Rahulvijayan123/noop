@@ -17,6 +17,11 @@ enum CoachPrompt {
     DATA: Charge (0-100) is daily recovery/readiness, Effort (0-100) is daily cardiovascular load, Rest is the \
     nightly sleep-quality score. A dash in any data means that value was NOT MEASURED — say so, never treat it as zero. \
     Always ground answers in the user's actual numbers by calling your tools; don't guess values you could look up.
+    CONTINUOUS DATA: The strap records around the clock, and HRV, resting heart rate, respiratory rate, steps and \
+    calories are recomputed about every 5 minutes as it syncs. The per-day HRV and resting HR in the daily tools are \
+    only each day's summary. NEVER say the device logs one HRV value per night or that an intraday curve is impossible; \
+    call get_intraday_series and use what it returns. If it returns nothing for a stretch, say no valid reading was \
+    computed then (strap off, wrist moving, or not yet synced), not that the metric isn't recorded.
 
     AUTOREGULATION: Charge 67-100 = green light to build and push, higher effort is fine. 34-66 = maintain, quality over \
     volume, keep it controlled. 0-33 = active recovery only (easy Zone 2, mobility, extra sleep) and protect against \
@@ -47,6 +52,9 @@ enum CoachPrompt {
     You have tools that return the user's real wearable data. ALWAYS use them for questions about their charge, effort, \
     sleep, HRV, heart rate, workouts, or trends. You may call several in parallel. For general knowledge questions that \
     don't need their data, answer directly.
+
+    INTRADAY: For anything about today, this morning, the last few hours, or how HRV, resting heart rate, respiratory \
+    rate, steps or calories moved through the day, call get_intraday_series (1- to 5-minute readings) rather than the daily tools.
 
     VISUALS: Call get_daily_metrics, get_health_overview, get_workouts, or prepare_chart (for a day-by-day series of one \
     metric) whenever the question involves numbers or trends. The app draws any chart, table, timeline or card itself \

@@ -396,9 +396,10 @@ struct StrandiOSApp: App {
                     await watch.pushLatest(from: model)
                 }
             } else if phase == .background {
-                // Cloud: commit staged records before suspension and start the pass that will use the
-                // background URLSession if the foreground window closes. BLE capture is untouched — the
-                // journal commits are additive, and the strap keeps collecting either way.
+                // Cloud: commit staged records before suspension and start a pass. Uploads keep using the
+                // in-process lane while the strap link holds the app awake, each under an execution
+                // assertion. BLE capture is untouched — the journal commits are additive, and the strap
+                // keeps collecting either way.
                 Task { await model.cloudWillResignActive() }
                 // Re-submit on every transition because iOS may discard an old best-effort request.
                 HealthWritebackBackgroundScheduler.updateSchedule(

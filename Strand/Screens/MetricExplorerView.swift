@@ -734,6 +734,8 @@ struct MetricDetailView: View {
     @State private var heroAnimatedFraction: Double = 0
     /// Full ascending series for this metric — ALL history.
     @State private var series: [(day: String, value: Double)] = []
+    /// Nightly SDNN index, charted next to the headline RMSSD on the HRV screen only.
+    @State private var sdnnSeries: [(day: String, value: Double)] = []
     /// day → the RAW source id that supplied that day's value (task #8). Loaded from `resolvedSeries`
     /// alongside `series` and used ONLY for the readings-table provenance column, so the plotted line
     /// (which rides `series`/`exploreSeries`) is never changed by adding source labels.
@@ -938,6 +940,7 @@ struct MetricDetailView: View {
                     // the ranges to misrepresent, and hiding the bar here would regress this
                     // "for context" intent.
                     rangeBar(effectiveRange: effRange, windowed: win, windowFellBack: fellBack)
+                    intradaySection
                     if metric.key == "fitness_age" {
                         // Fitness Age is COMPUTED on-device from resting HR + activity — not imported — so
                         // the generic "import your history" copy was wrong (and a dead end) here. Lead with
@@ -978,7 +981,12 @@ struct MetricDetailView: View {
                     // scores) or a big SF-Rounded headline, floated over the domain's starfield,
                     // with the range pill. Then the frosted chart / stat tiles / correlations.
                     heroHeader(effectiveRange: effRange, windowed: win, windowFellBack: fellBack)
-                    heroChart(effectiveRange: effRange, windowed: win, windowFellBack: fellBack)
+                    intradaySection
+                    if let dual = hrvDualPoints(windowed: win) {
+                        hrvDualHeroChart(points: dual, effectiveRange: effRange, windowFellBack: fellBack)
+                    } else {
+                        heroChart(effectiveRange: effRange, windowed: win, windowFellBack: fellBack)
+                    }
                     // #1848: the skin-temp explorer's explanatory note (nil for every other metric and
                     // for a skin-temp screen that needs no explanation). Sits between the chart and the
                     // stats so it reads as context for the series just plotted, not as a generic banner.
@@ -1039,6 +1047,21 @@ struct MetricDetailView: View {
         // Range changes the window, hence the correlation inputs — recompute the
         // cached scan rather than letting `correlationCard` run it inside body.
         .onChangeCompat(of: range) { _ in recomputeCorrelations() }
+    }
+
+    /// The server's 5-minute series for this metric, when the hosted worker computes one (HRV, resting heart
+    /// rate, respiratory rate, steps and calories from the strap) and cloud scoring is on. Everything else,
+    /// and every local-scoring install, shows nothing here.
+    @ViewBuilder
+    private var intradaySection: some View {
+        if let intraday = intradayMetric {
+            IntradaySeriesSection(metric: intraday, accent: metricAccent(metric))
+        }
+    }
+
+    private var intradayMetric: IntradayMetric? {
+        guard CloudPushSettings.isEnabled, CloudPushSettings.isConfigured else { return nil }
+        return IntradayMetric(catalogKey: metric.key, source: metric.source)
     }
 
     /// Two phases, because the screen used to wait for data it does not draw.
@@ -1204,6 +1227,11 @@ struct MetricDetailView: View {
         // OVERWRITES @State range - it renders through `coercedSelection` instead (non-destructive,
         // recomputed every body eval), so a shrinking history re-coerces and a growing one un-coerces
         // with no snap-back. See `coercedSelection`.
+        if metric.key == "hrv" {
+            sdnnSeries = repo.days.compactMap { row in
+                row.avgSdnn.map { (day: row.day, value: $0) }
+            }.sorted { $0.day < $1.day }
+        }
         loaded = true
 
         // Phase 2 — the cross-catalog scan behind the correlation card, now that the screen is up.
@@ -1402,12 +1430,18 @@ struct MetricDetailView: View {
                               windowFellBack: Bool) -> String {
         guard loaded, !windowed.isEmpty else { return "—" }
         let n = windowed.count
+        let dailySummary = intradayMetric != nil
         if isStepsDetail {
-            let name = windowFellBack
-                ? String(localized: "sparse, widened to \(effectiveRange.name)")
-                : effectiveRange.name
+            let name = dailySummary
+                ? DailyHistoryWording.rangeName(effectiveRange.name, widened: windowFellBack)
+                : windowFellBack
+                    ? String(localized: "sparse, widened to \(effectiveRange.name)")
+                    : effectiveRange.name
             return MetricDetailSteps.countCaption(
                 count: n, resolution: MetricDetailSteps.resolution(for: effectiveRange), rangeName: name)
+        }
+        if dailySummary {
+            return DailyHistoryWording.caption(days: n, rangeName: effectiveRange.name, widened: windowFellBack)
         }
         if windowFellBack {
             return n == 1
@@ -1436,14 +1470,22 @@ struct MetricDetailView: View {
         }()
         let heroValue = latestPoint.map { fmt($0.value) } ?? "—"
         let subtitle: String = {
+            let dailySummary = intradayMetric != nil
             if isStepsDetail {
-                let name = windowFellBack
-                    ? String(localized: "sparse, widened to \(effectiveRange.name)")
-                    : effectiveRange.name
+                let name = dailySummary
+                    ? DailyHistoryWording.rangeName(effectiveRange.name, widened: windowFellBack)
+                    : windowFellBack
+                        ? String(localized: "sparse, widened to \(effectiveRange.name)")
+                        : effectiveRange.name
                 return MetricDetailSteps.countCaption(
                     count: windowed.count,
                     resolution: MetricDetailSteps.resolution(for: effectiveRange),
                     rangeName: name)
+            }
+            if dailySummary {
+                let days = DailyHistoryWording.caption(days: windowed.count, rangeName: effectiveRange.name,
+                                                       widened: windowFellBack)
+                return String(localized: "Daily summary · \(days)")
             }
             return windowFellBack
                 ? String(localized: "Sparse, widened to \(effectiveRange.name) · \(windowed.count) readings")
@@ -1513,6 +1555,47 @@ struct MetricDetailView: View {
                     ("Window", effectiveRange.label),
                     ("Points", "\(windowed.count)"),
                     ("Latest", heroValue),
+                ])
+            }
+        }
+    }
+
+    // MARK: HRV: RMSSD + SDNN together
+
+    /// Both nightly HRV numbers for the visible window, or nil when this isn't the HRV screen or no night
+    /// has an SDNN yet (the single-series chart then renders exactly as before).
+    private func hrvDualPoints(windowed: [(day: String, value: Double)]) -> [HRVDualPoint]? {
+        guard metric.key == "hrv" else { return nil }
+        let sdnn = HRVDualSeries.window(sdnnSeries, firstDay: windowed.first?.day)
+        guard !sdnn.isEmpty else { return nil }
+        let merged = HRVDualSeries.merge(rmssd: windowed, sdnn: sdnn)
+        return merged.isEmpty ? nil : merged
+    }
+
+    private func hrvDualHeroChart(points: [HRVDualPoint],
+                                  effectiveRange: ExploreRange,
+                                  windowFellBack: Bool) -> some View {
+        let subtitle = windowFellBack
+            ? String(localized: "Sparse, widened to \(effectiveRange.name) · \(points.count) nights")
+            : String(localized: "RMSSD and SDNN · \(points.count) nights · \(range.name)")
+        let ratio = HRVDualSeries.ratio(points)
+        return ChartCard(
+            title: LocalizedStringKey("\(metric.title)"),
+            subtitle: subtitle,
+            height: NoopMetrics.chartHeight + 30,
+            tint: metricDomain(metric).color
+        ) {
+            HRVDualChart(points: points, baselineRMSSD: personalBaseline, height: NoopMetrics.chartHeight)
+        } footer: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("RMSSD is your headline HRV, the beat-to-beat change measured overnight. SDNN is the overall spread across the night, averaged over 5-minute windows, so it reads higher. They are different measures and are kept apart. The dashed line is your RMSSD baseline.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                ChartFooter([
+                    ("Window", effectiveRange.label),
+                    ("Nights", "\(points.count)"),
+                    ("SDNN ÷ RMSSD", ratio.map { String(format: "%.2f", $0) } ?? "—"),
                 ])
             }
         }

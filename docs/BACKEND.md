@@ -27,7 +27,7 @@ and checking each part.
 | Function | Called by | Purpose |
 | --- | --- | --- |
 | `push` | the app | Receives upload batches and object-lane uploads, writes rows and receipts. |
-| `scores` | the app | Returns published score snapshots and the changed-days feed. Also handles enrollment-time device registration and sleep edits. |
+| `scores` | the app | Returns published score snapshots, the changed-days feed and the intraday metric series (`GET /series`). Also handles enrollment-time device registration and sleep edits. |
 | `coach` | the app | Relays Coach questions to the language model and stores the conversation, the coach's memory and the Settings profile (`/profile`). Authenticates like `push` (installation bearer plus the fleet token). |
 | `ingest-verify` | operators | Checks the ingest pipeline end to end. |
 | `reconcile` | scheduled | Reconciles the object manifest against storage. |
@@ -121,9 +121,144 @@ archive and verify stay on.
 
 After changing a drop-in, run `systemctl daemon-reload && systemctl restart frwhoop-worker`.
 
+#### Legacy queue gating
+
+The scoring lane serves two queues, and the legacy fleet queue (`scoring_work_items`) comes first. Its
+results are not read by the app or by any edge function (the v2 publish refreshes the same
+`server_daily_scores` rows), but an upload re-queues the day and revokes any legacy claim for it. While a
+phone uploads every few seconds a legacy attempt therefore cannot finish: it computes the whole day (about
+10 s, and the retry loop repeated that up to three times), loses the claim, and is claimed again at once. Measured over
+12 minutes, 37 of the lane's 46 claims were legacy attempts and 33 were thrown away, which is why v2
+snapshots for the day came 1 to 7 minutes apart.
+
+The worker now leaves a legacy item alone while its owner has uploaded in the last
+`FRWHOOP_LEGACY_QUIET_SECONDS` (default 20; 0 restores the old behaviour), and claims it regardless once it
+has waited `FRWHOOP_LEGACY_MAX_DEFER_SECONDS` (default 1800), at most once per item per that long. A claim
+that an upload has revoked is no longer retried. The scoring lane's heartbeat counter `legacy_deferred`
+counts cycles that had only deferred legacy work, so a growing legacy backlog while the phone is active is
+expected, not a fault.
+
+#### Scoring input gate
+
+An upload takes the owner's `scoring-inputs-v2` advisory lock exclusively and then updates the job row.
+The v2 scoring pass used to do the opposite: it locked the job row when it claimed it, ran for about
+7 seconds, and asked for the shared side of the advisory lock only at publication. Any upload that
+reached its job-row update during those 7 seconds therefore deadlocked with the publication. Postgres
+killed the publication, so the whole pass was computed a second time (the worker retries a deadlock),
+or it killed the upload. Every pass ended that way once uploads arrived every couple of seconds: over
+14 minutes at a 45 second cooldown, 8% of uploads failed and the 90th percentile of an upload was 9 to
+10 seconds.
+
+The lane now takes that advisory lock (shared, session level) before it claims the job, so it locks in
+the same order as an upload. It first runs the claim function as a rolled-back dry run to learn which
+owner is next, then polls `pg_try_advisory_lock_shared` every 100 ms for up to
+`FRWHOOP_V2_INPUT_GATE_SECONDS` (default 10; 0 restores the old order). It polls instead of queueing
+because a queued request would sit ahead of every upload that arrives later. If the gate stays busy for
+the whole wait, the pass claims without it, so a phone that never stops uploading cannot starve scoring.
+The gate is released as soon as the snapshot transaction commits or rolls back. A dead connection drops
+it with the session. The scoring lane's heartbeat counters `gate_taken`, `gate_wait_ms` (summed) and
+`gate_skipped` show how it is doing; `gate_skipped` should stay near zero.
+
+With the gate in place the deadlocks stopped, uploads failed about 1% of the time, the 90th percentile of
+an upload fell to about 4 seconds, and today's snapshot is published every 45 to 46 seconds, which is the
+cooldown, instead of every 54 seconds. To check it, count `deadlock detected` and `statement timeout`
+entries in the database's Postgres logs and the non-200 `push` responses in `function_edge_logs`.
+
+## Intraday metric series
+
+HRV, resting heart rate, respiratory rate, steps and calories are also stored as a dense series, one
+value per bucket (one minute for respiratory rate, steps and calories, five for HRV and resting heart
+rate), next to the one-value-per-day rows in `server_daily_scores`. Baselines and
+event detection need the shape of the day, which a single daily number cannot give them.
+
+```text
+phone upload -> push -> noop_* rows -> scoring_jobs_v2 marked dirty -> worker re-scores the day
+  -> publish_scoring_snapshot_v2 (commits)
+  -> publish_metric_series_v1 (a separate statement) -> server_metric_series
+  -> GET scores/series -> the "Through the day" card on each metric's detail page
+```
+
+All of the arithmetic runs on the VPS (`Tools/CloudWorker/Sources/frwhoop-worker/IntradaySeries.swift`).
+Every scoring pass rebuilds the whole day's series from the raw streams, so a bucket fills in once the
+upload behind it has been scored. The cadence follows data arrival, not a timer, so the limit is how soon
+the strap's samples reach the database. The links in the chain, with the app open and a WHOOP 5.0/MG
+connected:
+
+| Link | Interval | Set by |
+| --- | --- | --- |
+| Strap to phone, heart rate and R-R | continuous (about 1 Hz) | BLE notifications |
+| Strap to phone, steps, motion, skin temperature, sleep state, SpO₂ byte | one history offload a minute | `BLEManager.freshBackfillIntervalSeconds`; the Power-saving "Sync every minute" switch (`noopFreshSync`, on by default, cloud mode only) |
+| Strap to phone, PPG waveform and PPG heart rate | one window of about 40 s roughly every 20 minutes, inside the same history offloads | The strap decides; the phone keeps these locally and does not upload them (see Known issues) |
+| Phone to Supabase | a batch about every 2.5 s in the foreground (measured: median gap 1.8 s), 10 s off screen; the upload that meets a scoring pass waits up to about 8 s. Measured with the phone passcode-locked for 20 minutes: 20 batches a minute across all streams (28 with the screen on), longest gap 19 s | `CloudCapture.sealTargetSeconds`; the scoring input gate below |
+| Day re-scored on the VPS | at most once per 45 s per day, whatever the number of uploads | `claim_scoring_v2` (migration `20261002123000`) |
+| Series and snapshot read by the app | every 30 s while a screen shows them | `AppModel.hostedRefreshSeconds`, `IntradaySeriesSection.refreshSeconds` |
+
+That puts a new step or calorie on screen roughly one to two minutes after the strap recorded it.
+While iOS has the app suspended (overnight, for instance) samples arrive hours late in one batch, and the
+buckets behind them fill in all at once.
+
+Heart rate reaches the receiver at most once per second of the day. The live notification and the history
+offload both carry most seconds, with a bpm that differs by a few beats, and the receiver treats a second
+that arrives with two values as a conflict and keeps neither (see Known issues). `CloudHeartRateLedger`
+(`Strand/Push/CloudCapture.swift`) therefore lets a second into the journal once, with whichever sample
+arrives first, the same rule the phone's own store applies. The offload still fills every second the live
+stream missed.
+
+| `metric` | Value in a bucket | Notes |
+| --- | --- | --- |
+| `hrv_rmssd_ms` | RMSSD of the bucket's clean R-R beats | Quiet wrist only, and at least 45 clean beats, so most daytime buckets are empty. |
+| `resting_hr_bpm` | Lowest near-still 5-minute mean over the trailing hour | The nightly definition applied to a moving window. |
+| `resp_rate_bpm` | Respiratory rate from the breaths in the trailing 2 minutes of R-R, one point per minute | Quiet wrist only. Read per unbroken run of beats (`SleepStager.respBreathTrack`), so a dropout costs only the seconds it covers; the nightly rate still uses 300 s windows. |
+| `steps` | Steps in the minute | The day's buckets sum to the daily total. |
+| `calories_kcal` | Resting plus active energy in the minute | The day's buckets sum to the daily total. |
+
+Each payload carries `bucket_seconds` (the default, 300) and `metric_bucket_seconds` (a width per metric), and
+each row stores its own `bucket_seconds`; the read returns both the widest bucket overall and the widest per
+metric. Apply `20261002120000_metric_series_per_metric_buckets.sql` before deploying a worker that sends
+`metric_bucket_seconds`: the earlier publish function ignores the field and would label minute buckets as
+five minutes wide.
+
+Buckets are anchored at the start of the day in the timezone the phone reported for it, the same day the
+daily scores use, so a day is 288 five-minute buckets (276 or 300 on a DST change) and 1,440 one-minute ones (1,380 or 1,500). Each row also carries the observations behind it (`sample_count`), the share of the
+bucket they cover (`coverage`) and how much the wrist was moving (`motion`), so a consumer can weigh or
+drop it. Values outside a plausible range are dropped rather than clamped.
+
+How it is written and read:
+
+- `publish_metric_series_v1(user, device, day, version, payload)` is callable by the service role only.
+  It does nothing unless the calling device is the one the day's scores are read from
+  (`selected_scoring_device_v2`), writes only buckets whose content changed, and deletes buckets in the
+  day's window that the payload no longer contains. The worker calls it after the snapshot transaction has
+  committed, never inside it: that transaction holds the locks uploads already deadlock against (see
+  Known issues). A failure is counted and logged, and the next scoring pass of that day repairs it.
+- `server_metric_series_read(user, from, to, metrics)` returns up to 72 hours as one jsonb document, which
+  keeps a full day under PostgREST's 1,000-row cap.
+- `GET /functions/v1/scores/series?deviceId=<id>&from=<unix>&to=<unix>[&metrics=a,b]` authenticates like
+  the other `scores` routes and returns `{series, identity}`, where `series.metrics.<name>` is a list of
+  `[bucket_start_unix, value, sample_count, coverage, motion]`. An unregistered device answers 409
+  `device_registration_pending`.
+- The app (`Strand/Push/IntradaySeriesStore.swift`) refreshes every 30 seconds while the card is on
+  screen and keeps the last response on disk, so it still draws offline.
+- The coach reads the same series through its `get_intraday_series` tool (`Strand/Coach/CoachIntraday.swift`),
+  and its prompt states that these metrics are continuous. The daily tools (`get_daily_metrics`,
+  `prepare_chart`) still return one HRV and resting HR per day, which is a summary, not what the strap records.
+- On a metric page, the daily-history chart under the intraday card is labelled in days ("2 days · ALL"),
+  never "readings" or "sparse", for these five metrics.
+
+Switch the series off without stopping scoring by adding `series` to `FRWHOOP_DISABLE_LANES` (for
+example `projection,series`) and restarting the worker. The table keeps what it holds.
+
+Known limits:
+
+- The series starts on the day the worker carrying it was deployed. Re-scoring an earlier day (marking its
+  `scoring_jobs_v2` row dirty) writes that day's series from the stored raw data, for as long as the raw
+  rows are kept.
+- Only the v2 scoring lane writes it. The legacy fleet lane does not.
+- A bucket holds a value only when the strap sent enough data for it. Gaps are expected: daytime HRV and
+  respiratory rate in particular are sparse by design.
 ## Health checks
 
-Run these with `psql` against the database. All four are read-only.
+Run these with `psql` against the database. All of them are read-only.
 
 ```sql
 -- Is the worker alive? since_poll should be under about 15 seconds.
@@ -141,6 +276,37 @@ from scoring_jobs_v2;
 
 -- What was published most recently?
 select day, device_id, computed_at from scoring_snapshots_v2 order by computed_at desc limit 5;
+
+-- Which device feeds each day of one owner's baselines, and which metrics did it contribute?
+select day, source_device_id, hrv_rmssd_ms is not null as hrv, resting_hr_bpm is not null as rhr,
+       resp_rate_bpm is not null as resp, skin_temp_c is not null as skin
+from server_daily_scores
+where user_id = '<owner uuid>' and algorithm_version = 'frwhoop-server-1' order by day desc limit 14;
+
+-- Is the intraday series fresh? Filter on user_id first: the table holds a row per bucket.
+select metric, count(*) as buckets, max(bucket_start) as latest_bucket, max(computed_at) as latest_write
+from server_metric_series
+where user_id = '<owner uuid>' and bucket_start > now() - interval '24 hours'
+group by metric order by metric;
+
+-- Are heart-rate seconds being refused? New rows per hour should stay at 0 while phones run the ledger
+-- build (the first query), and a worn, connected strap should reach close to 3,600 seconds an hour.
+select date_trunc('hour', detected_at) as hour, count(*) as refused_seconds
+from noop_projection_conflicts
+where user_id = '<owner uuid>' and stream = 'hrSample' and detected_at > now() - interval '24 hours'
+group by 1 order by 1;
+select date_trunc('hour', to_timestamp(ts)) as hour, count(*) as seconds
+from noop_hr_samples
+where user_id = '<owner uuid>' and ts > extract(epoch from now() - interval '12 hours')
+group by 1 order by 1;
+
+-- Series counters since the worker started. series_failed should stay at 0; series_skipped counts days
+-- whose canonical device was another one.
+select l->'counters'->>'series_published' as published, l->'counters'->>'series_rows_written' as rows_written,
+       l->'counters'->>'series_skipped' as skipped, l->'counters'->>'series_failed' as failed
+from (select meta from scoring_service_heartbeats order by last_poll_at desc limit 1) h,
+     jsonb_array_elements(h.meta->'lanes') l
+where l->>'name' = 'scoring';
 ```
 
 For upload errors, check the `push` function's logs in the Supabase dashboard, or query
@@ -148,16 +314,60 @@ For upload errors, check the `push` function's logs in the Supabase dashboard, o
 
 ## Known issues
 
-- **Lock-order conflict between uploads and scoring.** The worker's scoring transaction locks the
-  job row first and then takes a shared advisory lock on the user's inputs. An upload takes the
-  exclusive advisory lock first and then updates the job row. When both happen at once for the same
-  user, Postgres reports a deadlock and one side retries. Migration `20260930231500` stops the worker
-  from re-claiming a day within two minutes of its last claim, which cut upload failures from about
-  15% to about 2%. The full fix is to make the worker take the advisory lock before claiming the row.
+- **Uploads wait for a scoring pass.** The scoring pass holds the owner's scoring-input gate for its whole
+  computation (about 7 seconds) so that no upload can change the inputs under it; an upload that arrives
+  meanwhile waits, and one that arrives in the first second or so exceeds the API's 8 second statement
+  timeout and is retried by the app (about 1% of uploads). Letting `publish_scoring_snapshot_v2` accept a
+  revision that moved on, and leave the job dirty for the next pass, would remove the wait, but changes the
+  fenced publication contract and has not been done. Migration `20260930231500` still stops the worker from
+  re-claiming a day within two minutes of its last claim, and `20261002123000` shortens that to 45 seconds;
+  the cooldown only starts when a pass commits.
+- **Heart-rate seconds the receiver removed before 2 October 2026.** `noop_project_append_batch` keeps one
+  bpm per (device, second). When a second arrives again with a different bpm it writes the key to
+  `noop_projection_conflicts`, deletes the row it holds and refuses that second from then on. Earlier
+  builds offered the same second twice with different values: the live 0x2A37 notification and the
+  history offload (the offload carries every second the live stream already did, and its bpm matched in
+  about a quarter of them), and now and then two live notifications in one second. On the account checked,
+  51,838 seconds (about 14 hours, 30 September to 2 October) were removed that way, so the server held 37%
+  to 64% of each day's seconds while the phone held all of them. Only heart rate was affected: R-R, motion,
+  skin temperature, steps, sleep state and battery rows were complete. `CloudHeartRateLedger` stops new
+  conflicts. The removed seconds are still in `noop_projection_observations`; restoring them means
+  re-inserting each key's first observation into `noop_hr_samples` and deleting its marker, which marks the
+  affected days for scoring again. That repair has not been run. Changing the receiver to keep the first
+  value instead of deleting both would also stop the problem, but it relaxes a deliberate rule (a
+  contradiction is recorded, never silently resolved) and has not been done.
 - **Old projection debt.** About 16,000 `noop_projection_debt` rows from 12–20 September, from other
   test devices, fail replay and are left unprocessed while the projection lane is off. Clearing or
   dead-lettering them would let the lane run again.
 - **Verify lane mismatches.** The verify lane logs digest mismatches for some older objects.
 - **One other device fails a check constraint** on upload. It is not this app's install.
+- **Baselines come from one `server_daily_scores` row per owner and day.** The v2 projection fills it
+  from the device whose latest snapshot holds the most for that day (`selected_scoring_device_v2`: status,
+  then scored metrics, then serial-scoped over installation-scoped, then heart-rate coverage), so a strap
+  that was re-paired under a new install keeps its earlier nights in the baseline. A row in
+  `scoring_source_preferences_v2` overrides this for every day, including days that device never scored,
+  so do not use it to consolidate history. The legacy lane still upserts the same row for whichever device
+  it claimed, so a late upload from a stale install can replace a better row until the v2 lane next
+  refreshes that day. `reproject_scoring_legacy_v2(user, version)` rebuilds the rows from the stored
+  snapshots (derived rows only, safe to repeat); `20261001190000_baseline_device_selection.sql` runs it
+  once.
 - **Recovery** stays at "Calibrating" until a device has four nights of data.
-- **Blood oxygen** stays empty because the synced strap history contains no SpO₂ samples.
+- **Blood oxygen** is a strap estimate, not a measurement, and exists only for the night. The WHOOP 5.0/MG
+  history carries one SpO₂ byte per record (`@82` of the v18 record), but the strap fills it only while the
+  wearer is asleep and still: about 400 to 500 in-band readings (70 to 100) a night and none by day. Whether
+  those bytes are calibrated percentages is not established (the validity evidence disagrees), so they are
+  never published as `spo2Pct` and never feed a score. The phone sends each reading as a `SPO2_STRAP_EST`
+  event (`{"pct":97}`), the worker averages them per night into `spo2_candidate_pct` and
+  `spo2_candidate_samples` in the day's snapshot (`coverage.spo2StrapEstimate` records how many arrived), and
+  the app shows the number as "strap estimate (unverified)" (`PuffinExperiment.spo2CandidateDisplayEnabled`,
+  on by default).
+- **PPG is not continuous and is not uploaded.** The strap sends one 24 Hz waveform window of about 40 s
+  roughly every 20 minutes (about 70 windows, or 2,800 one-second records, a day on the phone checked on
+  2 October 2026). The phone keeps them in its own database; `CloudCapture` has no stream for the waveform
+  or for the PPG-derived heart rate, the server has never held a `noop_ppg_hr_samples` row, and the hosted
+  compute policy lists `ppg_hr` as `unqualified` (`optical_clock_channel_unqualified`). The only continuous
+  signals are heart rate and R-R, at about 1 Hz over BLE. The Test Centre "Legacy R22 feature-flag
+  experiment" has not been shown to make the strap send PPG continuously, the app does not store the
+  larger optical records it might produce (only the opt-in `PuffinDeepBufferLog` keeps raw frames), and its
+  sixteen writes include `disable_pip_r26_packets`, so it could reduce the windows above instead. It is
+  left off.

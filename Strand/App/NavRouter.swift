@@ -54,6 +54,10 @@ final class NavRouter: ObservableObject {
     /// in the iOS shell). The shell presents it, then resets this to false.
     @Published var quickActionsRequested = false
 
+    /// Set when the Today header's gear asks the shell to present Settings; the shell resets it.
+    @Published var settingsRequested = false
+    func openSettings() { settingsRequested = true }
+
     /// One-shot: `LiveView` reads this on appear to present the in-exercise screen for an already-running
     /// workout (routing alone only reaches the Live root), then clears it. A normal Live visit is
     /// unaffected, since the flag is only raised by `openActiveWorkout()` from the Today indicator card.

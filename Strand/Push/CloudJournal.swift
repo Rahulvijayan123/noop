@@ -700,6 +700,30 @@ final class CloudJournalStore: @unchecked Sendable {
         return out
     }
 
+    /// The strap timestamps the newest `lastRecords` journal records of one stream carry, per device and
+    /// owner. A relaunch reads these back to learn which seconds the last run already journaled.
+    ///
+    /// Bounded by sequence rather than by age: `seq` is the table's key, so this is a range read of the
+    /// tail instead of a scan of the whole journal.
+    func recentStrapSeconds(ownerId: String, stream: CloudStreamKind,
+                            lastRecords: Int) throws -> [String: [Int]] {
+        let stmt = try prepare("""
+        SELECT device_id, strap_ts FROM journal_record
+        WHERE seq > (SELECT COALESCE(MAX(seq), 0) FROM journal_record) - ?
+          AND stream = ? AND owner_id = ? AND strap_ts IS NOT NULL
+        """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(max(0, lastRecords)))
+        sqlite3_bind_text(stmt, 2, stream.rawValue, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 3, ownerId, -1, cloudSQLiteTransient)
+        var out: [String: [Int]] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let device = text(stmt, 0) else { continue }
+            out[device.lowercased(), default: []].append(Int(sqlite3_column_int64(stmt, 1)))
+        }
+        return out
+    }
+
     /// Register an immutable, already-written payload file as a durable job, and mark EXACTLY its
     /// membership sealed in the same transaction.
     func registerSeal(_ candidate: CloudSealCandidate, batchId: String, filePath: String,
@@ -1074,6 +1098,13 @@ public actor CloudJournal {
         commitObserver = observer
     }
 
+    /// Re-times sealing without reopening the store. A scene on screen wants its data on the server
+    /// within seconds; a locked phone gains nothing from a radio wake every two seconds, so it seals
+    /// fewer, larger files instead. Records are durable in the journal either way.
+    public func setActiveTargetSeconds(_ seconds: Double) {
+        policy.activeTargetSeconds = max(1, seconds)
+    }
+
     // MARK: notification boundary (nonisolated, never throws, never blocks)
 
     /// Queue one record for durable commit. Safe to call from the BLE notification path.
@@ -1105,6 +1136,10 @@ public actor CloudJournal {
     /// Start accepting records. Synchronous on purpose: it must be callable from a launch path that
     /// cannot await (the app delegate's `didFinishLaunching`), before the SQLite file is open.
     public nonisolated static func enableStaging() { CloudJournal.activeFlag = true }
+
+    /// Whether `submit` is currently taking records. Capture that keeps its own account of what was
+    /// submitted checks this first, so it never counts a record the journal was going to ignore.
+    public nonisolated static var isStaging: Bool { CloudJournal.activeFlag }
 
     /// Stop accepting records (cloud mode disabled). Staged records are kept, not dropped.
     public nonisolated static func disableStaging() { CloudJournal.activeFlag = false }
@@ -1347,6 +1382,14 @@ public actor CloudJournal {
     public func clearHistoryHold() async throws {
         staging.resetOverflow()
         try store?.setFlag("history_cursor_held", false)
+    }
+
+    /// The strap timestamps of the newest `lastRecords` records of one stream, per device, for the
+    /// configured owner. Empty when the journal is not open.
+    public func recentStrapSeconds(stream: CloudStreamKind, lastRecords: Int) async -> [String: [Int]] {
+        guard let store, let config = configuration else { return [:] }
+        return (try? store.recentStrapSeconds(ownerId: config.ownerId, stream: stream,
+                                              lastRecords: lastRecords)) ?? [:]
     }
 
     /// The persisted dense receive sequence, for diagnostics and for the readback freshness label.

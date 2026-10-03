@@ -40,6 +40,8 @@ struct RootTabView: View {
     @State private var quickAction: QuickAction?
     /// Presents the Devices manager (pair / switch bands) when a screen asks the shell to open it.
     @State private var showDevices = false
+    /// Presents Settings (opened from the Today header's gear) as a sheet.
+    @State private var showSettings = false
     /// A routed v5 pillar screen (Insights hub / Lab Book / fused record / Rhythm) presented as a sheet
     /// when a hub row deep-links to it via NavRouter. nil = closed.
     @State private var routedPillar: NavRouter.Destination?
@@ -119,25 +121,21 @@ struct RootTabView: View {
         // the corresponding system material and safe-area behaviour from the same TabView.
         TabView(selection: nativeTabSelection) {
             tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            tab(TrendsView(), "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
-            tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
-            // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
-            // matches the More-tab row and the macOS sidebar entry.
+            tab(MonitorView(), "Monitor", "waveform.path.ecg", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            tab(EventsView(), "Events", "calendar", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
             // Conditional on the master switch. The tags stay LITERAL rather than being renumbered when
-            // Coach is absent: `tabPaths` and `scrollTop` are indexed by tag, and More stays tag 4 in both
-            // shapes, so a wearer's More tab keeps its identity, its navigation path and its scroll
-            // position across a flip instead of inheriting Coach's.
+            // Coach is absent: `tabPaths` and `scrollTop` are indexed by tag.
             if coachEnabled {
-                tab(CoachChatView(), "Sana", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+                tab(CoachChatView(), "Sana", "sparkles", path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
             }
-            moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
         // Switching Coach off while STANDING on it leaves `selectedTab` pointing at a tag no tab claims
         // any more, which renders as an empty tab rather than as an error. Send that wearer to Today, and
         // only in that case, so a flip made from anywhere else does not move them.
         .onChangeCompat(of: coachEnabled) { enabled in
-            if !enabled && selectedTab == 3 { selectedTab = 0 }
+            if !enabled && selectedTab == 4 { selectedTab = 0 }
         }
         // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
         // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
@@ -187,6 +185,15 @@ struct RootTabView: View {
         .sheet(isPresented: $showDevices) {
             devicesScreen
         }
+        .sheet(isPresented: $showSettings) {
+            settingsScreen
+        }
+        .onChange(of: router.settingsRequested) { _, req in
+            if req {
+                showSettings = true
+                router.settingsRequested = false
+            }
+        }
         // v5 pillar deep-links (Insights hub / Lab Book / fused record / Rhythm) present as a sheet in
         // their own nav stack — the same idiom the quick-action + Devices screens use on iPhone.
         .sheet(item: $routedPillar) { dest in
@@ -199,27 +206,23 @@ struct RootTabView: View {
             case .devices:
                 showDevices = true
                 router.requestedDestination = nil
-            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms:
+            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms, .trends:
                 routedPillar = dest
                 router.requestedDestination = nil
             case .coach:
-                // K3: Coach is now a top-level tab (tag 3) — switch to it directly instead of
+                // K3: Coach is now a top-level tab (tag 4) — switch to it directly instead of
                 // presenting it as a pillar sheet.
                 //
                 // Guarded on the master switch, because this route is reachable with Coach OFF. A brief
                 // notification already sitting in Notification Centre still calls `openCoach()` when it is
-                // tapped (StrandApp wires `onCoachBriefTapped` to it), and with no tab claiming tag 3 the
+                // tapped (StrandApp wires `onCoachBriefTapped` to it), and with no tab claiming tag 4 the
                 // wearer would land on a BLANK tab. Dropping the request leaves them where they were, which
                 // is the honest answer for a feature that is switched off.
                 guard coachEnabled else {
                     router.requestedDestination = nil
                     break
                 }
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 3 }
-                router.requestedDestination = nil
-            case .trends:
-                // Trends is a primary tab on iPhone (not a pillar sheet) — switch to it.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 1 }
+                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 4 }
                 router.requestedDestination = nil
             case .activeWorkout:
                 // The Today active-workout indicator opens Live through the quick-action Live sheet; once
@@ -313,9 +316,7 @@ struct RootTabView: View {
                 case .fusedRecord: FusedRecordHost()
                 case .rhythm: RhythmHost(onClose: { routedPillar = nil })
                 case .devices: DevicesView()
-                // .trends is never presented as a pillar sheet on iPhone (it's a primary tab — the
-                // requestedDestination handler switches `selectedTab` instead), but the switch must stay
-                // exhaustive. Fall back to Trends inside the sheet host if it ever arrives here.
+                // Trends is no longer a tab; it opens in this pillar sheet.
                 case .trends: TrendsView()
                 // .activeWorkout routes through the quick-action Live sheet (handled above); this keeps the
                 // switch exhaustive and falls back to Live if it ever reaches the pillar host.
@@ -423,6 +424,22 @@ struct RootTabView: View {
         }
     }
 
+    /// Settings wrapped in its own nav stack + Done button (mirrors `devicesScreen`).
+    private var settingsScreen: some View {
+        NavigationStack {
+            SettingsView()
+                .background(StrandPalette.surfaceBase.ignoresSafeArea())
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbarBackground(.hidden, for: .navigationBar)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Done") { showSettings = false }
+                            .foregroundStyle(StrandPalette.accent)
+                    }
+                }
+        }
+    }
+
     private func tab<V: View>(_ view: V, _ title: LocalizedStringKey, _ icon: String,
                               path: Binding<NavigationPath>, scrollSignal: Int) -> some View {
         // Each primary tab gets its OWN NavigationStack so the in-content NavigationLinks (e.g. the Today
@@ -443,17 +460,6 @@ struct RootTabView: View {
         // / LiquidTodayView inside. Only THIS tab's token changes on its reselect, so the others don't scroll.
         .environment(\.scrollToTopSignal, scrollSignal)
         .tabItem { Label(title, systemImage: icon) }
-    }
-
-    // The last tab is the simplified Settings screen (account, profile, device, automations, export).
-    private func moreTab(path: Binding<NavigationPath>, scrollSignal: Int) -> some View {
-        NavigationStack(path: path) {
-            SettingsView()
-                .background(StrandPalette.surfaceBase.ignoresSafeArea())
-                .toolbar(.hidden, for: .navigationBar)
-        }
-        .environment(\.scrollToTopSignal, scrollSignal)
-        .tabItem { Label("Settings", systemImage: "gearshape") }
     }
 }
 

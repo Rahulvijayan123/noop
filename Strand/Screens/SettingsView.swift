@@ -12,11 +12,12 @@ import StrandAnalytics
 import WhoopStore
 import WhoopProtocol
 
-/// Settings: the Nara account, profile, strap, automations and data export.
+/// Settings: grouped rows (label, value, chevron). Each editable row drills into a small edit page.
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var profile: ProfileStore
+    @EnvironmentObject var behavior: BehaviorStore
 
     /// Profile-photo picker selection (PhotosUI). Cleared back to nil once the bytes are loaded.
     @State private var avatarPickerItem: PhotosPickerItem?
@@ -25,21 +26,24 @@ struct SettingsView: View {
     @State private var exportAlertTitle = ""
     @State private var exportAlertMessage = ""
     @State private var showExportAlert = false
+    @State private var showAbout = false
 
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    #if os(iOS)
+    @AppStorage("notif.masterEnabled") private var wristAlerts = false
+    #endif
 
     private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
 
     var body: some View {
-        ScreenScaffold(title: "Settings",
-                       subtitle: "Your profile, your strap, and your data.",
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Settings") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                accountCard.staggeredAppear(index: 0)
-                profileCard.staggeredAppear(index: 1)
-                deviceCard.staggeredAppear(index: 2)
-                automationsCard.staggeredAppear(index: 3)
-                exportCard.staggeredAppear(index: 4)
+                accountGroup
+                profileGroup
+                deviceGroup
+                automationsGroup
+                exportGroup
+                appGroup
             }
         }
         .alert(exportAlertTitle, isPresented: $showExportAlert) {
@@ -47,159 +51,112 @@ struct SettingsView: View {
         } message: {
             Text(exportAlertMessage)
         }
+        .sheet(isPresented: $showAbout) {
+            HowNoopWorksView(onClose: { showAbout = false })
+        }
+    }
+
+    private func navRow<Dest: View>(_ label: LocalizedStringKey, _ value: String? = nil,
+                                    @ViewBuilder to destination: () -> Dest) -> some View {
+        NavigationLink {
+            destination()
+        } label: {
+            SettingsRow(label, value: value)
+        }
+        .buttonStyle(SettingsRowStyle())
     }
 
     // MARK: - Account
 
-    private var accountCard: some View {
-        SettingsSection(
-            icon: "person.crop.circle",
-            title: "Nara account",
-            blurb: "Your strap data uploads to Nara, where recovery, strain and sleep are computed, and the results come back to this app."
-        ) {
-            NavigationLink(destination: CloudEnrollmentView()) {
-                HStack(spacing: NoopMetrics.space2) {
-                    Text(CloudPushSettings.isEnabled ? "Cloud sync is on" : "Set up cloud sync")
-                        .font(StrandFont.body)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
+    private var accountGroup: some View {
+        SettingsGroup("Account") {
+            navRow("Nara account", CloudPushSettings.isEnabled ? String(localized: "Cloud sync on") : nil) {
+                CloudEnrollmentView()
             }
-            .buttonStyle(LiquidPressStyle())
         }
     }
 
     // MARK: - Profile
 
-    private var profileCard: some View {
-        SettingsSection(
-            icon: "person.fill",
-            title: "Profile",
-            blurb: "These power your heart-rate zones, calorie estimates and recovery baselines. Keep them accurate."
-        ) {
-            VStack(spacing: 0) {
-                profilePhotoRow
-                rowDivider
-                FormRow(label: "Name") {
-                    TextField("Your name", text: $profile.displayName)
-                        .multilineTextAlignment(.trailing)
-                        #if os(iOS)
-                        .textContentType(.givenName)
-                        #endif
-                        .submitLabel(.done)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .accessibilityLabel("Name shown in your greeting")
-                }
-                rowDivider
-                FormRow(label: "Date of birth") {
-                    HStack(spacing: 12) {
-                        Text("\(profile.age)")
-                            .font(StrandFont.bodyNumber)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .frame(minWidth: 28, alignment: .trailing)
-                        // #146: age is derived from the date of birth, so it advances on its own.
-                        DatePicker("Date of birth",
-                                   selection: $profile.dateOfBirth,
-                                   in: ProfileStore.dateOfBirthRange,
-                                   displayedComponents: .date)
-                            .labelsHidden()
-                            .tint(StrandPalette.accent)
-                            .accessibilityLabel("Date of birth, age \(profile.age) years")
-                    }
-                }
-                rowDivider
-                FormRow(label: "Sex") {
-                    Picker("Sex", selection: $profile.sex) {
-                        Text("Male").tag("male")
-                        Text("Female").tag("female")
-                        Text("Non-binary").tag("nonbinary")
-                    }
-                    .labelsHidden()
-                    // #43: .menu, not .segmented + .fixedSize(). In FormRow's label(∞)+control HStack a
-                    // segmented picker collapses WITHOUT .fixedSize() but OVERFLOWS the screen WITH it once
-                    // the labels are long (German "Nicht-binär") or Text Size is enlarged — the oversized
-                    // Settings screen users reported. A menu is a compact button that fits any label length.
-                    .pickerStyle(.menu)
-                    .tint(StrandPalette.accent)
-                    .accessibilityLabel("Sex")
-                }
-                rowDivider
-                FormRow(label: "Units") {
-                    Picker("Units", selection: $unitSystemRaw) {
-                        Text("Metric").tag(UnitSystem.metric.rawValue)
-                        Text("Imperial").tag(UnitSystem.imperial.rawValue)
-                    }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .tint(StrandPalette.accent)
-                    .accessibilityLabel("Body measurement units")
-                }
-                rowDivider
-                FormRow(label: "Weight") {
-                    // Imperial mode steps in pounds and stores the kg equivalent; metric steps in kg.
-                    if unitSystem == .imperial {
-                        poundsField(weightKg: $profile.weightKg)
-                    } else {
-                        measureField(value: $profile.weightKg, unit: "kg",
-                                     range: 30...250, step: 0.5, format: "%.1f",
-                                     accessibility: String(localized: "Weight in kilograms"))
-                    }
-                }
-                rowDivider
-                FormRow(label: "Height") {
-                    // Imperial mode steps in whole inches and stores the cm equivalent; metric steps in cm.
-                    if unitSystem == .imperial {
-                        feetInchesField(heightCm: $profile.heightCm)
-                    } else {
-                        measureField(value: $profile.heightCm, unit: "cm",
-                                     range: 120...230, step: 1, format: "%.0f",
-                                     accessibility: String(localized: "Height in centimetres"))
-                    }
-                }
-                rowDivider
-                // Waist (optional). Unlike the rows above it, an empty waist is valid (0 = unset).
-                // VO₂max is ALWAYS offered (the Uth HR-ratio fallback needs no waist, #1391); a waist just
-                // upgrades it to the more accurate Nes waist-based estimate. It does NOT sharpen the Fitness
-                // Age itself (the body term cancels in the Nes model), so the note says it makes VO₂max more
-                // accurate rather than implying it tunes the age.
-                FormRow(label: "Waist (optional)") {
-                    // Imperial mode steps in whole inches and stores the cm equivalent; metric steps in cm.
-                    if unitSystem == .imperial {
-                        waistInchesField(waistCm: $profile.waistCm)
-                    } else {
-                        waistCentimetresField(waistCm: $profile.waistCm)
-                    }
-                }
-                Text("Optional: VO₂max builds from about 4 nights of heart rate; a waist makes it more accurate. The Fitness Age itself doesn't need it. Measure around your middle, at the navel.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+    private var profileGroup: some View {
+        SettingsGroup("Profile") {
+            navRow("Name", profile.displayName.isEmpty ? String(localized: "Add") : profile.displayName) {
+                nameEditor
             }
+            SettingsDivider()
+            navRow("Date of birth", profile.dateOfBirth.formatted(date: .abbreviated, time: .omitted)) {
+                dateOfBirthEditor
+            }
+            SettingsDivider()
+            navRow("Sex", sexLabel) { sexEditor }
+            SettingsDivider()
+            navRow("Units", unitSystem == .imperial ? String(localized: "Imperial") : String(localized: "Metric")) {
+                unitsEditor
+            }
+            SettingsDivider()
+            navRow("Weight", weightValue) { weightEditor }
+            SettingsDivider()
+            navRow("Height", heightValue) { heightEditor }
+            SettingsDivider()
+            navRow("Waist", waistValue) { waistEditor }
         }
     }
 
-    /// Compact profile-photo control kept inside the Profile card so the optional avatar does not
-    /// consume a second top-level settings section. PhotosUI works on both supported platforms.
-    private var profilePhotoRow: some View {
-        let hasAvatar = profile.hasAvatar
-        return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            HStack(spacing: NoopMetrics.space3) {
-                ProfileAvatarView(
-                    imageData: profile.avatarImageData,
-                    size: NoopMetrics.profileAvatarDiameter
-                )
-                    .accessibilityLabel(hasAvatar ? "Your profile photo" : "No profile photo set")
+    private static let profileFootnote: LocalizedStringKey =
+        "These power your heart-rate zones, calorie estimates and recovery baselines. Keep them accurate."
 
+    private var sexLabel: String {
+        switch profile.sex {
+        case "female": return String(localized: "Female")
+        case "nonbinary": return String(localized: "Non-binary")
+        default: return String(localized: "Male")
+        }
+    }
+
+    private var weightValue: String {
+        unitSystem == .imperial
+            ? "\(Int(UnitFormatter.kgToPounds(profile.weightKg).rounded())) lb"
+            : String(format: "%.1f kg", profile.weightKg)
+    }
+
+    private var heightValue: String {
+        if unitSystem == .imperial {
+            let parts = UnitFormatter.cmToFeetInches(profile.heightCm)
+            return "\(parts.feet)′ \(parts.inches)″"
+        }
+        return String(format: "%.0f cm", profile.heightCm)
+    }
+
+    /// 0 = unset: the waist is optional, unlike the other body measurements.
+    private var waistValue: String {
+        guard profile.waistCm > 0 else { return String(localized: "Not set") }
+        return unitSystem == .imperial
+            ? "\(Int(UnitFormatter.cmToInches(profile.waistCm).rounded())) in"
+            : "\(Int(profile.waistCm.rounded())) cm"
+    }
+
+    private var nameEditor: some View {
+        let hasAvatar = profile.hasAvatar
+        return SettingsEditPage("Name",
+                                footnote: "Optional photo. It stays on \(Platform.deviceNounPhrase) and is never uploaded.") {
+            TextField("Your name", text: $profile.displayName)
+                #if os(iOS)
+                .textContentType(.givenName)
+                #endif
+                .submitLabel(.done)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .padding(.horizontal, NoopMetrics.space4)
+                .frame(minHeight: 52)
+                .accessibilityLabel("Name shown in your greeting")
+            SettingsDivider()
+            HStack(spacing: NoopMetrics.space3) {
+                ProfileAvatarView(imageData: profile.avatarImageData, size: NoopMetrics.profileAvatarDiameter)
+                    .accessibilityLabel(hasAvatar ? "Your profile photo" : "No profile photo set")
                 PhotosPicker(selection: $avatarPickerItem, matching: .images) {
                     Text(hasAvatar ? "Change photo" : "Choose photo")
                 }
                 .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-
                 if hasAvatar {
                     Button {
                         profile.clearAvatar()
@@ -211,23 +168,100 @@ struct SettingsView: View {
                     .accessibilityHint("Reverts to the default profile icon")
                 }
             }
-
-            Text("Optional. Add a photo for your avatar. It stays on \(Platform.deviceNounPhrase) and is never uploaded.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        // Load the picked photo's bytes, then hand them to the store (which downscales + persists).
-        // Clearing the selection afterwards lets the user re-pick the same photo if they want.
-        .onChange(of: avatarPickerItem) { newItem in
-            guard let newItem else { return }
-            Task {
-                let data = try? await newItem.loadTransferable(type: Data.self)
-                await MainActor.run {
-                    if let data { profile.setAvatar(data) }
-                    avatarPickerItem = nil
+            .padding(NoopMetrics.space4)
+            // Load the picked photo's bytes, then hand them to the store (which downscales + persists).
+            // Clearing the selection afterwards lets the user re-pick the same photo.
+            .onChange(of: avatarPickerItem) { newItem in
+                guard let newItem else { return }
+                Task {
+                    let data = try? await newItem.loadTransferable(type: Data.self)
+                    await MainActor.run {
+                        if let data { profile.setAvatar(data) }
+                        avatarPickerItem = nil
+                    }
                 }
             }
+        }
+    }
+
+    private var dateOfBirthEditor: some View {
+        // #146: age is derived from the date of birth, so it advances on its own.
+        SettingsEditPage("Date of birth", footnote: "Age \(profile.age). \(Self.profileFootnote)") {
+            DatePicker("Date of birth",
+                       selection: $profile.dateOfBirth,
+                       in: ProfileStore.dateOfBirthRange,
+                       displayedComponents: .date)
+                .datePickerStyle(.graphical)
+                .labelsHidden()
+                .tint(StrandPalette.accent)
+                .padding(NoopMetrics.space3)
+                .accessibilityLabel("Date of birth, age \(profile.age) years")
+        }
+    }
+
+    private var sexEditor: some View {
+        SettingsEditPage("Sex", footnote: Self.profileFootnote) {
+            SettingsOptions(selection: $profile.sex, options: [
+                ("male", "Male"), ("female", "Female"), ("nonbinary", "Non-binary"),
+            ])
+        }
+    }
+
+    private var unitsEditor: some View {
+        SettingsEditPage("Units", footnote: "Used for weight, height and waist.") {
+            SettingsOptions(selection: $unitSystemRaw, options: [
+                (UnitSystem.metric.rawValue, "Metric"), (UnitSystem.imperial.rawValue, "Imperial"),
+            ])
+        }
+    }
+
+    private var weightEditor: some View {
+        SettingsEditPage("Weight", footnote: Self.profileFootnote) {
+            FormRow(label: "Weight") {
+                // Imperial mode steps in pounds and stores the kg equivalent; metric steps in kg.
+                if unitSystem == .imperial {
+                    poundsField(weightKg: $profile.weightKg)
+                } else {
+                    measureField(value: $profile.weightKg, unit: "kg",
+                                 range: 30...250, step: 0.5, format: "%.1f",
+                                 accessibility: String(localized: "Weight in kilograms"))
+                }
+            }
+            .padding(NoopMetrics.space4)
+        }
+    }
+
+    private var heightEditor: some View {
+        SettingsEditPage("Height", footnote: Self.profileFootnote) {
+            FormRow(label: "Height") {
+                // Imperial mode steps in whole inches and stores the cm equivalent; metric steps in cm.
+                if unitSystem == .imperial {
+                    feetInchesField(heightCm: $profile.heightCm)
+                } else {
+                    measureField(value: $profile.heightCm, unit: "cm",
+                                 range: 120...230, step: 1, format: "%.0f",
+                                 accessibility: String(localized: "Height in centimetres"))
+                }
+            }
+            .padding(NoopMetrics.space4)
+        }
+    }
+
+    // VO₂max is ALWAYS offered (the Uth HR-ratio fallback needs no waist, #1391); a waist just upgrades it
+    // to the more accurate Nes waist-based estimate. It does NOT sharpen the Fitness Age itself (the body
+    // term cancels in the Nes model), so the note says it makes VO₂max more accurate rather than implying
+    // it tunes the age.
+    private var waistEditor: some View {
+        SettingsEditPage("Waist",
+                         footnote: "Optional: VO₂max builds from about 4 nights of heart rate; a waist makes it more accurate. The Fitness Age itself doesn't need it. Measure around your middle, at the navel.") {
+            FormRow(label: "Waist") {
+                if unitSystem == .imperial {
+                    waistInchesField(waistCm: $profile.waistCm)
+                } else {
+                    waistCentimetresField(waistCm: $profile.waistCm)
+                }
+            }
+            .padding(NoopMetrics.space4)
         }
     }
 
@@ -368,20 +402,27 @@ struct SettingsView: View {
 
     // MARK: - Device
 
-    private var deviceCard: some View {
-        SettingsSection(
-            icon: "dot.radiowaves.left.and.right",
-            title: "Device",
-            blurb: "Your WHOOP strap's connection and battery."
-        ) {
+    private var deviceGroup: some View {
+        SettingsGroup("Device") {
+            SettingsRow("Strap", value: strapStatusTitle, chevron: false)
+            SettingsDivider()
+            if let pct = live.batteryPct {
+                SettingsRow("Battery",
+                            value: "\(Int(pct.rounded()))%" + (live.charging == true ? " · " + String(localized: "Charging") : ""),
+                            chevron: false)
+                SettingsDivider()
+            }
+            navRow("Manage strap") { strapEditor }
+        }
+    }
+
+    private var strapEditor: some View {
+        SettingsEditPage("Strap") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
                 HStack(spacing: NoopMetrics.space2) {
                     StatePill("\(strapStatusTitle)", tone: strapTone, pulsing: live.connected)
                     if let pct = live.batteryPct {
-                        StatePill(live.charging == true
-                                  ? "Battery \(Int(pct.rounded()))% · Charging"
-                                  : "Battery \(Int(pct.rounded()))%",
-                                  tone: batteryTone(pct), showsDot: false)
+                        StatePill("Battery \(Int(pct.rounded()))%", tone: batteryTone(pct), showsDot: false)
                     }
                     Spacer(minLength: 0)
                 }
@@ -403,6 +444,7 @@ struct SettingsView: View {
                     .disabled(!live.connected)
                 }
             }
+            .padding(NoopMetrics.space4)
         }
     }
 
@@ -450,81 +492,49 @@ struct SettingsView: View {
 
     // MARK: - Automations
 
-    private var automationsCard: some View {
-        SettingsSection(
-            icon: "bolt.horizontal.circle",
-            title: "Automations",
-            blurb: "Turn your scores into actions on this device."
-        ) {
-            NavigationLink(destination: AutomationsView()) {
-                HStack(spacing: NoopMetrics.space2) {
-                    Text("Manage automations")
-                        .font(StrandFont.body)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                .frame(minHeight: 44)
-                .contentShape(Rectangle())
+    private var automationsGroup: some View {
+        SettingsGroup("Automations") {
+            #if os(iOS)
+            navRow("Wrist alerts", wristAlerts ? String(localized: "On") : String(localized: "Off")) {
+                AutomationsView()
             }
-            .buttonStyle(LiquidPressStyle())
+            SettingsDivider()
+            #endif
+            navRow("Double-tap", behavior.doubleTapAction.label) { AutomationsView() }
+            SettingsDivider()
+            navRow("Manage automations") { AutomationsView() }
         }
     }
 
     // MARK: - Export
 
-    private var exportCard: some View {
-        SettingsSection(
-            icon: "square.and.arrow.up",
-            title: "Export",
-            blurb: "Save a copy of your Nara data from this device."
-        ) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                HStack(spacing: NoopMetrics.space2) {
-                    Button {
-                        runExport()
-                    } label: {
-                        backupButtonLabel(String(localized: "Export backup"), systemImage: "square.and.arrow.up")
-                    }
-                    .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-                    .disabled(exportBusy)
-                    Button {
-                        runCsvExport()
-                    } label: {
-                        backupButtonLabel(String(localized: "Export CSV"), systemImage: "tablecells")
-                    }
-                    .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-                    .disabled(exportBusy)
-                }
-                if exportBusy {
-                    HStack(spacing: 8) {
-                        ProgressView().controlSize(.small)
-                        Text("Working…")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
-                Text("Exports are not encrypted. Store them somewhere you trust.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    private var exportGroup: some View {
+        SettingsGroup("Export", footer: "Exports are not encrypted. Store them somewhere you trust.") {
+            exportRow("Export backup", action: runExport)
+            SettingsDivider()
+            exportRow("Export CSV", action: runCsvExport)
         }
     }
 
-    // Equal-width, single-line label for the export buttons. iPhone is too narrow to fit an icon +
-    // text side by side, so it goes icon-less there; macOS keeps the SF Symbol. (#188)
-    @ViewBuilder
-    private func backupButtonLabel(_ title: String, systemImage: String) -> some View {
-        #if os(macOS)
-        Label(title, systemImage: systemImage)
-            .lineLimit(1).minimumScaleFactor(0.7)
-        #else
-        Text(title)
-            .lineLimit(1).minimumScaleFactor(0.6)
-        #endif
+    private func exportRow(_ label: LocalizedStringKey, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            SettingsRow(label, value: exportBusy ? String(localized: "Working…") : nil, chevron: !exportBusy)
+        }
+        .buttonStyle(SettingsRowStyle())
+        .disabled(exportBusy)
+    }
+
+    // MARK: - App
+
+    private var appGroup: some View {
+        SettingsGroup("App") {
+            #if os(macOS)
+            navRow("Notifications") { NotificationSettingsView() }
+            SettingsDivider()
+            #endif
+            Button { showAbout = true } label: { SettingsRow("About") }
+                .buttonStyle(SettingsRowStyle())
+        }
     }
 
     private func runExport() {
@@ -577,45 +587,155 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Shared bits
+}
 
-    private var rowDivider: some View {
-        Rectangle()
-            .fill(StrandPalette.hairline)
-            .frame(height: 1)
-            .padding(.vertical, 4)
+// MARK: - Grouped-list building blocks
+
+/// A rounded card of rows under a small all-caps title. `footer` is a muted note beneath the card.
+/// With no title it is just the card, which the edit pages reuse.
+private struct SettingsGroup<Content: View>: View {
+    let title: LocalizedStringKey?
+    let footer: LocalizedStringKey?
+    @ViewBuilder var content: () -> Content
+
+    init(_ title: LocalizedStringKey? = nil, footer: LocalizedStringKey? = nil,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.footer = footer
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            StrandCard(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if let title {
+                        Text(title)
+                            .strandOverline()
+                            .textCase(.uppercase)
+                            .padding(.horizontal, NoopMetrics.space4)
+                            .padding(.top, NoopMetrics.space4)
+                            .padding(.bottom, NoopMetrics.space1)
+                    }
+                    content()
+                }
+            }
+            if let footer {
+                Text(footer)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, NoopMetrics.space1)
+            }
+        }
     }
 }
 
-// MARK: - Section card
+/// Label left; optional value and chevron right.
+private struct SettingsRow: View {
+    let label: LocalizedStringKey
+    let value: String?
+    let chevron: Bool
 
-/// A grouped settings card: a "Settings" overline + icon + title header, an explanatory blurb,
-/// then content. The surface stays neutral; accent blue is reserved for the icon and controls.
-private struct SettingsSection<Content: View>: View {
-    let icon: String
-    let title: LocalizedStringKey
-    let blurb: LocalizedStringKey
-    @ViewBuilder var content: () -> Content
+    init(_ label: LocalizedStringKey, value: String? = nil, chevron: Bool = true) {
+        self.label = label
+        self.value = value
+        self.chevron = chevron
+    }
 
     var body: some View {
-        StrandCard(padding: NoopMetrics.space5) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Settings").strandOverline()
-                    HStack(spacing: NoopMetrics.space2 + 2) {
-                        Image(systemName: icon)
-                            .foregroundStyle(StrandPalette.accent)
-                            .accessibilityHidden(true)
-                        Text(title)
-                            .font(StrandFont.title2)
+        HStack(spacing: NoopMetrics.space3) {
+            Text(label)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .layoutPriority(1)
+            Spacer(minLength: NoopMetrics.space3)
+            if let value {
+                Text(value)
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.accent)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if chevron {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, NoopMetrics.space4)
+        .frame(minHeight: 52)
+        .contentShape(Rectangle())
+    }
+}
+
+/// Hairline between rows, inset from the leading edge so it starts under the label text.
+private struct SettingsDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(StrandPalette.hairline)
+            .frame(height: 1)
+            .padding(.leading, NoopMetrics.space4)
+    }
+}
+
+private struct SettingsRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.55 : 1)
+    }
+}
+
+/// A pushed page: big title, one card, optional footnote.
+private struct SettingsEditPage<Content: View>: View {
+    let title: LocalizedStringKey
+    let footnote: LocalizedStringKey?
+    @ViewBuilder var content: () -> Content
+
+    init(_ title: LocalizedStringKey, footnote: LocalizedStringKey? = nil,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.title = title
+        self.footnote = footnote
+        self.content = content
+    }
+
+    var body: some View {
+        ScreenScaffold(title: title) {
+            SettingsGroup(footer: footnote, content: content)
+        }
+    }
+}
+
+/// Single-choice list with a checkmark on the selected row.
+private struct SettingsOptions: View {
+    @Binding var selection: String
+    let options: [(tag: String, label: LocalizedStringKey)]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(options.enumerated()), id: \.offset) { index, option in
+                if index > 0 { SettingsDivider() }
+                Button {
+                    selection = option.tag
+                } label: {
+                    HStack {
+                        Text(option.label)
+                            .font(StrandFont.body)
                             .foregroundStyle(StrandPalette.textPrimary)
+                        Spacer(minLength: 0)
+                        if selection == option.tag {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(StrandPalette.accent)
+                                .accessibilityHidden(true)
+                        }
                     }
+                    .padding(.horizontal, NoopMetrics.space4)
+                    .frame(minHeight: 52)
+                    .contentShape(Rectangle())
                 }
-                Text(blurb)
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                content()
+                .buttonStyle(SettingsRowStyle())
+                .accessibilityAddTraits(selection == option.tag ? .isSelected : [])
             }
         }
     }
@@ -1119,6 +1239,7 @@ private struct FormRow<Control: View>: View {
         .environmentObject(model)
         .environmentObject(model.live)
         .environmentObject(model.profile)
+        .environmentObject(model.behavior)
         // iPhone-width (402pt) so the narrow Backup row stays in the preview's blast radius —
         // at 720 the three-up button row had slack and the truncation regression slipped through. (#188)
         .frame(width: 402, height: 900)

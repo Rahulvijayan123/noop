@@ -71,9 +71,16 @@ enum PuffinExperiment {
     /// Display-only: writes nothing to the strap. The engine writes the resolved mean to metricSeries as
     /// "spo2_candidate" under the "-noop" computed device ID; the UI reads it only while this toggle is
     /// ON. Mirrors the Android `NoopPrefs.KEY_SPO2_CANDIDATE_DISPLAY`.
+    ///
+    /// ON unless it was explicitly turned off. This build has no screen that sets it, so a default of OFF
+    /// meant the nightly estimate (a few hundred strap readings a night, none by day) was computed and then
+    /// never shown. The estimate stays labelled "strap estimate (unverified)" wherever it appears and never
+    /// becomes `spo2Pct`.
     static let spo2CandidateDisplayKey = "noopSpo2CandidateDisplay"
 
-    static var spo2CandidateDisplayEnabled: Bool { UserDefaults.standard.bool(forKey: spo2CandidateDisplayKey) }
+    static var spo2CandidateDisplayEnabled: Bool {
+        (UserDefaults.standard.object(forKey: spo2CandidateDisplayKey) as? Bool) ?? true
+    }
 
     /// Opt-in "Personal daytime-stress baseline" (#463): score TODAY's intraday stress timeline against a
     /// PERSONAL cross-day rolling baseline (Oura-style `.baselineRelative`) instead of the day's own calm
@@ -193,6 +200,14 @@ enum PuffinExperiment {
     /// low. Default off. Cadence only — no data is lost (the strap banks to flash and trims on our ack).
     static let lowRefreshKey = "noopLowRefresh"
     static var lowRefreshEnabled: Bool { UserDefaults.standard.bool(forKey: lowRefreshKey) }
+
+    /// "Fresh data": in cloud mode, a WHOOP 5.0/MG hands over its history about once a minute so steps,
+    /// calories and respiratory rate on the server (and in the app) stay current. **Default ON** (an absent
+    /// key reads as on). It is cadence only: Power saving's Low refresh and low-battery stretch, and the
+    /// known-empty-history stretch, still slow it down, and nothing is lost either way because the strap
+    /// banks to flash and trims on our acknowledgement.
+    static let freshSyncKey = "noopFreshSync"
+    static var freshSyncEnabled: Bool { (UserDefaults.standard.object(forKey: freshSyncKey) as? Bool) ?? true }
 
     /// Battery-% threshold for power saving (10–30). Default 20 (0 in the store means "unset" → 20).
     static let powerSavingBatteryPctKey = "noopPowerSavingBatteryPct"

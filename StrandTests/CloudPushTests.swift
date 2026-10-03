@@ -419,6 +419,38 @@ final class CloudPushTests: XCTestCase {
         }
     }
 
+    // MARK: - upload lanes
+
+    func testAnInactiveSceneStaysOnTheInProcessLane() {
+        // BLE keeps the process running with the screen locked. The OS background session defers a
+        // transfer created off screen for hours, so the scene phase must not move uploads onto it.
+        var policy = CloudTransportCoordinator.Policy()
+        XCTAssertEqual(CloudTransportCoordinator.lane(sceneIsActive: true, policy: policy), .process)
+        XCTAssertEqual(CloudTransportCoordinator.lane(sceneIsActive: false, policy: policy), .process)
+        policy.useBackgroundLaneWhenInactive = true
+        XCTAssertEqual(CloudTransportCoordinator.lane(sceneIsActive: true, policy: policy), .process)
+        XCTAssertEqual(CloudTransportCoordinator.lane(sceneIsActive: false, policy: policy), .background)
+    }
+
+    func testEachLaneIsBudgetedOnItsOwn() {
+        let policy = CloudTransportCoordinator.Policy()
+        // Two transfers the OS has parked must not use up the slots live data needs.
+        XCTAssertTrue(CloudTransportCoordinator.hasRoom(lane: .process, inFlight: 0,
+                                                        backgroundInFlight: policy.maxBackgroundInFlight, policy: policy))
+        XCTAssertFalse(CloudTransportCoordinator.hasRoom(lane: .background, inFlight: 0,
+                                                         backgroundInFlight: policy.maxBackgroundInFlight, policy: policy))
+        XCTAssertFalse(CloudTransportCoordinator.hasRoom(lane: .process, inFlight: policy.maxInFlight,
+                                                         backgroundInFlight: 0, policy: policy))
+        XCTAssertTrue(CloudTransportCoordinator.hasRoom(lane: .process, inFlight: policy.maxInFlight - 1,
+                                                        backgroundInFlight: 0, policy: policy))
+    }
+
+    func testSealTargetRelaxesOffScreen() {
+        XCTAssertEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: true), 2)
+        XCTAssertGreaterThan(CloudPushRuntime.sealTargetSeconds(sceneActive: false), 2)
+        XCTAssertLessThanOrEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: false), 30)
+    }
+
     // MARK: - capture seam
 
     func testCaptureIsANoOpWhenCloudIsNotRunning() {
@@ -428,6 +460,123 @@ final class CloudPushTests: XCTestCase {
                                                  family: .whoop4, at: 1_700_000_000,
                                                  deviceId: "my-whoop", receivedAtMs: 1_700_000_000_000)
         XCTAssertEqual(skip, .notRunning)
+    }
+
+    // MARK: - heart-rate seconds (one bpm per second reaches the receiver)
+
+    private func liveRecords(hr: Int, rr: [Int] = [], at ts: Int, ledger: CloudHeartRateLedger?) -> [CloudJournalRecord] {
+        CloudCapture.standardHRRecords(hr: hr, rr: rr, contact: .supportedDetected, family: .whoop5, at: ts,
+                                       deviceId: "whoop-MGB0214654", receivedAtMs: ts * 1000,
+                                       characteristic: "2A37", ledger: ledger)
+    }
+
+    private func bpmValues(_ records: [CloudJournalRecord]) throws -> [Int] {
+        try records.filter { $0.stream == .hrSample }.map { record in
+            let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: record.payload) as? [String: Any])
+            let data = try XCTUnwrap(payload["data"] as? [String: Any])
+            return try XCTUnwrap(data["bpm"] as? Int)
+        }
+    }
+
+    func testLedgerKeepsTheFirstSampleOfASecondAndDropsTheRest() {
+        let ledger = CloudHeartRateLedger()
+        let first = ledger.claim([HRSample(ts: 100, bpm: 70), HRSample(ts: 100, bpm: 74),
+                                  HRSample(ts: 101, bpm: 71)], deviceId: "strap")
+        XCTAssertEqual(first, [HRSample(ts: 100, bpm: 70), HRSample(ts: 101, bpm: 71)],
+                       "a repeat inside one call keeps its first sample, as the local store does")
+        let later = ledger.claim([HRSample(ts: 101, bpm: 75), HRSample(ts: 102, bpm: 72)], deviceId: "STRAP")
+        XCTAssertEqual(later, [HRSample(ts: 102, bpm: 72)],
+                       "a held second is not offered again, and the device id is not case sensitive")
+        let other = ledger.claim([HRSample(ts: 100, bpm: 70)], deviceId: "other-strap")
+        XCTAssertEqual(other.count, 1, "each device holds its own seconds")
+        XCTAssertEqual(ledger.count(deviceId: "strap"), 3)
+    }
+
+    func testLedgerSeedMarksSecondsHeldAndResetForgetsThem() {
+        let ledger = CloudHeartRateLedger()
+        ledger.seed(["Whoop-A": [10, 11, 12], "empty": []])
+        XCTAssertTrue(ledger.holds(11, deviceId: "whoop-a"))
+        XCTAssertEqual(ledger.claim([HRSample(ts: 11, bpm: 60), HRSample(ts: 13, bpm: 61)], deviceId: "whoop-a"),
+                       [HRSample(ts: 13, bpm: 61)])
+        ledger.reset()
+        XCTAssertEqual(ledger.count(deviceId: "whoop-a"), 0)
+        XCTAssertEqual(ledger.claim([HRSample(ts: 11, bpm: 60)], deviceId: "whoop-a").count, 1)
+    }
+
+    func testLedgerForgetsSecondsOlderThanItsWindowOnceFull() {
+        let ledger = CloudHeartRateLedger(retainSeconds: 100, capacity: 10)
+        let now = 50_000
+        _ = ledger.claim((0..<10).map { HRSample(ts: now - 5_000 + $0, bpm: 60) }, deviceId: "d", now: now)
+        XCTAssertEqual(ledger.count(deviceId: "d"), 10)
+        _ = ledger.claim([HRSample(ts: now, bpm: 61), HRSample(ts: now - 1, bpm: 62)], deviceId: "d", now: now)
+        XCTAssertEqual(ledger.count(deviceId: "d"), 2, "the stale seconds are trimmed once the set is over capacity")
+        XCTAssertTrue(ledger.holds(now, deviceId: "d"))
+        XCTAssertFalse(ledger.holds(now - 5_000, deviceId: "d"))
+    }
+
+    func testStrapDoublingOneSecondSendsTheFirstBpmOnlyAndStillSendsTheBeat() throws {
+        let ledger = CloudHeartRateLedger()
+        let ts = 1_790_950_000
+        let first = liveRecords(hr: 72, rr: [830], at: ts, ledger: ledger)
+        let second = liveRecords(hr: 75, rr: [810], at: ts, ledger: ledger)
+        XCTAssertEqual(try bpmValues(first), [72])
+        XCTAssertEqual(try bpmValues(second), [], "a second bpm for the same second would be a conflict on the receiver")
+        XCTAssertEqual(second.filter { $0.stream == .rrInterval }.count, 1, "the beat itself is still sent")
+    }
+
+    func testHistorySendsOnlySecondsTheLiveNotificationsDidNotCover() throws {
+        let ledger = CloudHeartRateLedger()
+        let base = 1_790_950_000
+        for offset in 0..<3 {
+            XCTAssertEqual(try bpmValues(liveRecords(hr: 70 + offset, at: base + offset, ledger: ledger)).count, 1)
+        }
+        // The offload returns seconds 0...5; the strap's bpm differs from what was heard live.
+        let chunk = Streams(hr: (0..<6).map { HRSample(ts: base + $0, bpm: 80 + $0) })
+        let fresh = CloudCapture.freshHeartRates(chunk, deviceId: "whoop-MGB0214654", ledger: ledger)
+        XCTAssertEqual(fresh.hr.map(\.ts), [base + 3, base + 4, base + 5])
+        let records = CloudCapture.rows(from: fresh, provenance: .history, family: .whoop5,
+                                        wallClockRef: nil, deviceClockRef: nil, receivedAtMs: 0,
+                                        characteristic: nil, deviceId: "whoop-MGB0214654")
+        XCTAssertEqual(try bpmValues(records), [83, 84, 85])
+
+        let resent = CloudCapture.freshHeartRates(chunk, deviceId: "whoop-MGB0214654", ledger: ledger)
+        XCTAssertTrue(resent.hr.isEmpty, "a chunk the strap sends again adds nothing")
+    }
+
+    func testLiveSecondTheOffloadAlreadySentIsLeftOut() throws {
+        let ledger = CloudHeartRateLedger()
+        let ts = 1_790_950_000
+        let chunk = Streams(hr: [HRSample(ts: ts, bpm: 64)])
+        XCTAssertEqual(CloudCapture.freshHeartRates(chunk, deviceId: "whoop-MGB0214654", ledger: ledger).hr.count, 1)
+        XCTAssertEqual(try bpmValues(liveRecords(hr: 66, at: ts, ledger: ledger)), [],
+                       "the offload got there first, so the live sample for that second is dropped")
+    }
+
+    func testCaptureWithoutALedgerSendsEveryHeartRateRow() throws {
+        let ts = 1_790_950_000
+        XCTAssertEqual(try bpmValues(liveRecords(hr: 72, at: ts, ledger: nil)), [72])
+        XCTAssertEqual(try bpmValues(liveRecords(hr: 75, at: ts, ledger: nil)), [75])
+    }
+
+    func testRecentStrapSecondsReadsTheJournalTailPerDeviceForTheOwner() async throws {
+        let journal = try await makeJournal(deviceId: "my-whoop")
+        journal.submit([hrRecord(ts: 10, bpm: 60, deviceId: "Strap-A"), hrRecord(ts: 11, bpm: 61, deviceId: "strap-a"),
+                        hrRecord(ts: 12, bpm: 62)])
+        _ = await journal.flush()
+        let everything = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertEqual(Set(everything["strap-a"] ?? []), [10, 11])
+        XCTAssertEqual(everything["my-whoop"], [12])
+
+        let tail = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 1)
+        XCTAssertEqual(tail["my-whoop"], [12])
+        XCTAssertNil(tail["strap-a"], "only the newest records are read back")
+
+        let otherStream = await journal.recentStrapSeconds(stream: .battery, lastRecords: 100)
+        XCTAssertTrue(otherStream.isEmpty)
+
+        let otherOwner = try await makeJournal(ownerId: "33333333-3333-4333-8333-333333333333", deviceId: "my-whoop")
+        let theirs = await otherOwner.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertTrue(theirs.isEmpty, "another owner's seconds are not this owner's to skip")
     }
 
     // MARK: - blocked re-seal
@@ -569,6 +718,38 @@ final class CloudPushTests: XCTestCase {
                                                       records: rows, protocolVersion: "1.1"))
     }
 
+    func testHistoryRowsCarryTheStrapSpo2EstimateAsEventRows() throws {
+        let streams = Streams(v18Aux: [
+            V18AuxSample(ts: 1_790_748_000, auxByte82: 97),
+            V18AuxSample(ts: 1_790_748_001, auxByte82: 0),
+            V18AuxSample(ts: 1_790_748_002, auxByte82: 128),
+            V18AuxSample(ts: 1_790_748_003, auxByte82: 69),
+            V18AuxSample(ts: 1_790_748_004, auxByte82: 93),
+            V18AuxSample(ts: 1_790_748_005),
+        ])
+        let records = CloudCapture.rows(from: streams, provenance: .history, family: .whoop5,
+                                        wallClockRef: nil, deviceClockRef: nil, receivedAtMs: 0,
+                                        characteristic: nil, deviceId: "my-whoop")
+        XCTAssertEqual(records.map(\.strapTs), [1_790_748_000, 1_790_748_004],
+                       "only an in-band byte is a reading; 0, sentinels and codes are not")
+        XCTAssertTrue(records.allSatisfy { $0.stream == .event && $0.provenance == .history })
+
+        let rows = try records.enumerated().map { index, record in
+            try CloudBatchBuilder.decodeRow(CloudJournalEntry(seq: Int64(index + 1), record: record,
+                                                              ownerId: "o", deviceId: "d", sourceId: "s"))
+        }
+        XCTAssertNoThrow(try PushProtocol.appendBatch(table: .event,
+                                                      sourceId: "22222222-2222-4222-8222-222222222222",
+                                                      deviceId: "my-whoop", startCursor: nil,
+                                                      records: rows, protocolVersion: "1.1"))
+        let payload = try XCTUnwrap(try JSONSerialization.jsonObject(
+            with: XCTUnwrap(records.first).payload) as? [String: Any])
+        let key = try XCTUnwrap(payload["key"] as? [String: Any])
+        XCTAssertEqual(key["kind"] as? String, Spo2StrapEstimate.eventKind)
+        let data = try XCTUnwrap(payload["data"] as? [String: Any])
+        XCTAssertEqual(Spo2StrapEstimate.percent(fromPayloadJSON: try XCTUnwrap(data["payloadJSON"] as? String)), 97)
+    }
+
     // MARK: - hosted worker result
 
     private func hostedEnvelope(daily: [String: Any], revision: Any = "42") -> [String: Any] {
@@ -667,6 +848,47 @@ final class CloudPushTests: XCTestCase {
         XCTAssertEqual(rest.map(\.value), [82])
         let source = try await store.scoreInputSource(deviceId: computedId, day: "2026-09-30", key: "recovery")
         XCTAssertEqual(source, "my-whoop")
+    }
+
+    func testHostedStrapSpo2EstimateLandsInTheSeriesTheBloodOxygenTileReadsAndNeverInSpo2Pct() async throws {
+        let store = try await WhoopStore.inMemory()
+        let computedId = HostedResultMaterializer.computedId(for: "my-whoop")
+        let night: [String: Any] = ["restScore": 82, "spo2_candidate_pct": 96, "spo2_candidate_samples": 451]
+        let result = try XCTUnwrap(ServerScoreRepository.snapshot(
+            day: "2026-09-30", deviceId: "my-whoop", envelope: hostedEnvelope(daily: night), fetchedAtMs: 0).hostedResult)
+        XCTAssertEqual(result.spo2Candidate, 96)
+        XCTAssertEqual(result.spo2CandidateSamples, 451)
+        XCTAssertNil(result.daily.spo2Pct, "a strap estimate is never the calibrated blood-oxygen figure")
+
+        try await HostedResultMaterializer.persist(result, store: store, deviceId: "my-whoop")
+        var stored = try await store.metricSeries(deviceId: computedId, key: "spo2_candidate",
+                                                  from: "2026-09-30", to: "2026-09-30")
+        XCTAssertEqual(stored.map(\.value), [96])
+        let days = try await store.dailyMetrics(deviceId: computedId, from: "2026-09-30", to: "2026-09-30")
+        XCTAssertNil(days.first?.spo2Pct)
+
+        // A later pass that no longer finds an estimate clears the old one instead of leaving it behind.
+        let cleared = try XCTUnwrap(ServerScoreRepository.snapshot(
+            day: "2026-09-30", deviceId: "my-whoop", envelope: hostedEnvelope(daily: ["restScore": 82]),
+            fetchedAtMs: 0).hostedResult)
+        XCTAssertNil(cleared.spo2Candidate)
+        try await HostedResultMaterializer.persist(cleared, store: store, deviceId: "my-whoop")
+        stored = try await store.metricSeries(deviceId: computedId, key: "spo2_candidate",
+                                              from: "2026-09-30", to: "2026-09-30")
+        XCTAssertTrue(stored.isEmpty)
+    }
+
+    func testHostedStrapSpo2EstimateOutsideTheBandOrWithoutReadingsIsIgnored() throws {
+        func result(_ daily: [String: Any]) throws -> HostedDayResult {
+            try XCTUnwrap(ServerScoreRepository.snapshot(day: "2026-09-30", deviceId: "my-whoop",
+                                                         envelope: hostedEnvelope(daily: daily),
+                                                         fetchedAtMs: 0).hostedResult)
+        }
+        XCTAssertNil(try result(["spo2_candidate_pct": 61, "spo2_candidate_samples": 40]).spo2Candidate)
+        XCTAssertNil(try result(["spo2_candidate_pct": 101, "spo2_candidate_samples": 40]).spo2Candidate)
+        XCTAssertNil(try result(["spo2_candidate_pct": 96]).spo2Candidate, "a mean with no readings behind it")
+        XCTAssertNil(try result(["spo2_candidate_pct": 96, "spo2_candidate_samples": 0]).spo2Candidate)
+        XCTAssertNil(try result(["spo2_candidate_pct": true, "spo2_candidate_samples": 40]).spo2Candidate)
     }
 
 }

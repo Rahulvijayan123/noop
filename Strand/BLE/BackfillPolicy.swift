@@ -19,6 +19,10 @@ enum BackfillTrigger {
 /// (observed: ~15-min periodic + expedited event syncs).
 enum BackfillPolicy {
     static let periodicFloorSeconds: TimeInterval = 900   // 15 min
+    /// The periodic floor while the minute-cadence "fresh data" timer drives the offload (a WHOOP 5.0/MG in
+    /// cloud mode). It sits just under that timer's interval so a tick is never refused for arriving a few
+    /// seconds early, yet still absorbs a tick that lands right behind an event-triggered sync.
+    static let freshPeriodicFloorSeconds: TimeInterval = 48
     static let eventFloorSeconds: TimeInterval = 90       // absorbs reconnect-flaps / event bursts
     static let emptyBackoffThreshold = 3                  // empties before the floor starts stretching
     static let maxEmptyBackoff: Double = 4                // cap → ~6-min event / 1-hr periodic floor
@@ -42,7 +46,8 @@ enum BackfillPolicy {
     /// `emptyStreak`, `.connect`/`.foreground`/`.manual`/`.autoContinue` are never affected.
     static func shouldRun(trigger: BackfillTrigger, now: TimeInterval,
                           lastBackfillAt: TimeInterval?, emptyStreak: Int = 0,
-                          clockUntrusted: Bool = false) -> Bool {
+                          clockUntrusted: Bool = false,
+                          periodicFloor: TimeInterval = periodicFloorSeconds) -> Bool {
         guard let last = lastBackfillAt else { return true }
         let elapsed = now - last
         let backoff: Double = emptyStreak >= emptyBackoffThreshold
@@ -57,7 +62,7 @@ enum BackfillPolicy {
         // trust the range) but each holds the link ~60s and starves the WHOOP4 realtime-HR re-arm, so skip
         // them entirely — not just stretch the floor. The .connect pass above still re-checks the clock.
         case .strap:                 return !clockUntrusted && elapsed >= eventFloorSeconds * backoff
-        case .periodic:              return !clockUntrusted && elapsed >= periodicFloorSeconds * backoff
+        case .periodic:              return !clockUntrusted && elapsed >= periodicFloor * backoff
         }
     }
 }

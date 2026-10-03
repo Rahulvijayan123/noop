@@ -16,9 +16,27 @@ import NoopPush
 /// and is re-sent on the next pass (the receiver is idempotent for an identical batch id).
 public actor CloudTransportCoordinator {
 
+    /// Where an eligible batch is sent.
+    public enum UploadLane: Sendable, Equatable {
+        /// An ordinary request issued by this process and awaited here. It starts at once and does not
+        /// depend on the scene being on screen: BLE keeps the process running, so this is the lane that
+        /// keeps the server current while the phone is locked or the app is in the background.
+        case process
+        /// A file task owned by the OS background session. The system decides when it runs, and for a
+        /// transfer created while the app is backgrounded that has meant hours of silence.
+        case background
+    }
+
     public struct Policy: Sendable {
-        /// At most this many uploads in flight. Two is the spec's measured starting point.
+        /// At most this many in-process uploads in flight. Two is the spec's measured starting point.
         public var maxInFlight: Int = 2
+        /// At most this many OS-session uploads in flight. Counted apart from `maxInFlight`: a task the
+        /// OS defers must not use up the slots that live data needs.
+        public var maxBackgroundInFlight: Int = 2
+        /// Hand batches to the OS background session while the scene is not active. Off by default: the
+        /// background session defers a transfer created while backgrounded, which is how a phone that
+        /// stayed connected to the strap all night uploaded nothing from 01:00 until it was unlocked.
+        public var useBackgroundLaneWhenInactive: Bool = false
         /// At most this many of the in-flight uploads may be backlog; the rest stay free for fresh
         /// data. A strap-history backlog sent at full concurrency overloaded the receiver's database.
         public var maxBacklogInFlight: Int = 1
@@ -63,9 +81,11 @@ public actor CloudTransportCoordinator {
     private let now: @Sendable () -> Int
     private let random: @Sendable () -> Double
 
+    /// In-process uploads in flight. The OS-session lane has its own counter (`backgroundInFlight`).
     private var inFlight = 0
-    /// Prompt-lane uploads in flight, keyed by batch id; the value says whether the batch is backlog.
-    /// The prompt lane does not reserve its batch in the journal, so this is what stops a later pass
+    private var backgroundInFlight = 0
+    /// In-process uploads in flight, keyed by batch id; the value says whether the batch is backlog.
+    /// This lane does not reserve its batch in the journal, so this is what stops a later pass
     /// from sending the same batch again while the first upload is still waiting on the receiver.
     private var promptLaneBatches: [String: Bool] = [:]
     private var cycleScheduled = false
@@ -178,7 +198,9 @@ public actor CloudTransportCoordinator {
         let seconds = now()
         guard seconds - lastHeartbeatAtSeconds >= 30 else { return }
         lastHeartbeatAtSeconds = seconds
-        let summary = "\(seconds * 1000) stage=\(stage) inFlight=\(inFlight) protocol=\(negotiatedProtocolVersion ?? "nil")"
+        let summary = "\(seconds * 1000) stage=\(stage) inFlight=\(inFlight) bgInFlight=\(backgroundInFlight)"
+            + " sceneActive=\(CloudTransportCoordinator.applicationIsActive())"
+            + " protocol=\(negotiatedProtocolVersion ?? "nil")"
         Task { await journal.recordTransportDiagnostic("lastCycle", summary) }
     }
 
@@ -268,9 +290,30 @@ public actor CloudTransportCoordinator {
 
     // MARK: - sending
 
+    /// The lane for a batch, given whether the scene is on screen.
+    ///
+    /// The scene phase says nothing about whether this process is running, and a request made by a
+    /// running process is the only thing that reliably reaches the server promptly. So an inactive scene
+    /// stays on the in-process lane unless the policy explicitly asks for the OS background session.
+    static func lane(sceneIsActive: Bool, policy: Policy) -> UploadLane {
+        sceneIsActive || !policy.useBackgroundLaneWhenInactive ? .process : .background
+    }
+
+    /// Whether `lane` still has a free slot. Each lane is budgeted on its own, so transfers the OS has
+    /// deferred never block the in-process lane.
+    static func hasRoom(lane: UploadLane, inFlight: Int, backgroundInFlight: Int, policy: Policy) -> Bool {
+        switch lane {
+        case .process: return inFlight < policy.maxInFlight
+        case .background: return backgroundInFlight < policy.maxBackgroundInFlight
+        }
+    }
+
     /// Fill the in-flight budget with eligible batches, one backlog item and one fresh item per pass.
     private func sendEligible(identity: CloudPushIdentity) async throws {
-        guard inFlight < policy.maxInFlight else { return }
+        let lane = CloudTransportCoordinator.lane(sceneIsActive: CloudTransportCoordinator.applicationIsActive(),
+                                                  policy: policy)
+        guard CloudTransportCoordinator.hasRoom(lane: lane, inFlight: inFlight,
+                                                backgroundInFlight: backgroundInFlight, policy: policy) else { return }
         let nowMs = now() * 1000
         let notInFlight: (CloudSealedBatch) -> Bool = { [promptLaneBatches] in promptLaneBatches[$0.batchId] == nil }
         let due = try await journal.batches(states: [.sealed, .failed], dueBeforeMs: nowMs,
@@ -293,18 +336,21 @@ public actor CloudTransportCoordinator {
         if queue.isEmpty, backlogHasRoom { queue = Array(due.prefix(1)) }
 
         for batch in queue {
-            guard inFlight < policy.maxInFlight else { break }
+            guard CloudTransportCoordinator.hasRoom(lane: lane, inFlight: inFlight,
+                                                    backgroundInFlight: backgroundInFlight, policy: policy) else { break }
             guard let fileURL = payloadFileURL(for: batch) else {
                 // The file is gone but the records are not acknowledged: re-seal instead of dropping.
                 try await releaseForReseal(batch)
                 continue
             }
-            inFlight += 1
-            let appIsActive = CloudTransportCoordinator.applicationIsActive()
-            if appIsActive {
+            switch lane {
+            case .process:
+                inFlight += 1
                 promptLaneBatches[batch.batchId] = batch.createdAtMs < freshCutoff
-                Task { await self.uploadOnForegroundLane(batch, fileURL: fileURL, identity: identity) }
-            } else {
+                let sceneIsActive = CloudTransportCoordinator.applicationIsActive()
+                Task { await self.uploadInProcess(batch, fileURL: fileURL, holdExecution: !sceneIsActive) }
+            case .background:
+                backgroundInFlight += 1
                 let taskId = session.enqueueBackground(batchId: batch.batchId, fileURL: fileURL)
                 try await journal.markReserved(batchId: batch.batchId, taskId: String(taskId),
                                                taskKind: "background", authExpiresAtMs: nil)
@@ -312,51 +358,62 @@ public actor CloudTransportCoordinator {
         }
     }
 
-    /// Prompt lane: the app is executing, so send now and apply the receipt as soon as it lands.
-    private func uploadOnForegroundLane(_ batch: CloudSealedBatch, fileURL: URL, identity: CloudPushIdentity) async {
-        defer {
-            inFlight = max(0, inFlight - 1)
-            promptLaneBatches[batch.batchId] = nil
-        }
+    /// Process lane: this process is executing, so send now and apply the receipt as soon as it lands.
+    ///
+    /// When the scene is not on screen the app is running on borrowed time (a BLE wake), so the upload
+    /// holds an execution assertion until the receipt is applied. Once the slot is free the loop looks for
+    /// more work straight away, so a backlog drains without waiting for the next capture to kick it.
+    private func uploadInProcess(_ batch: CloudSealedBatch, fileURL: URL, holdExecution: Bool) async {
+        let release: (@Sendable () -> Void)? = holdExecution
+            ? await CloudTransportCoordinator.executionAssertion("cloud-upload")
+            : nil
+        var succeeded = false
         do {
             let outcome = try await session.uploadForeground(batchId: batch.batchId, fileURL: fileURL)
-            await handle(outcome: outcome)
+            succeeded = await handle(outcome: outcome)
         } catch {
             await handleFailure(batch: batch, error: String(describing: error))
         }
+        inFlight = max(0, inFlight - 1)
+        promptLaneBatches[batch.batchId] = nil
+        release?()
+        if succeeded { kick() }
     }
 
     // MARK: - outcomes
 
-    /// The background lane's only completion path, so it releases the in-flight slot here; the prompt
-    /// lane releases its own slot when its upload returns.
+    /// The background lane's only completion path, so it releases that lane's in-flight slot here; the
+    /// process lane releases its own slot when its upload returns.
     private func handleBackgroundOutcome(_ outcome: CloudUploadSession.Outcome) async {
-        inFlight = max(0, inFlight - 1)
-        await handle(outcome: outcome)
+        backgroundInFlight = max(0, backgroundInFlight - 1)
+        let applied = await handle(outcome: outcome)
+        if applied { kick() }
     }
 
     /// Apply a transfer outcome. A 200 body is the receiver's acknowledgement; anything else is a
-    /// failure with its own retry treatment.
-    private func handle(outcome: CloudUploadSession.Outcome) async {
-        guard active else { return }
+    /// failure with its own retry treatment. Returns whether the batch was acknowledged.
+    @discardableResult
+    private func handle(outcome: CloudUploadSession.Outcome) async -> Bool {
+        guard active else { return false }
         lastOutcomeAtMs = now() * 1000
         guard let batch = try? await journal.batches(states: [.sealed, .reserved, .uploaded, .failed],
                                                     dueBeforeMs: nil, limit: 256)
-            .first(where: { $0.batchId == outcome.batchId }) else { return }
+            .first(where: { $0.batchId == outcome.batchId }) else { return false }
 
         if outcome.isTransportFailure {
             await handleFailure(batch: batch, error: outcome.errorDescription ?? "transport")
-            return
+            return false
         }
         guard outcome.statusCode == 200, let body = outcome.body else {
             await handleFailure(batch: batch, error: "HTTP \(outcome.statusCode)")
-            return
+            return false
         }
         do {
             try await journal.markUploaded(batchId: batch.batchId)
-            try await applyReceipt(batch: batch, body: body)
+            return try await applyReceipt(batch: batch, body: body)
         } catch {
             await handleFailure(batch: batch, error: String(describing: error))
+            return false
         }
     }
 
@@ -366,29 +423,30 @@ public actor CloudTransportCoordinator {
     /// this exact batch (id, stream, device, end cursor, record count), the durability receipt must be
     /// a well-formed `verified_indexed` receipt for this owner, and its content digest must be the
     /// digest of the decoded body we sealed. Only then are the batch's records marked acknowledged.
-    private func applyReceipt(batch: CloudSealedBatch, body: Data) async throws {
+    @discardableResult
+    private func applyReceipt(batch: CloudSealedBatch, body: Data) async throws -> Bool {
         let ack = try PushAck.parse(body)
         guard ack.status == "accepted" else {
             lastError = "receiver status \(ack.status)"
-            return
+            return false
         }
         let rebuilt = try await rebuildBatch(batch)
         if let rebuilt {
             guard ack.exactlyMatches(rebuilt.batch) else {
                 lastError = "ack does not match the sealed batch \(batch.batchId)"
-                return
+                return false
             }
         }
         guard let receipt = ack.durabilityReceipt else {
             // A transport-level "accepted" without a durability receipt is not proof of durable
             // intake; keep the file and try again rather than treating it as done.
             lastError = "no durability receipt for \(batch.batchId)"
-            return
+            return false
         }
         if let rebuilt, let scope = try? AccountScope(projectURL: projectURL, userID: rebuilt.ownerId) {
             guard receipt.matches(rebuilt.batch, owner: scope) else {
                 lastError = "durability receipt does not match \(batch.batchId)"
-                return
+                return false
             }
         }
         let outcome = try await journal.applyReceipt(batchId: batch.batchId,
@@ -404,8 +462,10 @@ public actor CloudTransportCoordinator {
                                                    endCursorJSON: json)
             }
             try await deleteFileIfUnreferenced(batch)
+            return true
         case .duplicate:
             try await deleteFileIfUnreferenced(batch)
+            return true
         case .checksumMismatch(let expected, let received):
             lastError = "receipt checksum mismatch for \(batch.batchId): \(expected) != \(received)"
         case .unknownBatch:
@@ -413,6 +473,7 @@ public actor CloudTransportCoordinator {
         case .malformed:
             lastError = "malformed receipt for \(batch.batchId)"
         }
+        return false
     }
 
     /// Rebuild the wire batch from its durable membership.
@@ -468,6 +529,11 @@ public actor CloudTransportCoordinator {
         let dueAtMs = now() * 1000 + Int(backoff * 1000)
         try? await journal.markFailed(batchId: batch.batchId, error: error, nextAttemptAtMs: dueAtMs)
         lastError = error
+        // Nothing else wakes the loop when a backoff expires on a quiet link, so the retry schedules itself.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(backoff * 1_000_000_000) + 250_000_000)
+            self?.kick()
+        }
     }
 
     /// Bounded exponential backoff with full jitter: `min(cap, base · 2^min(attempt,10))`, spread over
@@ -604,7 +670,7 @@ public actor CloudTransportCoordinator {
     }
 
     public func status() async -> (stats: CloudJournalStats, inFlight: Int, protocolVersion: String?, lastError: String?, lastOutcomeAtMs: Int?) {
-        (await journal.stats(), inFlight, negotiatedProtocolVersion, lastError, lastOutcomeAtMs)
+        (await journal.stats(), inFlight + backgroundInFlight, negotiatedProtocolVersion, lastError, lastOutcomeAtMs)
     }
 
     private func protectPayloadDirectory() async {
@@ -625,4 +691,12 @@ public actor CloudTransportCoordinator {
     static var appIsActiveProvider: @Sendable () -> Bool = { true }
 
     static func applicationIsActive() -> Bool { appIsActiveProvider() }
+
+    /// Asks the OS to keep this process running until the returned closure is called.
+    ///
+    /// An upload that starts while the scene is off screen has to finish before the app is suspended
+    /// again, so it holds one of these for its whole duration. Injected by the iOS layer (UIKit's
+    /// `beginBackgroundTask`); the default does nothing, which is correct anywhere the process is not
+    /// suspended behind the user's back.
+    static var executionAssertion: @Sendable (String) async -> (@Sendable () -> Void) = { _ in { } }
 }

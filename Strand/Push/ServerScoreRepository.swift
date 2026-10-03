@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import WhoopProtocol
 import WhoopStore
 
 /// One day that the server says has changed, from the pull-based invalidation channel.
@@ -131,14 +132,15 @@ public actor ServerScoreRepository {
 
     // MARK: - cache
 
-    private func ensureDirectory() {
-        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    private func ensureDirectory(_ target: URL? = nil) {
+        let folder = target ?? directory
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         #if os(iOS)
         // Written from background wakes as well, so it takes the same after-first-unlock protection as
         // the store and the journal (see Strand/Collect/StorePaths.swift for the original reasoning).
         try? FileManager.default.setAttributes(
             [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
-            ofItemAtPath: directory.path)
+            ofItemAtPath: folder.path)
         #endif
     }
 
@@ -228,6 +230,49 @@ public actor ServerScoreRepository {
         }
         if let scope, !scope.isEmpty { defaults.set(scope, forKey: scopeKey(ownerId: identity.ownerId, deviceId: deviceId)) }
         return changes
+    }
+
+    // MARK: - intraday series
+
+    /// The dense intraday series between two instants (`GET scores/series`), cached under `cacheKey`.
+    ///
+    /// `metrics` narrows the answer to what the caller draws; nil asks for all five. The cache keeps the
+    /// server's own JSON, so a cached read goes through exactly the parser the network read used.
+    @discardableResult
+    public func intradaySeries(from: Int, to: Int, deviceId: String, metrics: [IntradayMetric]? = nil,
+                               cacheKey: String) async throws -> IntradaySeriesWindow {
+        guard let endpoint, !fleetToken.isEmpty else { throw ReadError.notConfigured }
+        guard let identity = identity() else { throw ReadError.missingIdentity }
+
+        var components = URLComponents(url: endpoint.appendingPathComponent("series"),
+                                       resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "deviceId", value: deviceId),
+                     URLQueryItem(name: "from", value: String(from)),
+                     URLQueryItem(name: "to", value: String(to))]
+        if let metrics, !metrics.isEmpty {
+            items.append(URLQueryItem(name: "metrics", value: metrics.map(\.rawValue).joined(separator: ",")))
+        }
+        components?.queryItems = items
+        guard let url = components?.url else { throw ReadError.malformed("series endpoint") }
+
+        let body = try await get(url: url, identity: identity)
+        guard let series = body["series"], let window = IntradaySeriesWindow(envelope: body) else {
+            throw ReadError.malformed("series")
+        }
+        writeSeriesCache(series, ownerId: identity.ownerId, deviceId: deviceId, key: cacheKey)
+        return window
+    }
+
+    /// The last series stored under `cacheKey` for the CURRENT owner. A pure local read, so a screen can
+    /// paint the last known readings before (or without) the network.
+    public func cachedIntradaySeries(cacheKey: String, deviceId: String) -> IntradaySeriesWindow? {
+        guard let ownerId = identity()?.ownerId else { return nil }
+        guard let data = try? Data(contentsOf: seriesCacheURL(ownerId: ownerId, deviceId: deviceId, key: cacheKey)),
+              let envelope = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let storedOwner = envelope["ownerId"] as? String,
+              storedOwner.lowercased() == ownerId.lowercased(),
+              let series = envelope["series"] as? [String: Any] else { return nil }
+        return IntradaySeriesWindow(envelope: series)
     }
 
     /// Drop a cached day (used when a local edit makes it stale).
@@ -391,6 +436,48 @@ public actor ServerScoreRepository {
         }
     }
 
+    private var seriesDirectory: URL { directory.appendingPathComponent("series", isDirectory: true) }
+
+    private func seriesCacheURL(ownerId: String, deviceId: String, key: String) -> URL {
+        let name = "\(ownerId.lowercased())|\(deviceId.lowercased())|\(key)"
+        let digest = SHA256.hash(data: Data(name.utf8)).map { String(format: "%02x", $0) }.joined()
+        return seriesDirectory.appendingPathComponent("\(digest).json")
+    }
+
+    private func writeSeriesCache(_ series: Any, ownerId: String, deviceId: String, key: String) {
+        ensureDirectory(seriesDirectory)
+        pruneSeriesCache()
+        let envelope: [String: Any] = [
+            "schemaVersion": 1,
+            "ownerId": ownerId,
+            "deviceId": deviceId,
+            "fetchedAtMs": now(),
+            "series": series,
+        ]
+        guard JSONSerialization.isValidJSONObject(envelope),
+              let data = try? JSONSerialization.data(withJSONObject: envelope) else { return }
+        let target = seriesCacheURL(ownerId: ownerId, deviceId: deviceId, key: key)
+        let temporary = target.appendingPathExtension("tmp")
+        do {
+            try data.write(to: temporary, options: [.atomic])
+            _ = try? FileManager.default.replaceItemAt(target, withItemAt: temporary)
+        } catch {
+            try? FileManager.default.removeItem(at: temporary)
+        }
+    }
+
+    /// One entry per (screen, day), and a day-keyed entry is never read again once its day is more than a
+    /// week old, so entries older than two weeks are deleted instead of accumulating.
+    private func pruneSeriesCache() {
+        let cutoff = Date().addingTimeInterval(-14 * 86_400)
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: seriesDirectory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        for file in files {
+            let modified = (try? file.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let modified, modified < cutoff { try? FileManager.default.removeItem(at: file) }
+        }
+    }
+
     private var defaults: UserDefaults { .standard }
     private func scopeKey(ownerId: String, deviceId: String) -> String {
         "noop.cloud.scores.scope.\(ownerId.lowercased()).\(deviceId.lowercased())"
@@ -444,6 +531,11 @@ public struct HostedDayResult: Equatable {
     public let daily: DailyMetric
     /// The Rest composite (0–100), which the local engine stores as the `sleep_performance` series.
     public let restScore: Double?
+    /// The night's mean of the strap's own SpO₂ estimate (`@82`, whole percent), which the local engine
+    /// stores as the `spo2_candidate` series, and the number of in-band readings it is the mean of.
+    /// A strap estimate, not a blood-oxygen measurement: it never becomes `daily.spo2Pct`.
+    public let spo2Candidate: Int?
+    public let spo2CandidateSamples: Int?
     public let sleep: [CachedSleepSession]
     /// Intraday HRV, one reading per slot of the local day, oldest first. Empty when the worker has not
     /// published one. Informational only: it is not what Charge or the baselines use.
@@ -475,6 +567,10 @@ public struct HostedDayResult: Equatable {
             spo2Ir: integer("spo2Ir"), avgSdnn: number("hrv_sdnn_ms"),
             skinTempC: number("skin_temp_c"), sleepHrOnly: daily["sleepHrOnly"] as? Bool)
         self.restScore = number("restScore")
+        let candidateSamples = integer("spo2_candidate_samples").flatMap { $0 > 0 ? $0 : nil }
+        self.spo2Candidate = candidateSamples == nil ? nil
+            : integer("spo2_candidate_pct").flatMap { Spo2StrapEstimate.band.contains($0) ? $0 : nil }
+        self.spo2CandidateSamples = self.spo2Candidate == nil ? nil : candidateSamples
         let series = daily["hrv_series"] as? [String: Any]
         let slot = Self.number(series?["slot_s"]).flatMap { Int(exactly: $0) } ?? 900
         self.hrvSlotSeconds = (60...3_600).contains(slot) ? slot : 900
@@ -529,6 +625,9 @@ public struct HostedDayResult: Equatable {
 public enum HostedResultMaterializer {
     public static func computedId(for deviceId: String) -> String { deviceId + "-noop" }
 
+    /// The `metricSeries` key the local engine writes the nightly SpO₂ estimate under (`IntelligenceEngine`).
+    static let spo2CandidateKey = "spo2_candidate"
+
     /// Persist one hosted day. `skipWindows` are nights the user deleted; a hosted session overlapping
     /// one (or a hand-edited night) is not written, the same guard a local pass applies.
     public static func persist(_ result: HostedDayResult,
@@ -537,7 +636,14 @@ public enum HostedResultMaterializer {
                                skipWindows: [(start: Int, end: Int)] = []) async throws {
         let computedId = computedId(for: deviceId)
         let day = result.day
-        let points = result.restScore.map { [MetricPoint(day: day, key: "sleep_performance", value: $0)] } ?? []
+        var points = result.restScore.map { [MetricPoint(day: day, key: "sleep_performance", value: $0)] } ?? []
+        // The strap's SpO₂ estimate goes where the local engine puts it, so the Blood Oxygen surfaces that
+        // already fall back to it (behind `PuffinExperiment.spo2CandidateDisplayEnabled`, labelled "strap
+        // estimate (unverified)") work in cloud mode with no second path. It is replaced with the day, so a
+        // recompute that finds no estimate clears a stale one.
+        if let candidate = result.spo2Candidate {
+            points.append(MetricPoint(day: day, key: spo2CandidateKey, value: Double(candidate)))
+        }
         var provenance: [ScoreInputProvenanceRow] = []
         if result.daily.recovery != nil { provenance.append(.init(day: day, key: "recovery", sourceId: deviceId)) }
         if result.daily.strain != nil { provenance.append(.init(day: day, key: "strain", sourceId: deviceId)) }
@@ -546,7 +652,8 @@ public enum HostedResultMaterializer {
         }
         try await store.persistComputedScores(dailyMetrics: [result.daily], metricPoints: points,
                                               provenance: provenance, deviceId: computedId,
-                                              from: day, to: day, replaceMetricKeys: ["sleep_performance"])
+                                              from: day, to: day,
+                                              replaceMetricKeys: ["sleep_performance", spo2CandidateKey])
 
         guard let earliest = result.sleep.map(\.startTs).min(),
               let latest = result.sleep.map(\.endTs).max() else { return }

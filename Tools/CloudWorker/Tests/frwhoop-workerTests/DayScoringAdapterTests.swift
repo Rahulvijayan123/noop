@@ -186,6 +186,32 @@ final class DayScoringAdapterTests: XCTestCase {
         XCTAssertEqual(DayScorer.stageMinutes([]).light, 0)
     }
 
+    // MARK: - SpO₂ strap estimate
+
+    func testSpo2EstimateKeysAreTheNightlyMeanOverReadingsInsideSleepOnly() {
+        let sleep = SleepSession(start: 1_000, end: 2_000, efficiency: 0.9, stages: [], restingHR: nil, avgHRV: nil)
+        let readings = [
+            V18AuxSample(ts: 900, auxByte82: 70),     // before sleep: not part of the night
+            V18AuxSample(ts: 1_000, auxByte82: 96),
+            V18AuxSample(ts: 1_500, auxByte82: 97),
+            V18AuxSample(ts: 2_000, auxByte82: 98),
+            V18AuxSample(ts: 2_100, auxByte82: 70),   // after sleep
+        ]
+        let keys = DayScorer.spo2EstimateKeys(sessions: [sleep], readings: readings)
+        XCTAssertEqual(keys["spo2_candidate_pct"] as? Int, 97)
+        XCTAssertEqual(keys["spo2_candidate_samples"] as? Int, 3)
+        XCTAssertNil(keys["spo2_pct"], "a strap estimate is never the calibrated blood-oxygen key")
+    }
+
+    func testSpo2EstimateKeysAreAbsentWithoutASessionOrAnInBandReading() {
+        let sleep = SleepSession(start: 1_000, end: 2_000, efficiency: 0.9, stages: [], restingHR: nil, avgHRV: nil)
+        XCTAssertTrue(DayScorer.spo2EstimateKeys(sessions: [], readings: [V18AuxSample(ts: 1_500, auxByte82: 97)]).isEmpty)
+        XCTAssertTrue(DayScorer.spo2EstimateKeys(sessions: [sleep], readings: []).isEmpty)
+        XCTAssertTrue(DayScorer.spo2EstimateKeys(
+            sessions: [sleep], readings: [V18AuxSample(ts: 1_500, auxByte82: 0), V18AuxSample(ts: 1_501, auxByte82: 128)]
+        ).isEmpty)
+    }
+
     // MARK: - R-R transport selection + intraday HRV
 
     /// `seconds` of 60 bpm beats from `start`, alternating 975/1025 ms so every successive difference is 50 ms

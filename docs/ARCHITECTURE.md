@@ -18,10 +18,14 @@ sequenceDiagram
     W->>D: claim a dirty day (claim_scoring_v2)
     W->>W: compute the day with StrandAnalytics
     W->>D: publish snapshot (publish_scoring_snapshot_v2)
+    W->>D: publish the day's 1- and 5-minute series (publish_metric_series_v1)
     P->>E: GET /functions/v1/scores/days, then /scores?day=…
     E->>D: read the latest snapshot
     E-->>P: server_scoring payload
     P->>P: write it into the local store; cards update
+    P->>E: GET /functions/v1/scores/series (metric detail pages)
+    E->>D: read server_metric_series
+    E-->>P: one value per bucket (1 or 5 minutes, per metric)
 ```
 
 ## 1. Strap to phone
@@ -42,7 +46,7 @@ The upload path lives in `Strand/Push/`:
 
 | File | Job |
 | --- | --- |
-| `CloudCapture.swift` | Turns each notification or history record into wire rows and stages them. It never blocks or throws into the Bluetooth pipeline. |
+| `CloudCapture.swift` | Turns each notification or history record into wire rows and stages them. It never blocks or throws into the Bluetooth pipeline. A second of heart rate is staged once (`CloudHeartRateLedger`, first sample wins), because the receiver treats two values for one second as a conflict and keeps neither. |
 | `CloudJournal.swift` | A durable SQLite outbox. Rows are journaled per stream with a sequence number, then sealed into batches. |
 | `CloudBatchBuilder.swift` | Encodes a sealed batch in the push wire format from `Packages/NoopPush`. |
 | `CloudTransportCoordinator.swift` | Seals batches of at most 2,000 records, uploads at most two at a time (only one of them from the history backlog, so fresh data is not stuck behind it), retries failures with backoff, and makes failed batches due again at launch. |
@@ -74,7 +78,7 @@ The worker runs independent lanes, each on its own thread and database connectio
 
 | Lane | Queue | What it does |
 | --- | --- | --- |
-| scoring | `scoring_jobs_v2` | Claims a stale day (`claim_scoring_v2`), loads its inputs, computes strain, sleep, recovery, HRV, resting heart rate and respiratory rate, and publishes a row to `scoring_snapshots_v2` (`publish_scoring_snapshot_v2`). |
+| scoring | `scoring_jobs_v2` | Claims a stale day (`claim_scoring_v2`), loads its inputs, computes strain, sleep, recovery, HRV, resting heart rate and respiratory rate, and publishes a row to `scoring_snapshots_v2` (`publish_scoring_snapshot_v2`). Once that commits it also writes the day's dense series (1-minute for respiratory rate, steps and calories, 5-minute for HRV and resting heart rate) of HRV, resting heart rate, respiratory rate, steps and calories to `server_metric_series` (`publish_metric_series_v1`); see [BACKEND.md](BACKEND.md#intraday-metric-series). |
 | archive | `scoring_archive_jobs_v2` | Copies each published snapshot to private B2 storage. |
 | verify | object arrivals | Reconciles objects uploaded through the object lane that were never verified. |
 | projection | `noop_projection_debt` | Replays stored objects into the typed tables. Turned off in production; see [BACKEND.md](BACKEND.md). |
@@ -87,12 +91,20 @@ The worker also writes a heartbeat to `scoring_service_heartbeats` every 15 seco
 
 - `GET /functions/v1/scores/days` lists the days whose results changed since the app's last cursor.
 - `GET /functions/v1/scores?day=YYYY-MM-DD&deviceId=…` returns that day's latest snapshot.
+- `GET /functions/v1/scores/series?deviceId=…&from=<unix>&to=<unix>` returns the intraday metric series for a
+  range of up to three days.
 
-`Strand/Push/ServerScoreRepository.swift` calls both, caches each result per owner, and
+`Strand/Push/ServerScoreRepository.swift` calls all three, caches each result per owner, and
 `HostedResultMaterializer` writes it into the same local tables (`dailyMetric` and the score
 provenance tables) that the cards already read. `AppModel.syncHostedResults()` pulls yesterday, today
-and any changed days when the app becomes active, then every two minutes while it stays in the
+and any changed days when the app becomes active, then every 30 seconds while it stays in the
 foreground.
+
+The intraday series does not go through the local store. `Strand/Push/IntradaySeriesStore.swift` keeps
+the last window it read for each metric in memory and in an on-disk cache, and the "Through the day" card
+(`Strand/Screens/IntradaySeriesSection.swift`) on the HRV, resting heart rate, respiratory rate, steps and
+calories detail pages re-reads it every 30 seconds while it is on screen. Nothing on the phone computes
+those values.
 
 ## 6. Coach
 
@@ -115,5 +127,8 @@ loads the stored profile when the app opens, so the values survive a reinstall a
 - **HRV and respiratory rate** come from overnight R-R intervals. Respiratory rate is derived from the
   breathing rhythm in heart rate, so it does not need a separate sensor stream.
 - **Recovery** needs a baseline of four nights. Until then the card shows "Calibrating".
-- **Blood oxygen** needs SpO₂ samples from the strap. The strap history this app syncs does not
-  include them, so the card stays empty.
+- **Blood oxygen** is shown only as a labelled strap estimate, and only for the night. The WHOOP 5.0/MG
+  history carries an SpO₂ byte, but the strap fills it only while the wearer is asleep and still (roughly
+  400 to 500 readings a night, none by day), and it is not established that the byte is a calibrated
+  percentage. The worker averages the night's readings into `spo2_candidate_pct`; the card says "strap
+  estimate (unverified)" and no score uses it. See the Blood oxygen entry in the backend runbook.

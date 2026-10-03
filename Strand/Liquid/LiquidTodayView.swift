@@ -73,6 +73,7 @@ struct LiquidTodayView: View {
     /// every hole up and drew a day of sparse live windows as one continuous line. That bites hardest on a
     /// strap whose history never offloads, where heart rate exists ONLY for the windows it was connected.
     @State private var hrSegments: [String] = []
+    @State private var hrTimes: [Double] = []
     @State private var workouts: [WorkoutRow] = [] // newest-first
     /// #today-hosted-cards: the shared SleepModel that backs every SleepModel-derived hosted sleep card
     /// (Stages vs typical today; more to follow). Built ONCE in `load()` from the SAME inputs the Sleep tab
@@ -578,7 +579,7 @@ struct LiquidTodayView: View {
                 // was written against.
                 .headerTrailingControlFadeMask(reserving: headerControlsWidth)
                 HStack(spacing: headerClusterSpacing) {
-                    LiquidBatteryButton()
+                    LiquidSettingsButton()
                 }
                 .background(
                     GeometryReader { proxy in
@@ -588,6 +589,7 @@ struct LiquidTodayView: View {
                         )
                     }
                 )
+                .offset(y: -4)
                 .zIndex(1)
             }
             .onPreferenceChange(HeaderControlsWidthKey.self) { measured in
@@ -641,29 +643,34 @@ struct LiquidTodayView: View {
         .accessibilityLabel("Start a live session. Beta. Silent strap coaching against today's Charge.")
     }
 
+    /// Heart-rate reserve in use, from the banked 5-minute HR buckets: the latest bucket for today, the
+    /// day's peak for a past day.
+    private var watchdogLoad: Double? {
+        let bpm: Double? = selectedDayOffset == 0 ? hrValues.last : hrValues.max()
+        let stored = displayDay?.restingHr ?? restingHrDay?.restingHr
+        let resting = stored.map(Double.init) ?? StrainScorer.defaultRestingHR
+        return HeroRings.heartLoad(bpm: bpm, resting: resting, max: Double(profile.hrMax))
+    }
+
     private var heroCard: some View {
         HStack(alignment: .top, spacing: 4) {
             // #543 carry: an unscored today shows the last scored night's REAL Charge (labelled as prior by
             // the state pill) rather than an empty vessel, matching the classic Today, the widget/watch/Live
-            // Activity (`Repository.widgetAnchor`) and Android. Effort deliberately does NOT carry — it is
-            // today's own accumulation, so yesterday's number would be a false statement, not a stale one.
-            HeroScoreCell(label: String(localized: "Charge"), score: chargeDisplay.pct,
+            // Activity (`Repository.widgetAnchor`) and Android. While calibrating, the ring fills with the
+            // learning progress instead of reading as an empty "–".
+            HeroScoreCell(label: String(localized: "Baseline"), score: chargeDisplay.ringValue,
                           tint: chargeDisplay.pct.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.chargeColor,
                           animated: dataLoaded, onGuide: { guideSection = .charge },
+                          status: chargeDisplay.ringStatus,
                           detailRoute: .metric(HeroRingMetric.charge))
-            // #45: the hero Effort must honour the user's Effort scale like every other Effort read-out.
-            // Show the value on the chosen scale (0–100 or WHOOP 0–21) with the matching vessel max, and
-            // one decimal on the compressed 0–21 axis to match the app-wide `effortDisplay` convention
-            // (12.6, not a rounded "13"); the 0–100 hero stays a whole number as before.
-            HeroScoreCell(label: String(localized: "Effort"),
-                          score: effortStrain(displayDay).map { UnitFormatter.effortValue($0, scale: effortScale) },
+            HeroScoreCell(label: String(localized: "Watchdog"), score: watchdogLoad,
                           tint: StrandPalette.effortColor, animated: dataLoaded,
                           onGuide: { guideSection = .effort },
-                          maxValue: effortScale == .whoop ? 21 : 100,
-                          decimals: effortScale == .whoop ? 1 : 0,
-                          detailRoute: .metric(HeroRingMetric.effort))
-            HeroScoreCell(label: String(localized: "Rest"), score: restScore, tint: StrandPalette.restColor,
+                          status: HeroRings.watchdogStatus(load: watchdogLoad),
+                          detailRoute: .watchdog)
+            HeroScoreCell(label: String(localized: "Recovery"), score: restScore, tint: StrandPalette.restColor,
                           animated: dataLoaded, onGuide: { guideSection = .rest },
+                          status: HeroRings.recoveryStatus(score: restScore),
                           detailRoute: .metric(HeroRingMetric.rest))
         }
         .padding(.vertical, NoopMetrics.space4)
@@ -674,8 +681,7 @@ struct LiquidTodayView: View {
     // MARK: - Heart rate
 
     private var heartRateSection: some View {
-        VStack(spacing: 8) {
-            sectionHead("Heart rate", trailing: "Live")
+        VStack(spacing: 12) {
             // #979: the whole-day HR trend (Deep Timeline) still exists but was buried behind Metrics →
             // Show all → Deep Timeline. The whole live HR card remains a one-tap route into it.
             NavigationLink(value: TabRoute.fullDayChart) {
@@ -684,7 +690,8 @@ struct LiquidTodayView: View {
                     // this card, never the whole Today. Shows the current bpm live with a rolling
                     // beat-by-beat trace; falls back to today's banked 5-minute trace when idle.
                     LiquidLiveHR(tint: liquidHeart, fallback: hrValues, fallbackSegments: hrSegments,
-                                 animated: dataLoaded)
+                                 fallbackTimes: hrTimes,
+                                 resting: displayDay?.restingHr ?? restingHrDay?.restingHr)
                 }
             }
             .buttonStyle(LiquidPressStyle())
@@ -695,6 +702,101 @@ struct LiquidTodayView: View {
                                            value: geometry.frame(in: .named(Self.daySwipeSpace)))
                 }
             }
+            medicationWatchdogRow
+        }
+    }
+
+    // MARK: - Medication + Watchdog (demo content until the real data lands)
+
+    private var medicationWatchdogRow: some View {
+        HStack(spacing: 12) {
+            NavigationLink(value: TabRoute.medication) { medicationCard }
+                .buttonStyle(LiquidPressStyle())
+            NavigationLink(value: TabRoute.watchdog) { watchdogCard }
+                .buttonStyle(LiquidPressStyle())
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func miniCard<V: View>(icon: String, title: LocalizedStringKey, @ViewBuilder _ content: () -> V) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(liquidHeart)
+                Text(title)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            content()
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(NoopPanelSurface(cornerRadius: 22, surfaceOpacity: cardOpacity))
+    }
+
+    private var medicationCard: some View {
+        miniCard(icon: "pills.fill", title: "Next medication") {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Methotrexate")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1).minimumScaleFactor(0.7)
+                Text("9:00 PM")
+                    .font(StrandFont.rounded(24))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text("2.5 mg • 1 tablet")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 6) {
+                medicationPill("checkmark", "Taken", filled: true)
+                medicationPill("clock", "Snooze", filled: false)
+            }
+        }
+    }
+
+    private func medicationPill(_ icon: String, _ title: LocalizedStringKey, filled: Bool) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.system(size: 10, weight: .bold))
+            Text(title).font(StrandFont.caption).lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .foregroundStyle(filled ? StrandPalette.textPrimary : StrandPalette.textSecondary)
+        .frame(maxWidth: .infinity, minHeight: 30)
+        .background(Capsule().fill(filled ? liquidHeart.opacity(0.35) : Color.clear))
+        .overlay(Capsule().strokeBorder(filled ? Color.clear : StrandPalette.hairlineStrong,
+                                        lineWidth: NoopMetrics.hairlineWidth))
+    }
+
+    private var watchdogCard: some View {
+        miniCard(icon: "eye.fill", title: "Watchdog alerts") {
+            VStack(alignment: .leading, spacing: 8) {
+                watchdogRow(StrandPalette.statusPositive, "10:14 AM", "Medication taken")
+                watchdogRow(StrandPalette.statusWarning, "1:32 PM", "Fatigue episode")
+                watchdogRow(liquidHeart, "3:48 PM", "HR above usual")
+                watchdogRow(StrandPalette.metricPurple, "7:21 PM", "Symptom noted")
+            }
+            Spacer(minLength: 0)
+            HStack(spacing: 3) {
+                Text("See all alerts").font(StrandFont.caption)
+                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
+            }
+            .foregroundStyle(StrandPalette.textSecondary)
+        }
+    }
+
+    private func watchdogRow(_ dot: Color, _ time: String, _ text: LocalizedStringKey) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(dot).frame(width: 6, height: 6)
+            (Text(time).foregroundColor(StrandPalette.textTertiary) + Text("  ") + Text(text).foregroundColor(StrandPalette.textPrimary))
+                .font(.system(size: 11))
+                .lineLimit(1).minimumScaleFactor(0.7)
         }
     }
 
@@ -1735,6 +1837,7 @@ struct LiquidTodayView: View {
         let hrBuckets = await hrA
         hrValues = hrBuckets.map { $0.bpm }
         hrSegments = hrGapSegments(bucketTs: hrBuckets.map { $0.ts }, bucketSeconds: 300)
+        hrTimes = hrBuckets.map { Double($0.ts) }
         workouts = (await wkA).filter { $0.startTs >= from && $0.startTs < to }
 
         // #today-hosted-cards: build the shared SleepModel that backs the hosted sleep cards, but ONLY when
@@ -2091,6 +2194,8 @@ private struct HeroScoreCell: View {
     let tint: Color
     let animated: Bool
     let onGuide: () -> Void
+    /// Short state line between the gauge and the label ("Within range", "On track"…).
+    var status: String? = nil
     // The scale `score` is already expressed on — 100 for Charge/Rest, or the user's chosen Effort scale
     // max (100 or 21, #45) — so the vessel fill matches the displayed number.
     var maxValue: Double = 100
@@ -2141,8 +2246,12 @@ private struct HeroScoreCell: View {
     }
 
     var body: some View {
-        VStack(spacing: 7) {
+        VStack(spacing: 5) {
             gaugeView
+            Text(status ?? " ")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .lineLimit(1).minimumScaleFactor(0.7)
             Button(action: onGuide) {
                 HStack(spacing: 3) {
                     // #74: one line, shrink-to-fit rather than wrap under large Dynamic Type (mirrors the
@@ -2271,112 +2380,82 @@ private struct LiquidFullWidthNavigationAction: View {
     }
 }
 
-/// The live heart-rate readout leaf. Owns LiveState so the ~1 Hz HR notifies re-render ONLY this card,
-/// never the whole Today (the isolation the classic Today depends on). Keeps its own rolling buffer of
-/// live samples, shows the current bpm live with a beat-by-beat trace, and falls back to today's banked
-/// 5-minute trace when the strap isn't streaming.
+/// The live heart-rate card. Owns LiveState so the ~1 Hz HR notifies re-render ONLY this card, never the
+/// whole Today. Header (title, live state, current bpm), a gridded area chart of the live beat-by-beat
+/// trace (falling back to today's banked 5-minute trace when the strap isn't streaming), and a
+/// Resting / Today high / Today low footer.
 private struct LiquidLiveHR: View {
     var tint: Color
     var fallback: [Double]        // today's banked 5-minute buckets — shown when there's no live stream
     /// Line identity for [fallback] only (#2082). The live series is 1 Hz and contiguous by construction,
     /// so it passes nil and draws exactly as before; the banked buckets skip the hours nothing was
-    /// recorded, and without this the sparkline joined across them as though the day were continuous.
+    /// recorded, and without this the chart joined across them as though the day were continuous.
     var fallbackSegments: [String] = []
-    var animated: Bool
+    /// Unix seconds of each [fallback] bucket, for the x-axis labels.
+    var fallbackTimes: [Double] = []
+    var resting: Int?
 
     @EnvironmentObject private var live: LiveState
     @State private var samples: [Double] = []
-    @State private var beat = false
     @State private var scrubX: CGFloat?
     #if os(iOS)
     @State private var scrubEngaged = false
     #endif
     private let maxSamples = 90   // ~1.5 min of 1 Hz live HR, enough to read the shape
+    private let chartHeight: CGFloat = 160
 
     private var isLive: Bool { live.connected && samples.count >= 2 }
     private var series: [Double] { isLive ? samples : fallback }
+    private var segments: [String]? { !isLive && fallbackSegments.count == fallback.count ? fallbackSegments : nil }
     /// The big number is the LIVE heart rate only. It used to fall back to the last banked 5-minute average, drawn
-    /// exactly like a live reading, so with the strap off the wrist the card went on showing one (a tester's 91). The
-    /// day's trace and its labelled min / avg / max still show without a live strap.
+    /// exactly like a live reading, so with the strap off the wrist the card went on showing one (a tester's 91).
     private var bigBpm: Int? {
         guard let hr = live.heartRate, hr > 0, live.connected else { return nil }
         return hr
     }
     private var subtitle: String {
-        if isLive { return String(localized: "Live · beat by beat") }
+        if isLive { return String(localized: "Live") }
         if fallback.count >= 2 { return String(localized: "5-minute average · since midnight") }
         return live.connected ? String(localized: "Waiting for the strap") : String(localized: "Strap not connected")
     }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .center, spacing: NoopMetrics.space2) {
-                HStack(spacing: NoopMetrics.space1) {
-                    Text("Beats per minute")
-                        .font(StrandFont.overline)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.65)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(tint)
-                        .fixedSize()
-                        .accessibilityHidden(true)
-                }
-                .layoutPriority(1)
-                Spacer(minLength: NoopMetrics.space2)
-                if isLive {
-                    // Reuses the existing incoming-HR event pulse; no timer or continuous redraw loop.
-                    Image(systemName: "heart.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(tint)
-                        .scaleEffect(beat ? 1.18 : 0.88)
-                        .opacity(beat ? 1 : 0.62)
-                        .animation(.easeOut(duration: 0.28), value: beat)
-                        .accessibilityHidden(true)
-                }
-                if let hr = bigBpm {
-                    (Text("\(hr)").font(StrandFont.rounded(22)).monospacedDigit()
-                        + Text(" bpm").font(StrandFont.caption))
-                        .foregroundStyle(tint)
-                        .contentTransition(.numericText())
-                        .animation(.easeOut(duration: 0.25), value: hr)
-                }
+    private var dayRange: [Double] { fallback.count >= 2 ? fallback : series }
+
+    /// Four evenly spaced x labels. Live samples are 1 Hz, so the label time is counted back from now.
+    private var tickLabels: [(index: Int, text: String)] {
+        let n = series.count
+        guard n >= 2 else { return [] }
+        let indices = Array(Set([0, (n - 1) / 3, 2 * (n - 1) / 3, n - 1])).sorted()
+        return indices.compactMap { i in
+            if isLive {
+                let d = Date().addingTimeInterval(-Double(n - 1 - i))
+                return (i, d.formatted(.dateTime.hour().minute()))
             }
-            Text(subtitle)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
+            guard fallbackTimes.count == n else { return nil }
+            return (i, Date(timeIntervalSince1970: fallbackTimes[i]).formatted(.dateTime.hour()))
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
             if series.count >= 2 {
-                ZStack {
-                    LiquidHeartRateGrid()
-                    LiquidThread(bpm: series,
-                                 segments: isLive ? nil : (fallbackSegments.count == series.count
-                                                           ? fallbackSegments : nil),
-                                 tint: tint, height: 92, animated: animated)
-                }
-                .frame(height: 92)
-                .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.space2, style: .continuous))
-                .contentShape(Rectangle())
-                .overlay { scrubReadout }
-                .onContinuousHover(coordinateSpace: .local) { phase in
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) {
-                        switch phase {
-                        case .active(let location): scrubX = location.x
-                        case .ended: scrubX = nil
+                LiquidHRChart(values: series, segments: segments, tickLabels: tickLabels, tint: tint)
+                    .frame(height: chartHeight)
+                    .contentShape(Rectangle())
+                    .overlay { scrubReadout }
+                    .onContinuousHover(coordinateSpace: .local) { phase in
+                        var transaction = Transaction()
+                        transaction.disablesAnimations = true
+                        withTransaction(transaction) {
+                            switch phase {
+                            case .active(let location): scrubX = location.x
+                            case .ended: scrubX = nil
+                            }
                         }
                     }
-                }
-                #if os(iOS)
-                .gesture(touchScrubGesture)
-                #endif
-                HStack {
-                    stat(String(localized: "Min"), series.min())
-                    Spacer()
-                    stat(String(localized: "Avg"), series.reduce(0, +) / Double(series.count))
-                    Spacer()
-                    stat(String(localized: "Max"), series.max())
-                }
+                    #if os(iOS)
+                    .gesture(touchScrubGesture)
+                    #endif
             } else {
                 Text(live.connected
                      ? String(localized: "Waiting for a live heartbeat…")
@@ -2386,6 +2465,7 @@ private struct LiquidLiveHR: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.vertical, 24)
             }
+            footer
         }
         .onAppear { if samples.isEmpty, let hr = live.heartRate, hr > 0 { samples = [Double(hr)] } }
         .onChangeCompat(of: live.heartRate) { hr in
@@ -2394,33 +2474,77 @@ private struct LiquidLiveHR: View {
             guard let hr, hr > 0 else { samples.removeAll(); return }
             samples.append(Double(hr))
             if samples.count > maxSamples { samples.removeFirst(samples.count - maxSamples) }
-            beat.toggle()
         }
     }
 
-    private func stat(_ label: String, _ v: Double?) -> some View {
-        HStack(spacing: 5) {
-            Text(label).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-            Text(v.map { String(Int($0.rounded())) } ?? "–")
-                .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
+    private var header: some View {
+        HStack(alignment: .top, spacing: NoopMetrics.space2) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Heart rate")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                HStack(spacing: 5) {
+                    if isLive { Circle().fill(tint).frame(width: 6, height: 6) }
+                    Text(subtitle)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+            Spacer(minLength: NoopMetrics.space2)
+            if let hr = bigBpm {
+                VStack(alignment: .trailing, spacing: 3) {
+                    (Text("\(hr)").font(StrandFont.rounded(30)).monospacedDigit()
+                        + Text(" bpm").font(StrandFont.caption))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .contentTransition(.numericText())
+                        .animation(.easeOut(duration: 0.25), value: hr)
+                    Text("Just now")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
         }
     }
 
-    /// Uses the thread renderer's ten-point inset and equal-distance sample positions, so the
-    /// readout points to the value actually drawn under the finger even for a sparse banked trace.
+    private var footer: some View {
+        HStack(spacing: 0) {
+            stat(resting.map { String($0) }, String(localized: "Resting"))
+            divider
+            stat(dayRange.max().map { String(Int($0.rounded())) }, String(localized: "Today high"))
+            divider
+            stat(dayRange.min().map { String(Int($0.rounded())) }, String(localized: "Today low"))
+        }
+    }
+
+    private var divider: some View {
+        Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 34)
+    }
+
+    private func stat(_ value: String?, _ label: String) -> some View {
+        VStack(spacing: 2) {
+            (Text(value ?? "–").font(StrandFont.rounded(20)).monospacedDigit()
+                + Text(" bpm").font(StrandFont.caption))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Text(label)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    /// Reads the chart's own plot mapping, so the crosshair points at the value actually drawn.
     private var scrubReadout: some View {
         GeometryReader { geometry in
             if let scrubX, series.count >= 2 {
-                // The renderer's own mapping, not a copy of it: a private inset or span floor here would
-                // agree by inspection and then drift the crosshair off the curve the moment either moved.
-                let plot = LiquidRender.ThreadPlot(size: geometry.size, values: series)
+                let plot = LiquidHRPlot(size: geometry.size, values: series)
                 let index = plot.nearestIndex(toX: Double(scrubX))
                 let width = geometry.size.width
                 let x = CGFloat(plot.x(index))
                 let y = CGFloat(plot.y(series[index]))
                 Path { path in
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: geometry.size.height))
+                    path.move(to: CGPoint(x: x, y: LiquidHRPlot.top))
+                    path.addLine(to: CGPoint(x: x, y: plot.baseY))
                 }
                 .stroke(tint, lineWidth: NoopMetrics.hairlineWidth)
                 Circle().fill(tint).frame(width: 8, height: 8).position(x: x, y: y)
@@ -2463,32 +2587,144 @@ private struct LiquidLiveHR: View {
     #endif
 }
 
-/// Static technical grid behind the live trace. Canvas draws only when layout/style changes, so the
-/// incoming heart-rate samples remain the card's sole animation driver.
-private struct LiquidHeartRateGrid: View {
+/// Plot geometry for the heart-rate chart: left gutter for y labels, bottom gutter for x labels, and a
+/// y-axis snapped outward to multiples of 30 bpm. Shared by the drawing and the scrub crosshair.
+private struct LiquidHRPlot {
+    static let left = 28.0, right = 12.0, top = 10.0, bottom = 22.0
+
+    let size: CGSize
+    let count: Int
+    let lo: Double
+    let hi: Double
+
+    init(size: CGSize, values: [Double]) {
+        let mn = values.min() ?? 60, mx = values.max() ?? 60
+        let lo = max(0, ((mn - 5) / 30).rounded(.down) * 30)
+        self.size = size
+        self.count = values.count
+        self.lo = lo
+        self.hi = max(((mx + 5) / 30).rounded(.up) * 30, lo + 60)
+    }
+
+    var ticks: [Double] { Array(stride(from: lo, through: hi, by: 30)) }
+    var baseY: Double { size.height - Self.bottom }
+
+    func x(_ i: Int) -> Double {
+        Self.left + Double(i) * (size.width - Self.left - Self.right) / Double(max(1, count - 1))
+    }
+
+    func y(_ v: Double) -> Double {
+        baseY - (v - lo) / (hi - lo) * (baseY - Self.top)
+    }
+
+    func nearestIndex(toX xPosition: Double) -> Int {
+        guard count >= 2 else { return 0 }
+        let plotWidth = max(1, size.width - Self.left - Self.right)
+        let raw = ((xPosition - Self.left) / plotWidth * Double(count - 1)).rounded()
+        return min(count - 1, max(0, Int(raw)))
+    }
+}
+
+/// Dotted-grid area chart: smooth line with a glow, a gradient fill beneath it and a glowing dot on the
+/// newest sample. `segments` breaks the line (and fill) where the strap recorded nothing.
+private struct LiquidHRChart: View {
+    let values: [Double]
+    let segments: [String]?
+    let tickLabels: [(index: Int, text: String)]
+    let tint: Color
+
     var body: some View {
         Canvas { context, size in
-            var path = Path()
-            let columns = 8
-            let rows = 4
+            let plot = LiquidHRPlot(size: size, values: values)
+            let right = size.width - LiquidHRPlot.right
+            let dotted = StrokeStyle(lineWidth: 0.6, lineCap: .round, dash: [1.5, 3.5])
+            let gridColor = StrandPalette.hairline.opacity(0.7)
+            let labelColor = StrandPalette.textTertiary
 
-            for column in 1..<columns {
-                let x = size.width * CGFloat(column) / CGFloat(columns)
-                path.move(to: CGPoint(x: x, y: 0))
-                path.addLine(to: CGPoint(x: x, y: size.height))
+            var grid = Path()
+            for t in plot.ticks {
+                grid.move(to: CGPoint(x: LiquidHRPlot.left, y: plot.y(t)))
+                grid.addLine(to: CGPoint(x: right, y: plot.y(t)))
             }
-            for row in 1..<rows {
-                let y = size.height * CGFloat(row) / CGFloat(rows)
-                path.move(to: CGPoint(x: 0, y: y))
-                path.addLine(to: CGPoint(x: size.width, y: y))
+            for tick in tickLabels {
+                grid.move(to: CGPoint(x: plot.x(tick.index), y: LiquidHRPlot.top))
+                grid.addLine(to: CGPoint(x: plot.x(tick.index), y: plot.baseY))
+            }
+            context.stroke(grid, with: .color(gridColor), style: dotted)
+
+            for t in plot.ticks {
+                context.draw(Text("\(Int(t))").font(.system(size: 10)).foregroundColor(labelColor),
+                             at: CGPoint(x: 0, y: plot.y(t)), anchor: .leading)
+            }
+            for (n, tick) in tickLabels.enumerated() {
+                let anchor: UnitPoint = n == 0 ? .topLeading : (n == tickLabels.count - 1 ? .topTrailing : .top)
+                context.draw(Text(tick.text).font(.system(size: 10)).foregroundColor(labelColor),
+                             at: CGPoint(x: plot.x(tick.index), y: plot.baseY + 6), anchor: anchor)
             }
 
-            context.stroke(path,
-                           with: .color(StrandPalette.hairline.opacity(0.34)),
-                           lineWidth: 0.5)
+            let fill = Gradient(colors: [tint.opacity(0.38), tint.opacity(0)])
+            for run in runs() {
+                guard run.upperBound > run.lowerBound else {
+                    let p = point(plot, run.lowerBound)
+                    context.fill(Path(ellipseIn: CGRect(x: p.x - 1.5, y: p.y - 1.5, width: 3, height: 3)),
+                                 with: .color(tint))
+                    continue
+                }
+                let line = curve(plot, run)
+                var area = line
+                area.addLine(to: CGPoint(x: plot.x(run.upperBound), y: plot.baseY))
+                area.addLine(to: CGPoint(x: plot.x(run.lowerBound), y: plot.baseY))
+                area.closeSubpath()
+                context.fill(area, with: .linearGradient(fill,
+                                                         startPoint: CGPoint(x: 0, y: LiquidHRPlot.top),
+                                                         endPoint: CGPoint(x: 0, y: plot.baseY)))
+                context.drawLayer { glow in
+                    glow.addFilter(.blur(radius: 4))
+                    glow.stroke(line, with: .color(tint.opacity(0.7)),
+                                style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+                }
+                context.stroke(line, with: .color(tint),
+                               style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
+            }
+
+            let last = point(plot, values.count - 1)
+            context.drawLayer { glow in
+                glow.addFilter(.blur(radius: 5))
+                glow.fill(Path(ellipseIn: CGRect(x: last.x - 8, y: last.y - 8, width: 16, height: 16)),
+                          with: .color(tint.opacity(0.8)))
+            }
+            context.fill(Path(ellipseIn: CGRect(x: last.x - 4, y: last.y - 4, width: 8, height: 8)),
+                         with: .color(tint))
         }
-        .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    private func point(_ plot: LiquidHRPlot, _ i: Int) -> CGPoint {
+        CGPoint(x: plot.x(i), y: plot.y(values[i]))
+    }
+
+    private func runs() -> [ClosedRange<Int>] {
+        var out: [ClosedRange<Int>] = []
+        var start = 0
+        if let segments, segments.count == values.count {
+            for i in 1..<values.count where segments[i] != segments[i - 1] {
+                out.append(start...(i - 1))
+                start = i
+            }
+        }
+        out.append(start...(values.count - 1))
+        return out
+    }
+
+    private func curve(_ plot: LiquidHRPlot, _ run: ClosedRange<Int>) -> Path {
+        var path = Path()
+        path.move(to: point(plot, run.lowerBound))
+        for i in (run.lowerBound + 1)..<run.upperBound {
+            let c = point(plot, i), n = point(plot, i + 1)
+            path.addQuadCurve(to: CGPoint(x: (c.x + n.x) / 2, y: (c.y + n.y) / 2), control: c)
+        }
+        path.addLine(to: point(plot, run.upperBound))
+        return path
     }
 }
 
@@ -2648,90 +2884,18 @@ extension LiquidTodayView {
     }
 }
 
-/// Active-device battery ring: the strap's charge under an active strap, the ring's own under an active
-/// ring. It always reads as the battery, including while history syncs; sync progress lives in the Data
-/// sources card and the pull-to-refresh label. Tap → Devices.
-private struct LiquidBatteryButton: View {
-    @EnvironmentObject var live: LiveState
+/// Top-right Today header control: opens Settings (the shell presents it as a sheet).
+private struct LiquidSettingsButton: View {
     @EnvironmentObject var router: NavRouter
-
-    private var batteryDisplay: LiquidTodayView.StrapBatteryDisplay {
-        #if DEBUG
-        if DemoSyncHarness.active {
-            // The harness stands in for a connected WHOOP, so it answers this the way one would.
-            return .resolve(
-                activeIsWhoop: true,
-                connected: true,
-                batteryPct: DemoSyncHarness.batteryPercent,
-                charging: DemoSyncHarness.charging,
-                ringPct: nil,
-                ringCharging: false
-            )
-        }
-        #endif
-        return .resolve(
-            activeIsWhoop: live.activeIsWhoop,
-            connected: live.connected,
-            batteryPct: live.batteryPct,
-            charging: live.charging,
-            ringPct: live.ouraBatteryPct,
-            ringCharging: live.ouraWearState == .charging
-        )
-    }
-
-    private var indicatorState: ChargeSyncIndicator.BatteryState {
-        switch batteryDisplay {
-        case .offline, .notActiveDevice:
-            return .offline
-        case .pending(let charging):
-            return .pending(charging: charging)
-        case .charge(let percent, let charging, _):
-            return .charge(percent: percent, charging: charging)
-        }
-    }
-
     var body: some View {
-        // Not drawn at all when the active device is neither the strap nor a ring with a charge of its
-        // own to show. The alternative is a glyph that has to say SOMETHING about a strap nobody is
-        // wearing, and every option is a claim: a charge that is not the active device's, or a crossed-out
-        // bolt asserting a disconnection that is not the interesting fact. (#2208) A ring that HAS
-        // reported its charge is the active device's own reading, and #2208's fix left it undrawn only
-        // because the control could not yet tell whose number it held.
-        if case .notActiveDevice = batteryDisplay {
-            EmptyView()
-        } else {
-            Button { router.openDevices() } label: {
-                ChargeSyncIndicator(batteryState: indicatorState, syncing: false, chunks: 0)
-            }
-            .nativeLiquidGlassSyncButton()
-            .accessibilityLabel(batteryAccessibility)
+        Button { router.openSettings() } label: {
+            Image(systemName: "gearshape")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .frame(width: 28, height: 28)
         }
-    }
-
-    /// Never "Strap battery" alone for a no-reading state — that was indistinguishable from a real one.
-    private var batteryAccessibility: String {
-        switch batteryDisplay {
-        case .notActiveDevice:
-            return ""          // not drawn; the label is unreachable and must not claim anything
-        case .offline:
-            return String(localized: "Strap battery, strap not connected")
-        case .pending(let charging):
-            return charging
-                ? String(localized: "Strap battery charging, no reading yet")
-                : String(localized: "Strap battery, no reading yet")
-        case .charge(let percent, let charging, let isRing):
-            let n = Int(percent.rounded())
-            // Named for the device the number belongs to: "Strap battery" over a ring's charge would be
-            // the #2208 misattribution again, in the label instead of the number.
-            if isRing {
-                return charging
-                    ? String(localized: "Ring battery \(n) percent, charging")
-                    : String(localized: "Ring battery \(n) percent")
-            }
-            return charging
-                ? String(localized: "Strap battery \(n) percent, charging")
-                : String(localized: "Strap battery \(n) percent")
-        }
+        .nativeLiquidGlassHeaderButton()
+        .accessibilityLabel("Settings")
     }
 }
 
@@ -2801,7 +2965,7 @@ private extension View {
 /// it has pulled, and when one last completed. It does NOT yet say "~15h behind" — that needs the
 /// persisted data frontier (max HR ts) compared against `strapRange.newestUnix`, and the frontier is a
 /// Repository read that LiveState does not carry. That remains open in B1. Kept here in the Data Sources
-/// card as the detailed view; `LiquidBatteryButton` above is the header's ambient at-a-glance signal.
+/// card as the detailed view; the header no longer carries a battery indicator.
 private struct LiquidSyncStatusRow: View {
     @EnvironmentObject var live: LiveState
     var body: some View {

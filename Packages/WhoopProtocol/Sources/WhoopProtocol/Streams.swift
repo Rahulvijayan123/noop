@@ -628,7 +628,8 @@ public struct Streams: Equatable, Codable {
     /// never pays for the 24x-larger raw stream, and so the two can be persisted/pruned independently.
     public var ppgWaveform: [PpgWaveformSample]
     /// Every remaining 5/MG v18 per-second field the decoder produces and this funnel used to discard —
-    /// carried verbatim for a later census. Empty on WHOOP 4.0 and on the live path. Nothing reads it.
+    /// carried verbatim for a later census. Empty on WHOOP 4.0 and on the live path. The only reader is the
+    /// SpO₂ strap estimate (`Spo2StrapEstimate`), which takes the in-band `@82` byte; nothing scores it.
     public var v18Aux: [V18AuxSample]
     public var events: [WhoopEvent]
     public var battery: [BatterySample]

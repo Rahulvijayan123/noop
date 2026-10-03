@@ -175,6 +175,101 @@ Deno.test('enrolled diagnostics: exact installation and registered device scope,
   assertEquals(calls.length, 0);
 });
 
+const SERIES_FROM = 1790838000;
+const SERIES_TO = SERIES_FROM + 86_400;
+const SERIES_BODY = { from: '2026-10-01T07:00:00+00:00', to: '2026-10-02T07:00:00+00:00', bucket_seconds: 300,
+  latest_computed_at: '2026-10-01T21:00:00+00:00', metrics: { steps: [[SERIES_FROM, 12, 300, 1, null]] } };
+
+async function seriesFixture() {
+  const { rest, calls } = await fixture();
+  const generic = rest.rpc;
+  rest.rpc = async (name: string, args: any) => {
+    const out = await generic(name, args);
+    return name === 'server_metric_series_read' ? SERIES_BODY : out;
+  };
+  return { rest, calls };
+}
+
+Deno.test('enrolled series: reads the token owner\'s dense series for the requested window and metrics', async () => {
+  const { rest, calls } = await seriesFixture();
+  const response = await handleScoresRequest(
+    request(`/series?deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_TO}&metrics=steps,hrv_rmssd_ms&userId=${OTHER}`),
+    { rest, cfg });
+  assertEquals(response.status, 200);
+  assertEquals(response.headers.get('cache-control'), 'no-store');
+  const body = await response.json();
+  assertEquals(body.series, SERIES_BODY);
+  assertEquals(body.identity, { userId: USER, sourceId: SOURCE, deviceId: DEVICE, externalDeviceId: LOCAL, project: cfg.supabaseUrl });
+  assertEquals(calls, [{ name: 'server_metric_series_read', args: {
+    p_user: USER, p_from: '2026-10-01T07:00:00.000Z', p_to: '2026-10-02T07:00:00.000Z',
+    p_metrics: ['steps', 'hrv_rmssd_ms'],
+  } }]);
+});
+
+Deno.test('enrolled series: every metric is requested when none is named', async () => {
+  const { rest, calls } = await seriesFixture();
+  const response = await handleScoresRequest(request(`/series?deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_TO}`), { rest, cfg });
+  assertEquals(response.status, 200);
+  assertEquals(calls[0].args, { p_user: USER, p_from: '2026-10-01T07:00:00.000Z', p_to: '2026-10-02T07:00:00.000Z' });
+});
+
+Deno.test('enrolled series: malformed windows and metric lists never reach the database', async () => {
+  const { rest, calls } = await seriesFixture();
+  const good = `deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_TO}`;
+  for (const [query, error] of [
+    [`deviceId=${LOCAL}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=${SERIES_FROM}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=abc&to=${SERIES_TO}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=-5&to=${SERIES_TO}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=1.5&to=${SERIES_TO}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=${SERIES_TO}&to=${SERIES_FROM}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_FROM}`, 'invalid_range'],
+    [`deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_FROM + 3 * 86_400 + 1}`, 'invalid_range'],
+    [`${good}&metrics=`, 'invalid_metrics'],
+    [`${good}&metrics=steps,steps`, 'invalid_metrics'],
+    [`${good}&metrics=steps,spo2`, 'invalid_metrics'],
+    [`${good}&metrics=steps;drop`, 'invalid_metrics'],
+  ] as const) {
+    const response = await handleScoresRequest(request(`/series?${query}`), { rest, cfg });
+    assertEquals(response.status, 400, query);
+    assertEquals((await response.json()).error, error, query);
+  }
+  assertEquals((await handleScoresRequest(request(`/series?from=${SERIES_FROM}&to=${SERIES_TO}`), { rest, cfg })).status, 400);
+  assertEquals(calls, []);
+  const widest = await handleScoresRequest(request(
+    `/series?deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_FROM + 3 * 86_400}`), { rest, cfg });
+  assertEquals(widest.status, 200);
+});
+
+Deno.test('enrolled series: an unregistered device and every non-enrolled credential are refused', async () => {
+  const { rest, calls } = await seriesFixture();
+  const unregistered = await handleScoresRequest(
+    request(`/series?deviceId=whoop-MISSING&from=${SERIES_FROM}&to=${SERIES_TO}`), { rest, cfg });
+  assertEquals(unregistered.status, 409);
+  assertEquals((await unregistered.json()).error, 'device_registration_pending');
+  for (const bearer of ['noop_fleet', 'noop_legacy', 'header.payload.signature']) {
+    const refused = await handleScoresRequest(
+      request(`/series?deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_TO}`, undefined, bearer),
+      { rest, cfg, fetchImpl: async () => Response.json({ error: 'invalid_token' }, { status: 401 }) });
+    assertEquals(refused.status, 401);
+  }
+  const wrongMethod = await handleScoresRequest(
+    request(`/series?deviceId=${LOCAL}`, { deviceId: LOCAL }), { rest, cfg });
+  assertEquals(wrongMethod.status, 405);
+  assertEquals(calls, []);
+});
+
+Deno.test('enrolled series: a database rejection stays a client error and a failure stays generic', async () => {
+  const { rest } = await seriesFixture();
+  rest.rpc = async () => { throw Object.assign(new Error('invalid window'), { status: 400, code: 'invalid_range' }); };
+  const rejected = await handleScoresRequest(request(`/series?deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_TO}`), { rest, cfg });
+  assertEquals(rejected.status, 400);
+  rest.rpc = async () => { throw new Error('connection refused to 10.0.0.1'); };
+  const failed = await handleScoresRequest(request(`/series?deviceId=${LOCAL}&from=${SERIES_FROM}&to=${SERIES_TO}`), { rest, cfg });
+  assertEquals(failed.status, 500);
+  assertEquals(await failed.json(), { error: 'scores_unavailable' });
+});
+
 Deno.test('enrolled registration: ACK follows atomic owned-device RPC', async () => {
   const { rest, calls } = await fixture();
   rest.tables.set('devices', []);

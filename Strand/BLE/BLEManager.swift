@@ -621,6 +621,8 @@ public final class BLEManager: NSObject, ObservableObject {
     private var backfillTimer: DispatchSourceTimer?
     /// User-elected hourly background-sync cadence (Settings → Power saving → "Low refresh"). Default off.
     private var lowRefreshMode = false
+    /// Cloud-mode "fresh data" cadence (see `freshBackfillIntervalSeconds`). Off until the app model turns it on.
+    private var freshSyncMode = false
     // The timer fires this often, but BackfillPolicy.periodicFloorSeconds is the real floor (a recent
     // event-triggered sync defers the next periodic tick). 900s = 15 min, matching WHOOP.
     static let backfillIntervalSeconds = 900
@@ -628,6 +630,15 @@ public final class BLEManager: NSObject, ObservableObject {
     /// earlier than its battery-adaptive deadline; this only lets Darwin coalesce the wake with nearby
     /// system work instead of waking the CPU at an unnecessarily exact instant.
     static let backfillTimerLeewaySeconds = 60
+    /// "Fresh data" cadence: a WHOOP 5.0/MG in cloud mode offloads its history about once a minute instead of
+    /// waiting for the 15-min timer or the strap's own prompt events (which arrived anywhere from 2 to 10
+    /// minutes apart). Steps, sleep state and the SpO₂ estimate exist only in the strap's history, so this
+    /// interval is the floor on how current they can be on the server and in the app. The link is already
+    /// held open for live heart rate, so a pass only adds a few seconds of transfer. Every power lever
+    /// below composes on top with `max` and therefore still wins: Low refresh, the low-battery stretch and
+    /// the known-empty-history stretch all slow this down exactly as they slow the 15-min cadence.
+    static let freshBackfillIntervalSeconds = 60
+    static let freshBackfillTimerLeewaySeconds = 10
     /// #477: stretched offload cadence while low on power (45 min). The strap banks to flash meanwhile,
     /// so this only delays sync (larger batches), never loses data. Mirrors Android
     /// `LOW_BATTERY_BACKFILL_INTERVAL_MS`.
@@ -666,8 +677,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Pure baseline-cadence decision: low refresh replaces the 15-min BASE with the hourly one, and every
     /// other lever composes on top with `max`, so a lever can only ever make the cadence QUIETER, never
     /// restore a faster one the user asked to slow down. Unit-testable without a CoreBluetooth seam.
-    static func baseBackfillInterval(lowRefresh: Bool) -> Int {
-        lowRefresh ? lowRefreshBackfillIntervalSeconds : backfillIntervalSeconds
+    static func baseBackfillInterval(lowRefresh: Bool, freshSync: Bool = false) -> Int {
+        if lowRefresh { return lowRefreshBackfillIntervalSeconds }
+        return freshSync ? freshBackfillIntervalSeconds : backfillIntervalSeconds
+    }
+
+    /// The periodic floor for a given offload cadence. Only the minute-cadence timer lowers it; every other
+    /// cadence (15 min, hourly, the stretched 45 min) keeps the 15-min floor it has always had.
+    static func periodicBackfillFloor(forInterval seconds: Int) -> TimeInterval {
+        seconds < backfillIntervalSeconds ? BackfillPolicy.freshPeriodicFloorSeconds
+                                          : BackfillPolicy.periodicFloorSeconds
     }
 
     /// #battery: is a keep-alive tick due to poll the strap's battery?
@@ -3323,6 +3342,17 @@ public final class BLEManager: NSObject, ObservableObject {
         lowRefreshMode = enabled
     }
 
+    /// The minute-cadence "fresh data" offload (cloud mode, WHOOP 5.0/MG only: other families keep the
+    /// 15-min cadence whatever is passed). Re-arms the timer now when the setting changes so the new
+    /// cadence takes effect without waiting out the old interval; a sync already in flight is untouched.
+    public func setFreshSyncMode(_ enabled: Bool) {
+        guard enabled != freshSyncMode else { return }
+        freshSyncMode = enabled
+        if backfillTimer != nil { startBackfillTimer() }
+    }
+
+    private var freshSyncActive: Bool { freshSyncMode && selectedModel.deviceFamily == .whoop5 }
+
     /// #477 (Settings): pause the background continuous-HRV stream when the strap is low. Keyed on the
     /// STRAP's battery like the offload lever — pass the same threshold; engages at/below it (0 = off).
     /// Reconciles now.
@@ -3353,7 +3383,7 @@ public final class BLEManager: NSObject, ObservableObject {
     private func nextBackfillInterval() -> Int {
         // Low refresh moves the BASE the other levers stretch from; each one composes with `max`, so the
         // cadence can only get quieter, never faster than the user asked for.
-        let base = BLEManager.baseBackfillInterval(lowRefresh: lowRefreshMode)
+        let base = BLEManager.baseBackfillInterval(lowRefresh: lowRefreshMode, freshSync: freshSyncActive)
         // #battery: known-empty-history 5/MG → stretch to the 45-min floor before any battery lever.
         if selectedModel.deviceFamily == .whoop5 {
             let stretched = BLEManager.whoop5EmptyHistoryBackfillInterval(
@@ -4877,9 +4907,10 @@ public final class BLEManager: NSObject, ObservableObject {
         // #477: one-shot, re-armed by triggerPeriodicBackfill() with a fresh (battery-adaptive) interval
         // each tick — so the cadence can stretch/relax as power state changes (was a fixed repeating timer).
         let interval = nextBackfillInterval()
+        let leeway = interval < BLEManager.backfillIntervalSeconds
+            ? BLEManager.freshBackfillTimerLeewaySeconds : BLEManager.backfillTimerLeewaySeconds
         let t = DispatchSource.makeTimerSource(queue: .main)
-        t.schedule(deadline: .now() + .seconds(interval),
-                   leeway: .seconds(BLEManager.backfillTimerLeewaySeconds))
+        t.schedule(deadline: .now() + .seconds(interval), leeway: .seconds(leeway))
         t.setEventHandler { [weak self] in self?.triggerPeriodicBackfill() }
         t.resume()
         backfillTimer = t
@@ -4903,7 +4934,8 @@ public final class BLEManager: NSObject, ObservableObject {
                                        // plain empty-offload streak incl. idle-timeout stalls — the latter is
                                        // what stops the 15-min poll spinning on a caught-up strap.
                                        emptyStreak: max(emptySyncTracker.consecutiveEmptySyncs, consecutiveEmptyOffloads),
-                                       clockUntrusted: clockUntrusted) else {
+                                       clockUntrusted: clockUntrusted,
+                                       periodicFloor: BLEManager.periodicBackfillFloor(forInterval: nextBackfillInterval())) else {
             log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago)")
             return
         }

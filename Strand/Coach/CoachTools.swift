@@ -10,6 +10,7 @@ enum CoachToolDisplayNames {
         case "get_workouts": return "Recent workouts"
         case "get_readiness_analysis": return "Readiness"
         case "prepare_chart": return "Metric series"
+        case "get_intraday_series": return "Readings through the day"
         case "save_memory": return "Saved note"
         case "get_memories": return "Past context"
         default: return tool.replacingOccurrences(of: "_", with: " ").capitalized
@@ -43,6 +44,11 @@ struct CoachToolExecutor {
              ["metric": ("string", "charge|effort|sleepHours|hrv|rhr|spo2|respiration|skinTemp|steps|activeCalories"),
               "days": ("integer", "Days (default 30, max 120)")],
              required: ["metric"]),
+        tool("get_intraday_series",
+             "Readings THROUGH THE DAY, every minute for respiratory rate, steps and calories and every 5 minutes for HRV and resting heart rate. The strap records these continuously and the server recomputes them as data syncs, so HRV is NOT a once-per-night value. Use this for any question about today, intraday curves, 'how has it changed since morning', or the last few hours.",
+             ["metric": ("string", CoachIntraday.metricNames),
+              "hours": ("integer", "Hours back from now (default: last 24 h, or the local day so far for steps and calories; max 72)")],
+             required: ["metric"]),
         tool("save_memory",
              "Save a durable fact about the user (goal, injury, preference, routine), third person, e.g. 'User is training for a half marathon in March'. Not transient data.",
              ["content": ("string", "The fact, under 400 characters"),
@@ -53,7 +59,7 @@ struct CoachToolExecutor {
     ]
 
     /// Tools every turn keeps: memory and the series fetch the visual pipeline draws from.
-    private static let coreTools: Set<String> = ["get_memories", "save_memory", "prepare_chart"]
+    private static let coreTools: Set<String> = ["get_memories", "save_memory", "prepare_chart", "get_intraday_series"]
 
     /// Per-intent bundle: the core plus the data tools the question can plausibly need. Deterministic keyword
     /// routing; an unrecognised question falls back to the full set so a tool is never withheld by a guess.
@@ -97,6 +103,7 @@ struct CoachToolExecutor {
         case "get_workouts": return await engine.recentWorkoutsBlock(limit: Self.int(args["limit"], default: 6, max: 20))
         case "get_readiness_analysis": return await readiness()
         case "prepare_chart": return chart(args)
+        case "get_intraday_series": return await intraday(args)
         case "save_memory": return await saveMemory(args)
         case "get_memories": return await memories()
         default: return "Unknown tool: \(name)"
@@ -119,7 +126,7 @@ struct CoachToolExecutor {
     private func dailyMetrics(days: Int) -> String {
         let window = Array(repo.days.suffix(days).reversed())
         guard !window.isEmpty else { return "No wearable data is available yet." }
-        let header = "Last \(window.count) days, newest first (charge 0-100, effort 0-100, rest in hours, stages in hours, efficiency %, HRV ms, RHR bpm; a dash means NOT MEASURED):"
+        let header = "Last \(window.count) days, newest first (charge 0-100, effort 0-100, rest in hours, stages in hours, efficiency %, HRV ms, RHR bpm; a dash means NOT MEASURED. HRV and RHR here are one summary per day; for readings through the day call get_intraday_series):"
         return ([header] + window.map { "  " + engine.dayLine($0) }).joined(separator: "\n")
     }
 
@@ -177,6 +184,40 @@ struct CoachToolExecutor {
         let chart = metric.chart(from: repo.days, last: Self.int(args["days"], default: 30, max: 120))
         guard !chart.points.isEmpty else { return "No \(metric.title) data recorded in that window." }
         return CoachVisualEvidence.describe(chart)
+    }
+
+    private func intraday(_ args: [String: Any]) async -> String {
+        guard let raw = args["metric"] as? String, let metric = CoachIntraday.metric(named: raw) else {
+            return "Unknown metric. Use one of: " + CoachIntraday.metricNames
+        }
+        guard let repository = CloudPushRuntime.shared.scoreRepository() else {
+            return "Intraday readings are not available on this install because cloud scoring is off. "
+                + "Only the daily summaries from get_daily_metrics exist here; say so rather than assuming the strap records once a day."
+        }
+        let now = Date()
+        let bounds: IntradayRange.Bounds
+        if args["hours"] != nil {
+            let hours = Self.int(args["hours"], default: 24, max: 72)
+            let to = (Int(now.timeIntervalSince1970) / IntradayRange.bucketSeconds + 1) * IntradayRange.bucketSeconds
+            bounds = IntradayRange.Bounds(from: to - hours * 3_600, to: to,
+                                          key: "coach|\(metric.rawValue)|\(hours)h", isLive: true)
+        } else {
+            bounds = IntradayRange.bounds(for: metric, dayOffset: 0, now: now)
+        }
+        do {
+            let window = try await repository.intradaySeries(
+                from: bounds.from, to: bounds.to, deviceId: IntradaySeriesStore.shared.readDeviceId,
+                metrics: [metric], cacheKey: bounds.key)
+            return CoachIntraday.describe(window: window, metric: metric, now: now)
+        } catch {
+            if let cached = await repository.cachedIntradaySeries(cacheKey: bounds.key,
+                                                                  deviceId: IntradaySeriesStore.shared.readDeviceId) {
+                return "(Could not reach the server; these are the last saved readings.)\n"
+                    + CoachIntraday.describe(window: cached, metric: metric, now: now)
+            }
+            return "Could not load intraday readings right now. Tell the user the live curve is unavailable, "
+                + "and do not say the device records only one value per day."
+        }
     }
 
     // MARK: Memory
