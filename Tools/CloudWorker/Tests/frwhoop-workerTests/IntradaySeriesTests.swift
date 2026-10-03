@@ -135,6 +135,35 @@ final class IntradaySeriesTests: XCTestCase {
         XCTAssertGreaterThan(series[.steps]!.count, 3)
     }
 
+    func testStepBucketsKeepBoutBlocksAndStillSumToTheDailyTotal() throws {
+        // The strap credits the first six steps of a bout as one still-labelled record, then 2 ticks a second.
+        var counter = 1_000
+        var samples: [StepSample] = []
+        func quiet(_ from: Int, _ to: Int) {
+            for t in from..<to { samples.append(StepSample(ts: t, counter: counter, activityClass: 0)) }
+        }
+        func bout(at start: Int, smoothSeconds: Int) {
+            counter += 6
+            samples.append(StepSample(ts: start, counter: counter, activityClass: 0))
+            for t in (start + 1)...(start + smoothSeconds) {
+                counter += 2
+                samples.append(StepSample(ts: t, counter: counter, activityClass: 1))
+            }
+        }
+        quiet(day0, day0 + 60)
+        bout(at: day0 + 60, smoothSeconds: 5)      // the block is the first second of minute 1
+        quiet(day0 + 66, day0 + 300)
+        bout(at: day0 + 300, smoothSeconds: 5)
+        quiet(day0 + 306, day0 + 600)
+
+        let series = IntradaySeries.build(inputs(steps: samples))
+        XCTAssertEqual(StepsCounter.stepsInWindow(samples), 32)
+        XCTAssertEqual(series[.steps]!.reduce(0) { $0 + $1.value }, 32, accuracy: 1e-9)
+        XCTAssertEqual(point(series, .steps, bucket: 1)?.value, 16, "block 6 + five 2-tick seconds")
+        XCTAssertEqual(point(series, .steps, bucket: 5)?.value, 16)
+        XCTAssertEqual(point(series, .steps, bucket: 0)?.value, 0)
+    }
+
     func testStepBucketsApplyTheCalibratedTicksPerStep() throws {
         let samples = counterSamples(day0, day0 + 900, start: 100) { _ in 2 }
         var calibrated = profile

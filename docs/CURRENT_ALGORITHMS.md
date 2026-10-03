@@ -335,14 +335,31 @@ Night value = **median** of the finite per-session rates. Nil if none survive.
 
 1. Sort by time. Need at least 2 samples.
 2. Increment = `(current − previous) mod 65536`.
-3. Reject a delta that is &lt; 1 or ≥ **512**, a non-positive elapsed time, or a rate above **4 ticks/second** (unless the gap is long enough that the 512 cap binds first).
-4. If **any** sample in the window has an activity class, only **walk (1)** and **run (2)** increments count. Still (0) and unknown are dropped. A fully unclassed legacy window counts every plausible increment (old counter-only behavior).
+3. A **bout block** is an increment of **6 to 20** ticks across **at most 2 seconds** (see below). It counts as is, whatever its activity class and whatever the rate.
+4. Any other increment is rejected when it is &lt; 1 or ≥ **512**, when the elapsed time is not positive, or when the rate is above **4 ticks/second** (unless the gap is long enough that the 512 cap binds first).
+5. If **any** sample in the window has an activity class, only **walk (1)** and **run (2)** increments count. Still (0) and unknown are dropped, and so is a bout block on a record that carries no class at all. A fully unclassed legacy window counts every plausible increment (old counter-only behavior).
+
+Every rule looks only at one sample and the one before it. That is what lets the per-minute step series (`IntradaySeries.stepPoints`) add up to the day total however the day is cut into windows.
 
 ```
 steps = round(ticks / stepTicksPerStep)
 ```
 
 Nil when the result is 0.
+
+### Bout blocks
+
+A WHOOP 5/MG behaves as if it holds back the first steps of a walking bout, then credits about six of them in a single record (+6 or +7, rarely a few more) and publishes the rest of the bout at 1 to 4 ticks per second. The label on that record tracks its size: a block of exactly six is always **still**, and the label turns **walk** once the count passes six.
+
+So neither earlier gate could keep a six. The class gate drops it, and the 4 ticks/second ceiling drops every block. Because the loss is one block per bout, it is additive rather than proportional: it grows with the number of short walks, and a single `stepTicksPerStep` multiplier cannot recover it. A 1,000-step continuous walk contains about one block, so calibrating by walking would not have exposed it either.
+
+Evidence (one WHOOP 5/MG, 30 Sep to 3 Oct 2026, 1 Hz records):
+
+- 898 increments of 6 or more ticks within one second. 587 were exactly 6 (all labelled still), 293 were 7 (256 walk, 37 still), 18 were 8 or more (all walk). None exceeded 15, and there were no jumps of 16 to 511 ticks within three seconds.
+- A live walking test with stops of a few seconds between bouts produced six bursts. Each opened with a 6 or 7 tick block: 39 of the 81 ticks. The old gates kept the other 42.
+- On 2 Oct the old rule gave 2,962 steps where an Apple Watch showed 4.8k. The blocks it dropped that day were 2,045 ticks.
+
+The 6 to 20 range and the 2 second spacing are read off that data, not specified by the firmware. A counter reset drops the counter, so its u16 difference is far above 20 and is never mistaken for a block. Bouts shorter than six steps may not be credited at all (the test did not settle it), which no counting rule can recover.
 
 WHOOP 4.0 does not emit `StepSample`, so its step total stays nil unless another source filled the stream.
 

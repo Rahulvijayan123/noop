@@ -62,8 +62,10 @@ public enum SleepAwareStepCounter {
                 guard current.ts > prior.ts else { continue }
                 previous = current
                 let delta = (current.counter - prior.counter) & 0xffff
+                let block = StepsCounter.isBoutBlock(previousTs: prior.ts, currentTs: current.ts, delta: delta)
                 guard StepsCounter.shouldCountDelta(activityClass: current.activityClass,
-                                                     hasActivityClasses: hasClasses) else {
+                                                     hasActivityClasses: hasClasses,
+                                                     isBoutBlock: block) else {
                     rejectedClass += delta; continue
                 }
                 guard StepsCounter.isPlausibleDelta(previousTs: prior.ts, currentTs: current.ts,
