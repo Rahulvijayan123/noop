@@ -112,9 +112,15 @@ do $$ declare t text; begin
   end loop;
 end $$;
 
--- Idempotent upsert: identical fingerprint replays are no-ops; a changed fingerprint (late
--- verified object, corrected range, version change) bumps input_revision and re-dirties the
--- day so a bounded recomputation replaces the prior output.
+-- Idempotent upsert with lossless merge: a changed fingerprint (late verified object,
+-- corrected range, version change) bumps input_revision and re-dirties the day so a bounded
+-- recomputation replaces the prior output; an unchanged fingerprint replays as a no-op.
+-- Ready-flips that race under READ COMMITTED can enqueue a per-object subset after the job
+-- already exists: the conflict branch MERGES the new ids/digests into the existing arrays
+-- (sorted, deduplicated) so no object's contribution is ever overwritten. Failure state
+-- (dead_letter, consecutive_failures, not_before backoff) is sticky across a same-fingerprint
+-- enqueue and only resets when the fingerprint actually changes, so a dead-lettered or
+-- backed-off job cannot be resurrected by an identical replay.
 create function public.enqueue_activity_context(p_user uuid, p_device uuid, p_day date,
   p_object_ids uuid[], p_digests text[], p_fingerprint text,
   p_model_version text default 'hart-activity-v1',
@@ -134,8 +140,10 @@ begin
   values(p_user, p_device, p_day, 'hart-activity-1', p_object_ids, p_digests, p_fingerprint,
     p_model_version, p_preprocessing_version, p_ontology_version, 1, 'input')
   on conflict(user_id, device_id, day, algorithm_version) do update set
-    input_object_ids = excluded.input_object_ids,
-    input_digests = excluded.input_digests,
+    input_object_ids = (select coalesce(array_agg(distinct x order by x), '{}'::uuid[])
+      from unnest(activity_context_jobs.input_object_ids || excluded.input_object_ids) as t(x)),
+    input_digests = (select coalesce(array_agg(distinct x order by x), '{}'::text[])
+      from unnest(activity_context_jobs.input_digests || excluded.input_digests) as t(x)),
     fingerprint = excluded.fingerprint,
     model_version = excluded.model_version,
     preprocessing_version = excluded.preprocessing_version,
@@ -144,8 +152,15 @@ begin
       then activity_context_jobs.input_revision + 1 else activity_context_jobs.input_revision end,
     dirty_at = case when activity_context_jobs.fingerprint is distinct from excluded.fingerprint
       then clock_timestamp() else activity_context_jobs.dirty_at end,
-    consecutive_failures = 0, dead_letter = false, not_before = clock_timestamp(),
-    last_error = null, reason = 'input';
+    consecutive_failures = case when activity_context_jobs.fingerprint is distinct from excluded.fingerprint
+      then 0 else activity_context_jobs.consecutive_failures end,
+    dead_letter = case when activity_context_jobs.fingerprint is distinct from excluded.fingerprint
+      then false else activity_context_jobs.dead_letter end,
+    not_before = case when activity_context_jobs.fingerprint is distinct from excluded.fingerprint
+      then clock_timestamp() else activity_context_jobs.not_before end,
+    last_error = case when activity_context_jobs.fingerprint is distinct from excluded.fingerprint
+      then null else activity_context_jobs.last_error end,
+    reason = 'input';
 end $$;
 
 -- FOR UPDATE SKIP LOCKED claim with token grant; the eligibility gates mirror claim_scoring_v2
@@ -209,7 +224,7 @@ create function public.publish_activity_context_v2(p_token uuid, p_revision bigi
   p_payload jsonb, p_duration_ms bigint)
 returns bigint language plpgsql security definer set search_path='' as $$
 declare j public.activity_context_jobs; e jsonb; rev bigint; computed timestamptz;
-  day_lo bigint; day_hi bigint; cnt integer := 0;
+  day_lo bigint; day_end bigint; day_hi bigint; cnt integer := 0;
 begin
   select * into j from public.activity_context_jobs where lease_token = p_token for update;
   if not found or j.lease_until <= clock_timestamp() or j.input_revision <> p_revision then return null; end if;
@@ -220,7 +235,8 @@ begin
     raise exception 'invalid_activity_payload';
   end if;
   day_lo := extract(epoch from (j.day::timestamp at time zone 'UTC'))::bigint;
-  day_hi := extract(epoch from ((j.day + 1)::timestamp at time zone 'UTC'))::bigint - 1;
+  day_end := extract(epoch from ((j.day + 1)::timestamp at time zone 'UTC'))::bigint;
+  day_hi := day_end - 1;
   for e in select value from jsonb_array_elements(p_payload -> 'epochs') loop
     cnt := cnt + 1;
     if cnt > 2880 then raise exception 'invalid_activity_epoch_count'; end if;
@@ -235,7 +251,7 @@ begin
       or coalesce(e ->> 'w', '') not in ('on_wrist','off_wrist','unknown')
       or (e ->> 's') is null or (e ->> 'e') is null or (e ->> 'c') is null
       or (e ->> 'os') is null or (e ->> 'vs') is null
-      or (e ->> 's')::bigint < day_lo or (e ->> 'e')::bigint > day_hi
+      or (e ->> 's')::bigint < day_lo or (e ->> 'e')::bigint > day_end
       or (e ->> 'e')::bigint <= (e ->> 's')::bigint
       or (e ->> 'os')::integer < 0 or (e ->> 'vs')::integer < 0
       or (e ->> 'c')::real < 0 or (e ->> 'c')::real > 1
@@ -315,17 +331,64 @@ revoke all on function internal.activity_raw_imu_ready() from public, anon, auth
 create trigger activity_raw_imu_ready after insert or update on public.object_manifests
   for each row execute function internal.activity_raw_imu_ready();
 
+-- Reconcile path for missed enqueue events (C5): the activity lane calls this each cycle.
+-- Scans rawImuSession objects that became ready (verified receipt, sha256 present) with an
+-- end newer than the lookback, and for every UTC day they cover re-aggregates the complete
+-- ready input set exactly like the ready-flip trigger, then re-enqueues idempotently. Safe to
+-- run repeatedly: an already-current job is a no-op (same fingerprint, no revision bump), a
+-- job whose object was missed by a racing ready-flip is repaired by the enqueue merge, and no
+-- epochs are ever written here.
+create function public.reconcile_activity_context(p_lookback interval default '7 days')
+returns void language plpgsql security definer set search_path='' as $$
+declare r record; d date; lo bigint; hi bigint; f text; ids uuid[]; digests text[];
+begin
+  if p_lookback is null or p_lookback < interval '0' then raise exception 'invalid_lookback'; end if;
+  for r in
+    select distinct m.user_id, m.device_id,
+      greatest((m.start_at at time zone 'UTC')::date, (clock_timestamp() - p_lookback)::date) as first_day,
+      (m.end_at at time zone 'UTC')::date as last_day
+    from public.object_manifests m
+    where m.object_kind = 'rawImuSession' and m.status = 'ready'
+      and m.verified_at is not null and m.sha256 is not null
+      and m.start_at is not null and m.end_at is not null
+      and m.end_at > clock_timestamp() - p_lookback
+      and (m.end_at - m.start_at) <= interval '8 days'
+  loop
+    for d in select generate_series(r.first_day, r.last_day, interval '1 day')::date loop
+      -- Same aggregation as internal.activity_raw_imu_ready so fingerprints converge.
+      select array_agg(x.id order by x.start_at, x.id),
+             array_agg(lower(x.sha256) order by x.start_at, x.id)
+        into ids, digests
+      from public.object_manifests x
+      where x.user_id = r.user_id and x.device_id = r.device_id
+        and x.object_kind = 'rawImuSession' and x.status = 'ready'
+        and x.sha256 is not null and x.start_at is not null and x.end_at is not null
+        and x.start_at < ((d + 1)::timestamp at time zone 'UTC')
+        and x.end_at > (d::timestamp at time zone 'UTC')
+        and (x.end_at - x.start_at) <= interval '8 days';
+      if ids is null or cardinality(ids) = 0 then continue; end if;
+      lo := extract(epoch from (d::timestamp at time zone 'UTC'))::bigint;
+      hi := extract(epoch from ((d + 1)::timestamp at time zone 'UTC'))::bigint - 1;
+      f := public.activity_context_fingerprint(digests, lo, hi, 'hart-activity-1',
+        'hart-activity-v1', 'hart-activity-preprocess-v1', 'v1');
+      perform public.enqueue_activity_context(r.user_id, r.device_id, d, ids, digests, f);
+    end loop;
+  end loop;
+end $$;
+
 revoke all on function public.enqueue_activity_context(uuid,uuid,date,uuid[],text[],text,text,text,text)
   from public, anon, authenticated;
 revoke all on function public.claim_activity_context_v2(integer) from public, anon, authenticated;
 revoke all on function public.renew_activity_context_v2(uuid,integer) from public, anon, authenticated;
 revoke all on function public.fail_activity_context_v2(uuid,bigint,text) from public, anon, authenticated;
 revoke all on function public.publish_activity_context_v2(uuid,bigint,jsonb,bigint) from public, anon, authenticated;
+revoke all on function public.reconcile_activity_context(interval) from public, anon, authenticated;
 grant execute on function public.enqueue_activity_context(uuid,uuid,date,uuid[],text[],text,text,text,text)
   to service_role;
 grant execute on function public.claim_activity_context_v2(integer) to service_role;
 grant execute on function public.renew_activity_context_v2(uuid,integer) to service_role;
 grant execute on function public.fail_activity_context_v2(uuid,bigint,text) to service_role;
 grant execute on function public.publish_activity_context_v2(uuid,bigint,jsonb,bigint) to service_role;
+grant execute on function public.reconcile_activity_context(interval) to service_role;
 
 commit;

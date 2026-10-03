@@ -134,6 +134,94 @@ begin
 end;
 $$;
 
+-- 3b. Supersede accounting (P2-2): a fail against the CLAIMED (stale) revision after a
+--     supersede is a CLEAN RELEASE (clear lease, reset failures, no backoff bump, no
+--     dead-letter); a fail against the CURRENT revision counts exactly like fail_scoring_v2.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-20';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp1 text; fp2 text; j record; tok uuid; n integer; nb timestamptz;
+begin
+  fp1 := public.activity_context_fingerprint(array[repeat('i',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  fp2 := public.activity_context_fingerprint(array[repeat('j',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('i',64)],fp1);
+  select * into j from public.claim_activity_context_v2(300);
+  assert found and j.input_revision=1, 'supersede test must claim the fresh job at revision 1';
+  tok := j.lease_token;
+  -- A late object supersedes the job mid-inference: revision bumps while the lease is held.
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('j',64)],fp2);
+  assert (select input_revision=2 from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day), 'supersede must bump the revision';
+  -- Worker releases with the CLAIMED (stale) revision 1 -> clean release, no failure counted.
+  perform public.fail_activity_context_v2(tok, 1, 'superseded');
+  select consecutive_failures, dead_letter, not_before, last_error, lease_token into n, j.dead_letter, nb, j.last_error, j.lease_token
+    from public.activity_context_jobs where user_id=u and device_id=dev and day=v_day;
+  assert n=0, 'stale-revision release must not count a failure';
+  assert not j.dead_letter, 'stale-revision release must not dead-letter';
+  assert nb<=clock_timestamp(), 'stale-revision release must not push the backoff';
+  assert j.last_error is null, 'stale-revision release must not record an error';
+  assert j.lease_token is null, 'stale-revision release must clear the lease';
+  -- A real failure against the CURRENT revision counts, matching fail_scoring_v2.
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  assert found and j.input_revision=2, 'superseded job must be claimable at revision 2';
+  perform public.fail_activity_context_v2(tok, 2, 'model error');
+  select consecutive_failures, last_error into n, j.last_error from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day;
+  assert n=1, 'matching-revision failure must count';
+  assert j.last_error='model error', 'matching-revision failure must record the error';
+  raise notice 'PASS 3b supersede clean release vs matching failure';
+end;
+$$;
+
+-- 3c. Dead-letter durability (P2-3): a same-fingerprint enqueue must NOT resurrect a
+--     dead-lettered job or cancel its backoff; only a changed fingerprint re-enqueues fresh.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-21';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp1 text; fp2 text; j record; tok uuid; i integer; n integer; dl boolean; nb timestamptz;
+begin
+  fp1 := public.activity_context_fingerprint(array[repeat('n',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  fp2 := public.activity_context_fingerprint(array[repeat('o',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('n',64)],fp1);
+  -- Drive the job to dead-letter (8 consecutive failures).
+  for i in 1..8 loop
+    update public.activity_context_jobs set not_before=clock_timestamp()
+      where user_id=u and device_id=dev and day=v_day;
+    select * into j from public.claim_activity_context_v2(300);
+    assert found, 'job must remain claimable before dead-letter';
+    perform public.fail_activity_context_v2(j.lease_token, j.input_revision, 'boom');
+  end loop;
+  select dead_letter, consecutive_failures into dl, n from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day;
+  assert dl and n=8, 'job must be dead-lettered at 8 failures';
+  -- Same-fingerprint enqueue (identical digests): dead_letter stays set, failures stay at 8,
+  -- the backoff is not cancelled, and the job is NOT claimable again.
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('n',64)],fp1);
+  select dead_letter, consecutive_failures, not_before into dl, n, nb from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day;
+  assert dl, 'same-fingerprint enqueue must not resurrect a dead-lettered job';
+  assert n=8, 'same-fingerprint enqueue must not reset consecutive_failures';
+  assert nb>clock_timestamp(), 'same-fingerprint enqueue must not cancel the backoff';
+  select * into j from public.claim_activity_context_v2(300);
+  assert not found, 'dead-lettered job must stay unclaimable after a same-fingerprint enqueue';
+  -- A changed fingerprint re-enqueues fresh: dead_letter cleared, failures reset, claimable.
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('o',64)],fp2);
+  select dead_letter, consecutive_failures into dl, n from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day;
+  assert not dl, 'changed-fingerprint enqueue must clear the dead-letter';
+  assert n=0, 'changed-fingerprint enqueue must reset consecutive_failures';
+  select * into j from public.claim_activity_context_v2(300);
+  assert found, 'changed-fingerprint enqueue must make the job claimable again';
+  raise notice 'PASS 3c dead-letter stickiness';
+end;
+$$;
+
 -- 4. Fenced publish: stale token/revision/lease return NULL and never touch epochs.
 do $$
 declare
@@ -279,10 +367,11 @@ begin
   end;
   update public.activity_context_jobs set lease_until=clock_timestamp()-interval '1 second'
     where user_id=u and device_id=dev and day=v_day;
-  -- Epoch outside the day's UTC bounds.
+  -- Epoch ending after the day's UTC bounds (e > dayEnd) is rejected; e == dayEnd is the
+  -- valid final 30-s epoch of the day and is covered by the boundary block at the end.
   select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
   payload := jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(
-    jsonb_build_object('s',lo+86300,'e',lo+86400,'m','walking','p','unknown','ex','false','sl','awake','ec','active','w','on_wrist','c',0.9,'os',30,'vs',30)));
+    jsonb_build_object('s',lo+86300,'e',lo+86401,'m','walking','p','unknown','ex','false','sl','awake','ec','active','w','on_wrist','c',0.9,'os',30,'vs',30)));
   begin
     perform public.publish_activity_context_v2(tok,j.input_revision,payload,100);
     raise exception 'out-of-day epoch accepted';
@@ -320,6 +409,57 @@ begin
   assert (select count(*)=0 from public.activity_context_epochs
     where user_id=u and device_id=dev and day=v_day), 'rejected payloads must not leave epochs';
   raise notice 'PASS 6 payload validation';
+end;
+$$;
+
+-- 6b. Midnight boundary (P1-1): the day's FINAL 30-s epoch [dayEnd-30, dayEnd) legitimately ends
+--     at e == dayEnd (half-open [s,e), exactly where a model window covering 23:59:30..00:00:00
+--     lands). e == dayEnd must publish; e == dayEnd+1 must still be rejected.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-09';
+  lo bigint; fp text; j record; tok uuid; rev bigint; payload jsonb;
+begin
+  lo := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp := public.activity_context_fingerprint(array[repeat('h',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('h',64)],fp);
+  -- e == dayEnd+1 still rejected.
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  payload := jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(
+    jsonb_build_object('s',lo+86370,'e',lo+86401,'m','walking','p','unknown','ex','false','sl','awake','ec','active','w','on_wrist','c',0.9,'os',30,'vs',30)));
+  begin
+    perform public.publish_activity_context_v2(tok,j.input_revision,payload,100);
+    raise exception 'post-day epoch accepted';
+  exception when others then
+    if sqlerrm like 'post-day epoch accepted%' then raise; end if;
+  end;
+  update public.activity_context_jobs set lease_until=clock_timestamp()-interval '1 second'
+    where user_id=u and device_id=dev and day=v_day;
+  -- e == dayEnd publishes the final epoch of the day.
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  payload := jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(
+    jsonb_build_object('s',lo+86370,'e',lo+86400,'m','walking','p','unknown','ex','false','sl','awake','ec','active','w','on_wrist','c',0.9,'os',30,'vs',30)));
+  rev := public.publish_activity_context_v2(tok,j.input_revision,payload,100);
+  assert rev is not null, 'final epoch e==dayEnd must publish';
+  assert exists(select 1 from public.activity_context_epochs
+    where user_id=u and device_id=dev and day=v_day and start_ts=lo+86370 and end_ts=lo+86400
+      and fingerprint=fp), 'final epoch must be stored with end_ts == dayEnd';
+  -- An epoch starting before the day is still rejected alongside e==dayEnd acceptance.
+  update public.activity_context_jobs set input_revision=2, completed_revision=1,
+    lease_token=null, lease_until=null, not_before=clock_timestamp()
+    where user_id=u and device_id=dev and day=v_day;
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  payload := jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(
+    jsonb_build_object('s',lo-1,'e',lo+29,'m','walking','p','unknown','ex','false','sl','awake','ec','active','w','on_wrist','c',0.9,'os',30,'vs',30)));
+  begin
+    perform public.publish_activity_context_v2(tok,j.input_revision,payload,100);
+    raise exception 'pre-day epoch accepted';
+  exception when others then
+    if sqlerrm like 'pre-day epoch accepted%' then raise; end if;
+  end;
+  raise notice 'PASS 6b midnight boundary';
 end;
 $$;
 
@@ -434,6 +574,10 @@ begin
       'a0000000-0000-4000-8000-000000000012','2026-10-12',array[gen_random_uuid()],array[repeat('9',64)],repeat('9',64));
     raise exception 'authenticated enqueue allowed';
   exception when insufficient_privilege then null; end;
+  begin
+    perform public.reconcile_activity_context();
+    raise exception 'authenticated reconcile allowed';
+  exception when insufficient_privilege then null; end;
 end;
 $$;
 reset role;
@@ -491,6 +635,83 @@ begin
   select count(*) into n from public.activity_context_epochs where user_id=u;
   assert n=0, 'account deletion must cascade epochs';
   raise notice 'PASS 9 deletion cascade';
+end;
+$$;
+
+-- 10. Merge + reconcile (P2-1): ready-flips that race under READ COMMITTED enqueue per-object
+--     subsets; the conflict branch MERGES them so both objects land in one job, and the
+--     reconcile RPC re-adds a missed enqueue idempotently without duplicating jobs or epochs.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-14';
+  v_day2 date := '2026-10-15';
+  lo bigint; lo2 bigint;
+  ma uuid := 'a0000000-0000-4000-8000-000000000031';
+  mb uuid := 'a0000000-0000-4000-8000-000000000032';
+  mc uuid := 'a0000000-0000-4000-8000-000000000033';
+  fp_a text; fp_b text; fp_c text;
+  ids uuid[]; digests text[]; n integer; rev bigint; job_count integer;
+begin
+  -- Section 9 deleted the account; re-create the owner/device for this section.
+  insert into auth.users(id) values (u);
+  insert into public.devices(id,user_id,source_kind) values (dev,u,'noop_push');
+  lo := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  lo2 := extract(epoch from (v_day2::timestamp at time zone 'UTC'))::bigint;
+  fp_a := public.activity_context_fingerprint(array[repeat('k',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  fp_b := public.activity_context_fingerprint(array[repeat('l',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  fp_c := public.activity_context_fingerprint(array[repeat('m',64)],lo2,lo2+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  -- Two objects for the same day: object A flips ready first (trigger enqueues {A}).
+  insert into public.object_manifests(id,user_id,device_id,object_class,object_kind,object_key,
+    start_at,end_at,sha256,sha256_source,status,verified_at)
+  values
+    (ma,u,dev,'raw','rawImuSession','race-obj-a','2026-10-14T00:10:00Z'::timestamptz,'2026-10-14T01:10:00Z'::timestamptz,repeat('k',64),'server_verified','pending',null),
+    (mb,u,dev,'raw','rawImuSession','race-obj-b','2026-10-14T01:10:00Z'::timestamptz,'2026-10-14T02:10:00Z'::timestamptz,repeat('l',64),'server_verified','pending',null),
+    (mc,u,dev,'raw','rawImuSession','missed-obj-c','2026-10-15T00:10:00Z'::timestamptz,'2026-10-15T01:10:00Z'::timestamptz,repeat('m',64),'server_verified','pending',clock_timestamp());
+  update public.object_manifests set status='ready' where id=ma;
+  select input_object_ids into ids from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day;
+  assert cardinality(ids)=1 and ids[1]=ma, 'first ready flip must enqueue {A}';
+  -- Object C becomes ready+verified; its ready flip enqueues {C} on day 2.
+  update public.object_manifests set status='ready' where id=mc;
+  -- B flips ready concurrently but its statement snapshot did not see A: it enqueues {B} as
+  -- a per-object subset. The merge must keep A's contribution instead of last-writer-wins.
+  perform public.enqueue_activity_context(u,dev,v_day,array[mb],array[repeat('l',64)],fp_b);
+  select input_object_ids, input_revision into ids, rev from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day;
+  assert cardinality(ids)=2 and ma = any(ids) and mb = any(ids),
+    'concurrent per-object enqueues must aggregate BOTH objects into one job';
+  assert rev=2, 'merged enqueue must bump the revision once';
+  select count(*) into job_count from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day and algorithm_version='hart-activity-1';
+  assert job_count=1, 'merged enqueues must not create duplicate jobs';
+  -- Reconcile after a MISSED enqueue: object C is ready+verified but its enqueue never
+  -- happened (job deleted, e.g. an enqueue crash between the ready flip and the RPC).
+  delete from public.activity_context_jobs where user_id=u and device_id=dev and day=v_day2;
+  assert not exists(select 1 from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day2), 'missed-enqueue setup must start clean';
+  perform public.reconcile_activity_context('30 days');
+  select input_object_ids, input_revision into ids, rev from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day2;
+  assert cardinality(ids)=1 and ids[1]=mc, 'reconcile must re-add the missed object';
+  assert rev=1, 'reconcile must create a fresh job for the missed object';
+  -- Reconcile is idempotent: a second pass is a no-op (no revision bump, still one job).
+  perform public.reconcile_activity_context('30 days');
+  assert (select input_revision=1 from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day2), 'reconcile replay must not bump the revision';
+  select count(*) into job_count from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day2;
+  assert job_count=1, 'reconcile replay must not duplicate jobs';
+  -- Reconcile never writes epochs.
+  assert (select count(*)=0 from public.activity_context_epochs
+    where user_id=u and device_id=dev and day=v_day2), 'reconcile must never write epochs';
+  -- Reconcile on an already-current job stays a no-op even after a direct same-set enqueue.
+  perform public.enqueue_activity_context(u,dev,v_day2,array[mc],array[repeat('m',64)],fp_c);
+  perform public.reconcile_activity_context('30 days');
+  assert (select input_revision=1 from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day2), 'reconcile on an already-current job must stay a no-op';
+  raise notice 'PASS 10 merge + reconcile';
 end;
 $$;
 
