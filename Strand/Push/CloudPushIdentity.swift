@@ -71,7 +71,10 @@ public enum CloudPushIdentityStore {
     }
 
     /// Stops scheduling for the signed-out owner WITHOUT deleting their credential or journal, so
-    /// their pending inputs can resume when they sign back in.
+    /// their pending inputs can resume when they sign back in. MainActor because it also clears the
+    /// collector's durable capture intent (a @MainActor store), so a signed-out install never
+    /// re-arms raw-IMU capture on the next connect.
+    @MainActor
     public static func signOutCurrentOwner() {
         UserDefaults.standard.removeObject(forKey: ownerIdKey)
         // A signed-out install must not re-arm raw-IMU capture on the next

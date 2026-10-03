@@ -609,10 +609,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         # The deployed artifact is the FINE-TUNED model: record its digest in
         # the manifest so serve's verify-on-load matches what it actually loads.
         from .manifest import file_sha256
-        fine_sha = file_sha256(os.path.join(args.out, "model.safetensors"))
+        fine_path = os.path.join(args.out, "model.safetensors")
+        fine_sha = file_sha256(fine_path)
         checkpoint_info["files"]["model.safetensors"]["sha256"] = fine_sha
+        checkpoint_info["files"]["model.safetensors"]["size"] = os.path.getsize(fine_path)
         checkpoint_info["files"]["model.safetensors"]["url"] = (
-            f"local:{os.path.join(args.out, 'model.safetensors')} "
+            f"local:{fine_path} "
             f"(fine-tuned from {checkpoint_info['commit'][:12]})")
 
     manifest = build_manifest(
