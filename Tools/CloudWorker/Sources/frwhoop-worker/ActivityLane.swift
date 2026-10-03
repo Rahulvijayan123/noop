@@ -85,6 +85,10 @@ struct ActivityLane {
     }
     var stats = Stats()
     var consecutiveFailures = 0
+    /// Throttle for the drain loop's reconcile call (once a minute is plenty:
+    /// the RPC is idempotent and the trigger covers the common path).
+    var lastReconcileAt: Date?
+    static let reconcileIntervalSeconds: TimeInterval = 60
 
     enum ActivityError: Error, CustomStringConvertible {
         /// A deterministic input violation: bounded retry through the fail
@@ -158,14 +162,21 @@ struct ActivityLane {
                 stats.lastErrorKind = "model_unavailable"
                 return
             }
-            // Reconcile missed enqueue events first (idempotent, bounded to
-            // the last 7 days by the RPC): a trigger race or a pre-trigger
+            // Reconcile missed enqueue events (idempotent, bounded to the
+            // last 7 days by the RPC): a trigger race or a pre-trigger
             // verification can leave a verified rawImuSession object without
-            // its activity job. Best effort — a transient failure must not
+            // its activity job. Throttled to once per reconcileInterval —
+            // the scan is not free, and the drain loop spins about once a
+            // second when idle. Best effort: a transient failure must not
             // block claiming.
-            _ = try? db.callFunctionForJSON(
-                "SELECT public.reconcile_activity_context($1::interval)::text",
-                ["'7 days'::interval"])
+            if let last = lastReconcileAt,
+               Date().timeIntervalSince(last) < Self.reconcileIntervalSeconds {
+            } else {
+                lastReconcileAt = Date()
+                _ = try? db.callFunctionForJSON(
+                    "SELECT public.reconcile_activity_context($1::interval)::text",
+                    ["'7 days'::interval"])
+            }
             do {
                 switch try cycle() {
                 case .empty:

@@ -225,6 +225,7 @@ create function public.publish_activity_context_v2(p_token uuid, p_revision bigi
 returns bigint language plpgsql security definer set search_path='' as $$
 declare j public.activity_context_jobs; e jsonb; rev bigint; computed timestamptz;
   day_lo bigint; day_end bigint; day_hi bigint; cnt integer := 0;
+  stamp_model text; stamp_pre text;
 begin
   select * into j from public.activity_context_jobs where lease_token = p_token for update;
   if not found or j.lease_until <= clock_timestamp() or j.input_revision <> p_revision then return null; end if;
@@ -260,6 +261,17 @@ begin
     end if;
   end loop;
   computed := clock_timestamp();
+  -- Epoch provenance must be the versions the LANE actually resolved (the
+  -- document carries them), not whatever the enqueue trigger guessed: a
+  -- baseline child must never stamp its rows as the HART version. The job
+  -- row and the epoch rows are stamped in the same transaction.
+  stamp_model := coalesce(nullif(p_payload ->> 'model_version', ''), j.model_version);
+  stamp_pre := coalesce(nullif(p_payload ->> 'preprocessing_version', ''), j.preprocessing_version);
+  update public.activity_context_jobs
+     set model_version = stamp_model, preprocessing_version = stamp_pre
+   where lease_token = p_token
+     and user_id = j.user_id and device_id = j.device_id and day = j.day
+     and algorithm_version = j.algorithm_version;
   rev := nextval('public.activity_context_epochs_result_revision_seq');
   delete from public.activity_context_epochs
     where user_id = j.user_id and device_id = j.device_id and day = j.day and fingerprint = j.fingerprint;
@@ -271,7 +283,7 @@ begin
     values(j.user_id, j.device_id, j.day, (e ->> 's')::bigint, (e ->> 'e')::bigint,
       e ->> 'm', e ->> 'p', e ->> 'ex', e ->> 'sl', e ->> 'ec', e ->> 'w',
       (e ->> 'c')::real, (e ->> 'os')::integer, (e ->> 'vs')::integer,
-      j.model_version, j.preprocessing_version, j.ontology_version,
+      stamp_model, stamp_pre, j.ontology_version,
       j.fingerprint, rev, computed);
   end loop;
   update public.activity_context_jobs set completed_revision = p_revision,
@@ -330,6 +342,10 @@ end $$;
 revoke all on function internal.activity_raw_imu_ready() from public, anon, authenticated, service_role;
 create trigger activity_raw_imu_ready after insert or update on public.object_manifests
   for each row execute function internal.activity_raw_imu_ready();
+
+create index if not exists object_manifests_raw_imu_ready_idx
+  on public.object_manifests (object_kind, status, end_at)
+  where object_kind = 'rawImuSession' and status = 'ready';
 
 -- Reconcile path for missed enqueue events (C5): the activity lane calls this each cycle.
 -- Scans rawImuSession objects that became ready (verified receipt, sha256 present) with an

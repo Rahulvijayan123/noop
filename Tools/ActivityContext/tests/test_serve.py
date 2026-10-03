@@ -168,3 +168,18 @@ def test_infer_accepts_top_level_head_tail(proc):
     assert resp["ok"] is True
     assert resp["windows"], "top-level head/tail must still classify windows"
     assert resp["id"] == "tl1"
+
+
+def test_explicit_missing_manifest_hard_fails():
+    """Audit P2 residual: an explicitly requested manifest that is missing must
+    exit loudly (model_missing diagnostic line), never fall back to the
+    baseline silently while the lane stamps HART versions."""
+    import subprocess, sys, tempfile, os
+    missing = os.path.join(tempfile.mkdtemp(), "manifest.json")
+    proc = subprocess.run(
+        [sys.executable, "-m", "activity_context.serve", "--manifest", missing],
+        cwd=os.path.join(os.path.dirname(__file__), ".."),
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode != 0
+    line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    assert '"kind": "model_missing"' in line or '"kind":"model_missing"' in line

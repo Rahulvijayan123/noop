@@ -716,3 +716,45 @@ end;
 $$;
 
 rollback;
+
+
+-- 11. Publish stamps the versions the LANE resolved (payload) onto the job row and every
+-- epoch row — a baseline child must never stamp rows as the HART version (audit P2 residual).
+begin;
+insert into auth.users(id) values ('a0000000-0000-4000-8000-000000000001');
+insert into public.devices(id,user_id,source_kind) values
+ ('a0000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','noop_push');
+do $$
+declare u uuid := 'a0000000-0000-4000-8000-000000000001';
+        dev uuid := 'a0000000-0000-4000-8000-000000000011';
+        v_day date := '2026-10-02';
+        tok uuid; rev bigint; fp text := repeat('e',64);
+        epoch_s bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+begin
+  perform public.enqueue_activity_context(u,dev,v_day,
+    array['d0000000-0000-4000-8000-0000000000d1'::uuid],array[repeat('d',64)],fp,'hart-activity-1','pre-1','v1');
+  select lease_token into tok from public.claim_activity_context_v2(60);
+  assert tok is not null, 'claim must succeed';
+  perform public.publish_activity_context_v2(tok, 1,
+    jsonb_build_object(
+      'day', v_day,
+      'model_version', 'baseline-v0',
+      'preprocessing_version', '1.0.0',
+      'epochs', jsonb_build_array(
+        jsonb_build_object('s',epoch_s,'e',epoch_s+30,'m','stationary','p','unknown',
+          'ex','unknown','sl','awake','ec','unknown','w','unknown',
+          'c',0.9,'os',30,'vs',30))),
+    10);
+  assert (select model_version='baseline-v0' and preprocessing_version='1.0.0'
+            from public.activity_context_jobs
+           where user_id=u and device_id=dev and day=v_day),
+    'publish must stamp the payload versions onto the job row';
+  assert (select count(*)=1 from public.activity_context_epochs
+            where user_id=u and device_id=dev and day=v_day and model_version='baseline-v0'
+              and preprocessing_version='1.0.0'),
+    'publish must stamp the payload versions onto the epoch rows';
+  raise notice 'PASS 11 publish stamps resolved versions';
+end;
+$$;
+
+rollback;

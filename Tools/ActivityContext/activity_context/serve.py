@@ -65,7 +65,14 @@ class ServeContext:
 
 def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
                   timeout: float = DEFAULT_TIMEOUT_SECONDS) -> ServeContext:
-    if manifest_path and os.path.isfile(manifest_path):
+    # An explicitly requested manifest that is missing or unreadable is a
+    # CONFIGURATION ERROR, never a silent baseline fallback: a misconfigured
+    # model dir must fail loudly (model_missing) instead of publishing
+    # heuristic windows stamped as the HART version.
+    if manifest_path:
+        if not os.path.isfile(manifest_path):
+            from .manifest import ManifestError
+            raise ManifestError(f"manifest not found: {manifest_path}")
         manifest = load_manifest(manifest_path)
     else:
         from .manifest import default_manifest
@@ -317,7 +324,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS,
                     help="per-request timeout in seconds")
     args = ap.parse_args(argv)
-    ctx = build_context(args.manifest, args.checkpoint, args.timeout)
+    try:
+        ctx = build_context(args.manifest, args.checkpoint, args.timeout)
+    except Exception as exc:
+        # Configuration error (e.g. an explicitly requested manifest that is
+        # missing): exit with a single JSON diagnostic line so the parent
+        # lane treats it as model_unavailable, never a silent baseline.
+        print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                          "kind": "model_missing"}), flush=True)
+        return 3
     return serve_forever(ctx)
 
 
