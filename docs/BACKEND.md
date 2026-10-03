@@ -256,6 +256,44 @@ Known limits:
 - Only the v2 scoring lane writes it. The legacy fleet lane does not.
 - A bucket holds a value only when the strap sent enough data for it. Gaps are expected: daytime HRV and
   respiratory rate in particular are sparse by design.
+
+## Activity context (shadow, off by default)
+
+Raw IMU classification (spec: activity context) runs as a separate worker lane. It is OFF by
+default: the lane starts only with `FRWHOOP_ACTIVITY_ENABLED=1` in `/etc/frwhoop/worker.env` and
+`activity` not in `FRWHOOP_DISABLE_LANES`.
+
+Objects and queues:
+
+```text
+phone raw capture (ImuSessionFileStore) -> rawImuSession NPB1 objects (object lane, verified)
+  -> object_manifests status 'ready' -> trigger enqueues activity_context_jobs (per UTC day)
+  -> activity lane: claim (lease) -> download + digest-verify + decode -> contiguous runs
+  -> persistent Python process (Tools/ActivityContext, HART) -> 4-s window predictions
+  -> shared ActivityContextPolicy (same code as the app) -> 30-s epochs
+  -> publish_activity_context_v2 (fenced) -> activity_context_epochs
+  -> scoring_dirty_span -> next scoring pass attaches daily.activity_context -> snapshot -> app
+```
+
+- The Python child is a persistent `stdin/stdout` JSON process (no per-window launches, no HTTP
+  endpoint, no GPU). Model loading and inference happen outside Postgres transactions; the lane
+  renews its lease around each run's inference. A missing model fails soft (`model_unavailable`),
+  never blocks BLE, ingest, scoring, sleep, recovery or archive.
+- Deployment needs the migration `20261003120000_activity_context.sql` applied with `psql`
+  (never `supabase db push`; see Migrations), the `Tools/ActivityContext` tree plus a Python 3.10
+  venv on the host (`uv venv && uv pip install -r Tools/ActivityContext/requirements` style pins in
+  the package README), and the trained model artifacts copied to `FRWHOOP_ACTIVITY_MODEL_DIR`
+  (fetch/build commands in the package README; nothing is committed to git).
+- Rollback: set `FRWHOOP_ACTIVITY_ENABLED` off (or add `activity` to `FRWHOOP_DISABLE_LANES`) and
+  restart the worker. The tables keep their rows; snapshots simply stop carrying
+  `activity_context` after the next scoring pass, and old clients are unaffected either way. The
+  migration is additive (new tables + functions only), so reverting it is not required for rollback.
+- Promotion is evidence-gated, not config-gated: the held-out WISDM-19 watch result (macro-F1 0.66,
+  coverage 0.66) does NOT meet the product targets (0.85 macro-F1, 0.90 walking/running precision),
+  so automatic labels stay in shadow mode until a WHOOP-labeled pilot passes those gates. Posture
+  and new activities have separate gates. The `RestingEligibility` policy is exported but rejects by
+  default (wear/sleep evidence is unknown in v1), so no physiological baseline behavior changed.
+
 ## Health checks
 
 Run these with `psql` against the database. All of them are read-only.

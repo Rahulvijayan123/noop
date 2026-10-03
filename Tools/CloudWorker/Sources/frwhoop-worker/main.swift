@@ -22,7 +22,15 @@ import FoundationNetworking
 //   FRWHOOP_ARCHIVE_BUDGET       archive jobs per wake (default 8)
 //   FRWHOOP_VERIFY_BUDGET        verification debt items per wake (default 4)
 //   FRWHOOP_RECONCILE_BUDGET     pending-object arrival reconciliations per wake (default 4)
-//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify);
+//   FRWHOOP_ACTIVITY_ENABLED     "1" runs the activity lane (default OFF; lane only
+//                                runs when enabled AND not disabled via DISABLE_LANES)
+//   FRWHOOP_ACTIVITY_BUDGET      activity jobs per wake (default 2)
+//   FRWHOOP_ACTIVITY_PYTHON      python interpreter for the activity service (default python3)
+//   FRWHOOP_ACTIVITY_HOME        Tools/ActivityContext package root on the host
+//   FRWHOOP_ACTIVITY_MODEL_DIR   model directory passed to the service (optional)
+//   FRWHOOP_ACTIVITY_TIMEOUT_SECONDS  per-inference timeout for the python child (default 60)
+//   FRWHOOP_ACTIVITY_LEASE_SECONDS    activity job lease length (default 300)
+//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity);
 //                                "series" keeps scoring but stops building and writing the dense intraday series
 //   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
 //                                (default 20; 0 claims them immediately, as the queue did originally)
@@ -56,6 +64,13 @@ struct WorkerConfig {
     let archiveBudget: Int
     let verifyBudget: Int
     let reconcileBudget: Int
+    let activityEnabled: Bool
+    let activityBudget: Int
+    let activityPython: String
+    let activityHome: String
+    let activityModelDir: String?
+    let activityTimeoutSeconds: Double
+    let activityLeaseSeconds: Int
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -87,6 +102,17 @@ struct WorkerConfig {
         self.archiveBudget = Int(environment["FRWHOOP_ARCHIVE_BUDGET"] ?? "8") ?? 8
         self.verifyBudget = Int(environment["FRWHOOP_VERIFY_BUDGET"] ?? "4") ?? 4
         self.reconcileBudget = Int(environment["FRWHOOP_RECONCILE_BUDGET"] ?? "4") ?? 4
+        // The activity lane is OFF by default: it only runs when explicitly
+        // enabled (FRWHOOP_ACTIVITY_ENABLED=1) AND not disabled below.
+        self.activityEnabled = (environment["FRWHOOP_ACTIVITY_ENABLED"] ?? "") == "1"
+        self.activityBudget = Int(environment["FRWHOOP_ACTIVITY_BUDGET"] ?? "2") ?? 2
+        self.activityPython = environment["FRWHOOP_ACTIVITY_PYTHON"] ?? "python3"
+        self.activityHome = environment["FRWHOOP_ACTIVITY_HOME"]
+            ?? FileManager.default.currentDirectoryPath + "/Tools/ActivityContext"
+        self.activityModelDir = environment["FRWHOOP_ACTIVITY_MODEL_DIR"]
+            .flatMap { $0.isEmpty ? nil : $0 }
+        self.activityTimeoutSeconds = Double(environment["FRWHOOP_ACTIVITY_TIMEOUT_SECONDS"] ?? "60") ?? 60
+        self.activityLeaseSeconds = Int(environment["FRWHOOP_ACTIVITY_LEASE_SECONDS"] ?? "300") ?? 300
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -122,6 +148,7 @@ let dbProjection: PostgresClient
 let dbScoring: PostgresClient
 let dbArchive: PostgresClient
 let dbVerify: PostgresClient
+let dbActivity: PostgresClient
 let storage: B2Storage
 do {
     dbOptions = try PostgresOptions.fromEnvironment(env)
@@ -130,6 +157,7 @@ do {
     dbScoring = try PostgresClient(options: dbOptions)
     dbArchive = try PostgresClient(options: dbOptions)
     dbVerify = try PostgresClient(options: dbOptions)
+    dbActivity = try PostgresClient(options: dbOptions)
     storage = B2Storage(keyID: config.b2KeyID, applicationKey: config.b2ApplicationKey, bucket: config.b2Bucket)
 } catch {
     FileHandle.standardError.write("frwhoop-worker: startup failed: \(error)\n".data(using: .utf8)!)
@@ -187,6 +215,12 @@ let projectionState = LaneState(LaneSnapshot(name: "projection", enabled: laneEn
 let scoringState = LaneState(LaneSnapshot(name: "scoring", enabled: laneEnabled("scoring")))
 let archiveState = LaneState(LaneSnapshot(name: "archive", enabled: laneEnabled("archive")))
 let verifyState = LaneState(LaneSnapshot(name: "verify", enabled: laneEnabled("verify")))
+// The activity lane is opt-in: it must be enabled by FRWHOOP_ACTIVITY_ENABLED
+// AND not disabled via FRWHOOP_DISABLE_LANES. A disabled/unenabled activity
+// lane must not affect any other lane, so it is simply never started.
+let activityState = LaneState(LaneSnapshot(
+    name: "activity",
+    enabled: config.activityEnabled && laneEnabled("activity")))
 
 let startedAt = Date()
 let processInstanceID = UUID().uuidString.lowercased()
@@ -296,6 +330,19 @@ var scoring = ScoringLane(db: dbScoring, scorer: DayScorer(db: dbScoring), inges
                           v2InputGateSeconds: config.v2InputGateSeconds)
 var archive = ArchiveLane(db: dbArchive, storage: storage)
 var verify = VerificationLane(db: dbVerify, storage: storage)
+var activity = ActivityLane(
+    db: dbActivity, storage: storage,
+    service: ActivityPythonService(config: ActivityPythonService.Config(
+        pythonBin: config.activityPython,
+        activityHome: config.activityHome,
+        modelDir: config.activityModelDir,
+        serveArgs: ActivityPythonService.Config.serveArgs(modelDir: config.activityModelDir),
+        requestTimeoutSeconds: config.activityTimeoutSeconds,
+        maxRequestBytes: 64 * 1024 * 1024,
+        maxResponseLineBytes: 16 * 1024 * 1024,
+        restartCap: 8,
+        restartCooldownSeconds: 30)),
+    leaseSeconds: config.activityLeaseSeconds)
 
 let laneQueue = DispatchQueue(label: "frwhoop.lanes", attributes: .concurrent)
 
@@ -389,10 +436,51 @@ if laneEnabled("verify") {
     }
 }
 
+if activityState.read().enabled {
+    laneQueue.async {
+        runLane(activityState, cycle: {
+            let before = activity.stats.completed + activity.stats.superseded
+            activity.drain(budget: config.activityBudget)
+            activityState.update {
+                $0.counters = [
+                    "claimed": activity.stats.claimed,
+                    "completed": activity.stats.completed,
+                    "failed": activity.stats.failed,
+                    "superseded": activity.stats.superseded,
+                    "not_completed": activity.stats.notCompleted,
+                    "failures_persisted": activity.stats.failuresPersisted,
+                    "failures_unsettled": activity.stats.failuresUnsettled,
+                    "model_unavailable": activity.stats.modelUnavailable,
+                    "windows_inferred": activity.stats.windowsInferred,
+                ]
+                $0.lastError = activity.stats.lastError
+                $0.lastErrorKind = activity.stats.lastErrorKind
+                $0.lastActivityAt = activity.stats.lastActivityAt
+            }
+            return (activity.stats.completed + activity.stats.superseded) > before
+        }, ensureConnected: { try dbActivity.ensureConnected() })
+    }
+}
+
 // MARK: - Heartbeat
 
-/// The age and depth of every claimable queue. Aggregate only: no user data.
-let queueAgeSQL = """
+/// Compose the heartbeat queue-age query. Aggregate only: no user data.
+///
+/// The activity entry is a STATIC reference to `public.activity_context_jobs`,
+/// which fails the WHOLE query at parse time when the table does not exist
+/// yet (deploy order: worker first, migration later) — a `to_regclass` guard
+/// in a WHERE clause cannot help because Postgres resolves relation names
+/// during analysis. The caller probes `to_regclass` and includes the entry
+/// only when the table is present, so the heartbeat stays green pre/post
+/// migration (audit P3-1).
+///
+/// The SQL fragments are LOCAL constants inside this function, never module
+/// globals: globals in an executable target's main.swift are initialized by
+/// that target's `main`, so a test bundle that never runs `main` reads
+/// uninitialized storage (crash/garbage). Keeping the composition pure makes
+/// the pre/post-migration behavior directly unit-testable.
+func queueAgeQuery(includeActivity: Bool) -> String {
+    let base = """
 with q as (
   select 'scoring_legacy' as lane, count(*) as n, min(w.next_attempt_at) as oldest
     from public.scoring_work_items w
@@ -436,12 +524,27 @@ with q as (
     from public.noop_object_verification_debt v
    where v.state in ('pending','retry','leased') and v.next_attempt_at <= now()
      and (v.state <> 'leased' or v.lease_until <= now())
+"""
+    let activity = """
+  union all
+  -- Activity jobs: same eligibility gates the claim applies (not
+  -- dead-lettered, not_before reached, lease expired, completed < input
+  -- revision).
+  select 'activity', count(*), min(j.not_before)
+    from public.activity_context_jobs j
+   where j.completed_revision < j.input_revision and not j.dead_letter
+     and j.not_before <= now() and (j.lease_until is null or j.lease_until <= now())
+"""
+    let closing = """
 )
 select lane, n::text as n,
        case when oldest is null then ''
             else greatest(0, extract(epoch from (now() - oldest))::bigint)::text end as age_seconds
   from q
 """
+    return base + (includeActivity ? activity : "") + closing
+}
+
 
 struct QueueAge {
     var counts: [String: Int] = [:]
@@ -450,7 +553,14 @@ struct QueueAge {
 }
 
 func queueAge() throws -> QueueAge {
-    let rows = try dbHeartbeat.query(queueAgeSQL, [])
+    // Pre-migration (deploy order: worker first, migration later) the
+    // activity tables do not exist; a static reference to them would fail the
+    // whole heartbeat query at parse time. Probe to_regclass and append the
+    // activity entry only when the table is present (audit P3-1).
+    let activityTablePresent = (try? dbHeartbeat.query(
+        "select to_regclass('public.activity_context_jobs') is not null as present", []))?
+        .first?["present"] == "t"
+    let rows = try dbHeartbeat.query(queueAgeQuery(includeActivity: activityTablePresent), [])
     var out = QueueAge()
     for row in rows {
         let lane = row["lane"] ?? ""
@@ -478,7 +588,8 @@ var lastHeartbeat = Date.distantPast
 var heartbeatFailures = 0
 
 func heartbeat(final: Bool = false) {
-    let lanes = [projectionState.read(), scoringState.read(), archiveState.read(), verifyState.read()]
+    let lanes = [projectionState.read(), scoringState.read(), archiveState.read(),
+                 verifyState.read(), activityState.read()]
     var dbError: String?
     var queue: QueueAge?
     do {
@@ -522,6 +633,7 @@ func heartbeat(final: Bool = false) {
             "archive": config.archiveBudget,
             "verify": config.verifyBudget,
             "reconcile": config.reconcileBudget,
+            "activity": config.activityBudget,
         ],
         "db": dbHeartbeat.connectionFacts(),
         "shutdown_requested": shutdown.isSet,

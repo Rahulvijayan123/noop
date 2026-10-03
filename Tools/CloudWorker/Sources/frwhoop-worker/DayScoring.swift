@@ -232,6 +232,14 @@ struct DayScorer {
         }
     }
 
+    /// The 15-min slot starts that actually have a PUBLISHED HRV point, from
+    /// the `hrvSlots` points `[slotStartUnix, rmssdMs, cleanBeats]` (audit
+    /// P3-2: the attach path must emit `contexts.hrv_slots` only where an HRV
+    /// result exists — never every activity-covered slot).
+    static func hrvSlotStarts(fromPoints points: [[Any]]) -> Set<Int> {
+        Set(points.compactMap { $0.first as? Int })
+    }
+
     // MARK: - Score one claimed day
 
     /// Score one claimed day: load inputs, compute, and return both the
@@ -385,6 +393,17 @@ struct DayScorer {
             snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots] as [String: Any]
         }
         snapshotDaily.merge(Self.spo2EstimateKeys(sessions: result.sleepSessions, readings: spo2Estimates)) { _, new in new }
+        // Optional activity context (C10): attach the day's latest published
+        // activity epochs beside hrv_series. Missing/partial activity NEVER
+        // fails scoring: absent key == old behavior (spec §10 "Preserve old
+        // clients and snapshots with no activity_context field").
+        // hrv_slots are pinned to the slots that actually PUBLISHED an HRV
+        // point (audit P3-2) — never every epoch-covered slot.
+        Self.attachActivityContext(to: &snapshotDaily, db: db,
+                                   userId: claim.userId, deviceId: claim.deviceId,
+                                   day: claim.day,
+                                   dayStart: dayStart, dayEnd: dayEnd,
+                                   hrvSlotStarts: Self.hrvSlotStarts(fromPoints: slots))
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
@@ -533,6 +552,124 @@ struct DayScorer {
         if let v = result.strain { daily["strain"] = v }
         if let v = result.restScore { daily["restScore"] = v }
         return daily
+    }
+
+    /// Attach the C10 `activity_context` document to the snapshot `daily`
+    /// object by reading the day's latest published activity epochs
+    /// (`activity_context_epochs`) plus the day's sleep sessions
+    /// (`public.sessions` kind='sleep') and rebuilding the compact document
+    /// with the SHARED StrandAnalytics policy/join
+    /// (`ActivityLane.activityDocument`) — the same fold the app and the
+    /// activity lane use, so the scoring snapshot and the live lane never
+    /// diverge (docs/ARCHITECTURE.md §4).
+    ///
+    /// Fail-safe by contract: any read/build error leaves the key ABSENT and
+    /// only logs, so the scoring lane never depends on the activity lane
+    /// (missing/partial activity never fails scoring).
+    static func attachActivityContext(to daily: inout [String: Any],
+                                      db: PostgresClient,
+                                      userId: String, deviceId: String,
+                                      day: String,
+                                      dayStart: Int, dayEnd: Int,
+                                      hrvSlotStarts: Set<Int>? = nil) {
+        let rows: [[String: String]]
+        do {
+            rows = try db.query("""
+                with latest as (
+                  select result_revision from public.activity_context_epochs
+                   where user_id = $1::uuid and device_id = $2::uuid
+                     and start_ts >= $3::bigint and start_ts < $4::bigint
+                   order by result_revision desc
+                   limit 1
+                )
+                select start_ts::text, end_ts::text, motion_label, posture,
+                       exercise_session, sleep_state, exertion_context, wear_state,
+                       confidence::text, observed_s::text, valid_s::text,
+                       model_version, preprocessing_version, ontology_version,
+                       fingerprint, result_revision::text
+                from public.activity_context_epochs
+                where user_id = $1::uuid and device_id = $2::uuid
+                  and start_ts >= $3::bigint and start_ts < $4::bigint
+                  and result_revision = (select result_revision from latest)
+                order by start_ts
+                """, [userId, deviceId, String(dayStart), String(dayEnd)])
+        } catch {
+            FileHandle.standardError.write(
+                "day \(day): activity attach skipped (epoch read failed): \(error)\n".data(using: .utf8)!)
+            return
+        }
+        guard !rows.isEmpty else { return }  // absent key == old behavior
+
+        var epochs: [ActivityEpoch] = []
+        var modelVersion = ""
+        var preprocessingVersion = ""
+        var ontologyVersion = "v1"
+        var maxEnd = dayStart
+        for r in rows {
+            guard let s = Int(r["start_ts"] ?? ""), let e = Int(r["end_ts"] ?? "") else { continue }
+            if let mv = r["model_version"], !mv.isEmpty { modelVersion = mv }
+            if let pv = r["preprocessing_version"], !pv.isEmpty { preprocessingVersion = pv }
+            if let ov = r["ontology_version"], !ov.isEmpty { ontologyVersion = ov }
+            maxEnd = max(maxEnd, e)
+            epochs.append(ActivityEpoch(
+                startTs: s, endTs: e,
+                motion: MotionLabel(rawValue: r["motion_label"] ?? "") ?? .unknown,
+                posture: PostureLabel(rawValue: r["posture"] ?? "") ?? .unknown,
+                exercise: ExerciseState(rawValue: r["exercise_session"] ?? "") ?? .unknown,
+                sleepState: SleepStateLabel(rawValue: r["sleep_state"] ?? "") ?? .unknown,
+                exertion: ExertionContext(rawValue: r["exertion_context"] ?? "") ?? .unknown,
+                wear: WearState(rawValue: r["wear_state"] ?? "") ?? .unknown,
+                confidence: Double(r["confidence"] ?? "") ?? 0,
+                observedS: Int(r["observed_s"] ?? "") ?? 0,
+                validS: Int(r["valid_s"] ?? "") ?? 0))
+        }
+        guard !epochs.isEmpty else { return }
+
+        let inputRevision: Int64
+        do {
+            let jobRows = try db.query("""
+                select input_revision::text as rev from public.activity_context_jobs
+                 where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
+                 order by input_revision desc
+                 limit 1
+                """, [userId, deviceId, day])
+            inputRevision = Int64(jobRows.first?["rev"] ?? "") ?? 0
+        } catch {
+            inputRevision = 0
+        }
+
+        let asleep: [(start: Int, end: Int)]
+        do {
+            let sessionRows = try db.query("""
+                select extract(epoch from start_at)::bigint as s,
+                       extract(epoch from end_at)::bigint as e
+                from public.sessions
+                where user_id = $1::uuid and device_id = $2::uuid and kind = 'sleep'
+                  and start_at < $4::timestamptz and end_at > $3::timestamptz
+                """, [userId, deviceId, ActivityLane.isoUTC(dayStart),
+                      ActivityLane.isoUTC(dayEnd)])
+            asleep = sessionRows.compactMap { r in
+                guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? "") else { return nil }
+                return (start: s, end: e)
+            }
+        } catch {
+            asleep = []
+        }
+
+        guard let doc = try? ActivityLane.activityDocument(
+            epochs: epochs, sleepIntervals: asleep,
+            dayStart: dayStart, dayEnd: dayEnd,
+            inputRevision: inputRevision,
+            modelVersion: modelVersion,
+            preprocessingVersion: preprocessingVersion,
+            dataThrough: maxEnd,
+            hrvSlots: (hrvSlotStarts ?? []).sorted(),
+            ontologyVersion: ontologyVersion) else {
+            FileHandle.standardError.write(
+                "day \(day): activity attach skipped (document build failed)\n".data(using: .utf8)!)
+            return
+        }
+        daily["activity_context"] = doc
     }
 
     private func confidenceJSON(from result: AnalyticsEngine.DayResult) -> [String: Any] {

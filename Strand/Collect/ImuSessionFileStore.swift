@@ -3,22 +3,40 @@ import Foundation
 import WhoopProtocol
 
 /// Canonical decoded 100 Hz IMU storage: UTC half-hour files with appendable 30-second zlib blocks.
+///
+/// Durability contract (spec §6 / C8 Fix E): a record is only ever considered HANDLED after its
+/// block is flushed to disk. The in-RAM `pending` tail is bounded by an append cadence flush
+/// (~10 s), and `seen` (the dedupe set) is extended ONLY after a successful `flushKey` write —
+/// a failed write stays in `pending` and is retried on the next cadence, never marked seen.
 @MainActor
-final class ImuSessionFileStore {
-    struct Stats { let bytes: Int64; let coveredSeconds: Int; let firstTs: Int64? }
+public final class ImuSessionFileStore {
+    struct Stats { let bytes: Int64; let diskSeconds: Int; let pendingSeconds: Int; let firstTs: Int64?
+        var coveredSeconds: Int { diskSeconds + pendingSeconds } }
     struct ExportSegment { let name: String; let data: Data; let startTs, endTs: Int; let sampleCount: Int }
     private struct Window: Codable { let id, deviceId: String; let from: Int64; var to: Int64? }
     private struct Record { let ts, receivedAtMs: Int64; let columns: [Int16] }
-    static let shared = ImuSessionFileStore()
+    public static let shared = ImuSessionFileStore()
     static let sampleRate = 100, axes = 6, blockSeconds = 30
     static let segmentSeconds: Int64 = 30 * 60
     private static let payloadBytes = sampleRate * axes * 2
     private static let magic = Data("NOOPIMU2".utf8)
+    /// C8 Fix E: append-cadence flush so the in-RAM tail reaches disk at most this long after the
+    /// last frame, instead of only at 30-record block boundaries.
+    private static let flushCadenceMs: Int64 = 10_000
+    /// P2-4: bounded eviction cadence during continuous capture. `evictExpired` used to run only on
+    /// session start/register, so an always-active session never triggered retention and could grow
+    /// to the disk limit. During an active capture it now runs on this cadence (5 min, far below
+    /// the 30-day age floor) so the active session's expired segments are still reaped.
+    private static let evictionCadenceMs: Int64 = 5 * 60_000
     private let defaults = UserDefaults.standard
     private let key = "imu-session-windows-v1"
     private let directory: URL
+    /// Timestamps DURABLE on disk per segment file (seeded by a scan on first touch, extended only
+    /// after a successful block write). Records still in `pending` are deliberately NOT here.
     private var seen: [String: Set<Int64>] = [:]
     private var pending: [String: [Record]] = [:]
+    private var lastFlushCheckMs: Int64 = 0
+    private var lastEvictionCheckMs: Int64 = 0
 
     private init() {
         let fm = FileManager.default
@@ -29,6 +47,7 @@ final class ImuSessionFileStore {
     }
 
     func start(id: String, deviceId: String, fromMs: Int64) {
+        evictExpired()
         var value = windows().filter { $0.id != id }
         value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
         try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
@@ -38,6 +57,7 @@ final class ImuSessionFileStore {
         if let index = value.firstIndex(where: { $0.id == id }) { value[index].to = toMs / 1_000; save(value) }
     }
     func register(id: String, deviceId: String, fromMs: Int64, toMs: Int64) {
+        evictExpired()
         var value = windows().filter { $0.id != id }
         value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: toMs / 1_000)); save(value)
         try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
@@ -49,6 +69,15 @@ final class ImuSessionFileStore {
     }
     func prepareForRead(_ id: String) { flushSession(id) }
 
+    /// C8 Fix E: flush EVERY session's RAM-only pending tail to disk now. Idempotent and bounded —
+    /// the durable tail never grows past `flushCadenceMs` of live capture, so this is a safe
+    /// explicit flush for lifecycle points (background/termination; the app should call it from
+    /// its scene-phase handler so a killed process loses at most the last ~10 s).
+    func flushPending() {
+        let keys = pending.keys.map { $0 }   // snapshot: flushKey mutates `pending`
+        for key in keys { flushKey(key) }
+    }
+
     func deleteFiles(_ id: String, removeItem: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }) -> Bool {
         flushSession(id); let dir = sessionDirectory(id)
         guard FileManager.default.fileExists(atPath: dir.path) else { return true }
@@ -58,9 +87,17 @@ final class ImuSessionFileStore {
     func deleteDevice(_ deviceId: String) -> Bool {
         let owned = windows().filter { $0.deviceId == deviceId }.map(\.id)
         guard owned.allSatisfy({ deleteFiles($0) }) else { return false }
-        owned.forEach { remove(id: $0) }; return true
+        owned.forEach { remove(id: $0) }
+        // C8 Fix D: an unpaired/forgotten strap must not re-arm its capture intent on the next
+        // connect. The device's IMU files are already gone (device unpair deletes them); clear the
+        // durable 'want' marker that rides along with the device id.
+        RawDataSessionStore.clearPersistedCaptureIntentIfDevice(deviceId)
+        return true
     }
 
+    /// C8 Fix B: append one complete 1244-byte 5/MG IMU frame (or no-op for any other frame).
+    /// The store gates on `Whoop5RawImu`'s exact shape, so the transport packet type is NOT
+    /// trusted — decode is authoritative (mirrors Android `ImuSessionFileStore.append`).
     @discardableResult
     func append(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Int {
         guard let ts = Whoop5RawImu.baseTs(frame), let columns = Whoop5RawImu.rawColumns(frame) else { return 0 }
@@ -68,26 +105,41 @@ final class ImuSessionFileStore {
         for window in windows() where window.deviceId == deviceId && Int64(ts) >= window.from
             && (window.to == nil || Int64(ts) <= window.to!) {
             let bucket = Self.bucketStart(Int64(ts)), url = segmentFile(window.id, bucket)
-            var timestamps = seen[url.path] ?? scan(url)
-            guard timestamps.insert(Int64(ts)).inserted else { continue }
-            seen[url.path] = timestamps
             let pendingKey = "\(window.id)/\(bucket)"
+            // Dedupe is split: `seen` (durable on disk) and `pending` (buffered in RAM). A record
+            // is only moved into `seen` by a successful flush — so a frame that never reached disk
+            // is NOT marked handled (spec §6: "do not mark failed writes as seen permanently").
+            let onDisk = seen[url.path] ?? scan(url)
+            seen[url.path] = onDisk   // cache the scan; every ts here is durable
+            guard !onDisk.contains(Int64(ts)) else { continue }
+            guard pending[pendingKey]?.contains(where: { $0.ts == Int64(ts) }) != true else { continue }
             pending[pendingKey, default: []].append(Record(ts: Int64(ts), receivedAtMs: receivedAtMs, columns: columns))
             if pending[pendingKey]!.count >= Self.blockSeconds { flushKey(pendingKey) }
             count += 1
         }
+        flushIfDue(nowMs: receivedAtMs)
+        // P2-4: retention must run DURING continuous capture, not only at start/register — an
+        // always-active session otherwise never evicts and grows unbounded. Bounded cadence keeps
+        // it out of the hot append path.
+        evictIfDue(nowMs: receivedAtMs)
         return count
     }
 
     func stats(_ id: String, from: Int, to: Int) -> Stats {
-        let records = readRecords(id, from: from, to: to, includePending: true)
-        let disk = segmentFiles(id).reduce(Int64(0)) { value, url in
+        // Durability-honest split (C8 Fix E): `diskSeconds` counts only seconds whose records are
+        // actually on disk; `pendingSeconds` counts the RAM-only tail separately, so the UI can
+        // never report "ready" for data that only exists in memory.
+        let disk = readRecords(id, from: from, to: to, includePending: false)
+        let pendingRows = pending.filter { $0.key.hasPrefix("\(id)/") }.values.flatMap { $0 }
+            .filter { $0.ts >= from && $0.ts <= to }
+        let diskBytes = segmentFiles(id).reduce(Int64(0)) { value, url in
             value + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
         }
-        let queued = pending.filter { $0.key.hasPrefix("\(id)/") }.values.flatMap { $0 }
-            .reduce(Int64(0)) { $0 + Int64($1.columns.count * 2 + 20) }
-        return Stats(bytes: disk + queued, coveredSeconds: Set(records.map(\.ts)).count,
-                     firstTs: records.map(\.ts).min())
+        let pendingBytes = pendingRows.reduce(Int64(0)) { $0 + Int64($1.columns.count * 2 + 20) }
+        return Stats(bytes: diskBytes + pendingBytes,
+                     diskSeconds: Set(disk.map(\.ts)).count,
+                     pendingSeconds: Set(pendingRows.map(\.ts)).count,
+                     firstTs: (disk + pendingRows).map(\.ts).min())
     }
 
     func exportSegments(_ id: String, from: Int, to: Int) -> [ExportSegment] {
@@ -101,6 +153,100 @@ final class ImuSessionFileStore {
                 startTs: Int(first.ts), endTs: Int(last.ts), sampleCount: rows.count * Self.sampleRate)
         }
     }
+
+    /// C10 public read API (ios-upload consumes): ALL windows for a device, flushed + disk,
+    /// sorted ascending, deduped by ts. Conflicting duplicates (same ts, different columns) are
+    /// dropped BOTH — never silently one — and reported in `lastReadQuality` so upstream can
+    /// treat them as error-rejected rows. Flushes the device's pending tail first so the read
+    /// reflects durable state; a record whose flush is failing is simply absent this round and is
+    /// retried on the next read (the upload cursor must not advance past it).
+    public func readRecords(deviceId: String, fromTs: Int64, toTs: Int64) -> [ImuStoredRecord] {
+        lastReadQuality = []
+        let windows = windows().filter { $0.deviceId == deviceId }
+        for window in windows { flushSession(window.id) }
+        var rows: [Record] = []
+        for window in windows {
+            for url in segmentFiles(window.id) {
+                rows += decode((try? Data(contentsOf: url)) ?? Data())
+                    .filter { Int64($0.ts) >= fromTs && Int64($0.ts) <= toTs }
+            }
+        }
+        let grouped = Dictionary(grouping: rows) { $0.ts }
+        var notes: [ImuReadQualityNote] = []
+        var kept: [Record] = []
+        for (ts, group) in grouped {
+            let first = group[0]
+            if group.allSatisfy({ $0.columns == first.columns }) {
+                kept.append(first)
+            } else {
+                notes.append(ImuReadQualityNote(ts: ts,
+                    reason: "conflicting_duplicate: \(group.count) records share ts with different columns; all dropped"))
+            }
+        }
+        lastReadQuality = notes.sorted { $0.ts < $1.ts }
+        return kept.sorted { $0.ts < $1.ts }
+            .map { ImuStoredRecord(ts: $0.ts, receivedAtMs: $0.receivedAtMs, columns: $0.columns) }
+    }
+
+    /// P2-5: flush EVERY window's RAM-only pending tail for a device — the upload read seam calls
+    /// this before every page so `readRecords` sees durable data — then return the earliest second
+    /// that is STILL not durable: its flush failed and it remains buffered (nil means the whole
+    /// tail reached disk). A non-nil result is an upload-blocking condition: the object source must
+    /// never let its cursor advance at or past that second, or the record would be stranded below
+    /// the cursor forever (it has no durable bytes to re-read). Runs on the MainActor like every
+    /// other store API — callers on other threads hop (see ImuSessionFileStoreReader).
+    @discardableResult
+    public func flushPendingFor(deviceId: String) -> Int64? {
+        let windows = windows().filter { $0.deviceId == deviceId }
+        for window in windows { flushSession(window.id) }
+        let owned = Set(windows.map(\.id))
+        return pending.filter { key, _ in
+            guard let id = key.split(separator: "/").first else { return false }
+            return owned.contains(String(id))
+        }.values.flatMap { $0 }.map(\.ts).min()
+    }
+
+    /// C8 Fix G + P2-4: apply the bounded NOOPIMU2 retention policy (age + size cap, conservative
+    /// constants) plus the P2-4 active-session SEGMENT rule. Completed sessions are evicted whole;
+    /// an active (open-ended) session is never evicted whole, but its expired segments that are
+    /// fully before the active window ARE reaped (on the capture cadence) so continuous capture
+    /// cannot grow without bound. Returns the evicted session ids.
+    @discardableResult
+    func evictExpired(now: Int64 = Int64(Date().timeIntervalSince1970),
+                      policy: ImuRetentionPolicy = .default) -> [String] {
+        let all = windows()
+        let activeIds = Set(all.filter { $0.to == nil }.map(\.id))
+        var evicted: [String] = []
+        for window in all where !activeIds.contains(window.id) {
+            if case .evict = policy.decision(active: false, endTs: window.to, now: now) {
+                evicted.append(window.id)
+                deleteFiles(window.id)
+                remove(id: window.id)
+            }
+        }
+        // P2-4: continuous capture keeps ONE active session open-ended, so the whole-session rules
+        // above never touch it. Reap only segments that are fully expired AND fully before the
+        // active window (the bucket currently being written) — never the active window, never
+        // seconds newer than the retention floor.
+        for id in activeIds {
+            evictActiveSessionSegments(id, now: now, policy: policy)
+        }
+        let survivors = windows()
+        let totalBytes = survivors.reduce(Int64(0)) { $0 + sessionBytes($1.id) }
+        let completed = survivors.filter { !activeIds.contains($0.id) }
+            .map { (id: $0.id, endTs: $0.to, bytes: sessionBytes($0.id)) }
+        for id in policy.evictionsForSizeCap(totalBytes: totalBytes, completed: completed)
+            where !evicted.contains(id) {
+            evicted.append(id)
+            deleteFiles(id)
+            remove(id: id)
+        }
+        return evicted
+    }
+
+    /// Quality notes from the most recent `readRecords(deviceId:fromTs:toTs:)` call — every
+    /// conflicting-duplicate timestamp that was dropped. Cleared at the start of each read.
+    public private(set) var lastReadQuality: [ImuReadQualityNote] = []
 
     private func readRecords(_ id: String, from: Int, to: Int, includePending: Bool) -> [Record] {
         var rows = segmentFiles(id).flatMap { decode((try? Data(contentsOf: $0)) ?? Data()) }
@@ -146,6 +292,65 @@ final class ImuSessionFileStore {
         return result
     }
 
+    /// C8 Fix E: bounded flush cadence. Called from `append`; flushes the whole RAM tail at most
+    /// every `flushCadenceMs`, so a crash loses at most ~10 s of IMU instead of up to 29 s.
+    private func flushIfDue(nowMs: Int64) {
+        guard nowMs - lastFlushCheckMs >= Self.flushCadenceMs, !pending.isEmpty else { return }
+        lastFlushCheckMs = nowMs
+        let keys = pending.keys.map { $0 }   // snapshot: flushKey mutates `pending`
+        for key in keys { flushKey(key) }
+    }
+
+    /// P2-4: bounded eviction cadence, called from `append` beside the flush cadence so an
+    /// always-active session still runs retention. Cheap when there is nothing to reap (a few
+    /// 24-byte header reads); the 5-minute cadence keeps it out of the hot append path.
+    private func evictIfDue(nowMs: Int64) {
+        guard nowMs - lastEvictionCheckMs >= Self.evictionCadenceMs else { return }
+        lastEvictionCheckMs = nowMs
+        evictExpired()
+    }
+
+    /// P2-4: reap the ACTIVE session's expired segments (one active window can span weeks). A
+    /// segment is a 30-minute bucket file; it is deleted only when it is fully expired (older than
+    /// the retention floor) AND fully before the active window — the bucket currently being
+    /// written — and has no still-buffered rows (a failing flush keeps the bucket, so its retry
+    /// can land before any eviction). The live capture window and anything newer than the floor
+    /// always survive.
+    private func evictActiveSessionSegments(_ id: String, now: Int64, policy: ImuRetentionPolicy) {
+        let files = segmentFiles(id)
+        guard !files.isEmpty else { return }
+        // Active window = the newest bucket among durable files and the RAM pending tail (bucket
+        // headers are 24 bytes to read; pending ts need no decode). Frames arrive in ts order, so
+        // the newest ts is the bucket still being appended.
+        var newestBucket: Int64 = 0
+        for url in files {
+            if let bucket = Self.segmentBucket(url) { newestBucket = max(newestBucket, bucket) }
+        }
+        if let newestPendingTs = pending.filter({ $0.key.hasPrefix("\(id)/") }).values
+            .flatMap({ $0 }).map(\.ts).max() {
+            newestBucket = max(newestBucket, Self.bucketStart(newestPendingTs))
+        }
+        for url in files {
+            guard let bucket = Self.segmentBucket(url) else { continue }
+            // A bucket with still-buffered rows is not fully durable — keep it for the flush retry.
+            if pending["\(id)/\(bucket)"]?.isEmpty == false { continue }
+            // Nominal segment end (conservative: a partial file's real end is earlier).
+            let segmentEnd = bucket + Self.segmentSeconds - 1
+            guard case .evict = policy.activeSessionSegmentDecision(segmentEndTs: segmentEnd,
+                                                                    activeWindowStartTs: newestBucket,
+                                                                    now: now) else { continue }
+            deleteSegmentFile(url, sessionId: id)
+        }
+    }
+
+    /// Delete one 30-minute segment file of a session, dropping its durable-dedupe cache and any
+    /// still-buffered rows for that bucket (both belong to the same evicted data).
+    private func deleteSegmentFile(_ url: URL, sessionId: String) {
+        seen[url.path] = nil
+        if let bucket = Self.segmentBucket(url) { pending["\(sessionId)/\(bucket)"] = nil }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     private func flushSession(_ id: String) { pending.keys.filter { $0.hasPrefix("\(id)/") }.forEach(flushKey) }
     private func flushKey(_ key: String) {
         guard let records = pending.removeValue(forKey: key), !records.isEmpty,
@@ -155,8 +360,17 @@ final class ImuSessionFileStore {
         try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
         if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: header(bucket)) }
         guard let handle = try? FileHandle(forWritingTo: url) else { pending[key] = records; return }
-        do { try handle.seekToEnd(); try handle.write(contentsOf: block(records)); try handle.close() }
-        catch { try? handle.close(); pending[key] = records }
+        do {
+            try handle.seekToEnd(); try handle.write(contentsOf: block(records)); try handle.close()
+            // Durable now: only here do the records count as seen. A failed write above keeps them
+            // in `pending` and OUT of `seen`, so the next cadence retries them (never marked handled
+            // before durable — spec §6).
+            var onDisk = seen[url.path] ?? scan(url)
+            for record in records { onDisk.insert(record.ts) }
+            seen[url.path] = onDisk
+        } catch {
+            try? handle.close(); pending[key] = records
+        }
     }
     private func header(_ bucket: Int64) -> Data {
         var data = Self.magic; data.appendBigEndian(bucket); data.appendBigEndian(Int32(Self.sampleRate)); data.appendBigEndian(Int32(Self.axes)); return data
@@ -177,12 +391,46 @@ final class ImuSessionFileStore {
     private func sessionDirectory(_ id: String) -> URL { directory.appendingPathComponent(id, isDirectory: true) }
     private func segmentFile(_ id: String, _ bucket: Int64) -> URL { sessionDirectory(id).appendingPathComponent("imu-\(Self.utcName(bucket)).imus") }
     private func segmentFiles(_ id: String) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: sessionDirectory(id), includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "imus" }.sorted { $0.lastPathComponent < $1.lastPathComponent } }
+    /// The 30-minute bucket start a segment file belongs to, read from its 24-byte NOOPIMU2 header
+    /// (magic 8 + bucket 8 + rate 4 + axes 4) — a cheap constant-time probe for eviction.
+    private static func segmentBucket(_ url: URL) -> Int64? {
+        guard let handle = try? FileHandle(forReadingFrom: url),
+              let data = try? handle.read(upToCount: 16) else { return nil }
+        try? handle.close()
+        let bytes = [UInt8](data)
+        guard bytes.count >= 16 else { return nil }
+        return Int64(bigEndianBytes: bytes, at: 8)
+    }
+    private func sessionBytes(_ id: String) -> Int64 {
+        segmentFiles(id).reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+    }
     private func scan(_ url: URL) -> Set<Int64> { Set(decode((try? Data(contentsOf: url)) ?? Data()).map(\.ts)) }
     private static func bucketStart(_ ts: Int64) -> Int64 { ts >= 0 ? ts / segmentSeconds * segmentSeconds : ((ts - segmentSeconds + 1) / segmentSeconds) * segmentSeconds }
     private static func utcName(_ ts: Int64) -> String { let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(secondsFromGMT: 0); f.dateFormat = "yyyyMMdd'T'HHmmss'Z'"; return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts))) }
     private func int32(_ bytes: [UInt8], _ offset: Int) -> Int { Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16 | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3]) }
     private func deflate(_ input: Data) -> Data? { let capacity = input.count + 128; var output = Data(count: capacity); let written = output.withUnsafeMutableBytes { dst in input.withUnsafeBytes { src in compression_encode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, capacity, src.bindMemory(to: UInt8.self).baseAddress!, input.count, nil, COMPRESSION_ZLIB) } }; guard written > 0 else { return nil }; output.count = written; return output }
     private func inflate(_ input: Data, size: Int) -> Data? { var output = Data(count: size); let written = output.withUnsafeMutableBytes { dst in input.withUnsafeBytes { src in compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, size, src.bindMemory(to: UInt8.self).baseAddress!, input.count, nil, COMPRESSION_ZLIB) } }; return written == size ? output : nil }
+}
+
+/// C10 public read record: one raw-IMU second (600 i16 axis-major columns) as returned by
+/// `ImuSessionFileStore.readRecords(deviceId:fromTs:toTs:)`.
+public struct ImuStoredRecord: Equatable {
+    public let ts: Int64
+    public let receivedAtMs: Int64
+    public let columns: [Int16]
+    public init(ts: Int64, receivedAtMs: Int64, columns: [Int16]) {
+        self.ts = ts; self.receivedAtMs = receivedAtMs; self.columns = columns
+    }
+}
+
+/// C10 quality note for a `readRecords` call: a timestamp dropped because two records with the
+/// same ts carried different columns (both dropped — never silently one).
+public struct ImuReadQualityNote: Equatable {
+    public let ts: Int64
+    public let reason: String
+    public init(ts: Int64, reason: String) {
+        self.ts = ts; self.reason = reason
+    }
 }
 
 private extension Int64 { init(bigEndianBytes bytes: [UInt8], at offset: Int) { self = bytes[offset..<(offset + 8)].reduce(0) { ($0 << 8) | Int64($1) } } }

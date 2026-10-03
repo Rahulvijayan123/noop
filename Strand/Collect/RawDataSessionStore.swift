@@ -13,6 +13,12 @@ final class RawDataSessionStore: ObservableObject {
         var markerId: String?
         var markerType: String?
         var text: String?
+        // C8 Fix F: duration-bearing activity intervals (kind == "activityInterval"). `endAtMs` is
+        // the interval end (ms), `label` the activity label, `provenance` its source. Optional, so
+        // persisted instant markers and sessions decode unchanged.
+        var endAtMs: Int64?
+        var label: String?
+        var provenance: String?
     }
 
     struct Session: Codable, Identifiable, Equatable {
@@ -67,6 +73,10 @@ final class RawDataSessionStore: ObservableObject {
         sessions.insert(session, at: 0)
         persist(session)
         ImuSessionFileStore.shared.start(id: session.id, deviceId: deviceId, fromMs: millis)
+        // C8 Fix D: persist the capture WANT so a reconnect/restore re-arms the BLE transport even
+        // when this view is gone (previously the view's `.task`/`onChange` was the only re-arm).
+        // Cleared by `stop`, `removeMetadata` and device delete (see `clearPersistedCaptureIntentIfDevice`).
+        Self.persistedCaptureIntent = CaptureIntent(sessionId: session.id, deviceId: deviceId)
         return session
     }
 
@@ -79,6 +89,9 @@ final class RawDataSessionStore: ObservableObject {
             session.events.append(Event(atMs: millis, kind: "stop"))
         }
         if let activeId { ImuSessionFileStore.shared.complete(id: activeId, toMs: Int64(now.timeIntervalSince1970 * 1_000)) }
+        // C8 Fix D: the user ended the session — the durable want is gone, so the BLE layer must
+        // not re-arm it on the next connect.
+        Self.persistedCaptureIntent = nil
     }
 
     @discardableResult
@@ -130,6 +143,44 @@ final class RawDataSessionStore: ObservableObject {
         return added
     }
 
+    /// C8 Fix F: add a duration-bearing activity interval (kind == "activityInterval") beside the
+    /// instant markers. Labels are the ontology-v1 motion vocabulary; the interval is stored as a
+    /// LOCAL OVERLAY with provenance "user_confirmed" and never overwrites any predicted label
+    /// (predicted labels are produced server-side and are not written here).
+    @discardableResult
+    func addIntervalLabel(sessionId: String, from: Date, to: Date, label: String) -> Event? {
+        guard Self.intervalLabels.contains(label) else { return nil }
+        var added: Event?
+        mutate(sessionId) { session in
+            let fromMs = Self.clamp(Int64(from.timeIntervalSince1970 * 1_000), to: session)
+            let toMs = Self.clamp(Int64(to.timeIntervalSince1970 * 1_000), to: session)
+            guard fromMs < toMs else { return }
+            let interval = Event(atMs: fromMs, kind: "activityInterval", markerId: UUID().uuidString,
+                                 markerType: label, text: nil, endAtMs: toMs, label: label,
+                                 provenance: Self.intervalProvenance)
+            session.events.append(interval)
+            added = interval
+        }
+        return added
+    }
+
+    /// C8 Fix F: edit a user-confirmed interval's range/label. Provenance is preserved untouched —
+    /// a local overlay stays "user_confirmed" and is never mutated toward "predicted".
+    func updateIntervalLabel(sessionId: String, intervalId: String, from: Date, to: Date, label: String) {
+        guard Self.intervalLabels.contains(label) else { return }
+        mutate(sessionId) { session in
+            guard let index = session.events.firstIndex(where: {
+                $0.kind == "activityInterval" && $0.markerId == intervalId }) else { return }
+            let fromMs = Self.clamp(Int64(from.timeIntervalSince1970 * 1_000), to: session)
+            let toMs = Self.clamp(Int64(to.timeIntervalSince1970 * 1_000), to: session)
+            guard fromMs < toMs else { return }
+            session.events[index].atMs = fromMs
+            session.events[index].endAtMs = toMs
+            session.events[index].label = label
+            session.events[index].markerType = label
+        }
+    }
+
     func updateMarker(sessionId: String, markerId: String, at: Date, type: String, text: String) {
         guard Self.markerTypes.contains(type) else { return }
         mutate(sessionId) { session in
@@ -141,7 +192,8 @@ final class RawDataSessionStore: ObservableObject {
     }
 
     func deleteMarker(sessionId: String, markerId: String) {
-        mutate(sessionId) { $0.events.removeAll { $0.kind == "marker" && $0.markerId == markerId } }
+        // Any user record (instant marker or interval label) is removed by its id.
+        mutate(sessionId) { $0.events.removeAll { $0.markerId == markerId } }
     }
 
     func markExported(_ sessionId: String, now: Date = Date()) {
@@ -162,6 +214,9 @@ final class RawDataSessionStore: ObservableObject {
             if FileManager.default.fileExists(atPath: metadata.path) { try removeItem(metadata) }
         } catch { return false }
         sessions.removeAll { $0.id == sessionId }
+        // C8 Fix D: deleting the session also drops its capture want (defensive — `stop` already
+        // cleared it, but a session can be removed without a stop on some flows).
+        if Self.persistedCaptureIntent?.sessionId == sessionId { Self.persistedCaptureIntent = nil }
         return true
     }
 
@@ -190,8 +245,65 @@ final class RawDataSessionStore: ObservableObject {
 
     static let markerTypes = ["moment", "start", "end", "issue"]
 
+    /// C8 Fix F: ontology-v1 motion labels a user can confirm locally as duration-bearing
+    /// intervals (kind "activityInterval"), distinct from the instant marker types above.
+    static let intervalLabels = ["walking", "running", "sitting", "standing", "other_movement"]
+    /// Provenance stamped on every locally-added interval. Predicted labels are server-produced
+    /// and never written here, so a correction is always a "user_confirmed" local overlay.
+    static let intervalProvenance = "user_confirmed"
+
     private static func clamp(_ atMs: Int64, to session: Session) -> Int64 {
         min(max(atMs, session.startedAtMs), session.endedAtMs ?? Int64(Date().timeIntervalSince1970 * 1_000))
+    }
+
+    /// The persisted capture-intent payload (C8 Fix D): which session on which device wants
+    /// raw IMU, so the BLE layer can re-arm START_RAW_DATA + TOGGLE_IMU_MODE after a relaunch,
+    /// reconnect or state restoration without a live collector view.
+    struct CaptureIntent: Codable, Equatable, Sendable {
+        var sessionId: String
+        var deviceId: String
+    }
+
+    // MARK: - C8 Fix D: persisted capture intent
+
+    static let captureIntentKey = "raw-data-session-capture-intent-v1"
+
+    /// The durable "want raw IMU" marker, readable from the BLE layer without a live view.
+    /// `start` sets it; `stop`, `removeMetadata` and device delete clear it.
+    static var persistedCaptureIntent: CaptureIntent? {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: Self.captureIntentKey) else { return nil }
+            return try? JSONDecoder().decode(CaptureIntent.self, from: data)
+        }
+        set {
+            if let newValue {
+                UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: Self.captureIntentKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: Self.captureIntentKey)
+            }
+        }
+    }
+
+    /// True when the persisted intent still refers to an ACTIVE session on disk. The BLE re-arm
+    /// requires this, so a stale intent (session file removed out from under it) never re-opens
+    /// capture. Reads the real session directory (cheap: one small directory listing per connect).
+    static var persistedCaptureIntentIsActive: Bool {
+        guard let intent = persistedCaptureIntent else { return false }
+        return RawDataSessionStore().sessions.contains { $0.id == intent.sessionId && $0.active }
+    }
+
+    /// Clear the persisted intent when it belongs to a deleted/unpaired device (C8 Fix D: a
+    /// forgotten strap must not re-arm its capture on the next connect; its IMU files are already
+    /// deleted by the device wipe).
+    static func clearPersistedCaptureIntentIfDevice(_ deviceId: String) {
+        if persistedCaptureIntent?.deviceId == deviceId { persistedCaptureIntent = nil }
+    }
+
+    /// Clear the persisted intent unconditionally (explicit stop, or the sign-out hook — the app
+    /// should call this from `CloudPushIdentity.signOutCurrentOwner` so a signed-out install never
+    /// re-arms capture on the next connect).
+    static func clearPersistedCaptureIntent() {
+        persistedCaptureIntent = nil
     }
 
     func exportEntries(for session: Session, sensorAvailable: Bool = false) -> [FileExport.BundleEntry] {
@@ -210,6 +322,17 @@ final class RawDataSessionStore: ObservableObject {
                 ["id": marker.markerId ?? "", "at_ms": marker.atMs,
                  "type": marker.markerType ?? "moment", "text": marker.text ?? ""] as [String: Any]
             },
+            // C8 Fix F: duration-bearing activity intervals exported beside the markers, each with
+            // its provenance ("user_confirmed" for every local overlay today).
+            "activity_intervals": session.events.filter {
+                $0.kind == "activityInterval" && $0.atMs >= session.startedAtMs
+                    && $0.atMs <= (session.endedAtMs ?? session.startedAtMs)
+            }.map { interval in
+                ["id": interval.markerId ?? "", "start_ms": interval.atMs,
+                 "end_ms": interval.endAtMs ?? interval.atMs,
+                 "label": interval.label ?? "unknown",
+                 "provenance": interval.provenance ?? RawDataSessionStore.intervalProvenance] as [String: Any]
+            },
         ]
         if let value = session.capturedStartedAtMs { meta["captured_started_at_ms"] = value }
         if let value = session.capturedEndedAtMs { meta["captured_ended_at_ms"] = value }
@@ -217,7 +340,8 @@ final class RawDataSessionStore: ObservableObject {
         let endMs = session.endedAtMs ?? session.startedAtMs
         let publicEvents = [Event(atMs: session.startedAtMs, kind: "start")]
             + session.events.filter {
-                $0.kind == "marker" && $0.atMs >= session.startedAtMs && $0.atMs <= endMs
+                ($0.kind == "marker" || $0.kind == "activityInterval")
+                    && $0.atMs >= session.startedAtMs && $0.atMs <= endMs
             }.sorted { $0.atMs < $1.atMs }
             + [Event(atMs: endMs, kind: "stop")]
         let eventData = publicEvents.compactMap { event -> Data? in
@@ -226,6 +350,11 @@ final class RawDataSessionStore: ObservableObject {
                 if let value = event.markerId { row["marker_id"] = value }
                 if let value = event.markerType { row["marker_type"] = value }
                 if let value = event.text { row["text"] = value }
+            } else if event.kind == "activityInterval" {
+                if let value = event.markerId { row["interval_id"] = value }
+                if let value = event.label { row["label"] = value }
+                if let value = event.endAtMs { row["end_ms"] = value }
+                row["provenance"] = event.provenance ?? RawDataSessionStore.intervalProvenance
             }
             return try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys])
         }.reduce(into: Data()) { $0.append($1); $0.append(0x0A) }

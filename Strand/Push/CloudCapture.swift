@@ -404,6 +404,15 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private var _deviceId: String?
     private var skippedPreClock = 0
     private var appIsActive = true
+    /// Object-lane pieces for the rawImuSession binary table (CONTRACTS C1). Source, HTTP transport
+    /// and durable progress live for the whole enrollment; the coordinator is built per lane pass
+    /// once capabilities are known, and the lane loop runs on its own task at a bounded cadence.
+    private var _objectTransport: ImuObjectTransport?
+    private var _objectProgress: ImuPushProgressStore?
+    private var _objectSource: ImuObjectSource?
+    private var _objectLoopTask: Task<Void, Never>?
+    private var _objectCapabilities: PushCapabilities?
+    private var _objectCapabilitiesAt: Int = 0
 
     private init() {}
 
@@ -463,11 +472,24 @@ public final class CloudPushRuntime: @unchecked Sendable {
             self?.appIsActiveValue ?? true
         }
         CloudHeartRateLedger.shared.reset()
+        // Object lane (CONTRACTS C1): the rawImuSession binary table is uploaded through the
+        // NoopPush object lane, never the NDJSON journal. A failure to open the durable progress
+        // store disables only the object lane for this enrollment (rows stay local) — it must not
+        // block the typed capture path.
+        let objectProgress = try? ImuPushProgressStore(directory: directory)
+        let objectTransport = ImuObjectTransport(endpoint: endpoint,
+                                                 fleetToken: CloudPushSettings.fleetToken,
+                                                 identity: { CloudPushIdentityStore.current() })
+        let objectSource = ImuObjectSource(store: ImuSessionFileStoreReader(),
+                                           deviceId: { [weak self] in self?._deviceId })
         lock.lock()
         _journal = journal
         _coordinator = coordinator
         _session = session
         _deviceId = deviceId.lowercased()
+        _objectTransport = objectTransport
+        _objectProgress = objectProgress
+        _objectSource = objectProgress != nil ? objectSource : nil
         lock.unlock()
         Task {
             await journal.setCommitObserver { [weak coordinator] _ in coordinator?.kick() }
@@ -484,6 +506,10 @@ public final class CloudPushRuntime: @unchecked Sendable {
                 CloudJournal.disableStaging()
             }
             await coordinator.start()
+        }
+        if objectProgress != nil {
+            let loop = Task { await self.runObjectLaneLoop() }
+            lock.lock(); _objectLoopTask = loop; lock.unlock()
         }
     }
 
@@ -595,10 +621,105 @@ public final class CloudPushRuntime: @unchecked Sendable {
         _coordinator = nil
         _journal = nil
         _deviceId = nil
+        let objectLoop = _objectLoopTask
+        _objectLoopTask = nil
+        _objectTransport = nil
+        _objectProgress = nil
+        _objectSource = nil
+        _objectCapabilities = nil
+        _objectCapabilitiesAt = 0
         lock.unlock()
         CloudHeartRateLedger.shared.reset()
+        objectLoop?.cancel()
         await coordinator?.stop()
         await CloudJournal.shared.deactivate()
+    }
+
+    // MARK: - object lane (rawImuSession)
+
+    /// Lane cadence for the rawImuSession object lane. Deliberately NOT per frame: the loop wakes
+    /// every ~45 s, and a pass only does network work when a new object window exists.
+    enum ObjectLaneCadence {
+        static let sleepNanoseconds: UInt64 = 45_000_000_000
+        /// Bounded drain per pass so a backlog (e.g. after an offline day) catches up in bounded
+        /// steps instead of one unbounded run.
+        static let maxObjectsPerPass = 8
+        /// Capabilities are cheap but still a network call; renegotiate at most every 5 minutes.
+        static let capabilitiesRefreshSeconds = 300
+    }
+
+    /// Drive the object lane: negotiate once per refresh window, then deliver bounded object
+    /// windows for the active device. Offline/failure simply keeps rows local — the durable
+    /// cursor only advances on a verified receipt, and the source never deletes store data.
+    private func runObjectLaneLoop() async {
+        while !Task.isCancelled {
+            await runObjectLanePass()
+            do { try await Task.sleep(nanoseconds: ObjectLaneCadence.sleepNanoseconds) }
+            catch { return }
+        }
+    }
+
+    private func runObjectLanePass() async {
+        guard isRunning else { return }
+        lock.lock()
+        let transport = _objectTransport
+        let progress = _objectProgress
+        let source = _objectSource
+        let deviceId = _deviceId
+        lock.unlock()
+        guard let transport, let progress, let source, let deviceId,
+              let identity = CloudPushIdentityStore.current() else { return }
+
+        let caps = await negotiatedObjectCapabilities(transport: transport)
+        guard let caps, PushProtocol.isObjectVersion(caps.protocolVersion),
+              let lane = caps.objectLane, lane.streams.contains(.rawImuSession),
+              let receiptOwner = try? AccountScope(projectURL: CloudPushSettings.canonicalProjectURL,
+                                                   userID: identity.ownerId) else { return }
+
+        // The coordinator is the state machine; the transport is the HTTP layer. A fresh wake
+        // budget bounds one pass. `associateReceipt` is intentionally empty: the receipt is
+        // validated by the coordinator, and durability is the cursor + in-flight records in the
+        // progress store (advanced only after that validation).
+        let coordinator = PushCoordinator(
+            source: source,
+            transport: transport,
+            progress: progress,
+            sourceId: identity.sourceId,
+            destinationStillCurrent: { [weak self] in self?.isRunning ?? false },
+            receiptOwner: receiptOwner,
+            objectProtocolVersion: caps.protocolVersion,
+            associateReceipt: { _, _, _ in },
+            wakeBudget: PushWakeBudget(duration: 20)
+        )
+        var result = await coordinator.pushObjects(.rawImuSession, deviceId: deviceId, lane: lane)
+        var drained = 0
+        while case .accepted(_, _, let hasMore, _) = result, hasMore,
+              drained < ObjectLaneCadence.maxObjectsPerPass {
+            result = await coordinator.pushObjects(.rawImuSession, deviceId: deviceId, lane: lane)
+            drained += 1
+        }
+    }
+
+    /// Cached capability negotiation for the object lane: refreshed at most every
+    /// `capabilitiesRefreshSeconds`; a failed refresh keeps the last known advertisement so a
+    /// transient outage does not stop already-advertised uploads.
+    private func negotiatedObjectCapabilities(transport: ImuObjectTransport) async -> PushCapabilities? {
+        let now = Int(Date().timeIntervalSince1970)
+        lock.lock()
+        let cached = _objectCapabilities
+        let cachedAt = _objectCapabilitiesAt
+        lock.unlock()
+        if let cached, now - cachedAt < ObjectLaneCadence.capabilitiesRefreshSeconds { return cached }
+        do {
+            guard case .available(let caps) = try await transport.capabilities() else { return cached }
+            lock.lock()
+            _objectCapabilities = caps
+            _objectCapabilitiesAt = now
+            lock.unlock()
+            return caps
+        } catch {
+            return cached
+        }
     }
 
     // MARK: - capture path (non-blocking)

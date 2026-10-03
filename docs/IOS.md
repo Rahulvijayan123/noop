@@ -80,6 +80,17 @@ Two caption tests, `SkinTempAbsoluteDisplayTests` and `SleepCarriedStampTests`, 
 Pacific time because they render the previous day. The code they test has not changed since before
 the Nara work.
 
+## Raw-data collector: activity labels
+
+The Raw Data collector screen (WHOOP 5.0/MG) records the strap's 100 Hz six-axis IMU durably
+during a session and exports `.imus` segments. Beyond moment/start/end/issue markers it now
+takes interval labels (walking, running, sitting, standing, other movement) with a from/to
+range; they export in `meta.json` (`activity_intervals`) and `events.jsonl` with
+`user_confirmed` provenance. Sessions on unsupported device families now say so instead of
+recording nothing, and a capture session re-arms itself after a relaunch or reconnect while it
+is still active (and never while signed out or unpaired). Cloud sync packs recorded seconds
+into `rawImuSession` objects through the object lane once a session's seconds are durable.
+
 ## Debugging on the phone
 
 Copy the app's local database off the phone to inspect it with `sqlite3`:

@@ -53,6 +53,27 @@ artifact for rollback. `systemctl restart frwhoop-worker` only after tests pass.
 DB URL + `FRWHOOP_DB_SSLMODE=verify-full` + `FRWHOOP_DB_SSLROOTCERT=/etc/frwhoop/supabase-ca-chain.pem`,
 B2 key id + application key, ingest secret, worker name, source revision, lane budgets.
 
+### Activity context lane (optional, off by default)
+
+The activity lane needs a Python 3.10 venv and the trained artifacts on the host:
+
+```bash
+ssh root@HOST
+cd /opt/noop/Tools/ActivityContext
+uv venv /var/lib/frwhoop/activity-venv --python 3.10
+/var/lib/frwhoop/activity-venv/bin/python -m pip install -e .   # or the pinned requirements
+# artifacts: fetch pretrained checkpoint + copy trained model/scaler/manifest to a model dir
+# then enable in /etc/frwhoop/worker.env:
+#   FRWHOOP_ACTIVITY_ENABLED=1
+#   FRWHOOP_ACTIVITY_PYTHON=/var/lib/frwhoop/activity-venv/bin/python
+#   FRWHOOP_ACTIVITY_HOME=/opt/noop/Tools/ActivityContext
+#   FRWHOOP_ACTIVITY_MODEL_DIR=/var/lib/frwhoop/activity-model
+systemctl restart frwhoop-worker
+```
+
+Rollback is `FRWHOOP_ACTIVITY_ENABLED` off (or `activity` in `FRWHOOP_DISABLE_LANES`) and a
+restart; the migration is additive and needs no revert.
+
 ## Operate / verify
 
 ```bash

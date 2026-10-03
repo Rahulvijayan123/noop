@@ -82,6 +82,8 @@ The worker runs independent lanes, each on its own thread and database connectio
 | archive | `scoring_archive_jobs_v2` | Copies each published snapshot to private B2 storage. |
 | verify | object arrivals | Reconciles objects uploaded through the object lane that were never verified. |
 | projection | `noop_projection_debt` | Replays stored objects into the typed tables. Turned off in production; see [BACKEND.md](BACKEND.md). |
+| activity | `activity_context_jobs` | (Off by default; `FRWHOOP_ACTIVITY_ENABLED=1`.) Downloads verified `rawImuSession` objects, decodes the NPB1 IMU payloads, splits contiguous runs, classifies each 4-second window through a persistent local Python process (HART, `Tools/ActivityContext`), folds the day through the same `ActivityContextPolicy` the app links, and publishes 30-second activity epochs under a fenced lease. Publishing re-dirties the day's score, so the next scoring pass attaches `daily.activity_context` to the snapshot. |
+
 
 The worker also writes a heartbeat to `scoring_service_heartbeats` every 15 seconds.
 
@@ -120,6 +122,20 @@ drawn by a second model pass on the server, which fact-checks them against the f
 The same function stores the Settings profile (name, date of birth, sex, height, weight) in the owner's
 `profiles` row, the row server-side scoring reads. The phone uploads an edit shortly after it is made and
 loads the stored profile when the app opens, so the values survive a reinstall and a second device.
+
+## 7. Activity context
+
+Raw IMU (the strap's 100 Hz six-axis stream) rides the same path with one extra hop: a bounded raw
+capture session records the strap's one-second frames durably on the phone (`ImuSessionFileStore`),
+the phone packs them into `rawImuSession` objects through the NoopPush object lane (verified objects
+only), and the worker's activity lane (off by default) classifies each 4-second window and publishes
+30-second activity epochs (`activity_context_epochs`). Scoring then attaches an `activity_context`
+object to the day's snapshot `daily`, and the app shows an activity ribbon and a context line
+("Walking", "Low movement; posture unknown", "Recent activity") on the metric pages. Unknown is a
+first-class label: the classifier abstains below its confidence thresholds, posture stays unknown
+until a validated head exists, and quiet wrists never prove the strap is worn. The first automatic
+labels are shadow-only: they have not met the promotion gates on held-out data, so the lane runs
+disabled by default and no physiological value depends on it.
 
 ## What each score needs
 

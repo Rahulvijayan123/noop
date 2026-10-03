@@ -21,6 +21,21 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   `fd4b0001-…`, CRC16-Modbus header, CLIENT_HELLO, and the "puffin" packet types)
   that NOOP's `DeviceFamily` Whoop-5 path and `whoop5_protocol.json` are ported from.
 
+## Activity context (HART)
+- **`EdgeIntelligenceLab/HART`** (MIT) — the pretrained HART checkpoint
+  (`TSPulseForReconstruction`, 856,744 bytes) and the classification-adaptation
+  contract (`finetuning_HART/finetune.py` freeze policy and config overrides) that
+  `Tools/ActivityContext` loads. Pinned to commit
+  `122b4a8b07758deedfcf3b1e87f03eed5ad55967`; the checkpoint is fetched at
+  deploy/train time by `Tools/ActivityContext/fetch_artifacts.sh` (never committed),
+  with its SHA-256 pinned in the model manifest. The fine-tuned head and scaler are
+  trained artifacts on the host, also not committed.
+- **WISDM Smartphone and Smartwatch Activity and Biometrics Dataset** (UCI
+  archive.ics.uci.edu, dataset 507, DOI 10.24432/C5HK59; Weiss et al., CC BY 4.0) —
+  the watch accelerometer+gyroscope streams used to train the coarse-activity head.
+  Downloaded at train time (never committed or redistributed); only aggregate
+  held-out metrics are recorded (`Tools/ActivityContext/eval/RESULTS.md`).
+
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device
   SQLite layout (`DataBase/<user_id>/de/<user_id>.db`, JSON `value` columns, the `*_day`

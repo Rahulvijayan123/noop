@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import WhoopProtocol
+import StrandAnalytics
 import WhoopStore
 
 /// One day that the server says has changed, from the pull-based invalidation channel.
@@ -541,6 +542,16 @@ public struct HostedDayResult: Equatable {
     /// published one. Informational only: it is not what Charge or the baselines use.
     public let hrvSeries: [HrvSeriesPoint]
     public let hrvSlotSeconds: Int
+    /// The optional C10 `daily.activity_context` snapshot (server-computed 30-s activity grid).
+    /// Nil when the payload has no key, when the field is malformed, or when this app build has not
+    /// learned a newer schema yet — never fatal. The UI renders nothing when it is nil (feature off).
+    ///
+    /// Cache: this rides inside the `daily` object that `snapshot()` keeps verbatim in `rawJSON`
+    /// (ServerScoreRepository.swift:293-347), so `writeCache` persists it automatically — no new
+    /// cache field. A cached read re-wraps the same payload and re-parses through `snapshot()`,
+    /// so offline renders the exact timeline the network read produced for the same
+    /// owner + device + result revision.
+    public let activityContext: ActivityContextDocument?
 
     init?(day: String, object: [String: Any]) {
         guard let daily = object["daily"] as? [String: Any],
@@ -581,6 +592,7 @@ public struct HostedDayResult: Equatable {
                   let beats = Self.number(point[2]).flatMap({ Int(exactly: $0) }) else { return nil }
             return HrvSeriesPoint(startTs: start, rmssd: rmssd, cleanBeats: beats)
         }.sorted { $0.startTs < $1.startTs }
+        self.activityContext = Self.activityContext(from: daily)
         self.sleep = ((object["sleep"] as? [Any]) ?? []).compactMap { entry -> CachedSleepSession? in
             guard let night = entry as? [String: Any],
                   night["is_nap"] as? Bool != true,
@@ -613,6 +625,20 @@ public struct HostedDayResult: Equatable {
         if let date = formatter.date(from: text) { return Int(date.timeIntervalSince1970) }
         formatter.formatOptions.insert(.withFractionalSeconds)
         return formatter.date(from: text).map { Int($0.timeIntervalSince1970) }
+    }
+
+    /// Decode the optional C10 `daily.activity_context` object into the SHARED StrandAnalytics
+    /// schema (the same types the worker serializes with), so app and server can never drift.
+    ///
+    /// Deliberately non-fatal on every failure mode: a missing key, a non-object value, a future
+    /// schema bump, or a malformed field all return nil and leave the rest of the hosted result
+    /// intact. Old payloads without the key are unaffected (spec-14 §10 "Preserve old clients and
+    /// snapshots with no activity_context field").
+    static func activityContext(from daily: [String: Any]) -> ActivityContextDocument? {
+        guard let raw = daily["activity_context"] else { return nil }
+        guard JSONSerialization.isValidJSONObject(raw) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        return try? JSONDecoder().decode(ActivityContextDocument.self, from: data)
     }
 }
 

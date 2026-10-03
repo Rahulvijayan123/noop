@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "activity-context"
+version = "0.1.0"
+description = "Nara offline activity-context pipeline: WHOOP raw-IMU preprocessing, baseline classifier, HART adapter, serve/train/evaluate CLIs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "PolyForm Noncommercial 1.0.0 (see repo LICENSE); HART code MIT; WISDM data CC BY 4.0" }
+dependencies = [
+    "numpy==2.2.6",
+]
+
+[project.optional-dependencies]
+model = [
+    "torch==2.8.0",          # CPU wheel on macOS/linux default PyPI build; pinned per hart-repro report
+    "transformers==4.56.0",
+    "granite-tsfm==0.3.3",   # HART TSPulseForClassification adapter (imported lazily/optionally)
+    "safetensors==0.8.0",
+]
+dev = [
+    "pytest>=8.0,<10",
+]
+
+[project.scripts]
+activity-serve = "activity_context.serve:main"
+activity-infer = "activity_context.infer:main"
+activity-train = "activity_context.train:main"
+activity-evaluate = "activity_context.evaluate:main"
+activity-fetch = "activity_context.fetch_artifacts:main"
+
+[tool.setuptools.packages.find]
+include = ["activity_context*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
