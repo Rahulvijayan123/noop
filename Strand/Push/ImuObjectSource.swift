@@ -25,6 +25,12 @@ public protocol ImuObjectReading: Sendable {
     /// Reads ALL windows for the device whose records fall in `[fromTs, toTs]`, flushed + disk,
     /// sorted and deduped by ts (the C10 read contract).
     func readImuRecords(deviceId: String, fromTs: Int64, toTs: Int64) async throws -> [ImuSourceRecord]
+    /// P2-5: flush the device's RAM-only pending tail to disk, then return the earliest second
+    /// that is STILL not durable (its flush failed and it remains buffered), or nil when every
+    /// buffered record reached disk. The pager must never let the cursor advance at or past a
+    /// returned frontier — that second has no durable bytes to re-read, so it would be skipped
+    /// forever.
+    func flushPendingFor(deviceId: String) async throws -> Int64?
 }
 
 /// Production reader: the C10 read API on the shared file store. The store is `@MainActor`; the
@@ -39,6 +45,15 @@ public struct ImuSessionFileStoreReader: ImuObjectReading {
             ImuSessionFileStore.shared.readRecords(deviceId: deviceId, fromTs: fromTs, toTs: toTs)
         }
         return records.map { ImuSourceRecord(ts: $0.ts, receivedAtMs: $0.receivedAtMs, columns: $0.columns) }
+    }
+
+    /// P2-5: hop to the MainActor (the store is `@MainActor`; the lane runs on its own task — never
+    /// the BLE delegate thread) and surface the store's earliest still-buffered second so the
+    /// pager can fence the cursor below it.
+    public func flushPendingFor(deviceId: String) async throws -> Int64? {
+        await MainActor.run {
+            ImuSessionFileStore.shared.flushPendingFor(deviceId: deviceId)
+        }
     }
 }
 
@@ -139,8 +154,14 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     /// Legacy `binaryRows` fallback; the coordinator pages through `binaryPage` for object lanes.
     public func binaryRows(table: PushBinaryTable, deviceId: String, afterRowId: Int64, limit: Int) async throws -> [PushBinaryRow] {
         guard table == .rawImuSession else { return [] }
-        let records = try await store.readImuRecords(deviceId: deviceId, fromTs: afterRowId + 1,
-                                                     toTs: afterRowId + Self.hardWindowSeconds)
+        let fromTs = afterRowId + 1
+        // P2-5: same flush-before-read + frontier fence as binaryPage — a still-buffered second
+        // must never be skipped by the cursor.
+        let frontier = try await store.flushPendingFor(deviceId: deviceId)
+        let toTs = frontier.map { min(afterRowId + Self.hardWindowSeconds, $0 - 1) }
+            ?? afterRowId + Self.hardWindowSeconds
+        guard toTs >= fromTs else { return [] }
+        let records = try await store.readImuRecords(deviceId: deviceId, fromTs: fromTs, toTs: toTs)
         return records.prefix(limit).compactMap { record in
             let data = Self.columnsData(record.columns)
             guard data.count == PushBinaryCodec.imuRecordPayloadBytes else { return nil }
@@ -165,10 +186,22 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     private func nextWindow(deviceId: String, afterRowId: Int64,
                             limits: PushSourceReadLimits) async throws -> [ImuSourceRecord] {
         let fromTs = afterRowId + 1
+        // P2-5 flush-before-read: every page starts by flushing the device's RAM-only pending tail
+        // so `readRecords` sees durable data. The returned flush frontier is the earliest second
+        // whose flush FAILED (still buffered): the cursor must never advance at or past it, or
+        // that second would be stranded below the cursor forever. Probes are fenced below the
+        // frontier and the scan pauses once it blocks.
+        let flushFrontier = try await store.flushPendingFor(deviceId: deviceId)
         lock.lock()
+        if let flushFrontier, flushFrontier <= fromTs {
+            // The next second to read is not durable yet — pause this cycle. It is still buffered
+            // and will be retried on the next flush; advancing would strand it permanently.
+            lock.unlock()
+            return []
+        }
         var probeStart: Int64
-        if let frontier = scanFrontier, frontier >= fromTs {
-            probeStart = frontier
+        if let scan = scanFrontier, scan >= fromTs {
+            probeStart = scan
         } else if afterRowId == 0 {
             // First-ever page for this device: the store's data lives at real epoch seconds, far
             // above an empty cursor, so anchor the scan in a recent, bounded horizon instead of
@@ -177,12 +210,17 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         } else {
             probeStart = fromTs
         }
+        // Defensive: a stale gap marker at/behind the blocked second must not skip durable seconds
+        // below it — restart the scan at the cursor and let the fence below bound the probes.
+        if let flushFrontier, probeStart >= flushFrontier { probeStart = fromTs }
         lock.unlock()
 
         var probes = 0
         while probes < Self.maxProbesPerCall {
             guard limits.shouldContinue() else { throw PushSourceReadError.deferred }
-            let probeEnd = min(probeStart + Self.hardWindowSeconds, Int64.max)
+            var probeEnd = min(probeStart + Self.hardWindowSeconds, Int64.max)
+            // Never read (and thus never return) a second at or past the first non-durable second.
+            if let flushFrontier, flushFrontier > probeStart { probeEnd = min(probeEnd, flushFrontier) }
             let records = try await store.readImuRecords(deviceId: deviceId, fromTs: probeStart, toTs: probeEnd - 1)
             if let first = records.min(by: { $0.ts < $1.ts }) {
                 lock.lock(); scanFrontier = nil; lock.unlock()
@@ -195,9 +233,13 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
             }
             probeStart += Self.hardWindowSeconds
             probes += 1
+            if let flushFrontier, probeStart >= flushFrontier { break }   // a blocked second fences the scan
         }
         lock.lock()
-        if probeStart > fromTs { scanFrontier = probeStart }
+        // Remember the gap position only while it stays BELOW any blocked second — a frontier must
+        // fence future scans so the marker never points past data that is not durable yet.
+        let mayAdvance = flushFrontier.map { probeStart < $0 } ?? true
+        if probeStart > fromTs && mayAdvance { scanFrontier = probeStart }
         lock.unlock()
         return []
     }

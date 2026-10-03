@@ -357,12 +357,30 @@ struct RawDataCollectorView: View {
         let result = model.ble.startGroundTruthRawCapture(sessionId: session.id)
         guard result == .started else {
             captureError = Self.captureErrorMessage(result)
-            // `.unsupportedDeviceFamily` latched `rawCaptureInFlight` to let the legacy writes
-            // through — release it so the next start isn't blocked.
-            Task { await model.ble.stopGroundTruthRawCapture() }
+            // P3 stop-rollback: only stop the transport when WE latched it. `.alreadyInFlight`
+            // means ANOTHER capture owns the transport — calling stopGroundTruthRawCapture()
+            // here would send stopRawData/toggleIMUMode and kill that capture (including a
+            // re-armed capture belonging to a different session). Leave it running; the honest
+            // conflict message above is the whole rollback story.
+            if Self.shouldStopInFlightTransport(on: result) {
+                // `.unsupportedDeviceFamily` latched `rawCaptureInFlight` to let the legacy writes
+                // through — release it so the next start isn't blocked.
+                Task { await model.ble.stopGroundTruthRawCapture() }
+            }
             store.stop()
             store.removeMetadata(session.id)
             return
+        }
+    }
+
+    /// P3 stop-rollback: whether a failed start must release the BLE transport. Only a start that
+    /// WE latched (`unsupportedDeviceFamily`, `notConnected` — both no-ops or our own latch)
+    /// may stop it. `.alreadyInFlight` is owned by another capture and must be left untouched.
+    static func shouldStopInFlightTransport(on result: BLEManager.GroundTruthCaptureStart) -> Bool {
+        switch result {
+        case .alreadyInFlight: return false
+        case .unsupportedDeviceFamily, .notConnected: return true
+        case .started: return false
         }
     }
 
@@ -484,7 +502,7 @@ struct RawDataCollectorView: View {
 
     /// C8 Fix C: user-facing reason a raw-data session could not start. Every failure path rolls
     /// the session back, so a WHOOP 4.0 (1917-byte REALTIME_RAW_DATA) can never appear to record.
-    private static func captureErrorMessage(_ result: BLEManager.GroundTruthCaptureStart) -> String {
+    static func captureErrorMessage(_ result: BLEManager.GroundTruthCaptureStart) -> String {
         switch result {
         case .unsupportedDeviceFamily:
             return "This WHOOP family doesn't provide the 100 Hz raw IMU stream this collector records (WHOOP 4.0's REALTIME_RAW_DATA is the 1917-byte variant, which the IMU store can't accept). No raw IMU was recorded and the session was rolled back — use a WHOOP 5/MG for raw capture."

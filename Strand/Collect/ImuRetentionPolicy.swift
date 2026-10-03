@@ -10,7 +10,9 @@ import Foundation
 ///  2. Size: when the total NOOPIMU2 footprint exceeds `maxTotalBytes`, the OLDEST completed
 ///     sessions are evicted (oldest-first by last recorded second) until the footprint is back
 ///     under the cap.
-/// Active (open-ended) sessions are NEVER evicted — their window is still being written.
+/// An active (open-ended) session is never evicted WHOLE, but on the P2-4 capture cadence its
+/// expired SEGMENTS (30-minute buckets) that are fully before the active window are reaped via
+/// `activeSessionSegmentDecision` — so continuous capture still cannot grow without bound.
 ///
 /// "Fully-uploaded" is not tracked here yet: upload-ack state lands with the ios-upload source
 /// (PushSnapshotSource.acknowledgeBinary), and once it exists the age trigger can be tightened to
@@ -57,5 +59,23 @@ struct ImuRetentionPolicy: Equatable {
             remaining -= candidate.bytes
         }
         return evicted
+    }
+
+    /// P2-4: active-session SEGMENT rule. Continuous capture keeps one open-ended session for
+    /// weeks, so whole-session age/size rules never touch it; eviction must work at the
+    /// 30-minute segment (bucket) granularity. A segment is protected when ANY of its seconds is
+    /// inside the active window (the bucket currently being written) or newer than the retention
+    /// floor; it may be evicted only when it is BOTH fully expired AND fully before the active
+    /// window. `segmentEndTs` is the segment's NOMINAL end second (bucketStart + segmentSeconds - 1)
+    /// — conservative, since a partial file's real end is earlier. "Fully uploaded" is still not
+    /// tracked here, so the age floor stays the conservative 30-day grace for un-uploaded data.
+    func activeSessionSegmentDecision(segmentEndTs: Int64, activeWindowStartTs: Int64, now: Int64) -> Decision {
+        guard now - segmentEndTs > Int64(maxAgeDays) * 86_400 else {
+            return .keep   // touches seconds newer than the retention floor
+        }
+        guard segmentEndTs < activeWindowStartTs else {
+            return .keep   // touches the active window (the bucket being written)
+        }
+        return .evict(reason: "expired (\(now - segmentEndTs)s ago) and fully before the active window (start \(activeWindowStartTs))")
     }
 }

@@ -114,6 +114,48 @@ final class ImuObjectLaneTests: XCTestCase {
         XCTAssertFalse(page.hasMore)
     }
 
+    // MARK: - P2-5 flush-before-read / cursor never skips un-flushed seconds
+
+    func testPendingTailFlushedBeforePageAndNeverSkippedByCursor() async throws {
+        // P2-5: a second still buffered in the store's RAM pending tail (its flush failed) is NOT
+        // durable. The source must not page at or past it, so the coordinator's cursor only ever
+        // advances over durable seconds; once the flush succeeds the buffered second uploads.
+        let store = FakeImuStore(records: records(ts: 1_000...1_299), pendingFrontier: 1_100)
+        let source = makeSource(store: store, now: 50_000)
+
+        // First page: only seconds BELOW the buffered second may be sent (cursor stops at 1_099).
+        let page = try await source.binaryPage(table: .rawImuSession, deviceId: "dev", afterRowId: 999,
+                                               limit: 5_001, limits: sourceLimits())
+        XCTAssertEqual(page.rows.count, 100)
+        guard case .rawImuSession(let last) = try XCTUnwrap(page.rows.last) else { return XCTFail("row kind") }
+        XCTAssertEqual(last.ts, 1_099, "cursor must not advance at or past the buffered second")
+
+        // The next page is fenced by the still-buffered second: nothing may be sent past it.
+        let blocked = try await source.binaryPage(table: .rawImuSession, deviceId: "dev", afterRowId: 1_099,
+                                                  limit: 5_001, limits: sourceLimits())
+        XCTAssertTrue(blocked.rows.isEmpty)
+
+        // The flush succeeds: the previously-buffered second is now durable and gets uploaded.
+        store.pendingFrontier = nil
+        let flushed = try await source.binaryPage(table: .rawImuSession, deviceId: "dev", afterRowId: 1_099,
+                                                  limit: 5_001, limits: sourceLimits())
+        XCTAssertEqual(flushed.rows.count, 200)
+        guard case .rawImuSession(let first) = try XCTUnwrap(flushed.rows.first) else { return XCTFail("row kind") }
+        XCTAssertEqual(first.ts, 1_100, "the previously-buffered second uploads after its flush")
+    }
+
+    func testDistantBufferedSecondDoesNotFenceOlderDurableData() async throws {
+        // P2-5: the flush frontier only fences reads AT the buffered second. A far-future buffered
+        // second (the normal recent-tail case) must not block older durable data from uploading.
+        let store = FakeImuStore(records: records(ts: 1_000...1_299), pendingFrontier: 1_758_000_000)
+        let source = makeSource(store: store, now: 50_000)
+        let page = try await source.binaryPage(table: .rawImuSession, deviceId: "dev", afterRowId: 999,
+                                               limit: 5_001, limits: sourceLimits())
+        XCTAssertEqual(page.rows.count, 300)
+        guard case .rawImuSession(let last) = try XCTUnwrap(page.rows.last) else { return XCTFail("row kind") }
+        XCTAssertEqual(last.ts, 1_299)
+    }
+
     // MARK: - cursor / fingerprint
 
     func testBinaryFingerprintMatchesRawImuSessionIdentity() async throws {
@@ -377,11 +419,23 @@ final class ImuObjectLaneTests: XCTestCase {
 
 // MARK: - Fakes
 
-private struct FakeImuStore: ImuObjectReading {
+private final class FakeImuStore: ImuObjectReading, @unchecked Sendable {
     var records: [ImuSourceRecord]
-    func readImuRecords(deviceId: String, fromTs: Int64, toTs: Int64) async throws -> [ImuSourceRecord] {
-        records.filter { $0.ts >= fromTs && $0.ts <= toTs }
+    /// First non-durable (still-buffered) second, simulating a failed flush in the real store's
+    /// RAM pending tail. `flushPendingFor` returns it and `readImuRecords` never yields it
+    /// (mirrors the real store: buffered rows are not on disk until their flush succeeds).
+    var pendingFrontier: Int64?
+
+    init(records: [ImuSourceRecord], pendingFrontier: Int64? = nil) {
+        self.records = records
+        self.pendingFrontier = pendingFrontier
     }
+
+    func readImuRecords(deviceId: String, fromTs: Int64, toTs: Int64) async throws -> [ImuSourceRecord] {
+        records.filter { $0.ts >= fromTs && $0.ts <= toTs && (pendingFrontier == nil || $0.ts < pendingFrontier!) }
+    }
+
+    func flushPendingFor(deviceId: String) async throws -> Int64? { pendingFrontier }
 }
 
 /// URLProtocol stub that records every request (including its body) and returns a canned

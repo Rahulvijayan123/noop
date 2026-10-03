@@ -188,8 +188,14 @@ def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
         # configured for HART but not loadable -> model_missing (never silently baseline)
         raise _ModelMissing(ctx.model_error or "HART model unavailable")
 
-    head = _bounded_b64_list(run.get("head_b64"), "head_b64", MAX_HEAD_SECONDS)
-    tail = _bounded_b64_list(run.get("tail_b64"), "tail_b64", MAX_TAIL_SECONDS)
+    # Boundary filter state may ride inside `run` (this service's native shape) or at the
+    # request's top level (the C10 contract's original wording). Both are accepted; the
+    # inside-run shape wins when both are present. Only contiguous boundary seconds are
+    # ever meaningful — a gap between the boundary and the run body is checked downstream.
+    head = _bounded_b64_list(run.get("head_b64") if run.get("head_b64") is not None
+                             else req.get("head_b64"), "head_b64", MAX_HEAD_SECONDS)
+    tail = _bounded_b64_list(run.get("tail_b64") if run.get("tail_b64") is not None
+                             else req.get("tail_b64"), "tail_b64", MAX_TAIL_SECONDS)
 
     t0 = time.monotonic()
     windows = classify_windows(ctx, start_ts, end_ts, body, head, tail)

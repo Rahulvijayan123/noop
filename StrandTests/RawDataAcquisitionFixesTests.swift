@@ -312,4 +312,102 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
         XCTAssertEqual(store.lastReadQuality[0].ts, 1_758_000_000)
         XCTAssertTrue(store.lastReadQuality[0].reason.contains("conflicting_duplicate"))
     }
+
+    // MARK: - P2-5: flush-before-read seam (upload cursor must never skip un-flushed seconds)
+
+    func testFlushPendingForFlushesDeviceTailAndReportsNoneBlocked() throws {
+        let store = ImuSessionFileStore.shared
+        let sessionId = "flushfor-\(UUID().uuidString)"
+        let deviceId = "flushfor-dev-\(UUID().uuidString)"
+        defer { _ = store.deleteFiles(sessionId); store.remove(id: sessionId) }
+        store.start(id: sessionId, deviceId: deviceId, fromMs: 1_758_000_000_000)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: 1_758_000_000),
+                                    receivedAtMs: 1_000), 1)
+        // The frame is below the 30-record block boundary, so it sits in the RAM pending tail.
+        // flushPendingFor flushes it, reports nil (nothing blocked), and readRecords now sees it
+        // as durable — the upload seam can page it safely.
+        XCTAssertNil(store.flushPendingFor(deviceId: deviceId))
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000,
+                                         toTs: 1_758_000_000).count, 1)
+        // A device with no windows is a no-op that reports nil.
+        XCTAssertNil(store.flushPendingFor(deviceId: "flushfor-missing-\(UUID().uuidString)"))
+    }
+
+    // MARK: - P2-4: retention during continuous capture
+
+    func testRetentionPolicyActiveSessionSegmentRule() {
+        let policy = ImuRetentionPolicy(maxAgeDays: 30, maxTotalBytes: 1_073_741_824)
+        let now: Int64 = 1_800_000_000
+        let day = Int64(86_400)
+        // A segment whose nominal end is newer than the retention floor is never evicted.
+        XCTAssertEqual(policy.activeSessionSegmentDecision(segmentEndTs: now - day,
+                                                           activeWindowStartTs: now, now: now), .keep)
+        // A segment that touches the active window (the bucket being written) is never evicted,
+        // even when it is older than the floor (a long-stalled capture keeps its last bucket).
+        XCTAssertEqual(policy.activeSessionSegmentDecision(segmentEndTs: now - 40 * day,
+                                                           activeWindowStartTs: now - 40 * day, now: now), .keep)
+        // Only fully-expired AND fully-before-the-active-window segments may be evicted.
+        if case .evict(let reason) = policy.activeSessionSegmentDecision(segmentEndTs: now - 31 * day,
+                                                                         activeWindowStartTs: now - 30 * day,
+                                                                         now: now) {
+            XCTAssertTrue(reason.contains("active window"))
+        } else { XCTFail("expired segment fully before the active window should be evicted") }
+    }
+
+    func testEvictExpiredReapsExpiredSegmentsOfActiveSessionOnly() throws {
+        let store = ImuSessionFileStore.shared
+        let sessionId = "evict-active-seg-\(UUID().uuidString)"
+        let deviceId = "evict-active-seg-dev-\(UUID().uuidString)"
+        let now: Int64 = 1_800_000_000
+        let day = Int64(86_400)
+        defer { _ = store.deleteFiles(sessionId); store.remove(id: sessionId) }
+        // A continuous-capture session that started more than a month ago and is STILL active.
+        store.start(id: sessionId, deviceId: deviceId, fromMs: (now - 35 * day) * 1_000)
+        // One expired second (31 days ago), one a day old, and one right now — all in the SAME
+        // active window, all appended below the 30-record block boundary (RAM tail).
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now - 31 * day)),
+                                    receivedAtMs: 1_000), 1)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now - day)),
+                                    receivedAtMs: 2_000), 1)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now)),
+                                    receivedAtMs: 3_000), 1)
+        // Real capture flushes the tail within ~10 s; make the frames durable before eviction.
+        XCTAssertNil(store.flushPendingFor(deviceId: deviceId))
+
+        _ = store.evictExpired(now: now, policy: ImuRetentionPolicy(maxAgeDays: 30, maxTotalBytes: 1_073_741_824))
+
+        // The expired segment (31 days old, fully before the active window) is gone; the seconds
+        // newer than the retention floor / inside the active window survive untouched.
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: now - 31 * day,
+                                        toTs: now - 31 * day).isEmpty, "expired segment evicted")
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now - day, toTs: now - day).count, 1)
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now, toTs: now).count, 1)
+    }
+
+    // MARK: - P3: stop-rollback on .alreadyInFlight must not kill the other capture
+
+    func testAlreadyInFlightRollbackDoesNotStopTheTransport() throws {
+        // The transport is only stopped when THIS start latched it. `.alreadyInFlight` means
+        // another capture owns the transport — stopping it would kill that capture.
+        XCTAssertFalse(RawDataCollectorView.shouldStopInFlightTransport(on: .alreadyInFlight))
+        XCTAssertTrue(RawDataCollectorView.shouldStopInFlightTransport(on: .unsupportedDeviceFamily))
+        XCTAssertTrue(RawDataCollectorView.shouldStopInFlightTransport(on: .notConnected))
+        XCTAssertFalse(RawDataCollectorView.shouldStopInFlightTransport(on: .started))
+        // The conflict is stated honestly, not hidden behind a generic failure.
+        XCTAssertTrue(RawDataCollectorView.captureErrorMessage(.alreadyInFlight)
+            .contains("Another raw-data capture is already running"))
+    }
+
+    func testAlreadyInFlightRollbackLeavesNoLocalSessionBehind() throws {
+        // The rollback performed on a failed start must remove every local trace of the
+        // just-created session: metadata file, IMU window, capture intent.
+        let store = RawDataSessionStore(directory: try temporaryDirectory())
+        let session = try XCTUnwrap(store.start(deviceId: "strap", now: Date(timeIntervalSince1970: 100)))
+        store.stop(now: Date(timeIntervalSince1970: 101))
+        XCTAssertTrue(store.removeMetadata(session.id))
+        XCTAssertTrue(store.sessions.isEmpty)
+        XCTAssertNil(RawDataSessionStore.persistedCaptureIntent)
+        XCTAssertTrue(ImuSessionFileStore.shared.readRecords(deviceId: "strap", fromTs: 0,
+                                                             toTs: 1_000_000).isEmpty)
+    }
 }

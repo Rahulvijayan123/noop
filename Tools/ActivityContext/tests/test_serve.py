@@ -156,3 +156,15 @@ def test_shutdown(proc):
     assert resp["ok"] is True
     proc.wait(timeout=10)
     assert proc.returncode == 0
+
+
+def test_infer_accepts_top_level_head_tail(proc):
+    """The C10 contract's original wording put head/tail at the request root; the
+    native shape is inside `run`. Both placements must work (the worker sends both)."""
+    run = dict(_golden_run())
+    head, tail = run.pop("head_b64"), run.pop("tail_b64")
+    resp = _roundtrip(proc, {"id": "tl1", "op": "infer", "run": run,
+                             "head_b64": head, "tail_b64": tail})
+    assert resp["ok"] is True
+    assert resp["windows"], "top-level head/tail must still classify windows"
+    assert resp["id"] == "tl1"

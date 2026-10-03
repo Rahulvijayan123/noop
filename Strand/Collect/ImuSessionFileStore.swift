@@ -23,6 +23,11 @@ public final class ImuSessionFileStore {
     /// C8 Fix E: append-cadence flush so the in-RAM tail reaches disk at most this long after the
     /// last frame, instead of only at 30-record block boundaries.
     private static let flushCadenceMs: Int64 = 10_000
+    /// P2-4: bounded eviction cadence during continuous capture. `evictExpired` used to run only on
+    /// session start/register, so an always-active session never triggered retention and could grow
+    /// to the disk limit. During an active capture it now runs on this cadence (5 min, far below
+    /// the 30-day age floor) so the active session's expired segments are still reaped.
+    private static let evictionCadenceMs: Int64 = 5 * 60_000
     private let defaults = UserDefaults.standard
     private let key = "imu-session-windows-v1"
     private let directory: URL
@@ -31,6 +36,7 @@ public final class ImuSessionFileStore {
     private var seen: [String: Set<Int64>] = [:]
     private var pending: [String: [Record]] = [:]
     private var lastFlushCheckMs: Int64 = 0
+    private var lastEvictionCheckMs: Int64 = 0
 
     private init() {
         let fm = FileManager.default
@@ -112,6 +118,10 @@ public final class ImuSessionFileStore {
             count += 1
         }
         flushIfDue(nowMs: receivedAtMs)
+        // P2-4: retention must run DURING continuous capture, not only at start/register — an
+        // always-active session otherwise never evicts and grows unbounded. Bounded cadence keeps
+        // it out of the hot append path.
+        evictIfDue(nowMs: receivedAtMs)
         return count
     }
 
@@ -178,8 +188,29 @@ public final class ImuSessionFileStore {
             .map { ImuStoredRecord(ts: $0.ts, receivedAtMs: $0.receivedAtMs, columns: $0.columns) }
     }
 
-    /// C8 Fix G: apply the bounded NOOPIMU2 retention policy (age + size cap, conservative
-    /// constants). NEVER evicts an active (open-ended) session. Returns the evicted session ids.
+    /// P2-5: flush EVERY window's RAM-only pending tail for a device — the upload read seam calls
+    /// this before every page so `readRecords` sees durable data — then return the earliest second
+    /// that is STILL not durable: its flush failed and it remains buffered (nil means the whole
+    /// tail reached disk). A non-nil result is an upload-blocking condition: the object source must
+    /// never let its cursor advance at or past that second, or the record would be stranded below
+    /// the cursor forever (it has no durable bytes to re-read). Runs on the MainActor like every
+    /// other store API — callers on other threads hop (see ImuSessionFileStoreReader).
+    @discardableResult
+    public func flushPendingFor(deviceId: String) -> Int64? {
+        let windows = windows().filter { $0.deviceId == deviceId }
+        for window in windows { flushSession(window.id) }
+        let owned = Set(windows.map(\.id))
+        return pending.filter { key, _ in
+            guard let id = key.split(separator: "/").first else { return false }
+            return owned.contains(String(id))
+        }.values.flatMap { $0 }.map(\.ts).min()
+    }
+
+    /// C8 Fix G + P2-4: apply the bounded NOOPIMU2 retention policy (age + size cap, conservative
+    /// constants) plus the P2-4 active-session SEGMENT rule. Completed sessions are evicted whole;
+    /// an active (open-ended) session is never evicted whole, but its expired segments that are
+    /// fully before the active window ARE reaped (on the capture cadence) so continuous capture
+    /// cannot grow without bound. Returns the evicted session ids.
     @discardableResult
     func evictExpired(now: Int64 = Int64(Date().timeIntervalSince1970),
                       policy: ImuRetentionPolicy = .default) -> [String] {
@@ -192,6 +223,13 @@ public final class ImuSessionFileStore {
                 deleteFiles(window.id)
                 remove(id: window.id)
             }
+        }
+        // P2-4: continuous capture keeps ONE active session open-ended, so the whole-session rules
+        // above never touch it. Reap only segments that are fully expired AND fully before the
+        // active window (the bucket currently being written) — never the active window, never
+        // seconds newer than the retention floor.
+        for id in activeIds {
+            evictActiveSessionSegments(id, now: now, policy: policy)
         }
         let survivors = windows()
         let totalBytes = survivors.reduce(Int64(0)) { $0 + sessionBytes($1.id) }
@@ -263,6 +301,56 @@ public final class ImuSessionFileStore {
         for key in keys { flushKey(key) }
     }
 
+    /// P2-4: bounded eviction cadence, called from `append` beside the flush cadence so an
+    /// always-active session still runs retention. Cheap when there is nothing to reap (a few
+    /// 24-byte header reads); the 5-minute cadence keeps it out of the hot append path.
+    private func evictIfDue(nowMs: Int64) {
+        guard nowMs - lastEvictionCheckMs >= Self.evictionCadenceMs else { return }
+        lastEvictionCheckMs = nowMs
+        evictExpired()
+    }
+
+    /// P2-4: reap the ACTIVE session's expired segments (one active window can span weeks). A
+    /// segment is a 30-minute bucket file; it is deleted only when it is fully expired (older than
+    /// the retention floor) AND fully before the active window — the bucket currently being
+    /// written — and has no still-buffered rows (a failing flush keeps the bucket, so its retry
+    /// can land before any eviction). The live capture window and anything newer than the floor
+    /// always survive.
+    private func evictActiveSessionSegments(_ id: String, now: Int64, policy: ImuRetentionPolicy) {
+        let files = segmentFiles(id)
+        guard !files.isEmpty else { return }
+        // Active window = the newest bucket among durable files and the RAM pending tail (bucket
+        // headers are 24 bytes to read; pending ts need no decode). Frames arrive in ts order, so
+        // the newest ts is the bucket still being appended.
+        var newestBucket: Int64 = 0
+        for url in files {
+            if let bucket = Self.segmentBucket(url) { newestBucket = max(newestBucket, bucket) }
+        }
+        if let newestPendingTs = pending.filter({ $0.key.hasPrefix("\(id)/") }).values
+            .flatMap({ $0 }).map(\.ts).max() {
+            newestBucket = max(newestBucket, Self.bucketStart(newestPendingTs))
+        }
+        for url in files {
+            guard let bucket = Self.segmentBucket(url) else { continue }
+            // A bucket with still-buffered rows is not fully durable — keep it for the flush retry.
+            if pending["\(id)/\(bucket)"]?.isEmpty == false { continue }
+            // Nominal segment end (conservative: a partial file's real end is earlier).
+            let segmentEnd = bucket + Self.segmentSeconds - 1
+            guard case .evict = policy.activeSessionSegmentDecision(segmentEndTs: segmentEnd,
+                                                                    activeWindowStartTs: newestBucket,
+                                                                    now: now) else { continue }
+            deleteSegmentFile(url, sessionId: id)
+        }
+    }
+
+    /// Delete one 30-minute segment file of a session, dropping its durable-dedupe cache and any
+    /// still-buffered rows for that bucket (both belong to the same evicted data).
+    private func deleteSegmentFile(_ url: URL, sessionId: String) {
+        seen[url.path] = nil
+        if let bucket = Self.segmentBucket(url) { pending["\(sessionId)/\(bucket)"] = nil }
+        try? FileManager.default.removeItem(at: url)
+    }
+
     private func flushSession(_ id: String) { pending.keys.filter { $0.hasPrefix("\(id)/") }.forEach(flushKey) }
     private func flushKey(_ key: String) {
         guard let records = pending.removeValue(forKey: key), !records.isEmpty,
@@ -303,6 +391,16 @@ public final class ImuSessionFileStore {
     private func sessionDirectory(_ id: String) -> URL { directory.appendingPathComponent(id, isDirectory: true) }
     private func segmentFile(_ id: String, _ bucket: Int64) -> URL { sessionDirectory(id).appendingPathComponent("imu-\(Self.utcName(bucket)).imus") }
     private func segmentFiles(_ id: String) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: sessionDirectory(id), includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "imus" }.sorted { $0.lastPathComponent < $1.lastPathComponent } }
+    /// The 30-minute bucket start a segment file belongs to, read from its 24-byte NOOPIMU2 header
+    /// (magic 8 + bucket 8 + rate 4 + axes 4) — a cheap constant-time probe for eviction.
+    private static func segmentBucket(_ url: URL) -> Int64? {
+        guard let handle = try? FileHandle(forReadingFrom: url),
+              let data = try? handle.read(upToCount: 16) else { return nil }
+        try? handle.close()
+        let bytes = [UInt8](data)
+        guard bytes.count >= 16 else { return nil }
+        return Int64(bigEndianBytes: bytes, at: 8)
+    }
     private func sessionBytes(_ id: String) -> Int64 {
         segmentFiles(id).reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     }
