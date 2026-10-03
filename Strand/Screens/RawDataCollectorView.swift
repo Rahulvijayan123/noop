@@ -509,7 +509,7 @@ struct RawDataCollectorView: View {
         case .alreadyInFlight:
             return "Another raw-data capture is already running, so this session was rolled back."
         case .notConnected:
-            return "The band isn't connected, so the capture could not start. The session was rolled back; it re-arms automatically on the next connection."
+            return "The band isn't connected, so the capture could not start and the session was rolled back. Reconnect the band, then start the session again."
         case .started:
             return ""
         }

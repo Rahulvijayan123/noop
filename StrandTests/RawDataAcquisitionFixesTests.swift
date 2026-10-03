@@ -398,6 +398,14 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
             .contains("Another raw-data capture is already running"))
     }
 
+    func testNotConnectedMessageDoesNotPromiseAnAutomaticRetry() throws {
+        // The failed start removes the session and its capture intent, so nothing re-arms on the
+        // next connection; the user has to start again.
+        let message = RawDataCollectorView.captureErrorMessage(.notConnected)
+        XCTAssertFalse(message.contains("re-arms"))
+        XCTAssertTrue(message.contains("start the session again"))
+    }
+
     func testAlreadyInFlightRollbackLeavesNoLocalSessionBehind() throws {
         // The rollback performed on a failed start must remove every local trace of the
         // just-created session: metadata file, IMU window, capture intent.

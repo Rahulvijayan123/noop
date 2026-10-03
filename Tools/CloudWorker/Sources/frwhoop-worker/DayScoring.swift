@@ -565,7 +565,9 @@ struct DayScorer {
     ///
     /// Fail-safe by contract: any read/build error leaves the key ABSENT and
     /// only logs, so the scoring lane never depends on the activity lane
-    /// (missing/partial activity never fails scoring).
+    /// (missing/partial activity never fails scoring). Scoring runs these reads
+    /// inside its fenced transaction, where a failed statement would abort the
+    /// whole transaction, so each read runs under a savepoint.
     static func attachActivityContext(to daily: inout [String: Any],
                                       db: PostgresClient,
                                       userId: String, deviceId: String,
@@ -574,7 +576,7 @@ struct DayScorer {
                                       hrvSlotStarts: Set<Int>? = nil) {
         let rows: [[String: String]]
         do {
-            rows = try db.query("""
+            rows = try db.isolatingFailures { try db.query("""
                 with latest as (
                   select result_revision from public.activity_context_epochs
                    where user_id = $1::uuid and device_id = $2::uuid
@@ -592,7 +594,7 @@ struct DayScorer {
                   and start_ts >= $3::bigint and start_ts < $4::bigint
                   and result_revision = (select result_revision from latest)
                 order by start_ts
-                """, [userId, deviceId, String(dayStart), String(dayEnd)])
+                """, [userId, deviceId, String(dayStart), String(dayEnd)]) }
         } catch {
             FileHandle.standardError.write(
                 "day \(day): activity attach skipped (epoch read failed): \(error)\n".data(using: .utf8)!)
@@ -627,12 +629,12 @@ struct DayScorer {
 
         let inputRevision: Int64
         do {
-            let jobRows = try db.query("""
+            let jobRows = try db.isolatingFailures { try db.query("""
                 select input_revision::text as rev from public.activity_context_jobs
                  where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
                  order by input_revision desc
                  limit 1
-                """, [userId, deviceId, day])
+                """, [userId, deviceId, day]) }
             inputRevision = Int64(jobRows.first?["rev"] ?? "") ?? 0
         } catch {
             inputRevision = 0
@@ -640,14 +642,14 @@ struct DayScorer {
 
         let asleep: [(start: Int, end: Int)]
         do {
-            let sessionRows = try db.query("""
+            let sessionRows = try db.isolatingFailures { try db.query("""
                 select extract(epoch from start_at)::bigint as s,
                        extract(epoch from end_at)::bigint as e
                 from public.sessions
                 where user_id = $1::uuid and device_id = $2::uuid and kind = 'sleep'
                   and start_at < $4::timestamptz and end_at > $3::timestamptz
                 """, [userId, deviceId, ActivityLane.isoUTC(dayStart),
-                      ActivityLane.isoUTC(dayEnd)])
+                      ActivityLane.isoUTC(dayEnd)]) }
             asleep = sessionRows.compactMap { r in
                 guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? "") else { return nil }
                 return (start: s, end: e)

@@ -82,6 +82,15 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     /// to 24 hours of gap without an unbounded read. The scan resumes across calls via the
     /// in-memory frontier below.
     static let maxProbesPerCall = 24
+    /// Probes never look further ahead than the later of the phone clock and the cursor, plus this
+    /// much for a strap whose clock runs ahead of the phone's. Records are keyed by the strap's
+    /// clock, and every probe decodes the device's whole store, so reading windows that cannot
+    /// hold data yet is pure cost.
+    static let futureSlackSeconds: Int64 = 1_800
+    /// The remembered gap position trails the phone clock by this much. A second captured now
+    /// (strap clock no more than this far behind the phone's) therefore always lies at or above
+    /// it and is found by the next scan.
+    static let frontierLagSeconds: Int64 = 1_200
 
     private let store: any ImuObjectReading
     private let deviceIdProvider: @Sendable () -> String?
@@ -199,14 +208,17 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
             lock.unlock()
             return []
         }
+        let present = now()
+        let trailingEdge = present - Self.frontierLagSeconds
         var probeStart: Int64
-        if let scan = scanFrontier, scan >= fromTs {
+        // A marker ahead of the trailing edge (the phone clock moved backwards) is not trusted.
+        if let scan = scanFrontier, scan >= fromTs, scan <= trailingEdge {
             probeStart = scan
         } else if afterRowId == 0 {
             // First-ever page for this device: the store's data lives at real epoch seconds, far
             // above an empty cursor, so anchor the scan in a recent, bounded horizon instead of
             // scanning across years of empty space.
-            probeStart = max(0, now() - lookbackSeconds)
+            probeStart = max(0, present - lookbackSeconds)
         } else {
             probeStart = fromTs
         }
@@ -215,8 +227,9 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         if let flushFrontier, probeStart >= flushFrontier { probeStart = fromTs }
         lock.unlock()
 
+        let reach = max(present, fromTs) + Self.futureSlackSeconds
         var probes = 0
-        while probes < Self.maxProbesPerCall {
+        while probes < Self.maxProbesPerCall, probeStart < reach {
             guard limits.shouldContinue() else { throw PushSourceReadError.deferred }
             var probeEnd = min(probeStart + Self.hardWindowSeconds, Int64.max)
             // Never read (and thus never return) a second at or past the first non-durable second.
@@ -237,9 +250,11 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         }
         lock.lock()
         // Remember the gap position only while it stays BELOW any blocked second — a frontier must
-        // fence future scans so the marker never points past data that is not durable yet.
-        let mayAdvance = flushFrontier.map { probeStart < $0 } ?? true
-        if probeStart > fromTs && mayAdvance { scanFrontier = probeStart }
+        // fence future scans so the marker never points past data that is not durable yet. It also
+        // never passes the trailing edge: windows nearer the present can still fill.
+        let remembered = min(probeStart, trailingEdge)
+        let mayAdvance = flushFrontier.map { remembered < $0 } ?? true
+        if remembered > fromTs && mayAdvance { scanFrontier = remembered }
         lock.unlock()
         return []
     }

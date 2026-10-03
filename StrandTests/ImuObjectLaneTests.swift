@@ -114,6 +114,115 @@ final class ImuObjectLaneTests: XCTestCase {
         XCTAssertFalse(page.hasMore)
     }
 
+    // MARK: - the scan never outruns the present
+
+    private final class TestClock: @unchecked Sendable {
+        private let lock = NSLock()
+        private var seconds: Int64
+        init(_ seconds: Int64) { self.seconds = seconds }
+        var value: Int64 { lock.lock(); defer { lock.unlock() }; return seconds }
+        func advance(_ delta: Int64) { lock.lock(); seconds += delta; lock.unlock() }
+        func set(_ newValue: Int64) { lock.lock(); seconds = newValue; lock.unlock() }
+    }
+
+    private static let sessionStart: Int64 = 1_758_000_000
+
+    private func makeSource(store: FakeImuStore, clock: TestClock) -> ImuObjectSource {
+        ImuObjectSource(store: store, deviceId: { "dev" }, now: { clock.value })
+    }
+
+    private func nextRows(_ source: ImuObjectSource, after cursor: Int64) async throws -> [PushBinaryRow] {
+        try await source.binaryPage(table: .rawImuSession, deviceId: "dev", afterRowId: cursor,
+                                    limit: 5_001, limits: sourceLimits()).rows
+    }
+
+    private func firstTs(_ rows: [PushBinaryRow]) -> Int64? {
+        guard case .rawImuSession(let record)? = rows.first else { return nil }
+        return record.ts
+    }
+
+    /// A caught-up device: one 300 s session uploaded, cursor on its last second, phone clock just after.
+    private func caughtUp() async throws -> (clock: TestClock, store: FakeImuStore, source: ImuObjectSource, cursor: Int64) {
+        let start = Self.sessionStart
+        let clock = TestClock(start)
+        let store = FakeImuStore(records: records(ts: (start - 300)...(start - 1)))
+        let source = makeSource(store: store, clock: clock)
+        let first = try await nextRows(source, after: start - 301)
+        XCTAssertEqual(first.count, 300)
+        return (clock, store, source, start - 1)
+    }
+
+    func testDataCapturedAfterIdlePassesStillUploads() async throws {
+        // The cycle polls every 45 s while nothing is captured (BLE dropped, session over). Whatever
+        // the idle length, a session that resumes afterwards must be found by the next pass.
+        for idleMinutes in [3, 25, 130] {
+            let (clock, store, source, cursor) = try await caughtUp()
+            for _ in 0..<(idleMinutes * 60 / 45) {
+                clock.advance(45)
+                let idle = try await nextRows(source, after: cursor)
+                XCTAssertTrue(idle.isEmpty)
+            }
+            let resumed = clock.value
+            store.records += records(ts: resumed...(resumed + 299))
+            let rows = try await nextRows(source, after: cursor)
+            XCTAssertEqual(firstTs(rows), resumed, "idle for \(idleMinutes) min stranded later data")
+            XCTAssertEqual(rows.count, 300)
+        }
+    }
+
+    func testIdlePassReadsTheStoreOnceNotOncePerHardWindowOfTheDay() async throws {
+        // Every read decodes the device's whole store, so an idle pass must stay at one probe.
+        let (clock, store, source, cursor) = try await caughtUp()
+        for _ in 0..<60 {
+            clock.advance(45)
+            let before = store.reads
+            _ = try await nextRows(source, after: cursor)
+            XCTAssertLessThanOrEqual(store.reads - before, 1)
+        }
+    }
+
+    func testScanCrossesAMultiDayGapInAFewPassesAndStopsAtThePresent() async throws {
+        let start = Self.sessionStart
+        let clock = TestClock(start)
+        let cursor = start - 3 * 86_400
+        let store = FakeImuStore(records: records(ts: (cursor - 299)...cursor))
+        let source = makeSource(store: store, clock: clock)
+        store.records += records(ts: (start - 120)...(start + 59))
+        var rows: [PushBinaryRow] = []
+        var passes = 0
+        while rows.isEmpty && passes < 8 {
+            rows = try await nextRows(source, after: cursor)
+            passes += 1
+            clock.advance(45)
+        }
+        XCTAssertEqual(firstTs(rows), start - 120)
+        XCTAssertLessThanOrEqual(passes, 4, "24 one-hour probes per pass cross 3 days in 3 passes")
+    }
+
+    func testStrapClockRunningAheadWithinTheSlackStillUploads() async throws {
+        let (clock, store, source, cursor) = try await caughtUp()
+        for _ in 0..<20 {
+            clock.advance(45)
+            _ = try await nextRows(source, after: cursor)
+        }
+        let ahead = clock.value + 900
+        store.records += records(ts: ahead...(ahead + 299))
+        let rows = try await nextRows(source, after: cursor)
+        XCTAssertEqual(firstTs(rows), ahead)
+    }
+
+    func testPhoneClockMovingBackwardsDoesNotStrandData() async throws {
+        let (clock, store, source, cursor) = try await caughtUp()
+        for _ in 0..<60 {
+            clock.advance(45)
+            _ = try await nextRows(source, after: cursor)
+        }
+        clock.set(Self.sessionStart + 60)
+        store.records += records(ts: Self.sessionStart...(Self.sessionStart + 299))
+        let rows = try await nextRows(source, after: cursor)
+        XCTAssertEqual(firstTs(rows), Self.sessionStart)
+    }
+
     // MARK: - P2-5 flush-before-read / cursor never skips un-flushed seconds
 
     func testPendingTailFlushedBeforePageAndNeverSkippedByCursor() async throws {
@@ -425,6 +534,7 @@ private final class FakeImuStore: ImuObjectReading, @unchecked Sendable {
     /// RAM pending tail. `flushPendingFor` returns it and `readImuRecords` never yields it
     /// (mirrors the real store: buffered rows are not on disk until their flush succeeds).
     var pendingFrontier: Int64?
+    private(set) var reads = 0
 
     init(records: [ImuSourceRecord], pendingFrontier: Int64? = nil) {
         self.records = records
@@ -432,7 +542,8 @@ private final class FakeImuStore: ImuObjectReading, @unchecked Sendable {
     }
 
     func readImuRecords(deviceId: String, fromTs: Int64, toTs: Int64) async throws -> [ImuSourceRecord] {
-        records.filter { $0.ts >= fromTs && $0.ts <= toTs && (pendingFrontier == nil || $0.ts < pendingFrontier!) }
+        reads += 1
+        return records.filter { $0.ts >= fromTs && $0.ts <= toTs && (pendingFrontier == nil || $0.ts < pendingFrontier!) }
     }
 
     func flushPendingFor(deviceId: String) async throws -> Int64? { pendingFrontier }
