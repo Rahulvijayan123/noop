@@ -101,6 +101,56 @@ def test_infer_happy_path_baseline(proc):
     assert resp["manifest"]["thresholds"] == {"max_prob": 0.8, "margin": 0.15}
 
 
+def test_every_window_carries_encoder_independent_features(proc):
+    resp = _roundtrip(proc, {"id": "f1", "op": "infer", "run": _golden_run()})
+    assert resp["ok"] is True
+    assert resp["feature_schema"] == "imu-feat-1"
+    for w in resp["windows"]:
+        assert set(w["feat"]) == {"accel_rms_g", "gyro_rms_dps", "jerk_rms", "cadence_hz",
+                                  "cadence_strength", "orientation_change_deg"}
+        assert w["feat"]["accel_rms_g"] > 0.05
+        assert 1.2 <= w["feat"]["cadence_hz"] <= 3.5
+        assert w["feat"]["cadence_strength"] >= 0.3
+
+
+def test_default_hop_is_the_training_hop(proc):
+    resp = _roundtrip(proc, {"id": "h0", "op": "infer", "run": _golden_run()})
+    assert resp["hop_s"] == 2.0
+    assert len(resp["windows"]) == 5
+
+
+def test_a_one_second_hop_doubles_the_window_rate_and_keeps_the_window_length(proc):
+    run = _golden_run()
+    run["hop_s"] = 1
+    resp = _roundtrip(proc, {"id": "h1", "op": "infer", "run": run})
+    assert resp["ok"] is True
+    assert resp["hop_s"] == 1.0
+    wins = resp["windows"]
+    assert len(wins) == 9
+    assert all(w["e"] - w["s"] == pytest.approx(4.0) for w in wins)
+    starts = [w["s"] for w in wins]
+    assert all(b - a == pytest.approx(1.0) for a, b in zip(starts, starts[1:]))
+    # Every window the 2 s hop would have produced is among them, with the same label.
+    base = _roundtrip(proc, {"id": "h2", "op": "infer", "run": _golden_run()})["windows"]
+    by_start = {round(w["s"], 3): w for w in wins}
+    for w in base:
+        assert by_start[round(w["s"], 3)]["label"] == w["label"]
+
+
+def test_hop_may_ride_at_the_request_root(proc):
+    resp = _roundtrip(proc, {"id": "h3", "op": "infer", "run": _golden_run(), "hop_s": 1})
+    assert resp["ok"] is True and resp["hop_s"] == 1.0
+
+
+@pytest.mark.parametrize("bad", [0.5, 3, 0, -1, "1", True, [1]])
+def test_other_hops_are_refused_not_rounded(proc, bad):
+    run = _golden_run()
+    run["hop_s"] = bad
+    resp = _roundtrip(proc, {"id": "hb", "op": "infer", "run": run})
+    assert resp["ok"] is False
+    assert resp["kind"] == "malformed"
+
+
 def test_infer_malformed_b64_rejected(proc):
     run = _golden_run()
     run["columns_b64"][0] = "!!not-base64!!"

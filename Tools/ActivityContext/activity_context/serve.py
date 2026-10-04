@@ -2,8 +2,13 @@
 
 C10 serve protocol (FINAL):
   Request : {"id":"<uuid>","op":"infer","run":{...}} | ping | shutdown
-  Response: {"id":..,"ok":true,"windows":[{s,e,label,probs,baseline}],...}
+  Response: {"id":..,"ok":true,"windows":[{s,e,label,probs,baseline,feat}],...}
             {"id":..,"ok":false,"error":"...","kind":"malformed|model_missing|timeout|internal|output_too_large"}
+
+Additive since the ActivityContext decoder (all optional, old callers unaffected):
+  * every window carries ``feat`` (imu-feat-1, see features.py): encoder-independent motion facts;
+  * ``run.hop_s`` (or request ``hop_s``) may be 1 or 2 (default 2, the training hop). The window length is
+    always 4 s, so a 1 s hop only changes how often the encoder is asked, never what it is asked.
 
 Deterministic: single thread, eval mode, fixed seed, no dropout. Baseline path
 runs with zero optional deps (numpy only); the HART path is loaded only when
@@ -29,8 +34,9 @@ import numpy as np
 
 from . import PREPROCESSING_VERSION, __version__
 from .baseline import MOTION_LABELS, classify_window
+from .features import FEATURE_SCHEMA, window_features
 from .manifest import Manifest, load_manifest
-from .preprocess import (COLUMNS_BYTES_PER_SECOND, MAX_HEAD_SECONDS,
+from .preprocess import (COLUMNS_BYTES_PER_SECOND, HOP_SAMPLES, MAX_HEAD_SECONDS,
                          MAX_RUN_SECONDS, MAX_TAIL_SECONDS, TARGET_HZ,
                          WINDOW_SECONDS, HOP_SECONDS, decode_columns_b64,
                          validate_request_units)
@@ -40,6 +46,10 @@ from .preprocess import (COLUMNS_BYTES_PER_SECOND, MAX_HEAD_SECONDS,
 MAX_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_WINDOWS_PER_RESPONSE = 200_000
 DEFAULT_TIMEOUT_SECONDS = 60.0
+
+# Hops a caller may ask for, in seconds. 2 s is the training hop; 1 s doubles the encoder calls for a
+# denser stream. Anything else is refused rather than silently rounded.
+ALLOWED_HOP_SECONDS = (1.0, 2.0)
 
 _ERROR_KINDS = ("malformed", "model_missing", "timeout", "internal", "output_too_large")
 
@@ -104,10 +114,22 @@ def _bounded_b64_list(value: Any, what: str, max_seconds: int) -> List[str]:
     return value
 
 
+def parse_hop_samples(value: Any) -> int:
+    """Hop in 30 Hz samples from an optional ``hop_s`` request value (None -> the training hop)."""
+    if value is None:
+        return HOP_SAMPLES
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"hop_s must be 1 or 2, got {value!r}")
+    if float(value) not in ALLOWED_HOP_SECONDS:
+        raise ValueError(f"hop_s must be 1 or 2, got {value!r}")
+    return int(round(float(value) * TARGET_HZ))
+
+
 def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
                      body: List[str], head: List[str], tail: List[str],
+                     hop_samples: int = HOP_SAMPLES,
                      ) -> List[Dict[str, Any]]:
-    """Decode -> runs -> windows -> per-window labels (baseline or HART)."""
+    """Decode -> runs -> windows -> per-window labels (baseline or HART) + imu-feat-1 features."""
     from .preprocess import windows_from_run, decode_seconds, PreprocessError, Run
 
     seconds: List[tuple] = []
@@ -121,25 +143,28 @@ def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
 
     windows: List[Any] = []
     for run in decode_seconds(seconds):
-        windows.extend(windows_from_run(run, start_ts, end_ts))
+        windows.extend(windows_from_run(run, start_ts, end_ts, hop_samples=hop_samples))
     windows.sort(key=lambda w: w.s)
     if len(windows) > MAX_WINDOWS_PER_RESPONSE:
         raise ValueError("too many windows for one response")
 
     out: List[Dict[str, Any]] = []
     for w in windows:
+        base_features = None
         if ctx.model is not None:
             pred = ctx.model.predict_window(w.data)
             label, probs, baseline = pred.label, pred.probs, pred.baseline
         else:
             res = classify_window(w)
             label, probs, baseline = res.label, res.probs, True
+            base_features = res.features
         out.append({
             "s": round(w.s, 6),
             "e": round(w.e, 6),
             "label": label,
             "probs": {k: round(float(v), 6) for k, v in probs.items()},
             "baseline": baseline,
+            "feat": window_features(w, base_features),
         })
     return out
 
@@ -204,13 +229,17 @@ def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
     tail = _bounded_b64_list(run.get("tail_b64") if run.get("tail_b64") is not None
                              else req.get("tail_b64"), "tail_b64", MAX_TAIL_SECONDS)
 
+    hop_samples = parse_hop_samples(run.get("hop_s") if run.get("hop_s") is not None else req.get("hop_s"))
+
     t0 = time.monotonic()
-    windows = classify_windows(ctx, start_ts, end_ts, body, head, tail)
+    windows = classify_windows(ctx, start_ts, end_ts, body, head, tail, hop_samples=hop_samples)
 
     resp: Dict[str, Any] = {
         "ok": True,
         "model_version": ctx.manifest.model_version,
         "preprocessing_version": ctx.manifest.preprocessing_version,
+        "feature_schema": FEATURE_SCHEMA,
+        "hop_s": hop_samples / TARGET_HZ,
         "windows": windows,
         "manifest": ctx.manifest.to_dict(),
         "duration_ms": int((time.monotonic() - t0) * 1000),
