@@ -28,20 +28,31 @@ public struct UserProfile: Equatable, Sendable {
     /// counter overcounts and its true tick rate is unknown, so the daily-steps total
     /// divides by this. 1.0 = raw pass-through (default); the engine clamps ≥ 0.5.
     public var stepTicksPerStep: Double
+    /// Resting metabolic rate measured by indirect calorimetry (kcal/day), when the wearer has one. The
+    /// energy model prefers it over the population equation for the 24 h resting term. nil (the default)
+    /// keeps every existing caller on the equation.
+    public var measuredRmrKcalPerDay: Double?
     public init(weightKg: Double = 70.0, heightCm: Double = 170.0,
                 age: Double = 30.0, sex: String = "nonbinary",
-                stepTicksPerStep: Double = 1.0) {
+                stepTicksPerStep: Double = 1.0,
+                measuredRmrKcalPerDay: Double? = nil) {
         self.weightKg = weightKg; self.heightCm = heightCm
         self.age = age; self.sex = sex
         self.stepTicksPerStep = stepTicksPerStep
+        self.measuredRmrKcalPerDay = measuredRmrKcalPerDay
     }
 
     /// Every stored field, for a cache key that must change when the profile does (the per-cycle load
     /// cache, `IntelligenceEngine`). Named explicitly rather than read from `String(describing:)`, whose
     /// format is not a contract and costs reflection per call. A new field belongs here too. Doubles by
     /// bit pattern, so the key is exact and locale-free. Twin of Kotlin `UserProfile.cacheKey`.
+    ///
+    /// The measured-RMR suffix is appended only when one is set, so a profile without it keeps the exact
+    /// key it had before the field existed.
     public var cacheKey: String {
-        "w=\(weightKg.bitPattern),h=\(heightCm.bitPattern),a=\(age.bitPattern),s=\(sex),t=\(stepTicksPerStep.bitPattern)"
+        let base = "w=\(weightKg.bitPattern),h=\(heightCm.bitPattern),a=\(age.bitPattern),s=\(sex),t=\(stepTicksPerStep.bitPattern)"
+        guard let rmr = measuredRmrKcalPerDay else { return base }
+        return base + ",rmr=\(rmr.bitPattern)"
     }
 }
 

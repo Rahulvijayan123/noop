@@ -32,6 +32,12 @@ final class ProfileStore: ObservableObject {
     /// Optional waist circumference (cm); 0 = not set. Only used to ALSO show an estimated VO₂max
     /// alongside Fitness Age — the Fitness Age itself does not need it (the body term cancels).
     @Published var waistCm: Double { didSet { d.set(waistCm, forKey: K.waist) } }
+    /// Optional measured resting metabolic rate (kcal/day, from indirect calorimetry); 0 = not set. When set it
+    /// replaces the population equation as the 24 h resting-energy term of the calorie estimate. Anything
+    /// outside 800…5000 is ignored by the estimator, so a stale or mistyped value cannot distort a day.
+    @Published var measuredRmrKcalPerDay: Double {
+        didSet { d.set(min(max(measuredRmrKcalPerDay, 0), 5000), forKey: K.measuredRmr) }
+    }
     /// 0 = auto-estimate from age.
     @Published var hrMaxOverride: Int { didSet { d.set(hrMaxOverride, forKey: K.hrMax) } }
     /// Five personalized inclusive zone starts in BPM; empty = conventional %HRmax zones.
@@ -107,6 +113,7 @@ final class ProfileStore: ObservableObject {
         static let hrZoneThresholds = "profile.hrZoneThresholds"
         static let stepScale = "profile.stepTicksPerStep"
         static let waist = "profile.waistCm"
+        static let measuredRmr = "profile.measuredRmrKcalPerDay"
         static let stepsCoeff = "profile.stepsCalibrationCoefficient"
         static let stepsSampleDays = "profile.stepsCalibrationSampleDays"
         static let stepsConfidence = "profile.stepsCalibrationConfidence"
@@ -144,6 +151,7 @@ final class ProfileStore: ObservableObject {
         weightKg = d.object(forKey: K.weight) as? Double ?? 75
         heightCm = d.object(forKey: K.height) as? Double ?? 178
         waistCm = d.object(forKey: K.waist) as? Double ?? 0
+        measuredRmrKcalPerDay = min(max(d.object(forKey: K.measuredRmr) as? Double ?? 0, 0), 5000)
         hrMaxOverride = d.object(forKey: K.hrMax) as? Int ?? 0
         let storedThresholds = d.string(forKey: K.hrZoneThresholds)?
             .split(separator: ",").compactMap { Int($0) } ?? []

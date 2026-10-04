@@ -1,0 +1,42 @@
+# Optional, maintainer-only: re-run the numpy-vs-Keras parity harness
+#   python -m energy_models.wrist_cnn.verify_keras
+# These are the exact versions the reported parity numbers were measured with (Python 3.11.13,
+# macOS arm64). Install into a throwaway virtualenv, never into the application environment.
+#
+# tf_keras (legacy Keras 2) is required: the upstream .h5 files were written by Keras 2.2.4 and
+# Keras 3 (installed as a dependency of TensorFlow) mis-reads their input shape.
+-r requirements-cnn-convert.txt
+tensorflow==2.21.0
+tf_keras==2.21.0
+pytest==9.1.1
+
+# transitive pins, as resolved when the numbers were measured
+absl-py==2.5.0
+astunparse==1.6.3
+certifi==2026.7.22
+charset-normalizer==3.5.2
+flatbuffers==25.12.19
+gast==0.7.0
+google-pasta==0.2.0
+grpcio==1.84.0
+idna==3.20
+iniconfig==2.3.0
+keras==3.15.1
+libclang==18.1.1
+markdown-it-py==4.2.0
+mdurl==0.1.2
+ml_dtypes==0.6.0
+namex==0.1.0
+opt_einsum==3.4.0
+optree==0.20.0
+packaging==26.3
+pluggy==1.6.0
+protobuf==7.36.2
+Pygments==2.21.0
+requests==2.34.2
+rich==15.0.0
+six==1.17.0
+termcolor==3.3.0
+typing_extensions==4.16.0
+urllib3==2.8.0
+wrapt==2.5.0

@@ -253,6 +253,9 @@ final class AppModel: ObservableObject {
     private var hostedSyncInFlight = false
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
+    private var hostedCatchUpDone = false
+    private static let hostedCatchUpSpan = 7
+    private static let hostedChangedDaysCap = 32
 
     /// Cloud mode replaces local physiological analysis with server work (spec F4).
     ///
@@ -314,8 +317,17 @@ final class AppModel: ObservableObject {
         let readId = hostedReadDeviceId
         IntradaySeriesStore.shared.readDeviceId = readId
         var days = [Repository.localDayKey(now.addingTimeInterval(-86_400)), Repository.localDayKey(now)]
+        // Once per launch, also re-read the last week. The change cursor advances as soon as it is polled, so a
+        // day the server rescored while the app was closed (or beyond the per-poll cap) was never fetched again
+        // and stayed a stale stub, which left the baseline a night short.
+        let catchUpDays = hostedCatchUpDone ? [] : (2...Self.hostedCatchUpSpan).map {
+            Repository.localDayKey(now.addingTimeInterval(-Double($0) * 86_400))
+        }
+        for day in catchUpDays where !days.contains(day) { days.append(day) }
         if let changed = try? await scores.pollChangedDays(deviceId: readId) {
-            for change in changed.prefix(8) where !days.contains(change.day) { days.append(change.day) }
+            for change in changed.prefix(Self.hostedChangedDaysCap) where !days.contains(change.day) {
+                days.append(change.day)
+            }
         }
         let dismissed = repo.dismissedSleepWindows()
         var written = 0
@@ -331,6 +343,7 @@ final class AppModel: ObservableObject {
                 live.append(log: "Cloud: could not store the server result for \(day): \(error)")
             }
         }
+        hostedCatchUpDone = true
         if written > 0 { await repo.refresh() }
         return written
     }

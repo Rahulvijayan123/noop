@@ -901,7 +901,9 @@ final class IntelligenceEngine: ObservableObject {
 
         let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
                              age: Double(profile.age), sex: profile.sex,
-                             stepTicksPerStep: profile.stepTicksPerStep)
+                             stepTicksPerStep: profile.stepTicksPerStep,
+                             measuredRmrKcalPerDay: profile.measuredRmrKcalPerDay > 0
+                                 ? profile.measuredRmrKcalPerDay : nil)
 
         let maxHR = profile.hrMaxOverride > 0 ? Double(profile.hrMaxOverride) : nil
         let now = Int(Date().timeIntervalSince1970)
@@ -1259,7 +1261,11 @@ final class IntelligenceEngine: ObservableObject {
                             // watermark gate above, never this one. Both reads are index-only aggregates
                             // over the same `(deviceId, ts)` keys; a miss costs the 7 full stream reads
                             // this gate exists to skip.
-                            streams: streamFp + "|rrAlias5=\(activeWhoop5RR && owner == Repository.whoopSource)",
+                            // The energy estimate also depends on the body measurements and the measured RMR,
+                            // none of which move a stream fingerprint. `rrAlias5` stays LAST: `missReason`
+                            // reads everything after it.
+                            streams: streamFp + "|energy=\(up.energyInputsSignature)"
+                                + "|rrAlias5=\(activeWhoop5RR && owner == Repository.whoopSource)",
                             // #1575: `hrvTraceActive &&` matters. With the HRV trace OFF no detail
                             // line is ever produced, so the flag describes nothing — but it would still
                             // flip at midnight and invalidate yesterday, charging EVERY user an extra
@@ -1548,7 +1554,10 @@ final class IntelligenceEngine: ObservableObject {
                                                      // ring buffer isn't flooded; every night keeps the summary.
                                                      hrvWindowDetail: dayStart == nowLocalMidnight,
                                                      deepHrvWindow: deepHrvWindow,
-                                                     effortMethod: effortMethodGlobal)
+                                                     effortMethod: effortMethodGlobal,
+                                                     // A day still in progress counts resting energy up to
+                                                     // now; a finished day is unaffected.
+                                                     energyAsOf: now)
                 dayScoreSeconds += Date().timeIntervalSince(tScore0)
                 // #195: whole-night HRV cleaning-pipeline summary for the always-on strap log, so a "reads ~2x
                 // too high" report is triageable without the HRV test mode: RMSSD vs SDNN (rmssd >> sdnn =

@@ -1,0 +1,1168 @@
+{
+ "schema": "nara.wristmet.manifest/1",
+ "model_id": "wristmet-v1",
+ "artifact": {
+  "path": "wristmet-v1.json.gz",
+  "bytes_gz": 548624,
+  "bytes_json": 1895588,
+  "sha256": "9135f0a2b665d4c8927ab49950e43c9e9e85d4a8c57f8315f30564c521f0f6e5",
+  "sha256_json": "60645945b1bdb9ca91e75b62786e4211fe9e6ab28bd092a342f435fcf49249b0",
+  "golden_fixture_bytes": 297603,
+  "committed_to_git": true
+ },
+ "provenance": {
+  "paper": {
+   "citation": "Wei B, Romano C, Pedram M, Nolan B, Morelli WA, Alshurafa N. Developing and comparing a new BMI inclusive energy expenditure algorithm on wrist-worn wearables. Scientific Reports 15 (2025). doi:10.1038/s41598-025-99963-0",
+   "url": "https://www.nature.com/articles/s41598-025-99963-0"
+  },
+  "code": {
+   "repository": "https://github.com/HAbitsLab/WristBased-EE-Estimation",
+   "commit": "3d3517cb95ef490d5e867ebf6a7207b8f7278788",
+   "license": "MIT",
+   "copyright": "Copyright (c) 2025 The HABits Lab"
+  },
+  "data": {
+   "title": "Wrist-Based Energy Expenditure Estimation In-lab Dataset",
+   "zenodo_record": 14858226,
+   "doi": "10.5281/zenodo.14858226",
+   "file": "Phase 2 - Data.zip",
+   "bytes": 800154464,
+   "md5": "1840803700111c0a1871e9af3eacc9be",
+   "license": "CC BY 4.0",
+   "creators": "Wei, Romano, Pedram, Nolan, Morelli, Alshurafa"
+  },
+  "weights": "Retrained from the public code and data by this project. These are NOT the authors' pretrained weights and NOT the model evaluated in the paper."
+ },
+ "dataset": {
+  "zenodo_zip_md5": "1840803700111c0a1871e9af3eacc9be",
+  "zenodo_zip_md5_matches_record": true,
+  "n_participants": 26,
+  "participants": [
+   "P1000",
+   "P1002",
+   "P1003",
+   "P1004",
+   "P1005",
+   "P1006",
+   "P1007",
+   "P1008",
+   "P1009",
+   "P1010",
+   "P1011",
+   "P1012",
+   "P1013",
+   "P1014",
+   "P1015",
+   "P1016",
+   "P1017",
+   "P1018",
+   "P1019",
+   "P1020",
+   "P1021",
+   "P1022",
+   "P1023",
+   "P1024",
+   "P1025",
+   "P1026"
+  ],
+  "n_windows_60s": 2189,
+  "n_windows_15s": 7112,
+  "n_windows_60s_without_reference_met": 3,
+  "window_met_range": [
+   1.0,
+   7.635
+  ],
+  "windows_by_activity_group_60s": {
+   "sedentary": 1501,
+   "vigorous": 440,
+   "light": 248
+  },
+  "windows_by_measured_met_class_60s": {
+   "sedentary(<1.5)": 1557,
+   "light(1.5-<3)": 203,
+   "moderate_vigorous(>=3)": 426
+  },
+  "windows_60s_with_raw_sample_gap_over_500ms": {
+   "accelerometer": 145,
+   "gyroscope": 60,
+   "either": 167,
+   "most_affected_participants": {
+    "P1019": "90/96 windows",
+    "P1025": "15/96 windows",
+    "P1015": "12/88 windows"
+   },
+   "note": "the shipped resampled data interpolate linearly across these gaps and the upstream pipeline trains on them; the faithful default keeps them (sensitivity: loso.w60_sensitivity)"
+  },
+  "resample_replica_vs_shipped_resampled_csv": {
+   "n_sensor_files_compared": 52,
+   "all_timestamps_equal": true,
+   "max_abs_value_diff": 7.105427357601002e-15
+  },
+  "demographic_sources": {
+   "sex_age_weight": "ActiGraph AGD header (age at the visit)",
+   "height": "upstream notebook table (MetCart height, 0.1 in resolution)",
+   "participant_sex_counts": {
+    "female": 17,
+    "male": 9
+   },
+   "age_years_min_max": [
+    25.0,
+    64.0
+   ],
+   "bmi_min_max": [
+    30.54,
+    46.23
+   ],
+   "participant_1001": "absent from the public record (paper: 27 participants); appears only in the upstream notebook table (male, notebook age 49 = about 47-48 at the visit, 177.8 cm, 129.3 kg) and is not used"
+  }
+ },
+ "training": {
+  "seed": 0,
+  "n_participants": 26,
+  "n_windows_classifier": 2189,
+  "n_windows_regressor": 688,
+  "n_sedentary_windows": 1501,
+  "n_nonsedentary_windows": 688,
+  "hyperparameters": {
+   "xgboost": {
+    "constructor": "XGBClassifier(random_state=seed, n_jobs=1)  # all other arguments at library defaults",
+    "sklearn_params": {
+     "objective": "binary:logistic",
+     "enable_categorical": false,
+     "missing": "nan",
+     "n_jobs": 1,
+     "random_state": 0
+    },
+    "tree_train_param": {
+     "alpha": "0",
+     "colsample_bylevel": "1",
+     "colsample_bynode": "1",
+     "colsample_bytree": "1",
+     "eta": "0.300000012",
+     "gamma": "0",
+     "grow_policy": "depthwise",
+     "interaction_constraints": "",
+     "lambda": "1",
+     "learning_rate": "0.300000012",
+     "max_bin": "256",
+     "max_cat_threshold": "64",
+     "max_cat_to_onehot": "4",
+     "max_delta_step": "0",
+     "max_depth": "6",
+     "max_leaves": "0",
+     "min_child_weight": "1",
+     "min_split_loss": "0",
+     "monotone_constraints": "()",
+     "refresh_leaf": "1",
+     "reg_alpha": "0",
+     "reg_lambda": "1",
+     "sampling_method": "uniform",
+     "sparse_threshold": "0.20000000000000001",
+     "subsample": "1"
+    },
+    "n_estimators_effective": 100
+   },
+   "random_forest": {
+    "constructor": "RandomForestRegressor(random_state=seed, n_jobs=1)  # all other arguments at library defaults",
+    "params": {
+     "bootstrap": true,
+     "ccp_alpha": 0.0,
+     "criterion": "squared_error",
+     "max_depth": null,
+     "max_features": 1.0,
+     "max_leaf_nodes": null,
+     "max_samples": null,
+     "min_impurity_decrease": 0.0,
+     "min_samples_leaf": 1,
+     "min_samples_split": 2,
+     "min_weight_fraction_leaf": 0.0,
+     "monotonic_cst": null,
+     "n_estimators": 100,
+     "n_jobs": 1,
+     "oob_score": false,
+     "random_state": 0,
+     "verbose": 0,
+     "warm_start": false
+    }
+   }
+  },
+  "library_versions": {
+   "python": "3.11.13",
+   "numpy": "2.2.6",
+   "pandas": "2.3.3",
+   "scikit-learn": "1.9.1",
+   "xgboost": "3.2.0",
+   "scipy": "1.17.1",
+   "openpyxl": "3.1.5",
+   "joblib": "1.6.0",
+   "threadpoolctl": "3.7.0"
+  },
+  "left_handed_participants_mirrored": [
+   "P1006",
+   "P1007",
+   "P1023"
+  ]
+ },
+ "pipeline_decisions": [
+  "Training data: Zenodo record 14858226 ('Phase 2 - Data.zip', md5 1840803700111c0a1871e9af3eacc9be, CC BY 4.0): 26 participants (P1000, P1002-P1026). The paper analyses 27; P1001 is not in the public record.",
+  "Wrist streams: the shipped 'Original' accelerometer/gyroscope chunk CSVs are re-sampled with a vectorised replica of sort_resample_organize.resample (grid t0 + k*50 ms, first sample copied, slope/intercept linear interpolation, no gap limit); the replica reproduces the shipped 'Resampled' CSVs exactly for all 26 participants and both sensors (build report). Chunks used: UTC date equal to, or the day after, the MetCart start date.",
+  "Reference METs: MetCart text files parsed as in-lab.py (lines whose stripped length is 72 or 80; time = chars [:8]; METs = chars [21:24], so values >= 10 METs would be mis-parsed; dates from the hard-coded met_cart_dic, in-lab.py:34); local times converted with America/Chicago.",
+  "Segments: activity-log rows with Include == 1 (columns located by header name). Windows: int((stop - start).seconds / W) back-to-back non-overlapping windows from the start time; the first 60/W*2 - 1 windows of each segment are skipped (1 at W=60, 7 at W=15; in-lab.py:271-321). The paper's text (50% overlap, first two minutes skipped, Butterworth filter) differs from the code; the code is reproduced. Result: 2,189 windows at 60 s (the paper's abstract count) and 7,112 at 15 s.",
+  "Window MET = round(mean(MetCart METs inside the window), 3) with numpy rounding; values below 1.0 are set to 1.0; windows without MetCart rows keep NaN (3 windows at 60 s, dropped from the metrics like the upstream dropna).",
+  "Class label = activity name: sedentary (label 0) for the upstream sedentary list (including 'Rest'), everything else non-sedentary (label 1). Reporting classes use the measured MET: <1.5 sedentary, 1.5-<3 light, >=3 moderate/vigorous (notebook set_intensity).",
+  "Classifier features: median, mean, max, min, range, std (ddof=0), rms of the six channels (gyr_xyz, acc_xyz), stat-major (helper_preprocess.py:158-175). Regressor features: gender, age, BMI, Intensity (Freq), gender_age, gender_BMI, age_BMI, age_gender_BMI, Intensity (RMSSD_l1) (in-lab.py:491).",
+  "Intensity (RMSSD_l1) (in-lab.py:165-197): per-axis L1 normalisation then sqrt(sum(dx^2+dy^2+dz^2)/N). Intensity (Freq) (in-lab.py:199-227): fs hard-coded to 100 although data are 20 Hz (so 5x the physical frequency), acc magnitude of samples 1..N-1, one-sided FFT bins [:n//2] including DC, second-largest magnitude, no band-pass filter although the paper describes one. All reproduced bit for bit (checked against a literal copy of the upstream functions on all 2,189 windows).",
+  "Left-handed participants (ActiGraph hip worn on the right = non-dominant side: P1006, P1007, P1023) are mirrored to a right-wrist frame by negating acc_x, gyr_y, gyr_z (Kyritsis et al., arXiv:2010.07051 Eq. 1). The paper reports 4 left-handed participants of 27; the 4th is presumably the excluded P1001.",
+  "Units verified on the recordings: accelerometer m/s^2 including gravity (|acc| = 9.81 at rest), gyroscope rad/s (rest |w| ~ 0.07, walking ~ 1.2, aerobics ~ 2.3). The dataset README (g and deg/s) is contradicted by its own example values.",
+  "Models: XGBClassifier(random_state=0, n_jobs=1) and RandomForestRegressor(random_state=0, n_jobs=1), every other argument at the library default (upstream constructs them without arguments: helper_model.py:42, in-lab.py:496; upstream sets no seed). The classifier is fit on all windows; the regressor on windows of light/vigorous activities with a finite MET (in-lab.py:480-497). Sedentary prediction = 1.0 MET; otherwise the regressor output (>= 1.0).",
+  "Demographics (training features): sex, age at the visit and weight from the ActiGraph header; height from the upstream notebook table (MetCart height, 0.1 in resolution; header heights are whole inches). The upstream age feature is 'year the script is run minus birth year' (1-3 years above the age at the visit); sensitivity runs for header heights, notebook ages and age+2 are in loso.w60_sensitivity."
+ ],
+ "determinism": {
+  "rebuilt_json_identical": true
+ },
+ "parity_vs_scikit_learn_and_xgboost": {
+  "n_windows": 2189,
+  "classifier_probability_max_abs_diff": 0.0,
+  "classifier_decisions_identical": true,
+  "regressor_max_abs_diff_all_windows": 0.0,
+  "end_to_end_met_max_abs_diff": 0.0,
+  "end_to_end_class_decisions_identical": true,
+  "end_to_end_all_finite": true,
+  "tolerances": {
+   "regressor": 1e-06,
+   "classifier_probability": 1e-05
+  }
+ },
+ "feature_parity_vs_upstream_code": {
+  "n_windows": 2189,
+  "classifier_features_42_bitwise_equal": true,
+  "classifier_features_max_abs_diff": 0.0,
+  "intensity_rmssd_l1_bitwise_equal": true,
+  "intensity_freq_bitwise_equal": true,
+  "literal_o_n2_freq_function_windows_checked": 41,
+  "literal_o_n2_freq_function_equals_hoisted_fft_variant": true
+ },
+ "speed": {
+  "ms_per_window_batch_of_200": 0.214,
+  "ms_per_window_single_call": 0.507,
+  "machine": "arm64 Darwin cpu_count=16",
+  "numpy": "2.2.6"
+ },
+ "envelope_summary": {
+  "signal": {
+   "n_windows": 2189,
+   "n_descriptors": 46,
+   "range_scale_e0": 0.5,
+   "gravity_angle_ok_deg": 10.0,
+   "gravity_angle_max_deg": 40.0,
+   "n_gravity_directions": 2188,
+   "loso_nearest_direction_angle_deg": {
+    "p50": 1.23,
+    "p90": 3.29,
+    "p95": 4.3,
+    "p99": 7.94,
+    "p99.9": 14.32,
+    "max": 16.74
+   },
+   "theta_ok_deg": 10.0,
+   "n_windows_with_defined_direction": 2188
+  },
+  "demographic": {
+   "n_participants": 26,
+   "age": {
+    "min": 25.0,
+    "max": 64.0,
+    "mean": 42.96153846153846,
+    "sd": 11.649826674181103
+   },
+   "bmi": {
+    "min": 30.54438600407763,
+    "max": 46.233600475111785,
+    "mean": 36.83405892647763,
+    "sd": 4.472170502791941
+   },
+   "sex_counts": {
+    "female": 17,
+    "male": 9
+   },
+   "sd_ddof": 1
+  },
+  "regression_features": {
+   "n_windows": 688,
+   "n_participants": 26,
+   "note": "computed over the windows the regressor was trained on (non-sedentary activities)"
+  }
+ },
+ "ood": {
+  "signal_formula": "descriptors v (46): 42 classifier features, Intensity (Freq), Intensity (RMSSD_l1), acc_mean_norm = ||mean acc||, acc_norm_median = median_t ||acc_t||. For each descriptor f: lo_f = p0.5, hi_f = p99.5 of the training windows, w_f = max(hi_f - lo_f, 1e-6 + 1e-3*max(|lo_f|,|hi_f|)), e_f = max(0, lo_f - v_f, v_f - hi_f) / w_f; s_range = 1 - exp(-max_f(e_f) / 0.5). Gravity direction: if ||mean acc|| >= 1 m/s^2, theta = angle in degrees from the unit vector of the mean acceleration to the nearest training-window unit vector; s_gravity = clip((theta - theta_ok) / 30, 0, 1) with theta_ok = 99th percentile of the leave-one-participant-out theta rounded up to 5 degrees. ood_signal = max(s_range, s_gravity); windows containing NaN/inf score 1.",
+  "demographic_formula": "z_age = max(0, age_min - age, age - age_max) / age_sd; z_bmi = max(0, bmi_min - bmi, bmi - bmi_max) / bmi_sd (min/max/sd over the 26 training participants, sd with ddof=1); ood_demographic = 1 - exp(-sqrt(z_age^2 + z_bmi^2)); 1 if the sex does not occur in the training participants.",
+  "signal_loso_false_alarm_rates": {
+   "ood_signal": {
+    "quantiles_p50_p90_p95_p99_max": [
+     0.0,
+     0.087,
+     0.36,
+     0.793,
+     1.0
+    ],
+    "fraction_above_0.1": 0.0968,
+    "fraction_above_0.25": 0.0708,
+    "fraction_above_0.5": 0.0343
+   },
+   "ood_range": {
+    "quantiles_p50_p90_p95_p99_max": [
+     0.0,
+     0.087,
+     0.36,
+     0.793,
+     1.0
+    ],
+    "fraction_above_0.1": 0.0968,
+    "fraction_above_0.25": 0.0708,
+    "fraction_above_0.5": 0.0343
+   },
+   "ood_gravity": {
+    "quantiles_p50_p90_p95_p99_max": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.225
+    ],
+    "fraction_above_0.1": 0.0027,
+    "fraction_above_0.25": 0.0,
+    "fraction_above_0.5": 0.0
+   }
+  },
+  "signal_in_sample_fraction_above_0.5": 0.021,
+  "stress_tests_on_training_windows": {
+   "n_windows": 2189,
+   "unmodified": {
+    "median_ood_signal": 0.0,
+    "fraction_above_0.5": 0.021
+   },
+   "acc_in_g_instead_of_m_s2": {
+    "median_ood_signal": 0.955,
+    "fraction_above_0.5": 1.0
+   },
+   "acc_scaled_x1.1": {
+    "median_ood_signal": 0.0,
+    "fraction_above_0.5": 0.026
+   },
+   "gyr_in_deg_s_instead_of_rad_s": {
+    "median_ood_signal": 1.0,
+    "fraction_above_0.5": 0.84
+   },
+   "swap_acc_x_y": {
+    "median_ood_signal": 0.085,
+    "fraction_above_0.5": 0.252
+   },
+   "swap_acc_x_z": {
+    "median_ood_signal": 0.0,
+    "fraction_above_0.5": 0.03
+   },
+   "swap_acc_y_z": {
+    "median_ood_signal": 0.408,
+    "fraction_above_0.5": 0.364
+   },
+   "flip_acc_x": {
+    "median_ood_signal": 0.0,
+    "fraction_above_0.5": 0.024
+   },
+   "flip_acc_y": {
+    "median_ood_signal": 0.485,
+    "fraction_above_0.5": 0.481
+   },
+   "flip_acc_z": {
+    "median_ood_signal": 0.0,
+    "fraction_above_0.5": 0.036
+   },
+   "flip_acc_xyz": {
+    "median_ood_signal": 0.558,
+    "fraction_above_0.5": 0.607
+   },
+   "left_wrist_not_mirrored": {
+    "median_ood_signal": 0.0,
+    "fraction_above_0.5": 0.029
+   }
+  },
+  "out_of_cohort_example": {
+   "age": 22.0,
+   "sex": "male",
+   "weight_kg": 70.0,
+   "height_cm": 175.0,
+   "ood_demographic": 0.8241
+  }
+ },
+ "frame_reference": {
+  "description": "median over training windows of the 60 s mean accelerometer vector (m/s^2, right-wrist frame, x y z) by activity",
+  "rows": [
+   {
+    "activity": "Rest",
+    "n_windows": 1205,
+    "median_window_mean_acc_m_s2_xyz": [
+     1.08,
+     -7.1,
+     4.07
+    ]
+   },
+   {
+    "activity": "Reading a book or magazine while reclining",
+    "n_windows": 104,
+    "median_window_mean_acc_m_s2_xyz": [
+     -2.93,
+     -7.16,
+     -1.32
+    ]
+   },
+   {
+    "activity": "Sweeping slowly",
+    "n_windows": 100,
+    "median_window_mean_acc_m_s2_xyz": [
+     1.89,
+     -7.7,
+     1.35
+    ]
+   },
+   {
+    "activity": "Typing on a computer while seated",
+    "n_windows": 100,
+    "median_window_mean_acc_m_s2_xyz": [
+     -1.01,
+     -4.44,
+     8.6
+    ]
+   },
+   {
+    "activity": "Walking 2 mph on treadmill",
+    "n_windows": 96,
+    "median_window_mean_acc_m_s2_xyz": [
+     8.76,
+     -3.85,
+     0.11
+    ]
+   },
+   {
+    "activity": "Walking 3.5 mph on treadmill",
+    "n_windows": 96,
+    "median_window_mean_acc_m_s2_xyz": [
+     8.71,
+     -3.97,
+     0.0
+    ]
+   },
+   {
+    "activity": "Lying down while doing nothing",
+    "n_windows": 92,
+    "median_window_mean_acc_m_s2_xyz": [
+     -6.65,
+     -0.96,
+     6.12
+    ]
+   },
+   {
+    "activity": "General aerobics video",
+    "n_windows": 88,
+    "median_window_mean_acc_m_s2_xyz": [
+     3.87,
+     -4.97,
+     0.87
+    ]
+   },
+   {
+    "activity": "Running 4 mph on a treadmill",
+    "n_windows": 73,
+    "median_window_mean_acc_m_s2_xyz": [
+     9.12,
+     -3.79,
+     -0.56
+    ]
+   },
+   {
+    "activity": "Squats (shoulder length legs, get down to 90 degree angle)",
+    "n_windows": 69,
+    "median_window_mean_acc_m_s2_xyz": [
+     7.34,
+     -3.56,
+     2.15
+    ]
+   },
+   {
+    "activity": "Chester Step Test (0.25 m step at a rate of 30 steps per minute)",
+    "n_windows": 60,
+    "median_window_mean_acc_m_s2_xyz": [
+     8.89,
+     -2.61,
+     -0.07
+    ]
+   },
+   {
+    "activity": "Push-ups against the wall",
+    "n_windows": 54,
+    "median_window_mean_acc_m_s2_xyz": [
+     -2.24,
+     -2.58,
+     8.07
+    ]
+   },
+   {
+    "activity": "Standing while fidgeting",
+    "n_windows": 52,
+    "median_window_mean_acc_m_s2_xyz": [
+     8.47,
+     -2.84,
+     1.29
+    ]
+   }
+  ]
+ },
+ "limitations": [
+  "The published accuracy is NOT reproduced. Under genuine leave-one-participant-out validation the retrained model has an overall 60 s RMSE of 0.765 MET (paper: 0.281); sedentary / light / moderate-vigorous 0.317 / 1.274 / 1.364 (paper: 0.268 / 0.307 / 0.310). On windows that really are non-sedentary the random forest reaches 1.31 MET RMSE for unseen people against 1.50 for predicting the training mean (explained variance about 24%); even knowing the activity leaves 0.80. The published LOSO loop in in-lab.py fits the classifier on all participants and calls a regression() helper that is not in the public repository, so the paper's figures could not be traced to code (see loso.w60_leakage_diagnostics for what leaking the held-out participant does).",
+  "Under LOSO the retrained classifier separates sedentary from non-sedentary windows well (accuracy 0.973; sedentary-positive precision / recall / F1 0.985 / 0.975 / 0.980 against 0.952 / 0.628 / 0.758 in the paper). Alternative label and metric definitions that were tried did not reproduce the paper's lower recall.",
+  "26 participants with obesity (BMI 30.54-46.23, age 25-64), scripted lab activities, a Fossil Sport Gen 4 watch on the dominant wrist. Younger or leaner people, free-living behaviour and non-dominant-wrist wear are outside the training distribution (ood_demographic / ood_signal quantify this).",
+  "The WHOOP strap's axes are assumed to equal the training watch's axes (AxisMap identity). The training frame was measured (frame_reference): with the arm hanging, the window-mean accelerometer vector is ~(+8.8, -3.9, 0) m/s^2, i.e. +x runs along the forearm towards the elbow. A wrong mapping is only partly detectable (ood.stress_tests_on_training_windows).",
+  "The regression stage is fit on the non-sedentary windows of the training participants only; the random forest cannot extrapolate beyond the MET values it saw (largest measured window MET in the training data: 7.6).",
+  "Not a medical device; research use only."
+ ],
+ "reproduce": "python scripts/build_wristmet.py --research-dir <dir with zenodo/Phase_2_Data.zip> (see the script's --help)",
+ "loso": {
+  "w60_primary": {
+   "n_windows": 2186,
+   "rmse_overall": 0.7646,
+   "rmse_sedentary": 0.3165,
+   "rmse_light": 1.2745,
+   "rmse_mod_vig": 1.3637,
+   "rmse_per_participant_mean": 0.7093,
+   "rmse_per_participant_sd": 0.253,
+   "classifier_sedentary_positive": {
+    "precision": 0.9852,
+    "recall": 0.9753,
+    "f1": 0.9802
+   },
+   "classifier_nonsedentary_positive": {
+    "precision": 0.9474,
+    "recall": 0.968,
+    "f1": 0.9576
+   },
+   "classifier_accuracy": 0.973,
+   "class_counts": {
+    "sedentary": 1557,
+    "light": 203,
+    "mod_vig": 426
+   },
+   "baselines": {
+    "predict_1.0_everywhere": 1.5894,
+    "classifier_then_constant_nonsedentary_mean": 0.8908,
+    "oracle_labels_then_constant_nonsedentary_mean": 0.8481,
+    "oracle_labels_then_activity_mean_loso": 0.461,
+    "classifier_then_published_rf_loso": 0.7646,
+    "nonsedentary_windows_n": 688,
+    "nonsedentary_sd_of_target": 1.4865,
+    "nonsedentary_rmse_constant_mean": 1.5009,
+    "nonsedentary_rmse_activity_mean_oracle": 0.8015
+   }
+  },
+  "w60_seed_variation": {
+   "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+   ],
+   "rmse_overall": [
+    0.7646,
+    0.7624,
+    0.7615,
+    0.7588,
+    0.7641
+   ],
+   "mean": 0.7623,
+   "sd": 0.0023
+  },
+  "w60_leakage_diagnostics": {
+   "in_sample_classifier_and_regressor": {
+    "n_windows": 2186,
+    "rmse_overall": 0.2482,
+    "rmse_sedentary": 0.1523,
+    "rmse_light": 0.4551,
+    "rmse_mod_vig": 0.3641,
+    "rmse_per_participant_mean": 0.2165,
+    "rmse_per_participant_sd": 0.1074,
+    "classifier_sedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_accuracy": 1.0,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "published_loop_leaky_classifier_proper_regressor": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7412,
+    "rmse_sedentary": 0.2703,
+    "rmse_light": 1.2523,
+    "rmse_mod_vig": 1.3435,
+    "rmse_per_participant_mean": 0.6862,
+    "rmse_per_participant_sd": 0.2467,
+    "classifier_sedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_accuracy": 1.0,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "proper_classifier_leaky_regressor": {
+    "n_windows": 2186,
+    "rmse_overall": 0.3544,
+    "rmse_sedentary": 0.2875,
+    "rmse_light": 0.5205,
+    "rmse_mod_vig": 0.4617,
+    "rmse_per_participant_mean": 0.2896,
+    "rmse_per_participant_sd": 0.1872,
+    "classifier_sedentary_positive": {
+     "precision": 0.9852,
+     "recall": 0.9753,
+     "f1": 0.9802
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9474,
+     "recall": 0.968,
+     "f1": 0.9576
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   }
+  },
+  "w60_ablation_demographics_free": {
+   "two_intensity_features": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7979,
+    "rmse_sedentary": 0.3512,
+    "rmse_light": 1.3527,
+    "rmse_mod_vig": 1.3943,
+    "rmse_per_participant_mean": 0.7353,
+    "rmse_per_participant_sd": 0.2685,
+    "classifier_sedentary_positive": {
+     "precision": 0.9852,
+     "recall": 0.9753,
+     "f1": 0.9802
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9474,
+     "recall": 0.968,
+     "f1": 0.9576
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "nine_features": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7646,
+    "rmse_sedentary": 0.3165,
+    "rmse_light": 1.2745,
+    "rmse_mod_vig": 1.3637,
+    "rmse_per_participant_mean": 0.7093,
+    "rmse_per_participant_sd": 0.253,
+    "classifier_sedentary_positive": {
+     "precision": 0.9852,
+     "recall": 0.9753,
+     "f1": 0.9802
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9474,
+     "recall": 0.968,
+     "f1": 0.9576
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    },
+    "baselines": {
+     "predict_1.0_everywhere": 1.5894,
+     "classifier_then_constant_nonsedentary_mean": 0.8908,
+     "oracle_labels_then_constant_nonsedentary_mean": 0.8481,
+     "oracle_labels_then_activity_mean_loso": 0.461,
+     "classifier_then_published_rf_loso": 0.7646,
+     "nonsedentary_windows_n": 688,
+     "nonsedentary_sd_of_target": 1.4865,
+     "nonsedentary_rmse_constant_mean": 1.5009,
+     "nonsedentary_rmse_activity_mean_oracle": 0.8015
+    },
+    "per_participant_rmse": {
+     "P1000": 0.4615,
+     "P1002": 0.5649,
+     "P1003": 0.4729,
+     "P1004": 1.0193,
+     "P1005": 0.6562,
+     "P1006": 0.7624,
+     "P1007": 0.5181,
+     "P1008": 0.6352,
+     "P1009": 0.6224,
+     "P1010": 0.6236,
+     "P1011": 0.8323,
+     "P1012": 0.5748,
+     "P1013": 0.6004,
+     "P1014": 0.8616,
+     "P1015": 0.9912,
+     "P1016": 0.4038,
+     "P1017": 0.4812,
+     "P1018": 0.7877,
+     "P1019": 1.2403,
+     "P1020": 1.1555,
+     "P1021": 0.6944,
+     "P1022": 0.3771,
+     "P1023": 0.7303,
+     "P1024": 0.4115,
+     "P1025": 1.2773,
+     "P1026": 0.6855
+    }
+   },
+   "regressor_only_rmse_on_nonsedentary_windows": {
+    "two_intensity_features": 1.355,
+    "nine_features": 1.3088
+   }
+  },
+  "w60_sensitivity": {
+   "mirroring_off": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7579,
+    "rmse_sedentary": 0.293,
+    "rmse_light": 1.2779,
+    "rmse_mod_vig": 1.3623,
+    "rmse_per_participant_mean": 0.7007,
+    "rmse_per_participant_sd": 0.2557,
+    "classifier_sedentary_positive": {
+     "precision": 0.9819,
+     "recall": 0.9786,
+     "f1": 0.9803
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9538,
+     "recall": 0.9608,
+     "f1": 0.9573
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "demographics_agd_heights": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7622,
+    "rmse_sedentary": 0.3243,
+    "rmse_light": 1.2956,
+    "rmse_mod_vig": 1.3405,
+    "rmse_per_participant_mean": 0.709,
+    "rmse_per_participant_sd": 0.2476,
+    "classifier_sedentary_positive": {
+     "precision": 0.9852,
+     "recall": 0.9753,
+     "f1": 0.9802
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9474,
+     "recall": 0.968,
+     "f1": 0.9576
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "demographics_upstream_notebook_ages": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7721,
+    "rmse_sedentary": 0.3202,
+    "rmse_light": 1.2822,
+    "rmse_mod_vig": 1.3786,
+    "rmse_per_participant_mean": 0.7135,
+    "rmse_per_participant_sd": 0.2616,
+    "classifier_sedentary_positive": {
+     "precision": 0.9852,
+     "recall": 0.9753,
+     "f1": 0.9802
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9474,
+     "recall": 0.968,
+     "f1": 0.9576
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "age_plus_2_years": {
+    "n_windows": 2186,
+    "rmse_overall": 0.7629,
+    "rmse_sedentary": 0.3147,
+    "rmse_light": 1.2672,
+    "rmse_mod_vig": 1.3637,
+    "rmse_per_participant_mean": 0.7065,
+    "rmse_per_participant_sd": 0.2538,
+    "classifier_sedentary_positive": {
+     "precision": 0.9852,
+     "recall": 0.9753,
+     "f1": 0.9802
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9474,
+     "recall": 0.968,
+     "f1": 0.9576
+    },
+    "classifier_accuracy": 0.973,
+    "class_counts": {
+     "sedentary": 1557,
+     "light": 203,
+     "mod_vig": 426
+    }
+   },
+   "n_windows_with_gap_over_500ms": 167,
+   "exclude_gap_windows_train_and_test": {
+    "n_windows": 2019,
+    "rmse_overall": 0.7393,
+    "rmse_sedentary": 0.3197,
+    "rmse_light": 1.3192,
+    "rmse_mod_vig": 1.2709,
+    "rmse_per_participant_mean": 0.7218,
+    "rmse_per_participant_sd": 0.2896,
+    "classifier_sedentary_positive": {
+     "precision": 0.9891,
+     "recall": 0.9841,
+     "f1": 0.9866
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9656,
+     "recall": 0.9763,
+     "f1": 0.9709
+    },
+    "classifier_accuracy": 0.9817,
+    "class_counts": {
+     "sedentary": 1441,
+     "light": 182,
+     "mod_vig": 396
+    }
+   },
+   "faithful_training_evaluated_on_clean_windows": {
+    "n_windows": 2019,
+    "rmse_overall": 0.7309,
+    "rmse_sedentary": 0.3097,
+    "rmse_light": 1.3103,
+    "rmse_mod_vig": 1.2593,
+    "rmse_per_participant_mean": 0.7173,
+    "rmse_per_participant_sd": 0.2882,
+    "classifier_sedentary_positive": {
+     "precision": 0.9891,
+     "recall": 0.9834,
+     "f1": 0.9863
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9641,
+     "recall": 0.9763,
+     "f1": 0.9702
+    },
+    "classifier_accuracy": 0.9812,
+    "class_counts": {
+     "sedentary": 1441,
+     "light": 182,
+     "mod_vig": 396
+    }
+   },
+   "faithful_training_evaluated_on_gap_windows": {
+    "n_windows": 167,
+    "rmse_overall": 1.0923,
+    "rmse_sedentary": 0.3914,
+    "rmse_light": 0.9072,
+    "rmse_mod_vig": 2.3394,
+    "rmse_per_participant_mean": 0.4313,
+    "rmse_per_participant_sd": 0.593,
+    "classifier_sedentary_positive": {
+     "precision": 0.9333,
+     "recall": 0.875,
+     "f1": 0.9032
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.7742,
+     "recall": 0.8727,
+     "f1": 0.8205
+    },
+    "classifier_accuracy": 0.8743,
+    "class_counts": {
+     "sedentary": 116,
+     "light": 21,
+     "mod_vig": 30
+    }
+   },
+   "skip_first_two_windows_per_segment": {
+    "n_windows": 1636,
+    "rmse_overall": 0.7636,
+    "rmse_sedentary": 0.3174,
+    "rmse_light": 1.3626,
+    "rmse_mod_vig": 1.3433,
+    "rmse_per_participant_mean": 0.7122,
+    "rmse_per_participant_sd": 0.2476,
+    "classifier_sedentary_positive": {
+     "precision": 0.9848,
+     "recall": 0.9786,
+     "f1": 0.9817
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9538,
+     "recall": 0.9668,
+     "f1": 0.9602
+    },
+    "classifier_accuracy": 0.9749,
+    "class_counts": {
+     "sedentary": 1177,
+     "light": 136,
+     "mod_vig": 323
+    }
+   }
+  },
+  "w15_primary": {
+   "n_windows": 7097,
+   "rmse_overall": 0.8394,
+   "rmse_sedentary": 0.33,
+   "rmse_light": 1.3723,
+   "rmse_mod_vig": 1.5244,
+   "rmse_per_participant_mean": 0.7687,
+   "rmse_per_participant_sd": 0.2959,
+   "classifier_sedentary_positive": {
+    "precision": 0.9808,
+    "recall": 0.9852,
+    "f1": 0.983
+   },
+   "classifier_nonsedentary_positive": {
+    "precision": 0.9674,
+    "recall": 0.9579,
+    "f1": 0.9626
+   },
+   "classifier_accuracy": 0.9766,
+   "class_counts": {
+    "sedentary": 5057,
+    "light": 659,
+    "mod_vig": 1381
+   },
+   "baselines": {
+    "predict_1.0_everywhere": 1.6163,
+    "classifier_then_constant_nonsedentary_mean": 0.8895,
+    "oracle_labels_then_constant_nonsedentary_mean": 0.8676,
+    "oracle_labels_then_activity_mean_loso": 0.4759,
+    "classifier_then_published_rf_loso": 0.8394,
+    "nonsedentary_windows_n": 2233,
+    "nonsedentary_sd_of_target": 1.5207,
+    "nonsedentary_rmse_constant_mean": 1.5352,
+    "nonsedentary_rmse_activity_mean_oracle": 0.8272
+   }
+  },
+  "w15_leakage_diagnostics": {
+   "in_sample_classifier_and_regressor": {
+    "n_windows": 7097,
+    "rmse_overall": 0.249,
+    "rmse_sedentary": 0.1522,
+    "rmse_light": 0.4634,
+    "rmse_mod_vig": 0.3624,
+    "rmse_per_participant_mean": 0.2179,
+    "rmse_per_participant_sd": 0.1073,
+    "classifier_sedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_accuracy": 1.0,
+    "class_counts": {
+     "sedentary": 5057,
+     "light": 659,
+     "mod_vig": 1381
+    }
+   },
+   "published_loop_leaky_classifier_proper_regressor": {
+    "n_windows": 7097,
+    "rmse_overall": 0.8094,
+    "rmse_sedentary": 0.2762,
+    "rmse_light": 1.353,
+    "rmse_mod_vig": 1.4879,
+    "rmse_per_participant_mean": 0.7462,
+    "rmse_per_participant_sd": 0.2724,
+    "classifier_sedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0
+    },
+    "classifier_accuracy": 1.0,
+    "class_counts": {
+     "sedentary": 5057,
+     "light": 659,
+     "mod_vig": 1381
+    }
+   },
+   "proper_classifier_leaky_regressor": {
+    "n_windows": 7097,
+    "rmse_overall": 0.3957,
+    "rmse_sedentary": 0.2953,
+    "rmse_light": 0.5513,
+    "rmse_mod_vig": 0.5834,
+    "rmse_per_participant_mean": 0.3137,
+    "rmse_per_participant_sd": 0.2205,
+    "classifier_sedentary_positive": {
+     "precision": 0.9808,
+     "recall": 0.9852,
+     "f1": 0.983
+    },
+    "classifier_nonsedentary_positive": {
+     "precision": 0.9674,
+     "recall": 0.9579,
+     "f1": 0.9626
+    },
+    "classifier_accuracy": 0.9766,
+    "class_counts": {
+     "sedentary": 5057,
+     "light": 659,
+     "mod_vig": 1381
+    }
+   }
+  },
+  "w15_ablation_demographics_free": {
+   "n_windows": 7097,
+   "rmse_overall": 0.8487,
+   "rmse_sedentary": 0.345,
+   "rmse_light": 1.4625,
+   "rmse_mod_vig": 1.4985,
+   "rmse_per_participant_mean": 0.79,
+   "rmse_per_participant_sd": 0.2625,
+   "classifier_sedentary_positive": {
+    "precision": 0.9808,
+    "recall": 0.9852,
+    "f1": 0.983
+   },
+   "classifier_nonsedentary_positive": {
+    "precision": 0.9674,
+    "recall": 0.9579,
+    "f1": 0.9626
+   },
+   "classifier_accuracy": 0.9766,
+   "class_counts": {
+    "sedentary": 5057,
+    "light": 659,
+    "mod_vig": 1381
+   }
+  },
+  "paper": {
+   "60s": {
+    "rmse_overall": 0.281,
+    "rmse_sedentary": 0.268,
+    "rmse_light": 0.307,
+    "rmse_mod_vig": 0.31,
+    "classifier_sedentary_positive": {
+     "precision": 0.952,
+     "recall": 0.628,
+     "f1": 0.758
+    }
+   },
+   "15s": {
+    "rmse_overall": 0.326
+   },
+   "10s": {
+    "rmse_overall": 0.316
+   }
+  },
+  "paper_comparison": {
+   "60s_rmse_overall": {
+    "paper": 0.281,
+    "ours_loso": 0.7646,
+    "ours_published_loop_leaky_classifier": 0.7412,
+    "ours_in_sample_not_a_valid_estimate": 0.2482
+   },
+   "60s_rmse_sedentary": {
+    "paper": 0.268,
+    "ours_loso": 0.3165,
+    "ours_published_loop_leaky_classifier": 0.2703,
+    "ours_in_sample_not_a_valid_estimate": 0.1523
+   },
+   "60s_rmse_light": {
+    "paper": 0.307,
+    "ours_loso": 1.2745,
+    "ours_published_loop_leaky_classifier": 1.2523,
+    "ours_in_sample_not_a_valid_estimate": 0.4551
+   },
+   "60s_rmse_mod_vig": {
+    "paper": 0.31,
+    "ours_loso": 1.3637,
+    "ours_published_loop_leaky_classifier": 1.3435,
+    "ours_in_sample_not_a_valid_estimate": 0.3641
+   },
+   "60s_classifier_sedentary_positive_precision": {
+    "paper": 0.952,
+    "ours_loso": 0.9852,
+    "ours_published_loop_leaky_classifier": 1.0
+   },
+   "60s_classifier_sedentary_positive_recall": {
+    "paper": 0.628,
+    "ours_loso": 0.9753,
+    "ours_published_loop_leaky_classifier": 1.0
+   },
+   "60s_classifier_sedentary_positive_f1": {
+    "paper": 0.758,
+    "ours_loso": 0.9802,
+    "ours_published_loop_leaky_classifier": 1.0
+   },
+   "15s_rmse_overall": {
+    "paper": 0.326,
+    "ours_loso": 0.8394,
+    "ours_published_loop_leaky_classifier": 0.8094,
+    "ours_in_sample_not_a_valid_estimate": 0.249
+   },
+   "10s_rmse_overall": {
+    "paper": 0.316,
+    "ours_loso": null,
+    "note": "10 s windows not evaluated"
+   }
+  }
+ }
+}

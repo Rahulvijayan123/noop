@@ -148,6 +148,7 @@ struct LiquidTodayView: View {
     /// the other caches. It composes `TodayView.lastScoredRecoveryDay`, which is O(days) — exactly the scan
     /// this cache exists to keep out of body. Never resolved in body.
     @State private var cachedChargeDisplay: ChargeDisplay = .noData
+    @State private var cachedBaselineNights: (hrv: [Double?], dayKeys: [String]) = ([], [])
     /// Flips true once the first load() completes. Until then the hero gauges + sky render STATIC so the
     /// launch data-churn (refresh publish + BLE/HR notifies) isn't fighting 4 live canvases + CoreMotion.
     @State private var dataLoaded = false
@@ -702,101 +703,6 @@ struct LiquidTodayView: View {
                                            value: geometry.frame(in: .named(Self.daySwipeSpace)))
                 }
             }
-            medicationWatchdogRow
-        }
-    }
-
-    // MARK: - Medication + Watchdog (demo content until the real data lands)
-
-    private var medicationWatchdogRow: some View {
-        HStack(spacing: 12) {
-            NavigationLink(value: TabRoute.medication) { medicationCard }
-                .buttonStyle(LiquidPressStyle())
-            NavigationLink(value: TabRoute.watchdog) { watchdogCard }
-                .buttonStyle(LiquidPressStyle())
-        }
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func miniCard<V: View>(icon: String, title: LocalizedStringKey, @ViewBuilder _ content: () -> V) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(liquidHeart)
-                Text(title)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            content()
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(NoopPanelSurface(cornerRadius: 22, surfaceOpacity: cardOpacity))
-    }
-
-    private var medicationCard: some View {
-        miniCard(icon: "pills.fill", title: "Next medication") {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Methotrexate")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(1).minimumScaleFactor(0.7)
-                Text("9:00 PM")
-                    .font(StrandFont.rounded(24))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("2.5 mg • 1 tablet")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: 6) {
-                medicationPill("checkmark", "Taken", filled: true)
-                medicationPill("clock", "Snooze", filled: false)
-            }
-        }
-    }
-
-    private func medicationPill(_ icon: String, _ title: LocalizedStringKey, filled: Bool) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: icon).font(.system(size: 10, weight: .bold))
-            Text(title).font(StrandFont.caption).lineLimit(1).minimumScaleFactor(0.7)
-        }
-        .foregroundStyle(filled ? StrandPalette.textPrimary : StrandPalette.textSecondary)
-        .frame(maxWidth: .infinity, minHeight: 30)
-        .background(Capsule().fill(filled ? liquidHeart.opacity(0.35) : Color.clear))
-        .overlay(Capsule().strokeBorder(filled ? Color.clear : StrandPalette.hairlineStrong,
-                                        lineWidth: NoopMetrics.hairlineWidth))
-    }
-
-    private var watchdogCard: some View {
-        miniCard(icon: "eye.fill", title: "Watchdog alerts") {
-            VStack(alignment: .leading, spacing: 8) {
-                watchdogRow(StrandPalette.statusPositive, "10:14 AM", "Medication taken")
-                watchdogRow(StrandPalette.statusWarning, "1:32 PM", "Fatigue episode")
-                watchdogRow(liquidHeart, "3:48 PM", "HR above usual")
-                watchdogRow(StrandPalette.metricPurple, "7:21 PM", "Symptom noted")
-            }
-            Spacer(minLength: 0)
-            HStack(spacing: 3) {
-                Text("See all alerts").font(StrandFont.caption)
-                Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold))
-            }
-            .foregroundStyle(StrandPalette.textSecondary)
-        }
-    }
-
-    private func watchdogRow(_ dot: Color, _ time: String, _ text: LocalizedStringKey) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(dot).frame(width: 6, height: 6)
-            (Text(time).foregroundColor(StrandPalette.textTertiary) + Text("  ") + Text(text).foregroundColor(StrandPalette.textPrimary))
-                .font(.system(size: 11))
-                .lineLimit(1).minimumScaleFactor(0.7)
         }
     }
 
@@ -1249,7 +1155,7 @@ struct LiquidTodayView: View {
                         // The reason the count is not moving, when nights are arriving empty. Sits under
                         // the progress rather than replacing it: the wearer needs both the number and why.
                         if let why = chargeDisplay.calibrationReason(
-                            dayKeys: repo.days.map(\.day), nightlyHrv: repo.days.map(\.avgHrv),
+                            dayKeys: cachedBaselineNights.dayKeys, nightlyHrv: cachedBaselineNights.hrv,
                             today: Repository.logicalDayKey(Date())) {
                             Text(why).font(StrandFont.caption)
                                 .foregroundStyle(StrandPalette.textSecondary)
@@ -1672,9 +1578,11 @@ struct LiquidTodayView: View {
         // selector below scans repo.days. Calibration nights come from the SAME `RecoveryScorer` helper the
         // classic Today reads, so the two screens agree on when a wearer is genuinely mid-calibration
         // rather than simply lacking a scored night.
+        let baselineNights = Self.baselineNightlyHrv(days: repo.days, sleeps: repo.sleeps)
+        cachedBaselineNights = baselineNights
         let calNights = (selectedDayOffset == 0)
-            ? RecoveryScorer.calibrationNights(nightlyHrv: repo.days.map(\.avgHrv),
-                                               dayKeys: repo.days.map(\.day),
+            ? RecoveryScorer.calibrationNights(nightlyHrv: baselineNights.hrv,
+                                               dayKeys: baselineNights.dayKeys,
                                                hasRecovery: day?.recovery != nil)
             : nil
         let priorScored = TodayView.lastScoredRecoveryDay(
@@ -2398,9 +2306,6 @@ private struct LiquidLiveHR: View {
     @EnvironmentObject private var live: LiveState
     @State private var samples: [Double] = []
     @State private var scrubX: CGFloat?
-    #if os(iOS)
-    @State private var scrubEngaged = false
-    #endif
     private let maxSamples = 90   // ~1.5 min of 1 Hz live HR, enough to read the shape
     private let chartHeight: CGFloat = 160
 
@@ -2453,9 +2358,6 @@ private struct LiquidLiveHR: View {
                             }
                         }
                     }
-                    #if os(iOS)
-                    .gesture(touchScrubGesture)
-                    #endif
             } else {
                 Text(live.connected
                      ? String(localized: "Waiting for a live heartbeat…")
@@ -2576,31 +2478,6 @@ private struct LiquidLiveHR: View {
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
-
-    #if os(iOS)
-    private var touchScrubGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
-            .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
-                if !scrubEngaged {
-                    scrubEngaged = true
-                    StrandHaptic.selection.play()
-                }
-                if let drag {
-                    var transaction = Transaction()
-                    transaction.disablesAnimations = true
-                    withTransaction(transaction) { scrubX = drag.location.x }
-                }
-            }
-            .onEnded { _ in
-                scrubEngaged = false
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) { scrubX = nil }
-            }
-    }
-    #endif
 }
 
 /// Plot geometry for the heart-rate chart: left gutter for y labels, bottom gutter for x labels, and a
@@ -2817,6 +2694,28 @@ extension LiquidTodayView {
             guard let pct = batteryPct else { return .pending(charging: charging == true) }
             return .charge(pct: pct, charging: charging == true, isRing: false)
         }
+    }
+
+    /// Per-night HRV for the "N of 4 nights" baseline count. The scored daily rows alone under-count: a night
+    /// whose sleep session was banked (with its HRV) but whose daily row is still an unscored stub reads as
+    /// "no HRV", so the card said "Learning, 3 of 4" while the scorer had four usable nights. Banked sessions
+    /// fill only the days whose row carries no HRV, so a scored row always wins.
+    static func baselineNightlyHrv(days: [DailyMetric],
+                                   sleeps: [CachedSleepSession]) -> (hrv: [Double?], dayKeys: [String]) {
+        var byDay: [String: Double] = [:]
+        var keys = Set(days.map(\.day))
+        for d in days { if let h = d.avgHrv, h > 0 { byDay[d.day] = h } }
+        var longest: [String: (len: Int, hrv: Double)] = [:]
+        for s in sleeps {
+            guard let h = s.avgHrv, h > 0 else { continue }
+            let key = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(s.endTs)))
+            keys.insert(key)
+            let len = s.endTs - s.startTs
+            if len > (longest[key]?.len ?? 0) { longest[key] = (len, h) }
+        }
+        for (key, entry) in longest where byDay[key] == nil { byDay[key] = entry.hrv }
+        let ordered = keys.sorted()
+        return (ordered.map { byDay[$0] }, ordered)
     }
 
     /// What the Charge hero can honestly say for the selected day. Pure + static so the truth table is

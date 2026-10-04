@@ -1,0 +1,27 @@
+# Exact pins of the environment that built artifacts/wristmet/wristmet-v1.json.gz (CPython 3.11.13, macOS arm64).
+# Build-time only: inference (energy_models.wristmet.model) needs numpy==2.2.6 and nothing else.
+# Install into a virtual environment OUTSIDE the repository, e.g.
+#   python3.11 -m venv "$WRISTMET_RESEARCH_DIR/venv-wristmet"
+#   "$WRISTMET_RESEARCH_DIR/venv-wristmet/bin/pip" install -r requirements-wristmet-build.txt
+#   "$WRISTMET_RESEARCH_DIR/venv-wristmet/bin/python" scripts/build_wristmet.py --research-dir "$WRISTMET_RESEARCH_DIR"
+numpy==2.2.6
+pandas==2.3.3
+scikit-learn==1.9.1
+xgboost==3.2.0
+scipy==1.17.1
+openpyxl==3.1.5
+joblib==1.6.0
+threadpoolctl==3.7.0
+python-dateutil==2.9.0.post0
+pytz==2026.4
+tzdata==2026.5
+six==1.17.0
+et_xmlfile==2.0.0
+cloudpickle==3.1.2
+narwhals==2.26.0
+# tests
+pytest==9.1.1
+pluggy==1.6.0
+iniconfig==2.3.0
+packaging==26.3
+Pygments==2.21.0

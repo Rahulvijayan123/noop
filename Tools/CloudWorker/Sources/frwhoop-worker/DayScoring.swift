@@ -369,6 +369,12 @@ struct DayScorer {
             return (legacy, snapshot, nil)
         }
 
+        // The activity lane's epochs for this day, read once: the energy model takes them as context (it never
+        // reclassifies activity) and the snapshot's activity document is built from the same rows below.
+        let publishedActivity = Self.readPublishedActivityEpochs(
+            db: db, userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+            dayStart: dayStart, dayEnd: dayEnd)
+
         let result = AnalyticsEngine.analyzeDay(
             day: claim.day,
             hr: hr, rr: rr, resp: resp, gravity: gravity,
@@ -380,7 +386,10 @@ struct DayScorer {
             // Offset on the CLAIMED day (DST-correct), not the offset "now".
             tzOffsetSeconds: tz.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(dayStart))),
             wristOff: wristOff,
-            bandSleepState: sleepState
+            bandSleepState: sleepState,
+            activityEpochs: publishedActivity.epochs,
+            // A day still in progress counts resting energy only up to now; a finished day is unaffected.
+            energyAsOf: now
         )
 
         let status = Self.classifyStatus(hrCount: hr.count, rrCount: rr.count, respCount: resp.count,
@@ -403,7 +412,8 @@ struct DayScorer {
                                    userId: claim.userId, deviceId: claim.deviceId,
                                    day: claim.day,
                                    dayStart: dayStart, dayEnd: dayEnd,
-                                   hrvSlotStarts: Self.hrvSlotStarts(fromPoints: slots))
+                                   hrvSlotStarts: Self.hrvSlotStarts(fromPoints: slots),
+                                   published: publishedActivity)
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
@@ -458,7 +468,7 @@ struct DayScorer {
             // The night-window streams run past the day on both sides; the builder keeps `[dayStart, dayEnd)`.
             let built = IntradaySeries.build(IntradaySeries.Inputs(
                 dayStart: dayStart, dayEnd: dayEnd, hr: dayHr, rr: rr, gravity: dayGravity, steps: daySteps,
-                profile: profile, restingHR: result.daily.restingHr))
+                profile: profile, restingHR: result.daily.restingHr, energy: result.energy))
             series = IntradaySeries.payload(dayStart: dayStart, dayEnd: dayEnd, series: built)
         }
         return (legacy, snapshot, series)
@@ -545,6 +555,7 @@ struct DayScorer {
         if let v = d.steps { daily["steps"] = v }
         if let v = d.exerciseCount { daily["exerciseCount"] = v }
         if let v = d.activeKcalEst { daily["activeKcalEst"] = v }
+        if let energy = result.energy { daily["energy"] = Self.energyJSON(energy) }
         if let v = d.spo2Red { daily["spo2Red"] = v }
         if let v = d.spo2Ir { daily["spo2Ir"] = v }
         if let v = d.sleepHrOnly { daily["sleepHrOnly"] = v }
@@ -554,26 +565,63 @@ struct DayScorer {
         return daily
     }
 
-    /// Attach the C10 `activity_context` document to the snapshot `daily`
-    /// object by reading the day's latest published activity epochs
-    /// (`activity_context_epochs`) plus the day's sleep sessions
-    /// (`public.sessions` kind='sleep') and rebuilding the compact document
-    /// with the SHARED StrandAnalytics policy/join
-    /// (`ActivityLane.activityDocument`) — the same fold the app and the
-    /// activity lane use, so the scoring snapshot and the live lane never
-    /// diverge (docs/ARCHITECTURE.md §4).
-    ///
-    /// Fail-safe by contract: any read/build error leaves the key ABSENT and
-    /// only logs, so the scoring lane never depends on the activity lane
-    /// (missing/partial activity never fails scoring). Scoring runs these reads
-    /// inside its fenced transaction, where a failed statement would abort the
-    /// whole transaction, so each read runs under a savepoint.
-    static func attachActivityContext(to daily: inout [String: Any],
-                                      db: PostgresClient,
-                                      userId: String, deviceId: String,
-                                      day: String,
-                                      dayStart: Int, dayEnd: Int,
-                                      hrvSlotStarts: Set<Int>? = nil) {
+    /// The snapshot's `energy` object: the day's resting / active split and what stands behind it. Compact on
+    /// purpose — the per-minute timeline reaches consumers through the calories series, not the snapshot.
+    /// Free-form jsonb alongside `activeKcalEst` (which equals `total_kcal`), so older readers are unaffected.
+    static func energyJSON(_ e: DayEnergy) -> [String: Any] {
+        func rounded(_ value: Double, _ places: Int = 2) -> Double {
+            let scale = pow(10.0, Double(places))
+            return (value * scale).rounded() / scale
+        }
+        var out: [String: Any] = [
+            "model_version": e.modelVersion,
+            "feature_version": e.featureVersion,
+            "rmr_kcal_day": rounded(e.rmrKcalPerDay, 1),
+            "rmr_source": e.rmrSource.rawValue,
+            "resting_kcal": rounded(e.restingKcal),
+            "resting_gap_kcal": rounded(e.restingGapKcal),
+            "active_kcal": rounded(e.activeKcal),
+            "workout_kcal": rounded(e.workoutKcal),
+            "total_kcal": rounded(e.totalKcal),
+            "sleep_min": e.sleepMinutes,
+            "sedentary_min": e.sedentaryMinutes,
+            "light_min": e.lightMinutes,
+            "moderate_min": e.moderateMinutes,
+            "high_min": e.highMinutes,
+            "expected_min": e.expectedMinutes,
+            "coverage_min": e.coverageMinutes,
+            "gap_min": e.gapMinutes,
+            "confidence": rounded(e.confidence, 3),
+            "evidence_min": e.evidenceMinutes,
+            "workouts": e.workouts.map { w -> [String: Any] in
+                var item: [String: Any] = ["start": w.start, "end": w.end, "active_kcal": rounded(w.activeKcal),
+                                           "confidence": rounded(w.confidence, 3)]
+                if let met = w.averageMET { item["average_met"] = rounded(met, 2) }
+                return item
+            },
+        ]
+        if let v = e.projectedTotalKcal { out["projected_total_kcal"] = rounded(v) }
+        if let v = e.averageMET { out["average_met"] = rounded(v, 3) }
+        if let v = e.peakMET { out["peak_met"] = rounded(v, 2) }
+        return out
+    }
+
+    /// What the activity lane published for one day: the latest result revision's epochs and the model
+    /// provenance its `activity_context` document records. Read once per scoring pass and shared by the
+    /// energy model (which reads the epochs as context, never recomputes them) and the document attach.
+    struct PublishedActivityEpochs {
+        var epochs: [ActivityEpoch] = []
+        var modelVersion = ""
+        var preprocessingVersion = ""
+        var ontologyVersion = "v1"
+        var maxEnd: Int
+    }
+
+    /// The day's latest published activity epochs, or none when the lane has not run, the tables are
+    /// unreadable (the read runs under a savepoint, so a failure cannot abort the scoring transaction) or the
+    /// day has no epochs. Never throws: activity context is optional input to scoring.
+    static func readPublishedActivityEpochs(db: PostgresClient, userId: String, deviceId: String,
+                                            day: String, dayStart: Int, dayEnd: Int) -> PublishedActivityEpochs {
         let rows: [[String: String]]
         do {
             rows = try db.isolatingFailures { try db.query("""
@@ -598,22 +646,17 @@ struct DayScorer {
         } catch {
             FileHandle.standardError.write(
                 "day \(day): activity attach skipped (epoch read failed): \(error)\n".data(using: .utf8)!)
-            return
+            return PublishedActivityEpochs(maxEnd: dayStart)
         }
-        guard !rows.isEmpty else { return }  // absent key == old behavior
 
-        var epochs: [ActivityEpoch] = []
-        var modelVersion = ""
-        var preprocessingVersion = ""
-        var ontologyVersion = "v1"
-        var maxEnd = dayStart
+        var out = PublishedActivityEpochs(maxEnd: dayStart)
         for r in rows {
             guard let s = Int(r["start_ts"] ?? ""), let e = Int(r["end_ts"] ?? "") else { continue }
-            if let mv = r["model_version"], !mv.isEmpty { modelVersion = mv }
-            if let pv = r["preprocessing_version"], !pv.isEmpty { preprocessingVersion = pv }
-            if let ov = r["ontology_version"], !ov.isEmpty { ontologyVersion = ov }
-            maxEnd = max(maxEnd, e)
-            epochs.append(ActivityEpoch(
+            if let mv = r["model_version"], !mv.isEmpty { out.modelVersion = mv }
+            if let pv = r["preprocessing_version"], !pv.isEmpty { out.preprocessingVersion = pv }
+            if let ov = r["ontology_version"], !ov.isEmpty { out.ontologyVersion = ov }
+            out.maxEnd = max(out.maxEnd, e)
+            out.epochs.append(ActivityEpoch(
                 startTs: s, endTs: e,
                 motion: MotionLabel(rawValue: r["motion_label"] ?? "") ?? .unknown,
                 posture: PostureLabel(rawValue: r["posture"] ?? "") ?? .unknown,
@@ -625,7 +668,38 @@ struct DayScorer {
                 observedS: Int(r["observed_s"] ?? "") ?? 0,
                 validS: Int(r["valid_s"] ?? "") ?? 0))
         }
-        guard !epochs.isEmpty else { return }
+        return out
+    }
+
+    /// Attach the C10 `activity_context` document to the snapshot `daily`
+    /// object by reading the day's latest published activity epochs
+    /// (`activity_context_epochs`) plus the day's sleep sessions
+    /// (`public.sessions` kind='sleep') and rebuilding the compact document
+    /// with the SHARED StrandAnalytics policy/join
+    /// (`ActivityLane.activityDocument`) — the same fold the app and the
+    /// activity lane use, so the scoring snapshot and the live lane never
+    /// diverge (docs/ARCHITECTURE.md §4).
+    ///
+    /// Fail-safe by contract: any read/build error leaves the key ABSENT and
+    /// only logs, so the scoring lane never depends on the activity lane
+    /// (missing/partial activity never fails scoring). Scoring runs these reads
+    /// inside its fenced transaction, where a failed statement would abort the
+    /// whole transaction, so each read runs under a savepoint.
+    static func attachActivityContext(to daily: inout [String: Any],
+                                      db: PostgresClient,
+                                      userId: String, deviceId: String,
+                                      day: String,
+                                      dayStart: Int, dayEnd: Int,
+                                      hrvSlotStarts: Set<Int>? = nil,
+                                      published: PublishedActivityEpochs? = nil) {
+        let published = published ?? readPublishedActivityEpochs(
+            db: db, userId: userId, deviceId: deviceId, day: day, dayStart: dayStart, dayEnd: dayEnd)
+        let epochs = published.epochs
+        guard !epochs.isEmpty else { return }  // absent key == old behavior
+        let modelVersion = published.modelVersion
+        let preprocessingVersion = published.preprocessingVersion
+        let ontologyVersion = published.ontologyVersion
+        let maxEnd = published.maxEnd
 
         let inputRevision: Int64
         do {
@@ -916,8 +990,35 @@ struct DayScorer {
             weightKg: Double(r["w"] ?? "") ?? 70.0,
             heightCm: Double(r["h"] ?? "") ?? 170.0,
             age: age,
-            sex: sex
+            sex: sex,
+            measuredRmrKcalPerDay: loadMeasuredRmr(userId: userId)
         )
+    }
+
+    /// The wearer's measured resting metabolic rate (indirect calorimetry), kcal/day, from the active row of
+    /// `energy_user_calibration` (`params.measured_rmr_kcal_per_day`). Optional input: nil when the table,
+    /// the row or the key is missing or unreadable — the estimator then uses the population equation. The read
+    /// runs under a savepoint, so it can never abort scoring's transaction, and the estimator itself ignores
+    /// an implausible value (outside 800...5000 kcal/day).
+    private func loadMeasuredRmr(userId: String) -> Double? {
+        let rows: [[String: String]]
+        do {
+            rows = try db.isolatingFailures { try db.query("""
+                select params->>'measured_rmr_kcal_per_day' as rmr
+                from public.energy_user_calibration
+                where user_id = $1::uuid and status = 'active'
+                limit 1
+                """, [userId]) }
+        } catch {
+            return nil
+        }
+        return Self.parseMeasuredRmr(rows.first?["rmr"])
+    }
+
+    static func parseMeasuredRmr(_ raw: String?) -> Double? {
+        guard let raw, let value = Double(raw.trimmingCharacters(in: .whitespaces)),
+              value.isFinite, value >= 800, value <= 5000 else { return nil }
+        return value
     }
 
     /// Folds each metric's nightly history through the PRODUCTION baseline fold

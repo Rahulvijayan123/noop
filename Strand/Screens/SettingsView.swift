@@ -99,6 +99,8 @@ struct SettingsView: View {
             navRow("Height", heightValue) { heightEditor }
             SettingsDivider()
             navRow("Waist", waistValue) { waistEditor }
+            SettingsDivider()
+            navRow("Resting metabolic rate", rmrValue) { rmrEditor }
         }
     }
 
@@ -133,6 +135,54 @@ struct SettingsView: View {
         return unitSystem == .imperial
             ? "\(Int(UnitFormatter.cmToInches(profile.waistCm).rounded())) in"
             : "\(Int(profile.waistCm.rounded())) cm"
+    }
+
+    /// 0 = unset: a measured resting metabolic rate is optional, and the calorie estimate falls back to the
+    /// population equation without it.
+    private var rmrValue: String {
+        guard profile.measuredRmrKcalPerDay > 0 else { return String(localized: "Not set") }
+        return "\(Int(profile.measuredRmrKcalPerDay.rounded())) kcal/day"
+    }
+
+    private var rmrEditor: some View {
+        let set = profile.measuredRmrKcalPerDay > 0
+        let equation = MetabolicEstimator.resolveRMR(profile: UserProfile(
+            weightKg: profile.weightKg, heightCm: profile.heightCm, age: Double(profile.age), sex: profile.sex))
+        return SettingsEditPage("Resting metabolic rate",
+                                footnote: "Optional: your resting energy from a lab or metabolic-cart test, in kcal per day. It sets the resting part of your daily calories; without it Nara uses an equation (about \(Int(equation.kcalPerDay.rounded())) kcal/day for your profile).") {
+            FormRow(label: "Resting metabolic rate") {
+                HStack(spacing: NoopMetrics.space2) {
+                    HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
+                        Text(set ? "\(Int(profile.measuredRmrKcalPerDay.rounded()))" : String(localized: "Not set"))
+                            .font(StrandFont.bodyNumber)
+                            .foregroundStyle(set ? StrandPalette.textPrimary : StrandPalette.textTertiary)
+                            .frame(minWidth: NoopMetrics.formValueColumnWidth, alignment: .center)
+                        if set {
+                            Text("kcal/day")
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .fixedSize()
+                        }
+                    }
+                    .fixedSize()
+                    Stepper("Resting metabolic rate in kilocalories per day") {
+                        // From unset the first step lands on the equation's value, a sensible place to start.
+                        profile.measuredRmrKcalPerDay = min(4000, set
+                            ? profile.measuredRmrKcalPerDay + 10
+                            : (equation.kcalPerDay / 10).rounded() * 10)
+                    } onDecrement: {
+                        let next = profile.measuredRmrKcalPerDay - 10
+                        profile.measuredRmrKcalPerDay = next < 800 ? 0 : next
+                    }
+                    .labelsHidden()
+                    .accessibilityLabel(set
+                        ? "Resting metabolic rate, \(Int(profile.measuredRmrKcalPerDay.rounded())) kilocalories per day"
+                        : "Resting metabolic rate not set")
+                }
+                .fixedSize()
+            }
+            .padding(NoopMetrics.space4)
+        }
     }
 
     private var nameEditor: some View {

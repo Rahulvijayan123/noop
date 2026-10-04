@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+Package.resolved
+
+# Health data never lives in this repository. Bundles, exports and reports belong OUTSIDE the tree; these
+# patterns are a backstop in case one is written next to the code by mistake.
+days/
+data/
+*.bundle.json
+energy-bench-day-*.json
+report*.md
+report*.json
+*.csv
