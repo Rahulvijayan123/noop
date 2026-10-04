@@ -48,6 +48,10 @@ struct FullDayChartView: View {
     @State private var activityContextLoading = false
 
     @State private var metric: Repository.TimelineMetric = .hr
+    /// The pills offered for the active device. A WHOOP strap never fills the Oura ring's movement track, so
+    /// it is only listed once the registry says the active device is a ring.
+    @State private var availableMetrics: [Repository.TimelineMetric] =
+        Repository.TimelineMetric.allCases.filter { $0 != .ouraMovement }
     // Imperial/Metric temperature preference (#101) — mirrors MetricExplorerView so skin temp here
     // respects the same °C/°F override instead of always showing Celsius.
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
@@ -162,18 +166,22 @@ struct FullDayChartView: View {
         }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
-        .task(id: repo.deviceId) { sourceName = repo.activeDeviceDisplayName() }
+        .task(id: repo.deviceId) {
+            sourceName = repo.activeDeviceDisplayName()
+            availableMetrics = repo.timelineMetrics()
+            if !availableMetrics.contains(metric) { metric = .hr }
+        }
     }
 
-    /// #623: a SpO2/respiration track is "unsupported on this strap" only when it's a 5.0-family strap that
-    /// has never produced the metric — not merely an empty window (a 4.0-v24 banks SpO2, and the legacy
-    /// bare-"WHOOP" model resolves to the 5.0 family). Re-resolves when the metric changes.
+    /// #623: a SpO2 track is "unsupported on this strap" only when it's a 5.0-family strap that has never
+    /// produced the metric — not merely an empty window (a 4.0-v24 banks SpO2, and the legacy bare-"WHOOP"
+    /// model resolves to the 5.0 family). Re-resolves when the metric changes.
     ///
-    /// The family test must be a positive "is it a 5/MG" (#1086), never a coalesced one: the respiration
-    /// copy tells the reader their estimate is on the Health screen, which is true for a WHOOP 5 (the R-R
-    /// RSA estimate runs) and false for a non-WHOOP device whose banked stream that estimate refuses.
+    /// Respiration is deliberately not asked: a strap with no raw breathing channel now gets a rate estimated
+    /// from the heartbeat rhythm, so an empty respiration window means "no steady beats here", not "this strap
+    /// cannot do it".
     private func resolveMetricUnsupported() async {
-        guard repo.activeStrapIsWhoop5(), metric == .spo2 || metric == .respiration else {
+        guard repo.activeStrapIsWhoop5(), metric == .spo2 else {
             metricUnsupported = false
             return
         }
@@ -199,7 +207,7 @@ struct FullDayChartView: View {
 
     private var metricPills: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            SegmentedPillControl(Repository.TimelineMetric.allCases, selection: $metric) { $0.title }
+            SegmentedPillControl(availableMetrics, selection: $metric) { $0.title }
                 .padding(.vertical, NoopMetrics.space1 / 2)
         }
     }
@@ -376,16 +384,21 @@ struct FullDayChartView: View {
         .padding(.horizontal, NoopMetrics.space6)
     }
 
-    /// #623: on a 5.0/MG the SpO2 + raw respiration tracks are PERMANENTLY empty (4.0-only wire signals),
-    /// so say that instead of a generic "nothing offloaded" that reads as broken, and point respiration at
-    /// the Health screen where the R-R/RSA estimate surfaces. Strap view only (ownedOnly). Twin of Android
+    /// #623: on a 5.0/MG the SpO2 track is PERMANENTLY empty (a 4.0-only wire signal), so say that instead of
+    /// a generic "nothing offloaded" that reads as broken. Strap view only (ownedOnly). Twin of Android
     /// FullDayChartScreen.EmptyTimelineState.
+    ///
+    /// Respiration and SDNN are read from the heartbeat rhythm, so an empty window there means the beats were
+    /// not steady enough to read (movement, loose fit, a sync gap), not that the strap lacks the channel.
     private var emptyReason: String {
         if ownedOnly, metricUnsupported, metric == .spo2 {
             return String(localized: "This strap doesn’t send SpO₂ over Bluetooth. Import a WHOOP export or Health Connect to see it.")
         }
-        if ownedOnly, metricUnsupported, metric == .respiration {
-            return String(localized: "This strap sends no raw respiration stream. Your estimated respiratory rate appears on the Health screen.")
+        if ownedOnly, metric == .respiration {
+            return String(localized: "Breathing is estimated from your heartbeat rhythm, and nothing steady enough was recorded in this window. It reads best while you are still, such as asleep.")
+        }
+        if ownedOnly, metric == .sdnn {
+            return String(localized: "SDNN needs several minutes of clean heartbeat timing, and this window doesn’t have enough.")
         }
         return ownedOnly
             ? String(localized: "Nothing offloaded for this window yet.")
@@ -497,6 +510,7 @@ struct FullDayChartView: View {
 
     private var resolutionSubtitle: String {
         guard !series.points.isEmpty else { return "—" }
+        if series.derivedFromRR { return String(localized: "Estimated from heartbeat timing") }
         if series.isRaw { return String(localized: "Raw · per second") }
         let m = series.bucketSeconds / 60
         return m >= 1 ? String(localized: "\(m)-minute average")
@@ -511,10 +525,12 @@ struct FullDayChartView: View {
         switch metric {
         case .hr: return " bpm"
         case .skinTemp: return UnitFormatter.temperatureUnit(temperatureUnit)   // #101: °C / °F per preference
-        case .respiration: return ""
-        case .hrv: return " ms"
-        // Gravity-vector magnitude (#102): tag it "g" so the readout doesn't read as a bare, unexplained
-        // number — spo2/bandSleepState stay unitless (unitless ratio / a named state, not a magnitude).
+        // A raw breathing channel (an Oura ring or a 4.0) is unitless on this axis; the rate estimated from
+        // the heartbeat rhythm is in breaths per minute.
+        case .respiration: return series.derivedFromRR ? " br/min" : ""
+        case .hrv, .sdnn: return " ms"
+        // Change in the gravity vector between records, in g (the vector's own length is a constant 1 g, so
+        // that is not what this plots). spo2/bandSleepState stay unitless (a ratio / a named state).
         case .motion: return " g"
         // Seconds of movement per ~30 s window (the ring's OWN 0x47 activity), so tag it "s".
         case .ouraMovement: return " s"
@@ -524,11 +540,14 @@ struct FullDayChartView: View {
 
     private func format(_ v: Double) -> String {
         switch metric {
-        case .hr, .respiration, .hrv, .ouraMovement: return String(Int(v.rounded()))
+        case .hr, .hrv, .sdnn, .ouraMovement: return String(Int(v.rounded()))
+        case .respiration: return series.derivedFromRR ? String(format: "%.1f", v) : String(Int(v.rounded()))
         // `v` already arrives in the displayed unit — callers read from `displayPoints`, which converts
         // skin temp to °F upfront so the chart's own axis (plotted from the same points) agrees. (#101)
         case .skinTemp: return String(format: "%.1f", v)
-        case .spo2, .motion: return String(format: "%.2f", v)
+        case .spo2: return String(format: "%.2f", v)
+        // Resting wrist motion is a few thousandths of a g; two decimals would read as a flat 0.00.
+        case .motion: return String(format: "%.3f", v)
         // #175: name the band's own state at the nearest code so the readout reads "asleep", not "2.0".
         case .bandSleepState: return Self.bandStateLabel(v)
         }
@@ -566,6 +585,8 @@ struct FullDayChartView: View {
             return Gradient(colors: [StrandPalette.strain033.opacity(0.55), StrandPalette.strain033])
         case .hrv, .spo2:
             return Gradient(colors: [StrandPalette.sleepLight.opacity(0.55), StrandPalette.sleepLight])
+        case .sdnn:
+            return Gradient(colors: [StrandPalette.metricCyan.opacity(0.55), StrandPalette.metricCyan])
         case .respiration, .motion, .ouraMovement:
             return Gradient(colors: [StrandPalette.textSecondary.opacity(0.5), StrandPalette.textSecondary])
         // #175: the band-state track uses the deep-sleep hue so it reads as a distinct sleep track.

@@ -1864,7 +1864,8 @@ final class Repository: ObservableObject {
     /// A metric the Deep Timeline can plot. HR is the always-present hero (adaptively downsampled);
     /// the rest are lower-frequency raw-sample streams shown where the strap offloaded them.
     enum TimelineMetric: String, CaseIterable, Identifiable, Sendable {
-        case hr, hrv, spo2, skinTemp, respiration, motion, bandSleepState, ouraMovement
+        // Declaration order is the pill order, so `sdnn` sits beside the rMSSD line it is read against.
+        case hr, hrv, sdnn, spo2, skinTemp, respiration, motion, bandSleepState, ouraMovement
         var id: String { rawValue }
 
         /// User-facing pill label.
@@ -1875,10 +1876,18 @@ final class Repository: ObservableObject {
             // .rollingRmssd), not one opaque "HRV" figure and not raw R-R ms. Label it honestly so the
             // pill names what the chart actually plots.
             case .hrv: return String(localized: "Windowed rMSSD")
+            // The SDNN twin of the line above (HRVAnalyzer.rollingSdnn): the spread of the beats in a
+            // five-minute trailing window, the same window the nightly SDNN index is built from.
+            case .sdnn: return String(localized: "Windowed SDNN")
             case .spo2: return "SpO₂"
             case .skinTemp: return String(localized: "Skin Temp")
+            // A raw breathing channel where the device sends one (WHOOP 4.0, Oura); otherwise the rate
+            // estimated from the heartbeat rhythm (see `respirationFromRR`).
             case .respiration: return String(localized: "Respiration")
-            case .motion: return String(localized: "Motion")
+            // How much the wrist moved each second, from the strap's gravity vector (see
+            // `movementTimelinePoints`). It used to plot the vector's MAGNITUDE, which is ~1 g whatever
+            // the wrist does, so the chart was a flat line.
+            case .motion: return String(localized: "Movement")
             // #175: the strap's OWN band sleep_state track (0 wake/1 still/2 asleep/3 up), shown as a
             // distinct stepped track alongside the derived hypnogram. This is the band's reported state,
             // NOT a stage NOOP trusts as truth — the pill names it "Band Sleep State" so it can't be
@@ -1886,11 +1895,18 @@ final class Repository: ObservableObject {
             case .bandSleepState: return String(localized: "Band Sleep State")
             // The Oura ring's OWN per-window motion: seconds of movement in each ~30 s window (0x47,
             // OURA_MOTION events). An honest ACTIVITY signal — NOT gravity magnitude (the ring sends no
-            // continuous gravity) and NEVER a step count. Empty for a WHOOP strap. Labelled "Movement" so
-            // it can't be mistaken for the derived stages or for steps.
-            case .ouraMovement: return String(localized: "Movement")
+            // continuous gravity) and NEVER a step count. Empty for a WHOOP strap, so the pill is only
+            // offered when the active device is a ring (`timelineMetrics()`). Named for the ring so it
+            // can't be mistaken for the strap's Movement track, the derived stages or steps.
+            case .ouraMovement: return String(localized: "Ring Movement")
             }
         }
+    }
+
+    /// The pills the Deep Timeline offers for the active device. Every metric except the ring's own
+    /// movement track, which a WHOOP strap can never fill: showing it there was a permanently empty pill.
+    func timelineMetrics() -> [TimelineMetric] {
+        TimelineMetric.allCases.filter { $0 != .ouraMovement || activeDeviceIsOura }
     }
 
     /// One Deep-Timeline read: the plotted points plus whether they came from raw seconds or coarse
@@ -1899,6 +1915,10 @@ final class Repository: ObservableObject {
         var points: [TrendPoint]
         var isRaw: Bool
         var bucketSeconds: Int
+        /// True when the points are an ESTIMATE computed from the heartbeat rhythm because the device sends
+        /// no channel for this metric (breathing on a WHOOP 5/MG). The view says so instead of presenting
+        /// it as a sensor reading.
+        var derivedFromRR: Bool = false
         static let empty = TimelineSeries(points: [], isRaw: false, bucketSeconds: 0)
     }
 
@@ -1928,6 +1948,47 @@ final class Repository: ObservableObject {
     nonisolated static func hrvRollingWindowSec(spanSeconds: Int) -> Int {
         let span = max(1, spanSeconds)
         return min(600, max(120, span / 30))
+    }
+
+    /// The trailing-window width (seconds) for the windowed-SDNN `.sdnn` series. Same widening rule as
+    /// `hrvRollingWindowSec` but never below five minutes: SDNN is the spread of the beats in the window, so
+    /// a shorter window holds less slow drift and reads lower, and only a five-minute window is comparable
+    /// with the nightly SDNN index the HRV screen shows. Clamped to [300 s, 600 s]. Pure + static.
+    nonisolated static func sdnnRollingWindowSec(spanSeconds: Int) -> Int {
+        min(600, max(300, max(1, spanSeconds) / 30))
+    }
+
+    /// The seconds between points of the breaths-per-minute estimate for a window of `windowSec`: a quarter
+    /// of the window, so consecutive points overlap (each is pooled over the whole window) without a point
+    /// per heartbeat. Never below 30 s. Pure + static.
+    nonisolated static func respRollingStepSec(windowSec: Int) -> Int {
+        max(30, windowSec / 4)
+    }
+
+    /// Longest gap between two 1 Hz gravity vectors that still counts as one second of movement. A larger
+    /// jump is a sensor dropout (the strap came off, or a sync gap), not the wrist moving, so it is skipped
+    /// rather than drawn as a spike. The same 5 s the worker's intraday motion mask uses.
+    nonisolated static let movementMaxGapSeconds = 5
+
+    /// The Movement track: how far the gravity vector moved between consecutive records, in g.
+    ///
+    /// The vector's MAGNITUDE (what this track used to plot) is ~1 g whatever the wrist is doing, because
+    /// gravity is a constant 1 g and only its direction changes, so the line was flat. The L2 change
+    /// between consecutive vectors is the motion-intensity proxy the activity and sleep scoring already
+    /// use (`WorkoutDetector.activitySeries`): near 0 at rest, and above `WorkoutDetector.motionThreshold`
+    /// (0.2 g) while walking. Deltas across a gap longer than `movementMaxGapSeconds` are dropped. Pure +
+    /// static so it runs off the main actor and is unit-testable.
+    nonisolated static func movementTimelinePoints(_ gravity: [GravitySample]) -> [TrendPoint] {
+        let activity = WorkoutDetector.activitySeries(gravity)
+        guard activity.count > 1 else { return [] }
+        var out: [TrendPoint] = []
+        out.reserveCapacity(activity.count - 1)
+        for i in 1..<activity.count {
+            let dt = activity[i].ts - activity[i - 1].ts
+            guard dt > 0, dt <= movementMaxGapSeconds else { continue }
+            out.append(timelinePoint(activity[i].ts, activity[i].intensity))
+        }
+        return out
     }
 
     /// The plausible range for a SINGLE-CHANNEL SpO2 reading plotted as a percentage. Its ONLY job is to
@@ -2032,11 +2093,23 @@ final class Repository: ObservableObject {
             perId.append(await timelineRawMetric(metric: metric, store: store, source: id,
                                                  family: familyById[id] ?? .whoop5, from: from, to: to))
         }
+        // A strap with no breathing channel (the WHOOP 5/MG) leaves every source empty here. Fall back to the
+        // rate estimated from the heartbeat rhythm, for ALL sources together: mixing a raw breathing
+        // waveform from one strap with breaths per minute from another would put two units on one axis.
+        var derivedFromRR = false
+        if metric == .respiration, perId.allSatisfy(\.isEmpty) {
+            perId = []
+            for id in unionIds {
+                perId.append(await respirationFromRR(store: store, source: id, from: from, to: to))
+            }
+            derivedFromRR = perId.contains { !$0.isEmpty }
+        }
         let points = await Task.detached(priority: .utility) {
             Self.dedupSortDownsampleRaw(perId, isRaw: isRaw, bucketSeconds: bucket)
         }.value
         guard !points.isEmpty else { return TimelineSeries(points: [], isRaw: isRaw, bucketSeconds: bucket) }
-        return TimelineSeries(points: points, isRaw: isRaw, bucketSeconds: isRaw ? 1 : bucket)
+        return TimelineSeries(points: points, isRaw: isRaw, bucketSeconds: isRaw ? 1 : bucket,
+                              derivedFromRR: derivedFromRR)
     }
 
     /// Map each device id to the strap family that wrote its rows (#938), for the family-aware skin-temp
@@ -2116,15 +2189,26 @@ final class Repository: ObservableObject {
             // rather than a noisy spike. The `to - from` span chooses the window width: a 2-min rMSSD for a
             // zoomed-in look, widening with the visible span so a day-scale view stays readable. The thinning
             // stride keeps a 1 Hz R-R stream from emitting a point per beat.
-            let activeWhoop5 = (try? await store.isWhoop5RRSource(deviceId: deviceId)) ?? true
-            let rr = (try? await store.rrIntervals(deviceId: source, from: from, to: to, limit: 200_000,
-                unlabelledAliasOfWhoop5: activeWhoop5 && source == Self.whoopSource)) ?? []
+            let rr = await timelineRR(store: store, source: source, from: from, to: to)
             let window = Self.hrvRollingWindowSec(spanSeconds: to - from)
             // rollingRmssd + the map over its output run OFF the main actor (mirrors the HR branch's
             // Task.detached in `timelineSeries`): only the already-read Sendable `rr` rows cross in.
             return await Task.detached(priority: .utility) {
                 HRVAnalyzer.rollingRmssd(rr: rr, windowSec: window, stepSec: max(1, window / 8))
                     .map { Self.timelinePoint($0.ts, $0.rmssd) }
+            }.value
+        case .sdnn:
+            // The SDNN twin of the rMSSD line: same R-R read, same trailing window and cleaning, but never
+            // narrower than five minutes (see `sdnnRollingWindowSec`). The read reaches one window BEFORE
+            // `from` so the first points of the view are full windows rather than a ramp-up, and only points
+            // inside the view are returned. Windows that fail the over-count or beat-accuracy gates are
+            // omitted (`HRVAnalyzer.rollingSdnn`), leaving a gap rather than an inflated spread.
+            let window = Self.sdnnRollingWindowSec(spanSeconds: to - from)
+            let rr = await timelineRR(store: store, source: source, from: from - window, to: to)
+            return await Task.detached(priority: .utility) {
+                HRVAnalyzer.rollingSdnn(rr: rr, windowSec: window, stepSec: max(1, window / 8))
+                    .filter { $0.ts >= from }
+                    .map { Self.timelinePoint($0.ts, $0.sdnn) }
             }.value
         case .spo2:
             // Two-channel (WHOOP) → the honest raw red/IR ratio proxy; single-channel (Oura) → the reading
@@ -2152,11 +2236,12 @@ final class Repository: ObservableObject {
                 s.map { Self.timelinePoint($0.ts, OuraRespScale.displayValue(raw: $0.raw, deviceId: source)) }
             }.value
         case .motion:
-            // Gravity vector magnitude as a coarse movement signal (1 g at rest).
+            // How far the gravity vector moved each second (`movementTimelinePoints`), NOT its magnitude,
+            // which is ~1 g whatever the wrist does. The pass over up to 200k gravity rows runs OFF the
+            // main actor.
             let s = (try? await store.gravitySamples(deviceId: source, from: from, to: to, limit: 200_000)) ?? []
-            // The sqrt-per-row magnitude over up to 200k gravity rows runs OFF the main actor.
             return await Task.detached(priority: .utility) {
-                s.map { Self.timelinePoint($0.ts, ($0.x * $0.x + $0.y * $0.y + $0.z * $0.z).squareRoot()) }
+                Self.movementTimelinePoints(s)
             }.value
         case .bandSleepState:
             // #175: the strap's OWN band sleep_state (0 wake/1 still/2 asleep/3 up) as a stepped track. Read
@@ -2180,6 +2265,32 @@ final class Repository: ObservableObject {
                 }
             }.value
         }
+    }
+
+    /// The R-R rows the heartbeat-derived timeline tracks (rMSSD, SDNN, estimated breathing) read for one
+    /// source, through the same WHOOP 5 transport policy the nightly HRV read applies.
+    private func timelineRR(store: WhoopStore, source: String, from: Int, to: Int) async -> [RRInterval] {
+        let activeWhoop5 = (try? await store.isWhoop5RRSource(deviceId: deviceId)) ?? true
+        return (try? await store.rrIntervals(deviceId: source, from: from, to: to, limit: 200_000,
+            unlabelledAliasOfWhoop5: activeWhoop5 && source == Self.whoopSource)) ?? []
+    }
+
+    /// Breaths per minute estimated from the heartbeat rhythm, for a strap that sends no breathing channel
+    /// (every WHOOP 5/MG; the raw `respSample` table is empty for it). The rate comes from respiratory sinus
+    /// arrhythmia, the same signal the nightly respiratory rate uses (`SleepStager.rollingRespRate`).
+    ///
+    /// Like the windowed SDNN, the read reaches one window before `from` so the first points are pooled over
+    /// a full window. Gated for non-WHOOP sources by the R-R read policy and by the beat-accuracy gate, so a
+    /// ring whose stored intervals are not beat-to-beat accurate yields nothing instead of a made-up rate.
+    private func respirationFromRR(store: WhoopStore, source: String, from: Int, to: Int) async -> [TrendPoint] {
+        let window = Self.hrvRollingWindowSec(spanSeconds: to - from)
+        let step = Self.respRollingStepSec(windowSec: window)
+        let rr = await timelineRR(store: store, source: source, from: from - window, to: to)
+        return await Task.detached(priority: .utility) {
+            SleepStager.rollingRespRate(rr, windowSec: window, stepSec: step)
+                .filter { $0.ts >= from }
+                .map { Self.timelinePoint($0.ts, $0.breathsPerMinute) }
+        }.value
     }
 
     /// Build a `TrendPoint` from a unix-seconds `ts` + value. `nonisolated static` so the per-row

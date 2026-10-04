@@ -216,3 +216,81 @@ extension SleepStager {
         return out
     }
 }
+
+/// One point of a breaths-per-minute timeline: the rate pooled over the trailing window ending at `ts`.
+public struct RespRatePoint: Equatable, Sendable {
+    public let ts: Int
+    public let breathsPerMinute: Double
+    public init(ts: Int, breathsPerMinute: Double) { self.ts = ts; self.breathsPerMinute = breathsPerMinute }
+}
+
+extension SleepStager {
+    /// Fewest beats a pooled window must hold before a rate is read from it (about 30 s of them).
+    static let respRollingMinBeats = 30
+
+    /// The newest slice (one `stepSec`) must contribute this many beats, so a point is never just its
+    /// predecessor's data repeated across a dropout.
+    static let respRollingMinCurrentBeats = 10
+
+    /// Share of the window that must sit inside unbroken runs of beats. One third of a two-minute window is
+    /// 40 s, enough for several breaths and enough to refuse a window that is mostly dropout.
+    static let respRollingMinCoverage = 0.33
+
+    /// Breaths per minute over a stretch of R-R, one point per grid step, each pooled over the trailing
+    /// `windowSec`. For a strap that sends no breathing channel (the WHOOP 5/MG), the heartbeat rhythm is the
+    /// only source, and this is how a timeline of it is drawn.
+    ///
+    /// Points sit on multiples of `stepSec`, so neighbouring pans share their x positions and the line does not
+    /// shimmer as the window slides. Each window is read per unbroken run (`respBreathTrack`) and then pooled,
+    /// because a daytime stream drops out every minute or two and the nightly kernel would discard nearly all
+    /// of it. A window is refused, not smoothed over, when:
+    /// - it holds too few beats, or too few from its newest slice (`respRollingMinBeats`, `respRollingMinCurrentBeats`);
+    /// - its beats claim more time than the wall clock allows, or are not beat-accurate (the same two gates
+    ///   the worker's one-minute series applies before it will report a rate);
+    /// - too little of it is covered by unbroken runs (`respRollingMinCoverage`); or
+    /// - the median falls outside `respPlausibleRangeBpm`.
+    ///
+    /// This does not mask movement: the heart-rate swings of walking or running can read as breathing, so
+    /// callers present the line as an estimate that is most trustworthy at rest.
+    public static func rollingRespRate(_ rr: [RRInterval], windowSec: Int, stepSec: Int) -> [RespRatePoint] {
+        guard windowSec > 0, stepSec > 0 else { return [] }
+        let rows = rr.sortedByTsStable()
+        guard rows.count >= respRollingMinBeats else { return [] }
+        let track = respBreathTrack(rows)
+        guard let firstBreath = track.intervals.first?.ts,
+              let lastBreath = track.intervals.last?.ts else { return [] }
+
+        func lowerBound(_ ts: Int) -> Int {
+            var lo = 0, hi = rows.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if rows[mid].ts < ts { lo = mid + 1 } else { hi = mid }
+            }
+            return lo
+        }
+
+        var out: [RespRatePoint] = []
+        var t = ((firstBreath + stepSec - 1) / stepSec) * stepSec
+        let end = ((lastBreath + stepSec - 1) / stepSec) * stepSec
+        while t <= end {
+            defer { t += stepSec }
+            let from = t - windowSec + 1
+            let to = t + 1
+            let currentFrom = t - stepSec + 1
+            let lo = lowerBound(from), hi = lowerBound(to)
+            guard hi - lo >= respRollingMinBeats,
+                  hi - lowerBound(currentFrom) >= respRollingMinCurrentBeats else { continue }
+            let window = rows[lo..<hi]
+            let tsSec = window.map(\.ts)
+            let rrMs = window.map { Double($0.rrMs) }
+            guard HRVAnalyzer.rrCoverage(tsSec: tsSec, rrMs: rrMs) <= HRVAnalyzer.coveragePlausibleCeiling,
+                  HRVAnalyzer.beatValuesAreTrustworthy(
+                    beatAccurateFraction: HRVAnalyzer.beatAccurateFraction(tsSec: tsSec, rrMs: rrMs))
+            else { continue }
+            guard let estimate = track.estimate(from: from, to: to, currentFrom: currentFrom),
+                  estimate.coveredSeconds / Double(windowSec) >= respRollingMinCoverage else { continue }
+            out.append(RespRatePoint(ts: t, breathsPerMinute: (estimate.breathsPerMinute * 10).rounded() / 10))
+        }
+        return out
+    }
+}
