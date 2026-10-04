@@ -37,7 +37,7 @@ final class IntradayStaleResponseTests: XCTestCase {
         ServerScoreRepository(
             session: session,
             endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-            fleetToken: "noop_test", directory: directory,
+            directory: directory,
             identity: { CloudPushIdentity(ownerId: self.owner,
                                           sourceId: "22222222-2222-4222-8222-222222222222",
                                           tokenId: "t", uploadToken: "noop_x") })

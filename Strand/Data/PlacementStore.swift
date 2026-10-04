@@ -193,8 +193,8 @@ public struct PlacementStore: Sendable {
 // MARK: - PlacementCloudSync (G4 sync, same authenticated route pattern)
 
 /// Uploads journaled placement declarations to the server and reconciles the interval model back,
-/// using the SAME authenticated route pattern as the profile/scores routes: `Authorization: Bearer
-/// <installation uploadToken>` plus `x-noop-fleet-token`, against the `scores` edge function host
+/// using the SAME authenticated route pattern as the profile/scores routes: the installation
+/// credential (`CloudReceiverAuth`), against the `scores` edge function host
 /// derived from the push receiver URL (single source of truth, `ServerScoreRepository`/`CoachAPI`
 /// trick).
 ///
@@ -210,18 +210,15 @@ public struct PlacementStore: Sendable {
 public final class PlacementCloudSync: Sendable {
     private let session: URLSession
     private let endpoint: @Sendable () -> URL?
-    private let fleetToken: @Sendable () -> String
     private let identity: @Sendable () -> CloudPushIdentity?
     private let store: @Sendable () -> PlacementStore?
 
     public init(session: URLSession = .shared,
                 endpoint: @escaping @Sendable () -> URL? = { PlacementCloudSync.derivedEndpoint() },
-                fleetToken: @escaping @Sendable () -> String = { CloudPushSettings.fleetToken },
                 identity: @escaping @Sendable () -> CloudPushIdentity? = { CloudPushIdentityStore.current() },
                 store: @escaping @Sendable () -> PlacementStore? = { nil }) {
         self.session = session
         self.endpoint = endpoint
-        self.fleetToken = fleetToken
         self.identity = identity
         self.store = store
     }
@@ -244,8 +241,7 @@ public final class PlacementCloudSync: Sendable {
         guard let store = store(), let id = identity() else { return 0 }
         let pending = try store.pendingChanges()
         guard !pending.isEmpty else { return 0 }
-        let fleet = fleetToken()
-        guard let base = endpoint(), !fleet.isEmpty else { return 0 }
+        guard let base = endpoint() else { return 0 }
         var uploaded = 0
         for change in pending {
             var body: [String: Any] = [
@@ -256,8 +252,7 @@ public final class PlacementCloudSync: Sendable {
             var req = URLRequest(url: base.appendingPathComponent("placement"),
                                  timeoutInterval: 30)
             req.httpMethod = "POST"
-            req.setValue("Bearer \(id.uploadToken)", forHTTPHeaderField: "Authorization")
-            req.setValue(fleet, forHTTPHeaderField: "x-noop-fleet-token")
+            CloudReceiverAuth.apply(id, to: &req)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (_, resp) = try await session.data(for: req)
@@ -275,12 +270,10 @@ public final class PlacementCloudSync: Sendable {
     /// count, or 0 when skipped.
     public func reconcile() async throws -> Int {
         guard let store = store(), let id = identity() else { return 0 }
-        let fleet = fleetToken()
-        guard let base = endpoint(), !fleet.isEmpty else { return 0 }
+        guard let base = endpoint() else { return 0 }
         guard try store.pendingChanges().isEmpty else { return 0 }
         var req = URLRequest(url: base.appendingPathComponent("placement"), timeoutInterval: 30)
-        req.setValue("Bearer \(id.uploadToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(fleet, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(id, to: &req)
         let (data, resp) = try await session.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             throw PlacementSyncError.serverRejected

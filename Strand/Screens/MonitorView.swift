@@ -365,7 +365,7 @@ struct PipelineDiagnostics: Decodable, Hashable {
 }
 
 /// Fetches the owner-scoped diagnostics route with the SAME installation credential as
-/// every other score read (Bearer upload token + x-noop-fleet-token, deviceId=my-whoop),
+/// every other score read (`CloudReceiverAuth`, deviceId=my-whoop),
 /// matching `ServerScoreRepository`'s single-source-of-truth endpoint derivation.
 enum PipelineDiagnosticsClient {
     struct Unavailable: Error, CustomStringConvertible {
@@ -389,8 +389,7 @@ enum PipelineDiagnosticsClient {
         guard let url = components.url else { throw Unavailable(reason: "cloud endpoint not configured") }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(CloudPushSettings.fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.timeoutInterval = 20
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw Unavailable(reason: "no response") }

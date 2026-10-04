@@ -396,7 +396,6 @@ final class PlacementTests: XCTestCase {
         let sync = PlacementCloudSync(
             session: PlacementStub.session(),
             endpoint: { URL(string: "https://example.invalid/functions/v1/scores")! },
-            fleetToken: { "noop_fleet" },
             identity: { CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
                                           sourceId: "22222222-2222-4222-8222-222222222222",
                                           tokenId: "t", uploadToken: "noop_x") },
@@ -407,7 +406,8 @@ final class PlacementTests: XCTestCase {
         XCTAssertEqual(PlacementStub.requests.count, 2)
         for (index, req) in PlacementStub.requests.enumerated() {
             XCTAssertEqual(req.value(forHTTPHeaderField: "Authorization"), "Bearer noop_x")
-            XCTAssertEqual(req.value(forHTTPHeaderField: "x-noop-fleet-token"), "noop_fleet")
+            XCTAssertNil(req.value(forHTTPHeaderField: "x-noop-fleet-token"),
+                         "an Auth-provisioned credential needs no shared fleet token")
             XCTAssertEqual(req.httpMethod, "POST")
             let bodyData = index < PlacementStub.requestBodies.count ? PlacementStub.requestBodies[index] : Data()
             let body = try JSONSerialization.jsonObject(with: bodyData) as? [String: Any]
@@ -429,7 +429,6 @@ final class PlacementTests: XCTestCase {
         let sync = PlacementCloudSync(
             session: PlacementStub.session(),
             endpoint: { URL(string: "https://example.invalid/functions/v1/scores")! },
-            fleetToken: { "noop_fleet" },
             identity: { CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
                                           sourceId: "22222222-2222-4222-8222-222222222222",
                                           tokenId: "t", uploadToken: "noop_x") },

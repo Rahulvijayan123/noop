@@ -189,7 +189,7 @@ final class ActivityContextUITests: XCTestCase {
 
         let repo = ServerScoreRepository(session: ScoreStub.session(),
                                          endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-                                         fleetToken: "noop_test", directory: directory,
+                                         directory: directory,
                                          identity: { CloudPushIdentity(ownerId: owner, sourceId: "22222222-2222-4222-8222-222222222222",
                                                                        tokenId: "t", uploadToken: "noop_x") })
         let body = hostedEnvelope(daily: c10Daily)

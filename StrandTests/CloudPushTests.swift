@@ -943,10 +943,10 @@ final class CloudPushTests: XCTestCase {
         let identity = CloudPushIdentity(ownerId: owner, sourceId: source, tokenId: "t", uploadToken: "noop_t")
         let session = CloudUploadSession(
             endpoint: URL(string: "http://127.0.0.1:1/functions/v1/push")!,
-            fleetToken: "noop_f", bundleIdentifier: "com.test.\(UUID().uuidString)",
+            bundleIdentifier: "com.test.\(UUID().uuidString)",
             identity: { identity })
         var enabled = false
-        let coordinator = CloudTransportCoordinator(journal: journal, session: session,
+        let coordinator = CloudTransportCoordinator(journal: journal, session: session, scope: identity.scope,
                                                     payloadDirectory: directory,
                                                     projectURL: "http://127.0.0.1",
                                                     identity: { identity },
@@ -1056,10 +1056,9 @@ final class CloudPushTests: XCTestCase {
                        "the original owner's pending records must survive the switch")
     }
 
-    /// The coordinator's send path refuses a batch whose acquisition-time owner differs from the
-    /// current identity: the batch is quarantined (blocked, retained under the original owner) and
-    /// never transmitted with a different owner's token (contract C3).
-    func testCrossOwnerBatchIsQuarantinedNotUploadedUnderADifferentOwner() async throws {
+    /// A coordinator serving owner B never sends a batch owner A sealed: it is not even visible to B's
+    /// scope, so it stays sealed and retained under A, payload file included (contract C3).
+    func testCrossOwnerBatchIsRetainedNotUploadedUnderADifferentOwner() async throws {
         let ownerA = "11111111-1111-4111-8111-111111111111"
         let ownerB = "33333333-3333-4333-8333-333333333333"
         let source = "22222222-2222-4222-8222-222222222222"
@@ -1082,9 +1081,9 @@ final class CloudPushTests: XCTestCase {
         let identityB = CloudPushIdentity(ownerId: ownerB, sourceId: source, tokenId: "t", uploadToken: "noop_b")
         let session = CloudUploadSession(
             endpoint: URL(string: "http://127.0.0.1:1/functions/v1/push")!,
-            fleetToken: "noop_f", bundleIdentifier: "com.test.\(UUID().uuidString)",
+            bundleIdentifier: "com.test.\(UUID().uuidString)",
             identity: { identityB })
-        let coordinator = CloudTransportCoordinator(journal: journal, session: session,
+        let coordinator = CloudTransportCoordinator(journal: journal, session: session, scope: identityB.scope,
                                                     payloadDirectory: directory,
                                                     projectURL: "http://127.0.0.1",
                                                     identity: { identityB },
@@ -1092,41 +1091,45 @@ final class CloudPushTests: XCTestCase {
         await coordinator.start()
         await coordinator.cycle()
 
-        // The cross-owner batch is quarantined, never transmitted under B's token.
+        // The cross-owner batch is never transmitted under B's token.
         let state = try await journal.batchState(plan.batch.batchId)
-        XCTAssertEqual(state, .blocked,
-                       "another owner's batch must be quarantined, not uploaded under a different owner")
-        let quarantined = await journal.stats()
-        XCTAssertEqual(quarantined.pendingRecords, 1,
-                       "quarantine retains the records under the original owner")
+        XCTAssertEqual(state, .sealed,
+                       "another owner's batch must stay sealed, not be uploaded under a different owner")
+        try await journal.activate(configuration: .init(ownerId: ownerA, sourceId: source, deviceId: "my-whoop"),
+                                   directory: directory)
+        let retained = await journal.stats()
+        XCTAssertEqual(retained.pendingRecords, 1,
+                       "the records stay retained under the original owner")
         XCTAssertTrue(FileManager.default.fileExists(atPath: file.path),
-                      "the quarantined payload file must be kept, not deleted")
+                      "the payload file must be kept, not deleted")
     }
 
-    /// The upload session refuses to resolve a different owner's token for a batch at SEND time
-    /// (the T23 token-resolution rule), even when the coordinator guard is bypassed.
+    /// The upload session refuses to send a batch for one account with another account's credential at
+    /// SEND time (the T23 token-resolution rule), even when the coordinator guard is bypassed.
     func testUploadSessionRefusesToSendAnotherOwnersBatch() async throws {
         let ownerA = "11111111-1111-4111-8111-111111111111"
         let ownerB = "33333333-3333-4333-8333-333333333333"
+        let source = "22222222-2222-4222-8222-222222222222"
         let session = CloudUploadSession(
             endpoint: URL(string: "http://127.0.0.1:1/functions/v1/push")!,
-            fleetToken: "noop_f", bundleIdentifier: "com.test.\(UUID().uuidString)",
-            identity: { CloudPushIdentity(ownerId: ownerB, sourceId: "22222222-2222-4222-8222-222222222222",
+            bundleIdentifier: "com.test.\(UUID().uuidString)",
+            identity: { CloudPushIdentity(ownerId: ownerB, sourceId: source,
                                           tokenId: "t", uploadToken: "noop_b") })
         let file = directory.appendingPathComponent("batch.ndjson.gz")
         try Data("sealed".utf8).write(to: file)
+        let scopeA = CloudDataScope(ownerId: ownerA, sourceId: source)
         do {
-            _ = try await session.uploadForeground(batchId: "b1", fileURL: file, expectedOwnerId: ownerA)
+            _ = try await session.uploadForeground(batchId: "b1", fileURL: file, scope: scopeA)
             XCTFail("uploading owner A's batch with owner B's token must be refused")
         } catch let error as CloudUploadSession.UploadError {
-            guard case .ownerMismatch(let expected, let current) = error else {
-                return XCTFail("expected ownerMismatch, got \(error)")
+            guard case .wrongAccount = error else {
+                return XCTFail("expected wrongAccount, got \(error)")
             }
-            XCTAssertEqual(expected, ownerA)
-            XCTAssertEqual(current, ownerB)
         } catch {
-            XCTFail("expected ownerMismatch, got \(error)")
+            XCTFail("expected wrongAccount, got \(error)")
         }
+        XCTAssertThrowsError(try session.enqueueBackground(batchId: "b2", fileURL: file, scope: scopeA),
+                             "the background lane must refuse it too")
     }
 
 
