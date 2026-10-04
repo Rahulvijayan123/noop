@@ -1,0 +1,293 @@
+import XCTest
+@testable import StrandAnalytics
+
+/// The canonical activity taxonomy: stable codes, the display-label mapping, and the class a set of heads
+/// reads as (with its confidence and runner-up). Pure value tests — no decoder.
+final class ActivityContextClassTests: XCTestCase {
+
+    private typealias Posture = HeadProbabilities<PostureClass>
+    private typealias Locomotion = HeadProbabilities<LocomotionClass>
+    private typealias Arm = HeadProbabilities<ArmBehaviorClass>
+
+    private func classify(posture: [PostureClass: Double] = [.unknown: 1],
+                          locomotion: [LocomotionClass: Double] = [.stationary: 1],
+                          arm: [ArmBehaviorClass: Double] = [.unknown: 1],
+                          sleep: SleepContextState = .awake, wear: WearContextState = .onWrist,
+                          quality: Double = 0.8) -> ActivityClassification {
+        ActivityClassifier.classify(posture: Posture(posture), locomotion: Locomotion(locomotion),
+                                    armBehavior: Arm(arm), sleep: sleep, wear: wear, evidenceQuality: quality)
+    }
+
+    // MARK: Vocabulary
+
+    func testRawValuesAreThePersistedCodes() {
+        // These strings are written to the database and the day documents. Renaming one orphans history.
+        XCTAssertEqual(ActivityClass.allCases.map(\.rawValue), [
+            "off_wrist", "sleeping", "lying_down", "sitting", "sitting_desk", "standing", "stationary",
+            "fidgeting", "light_activity", "walking", "brisk_walking", "running", "cycling",
+            "vigorous_activity", "unknown",
+        ])
+        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-1")
+    }
+
+    func testTheRequestedVocabularyIsAllRepresented() {
+        let names = Set(ActivityClass.allCases.map(\.displayName))
+        for wanted in ["Sleeping", "Lying down", "Sitting", "Sitting at a desk", "Standing", "Fidgeting", "Walking",
+                       "Brisk walking", "Running", "Cycling", "Higher-intensity activity", "Off wrist", "Unknown"] {
+            XCTAssertTrue(names.contains(wanted), "missing \(wanted)")
+        }
+        // The only additions are the two the sensors force on us: an honest "sitting or standing" and the
+        // non-gait movement bucket.
+        let extras = names.subtracting(["Sleeping", "Lying down", "Sitting", "Sitting at a desk", "Standing",
+                                        "Fidgeting", "Walking", "Brisk walking", "Running", "Cycling",
+                                        "Higher-intensity activity", "Off wrist", "Unknown"])
+        XCTAssertEqual(extras, ["Still (sitting or standing)", "Light activity"])
+    }
+
+    func testEveryClassStatesWhatItCanAndCannotClaim() {
+        let covered = ActivityClass.capabilities.map(\.activityClass)
+        XCTAssertEqual(covered, ActivityClass.allCases, "one entry per class, in vocabulary order")
+        for entry in ActivityClass.capabilities {
+            XCTAssertFalse(entry.evidence.isEmpty)
+            XCTAssertFalse(entry.limitation.isEmpty)
+        }
+        func basis(_ c: ActivityClass) -> ActivityClassBasis {
+            ActivityClass.capabilities.first { $0.activityClass == c }!.basis
+        }
+        // Cycling is never inferred; sitting vs standing is never a measurement.
+        XCTAssertEqual(basis(.cycling), .namedByLabel)
+        XCTAssertEqual(basis(.sitting), .hedged)
+        XCTAssertEqual(basis(.standing), .hedged)
+        XCTAssertEqual(basis(.sleeping), .sessionContext)
+    }
+
+    func testClassGroupsAgreeWithTheirMembers() {
+        XCTAssertEqual(ActivityClass.allCases.filter(\.isGait), [.walking, .briskWalking, .running])
+        XCTAssertEqual(Set(ActivityClass.allCases.filter(\.isMovement)),
+                       [.walking, .briskWalking, .running, .cycling, .vigorousActivity, .lightActivity])
+        XCTAssertEqual(Set(ActivityClass.allCases.filter(\.isRest)), [.sleeping, .lyingDown])
+        XCTAssertEqual(Set(ActivityClass.allCases.filter(\.isStationaryAwake)),
+                       [.sitting, .sittingDesk, .standing, .stationary, .fidgeting])
+        // The groups never overlap.
+        for c in ActivityClass.allCases {
+            let memberships = [c.isMovement, c.isRest, c.isStationaryAwake].filter { $0 }.count
+            XCTAssertLessThanOrEqual(memberships, 1, "\(c) is in more than one group")
+        }
+    }
+
+    // MARK: Display label → class
+
+    func testEveryDisplayLabelMapsToTheExpectedClass() {
+        let expected: [String: ActivityClass] = [
+            "Unclear": .unknown, "Off wrist": .offWrist,
+            "Running": .running, "Walking": .walking, "Brisk walking": .briskWalking, "Taking stairs": .walking,
+            "Cycling": .cycling, "In a vehicle": .sitting, "Exercising": .vigorousActivity, "Moving": .lightActivity,
+            "Asleep": .sleeping, "Resting in bed": .lyingDown, "Lying down": .lyingDown,
+            "Changing position": .lightActivity,
+            "Desk sitting": .sittingDesk, "Sitting quietly": .sitting, "Sitting, restless": .fidgeting,
+            "Sitting, repetitive hand activity": .sitting, "Sitting, gesturing": .sitting, "Sitting (likely)": .sitting,
+            "Standing quietly": .standing, "Standing, restless": .fidgeting, "Standing, gesturing": .standing,
+            "Standing, repetitive hand activity": .standing, "Standing, hands busy": .standing,
+            "Standing (likely)": .standing,
+            "Still, sitting or standing": .stationary, "Hands busy, sitting or standing": .stationary,
+            "Stationary": .stationary,
+        ]
+        XCTAssertEqual(Set(expected.keys), Set(ActivityDisplay.allLabels),
+                       "a new display label needs a deliberate class")
+        for label in ActivityDisplay.allLabels {
+            XCTAssertEqual(ActivityClassifier.activityClass(forDisplayLabel: label), expected[label], label)
+        }
+    }
+
+    func testAnUnrecognisedOrMissingLabelIsUnknownNeverAGuess() {
+        XCTAssertEqual(ActivityClassifier.activityClass(forDisplayLabel: nil), .unknown)
+        XCTAssertEqual(ActivityClassifier.activityClass(forDisplayLabel: "Teleporting"), .unknown)
+    }
+
+    // MARK: Heads → class
+
+    func testOffWristIsAHardGate() {
+        let k = classify(locomotion: [.walking: 1], wear: .offWrist)
+        XCTAssertEqual(k.activityClass, .offWrist)
+        XCTAssertEqual(k.confidence, 1)
+        XCTAssertNil(k.runnerUp)
+    }
+
+    func testWalkingFamilyConfidenceAndTheBriskRunnerUp() {
+        let k = classify(locomotion: [.walking: 0.55, .briskWalking: 0.35, .stationary: 0.10])
+        XCTAssertEqual(k.activityClass, .walking)
+        XCTAssertEqual(k.confidence, 0.90, accuracy: 1e-9, "walking and brisk walking are one belief")
+        XCTAssertEqual(k.runnerUp, .briskWalking)
+        XCTAssertEqual(k.runnerUpConfidence, 0.35, accuracy: 1e-9)
+        XCTAssertEqual(k.locomotion, .walking)
+    }
+
+    func testBriskWalkingWinsWhenItLeadsTheFamily() {
+        let k = classify(locomotion: [.walking: 0.30, .briskWalking: 0.62, .stationary: 0.08])
+        XCTAssertEqual(k.activityClass, .briskWalking)
+        XCTAssertEqual(k.runnerUp, .walking)
+    }
+
+    func testStairsAreReportedAsWalkingWithTheHeadKeepingTheDetail() {
+        let k = classify(locomotion: [.stairs: 0.7, .walking: 0.25, .unknown: 0.05])
+        XCTAssertEqual(k.activityClass, .walking)
+        XCTAssertEqual(k.locomotion, .stairs)
+    }
+
+    func testRunning() {
+        let k = classify(locomotion: [.running: 0.9, .briskWalking: 0.05, .unknown: 0.05])
+        XCTAssertEqual(k.activityClass, .running)
+        XCTAssertEqual(k.confidence, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(k.runnerUp, .briskWalking)
+    }
+
+    func testCyclingNeedsTheHeadToSayCycling() {
+        let k = classify(locomotion: [.cycling: 0.8, .other: 0.1, .unknown: 0.1])
+        XCTAssertEqual(k.activityClass, .cycling)
+        let none = classify(locomotion: [.other: 0.8, .unknown: 0.2], arm: [.exerciseMotion: 0.9, .other: 0.1])
+        XCTAssertNotEqual(none.activityClass, .cycling)
+    }
+
+    func testNonGaitEffortIsVigorousOnlyWhenTheArmSaysExercise() {
+        let vigorous = classify(locomotion: [.other: 0.8, .unknown: 0.2], arm: [.exerciseMotion: 0.7, .other: 0.3])
+        XCTAssertEqual(vigorous.activityClass, .vigorousActivity)
+        XCTAssertEqual(vigorous.confidence, 0.8, accuracy: 1e-9)
+        let light = classify(locomotion: [.other: 0.8, .unknown: 0.2], arm: [.fidgeting: 0.6, .other: 0.4])
+        XCTAssertEqual(light.activityClass, .lightActivity)
+        XCTAssertEqual(light.runnerUp, nil, "the sibling only shows up when the arm head leans toward exercise")
+        let leaning = classify(locomotion: [.other: 0.8, .unknown: 0.2], arm: [.exerciseMotion: 0.3, .other: 0.7])
+        XCTAssertEqual(leaning.activityClass, .lightActivity)
+        XCTAssertEqual(leaning.runnerUp, .vigorousActivity)
+    }
+
+    func testDeskSittingIsTheSeatedBeliefWithTheDeskWording() {
+        let k = classify(posture: [.seatedLikely: 0.7, .uprightStationary: 0.2, .unknown: 0.1],
+                         locomotion: [.stationary: 0.97, .unknown: 0.03],
+                         arm: [.deskLike: 0.6, .quiet: 0.2, .fidgeting: 0.2])
+        XCTAssertEqual(k.activityClass, .sittingDesk)
+        XCTAssertEqual(k.confidence, 0.97 * 0.7, accuracy: 1e-9)
+        XCTAssertEqual(k.runnerUp, .standing)
+        XCTAssertEqual(k.posture, .seatedLikely)
+        XCTAssertEqual(k.armBehavior, .deskLike)
+    }
+
+    func testPlainSittingAndRestlessSittingShareTheSeatedBelief() {
+        let posture: [PostureClass: Double] = [.seatedLikely: 0.7, .uprightStationary: 0.2, .unknown: 0.1]
+        let loco: [LocomotionClass: Double] = [.stationary: 0.97, .unknown: 0.03]
+        let quiet = classify(posture: posture, locomotion: loco, arm: [.quiet: 0.8, .deskLike: 0.2])
+        XCTAssertEqual(quiet.activityClass, .sitting)
+        let restless = classify(posture: posture, locomotion: loco, arm: [.fidgeting: 0.7, .quiet: 0.3])
+        XCTAssertEqual(restless.activityClass, .fidgeting)
+        XCTAssertEqual(restless.posture, .seatedLikely, "fidgeting keeps the posture it happened in")
+        XCTAssertEqual(restless.confidence, 0.97 * (0.7 + 0.2), accuracy: 1e-9)
+    }
+
+    func testStandingNeedsAClearUprightLean() {
+        let standing = classify(posture: [.uprightStationary: 0.7, .seatedLikely: 0.2, .unknown: 0.1],
+                                locomotion: [.stationary: 0.97, .unknown: 0.03], arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(standing.activityClass, .standing)
+        XCTAssertEqual(standing.confidence, 0.97 * 0.7, accuracy: 1e-9)
+    }
+
+    func testStillWristWithNoLeanStaysStationaryNotSittingOrStanding() {
+        let k = classify(posture: [.seatedLikely: 0.4, .uprightStationary: 0.35, .unknown: 0.25],
+                         locomotion: [.stationary: 0.97, .unknown: 0.03], arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(k.activityClass, .stationary)
+        XCTAssertEqual(k.confidence, 0.97, accuracy: 1e-9, "sure it is a still, awake, non-recumbent wrist")
+        XCTAssertEqual(k.runnerUp, .sitting, "...and the lean it cannot commit to")
+    }
+
+    func testSleepingNeedsTheSessionAndLyingDownDoesNot() {
+        let night = classify(posture: [.recumbent: 0.9, .unknown: 0.1], locomotion: [.stationary: 0.97, .unknown: 0.03],
+                             sleep: .asleep)
+        XCTAssertEqual(night.activityClass, .sleeping)
+        // Inside the session anything short of a clear sit/stand lean is the night.
+        XCTAssertEqual(night.confidence, 0.97, accuracy: 1e-9)
+
+        let nap = classify(posture: [.recumbent: 0.9, .unknown: 0.1], locomotion: [.stationary: 0.97, .unknown: 0.03],
+                           sleep: .unknown)
+        XCTAssertEqual(nap.activityClass, .lyingDown)
+        XCTAssertEqual(nap.confidence, 0.97 * 0.9, accuracy: 1e-9)
+        let inBed = classify(posture: [.recumbent: 0.9, .unknown: 0.1], locomotion: [.stationary: 0.97, .unknown: 0.03],
+                             sleep: .awake)
+        XCTAssertEqual(inBed.activityClass, .lyingDown)
+    }
+
+    func testThinEvidenceIsUnknownWithTheBestGuessAsRunnerUp() {
+        let k = classify(posture: [.seatedLikely: 0.5, .uprightStationary: 0.3, .unknown: 0.2],
+                         locomotion: [.stationary: 0.6, .walking: 0.2, .unknown: 0.2], quality: 0.2)
+        XCTAssertEqual(k.activityClass, .unknown)
+        XCTAssertEqual(k.confidence, 0)
+        XCTAssertEqual(k.runnerUp, .sitting, "what it would be if forced, offered as a guess and nothing more")
+        XCTAssertEqual(k.evidenceQuality, 0.2, accuracy: 1e-9)
+    }
+
+    func testConfidenceAndEvidenceQualityAreBoundedAndIndependent() {
+        let k = classify(locomotion: [.running: 1], quality: 7)
+        XCTAssertEqual(k.evidenceQuality, 1)
+        XCTAssertEqual(k.confidence, 1)
+        let low = classify(locomotion: [.running: 1], quality: 0.31)
+        XCTAssertEqual(low.activityClass, .running)
+        XCTAssertEqual(low.evidenceQuality, 0.31, accuracy: 1e-9, "a sure class over thin evidence says so")
+    }
+
+    func testClassificationOfAStateAndItsRunAgree() {
+        let state = ActivityContextState(
+            ts: 1_760_000_000, posture: Posture([.seatedLikely: 0.7, .uprightStationary: 0.2, .unknown: 0.1]),
+            locomotion: Locomotion([.stationary: 0.97, .unknown: 0.03]), armBehavior: Arm([.deskLike: 0.6, .quiet: 0.4]),
+            intensity: 0.2, transition: nil, sleep: SleepContext(state: .awake), wear: WearContext(state: .onWrist, validity: 1),
+            overallConfidence: 0.8, overallUncertainty: 0.2,
+            headConfidence: ActivityHeadConfidence(posture: 0.7, locomotion: 0.97, armBehavior: 0.6),
+            displayContext: "Desk sitting",
+            history: ActivityHistorySummary(sinceLocomotionS: nil, stationaryForS: 300, recentEvents: []),
+            evidence: ActivityEvidenceSummary(imu: false, encoder: false, dynAccel: true, gravity: true, steps: true,
+                                              heartRate: true, sleep: true, coverage: 0.8),
+            versions: ActivityStateVersions())
+        let run = ActivityContextRun(start: state.ts, end: state.ts + 5, posture: state.posture,
+                                     locomotion: state.locomotion, armBehavior: state.armBehavior, intensity: 0.2,
+                                     overallConfidence: 0.8, overallUncertainty: 0.2, displayContext: "Desk sitting",
+                                     sleep: .awake, wear: .onWrist, count: 1)
+        XCTAssertEqual(ActivityClassifier.classify(state: state), ActivityClassifier.classify(run: run))
+        XCTAssertEqual(run.classification.activityClass, .sittingDesk)
+    }
+
+    // MARK: Persisted shape
+
+    func testRunsCarryTheCanonicalClassInTheirJSONAndIgnoreItOnRead() throws {
+        let run = ActivityContextRun(start: 100, end: 160, posture: Posture([.unknown: 1]),
+                                     locomotion: Locomotion([.walking: 0.9, .briskWalking: 0.05, .unknown: 0.05]),
+                                     armBehavior: Arm([.other: 1]), intensity: 0.5, overallConfidence: 0.8,
+                                     overallUncertainty: 0.2, displayContext: "Walking", sleep: .awake,
+                                     wear: .onWrist, count: 12)
+        let data = try JSONEncoder().encode(run)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(json["activity_class"] as? String, "walking")
+        XCTAssertEqual(try XCTUnwrap(json["class_confidence"] as? Double), 0.95, accuracy: 0.011)
+        XCTAssertEqual(try JSONDecoder().decode(ActivityContextRun.self, from: data), run)
+
+        // A run written before the taxonomy existed still reads.
+        var legacy = json
+        legacy["activity_class"] = nil; legacy["class_confidence"] = nil
+        let old = try JSONSerialization.data(withJSONObject: legacy)
+        XCTAssertEqual(try JSONDecoder().decode(ActivityContextRun.self, from: old), run)
+    }
+
+    func testDaySummaryAddsSecondsPerClassAndOldSummariesStillDecode() throws {
+        let walk = ActivityContextRun(start: 0, end: 60, posture: Posture([.unknown: 1]),
+                                      locomotion: Locomotion([.walking: 1]), armBehavior: Arm([.other: 1]),
+                                      intensity: 0.5, overallConfidence: 0.8, overallUncertainty: 0.2,
+                                      displayContext: "Walking", sleep: .awake, wear: .onWrist, count: 12)
+        let off = ActivityContextRun(start: 60, end: 100, posture: Posture([.unknown: 1]),
+                                     locomotion: Locomotion([.unknown: 1]), armBehavior: Arm([.unknown: 1]),
+                                     intensity: nil, overallConfidence: 0, overallUncertainty: 1,
+                                     displayContext: "Off wrist", sleep: .unknown, wear: .offWrist, count: 8)
+        let summary = ActivityContextDaySummary(runs: [walk, off])
+        XCTAssertEqual(summary.classSeconds, ["walking": 60, "off_wrist": 40])
+
+        let legacy = #"{"label_s":{"Walking":60},"unclear_s":0,"mean_confidence":0.8}"#.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(ActivityContextDaySummary.self, from: legacy)
+        XCTAssertNil(decoded.classSeconds)
+        let key = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(summary)) as? [String: Any])
+        XCTAssertNotNil(key["class_s"])
+    }
+}

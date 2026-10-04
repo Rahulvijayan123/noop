@@ -35,9 +35,12 @@ struct ActivitySim {
 
     struct Options {
         var hr: Int? = 66
+        /// Heart rate as a function of time; wins over `hr` when set (ramps, recovery curves).
+        var hrAt: ((Int) -> Int?)? = nil
         var sleep: SleepEvidence = .unknown
         var wear: WearEvidence = .onWrist
         var workout = false
+        var workoutKind: WorkoutKind = .unspecified
         var gravity = true
         var dyn = true
         var steps = true
@@ -54,10 +57,11 @@ struct ActivitySim {
         if opt.dyn { o.dynAccelG = dyn }
         if opt.gravity { o.gravity = gravityVector(jitter: jitter) }
         if opt.steps { o.stepTicks = ticks; o.strapClass = cls }
-        o.hrBpm = opt.hr
+        o.hrBpm = opt.hrAt?(ts) ?? opt.hr
         o.sleep = opt.sleep
         o.wear = opt.wear
         o.loggedWorkout = opt.workout
+        o.workoutKind = opt.workoutKind
         o.encoder = opt.encoder?(ts)
         o.imu = opt.imu?(ts)
         observations.append(o)
@@ -107,6 +111,14 @@ struct ActivitySim {
         o.hr = opt.hr == nil ? nil : 152
         for _ in 0..<seconds {
             emit(dyn: 0.42 + noise(0.12), ticks: 3, cls: 2, rotate: noise(0.3), jitter: noise(14), opt: o)
+        }
+    }
+
+    /// Vigorous effort without a gait (rowing, lifting, HIIT): large arm movement and orientation
+    /// churn, no step ticks. Heart rate comes from `opt` (use `hrAt` for a ramp).
+    mutating func vigorous(_ seconds: Int, opt: Options = Options()) {
+        for _ in 0..<seconds {
+            emit(dyn: 0.45 + rand() * 0.35, ticks: 0, cls: 0, rotate: noise(0.5), jitter: noise(30), opt: opt)
         }
     }
 

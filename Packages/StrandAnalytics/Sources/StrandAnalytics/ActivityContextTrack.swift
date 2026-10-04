@@ -123,6 +123,26 @@ public enum ActivityContextTrackBuilder {
                                     lastTs: decoder.lastObservationTs)
     }
 
+    /// Step ticks per second = counter delta between consecutive samples 1–2 s apart, bounded by the gait
+    /// ceiling (a walking-bout credit of 6–20 ticks lands in one second and counts as the ceiling), and the
+    /// strap's per-record still/walk/run label, both keyed by second.
+    static func stepTicksAndClasses(_ samples: [StepSample], lo: Int, hi: Int)
+        -> (ticks: [Int: Int], classes: [Int: Int]) {
+        var tickAt: [Int: Int] = [:], classAt: [Int: Int] = [:]
+        let steps = samples.sorted { $0.ts < $1.ts }
+        for (k, s) in steps.enumerated() where s.ts >= lo && s.ts < hi {
+            if let c = s.activityClass { classAt[s.ts] = c }
+            guard k > 0 else { continue }
+            let p = steps[k - 1]
+            let dt = s.ts - p.ts
+            let d = (s.counter - p.counter) & 0xFFFF
+            if dt >= 1, dt <= 2, d < StepsCounter.maxStepDelta {
+                tickAt[s.ts] = min(d, StepsCounter.maxTicksPerSecond * dt)
+            }
+        }
+        return (tickAt, classAt)
+    }
+
     /// One observation per second that has any data (or an off-wrist span), in time order.
     static func observations(for input: ActivityContextTrackInput) -> [ActivityObservation] {
         let lo = input.dayStart, hi = input.dayEnd
@@ -134,20 +154,7 @@ public enum ActivityContextTrackBuilder {
         var gravAt: [Int: GravitySample] = [:]
         for s in input.gravity where s.ts >= lo && s.ts < hi { gravAt[s.ts] = s }
 
-        // Step ticks per second = counter delta between consecutive samples 1–2 s apart, bounded by the
-        // gait ceiling (a walking-bout credit of 6–20 ticks lands in one second and counts as the ceiling).
-        var tickAt: [Int: Int] = [:], classAt: [Int: Int] = [:]
-        let steps = input.steps.sorted { $0.ts < $1.ts }
-        for (k, s) in steps.enumerated() where s.ts >= lo && s.ts < hi {
-            if let c = s.activityClass { classAt[s.ts] = c }
-            guard k > 0 else { continue }
-            let p = steps[k - 1]
-            let dt = s.ts - p.ts
-            let d = (s.counter - p.counter) & 0xFFFF
-            if dt >= 1, dt <= 2, d < StepsCounter.maxStepDelta {
-                tickAt[s.ts] = min(d, StepsCounter.maxTicksPerSecond * dt)
-            }
-        }
+        let (tickAt, classAt) = stepTicksAndClasses(input.steps, lo: lo, hi: hi)
 
         var encoderAt: [Int: MotionEncoderOutput] = [:]
         for w in input.encoderWindows where w.endTs >= lo && w.endTs < hi {
@@ -160,6 +167,7 @@ public enum ActivityContextTrackBuilder {
         let sleepSpans = input.sleep.sorted { $0.start < $1.start }
         let offSpans = input.offWrist.sorted { $0.start < $1.start }
         let workouts = input.workouts.sorted { $0.start < $1.start }
+        let workoutKinds = workouts.map { WorkoutKind(sport: $0.sport) }
         var sleepCursor = 0, offCursor = 0, workoutCursor = 0
 
         func inside<S>(_ spans: [S], _ cursor: inout Int, _ ts: Int, start: (S) -> Int, end: (S) -> Int) -> Bool {
@@ -196,7 +204,10 @@ public enum ActivityContextTrackBuilder {
             } else {
                 o.sleep = input.sleepKnownOutsideSessions ? .awake : .unknown
             }
-            o.loggedWorkout = inside(workouts, &workoutCursor, ts, start: \.start, end: \.end)
+            if inside(workouts, &workoutCursor, ts, start: \.start, end: \.end) {
+                o.loggedWorkout = true
+                o.workoutKind = workoutKinds[workoutCursor]
+            }
             out.append(o)
         }
         return out
@@ -240,7 +251,29 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         case intensity
         case overallConfidence = "overall_confidence", overallUncertainty = "overall_uncertainty"
         case displayContext = "display_context", sleep, wear, count = "n"
+        // Derived on write from the fields above (`ActivityClassifier`), never read back: the document
+        // carries them so SQL and other readers get the canonical class without re-implementing the mapping.
+        case activityClass = "activity_class", classConfidence = "class_confidence"
     }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        start = try c.decode(Int.self, forKey: .start)
+        end = try c.decode(Int.self, forKey: .end)
+        posture = try c.decode(HeadProbabilities<PostureClass>.self, forKey: .posture)
+        locomotion = try c.decode(HeadProbabilities<LocomotionClass>.self, forKey: .locomotion)
+        armBehavior = try c.decode(HeadProbabilities<ArmBehaviorClass>.self, forKey: .armBehavior)
+        intensity = try c.decodeIfPresent(Double.self, forKey: .intensity)
+        overallConfidence = try c.decode(Double.self, forKey: .overallConfidence)
+        overallUncertainty = try c.decode(Double.self, forKey: .overallUncertainty)
+        displayContext = try c.decodeIfPresent(String.self, forKey: .displayContext)
+        sleep = try c.decode(SleepContextState.self, forKey: .sleep)
+        wear = try c.decode(WearContextState.self, forKey: .wear)
+        count = try c.decode(Int.self, forKey: .count)
+    }
+
+    /// The canonical class of the run (see `ActivityClassifier`).
+    public var classification: ActivityClassification { ActivityClassifier.classify(run: self) }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
@@ -258,6 +291,9 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         try c.encode(sleep, forKey: .sleep)
         try c.encode(wear, forKey: .wear)
         try c.encode(count, forKey: .count)
+        let k = classification
+        try c.encode(k.activityClass.rawValue, forKey: .activityClass)
+        try c.encode((k.confidence * 100).rounded() / 100, forKey: .classConfidence)
     }
 
     /// The run as the canonical published-state shape (provenance fields are carried by the document).
@@ -464,28 +500,37 @@ public struct ActivityContextDaySummary: Codable, Equatable, Sendable {
     public var labelSeconds: [String: Int]
     public var unclearSeconds: Int
     public var meanConfidence: Double
+    /// Seconds per canonical `ActivityClass` code (every class, `unknown` included). nil on documents
+    /// written before the taxonomy existed.
+    public var classSeconds: [String: Int]?
 
     enum CodingKeys: String, CodingKey {
         case labelSeconds = "label_s", unclearSeconds = "unclear_s", meanConfidence = "mean_confidence"
+        case classSeconds = "class_s"
     }
 
-    public init(labelSeconds: [String: Int], unclearSeconds: Int, meanConfidence: Double) {
+    public init(labelSeconds: [String: Int], unclearSeconds: Int, meanConfidence: Double,
+                classSeconds: [String: Int]? = nil) {
         self.labelSeconds = labelSeconds; self.unclearSeconds = unclearSeconds; self.meanConfidence = meanConfidence
+        self.classSeconds = classSeconds
     }
 
     public init(runs: [ActivityContextRun]) {
         var labelSeconds: [String: Int] = [:]
+        var classSeconds: [String: Int] = [:]
         var unclear = 0
         var confSum = 0.0
         var total = 0
         for r in runs {
             let seconds = r.end - r.start
             if let l = r.displayContext { labelSeconds[l, default: 0] += seconds } else { unclear += seconds }
+            classSeconds[ActivityClassifier.classify(run: r).activityClass.rawValue, default: 0] += seconds
             confSum += r.overallConfidence * Double(seconds)
             total += seconds
         }
         self.init(labelSeconds: labelSeconds, unclearSeconds: unclear,
-                  meanConfidence: (confSum / Double(max(1, total)) * 1000).rounded() / 1000)
+                  meanConfidence: (confSum / Double(max(1, total)) * 1000).rounded() / 1000,
+                  classSeconds: classSeconds)
     }
 }
 

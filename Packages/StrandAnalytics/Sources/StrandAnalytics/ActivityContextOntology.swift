@@ -17,7 +17,7 @@ public enum ActivityContextVersions {
     /// Head vocabularies below.
     public static let ontology = "v2.0"
     /// Temporal decoder structure + parameter tables.
-    public static let decoder = "hsmm-1.1"
+    public static let decoder = "hsmm-1.2"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     public static let featureSchema = "imu-feat-1"
 }

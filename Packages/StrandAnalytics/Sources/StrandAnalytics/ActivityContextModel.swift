@@ -14,7 +14,7 @@ import Foundation
 // through a context prior. Heads are marginals of those two filtered posteriors; none is ever a raw
 // per-window classifier output.
 //
-// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.1`). They were set from this strap's own
+// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.2`). They were set from this strap's own
 // distributions where those exist (dynamic-acceleration percentiles for still / walking / running
 // seconds) and from physiological plausibility elsewhere. They are versioned, centralized, and meant
 // to be replaced by fitted values once labelled data exists; tests pin behaviour, not the numbers.
@@ -330,7 +330,7 @@ enum ActivityContextModel {
     // MARK: Channel weights and "no information" constants
 
     static let wMotion = 1.0, wGait = 1.0, wOrient = 0.7, wEncoder = 0.8, wArm = 0.4, wHR = 0.35, wGate = 1.0
-    static let wShift = 1.0
+    static let wShift = 1.0, wHRTrend = 0.6
     static let uMotion = 0.20, uGait = 0.35, uOrient = 0.35, uEncoder = 0.30, uArm = 0.25, uHR = 0.55, uGate = 0.30
     static let uShift = 0.30
 
@@ -349,6 +349,47 @@ enum ActivityContextModel {
         let burst = f.mBurst10 ?? 0
         let gait = f.gaitPresence ?? 0
         return acSigmoid((net - 50) / 10) * acSigmoid((burst - 0.38) / 0.05) * (1 - min(1, gait))
+    }
+
+    // MARK: Exertion (what the heart says about effort)
+
+    /// Heart rate as a fraction of reserve at which effort starts to count, and at which it counts fully.
+    /// 0.30 of reserve is a brisk walk for most people; 0.45 is where "higher-intensity" starts.
+    static let exertionStart = 0.30, exertionFull = 0.45
+
+    /// Smooth 0…1 ramp.
+    @inline(__always) static func smoothStep(_ x: Double) -> Double {
+        let t = min(1, max(0, x))
+        return t * t * (3 - 2 * t)
+    }
+
+    /// 0…1: how strongly the heart says "working hard right now". A rate well above rest that is steady or
+    /// still climbing counts in full; a rate that is falling is recovery and counts for little; a steep
+    /// climb counts early (the first minutes of a hard effort, before the rate has caught up).
+    ///
+    /// This is the only cue the strap streams offer for vigorous effort that has no gait — rowing,
+    /// lifting, HIIT — which is why it alone can lift the generic-exercise mode out of its "needs a label"
+    /// gate. It never makes a still wrist exercise: the movement channels still have to agree.
+    static func exertion(_ f: ActivityFeatures) -> Double {
+        guard let hr = f.hrRel else { return 0 }
+        let level = smoothStep((hr - exertionStart) / (exertionFull - exertionStart))
+        let slope = f.hrSlope ?? 0
+        let falling = min(1, max(0, -slope / 6))
+        let rising = min(1, max(0, slope / 6))
+        let onset = rising * smoothStep((hr - 0.15) / 0.12)
+        return min(1, max(0, level * (1 - 0.6 * falling) + 0.5 * onset * (1 - level)))
+    }
+
+    /// Whether a logged workout of `kind` explains `mode`. A logged run says nothing for cycling, and a
+    /// logged ride says nothing for stairs; an unrecognised sport keeps the permissive behaviour.
+    static func workoutCovers(_ mode: BodyMode, kind: WorkoutKind) -> Bool {
+        switch kind {
+        case .unspecified: return true
+        case .running: return mode == .otherExercise
+        case .walking: return mode == .stairs
+        case .cycling: return mode == .cycling
+        case .other: return mode == .otherExercise || mode == .stairs
+        }
     }
 
     // MARK: Observation score
@@ -531,17 +572,36 @@ enum ActivityContextModel {
             add(v, unknownValue: uHR, weight: wHR)
         }
 
+        // 6a. Heart-rate trend. A rate that is clearly falling from an elevated level is recovery, which
+        // argues against the modes that mean "working hard right now"; a steady or rising rate argues
+        // against nothing. Not counted as an evidence channel: it only refines the level above.
+        if let slope = f.hrSlope, let hr = f.hrRel, hr >= 0.25 {
+            let recovering = min(1, max(0, (-slope - 2) / 6))
+            if recovering > 0 {
+                var v = [Double](repeating: 1, count: n)
+                for m in 0..<n where m != unknownIdx && profiles[m].hrRel >= exertionFull {
+                    v[m] = 1 - 0.7 * recovering
+                }
+                add(v, unknownValue: 1.0, weight: wHRTrend, isEvidence: false)
+            }
+        }
+
         // 6b. Specialist support: stairs / cycling / vehicle / generic exercise have no cue of their own
-        // in the strap streams, so they are only plausible while the encoder names them (or, for
-        // exercise-like modes, a logged workout covers the time). No penalty for the others.
+        // in the strap streams, so they are only plausible while the encoder names them or a logged
+        // workout of a compatible kind covers the time. Generic exercise has one more way in: a heart
+        // that says "working hard" (see `exertion`). No penalty for the other modes.
         var specialists = false
         var support = [Double](repeating: 1, count: n)
+        let effort = exertion(f)
         for m in 0..<n {
             guard let label = profiles[m].requiresLabel else { continue }
             specialists = true
+            let mode = BodyMode(rawValue: m)!
             let said = f.encoder?.classProbs[label] ?? 0
-            let covered = f.loggedWorkout && profiles[m].workout >= 0.9
-            support[m] = (said >= 0.15 || covered) ? 1.0 : 0.04
+            let covered = f.loggedWorkout && profiles[m].workout >= 0.9 && workoutCovers(mode, kind: f.workoutKind)
+            var s = (said >= 0.15 || covered) ? 1.0 : 0.04
+            if mode == .otherExercise { s = max(s, 0.04 + 0.96 * effort) }
+            support[m] = s
         }
         if specialists { add(support, unknownValue: 1.0, weight: 1.0, isEvidence: false) }
 
