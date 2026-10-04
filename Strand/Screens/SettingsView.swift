@@ -27,6 +27,8 @@ struct SettingsView: View {
     @State private var exportAlertMessage = ""
     @State private var showExportAlert = false
     @State private var showAbout = false
+    /// The current manual strap placement (G4), loaded when Settings appears.
+    @State private var currentPlacement = StrapPlacement.unknown
 
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
     #if os(iOS)
@@ -54,6 +56,28 @@ struct SettingsView: View {
         .sheet(isPresented: $showAbout) {
             HowNoopWorksView(onClose: { showAbout = false })
         }
+        .task { await loadCurrentPlacement() }
+    }
+
+    /// Reads the effective placement at "now" for the active strap from the local store. History
+    /// before the first declaration is UNKNOWN and is never backfilled (spec §6).
+    private func loadCurrentPlacement() async {
+        guard let store = await model.repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        let device = model.repo.deviceId
+        currentPlacement = (try? placementStore.activePlacement(at: Date(), deviceId: device))?.placement
+            ?? .unknown
+        // F5 (audit-g34-g7-context): pull server-side placement corrections back at the Settings
+        // appear cadence. Best-effort and non-blocking; reconcile() self-skips while any local
+        // change is still unsynced, so an offline declaration is never overwritten.
+        await reconcilePlacement(placementStore)
+    }
+
+    /// Best-effort pull of the server's placement intervals (same authenticated route pattern).
+    private func reconcilePlacement(_ placementStore: PlacementStore) async {
+        guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil else { return }
+        let sync = PlacementCloudSync(store: { placementStore })
+        _ = try? await sync.reconcile()
     }
 
     private func navRow<Dest: View>(_ label: LocalizedStringKey, _ value: String? = nil,
@@ -462,8 +486,21 @@ struct SettingsView: View {
                             chevron: false)
                 SettingsDivider()
             }
+            SettingsDivider()
+            navRow("Wear placement",
+                   currentPlacement == .unknown ? String(localized: "Not set") : currentPlacement.displayName) {
+                placementEditor
+            }
+            SettingsDivider()
             navRow("Manage strap") { strapEditor }
         }
+    }
+
+    /// Manual, effective-dated placement (G4). Picking a row declares the placement effective at the
+    /// moment it is saved, offline-safe; corrections close the overlapping interval in the local
+    /// store and are journaled for upload.
+    private var placementEditor: some View {
+        PlacementEditorView()
     }
 
     private var strapEditor: some View {
@@ -1297,3 +1334,57 @@ private struct FormRow<Control: View>: View {
         .preferredColorScheme(.dark)
 }
 #endif
+
+
+// MARK: - Placement editor (G4)
+
+/// Sets the current strap placement. Loads the effective placement when it appears; picking a row
+/// declares the change effective at save time (offline-safe), folds it into the local interval
+/// model, and best-effort uploads the journal through the same authenticated route pattern as the
+/// profile/scores routes. "Not set"/Unknown is the honest state for unannotated history.
+private struct PlacementEditorView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var selection = StrapPlacement.unknown.rawValue
+    @State private var loaded = false
+
+    var body: some View {
+        SettingsEditPage("Wear placement",
+                         footnote: "Where you wear your strap. Placement-aware metric eligibility uses this; days before the first declaration stay unknown.") {
+            SettingsOptions(selection: $selection, options: [
+                (StrapPlacement.wrist.rawValue, "Wrist"),
+                (StrapPlacement.bicep.rawValue, "Bicep"),
+                (StrapPlacement.other.rawValue, "Other"),
+                (StrapPlacement.unknown.rawValue, "Unknown"),
+            ])
+        }
+        .task { await load() }
+        .onChange(of: selection) { newValue in
+            guard loaded, newValue != StrapPlacement.unknown.rawValue else { return }
+            Task { await save(raw: newValue) }
+        }
+    }
+
+    private func load() async {
+        guard let store = await model.repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        let active = (try? placementStore.activePlacement(at: Date(), deviceId: model.repo.deviceId))?.placement
+        selection = (active ?? .unknown).rawValue
+        loaded = true
+    }
+
+    private func save(raw: String) async {
+        guard let placement = StrapPlacement(rawValue: raw) else { return }
+        guard let store = await model.repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        try? placementStore.setCurrent(placement, deviceId: model.repo.deviceId)
+        // Best-effort upload of the journal; the edge route is the parent integration point
+        // (see docs/core-plumbing/findings/g34-wear-placement.md). A failure leaves the rows
+        // unsynced and the next save/launch retries them.
+        guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil else { return }
+        let sync = PlacementCloudSync(store: { placementStore })
+        _ = try? await sync.pushPending()
+        // Pull the server state back after the push so a server-side correction (e.g. a
+        // future-dated cap) reaches this install. Best-effort; pending rows block the pull.
+        _ = try? await sync.reconcile()
+    }
+}

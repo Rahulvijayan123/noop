@@ -135,9 +135,15 @@ export function createInstallationLifecycle(rest: SupabaseRest) {
             p_evidence: evidence,
           });
         } catch (error) {
+          // The exact SQL marker authorizes deferral ONLY together with its HTTP 409
+          // (audit 2026-10-03: the rest client now propagates safe receiver codes on
+          // 401/403 authority rejections too, so receiverCode alone no longer implies
+          // the marker's own 409 — a 401/403 marker lookalike must stay a rejection,
+          // never a deferral. Pinned by retained_identity_deferral_test.ts:104.)
           if (
             body.provisionalExternalDeviceId === "my-whoop" && isUuid(provisional) &&
-            (error as { receiverCode?: string })?.receiverCode === "retained_legacy_identity_v1"
+            (error as { receiverCode?: string })?.receiverCode === "retained_legacy_identity_v1" &&
+            (error as { status?: number })?.status === 409
           ) {
             return reply({ version: 1, state: "deferred", reason: "retained_identity_requires_review",
               userId, sourceId, provisionalExternalDeviceId: "my-whoop", deviceId: provisional }, 202);

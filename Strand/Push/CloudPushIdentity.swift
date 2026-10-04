@@ -81,6 +81,14 @@ public enum CloudPushIdentityStore {
         // connect: the durable capture intent belongs to the collector session,
         // which is user-scoped (see RawDataSessionStore.clearPersistedCaptureIntent).
         RawDataSessionStore.clearPersistedCaptureIntent()
+        // Stop the runtime too. A signed-out runtime would otherwise keep staging NEW records into
+        // the old owner's journal (cycle() has no identity and returns early, but staging is not
+        // gated on identity), which is neither retained-under-A nor deleted — it is new A-labelled
+        // data the old owner never consented to. The runtime stop pauses staging and the upload
+        // cycle; the journal and the signed-out owner's credential are kept for re-enrollment.
+        // The owner pointer is cleared BEFORE the stop so a racing startIfEnabled() (from a scene
+        // activation or a settings flip) cannot re-adopt the old identity.
+        Task { await CloudPushRuntime.shared.stop() }
     }
 
     /// Irreversible removal, for an explicit account deletion.
@@ -88,7 +96,13 @@ public enum CloudPushIdentityStore {
         let owner = ownerId.lowercased()
         CloudKeychain.remove(account: "uploadToken.\(owner)", service: service)
         UserDefaults.standard.removeObject(forKey: "\(tokenIdKey).\(owner)")
-        if currentOwnerId() == owner { UserDefaults.standard.removeObject(forKey: ownerIdKey) }
+        let wasCurrent = currentOwnerId() == owner
+        if wasCurrent { UserDefaults.standard.removeObject(forKey: ownerIdKey) }
+        // Same reasoning as `signOutCurrentOwner`: an install that just deleted (or is about to
+        // re-enroll elsewhere) must not keep staging into a journal under a removed owner. The
+        // journal rows themselves are not deleted — deletion is a server flow — but the runtime
+        // stops touching them until a fresh enrollment adopts the install.
+        if wasCurrent { Task { await CloudPushRuntime.shared.stop() } }
     }
 
     // MARK: - Device id

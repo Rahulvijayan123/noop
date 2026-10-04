@@ -555,6 +555,14 @@ struct ActivityLane {
                                          user: job.userId, device: job.deviceId,
                                          dayStart: dayBounds.start, dayEnd: dayBounds.end)
 
+        // 4b. Wear evidence (G3/G7): WRIST_ON/OFF rows from noop_events feed the shared fold so
+        // epochs carry an EVIDENCED wear_state (unknown where no event covers) instead of the
+        // policy's all-unknown default. Deterministic; quiet IMU is never on-wrist evidence.
+        let wearEvents = try loadWearEvents(user: job.userId, device: job.deviceId,
+                                            dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let wearIntervals = Self.wearIntervals(fromEvents: wearEvents,
+                                               from: dayBounds.start, to: dayBounds.end)
+
         // 5. Inference per run, outside any transaction, lease renewed around
         //    the long work. Windows are collected per run and folded ONCE
         //    through the shared policy in step 6 (see
@@ -607,7 +615,8 @@ struct ActivityLane {
             inputRevision: job.inputRevision,
             modelVersion: versions.model,
             preprocessingVersion: versions.preprocessing,
-            dataThrough: dataThrough)
+            dataThrough: dataThrough,
+            wearIntervals: wearIntervals)
         // The publish RPC validates `p_payload ->> 'day'` against the job's
         // day (20261003120000_activity_context.sql), so the C10 document is
         // stamped with the job day before it is sealed.
@@ -839,6 +848,61 @@ struct ActivityLane {
             guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? "") else { return nil }
             return (start: s, end: e)
         }
+    }
+
+    /// WRIST_ON/WRIST_OFF event rows (`noop_events`) inside `[dayStart, dayEnd)`, for the wear fold.
+    /// Only events within the day count: a stale pre-day OFF cannot paint the day start off-body.
+    private func loadWearEvents(user: String, device: String,
+                                dayStart: Int, dayEnd: Int) throws -> [(ts: Int, kind: String)] {
+        let rows = try db.query("""
+            select ts::text, kind from public.noop_events
+            where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint and ts < $4::bigint
+              and (left(kind, 9) = 'WRIST_OFF' or left(kind, 8) = 'WRIST_ON')
+            order by ts asc, kind asc
+            """, [user, device, String(dayStart), String(dayEnd)])
+        return rows.compactMap { r in
+            guard let ts = Int(r["ts"] ?? ""), let kind = r["kind"], !kind.isEmpty else { return nil }
+            return (ts: ts, kind: kind)
+        }
+    }
+
+    /// Reconstruct half-open `WearInterval`s from WRIST event rows over `[from, to)`. Deterministic
+    /// and duplicate/out-of-order safe (events are sorted; an ON while on or OFF while off is
+    /// coalesced). A WRIST_ON asserts worn from its ts; a WRIST_OFF asserts off-body from its ts; the
+    /// state flips at the next opposite event; an open tail extends to `to`. Gaps carry no interval,
+    /// so the shared policy defaults those epochs to `.unknown` — absence of evidence is never a
+    /// guessed state. Only events inside `[from, to)` are considered.
+    static func wearIntervals(fromEvents events: [(ts: Int, kind: String)],
+                              from: Int, to: Int) -> [WearInterval] {
+        guard to > from else { return [] }
+        let wear = events
+            .filter { $0.ts >= from && $0.ts < to }
+            .filter { $0.kind.hasPrefix("WRIST_ON") || $0.kind.hasPrefix("WRIST_OFF") }
+            .sorted { lhs, rhs in
+                // Deterministic tie-break at equal timestamps (audit-g34-g7-context F7): WRIST_OFF
+                // sorts before WRIST_ON so an OFF+ON pair at the same second yields "on from then",
+                // matching AnalyticsEngine.offWristIntervals. Swift's sort is not contractually
+                // stable, so the secondary key is what makes the reconstruction reproducible.
+                if lhs.ts != rhs.ts { return lhs.ts < rhs.ts }
+                return lhs.kind.hasPrefix("WRIST_OFF") && rhs.kind.hasPrefix("WRIST_ON")
+            }
+        var out: [WearInterval] = []
+        var state: WearState? = nil
+        var spanStart = from
+        for e in wear {
+            let on = e.kind.hasPrefix("WRIST_ON")
+            let next: WearState = on ? .onWrist : .offWrist
+            if state == next { continue }
+            if let current = state, e.ts > spanStart {
+                out.append(WearInterval(start: spanStart, end: e.ts, wear: current))
+            }
+            state = next
+            spanStart = e.ts
+        }
+        if let current = state, to > spanStart {
+            out.append(WearInterval(start: spanStart, end: to, wear: current))
+        }
+        return out
     }
 
     // MARK: - Job row parsing
@@ -1187,7 +1251,8 @@ struct ActivityLane {
                                  inputRevision: Int64,
                                  modelVersion: String,
                                  preprocessingVersion: String,
-                                 dataThrough: Int) throws -> [String: Any] {
+                                 dataThrough: Int,
+                                 wearIntervals: [WearInterval] = []) throws -> [String: Any] {
         let sleepSessions = sleepIntervals.map { Self.sleepSession(from: $0) }
         let exerciseSessions = exerciseIntervals.map { Self.exerciseSession(from: $0) }
         let shared = windows.compactMap {
@@ -1197,7 +1262,8 @@ struct ActivityLane {
             windows: shared,
             runStart: dayStart, runEnd: dayEnd,
             exerciseSessions: exerciseSessions,
-            sleepSessions: sleepSessions)
+            sleepSessions: sleepSessions,
+            wearIntervals: wearIntervals)
         return try activityDocument(epochs: build.epochs,
                                     sleepIntervals: sleepIntervals,
                                     dayStart: dayStart, dayEnd: dayEnd,

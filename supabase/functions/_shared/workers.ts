@@ -126,6 +126,11 @@ export async function reconcileObjects({
   const staleBefore = new Date(now().getTime() - STALE_PENDING_MS).toISOString();
 
   for (const row of manifests as any[]) {
+    // Quarantined manifests can never verify (deterministic digest/RPC failure, durably
+    // recorded via noop_quarantine_manifest_verification). Stop re-reconciling them, with
+    // the SAME exclusion as VerificationLane.candidateSQL (verification_failure_code IS NULL),
+    // so the edge scan and the worker agree about what stays eligible.
+    if (row.verification_failure_code != null) continue;
     // Raw intake has its own paginated, byte-verifying, atomic-index reconciler. HEAD is not
     // evidence of a digest or a durable window and must never promote these manifests.
     if (row.object_class === 'raw') continue;

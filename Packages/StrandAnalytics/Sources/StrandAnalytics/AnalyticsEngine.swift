@@ -200,12 +200,29 @@ public enum AnalyticsEngine {
     ///
     /// This is a UTC midnight that callers pair with one captured offset and fixed 86,400-second blocks,
     /// so every boundary beyond a clock change sits an hour from the local midnight it names.
-    /// `LocalDayWindows` is the zone-rule-correct primitive built to replace that, and is deliberately
-    /// called by nothing yet. This function remains the shipped answer until a switch-over lands; the two
-    /// disagree by an hour on the far side of a transition, and `LocalDayWindowsTests` pins both answers
-    /// so the difference is visible rather than discovered.
+    /// `LocalDayWindows` is the zone-rule-correct primitive, and the scoring switch-over has landed: the
+    /// app and the worker pass a `LocalDayWindows`-derived `dayWindow` to `analyzeDay` (see
+    /// `localDayWindow(day:zone:)`), so the shipped day buckets are zone-correct on DST days. This
+    /// function remains the answer for pure-function callers/tests on UTC (offset 0), where the two are
+    /// byte-identical, and for the fallback when no zone-correct window is supplied. The two disagree by
+    /// an hour on the far side of a transition, and `LocalDayWindowsTests` pins both answers so the
+    /// difference is visible rather than discovered.
     static func dayStartUtcSeconds(_ day: String) -> Int {
         Int(isoDay.date(from: day)?.timeIntervalSince1970 ?? 0)
+    }
+
+    /// The half-open local-day bounds `[start, end)` of a `YYYY-MM-DD` day key in `zone`, from the
+    /// zone's own rules (`LocalDayWindows`). `start` is the instant local midnight begins; `end` is the
+    /// start of the next existing date, so a DST day is 23 h or 25 h (and a skipped date's predecessor
+    /// reaches over it). nil when the key is malformed or the zone has no such date.
+    ///
+    /// This is the switch-over helper scoring callers pair with `analyzeDay`'s `dayWindow:` parameter:
+    /// the same `LocalDayWindows` lookup also produces the day key (`LocalDayWindow.date.key`), so the
+    /// day key and the bucket agree by construction — byte-identical to the fixed-offset
+    /// `dayString(_:offsetSec:)` answer on every non-DST day, and the zone-correct answer on DST days
+    /// where the fixed-offset math was wrong by an hour.
+    public static func localDayWindow(day: String, zone: TimeZone) -> LocalDayWindow? {
+        LocalDayWindows(timeZone: zone).window(ofDayKey: day)
     }
 
     /// Skip the redundant calendar-day re-read in analyzeRecent's per-day scan (#997, ryanbr). For a
@@ -400,6 +417,16 @@ public enum AnalyticsEngine {
                                   // false-sleep guard (#90). Default 0 keeps pure-function callers/tests
                                   // on UTC; IntelligenceEngine passes the device's real offset.
                                   tzOffsetSeconds: Int = 0,
+                                  // Zone-correct half-open local-day bounds `[start, end)` of `day`
+                                  // (unix seconds), from `LocalDayWindows` (see `localDayWindow(day:zone:)`).
+                                  // When provided, the day-bucketing filters use them instead of the
+                                  // fixed-offset + 86,400 block, so a DST day (23 h/25 h) is bucketed by
+                                  // the zone's own rules. nil (the default) keeps every pure-function
+                                  // caller/test byte-identical on the fixed-offset answer. The window and
+                                  // the day key agree by construction (both come from the same lookup), so
+                                  // non-DST days are byte-identical to `dayString(_:offsetSec:) == day` and
+                                  // DST days are the zone-correct answer the fixed-offset math got wrong.
+                                  dayWindow: LocalDayWindow? = nil,
                                   // Off-wrist `[start, end)` intervals (unix seconds) for the off-wrist
                                   // sleep backstop (#500), paired from WRIST_OFF/WRIST_ON events by
                                   // `offWristIntervals`. The HR-gap proxy in detectSleep is the always-on
@@ -520,15 +547,28 @@ public enum AnalyticsEngine {
                                   // day, which counts the full 24 h of resting energy.
                                   energyAsOf: Int? = nil) -> DayResult {
 
-        // Precompute the day's UTC bounds ONCE (#996). `dayString(ts, offsetSec:)` formats the UTC
-        // calendar day of (ts + offset) with a FIXED offset, so "== day" is exactly membership in
-        // [dayStartUtc, +86400). That turns the day-bucketing filters below — otherwise a per-sample
-        // DateFormatter over the full-day dayHr/daySteps streams (~86k 1 Hz samples each) once per
-        // analyzeDay, ×maxDays every pass — into an integer range check. Byte-identical to the
-        // formatter compare (locked by AnalyticsEngineDayBoundsTests, incl. fractional offsets).
+        // Precompute the day's bounds ONCE (#996). Two answers coexist here:
+        //   * `dayWindow` (the shipped answer when supplied): the zone-correct half-open [start, end)
+        //     of the LOCAL calendar day from `LocalDayWindows`, so a 23 h/25 h DST day is bucketed by
+        //     the zone's own rules and the key/bucket agree by construction.
+        //   * fixed-offset fallback (nil): membership in (ts + tzOffsetSeconds) ∈ [dayStartUtc, +86400),
+        //     byte-identical to the `dayString(ts, offsetSec:) == day` formatter compare for every
+        //     caller that passes no zone-correct window (pure-function callers/tests on UTC).
+        // Either way this turns the day-bucketing filters below — otherwise a per-sample DateFormatter
+        // over the full-day dayHr/daySteps streams (~86k 1 Hz samples each) once per analyzeDay, ×maxDays
+        // every pass — into an integer range check (locked by AnalyticsEngineDayBoundsTests, incl.
+        // fractional offsets, for the fallback).
         let dayStartUtc = dayStartUtcSeconds(day)
-        let dayEndUtc = dayStartUtc + 86_400
-        func tsInDay(_ ts: Int) -> Bool { (ts + tzOffsetSeconds) >= dayStartUtc && (ts + tzOffsetSeconds) < dayEndUtc }
+        let dayStartIn: Int
+        let dayEndIn: Int
+        if let window = dayWindow {
+            dayStartIn = Int(window.start.timeIntervalSince1970)
+            dayEndIn = Int(window.nextStart.timeIntervalSince1970)
+        } else {
+            dayStartIn = dayStartUtc - tzOffsetSeconds
+            dayEndIn = dayStartIn + 86_400
+        }
+        func tsInDay(_ ts: Int) -> Bool { ts >= dayStartIn && ts < dayEndIn }
 
         // ── Sleep detection + staging ─────────────────────────────────────────
         let detectedSessions = SleepStager.detectSleep(hr: hr, rr: rr, resp: resp, gravity: gravity,

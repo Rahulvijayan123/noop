@@ -3,6 +3,17 @@ import Combine
 import SwiftUI
 import StrandAnalytics
 
+/// One observed reporting-timezone change (T06 travel): the IANA `zoneId` that took effect at
+/// `effectiveFrom` (unix seconds). The phone-side effective-dated journal the scoring day-bucketing
+/// consumes (see `IntelligenceEngine.localDayRun`), mirroring the server's `scoring_timezone_history`
+/// so historical days keep the zone that was in effect when they happened after the phone travels.
+/// Seeded with the current zone on first use and appended in `refreshTimezoneFromDevice()` whenever the
+/// device's zone id changes; entries are in chronological order.
+struct TimezoneChange: Codable, Equatable, Sendable {
+    let zoneId: String
+    let effectiveFrom: Int
+}
+
 /// User profile (age/sex/body metrics/HR-max) persisted in UserDefaults.
 /// Powers HR zones, calories and recovery baselines.
 @MainActor
@@ -100,6 +111,30 @@ final class ProfileStore: ObservableObject {
             if displayName != oldValue { markCloudDirty() }
         }
     }
+    /// The owner's reporting timezone (IANA id), synced to the cloud `profiles.timezone` so server
+    /// scoring claims use the same zone as the phone (spec §3 / contract C2). DEVICE-AUTHORITATIVE:
+    /// refreshed from `TimeZone.current.identifier` at profile sync (`refreshTimezoneFromDevice()`) and
+    /// never adopted from the cloud, so a server default (or a stale travel value) can never decide the
+    /// user's day ownership. An edit is not required to change it — a zone change marks the cloud dirty
+    /// and the next profile sync uploads it.
+    @Published var timezone: String {
+        didSet {
+            d.set(timezone, forKey: K.timezone)
+            if timezone != oldValue { markCloudDirty() }
+        }
+    }
+    /// The effective-dated reporting-zone journal (T06 travel): every zone the phone has been observed
+    /// in since this journal was seeded, oldest first. `localDayRun` picks the zone effective for each
+    /// historical day from it, so a past day stays bucketed in the zone it actually happened in after
+    /// the phone travels (the server's `scoring_timezone_history` does the same). Seeded from the
+    /// current zone on first use; appended in `refreshTimezoneFromDevice()` (which the launch path and
+    /// the zone-change observer both drive — see `init`) on each change.
+    private(set) var timezoneHistory: [TimezoneChange]
+    /// Round-3 / audit F3-P1: the zone-change observer token (`Repository.dayKeyDidChange`, posted by the
+    /// DayRolloverCoordinator on `NSSystemTimeZoneDidChange` / significant-time-change). Registered in
+    /// `init` WITHOUT requiring cloud mode, so a zone change mid-session appends to the journal
+    /// immediately and TODAY stays bucketed in the phone's live zone for every user. Removed in `deinit`.
+    private var zoneChangeObserver: NSObjectProtocol?
 
     private let d = UserDefaults.standard
     private enum K {
@@ -114,6 +149,12 @@ final class ProfileStore: ObservableObject {
         static let stepScale = "profile.stepTicksPerStep"
         static let waist = "profile.waistCm"
         static let measuredRmr = "profile.measuredRmrKcalPerDay"
+        /// The synced reporting timezone (IANA id), refreshed from the device and uploaded to the
+        /// cloud `profiles.timezone` so server scoring claims use the same zone as the phone.
+        static let timezone = "profile.timezone"
+        /// The effective-dated timezone journal (JSON `[TimezoneChange]`), seeded on first use and
+        /// appended on each observed zone change (T06 travel).
+        static let timezoneHistory = "profile.timezoneHistory"
         static let stepsCoeff = "profile.stepsCalibrationCoefficient"
         static let stepsSampleDays = "profile.stepsCalibrationSampleDays"
         static let stepsConfidence = "profile.stepsCalibrationConfidence"
@@ -164,6 +205,49 @@ final class ProfileStore: ObservableObject {
         stepsManualCoefficient = max(0, d.object(forKey: K.stepsManualCoeff) as? Double ?? 0)
         stepsHasBankedMotion = d.object(forKey: K.stepsHasMotion) as? Bool ?? false
         avatarImageData = d.data(forKey: K.avatar)
+        // Load the effective-dated zone journal BEFORE the timezone property is read below: a fresh
+        // install (or a pre-journal upgrade) seeds it with the CURRENT zone, so a first-ever travel is
+        // the first thing appended. Persisted, so relaunch history survives.
+        if let data = d.data(forKey: K.timezoneHistory),
+           let history = try? JSONDecoder().decode([TimezoneChange].self, from: data),
+           !history.isEmpty {
+            timezoneHistory = history
+        } else {
+            timezoneHistory = [TimezoneChange(zoneId: TimeZone.current.identifier, effectiveFrom: 0)]
+            d.set(try? JSONEncoder().encode(timezoneHistory), forKey: K.timezoneHistory)
+        }
+        // Load the persisted reporting zone; a fresh install defaults to the device's CURRENT zone (never
+        // a server-decided default). `didSet` doesn't fire for the initial assignment inside `init`, so
+        // persist the resolved value explicitly — otherwise the first-launch default never reaches storage.
+        timezone = d.string(forKey: K.timezone) ?? TimeZone.current.identifier
+        d.set(timezone, forKey: K.timezone)
+        // Round-3 / audit F3-P1: the journal must never be stale at LAUNCH. If the device's CURRENT zone
+        // differs from the journal's last observed zone (a trip made while the app was killed), append
+        // the new zone NOW — a non-cloud / pre-first-sync user's TODAY (and any days since the trip) are
+        // then bucketed in the phone's live zone, not a stale launch-time zone. `timezone`/`cloudDirty`
+        // are set directly (not via observers) so the behavior is deterministic inside `init`.
+        let currentZoneId = TimeZone.current.identifier
+        if timezoneHistory.last?.zoneId != currentZoneId {
+            timezoneHistory.append(TimezoneChange(zoneId: currentZoneId,
+                                                  effectiveFrom: Int(Date().timeIntervalSince1970)))
+            d.set(try? JSONEncoder().encode(timezoneHistory), forKey: K.timezoneHistory)
+            timezone = currentZoneId
+            d.set(currentZoneId, forKey: K.timezone)
+            cloudDirty = true   // profiles.timezone is stale; the next cloud sync pushes the fresh zone
+        }
+        // Round-3 / audit F3-P1: observe the EXISTING day-boundary/zone-change signal
+        // (`Repository.dayKeyDidChange`, posted by the DayRolloverCoordinator on
+        // `NSSystemTimeZoneDidChange` / significant-time-change) WITHOUT requiring cloud mode, so a zone
+        // change mid-session appends to the journal immediately and today stays bucketed in the phone's
+        // live zone for every user. `refreshTimezoneFromDevice()` is a no-op unless the zone changed.
+        zoneChangeObserver = NotificationCenter.default.addObserver(
+            forName: Repository.dayKeyDidChange, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.refreshTimezoneFromDevice() }
+        }
+    }
+
+    deinit {
+        if let zoneChangeObserver { NotificationCenter.default.removeObserver(zoneChangeObserver) }
     }
 
     // MARK: - Cloud profile
@@ -183,7 +267,8 @@ final class ProfileStore: ObservableObject {
     /// The synced fields exactly as they would be uploaded.
     var cloudSnapshot: CloudProfile {
         CloudProfile(displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines),
-                     dateOfBirth: Self.dayString(dateOfBirth), sex: sex, heightCm: heightCm, weightKg: weightKg)
+                     dateOfBirth: Self.dayString(dateOfBirth), sex: sex, heightCm: heightCm, weightKg: weightKg,
+                     timezone: timezone)
     }
 
     /// Whether this device holds profile values the user entered before cloud sync existed. Name, sex,
@@ -194,7 +279,25 @@ final class ProfileStore: ObservableObject {
         return named || [K.sex, K.weight, K.height].contains { d.object(forKey: $0) != nil } || age != 30
     }
 
+    /// Refresh the synced reporting timezone from the device's CURRENT IANA zone and mark the cloud
+    /// dirty when it changed, so travel propagates on the next profile sync. Returns whether it changed.
+    /// On a change the effective-dated zone journal is appended (T06 travel), so historical days keep the
+    /// zone that was actually in effect for them when the engine re-scores.
+    @discardableResult
+    func refreshTimezoneFromDevice() -> Bool {
+        let id = TimeZone.current.identifier
+        guard id != timezone else { return false }
+        timezone = id   // didSet persists + marks the cloud dirty
+        timezoneHistory.append(TimezoneChange(zoneId: id, effectiveFrom: Int(Date().timeIntervalSince1970)))
+        d.set(try? JSONEncoder().encode(timezoneHistory), forKey: K.timezoneHistory)
+        return true
+    }
+
     /// Adopt the cloud profile. Fields the cloud has not stored keep their local value.
+    ///
+    /// `timezone` is deliberately NOT adopted: the phone is the timezone authority (spec §3), so the
+    /// cloud's stored zone (a `'UTC'` default or a stale travel value) must never overwrite the
+    /// device's own zone. The mismatch is pushed instead (see ``ProfileCloudSync.reconcile()``).
     func applyCloud(_ remote: CloudProfile) {
         applyingCloud = true
         defer { applyingCloud = false }
