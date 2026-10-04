@@ -80,6 +80,10 @@ public actor CloudTransportCoordinator {
     private let policy: Policy
     private let now: @Sendable () -> Int
     private let random: @Sendable () -> Double
+    /// Whether the master cloud switch is on. Injected so tests can drive it deterministically;
+    /// production defaults to `CloudPushSettings.isEnabled` (the D1 gate that stops the upload
+    /// cycle the moment the user disables cloud, before the runtime teardown lands).
+    private let cloudEnabled: @Sendable () -> Bool
 
     /// In-process uploads in flight. The OS-session lane has its own counter (`backgroundInFlight`).
     private var inFlight = 0
@@ -105,7 +109,8 @@ public actor CloudTransportCoordinator {
                 projectURL: String, identity: @escaping @Sendable () -> CloudPushIdentity?,
                 policy: Policy = Policy(),
                 now: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970) },
-                random: @escaping @Sendable () -> Double = { Double.random(in: 0...1) }) {
+                random: @escaping @Sendable () -> Double = { Double.random(in: 0...1) },
+                cloudEnabled: @escaping @Sendable () -> Bool = { CloudPushSettings.isEnabled }) {
         self.journal = journal
         self.session = session
         self.payloadDirectory = payloadDirectory
@@ -114,6 +119,7 @@ public actor CloudTransportCoordinator {
         self.policy = policy
         self.now = now
         self.random = random
+        self.cloudEnabled = cloudEnabled
     }
 
     // MARK: - lifecycle
@@ -173,6 +179,11 @@ public actor CloudTransportCoordinator {
     /// One bounded pass: reconcile, seal what is ready, then fill the in-flight budget.
     public func cycle() async {
         guard active else { return }
+        // D1: the master switch stops the upload cycle. This is checked on every pass, so there is
+        // no window between the user disabling cloud and the runtime teardown landing — a pass that
+        // starts after the flip sends nothing, seals nothing and reserves nothing. The journal and
+        // its pending/sealed work are untouched and resume on re-enable.
+        guard cloudEnabled() else { return }
         guard let identity = identity() else {
             lastError = "no installation identity"
             return
@@ -220,6 +231,15 @@ public actor CloudTransportCoordinator {
         for candidate in candidates {
             guard CloudBatchBuilder.appendTable(for: candidate.stream) != nil else {
                 // Replace-window / archive streams are not authored by the phone in cloud mode.
+                continue
+            }
+            // T23: never seal a pending group under a different owner than the one that acquired it.
+            // The journal already filters groups by its configured owner, but the configured owner can
+            // lag the current identity after an account switch; stamping this candidate with the
+            // CURRENT identity's sourceId would let another owner's records ride a different owner's
+            // sourceId. Leave the group pending instead — it stays quarantined under its own owner.
+            guard candidate.ownerId == identity.ownerId else {
+                lastError = "owner mismatch: not sealing \(candidate.stream.rawValue) group of \(candidate.ownerId) under \(identity.ownerId)"
                 continue
             }
             let entries = try await journal.entries(for: candidate, limit: policy.sealMaxRecords)
@@ -338,6 +358,19 @@ public actor CloudTransportCoordinator {
         for batch in queue {
             guard CloudTransportCoordinator.hasRoom(lane: lane, inFlight: inFlight,
                                                     backgroundInFlight: backgroundInFlight, policy: policy) else { break }
+            // T23 / contract C3: the upload token is resolved at SEND time from the current
+            // identity, so a batch whose acquisition-time owner differs from the current owner must
+            // be quarantined, never transmitted. Quarantine retains the records and the file under
+            // the ORIGINAL owner (blocked = kept + surfaced, no automatic retry); the coordinator's
+            // launch reconciliation re-seals blocked work when the original owner returns.
+            guard batch.ownerId == identity.ownerId else {
+                try? await journal.markFailed(
+                    batchId: batch.batchId,
+                    error: "owner mismatch: batch \(batch.batchId) belongs to \(batch.ownerId), "
+                        + "current owner \(identity.ownerId); retained under original owner",
+                    nextAttemptAtMs: nil, blocked: true)
+                continue
+            }
             guard let fileURL = payloadFileURL(for: batch) else {
                 // The file is gone but the records are not acknowledged: re-seal instead of dropping.
                 try await releaseForReseal(batch)
@@ -350,8 +383,17 @@ public actor CloudTransportCoordinator {
                 let sceneIsActive = CloudTransportCoordinator.applicationIsActive()
                 Task { await self.uploadInProcess(batch, fileURL: fileURL, holdExecution: !sceneIsActive) }
             case .background:
+                let taskId = session.enqueueBackground(batchId: batch.batchId, fileURL: fileURL,
+                                                       expectedOwnerId: batch.ownerId)
+                guard taskId >= 0 else {
+                    // The session refused (owner mismatch); keep the records under their owner.
+                    try? await journal.markFailed(
+                        batchId: batch.batchId,
+                        error: "owner mismatch: refusing to enqueue \(batch.batchId) (\(batch.ownerId)) under \(identity.ownerId)",
+                        nextAttemptAtMs: nil, blocked: true)
+                    continue
+                }
                 backgroundInFlight += 1
-                let taskId = session.enqueueBackground(batchId: batch.batchId, fileURL: fileURL)
                 try await journal.markReserved(batchId: batch.batchId, taskId: String(taskId),
                                                taskKind: "background", authExpiresAtMs: nil)
             }
@@ -369,7 +411,8 @@ public actor CloudTransportCoordinator {
             : nil
         var succeeded = false
         do {
-            let outcome = try await session.uploadForeground(batchId: batch.batchId, fileURL: fileURL)
+            let outcome = try await session.uploadForeground(batchId: batch.batchId, fileURL: fileURL,
+                                                             expectedOwnerId: batch.ownerId)
             succeeded = await handle(outcome: outcome)
         } catch {
             await handleFailure(batch: batch, error: String(describing: error))
@@ -482,7 +525,6 @@ public actor CloudTransportCoordinator {
     /// entries are still in the journal, and the builder is deterministic, so the same batch (and the
     /// same batch id) can be reconstructed and used to validate the receipt.
     private func rebuildBatch(_ batch: CloudSealedBatch) async throws -> (batch: PushBatch, ownerId: String, deviceId: String, stream: CloudStreamKind)? {
-        guard let identity = identity() else { return nil }
         let candidate = CloudSealCandidate(ownerId: batch.ownerId, sourceId: batch.sourceId,
                                           deviceId: batch.deviceId, stream: batch.stream,
                                           firstSeq: batch.firstSeq, lastSeq: batch.lastSeq,
@@ -501,7 +543,11 @@ public actor CloudTransportCoordinator {
             lastError = "rebuilt batch id mismatch for \(batch.batchId)"
             return nil
         }
-        return (plan.batch, identity.ownerId, batch.deviceId, batch.stream)
+        // The receipt binds the batch's ACQUISITION-TIME owner (T23): the durability receipt the
+        // receiver returned was issued against the owner the upload was made under, which is the
+        // batch's owner once the send-path guards have run. Using the batch's owner rather than the
+        // current identity keeps this check correct even if the current identity moved on.
+        return (plan.batch, batch.ownerId, batch.deviceId, batch.stream)
     }
 
     // MARK: - failure handling

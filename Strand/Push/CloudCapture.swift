@@ -38,7 +38,11 @@ public enum CloudCapture {
                               family: DeviceFamily,
                               receivedAtMs: Int,
                               characteristic: String? = nil) -> Skip? {
-        guard let runtime = CloudPushRuntime.sharedIfRunning else { return .notRunning }
+        // The master switch is checked HERE, before the heart-rate ledger claims anything: a second
+        // claimed but never staged would otherwise be skipped as "already sent" after re-enable.
+        // `sharedIfRunning` is nil once the runtime is stopped, so this only matters in the tiny
+        // window between the user flipping the switch and `stop()` running (D1).
+        guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else { return .notRunning }
         guard let ref = clockRef else {
             runtime.noteSkippedPreClock(1)
             return .preClock
@@ -72,7 +76,8 @@ public enum CloudCapture {
                                         deviceId: String,
                                         receivedAtMs: Int,
                                         characteristic: String = "2A37") -> Skip? {
-        guard let runtime = CloudPushRuntime.sharedIfRunning else { return .notRunning }
+        // Same master-switch gate as `record(frame:)` — see the comment there (D1).
+        guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else { return .notRunning }
         let records = standardHRRecords(hr: hr, rr: rr, contact: contact, family: family, at: ts,
                                         deviceId: deviceId, receivedAtMs: receivedAtMs,
                                         characteristic: characteristic, ledger: journalLedger)
@@ -130,7 +135,9 @@ public enum CloudCapture {
                                      deviceId: String,
                                      family: DeviceFamily?,
                                      clockRef: ClockRef?) async -> Int {
-        guard let runtime = CloudPushRuntime.sharedIfRunning else { return 0 }
+        // Same master-switch gate as `record(frame:)` (D1). Returns 0 so the caller retries the
+        // window on the next pass instead of treating it as fully sent.
+        guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else { return 0 }
         let fresh = journalLedger.map { freshHeartRates(streams, deviceId: deviceId, ledger: $0) } ?? streams
         let alreadyHeld = streams.hr.count - fresh.hr.count
         let receivedAtMs = Int(Date().timeIntervalSince1970 * 1000)
@@ -413,6 +420,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private var _objectLoopTask: Task<Void, Never>?
     private var _objectCapabilities: PushCapabilities?
     private var _objectCapabilitiesAt: Int = 0
+    /// The D2 retry: re-attempts `journal.activate` when protected data becomes available after a
+    /// locked launch. Cancelled on `stop()` so a disabled/signed-out runtime never re-activates.
+    private var _reactivationTask: Task<Void, Never>?
 
     private init() {}
 
@@ -496,15 +506,16 @@ public final class CloudPushRuntime: @unchecked Sendable {
             await journal.setCommitObserver { [weak coordinator] _ in coordinator?.kick() }
             do {
                 try await journal.activate(configuration: configuration, policy: policy)
-                // What the last run already journaled, so an offload that overlaps it does not offer
-                // those seconds a second time with a different bpm.
-                let held = await journal.recentStrapSeconds(stream: .hrSample,
-                                                            lastRecords: CloudHeartRateLedger.seedRecords)
-                CloudHeartRateLedger.shared.seed(held)
+                await Self.activateLedgerFromJournalTail(journal)
             } catch {
-                // A protected-data failure (locked phone before the first unlock) is not fatal: staged
-                // records stay staged and are committed on the next activation attempt.
+                // A protected-data failure (locked phone before the first unlock) is not fatal: the
+                // journal cannot open yet, so staging stays off. Unlike the previous build, this is
+                // not a dead end: schedule the re-activation retry that fires the moment the
+                // journal's files become readable again (D2), so live seconds captured after a
+                // locked launch still reach the cloud.
                 CloudJournal.disableStaging()
+                scheduleJournalReactivation(journal: journal, configuration: configuration,
+                                            policy: policy, directory: directory)
             }
             await coordinator.start()
         }
@@ -624,6 +635,8 @@ public final class CloudPushRuntime: @unchecked Sendable {
         _deviceId = nil
         let objectLoop = _objectLoopTask
         _objectLoopTask = nil
+        let reactivation = _reactivationTask
+        _reactivationTask = nil
         _objectTransport = nil
         _objectProgress = nil
         _objectSource = nil
@@ -632,9 +645,62 @@ public final class CloudPushRuntime: @unchecked Sendable {
         lock.unlock()
         CloudHeartRateLedger.shared.reset()
         objectLoop?.cancel()
+        reactivation?.cancel()
         await coordinator?.stop()
         await CloudJournal.shared.deactivate()
     }
+
+    // MARK: - journal (re-)activation
+
+    /// Seed the heart-rate ledger from what the last run already journaled, so an offload that
+    /// overlaps it does not offer those seconds a second time with a different bpm.
+    private static func activateLedgerFromJournalTail(_ journal: CloudJournal) async {
+        let held = await journal.recentStrapSeconds(stream: .hrSample,
+                                                    lastRecords: CloudHeartRateLedger.seedRecords)
+        CloudHeartRateLedger.shared.seed(held)
+    }
+
+    /// Retry `journal.activate` until the protected journal becomes readable (D2).
+    ///
+    /// A Bluetooth relaunch on a phone that has not been unlocked since boot reaches `start()` while
+    /// the journal file is still unreadable (`CloudJournalPaths.isDataAvailable` is false), and the
+    /// first activation throws `protectedDataUnavailable`. Previously that left staging disabled for
+    /// the whole process lifetime, so every live second captured after the locked launch was lost
+    /// from the cloud path. This retry polls the same data-availability signal `activate` itself
+    /// uses — cheap filesystem checks, no network — and re-attempts activation as soon as the first
+    /// unlock makes the file readable, so live seconds after that point reach the cloud. Staged
+    /// records from before the failure (the earliest restored notifications) are committed in the
+    /// same activation. The task is cancelled by `stop()`, so a disabled or signed-out runtime never
+    /// re-activates behind the user's back.
+    private func scheduleJournalReactivation(journal: CloudJournal, configuration: CloudJournal.Configuration,
+                                             policy: CloudJournal.SealPolicy, directory: URL) {
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(nanoseconds: Self.journalReactivationPollNanoseconds) }
+                catch { return }
+                guard CloudJournalPaths.isDataAvailable(at: directory) else { continue }
+                do {
+                    try await journal.activate(configuration: configuration, policy: policy)
+                    await Self.activateLedgerFromJournalTail(journal)
+                    // Activation restarted the journal's drain loop; wake the transport so any
+                    // records that were staged before the failure are sealed and sent now.
+                    self?.coordinatorIfRunning?.kick()
+                    return
+                } catch {
+                    // Still unavailable or a transient failure; retry on the next poll.
+                    continue
+                }
+            }
+        }
+        lock.lock()
+        _reactivationTask = task
+        lock.unlock()
+    }
+
+    /// Poll cadence for the D2 re-activation retry. Two seconds: a first unlock is a hard OS
+    /// transition, so this converges almost immediately after it, and the check is just a file
+    /// stat. `@TaskLocal`-free and fixed so tests and production share one behaviour.
+    static let journalReactivationPollNanoseconds: UInt64 = 2_000_000_000
 
     // MARK: - object lane (rawImuSession)
 
@@ -727,7 +793,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
     // MARK: - capture path (non-blocking)
 
     public func submit(_ records: [CloudJournalRecord]) {
-        guard let journal = journalIfRunning else { return }
+        // Master-switch gate (D1): between the user flipping the switch and `stop()` running, a
+        // capture can still reach this method; it must not stage a single record while cloud is off.
+        guard CloudPushSettings.isEnabled, let journal = journalIfRunning else { return }
         journal.submit(records)
     }
 
@@ -735,7 +803,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
     /// never overrun the staging buffer. Returns how many records the journal committed.
     @discardableResult
     public func submitDurably(_ records: [CloudJournalRecord], sliceSize: Int = 2_000) async -> Int {
-        guard let journal = journalIfRunning, sliceSize > 0 else { return 0 }
+        // Master-switch gate (D1), same as `submit` — the history/SpO2 seeders and the backfill
+        // offload all land here and must stop with the switch.
+        guard CloudPushSettings.isEnabled, let journal = journalIfRunning, sliceSize > 0 else { return 0 }
         var committed = 0
         var start = records.startIndex
         while start < records.endIndex {

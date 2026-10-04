@@ -56,14 +56,339 @@ public struct IntradaySeriesPoint: Equatable, Sendable {
     public let coverage: Double
     /// Share of the bucket spent moving, when the worker measured it.
     public let motion: Double?
+    /// Per-bucket placement evidence (G4), when the server published it. UNKNOWN is first-class;
+    /// nil means the server predates the field and readers should fall back to local derivation.
+    public let placement: PlacementEligibility?
+    /// Per-bucket wear evidence (G3), when the server published it. nil = no server field.
+    public let wear: WearEligibility?
+    /// True when placement or wear changes within the window — a mixed window has no stable label.
+    /// nil = no server field.
+    public let mixed: Bool?
 
-    public init(start: Int, value: Double, samples: Int, coverage: Double, motion: Double?) {
+    public init(start: Int, value: Double, samples: Int, coverage: Double, motion: Double?,
+                placement: PlacementEligibility? = nil, wear: WearEligibility? = nil,
+                mixed: Bool? = nil) {
         self.start = start; self.value = value; self.samples = samples
         self.coverage = coverage; self.motion = motion
+        self.placement = placement; self.wear = wear; self.mixed = mixed
     }
 
     public var date: Date { Date(timeIntervalSince1970: TimeInterval(start)) }
 }
+
+// MARK: - Per-window wear/placement eligibility (G4)
+
+/// Manual placement evidence for one window (G4). `unknown` is first-class: unannotated windows are
+/// UNKNOWN, never a guessed stable label.
+public enum PlacementEligibility: String, Codable, Equatable, Sendable {
+    case wrist
+    case bicep
+    case other
+    case unknown
+
+    public init?(raw: String) {
+        self.init(rawValue: raw)
+    }
+}
+
+/// Wear-state evidence for one window (G3). `unknown` is first-class: a window with no WRIST
+/// evidence is UNKNOWN, never assumed worn. Raw values match the shared HART `WearState` wire
+/// vocabulary (`on_wrist`/`off_wrist`/`unknown`) so a server-published bucket flag parses with
+/// no remapping.
+public enum WearEligibility: String, Codable, Equatable, Sendable {
+    case worn = "on_wrist"
+    case offBody = "off_wrist"
+    case unknown
+
+    public init?(raw: String) {
+        self.init(rawValue: raw)
+    }
+}
+
+/// Sensor-contact state for one window (G3/F4). Only present when the source actually carries
+/// standard-BLE contact transitions (generic standard-HR straps); WHOOP has no such stream, so the
+/// line is omitted there rather than guessed. `unknown` = no transition covers the window.
+public enum ContactEligibility: String, Codable, Equatable, Sendable {
+    case good
+    case poor
+    case unsupported
+    case unknown
+
+    /// Maps a persisted `StandardHRContact` raw value; nil for anything unrecognised (treated as
+    /// absent, so an unknown byte is never a claim about contact).
+    public init?(raw: String) {
+        switch raw {
+        case "supported_detected": self = .good
+        case "supported_not_detected": self = .poor
+        case "unsupported": self = .unsupported
+        default: return nil
+        }
+    }
+}
+
+/// The derived per-window eligibility flags. A MIXED window carries `.unknown` for the changing
+/// dimension rather than a guessed stable label; the per-dimension `*Mixed` flags let a consumer
+/// say exactly which dimension changed (audit-g34-g7-context F3: an un-evidenced leading/trailing
+/// sub-portion inside the window is itself a change — UNKNOWN mixed with a known state).
+public struct IntradayEligibility: Equatable, Sendable {
+    public let placement: PlacementEligibility
+    public let wear: WearEligibility
+    /// `placementMixed || wearMixed` (kept for wire/reader compatibility).
+    public let mixed: Bool
+    /// True when placement evidence changes (or starts/stops) inside the window.
+    public let placementMixed: Bool
+    /// True when wear evidence changes (or starts/stops) inside the window.
+    public let wearMixed: Bool
+
+    public init(placement: PlacementEligibility, wear: WearEligibility, mixed: Bool,
+                placementMixed: Bool, wearMixed: Bool) {
+        self.placement = placement; self.wear = wear; self.mixed = mixed
+        self.placementMixed = placementMixed; self.wearMixed = wearMixed
+    }
+
+    /// Derive the flags for one half-open `[windowStart, windowEnd)` window from local evidence:
+    /// placement intervals (half-open, nil end = open) and raw WRIST event rows
+    /// (`(ts, kind)` with "WRIST_ON(n)"/"WRIST_OFF(n)" kinds). Pure and deterministic; gaps are
+    /// UNKNOWN. When more than one placement value (or wear state) overlaps the window, or when the
+    /// evidence only partially covers the window (an un-evidenced leading/trailing sub-portion), the
+    /// window is MIXED and the changing dimension is `.unknown` — no stable label is assigned.
+    public static func flag(windowStart: Date, windowEnd: Date,
+                            placementIntervals: [PlacementInterval],
+                            wearEvents: [(ts: Int, kind: String)]) -> IntradayEligibility {
+        let windowStartSec = Int(windowStart.timeIntervalSince1970)
+        let windowEndSec = Int(windowEnd.timeIntervalSince1970)
+        let overlapping = placementIntervals
+            .filter { $0.overlaps(windowStart: windowStart, windowEnd: windowEnd) }
+
+        // Placement: unknown when nothing covers; mixed when the evidence changes OR only partially
+        // covers the window (a gap inside the window is an UNKNOWN transition).
+        let placementSet = Set(overlapping.map(\.placement))
+        let placementCoverageComplete = coverageComplete(
+            spans: overlapping.sorted { $0.effectiveStart < $1.effectiveStart }
+                .map { ($0.effectiveStart, $0.effectiveEnd) },
+            from: windowStartSec, to: windowEndSec)
+        let placement: PlacementEligibility
+        let placementMixed: Bool
+        if overlapping.isEmpty {
+            placement = .unknown
+            placementMixed = false
+        } else if placementCoverageComplete, placementSet.count == 1 {
+            placement = PlacementEligibility(raw: placementSet.first!.rawValue) ?? .unknown
+            placementMixed = false
+        } else {
+            placement = .unknown
+            placementMixed = true
+        }
+
+        // Wear: spans from WRIST events (contiguous from the first span to `to` by construction);
+        // the only possible gap is a leading un-evidenced portion.
+        let spans = WearStateSpans.reconstruct(
+            events: wearEvents, from: windowStartSec, to: windowEndSec)
+        let wearStates = Set(spans.map(\.state))
+        let wearCoverageComplete = spans.first?.start == windowStartSec
+        let wear: WearEligibility
+        let wearMixed: Bool
+        if spans.isEmpty {
+            wear = .unknown
+            wearMixed = false
+        } else if wearCoverageComplete, wearStates.count == 1 {
+            wear = wearStates.first == .on ? .worn : .offBody
+            wearMixed = false
+        } else {
+            wear = .unknown
+            wearMixed = true
+        }
+        return IntradayEligibility(placement: placement, wear: wear,
+                                   mixed: placementMixed || wearMixed,
+                                   placementMixed: placementMixed, wearMixed: wearMixed)
+    }
+
+    /// Whether a set of half-open spans (sorted by start, nil end = open) covers `[from, to)` with
+    /// no gap. Empty spans cover nothing; overlapping/contiguous spans merge.
+    private static func coverageComplete(spans: [(start: Date, end: Date?)],
+                                         from: Int, to: Int) -> Bool {
+        var cursor = from
+        for span in spans {
+            let s = max(Int(span.start.timeIntervalSince1970), cursor)
+            if s > cursor { return false }             // a gap before this span
+            let e = span.end.map { Int($0.timeIntervalSince1970) } ?? to
+            if e <= cursor { continue }                // fully inside what we already covered
+            cursor = e
+            if cursor >= to { return true }
+        }
+        return cursor >= to
+    }
+}
+
+/// A per-metric context line set for a metric's visible window (G3/G4/G7 consumer surface). Each
+/// line is per-metric and honest — never a guessed whole-window label. Absent dimensions are nil.
+public struct IntradaySeriesContext: Equatable, Sendable {
+    public let placementLine: String?
+    public let wearLine: String?
+    public let contactLine: String?
+
+    public init(placementLine: String?, wearLine: String?, contactLine: String?) {
+        self.placementLine = placementLine
+        self.wearLine = wearLine
+        self.contactLine = contactLine
+    }
+
+    public var hasAny: Bool { placementLine != nil || wearLine != nil || contactLine != nil }
+    public var lines: [String] { [placementLine, wearLine, contactLine].compactMap { $0 } }
+}
+
+/// Builds the honest per-metric context for a window's points from server-published point flags
+/// (when present) and/or local derivation, plus persisted sensor-contact transitions. Pure and
+/// deterministic so the card and tests share one aggregation.
+public enum IntradaySeriesContextBuilder {
+    /// Summarize one metric's visible points.
+    ///
+    /// Honesty rules (never a guessed whole-window label):
+    /// - Per point: a server-published flag (`point.placement/wear/mixed` non-nil) wins; otherwise
+    ///   placement is derived locally (per-window, F3 partial-coverage aware) and wear is derived
+    ///   from RANGE-WIDE WRIST spans — an event before a bucket covers it until the next event, so
+    ///   sparse events do not fabricate "unknown" for windows that ARE evidenced.
+    /// - Placement: any mid-window placement change/partial coverage → "Mixed placement in this
+    ///   window"; a single stable value → "Wrist"/"Bicep"/"Other"; no evidence → nil.
+    /// - Wear: any mid-window wear change → "Wear changed in this window"; all points one stable
+    ///   state → "Worn"/"Off body"; a mix of known and unknown points → "Wear varies" (honest);
+    ///   no known state anywhere → "Wear unknown".
+    /// - Contact: the last transition at-or-before the window end, when one exists → "Contact
+    ///   good"/"Contact poor"/"Contact not supported"; none → nil.
+    public static func summarize(points: [IntradaySeriesPoint],
+                                 width: Int,
+                                 placementIntervals: [PlacementInterval],
+                                 wearEvents: [(ts: Int, kind: String)],
+                                 contactSamples: [(ts: Int, state: ContactEligibility)]) -> IntradaySeriesContext {
+        guard let first = points.first, let last = points.last else {
+            return IntradaySeriesContext(placementLine: nil, wearLine: nil, contactLine: nil)
+        }
+        let rangeStart = first.start
+        let rangeEnd = last.start + width
+        // Range-wide wear spans: an event before a bucket covers it until the next opposite event.
+        let wearSpans = WearStateSpans.reconstruct(events: wearEvents, from: rangeStart, to: rangeEnd)
+
+        var placementMixed = false
+        var placements = Set<PlacementEligibility>()
+        var wearMixed = false
+        var wears = Set<WearEligibility>()
+        var unknownWearPoints = false
+
+        for point in points {
+            let s = point.start
+            let e = point.start + width
+
+            // Placement dimension.
+            if let published = point.placement {
+                placements.insert(published)
+                if point.mixed == true { placementMixed = true }
+            } else {
+                let local = IntradayEligibility.flag(
+                    windowStart: Date(timeIntervalSince1970: TimeInterval(s)),
+                    windowEnd: Date(timeIntervalSince1970: TimeInterval(e)),
+                    placementIntervals: placementIntervals,
+                    wearEvents: [])
+                if local.placement != .unknown { placements.insert(local.placement) }
+                if local.placementMixed { placementMixed = true }
+            }
+
+            // Wear dimension.
+            if let published = point.wear {
+                if published != .unknown { wears.insert(published) } else { unknownWearPoints = true }
+                if point.mixed == true { wearMixed = true }
+            } else {
+                switch wearState(at: s, to: e, spans: wearSpans) {
+                case .worn: wears.insert(.worn)
+                case .offBody: wears.insert(.offBody)
+                case .mixed: wearMixed = true
+                case .unknown: unknownWearPoints = true
+                }
+            }
+        }
+
+        let placementLine: String?
+        if placementMixed {
+            placementLine = String(localized: "Mixed placement in this window")
+        } else if placements.count == 1 {
+            placementLine = displayPlacement(placements.first!)
+        } else {
+            placementLine = nil
+        }
+
+        let wearLine: String?
+        if wearMixed {
+            wearLine = String(localized: "Wear changed in this window")
+        } else if wears.count == 1, !unknownWearPoints {
+            wearLine = displayWear(wears.first!)
+        } else if !wears.isEmpty {
+            wearLine = String(localized: "Wear varies")
+        } else {
+            wearLine = String(localized: "Wear unknown")
+        }
+
+        let contactLine = contactLine(contactSamples: contactSamples, windowEnd: rangeEnd)
+
+        return IntradaySeriesContext(placementLine: placementLine, wearLine: wearLine, contactLine: contactLine)
+    }
+
+    /// The wear state of one bucket against the range-wide contiguous spans. `.unknown` when no
+    /// span covers the bucket (a gap before the first event); `.mixed` when a span boundary or a
+    /// leading gap falls INSIDE the bucket (F3 — the bucket is not a stable whole-window state).
+    private enum BucketWear {
+        case worn
+        case offBody
+        case mixed
+        case unknown
+    }
+
+    private static func wearState(at s: Int, to e: Int,
+                                  spans: [WearStateSpans.Span]) -> BucketWear {
+        let covering = spans.filter { $0.start < e && $0.end > s }
+        guard let firstSpan = covering.first, let lastSpan = covering.last else { return .unknown }
+        if firstSpan.start > s || lastSpan.end < e {
+            // A leading gap or a trailing transition inside the bucket: not a stable state.
+            return .mixed
+        }
+        let states = Set(covering.map(\.state))
+        guard states.count == 1 else { return .mixed }
+        return states.first == .on ? .worn : .offBody
+    }
+
+    private static func displayPlacement(_ p: PlacementEligibility) -> String {
+        switch p {
+        case .wrist: return String(localized: "Wrist")
+        case .bicep: return String(localized: "Bicep")
+        case .other: return String(localized: "Other")
+        case .unknown: return String(localized: "Placement unknown")
+        }
+    }
+
+    private static func displayWear(_ w: WearEligibility) -> String {
+        switch w {
+        case .worn: return String(localized: "Worn")
+        case .offBody: return String(localized: "Off body")
+        case .unknown: return String(localized: "Wear unknown")
+        }
+    }
+
+    /// The last contact transition at-or-before `windowEnd` (contact is a state with transitions;
+    /// the most recent one defines the effective state). Nil when none covers the window.
+    private static func contactLine(contactSamples: [(ts: Int, state: ContactEligibility)],
+                                    windowEnd: Int) -> String? {
+        let effective = contactSamples
+            .filter { $0.ts <= windowEnd && $0.state != .unknown }
+            .sorted { $0.ts < $1.ts }
+            .last
+        guard let effective else { return nil }
+        switch effective.state {
+        case .good: return String(localized: "Contact good")
+        case .poor: return String(localized: "Contact poor")
+        case .unsupported: return String(localized: "Contact not supported")
+        case .unknown: return nil
+        }
+    }
+}
+
 
 /// A running total at an instant.
 public struct IntradayCumulativePoint: Equatable, Sendable {
@@ -130,9 +455,15 @@ public struct IntradaySeriesWindow: Equatable, Sendable {
                       let samples = (row[2] as? NSNumber)?.intValue,
                       let coverage = (row[3] as? NSNumber)?.doubleValue, coverage.isFinite else { continue }
                 let motion = row.count > 4 ? (row[4] as? NSNumber)?.doubleValue : nil
+                // Additive G4/G3 flags: rows 5..7 are optional; a server that predates them sends
+                // none and existing readers simply ignore the absent fields.
+                let placement = row.count > 5 ? (row[5] as? String).flatMap(PlacementEligibility.init(raw:)) : nil
+                let wear = row.count > 6 ? (row[6] as? String).flatMap(WearEligibility.init(raw:)) : nil
+                let mixed = row.count > 7 ? (row[7] as? NSNumber)?.boolValue : nil
                 byStart[start] = IntradaySeriesPoint(start: start, value: value, samples: samples,
                                                      coverage: coverage,
-                                                     motion: motion.flatMap { $0.isFinite ? $0 : nil })
+                                                     motion: motion.flatMap { $0.isFinite ? $0 : nil },
+                                                     placement: placement, wear: wear, mixed: mixed)
             }
             parsed[metric] = byStart.values.sorted { $0.start < $1.start }
         }

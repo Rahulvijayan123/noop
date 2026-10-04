@@ -39,6 +39,7 @@ struct VerificationLane {
         var reconciled = 0       // arrivals committed via noop_commit_object_receipt
         var deferred = 0         // arrivals deferred (object not in storage yet)
         var digestMismatch = 0   // arrivals/verifications whose bytes did not match
+        var quarantined = 0      // deterministic mismatches durably recorded so restarts stop rescanning
         var debtCompleted = 0    // debt rows completed (or retry-parked after verified)
         var debtFailed = 0       // debt rows whose finish call lost the lease / threw
     }
@@ -115,6 +116,7 @@ struct VerificationLane {
         WHERE object_class = 'raw'
           AND status = 'ready'
           AND (durability_receipt IS NULL OR durability_receipt->>'state' IS DISTINCT FROM 'verified_indexed')
+          AND verification_failure_code IS NULL
           AND coalesce(compressed_bytes, 0) > 0
           AND object_key IS NOT NULL
           AND object_kind IS NOT NULL
@@ -175,6 +177,22 @@ struct VerificationLane {
             case .digestMismatch(let reason):
                 stats.digestMismatch += 1
                 stats.lastError = "digest mismatch \(objectId): \(reason)"
+                if Self.isDeterministicMismatch(reason) {
+                    // Deterministically-unverifiable (e.g. no expected digest
+                    // recorded): record the quarantine durably so a restart stops
+                    // rescanning this object. Best-effort — a quarantine write
+                    // failure must not crash the cycle; the in-process negative
+                    // cache still prevents a re-download this process.
+                    do {
+                        try db.callFunctionForJSON(
+                            "SELECT public.noop_quarantine_manifest_verification($1::uuid, $2::text)::text",
+                            [objectId, Self.quarantineCode(forReason: reason)])
+                        stats.quarantined += 1
+                    } catch {
+                        stats.failed += 1
+                        stats.lastError = "quarantine \(objectId): \(error)"
+                    }
+                }
                 rememberNegative(objectId, reason: reason)
             }
         } catch {
@@ -474,6 +492,47 @@ struct VerificationLane {
     static func effectiveDigestScope(format: String?, digestScope: String?) -> String {
         if let ds = digestScope, !ds.isEmpty { return ds }
         return (format?.hasPrefix("ndjson") ?? false) ? "wire" : "decoded"
+    }
+
+    /// Whether a digest-mismatch reason is DETERMINISTIC (retrying can never
+    /// succeed) or TRANSIENT (a torn upload / decode failure the object or the
+    /// storage path may recover from). Deterministic reasons are durably
+    /// quarantined so restarts stop rescanning; transient ones keep their bounded
+    /// in-process negative cache + retry as today.
+    static func isDeterministicMismatch(_ reason: String) -> Bool {
+        // No expected digest recorded: the manifest can never satisfy the commit RPC.
+        if reason.hasPrefix("no expected wire digest")
+            || reason.hasPrefix("no expected content digest") { return true }
+        // The RPC itself refused (check/ownership/pattern): permanent.
+        if reason.hasPrefix("commit rejected") || reason.hasPrefix("commit returned NULL")
+            || reason.hasPrefix("commit result state") { return true }
+        // Verified-key derivation/pattern failures are permanent for the key.
+        if reason.hasPrefix("verified key fails") || reason.hasPrefix("cannot derive verified key") { return true }
+        // Row identity is permanently missing for this row.
+        if reason.hasPrefix("row missing identity") || reason.hasPrefix("missing object_key") { return true }
+        // A receipt is authoritative: bytes can never match a receipt they already disagree with.
+        if reason.contains("(receipt authoritative)")
+            || reason.hasPrefix("receipt wireSha256") || reason.hasPrefix("receipt contentSha256")
+            || reason.hasPrefix("receipt compressedBytes") || reason.hasPrefix("receipt uncompressedBytes") {
+            return true
+        }
+        return false
+    }
+
+    /// Map a deterministic reason to the bounded `^[a-z0-9_]{3,64}$` quarantine
+    /// code the DB CHECK admits.
+    static func quarantineCode(forReason reason: String) -> String {
+        if reason.hasPrefix("no expected wire digest") { return "no_expected_wire_digest" }
+        if reason.hasPrefix("no expected content digest") { return "no_expected_content_digest" }
+        if reason.hasPrefix("commit rejected") || reason.hasPrefix("commit returned NULL")
+            || reason.hasPrefix("commit result state") { return "commit_rejected" }
+        if reason.hasPrefix("verified key fails") { return "verified_key_pattern" }
+        if reason.hasPrefix("cannot derive verified key") { return "verified_key_derivation" }
+        if reason.hasPrefix("row missing identity") { return "row_missing_identity" }
+        if reason.hasPrefix("missing object_key") { return "missing_object_key" }
+        if reason.contains("(receipt authoritative)") { return "receipt_authoritative_mismatch" }
+        if reason.hasPrefix("receipt ") { return "receipt_authoritative_mismatch" }
+        return "digest_mismatch"
     }
 
     /// format LIKE '%gzip%' OR compression='gzip'.

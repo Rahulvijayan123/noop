@@ -90,6 +90,18 @@ public enum CloudPushSettings {
 
     public static func setEnabled(_ enabled: Bool) {
         UserDefaults.standard.set(enabled, forKey: enabledOverrideKey)
+        // The master switch is a lifecycle control, not just a flag. Flipping it off must stop the
+        // runtime's capture staging AND its upload cycle the moment the user asks (D1): the durable
+        // journal and any already-sealed batches are retained and resume on re-enable, so nothing is
+        // deleted or uploaded while cloud is off. Flipping it on resumes an enrolled install. Both
+        // calls are idempotent and a no-op when the runtime is already in the target state, and the
+        // runtime paths additionally gate on `isEnabled` so there is no window between the flag flip
+        // and the runtime reacting.
+        if enabled {
+            Task { CloudPushRuntime.shared.startIfEnabled() }
+        } else {
+            Task { await CloudPushRuntime.shared.stop() }
+        }
     }
 
     public static var isConfigured: Bool { receiverURL != nil && !fleetToken.isEmpty }

@@ -9,8 +9,11 @@ export interface RestConfig {
 
 /** A server authorization/fence rejection, without copying its body into logs. */
 export class RestAuthorityError extends Error {
-  constructor(readonly status: number, readonly receiverCode?: 'intake_admission_scope_mismatch') {
+  /** The receiver's own bounded rejection code when one exists; the generic fallback otherwise. */
+  readonly code: string;
+  constructor(readonly status: number, readonly receiverCode?: string) {
     super(receiverCode ?? 'supabase_authority_rejected');
+    this.code = receiverCode ?? 'supabase_authority_rejected';
   }
 }
 
@@ -67,8 +70,18 @@ export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig
       // recovery RPC contains "recovery_", including ordinary object failures.
       if ([401, 403].includes(res.status) || json?.code === '42501' ||
           (json?.code === 'P0001' && typeof json?.message === 'string' && /^recovery_[a-z0-9_]+$/.test(json.message))) {
-        throw new RestAuthorityError(res.status, json?.code === '42501' && json?.message === 'intake_admission_scope_mismatch'
-          ? 'intake_admission_scope_mismatch' : undefined);
+        // Propagate the receiver's own rejection code to callers when it is a
+        // safe, bounded identifier (contract C4): the receiver's condition, not
+        // this client's guess at it. Arbitrary SQL messages/codes remain private
+        // and are never copied into diagnostics. The bounded legacy special case
+        // (`intake_admission_scope_mismatch`) is subsumed by the safe-code rule;
+        // the standard Postgres "permission denied ..." family has no code of its
+        // own, so it surfaces as the canonical bounded phrase instead.
+        const receiverMessage = typeof json?.message === 'string' ? json.message : '';
+        const receiverCode = /^[a-z0-9_]{3,64}$/.test(receiverMessage)
+          ? receiverMessage
+          : (/^permission denied\b/.test(receiverMessage) ? 'permission denied' : undefined);
+        throw new RestAuthorityError(res.status, receiverCode);
       }
       const msg = typeof json === 'string' ? json : (json?.message || json?.hint || text);
       const err: any = new Error(`${method} ${path} failed (${res.status}) ${String(msg || '').slice(0, 180)}`);

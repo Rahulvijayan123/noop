@@ -206,6 +206,43 @@ final class Repository: ObservableObject {
     @Published private(set) var hydrationSeq = 0
     func noteHydrationChanged() { hydrationSeq += 1 }
 
+    /// G1 day-rollover signal (audit branch 20261003, findings/g1-day-ui.md T01/T02/T04): bumped by the
+    /// shared day-boundary driver (`DayRolloverCoordinator` in AppModel.swift) whenever the LOCAL calendar
+    /// "Today" key changes — at local midnight, on foreground/resume, on `NSSystemTimeZoneDidChange`, or on
+    /// a significant time change. Today surfaces include this in their reload key so the whole dashboard
+    /// (labels, counters, chart bounds, day-scoped queries) re-keys to the new day within ~1s of local
+    /// midnight WITHOUT waiting for a data refresh, a new sensor reading, network, or a DB revision bump.
+    /// `noteDayRolledOver` is also what posts `dayKeyDidChange`, so other owners of day-scoped state
+    /// (e.g. `IntradaySeriesStore`'s stale-generation guard) can re-key on the same single signal.
+    @Published private(set) var dayRolloverSeq = 0
+    /// The `yyyy-MM-dd` phone-local "Today" key the last `dayRolloverSeq` bump corresponds to. Seeded by
+    /// the first `DayRolloverCoordinator.recomputeTodayIfNeeded()` at launch; empty means "not resolved yet".
+    @Published private(set) var rolloverDayKey = ""
+    /// Posted on the default `NotificationCenter` every time `dayRolloverSeq` bumps. Object is this
+    /// Repository. `IntradaySeriesStore` bumps its stale-generation guard on this so a pre-midnight
+    /// response can never land on the new day.
+    static let dayKeyDidChange = Notification.Name("Strand.Repository.dayKeyDidChange")
+    /// Record a local "Today" key change. No-op when the key is unchanged (the common call); bumps the
+    /// seq + posts `dayKeyDidChange` only on a real change. @MainActor like the rest of the Repository.
+    func noteDayRolledOver(newKey: String) {
+        guard newKey != rolloverDayKey else { return }
+        rolloverDayKey = newKey
+        dayRolloverSeq += 1
+        NotificationCenter.default.post(name: Self.dayKeyDidChange, object: self)
+    }
+
+    /// G1 zone-context version (audit-g1-day F1b): bumped on EVERY significant-time / timezone / wake
+    /// change, even when the local day key is unchanged (e.g. UTC+1→UTC+2 at 13:00). Day-scoped surfaces
+    /// include this in their reload key so chart bounds / live windows move to the new zone's midnight
+    /// without waiting for a data refresh or a day rollover. Also posts `dayKeyDidChange` so owners of
+    /// day-scoped state (`IntradaySeriesStore`'s stale-generation guard) invalidate in-flight reads on
+    /// the same signal. @MainActor like the rest of the Repository.
+    @Published private(set) var zoneContextSeq = 0
+    func noteZoneContextChanged() {
+        zoneContextSeq += 1
+        NotificationCenter.default.post(name: Self.dayKeyDidChange, object: self)
+    }
+
     /// Bumped whenever a period-start row is logged or removed. Cycle surfaces use this lightweight
     /// signal to reload their sensitive local history without forcing a full strap-data refresh.
     @Published private(set) var cycleTrackingSeq = 0
@@ -552,20 +589,18 @@ final class Repository: ObservableObject {
         return latest
     }
 
-    /// Today's row, by the device's LOGICAL local day , NOT just the newest stored row, which after a
-    /// historical import was months-old data shown as today's hero (issue #23). The logical day rolls at
-    /// 04:00 local (see `logicalDayKey`), so between midnight and 4am we keep resolving the prior logical
-    /// day's row instead of an empty new-calendar-day row that blanks the dashboard (#144). nil if no row
-    /// for that day yet (the dashboard then shows its empty/pending state). Presentation-only , stored
-    /// row keys are untouched.
+    /// Today's row, by the device's LOGICAL local day, NOT just the newest stored row, which after a
+    /// historical import was months-old data shown as today's hero (issue #23). Since the G1 day-ui audit
+    /// (20261003, docs/core-plumbing/findings/g1-day-ui.md) the logical day rolls at LOCAL MIDNIGHT
+    /// (`logicalDayRolloverHour = 0`), so "Today" is exactly the phone-local calendar day; the pre-audit
+    /// 04:00 hybrid (#144) is retired. nil if no row for that day yet (the dashboard then shows its
+    /// empty/pending state). Presentation-only; stored row keys are untouched.
     ///
-    /// Non-UTC pre-04:00 carve-out (#304): a user who falls asleep before midnight and wakes before the
-    /// 04:00 rollover has the just-finished night banked under the NEW local calendar day (sleep is keyed
-    /// by the local wake-day , `mergeSleep` / IntelligenceEngine), while `logicalDayKey` still points at
-    /// yesterday. Resolving strictly by logical day would then surface the PREVIOUS night. So: if the
-    /// local calendar day differs from the logical day AND a row for the local day has a banked night
-    /// (`totalSleepMin != nil`), prefer that row. Otherwise fall back to the logical-day row , which keeps
-    /// the #144 anti-blank guard (no night banked yet ⇒ keep yesterday's logical row, never blank).
+    /// The pre-audit #304 carve-out is retained as dead-simple pure code for compatibility: when the
+    /// local calendar day differs from the logical day (only possible for callers that still pass a
+    /// non-zero `rolloverHour`) AND a row for the local day has a banked night (`totalSleepMin != nil`),
+    /// prefer that row; otherwise fall back to the logical-day row (never blank). With the midnight
+    /// policy `localKey == logicalKey` always, so the carve-out collapses to the plain logical-day lookup.
     var today: DailyMetric? {
         let now = Date()
         return Repository.resolveToday(days: days,
@@ -573,10 +608,10 @@ final class Repository: ObservableObject {
                                        localKey: Repository.localDayKey(now))
     }
 
-    /// Pure resolver behind `today` (extracted so the #304 boundary is testable without a live clock):
+    /// Pure resolver behind `today` (kept injectable so the boundary is testable without a live clock):
     /// prefer the LOCAL-calendar-day row when it differs from the logical day AND has a banked night
-    /// (`totalSleepMin != nil`); otherwise the logical-day row (preserving the #144 anti-blank guard).
-    /// `localKey == logicalKey` (the common daytime case) collapses to the plain logical-day lookup.
+    /// (`totalSleepMin != nil`); otherwise the logical-day row. `localKey == logicalKey` (always true
+    /// under the local-midnight policy) collapses to the plain logical-day lookup.
     nonisolated static func resolveToday(days: [DailyMetric], logicalKey: String, localKey: String) -> DailyMetric? {
         if localKey != logicalKey,
            let localRow = days.last(where: { $0.day == localKey && $0.totalSleepMin != nil }) {
@@ -634,7 +669,7 @@ final class Repository: ObservableObject {
 
     /// The recovery-INDEPENDENT overnight-vitals carry (the durable fix for the v8 Today rollover blank):
     /// the freshest strictly-prior day that recorded any of HRV / resting HR / respiratory, so the recovery
-    /// VITALS keep reading through the post-04:00 window before tonight's sleep is scored, WITHOUT being
+    /// VITALS keep reading through the post-midnight window before tonight's sleep is scored, WITHOUT being
     /// gated on the prior night's recovery (a night with real HRV/RHR but null recovery is a valid source
     /// here, unlike `widgetAnchor`/`lastScoredRecoveryDay`). It is only the fallback — call sites read each
     /// vital today-first (`displayDay?.field ?? vitalsDay?.field`), so today's own value always wins.
@@ -729,13 +764,21 @@ final class Repository: ObservableObject {
     }()
     nonisolated static func localDayKey(_ date: Date) -> String { dayKeyFormatter.string(from: date) }
 
-    /// The hour the LOGICAL day rolls (04:00 local). Between midnight and this hour, "Today" stays put.
-    nonisolated static let logicalDayRolloverHour = 4
+    /// The hour the LOGICAL day rolls. G1 day-ui audit (20261003): the logical day now IS the local
+    /// calendar day — it rolls at local MIDNIGHT (`logicalDayRolloverHour = 0`), per docs/core-plumbing/
+    /// spec.md §3 ("switch all day labels … to the new day within one second of local midnight") and
+    /// findings/g1-day-ui.md T01/T06. The pre-2026-10-03 product chose 04:00 local so the small hours
+    /// after midnight kept resolving the prior calendar date's row instead of an empty new-calendar-day
+    /// row (#144, plus the #304 pre-04:00 carve-out below); that undocumented hybrid is retired. Sleep
+    /// wake-date keying is untouched: sleep stays keyed by its LOCAL WAKE date (mergeSleep /
+    /// IntelligenceEngine), which is a separate association from this Today-row selector.
+    nonisolated static let logicalDayRolloverHour = 0
 
-    /// The LOGICAL local day for `now` , the calendar date of `now - rolloverHour hours`. Rolls at
-    /// 04:00 local rather than midnight, so the small hours after midnight still resolve to the prior
-    /// calendar date's row instead of an empty new-calendar-day row (#144). Pure + injectable so the
-    /// boundary is testable (23:59 → same day, 01:00 → previous day, 04:01 → new day). Presentation-only:
+    /// The LOGICAL local day for `now`, the calendar date of `now - rolloverHour hours`. With
+    /// `logicalDayRolloverHour = 0` this is exactly the phone-local calendar day (`localDayKey`), so the
+    /// Today row selection rolls at local midnight and never depends on a fixed 04:00 shift (half-open
+    /// [local midnight, next local midnight) bounds; never a fixed 86,400-second slice). Pure + injectable
+    /// so the boundary is testable (23:59:59 → today's key, 00:00:01 → the new day's key). Presentation-only:
     /// used solely to pick which stored row is Today and to anchor the Today HR-trend window start; stored
     /// row keys are never rewritten.
     static func logicalDay(_ now: Date, rolloverHour: Int = logicalDayRolloverHour) -> Date {
@@ -747,9 +790,9 @@ final class Repository: ObservableObject {
         localDayKey(logicalDay(now, rolloverHour: rolloverHour))
     }
 
-    /// Start of the logical day (its real calendar midnight) for `now`, in `calendar`'s zone , the anchor
-    /// for the Today HR-trend window so it spans from the logical day's 00:00 rather than restarting at the
-    /// new calendar midnight while we're still showing yesterday's logical day in the small hours (#144).
+    /// Start of the logical day (its real calendar midnight) for `now`, in `calendar`'s zone, the anchor
+    /// for the Today HR-trend window. At `logicalDayRolloverHour = 0` this is `calendar.startOfDay(for:
+    /// now)` — the day the screen actually shows, so the HR trend spans the selected day's 00:00.
     static func logicalDayStart(_ now: Date, calendar: Calendar = .current,
                                 rolloverHour: Int = logicalDayRolloverHour) -> Date {
         calendar.startOfDay(for: logicalDay(now, rolloverHour: rolloverHour))

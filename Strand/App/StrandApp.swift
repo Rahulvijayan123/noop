@@ -77,7 +77,13 @@ struct StrandApp: App {
                 // Single-param form (not the two-param `{ _, phase in }`) — that overload needs macOS 14,
                 // this target is macOS 13.
                 .onChange(of: scenePhase) { phase in
-                    if phase == .active { model.ble.requestSync(.foreground) }
+                    if phase == .active {
+                        // G1 (findings/g1-day-ui.md T01/T02): recompute the local "Today" key BEFORE the
+                        // first resumed render — no network, no data refresh — so a Mac that slept across
+                        // midnight (or a zone/clock change) re-keys Today immediately.
+                        model.recomputeTodayDay()
+                        model.ble.requestSync(.foreground)
+                    }
                 }
         }
         .windowStyle(.hiddenTitleBar)

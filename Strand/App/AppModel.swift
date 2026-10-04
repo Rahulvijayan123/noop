@@ -6,7 +6,10 @@ import StrandAnalytics
 import StrandImport
 import OuraProtocol
 #if os(iOS)
+import UIKit
 import UserNotifications
+#elseif os(macOS)
+import AppKit
 #endif
 
 /// Data source currently running an import from the Data Sources screen.
@@ -58,6 +61,11 @@ final class AppModel: ObservableObject {
     let ble: BLEManager
     /// Read model over the on-device store (dashboard + detail screens).
     let repo: Repository
+    /// G1 day-boundary driver (audit 20261003): recomputes the local "Today" key on launch/resume/
+    /// timezone/significant-time changes and keeps the next-local-midnight timer while the app is
+    /// active, so the Today surfaces re-key without waiting for any data refresh. See
+    /// `DayRolloverCoordinator` (bottom of this file).
+    let dayRollover: DayRolloverCoordinator
     /// User profile (age/sex/body/HR-max) for zones, calories, baselines.
     let profile = ProfileStore()
     /// Mirrors the Settings profile to the cloud `profiles` row (cloud mode only).
@@ -278,7 +286,15 @@ final class AppModel: ObservableObject {
     /// Going active is an execution opportunity: close the journal's ≤1 s coalescing window and start a
     /// pass. Going to the background is the last chance to commit staged records before suspension, so
     /// the flush happens first and the pass afterwards. Both are no-ops unless cloud mode is running.
+    /// G1: recompute the phone-local "Today" key now (no data, no network). Called from the scenePhase
+    /// active handlers so the first meaningful resumed Today render is current before any network
+    /// catch-up, and from `cloudBecameActive` as a belt-and-braces edge.
+    func recomputeTodayDay() {
+        dayRollover.recomputeTodayIfNeeded()
+    }
+
     func cloudBecameActive() async {
+        recomputeTodayDay()
         CloudPushRuntime.shared.setAppIsActive(true)
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
         applyPowerSaving()   // cloud mode may have been enabled since launch; the minute cadence follows it
@@ -313,7 +329,11 @@ final class AppModel: ObservableObject {
         // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
         let readId = hostedReadDeviceId
         IntradaySeriesStore.shared.readDeviceId = readId
-        var days = [Repository.localDayKey(now.addingTimeInterval(-86_400)), Repository.localDayKey(now)]
+        // G1 (findings/g1-day-ui.md Q3/Q5): "yesterday" is the previous LOCAL CALENDAR day, computed with
+        // Calendar arithmetic — a fixed 86,400-second shift is the same calendar day on a 25-hour DST day
+        // and skips the true previous day. Half-open [dayStart, dayStart+1day) bounds in the phone zone.
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: now) ?? now.addingTimeInterval(-86_400)
+        var days = [Repository.localDayKey(yesterday), Repository.localDayKey(now)]
         if let changed = try? await scores.pollChangedDays(deviceId: readId) {
             for change in changed.prefix(8) where !days.contains(change.day) { days.append(change.day) }
         }
@@ -422,6 +442,9 @@ final class AppModel: ObservableObject {
         // the registry active id once the store opens. Single-device install keeps "my-whoop" throughout.
         self.ble = BLEManager(state: live, deviceId: deviceId)
         self.repo = Repository(deviceId: deviceId)
+        // G1 day-boundary driver: seeds the Today key and starts observing lifecycle/time-change
+        // notifications + the visible-app midnight timer. No network, no data refresh.
+        self.dayRollover = DayRolloverCoordinator(repo: self.repo)
         self.coach = AICoachEngine(repo: repo)
         self.intelligence = IntelligenceEngine(repo: repo, profile: profile, deviceId: deviceId)
         // Route the engine's per-day scoring diagnostic into the SAME shareable strap log every other
@@ -2877,5 +2900,189 @@ final class AppModel: ObservableObject {
             xiaomiImportFailed = failed
         }
         activeImportSource = nil
+    }
+}
+
+
+// MARK: - G1 day-boundary driver (day-ui repair, audit branch 20261003)
+
+/// Shared day-boundary driver for the G1 "Today" rollover repair (docs/core-plumbing/findings/g1-day-ui.md
+/// T01/T02; docs/core-plumbing/spec.md §3). Owned by AppModel and registered on the app lifecycle
+/// notifications; it:
+///
+///   (a) recomputes the phone-local "Today" key at launch, on foreground/resume (`scenePhase` active /
+///       `didBecomeActive`), on `NSSystemTimeZoneDidChange`, and on significant-time-change (iOS
+///       `UIApplication.significantTimeChangeNotification`; macOS recomputes on wake via
+///       `NSWorkspace.didWakeNotification`), and
+///   (b) keeps a next-local-midnight timer running while the app is ACTIVE, so the Today surfaces re-key
+///       within ~1s of local midnight WITHOUT waiting for a data refresh, a new sensor reading, network,
+///       or a DB revision bump.
+///
+/// It never touches day-scoped data itself: it only drives `Repository.noteDayRolledOver(newKey:)`
+/// (bumps `Repository.dayRolloverSeq` and posts `Repository.dayKeyDidChange`), which the Today reload
+/// keys and the `IntradaySeriesStore` stale-generation guard already observe. The clock is injectable
+/// (`now`) and notification registration is switchable (`observesNotifications: false`) so the boundary
+/// is deterministic in the macOS test suite.
+@MainActor
+final class DayRolloverCoordinator {
+    /// The Repository whose day-rollover signal this driver owns.
+    let repo: Repository
+    /// Injectable clock; the default reads the wall clock.
+    private let now: () -> Date
+    /// Injectable sleep (nanoseconds), so tests can drive the midnight-timer loop deterministically
+    /// without waiting on real time (audit-g1-day F1a). The default sleeps for real.
+    private let sleep: (UInt64) async -> Void
+    /// The currently scheduled next-midnight task. nil while the app is inactive.
+    private var midnightTimer: Task<Void, Never>?
+    /// Notification-center observers, removed in `stop()` / `deinit`.
+    private var observers: [NSObjectProtocol] = []
+    /// Whether the app is currently foreground-active (drives the visible-app timer).
+    private var appActive = false
+
+    /// `observesNotifications` defaults to true for the app; tests pass false and drive
+    /// `recomputeTodayIfNeeded()` with an injected clock (and an injected `sleep` for the timer loop).
+    init(repo: Repository,
+         now: @escaping () -> Date = { Date() },
+         observesNotifications: Bool = true,
+         sleep: @escaping (UInt64) async -> Void = { nanoseconds in
+             _ = try? await Task.sleep(nanoseconds: nanoseconds)
+         }) {
+        self.repo = repo
+        self.now = now
+        self.sleep = sleep
+        guard observesNotifications else {
+            recomputeTodayIfNeeded()
+            return
+        }
+        let center = NotificationCenter.default
+        #if os(iOS)
+        // Foreground/resume: recompute + re-anchor the visible-app midnight timer.
+        observers.append(center.addObserver(forName: UIApplication.didBecomeActiveNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAppActive(true) }
+        })
+        observers.append(center.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAppActive(false) }
+        })
+        // Significant time change (clock jumped / date rolled while suspended): recompute now.
+        observers.append(center.addObserver(forName: UIApplication.significantTimeChangeNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.significantTimeChange() }
+        })
+        #else
+        observers.append(center.addObserver(forName: NSApplication.didBecomeActiveNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAppActive(true) }
+        })
+        observers.append(center.addObserver(forName: NSApplication.didResignActiveNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.setAppActive(false) }
+        })
+        // A Mac can sleep across midnight (or across a clock change); recompute on wake.
+        observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.significantTimeChange() }
+        })
+        #endif
+        // Zone changes (travel / DST auto-update) move local midnight: recompute + re-anchor.
+        observers.append(center.addObserver(forName: NSNotification.Name.NSSystemTimeZoneDidChange,
+                                            object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.significantTimeChange() }
+        })
+        // Seed the Today key at construction so a launch never waits for the first notification.
+        recomputeTodayIfNeeded()
+    }
+
+    deinit {
+        midnightTimer?.cancel()
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    /// Recompute the phone-local "Today" key for `now` and, when the day changed, record the rollover on
+    /// `repo` (bumps `dayRolloverSeq`, posts `Repository.dayKeyDidChange`). Returns true when a rollover
+    /// was recorded. Cheap (one date formatting) so lifecycle edges may call it unconditionally.
+    @discardableResult
+    func recomputeTodayIfNeeded(now: Date? = nil) -> Bool {
+        let key = Repository.localDayKey(now ?? self.now())
+        guard key != repo.rolloverDayKey else { return false }
+        repo.noteDayRolledOver(newKey: key)
+        return true
+    }
+
+    /// Start (or re-anchor) the next-local-midnight timer. Called on every foreground/zone/significant-
+    /// time change and after each firing, so a long suspension or a zone change can never leave the
+    /// timer pointing at a stale boundary.
+    ///
+    /// audit-g1-day F1: the loop RECOMPUTES the Today key at the TOP of every iteration (before deriving
+    /// the next boundary), so a wake that lands a hair BEFORE local midnight — the sub-microsecond
+    /// truncation of `UInt64(delay * 1e9)` makes this genuinely reachable — still rolls the day on the
+    /// 1 s retry instead of re-arming a ~24 h sleep past the boundary it just missed. The boundary and
+    /// its delay are re-derived from the CURRENT clock + `Calendar.current` on every arm, so a fall-back
+    /// DST transition (which macOS does not announce via a significantTimeChange notification) cannot
+    /// leave the next deadline an hour late. Visible-app only: `setAppActive(false)` cancels it (iOS
+    /// suspension defers the fire, which the `didBecomeActive` recompute covers).
+    func scheduleMidnightTimer(now: Date? = nil) {
+        midnightTimer?.cancel()
+        midnightTimer = nil
+        let instant = now ?? self.now()
+        // Validate the boundary computation now (the task re-derives the exact deadline from the live
+        // clock at each arm); a calendar that cannot name a next midnight means no timer.
+        guard Calendar.current.date(byAdding: .day, value: 1,
+                                    to: Calendar.current.startOfDay(for: instant)) != nil else { return }
+        midnightTimer = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                // Recompute FIRST, against the live clock: a retry (or a zone/DST change that happened
+                // under us) that has already crossed local midnight rolls the day before we re-arm a
+                // long sleep. See the F1 note above.
+                self.recomputeTodayIfNeeded()
+                let current = self.now()
+                let calendar = Calendar.current   // fresh each arm: reflects DST/zone changes
+                guard let boundary = calendar.date(byAdding: .day, value: 1,
+                                                   to: calendar.startOfDay(for: current)) else { return }
+                let delay = boundary.timeIntervalSince(current)
+                guard delay > 0 else { return }
+                await self.sleep(UInt64(delay * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                // Woke just before the boundary: recompute now; if still the same day, retry in one
+                // second (the loop TOP then re-checks the boundary just crossed — never a full-day skip).
+                self.recomputeTodayIfNeeded()
+                await self.sleep(1_000_000_000)
+            }
+        }
+    }
+
+    /// Foreground/background edge: the visible-app midnight timer runs only while the app is active.
+    func setAppActive(_ active: Bool) {
+        appActive = active
+        if active {
+            recomputeTodayIfNeeded()
+            scheduleMidnightTimer()
+        } else {
+            midnightTimer?.cancel()
+            midnightTimer = nil
+        }
+    }
+
+    /// Significant-time / timezone / wake change: recompute the Today key AND bump the zone-context
+    /// signal (audit-g1-day F1b) so day-scoped surfaces re-key even when the local day key is unchanged
+    /// (e.g. a UTC+1→UTC+2 change at 13:00 — the chart bounds / live windows must move to the new
+    /// zone's midnight without waiting for a data refresh). Re-anchors the boundary. Returns whether a
+    /// day rollover was recorded (the recompute result), so tests can drive the exact edge.
+    @discardableResult
+    func significantTimeChange() -> Bool {
+        let rolled = recomputeTodayIfNeeded()
+        repo.noteZoneContextChanged()
+        if appActive { scheduleMidnightTimer() }
+        return rolled
+    }
+
+    /// Tear down observers + timer (test teardown).
+    func stop() {
+        midnightTimer?.cancel()
+        midnightTimer = nil
+        for observer in observers { NotificationCenter.default.removeObserver(observer) }
+        observers.removeAll()
     }
 }

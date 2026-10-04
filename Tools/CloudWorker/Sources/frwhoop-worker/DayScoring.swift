@@ -107,6 +107,17 @@ struct DayScorer {
         return reasons
     }
 
+    /// Mirror of the SQL midnight-closure boundary (G2-attestation item 3). The
+    /// authoritative boundary math lives in `scoring_enqueue_due_day_closure` using
+    /// Postgres `AT TIME ZONE` (pg_timezone_names DST rules, identical to
+    /// `scoring_day_segments`); this pure helper pins the worker-side predicate
+    /// that mirrors it: a day is due for closure when its LOCAL midnight (computed
+    /// with `dayStartUnix`, calendar-correct across DST) plus the settle window has
+    /// passed.
+    static func closureDue(yesterdayLocalMidnightUnix: Int, nowUnix: Int, settleSeconds: Int) -> Bool {
+        nowUnix >= yesterdayLocalMidnightUnix + settleSeconds
+    }
+
     /// The skin-temp scale family that wrote a device's rows — never hardcoded.
     /// Mirrors the app exactly: `DeviceFamily.forRegistryDevice(model:brand:)
     /// ?? .whoop5` (Strand/Data/IntelligenceEngine.swift:3159). `deviceFamily`
@@ -149,6 +160,77 @@ struct DayScorer {
             }
         }
         return (light, deep, rem)
+    }
+
+    /// Compact spec-4.4 daily attestation the v2 scoring pass writes AFTER a
+    /// successful snapshot publish (G2-attestation item 2). Only what the pass
+    /// actually observed is populated; everything it cannot know is an explicit
+    /// `not_measured` marker — nothing is fabricated, and the record never
+    /// claims a continuity verdict. The `status`/`statusReasons`/`coverage`/
+    /// `dataThrough` come verbatim from the published snapshot; projection
+    /// completion is factual because the publish succeeded before this is built.
+    static func dayAttestation(claim: Claim, snapshot: [String: Any],
+                               resultRevision: Int64, algorithmVersion: String,
+                               asOf: Int = Int(Date().timeIntervalSince1970)) -> [String: Any] {
+        let tz = TimeZone(identifier: claim.timezoneId) ?? TimeZone(identifier: "UTC")!
+        let dayStart = dayStartUnix(claim.day, tz: tz) ?? 0
+        let dayEnd = nextDayStartUnix(after: dayStart, tz: tz)
+        let coverage = snapshot["coverage"] as? [String: Any] ?? [:]
+        let status = snapshot["status"] as? String ?? "unknown"
+        let statusReasons = snapshot["statusReasons"] as? [String] ?? []
+        let dataThrough = snapshot["dataThrough"] as? String ?? ""
+        return [
+            "identity": [
+                "user_id": claim.userId,
+                "device_id": claim.deviceId,
+                "day": claim.day,
+                "timezone_id": claim.timezoneId,
+                "calendar_policy_version": "job-calendar-1",
+                "day_start_unix": dayStart,
+                "day_end_unix": dayEnd,
+                "input_revision": claim.inputRevision,
+                "as_of_unix": asOf,
+                "algorithm_version": algorithmVersion,
+            ],
+            "status": status,
+            "statusReasons": statusReasons,
+            "dataThrough": dataThrough,
+            "acquisition": [
+                // Per-stream received counts + the night window bounds are what the
+                // pass measured. Durations/gaps/rejected/duplicate/off-body/unknown
+                // are NOT derivable from the counts the pass loads, so they stay
+                // explicit not_measured markers.
+                "streams": coverage,
+                "coverage_durations": "not_measured",
+                "rejected": "not_measured",
+                "duplicates": "not_measured",
+                "missing_intervals": "not_measured",
+                "largest_gap_s": "not_measured",
+                "off_body_s": "not_measured",
+                "unknown_s": "not_measured",
+            ],
+            "handoff": [
+                "phone_watermarks": "not_measured",
+                "durably_accepted_ids": "not_measured",
+                "worker_backlog": "not_measured",
+            ],
+            "archive": [
+                "manifest_refs": "not_measured",
+                "hash_verification": "not_measured",
+                "last_archived_event": "not_measured",
+            ],
+            "projection": [
+                "input_revision": claim.inputRevision,
+                "completed": true,
+                "snapshot_result_revision": resultRevision,
+                "algorithm_version": algorithmVersion,
+            ],
+            "context": [
+                "wear": "not_measured",
+                "placement": "not_measured",
+                "source_arbitration": "not_measured",
+            ],
+        ]
     }
 
     // MARK: - SpO₂ strap estimate
@@ -379,6 +461,14 @@ struct DayScorer {
             baselines: baselines,
             // Offset on the CLAIMED day (DST-correct), not the offset "now".
             tzOffsetSeconds: tz.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(dayStart))),
+            // Zone-correct half-open [start, end) day bounds for the day-bucketing
+            // filters (repair-daybucket, contract C2): the legacy fixed-offset +
+            // 86,400 window re-buckets the boundary hour onto the wrong day on DST
+            // transition days. LocalDayWindows is the same helper the app uses, so
+            // the worker and the app agree; on every non-DST day this is
+            // byte-identical to the old math. Nil (unreachable for a valid claim
+            // day) falls back to the old fixed-offset behavior.
+            dayWindow: LocalDayWindows(timeZone: tz).window(ofDayKey: claim.day),
             wristOff: wristOff,
             bandSleepState: sleepState
         )

@@ -347,6 +347,10 @@ struct StrandiOSApp: App {
         // safe no-op until the user opts in.
         .onChange(of: scenePhase, initial: true) { _, phase in
             if phase == .active {
+                // G1 (findings/g1-day-ui.md T01/T02): recompute the local "Today" key synchronously,
+                // BEFORE the first meaningful resumed render and before any network catch-up, so a phone
+                // suspended across midnight re-keys Today the moment it resumes.
+                model.recomputeTodayDay()
                 // Cloud: an active scene is an execution opportunity. Start the runtime if it is not
                 // running (a Bluetooth relaunch may have started it already), commit any staged
                 // records, and begin a pass. A no-op unless cloud mode is enabled.

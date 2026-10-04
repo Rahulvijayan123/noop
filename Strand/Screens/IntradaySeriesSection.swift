@@ -1,6 +1,8 @@
 import SwiftUI
 import Charts
 import StrandDesign
+import WhoopStore
+import WhoopProtocol
 
 /// "Through the day": the server's dense intraday series for one metric.
 ///
@@ -18,8 +20,15 @@ struct IntradaySeriesSection: View {
     let metric: IntradayMetric
     let accent: Color
 
+    @EnvironmentObject private var repo: Repository
     @ObservedObject private var store: IntradaySeriesStore
     @State private var dayOffset = 0
+    /// Local placement intervals for the active strap (G4), loaded for the visible range.
+    @State private var placementIntervals: [PlacementInterval] = []
+    /// Local WRIST_ON/OFF event rows (G3) for the visible range.
+    @State private var wearEvents: [(ts: Int, kind: String)] = []
+    /// Persisted standard-BLE sensor-contact transitions (G3/F4) for the visible range.
+    @State private var contactSamples: [(ts: Int, state: ContactEligibility)] = []
 
     private static let refreshSeconds: UInt64 = 30
 
@@ -33,7 +42,10 @@ struct IntradaySeriesSection: View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             card(now: context.date)
         }
-        .task(id: dayOffset) { await keepFresh(dayOffset) }
+        .task(id: dayOffset) {
+            await loadEligibilityEvidence(dayOffset)
+            await keepFresh(dayOffset)
+        }
     }
 
     private func keepFresh(_ offset: Int) async {
@@ -43,6 +55,26 @@ struct IntradaySeriesSection: View {
             await store.refresh(metric, bounds: bounds)
             guard bounds.isLive else { return }
             try? await Task.sleep(nanoseconds: Self.refreshSeconds * 1_000_000_000)
+        }
+    }
+
+    /// Loads the local evidence the eligibility context line derives from: the active strap's
+    /// placement intervals plus WRIST and contact events inside the visible range. Best-effort and
+    /// non-blocking; any failure just leaves the context line absent (never a guessed state).
+    private func loadEligibilityEvidence(_ offset: Int) async {
+        let bounds = IntradayRange.bounds(for: metric, dayOffset: offset, now: Date())
+        guard let store = await repo.storeHandle() else { return }
+        let device = repo.deviceId
+        if let placement = try? PlacementStore(dbQueue: store.registryWriter) {
+            placementIntervals = (try? placement.intervals(deviceId: device)) ?? []
+        }
+        let events = (try? await store.events(deviceId: device, from: bounds.from, to: bounds.to, limit: 5000)) ?? []
+        wearEvents = events
+            .filter { $0.kind.hasPrefix("WRIST_ON") || $0.kind.hasPrefix("WRIST_OFF") }
+            .map { ($0.ts, $0.kind) }
+        let contacts = (try? await store.standardHRContacts(deviceId: device, from: bounds.from, to: bounds.to, limit: 2000)) ?? []
+        contactSamples = contacts.compactMap { sample in
+            ContactEligibility(raw: sample.contact.rawValue).map { (sample.ts, $0) }
         }
     }
 
@@ -56,8 +88,32 @@ struct IntradaySeriesSection: View {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
                 header(bounds: bounds)
                 readout(window: window, bounds: bounds, failed: failed, now: now)
+                eligibilityLine(window: window)
                 chart(window: window, bounds: bounds)
                 footer(window: window, failed: failed)
+            }
+        }
+    }
+
+    /// A one-line per-metric context annotation (G3/G4/G7 consumer surface): placement, wear and
+    /// contact eligibility for THIS metric's visible window, derived from the local evidence when
+    /// the server has not published bucket flags. Shown only when there is something honest to say;
+    /// never a guessed whole-window label (a mixed window says it is mixed).
+    @ViewBuilder
+    private func eligibilityLine(window: IntradaySeriesWindow?) -> some View {
+        if let window = window {
+            let width = window.bucketSeconds(for: metric)
+            let context = IntradaySeriesContextBuilder.summarize(
+                points: window.points(metric), width: width,
+                placementIntervals: placementIntervals,
+                wearEvents: wearEvents,
+                contactSamples: contactSamples)
+            if context.hasAny {
+                Text(context.lines.joined(separator: " · "))
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel(Text(context.lines.joined(separator: ", ")))
             }
         }
     }

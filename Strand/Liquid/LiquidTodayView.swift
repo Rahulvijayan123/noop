@@ -124,8 +124,10 @@ struct LiquidTodayView: View {
     /// readings — every Effort read-out then falls back to the stored row rather than a fabricated value.
     @State private var liveTodayStrain: Double?
 
-    // day navigation (0 = today, 1 = yesterday, …)
-    @State private var selectedDayOffset = 0
+    // day navigation (0 = today, 1 = yesterday, …). G1 (findings/g1-day-ui.md Q4 / T03): persisted via
+    // the SAME key classic TodayView uses, so a browsed past day survives a process restart and a
+    // SwiftUI re-mount, and the two Today surfaces agree on the selection.
+    @AppStorage(TodayView.selectedDayOffsetKey) private var selectedDayOffset = 0
     @State private var showDayPicker = false
     @State private var heartRateCardFrame: CGRect = .null
     private static let daySwipeSpace = "liquidTodayDaySwipeSpace"
@@ -447,9 +449,19 @@ struct LiquidTodayView: View {
         .liquidMediumHaptic(trigger: pullHaptic)
         // hydrationSeq joins the id so logging a drink re-reads the card immediately, the same trigger set
         // classic TodayView's reloadHydration() uses.
-        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.hydrationSeq)-\(hydrationEnabled)-\(dayCycleModeRaw)") {
+        // G1 (findings/g1-day-ui.md T01; audit-g1-day F1b): the day-rollover + zone-context sequences
+        // join the reload key so the liquid Today re-keys to the new local-midnight day within ~1s even
+        // at an unchanged refreshSeq (no data refresh, sensor reading, network, or DB revision), and
+        // re-keys day-scoped bounds on a same-day timezone change.
+        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.dayRolloverSeq)-\(repo.zoneContextSeq)-\(repo.hydrationSeq)-\(hydrationEnabled)-\(dayCycleModeRaw)") {
             DashboardCardPrefs.migrateLegacyStepsAverage()
             await load()
+        }
+        // G1 (T03): clamp a persisted past-day selection into the current navigable range on appear so a
+        // stored offset can never strand the user past the earliest banked day.
+        .onAppear {
+            let clamped = TodayView.restoredDayOffset(saved: selectedDayOffset, maxOffset: earliestDayOffset)
+            if clamped != selectedDayOffset { selectedDayOffset = clamped }
         }
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
@@ -579,6 +591,24 @@ struct LiquidTodayView: View {
                 // was written against.
                 .headerTrailingControlFadeMask(reserving: headerControlsWidth)
                 HStack(spacing: headerClusterSpacing) {
+                    // G1 (spec §3 / findings T03): explicit "return to Today", shown only while browsing
+                    // a past day. The liquid header title taps into the picker (and would otherwise be
+                    // the only way back besides swiping to the clamp).
+                    if selectedDayOffset > 0 {
+                        Button {
+                            withAnimation(.easeOut(duration: 0.25)) { selectedDayOffset = 0 }
+                            showDayPicker = false
+                        } label: {
+                            Text("Today")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.accent)
+                                .padding(.horizontal, 12).padding(.vertical, 7)
+                                .background(Capsule().fill(StrandPalette.surfaceInset.opacity(0.72)))
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Return to today")
+                    }
                     LiquidSettingsButton()
                 }
                 .background(

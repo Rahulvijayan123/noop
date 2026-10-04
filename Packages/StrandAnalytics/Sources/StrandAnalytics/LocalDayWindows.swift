@@ -142,11 +142,14 @@ public struct LocalDayStart: Hashable, Sendable {
 /// because a day on which the clocks move is 23 or 25 hours long. This type is the shared primitive
 /// that answers it correctly; it changes no caller on its own.
 ///
-/// SO TWO ANSWERS COEXIST, and this one is not yet the shipped one. `AnalyticsEngine.dayStartUtcSeconds`
-/// with `AnalyticsEngine.dayString` remains what every scored day actually uses; this file is called by
-/// nothing but its own tests until a switch-over lands. They disagree by an hour on the far side of a
+/// SO TWO ANSWERS COEXIST, and this one is now the shipped one for the scoring paths. The app
+/// (`IntelligenceEngine`) and the worker (`DayScoring`) derive the day bounds they feed
+/// `AnalyticsEngine.analyzeDay(dayWindow:)` from this type, so scored days are bucketed by the zone's
+/// own rules. `AnalyticsEngine.dayStartUtcSeconds` with `AnalyticsEngine.dayString` remains the answer
+/// for pure-function callers/tests on UTC (offset 0) and for the fallback when no zone-correct window
+/// is supplied, where the two are byte-identical. They disagree by an hour on the far side of a
 /// transition, which `LocalDayWindowsTests` pins deliberately by asserting BOTH answers for
-/// America/New_York on 2025-10-19. Reach for the core unless you are writing that switch-over.
+/// America/New_York on 2025-10-19.
 ///
 /// Kotlin twin: `LocalDayWindows`.
 ///
@@ -246,6 +249,17 @@ public struct LocalDayWindows: Sendable {
                               start: dayStart,
                               nextStart: end,
                               utcOffsetSeconds: offsetSeconds(at: dayStart))
+    }
+
+    /// The window of the local date named by a `YYYY-MM-DD` key, or nil when the key is malformed or
+    /// the zone has no such date. This is the switch-over seam the scoring callers use: the same
+    /// lookup that produces the day key (`LocalCalendarDate.key`) also produces the window, so a day
+    /// key and its bucket can never disagree.
+    public func window(ofDayKey key: String) -> LocalDayWindow? {
+        let parts = key.split(separator: "-")
+        guard parts.count == 3,
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]) else { return nil }
+        return window(of: LocalCalendarDate(year: year, month: month, day: day))
     }
 
     /// The start of the local day that contains `instant`, as an instant and without formatting a date

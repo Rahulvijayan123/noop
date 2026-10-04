@@ -332,7 +332,8 @@ Deno.test('coach profile: saved fields read back, partial updates keep the rest,
   assertEquals(put.status, 200);
   const saved = (await put.json()).profile;
   assertEquals({ ...saved, updatedAt: null }, {
-    displayName: 'Rahul', dateOfBirth: '1990-04-12', sex: 'male', heightCm: 180.5, weightKg: 77.1107, updatedAt: null,
+    displayName: 'Rahul', dateOfBirth: '1990-04-12', sex: 'male', heightCm: 180.5, weightKg: 77.1107,
+    timezone: null, updatedAt: null,
   });
 
   await handleCoachRequest(call('profile', { method: 'PUT', body: { weightKg: 80 } }), deps);

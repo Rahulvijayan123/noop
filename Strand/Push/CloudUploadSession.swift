@@ -40,6 +40,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
     public enum UploadError: Error, CustomStringConvertible {
         case notConfigured
         case missingIdentity
+        case ownerMismatch(expected: String, current: String)
         case unexpectedStatus(Int, String?)
         case transport(String)
 
@@ -47,6 +48,8 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
             switch self {
             case .notConfigured: return "cloud: receiver not configured"
             case .missingIdentity: return "cloud: no installation identity"
+            case .ownerMismatch(let expected, let current):
+                return "cloud: refusing to upload batch owned by \(expected) with the \(current) owner's token"
             case .unexpectedStatus(let code, let body): return "cloud: HTTP \(code) \(body ?? "")"
             case .transport(let message): return "cloud: transport failure: \(message)"
             }
@@ -148,8 +151,17 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
 
     /// Foreground upload: awaits the receiver's acknowledgement. Used while the app is executing so a
     /// captured record can reach the server within seconds of arriving.
-    public func uploadForeground(batchId: String, fileURL: URL) async throws -> Outcome {
+    ///
+    /// `expectedOwnerId` is the batch's acquisition-time owner (sealed into the journal at capture
+    /// time). The upload token is resolved at SEND time from the CURRENT identity, so this method
+    /// refuses outright when the current owner differs: sending another owner's records under a
+    /// different owner's token is the exact credential confusion T23 forbids. The caller (the
+    /// coordinator) additionally quarantines such a batch, so this is the second line of defence.
+    public func uploadForeground(batchId: String, fileURL: URL, expectedOwnerId: String) async throws -> Outcome {
         guard let identity = identity() else { throw UploadError.missingIdentity }
+        guard identity.ownerId == expectedOwnerId else {
+            throw UploadError.ownerMismatch(expected: expectedOwnerId, current: identity.ownerId)
+        }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
         request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
@@ -175,13 +187,17 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
 
     /// Background upload: hands a file task to the stable background session and returns its
     /// identifier. The outcome arrives through `onOutcome` (possibly in a later process lifetime).
+    ///
+    /// Same T23 rule as `uploadForeground`: the token is resolved at send time from the current
+    /// identity, so a batch whose acquisition-time owner differs from the current owner is refused
+    /// here (returns -1; the caller must quarantine it, never send it). This lane is synchronous, so
+    /// refusal is signalled by the invalid task id rather than a thrown error.
     @discardableResult
-    public func enqueueBackground(batchId: String, fileURL: URL) -> Int {
+    public func enqueueBackground(batchId: String, fileURL: URL, expectedOwnerId: String) -> Int {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        if let identity = identity() {
-            request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        }
+        guard let identity = identity(), identity.ownerId == expectedOwnerId else { return -1 }
+        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
         request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
         request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")

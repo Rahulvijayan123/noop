@@ -220,4 +220,72 @@ final class VerificationLaneTests: XCTestCase {
         }
         return out
     }
+
+    // MARK: - Deterministic vs transient digest-mismatch classification
+
+    func testDeterministicMismatchesAreQuarantined() {
+        for reason in [
+            "no expected wire digest recorded",
+            "no expected content digest recorded",
+            "commit rejected sqlstate=42501: permission denied",
+            "commit rejected sqlstate=23514: check constraint",
+            "commit returned NULL jsonb",
+            "commit result state != verified_indexed",
+            "verified key fails DB pattern",
+            "cannot derive verified key",
+            "row missing identity",
+            "missing object_key",
+            "wire sha mismatch (receipt authoritative)",
+            "content sha mismatch (receipt authoritative)",
+            "receipt wireSha256 mismatch",
+            "receipt contentSha256 mismatch",
+            "receipt compressedBytes mismatch",
+            "receipt uncompressedBytes mismatch",
+        ] {
+            XCTAssertTrue(VerificationLane.isDeterministicMismatch(reason), "\(reason) must be deterministic")
+        }
+    }
+
+    func testTransientMismatchesStayBoundedRetry() {
+        for reason in [
+            "compressed_bytes 12 != manifest 13",
+            "wire sha mismatch",
+            "uncompressed_bytes 12 != manifest 13",
+            "gunzip failed: fixture",
+            "zstd decompress failed: fixture",
+        ] {
+            XCTAssertFalse(VerificationLane.isDeterministicMismatch(reason), "\(reason) must be transient")
+        }
+    }
+
+    func testQuarantineCodesAreBoundedAndStable() {
+        let codes = [
+            "no expected wire digest recorded": "no_expected_wire_digest",
+            "no expected content digest recorded": "no_expected_content_digest",
+            "commit rejected sqlstate=42501": "commit_rejected",
+            "verified key fails DB pattern": "verified_key_pattern",
+            "cannot derive verified key": "verified_key_derivation",
+            "row missing identity": "row_missing_identity",
+            "missing object_key": "missing_object_key",
+            "wire sha mismatch (receipt authoritative)": "receipt_authoritative_mismatch",
+            "receipt wireSha256 mismatch": "receipt_authoritative_mismatch",
+        ]
+        for (reason, expected) in codes {
+            XCTAssertEqual(VerificationLane.quarantineCode(forReason: reason), expected, "for \(reason)")
+            XCTAssertNotNil(VerificationLane.quarantineCode(forReason: reason).range(of: #"^[a-z0-9_]{3,64}$"#, options: .regularExpression),
+                            "\(reason) code must satisfy the DB CHECK")
+        }
+    }
+
+    func testCandidateSQLExcludesDurablyQuarantinedRows() {
+        // Deterministic mismatch -> the next scan must not re-select the object.
+        for sql in [VerificationLane.candidateSQL(afterCursor: false), VerificationLane.candidateSQL(afterCursor: true)] {
+            XCTAssertTrue(sql.contains("verification_failure_code IS NULL"),
+                          "candidateSQL must exclude durably-quarantined rows")
+        }
+        // Transient mismatch -> still selected: no attempt/code-based predicate may gate it.
+        let sql = VerificationLane.candidateSQL(afterCursor: false)
+        XCTAssertFalse(sql.contains("verification_attempts"), "transient rows must not be excluded by attempts")
+        XCTAssertFalse(sql.contains("verification_failed_at"), "transient rows must not be excluded by time")
+    }
 }

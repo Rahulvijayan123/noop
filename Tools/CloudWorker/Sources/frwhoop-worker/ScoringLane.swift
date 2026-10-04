@@ -68,7 +68,15 @@ struct ScoringLane {
     /// lost and was recomputed in full, or the upload was killed. Holding the gate from before the claim
     /// restores one lock order. 0 keeps the original order (claim first).
     var v2InputGateSeconds: Int = ScoringLane.defaultV2InputGateSeconds
+    /// Zone-aware midnight-closure sweep (G2-attestation item 3): how often the
+    /// worker asks the DB for due day-closure work, and how many days one sweep
+    /// may enqueue. 0 disables the sweep.
+    var dayClosureSweepIntervalSeconds: Int = ScoringLane.defaultDayClosureSweepIntervalSeconds
+    var dayClosureBatch: Int = 16
+    var dayClosureSettleSeconds: Int = 600
+    var lastDayClosureSweep: Date?
 
+    static let defaultDayClosureSweepIntervalSeconds = 60
     static let defaultLegacyQuietSeconds = 20
     static let defaultLegacyMaxDeferSeconds = 1800
     static let defaultV2InputGateSeconds = 10
@@ -104,6 +112,19 @@ struct ScoringLane {
         var seriesRowsWritten = 0
         /// The database declined: another device is canonical for the day, or the day has no snapshot yet.
         var seriesSkipped = 0
+        /// The publish was fenced as superseded: a newer input revision owns the day, so the write
+        /// was intentionally refused. Neither a success nor a failure — derived data, next pass repairs.
+        var seriesSuperseded = 0
+        /// Day attestation (day_completeness) writes after successful v2 publishes. Like the series,
+        /// attestation is derived bookkeeping: none of these counters changes a day's outcome.
+        var attestationWritten = 0
+        var attestationSuperseded = 0
+        var attestationSkipped = 0
+        var attestationFailed = 0
+        /// Zone-aware midnight closure: days enqueued by the due-day sweep, and
+        /// sweep failures (never fatal — the sweep is bounded and idempotent).
+        var dayClosureEnqueued = 0
+        var dayClosureFailed = 0
         var seriesFailed = 0
         var failureKinds: [String: Int] = [:]
         var lastScoreAt: Date?
@@ -117,6 +138,7 @@ struct ScoringLane {
     var consecutiveFailures = 0
 
     mutating func drain(budget: Int) {
+        maybeSweepDayClosure()
         for _ in 0..<max(1, budget) {
             // Reconnect only at this safe boundary: no transaction is open here.
             do {
@@ -491,6 +513,8 @@ struct ScoringLane {
                 try db.commitTransaction()
                 dropGate()
                 publishSeries(payloads.series, claim: claim, scoringVersion: algorithmVersion)
+                publishAttestation(payloads.snapshot, claim: claim, scoringVersion: algorithmVersion,
+                                   resultRevision: revision)
                 return .completed
             }
             // NULL (or a non-positive revision) means the publication did NOT
@@ -509,6 +533,16 @@ struct ScoringLane {
     /// `pg_try_advisory_lock_shared` on the key every upload takes exclusively and `publish_scoring_snapshot_v2`
     /// takes shared (`hashtextextended('scoring-inputs-v2:' || owner, 0)`). Session level, so it outlives the
     /// transaction that opens after it and the transaction's snapshot is taken only once the gate is held.
+    /// The fenced dense-series write: carries the claimed input revision ($6) so
+    /// the RPC can reject a stale pass (G2-attestation item 4 / T31).
+    static let seriesPublishSQL = """
+        SELECT public.publish_metric_series_v1($1::uuid,$2::uuid,$3::date,$4::text,$5::jsonb,$6::bigint)::text
+        """
+    /// The fenced day-attestation write (publish_day_attestation_v1): carries the
+    /// claimed input revision ($4) so an older pass cannot overwrite a newer day.
+    static let dayAttestationSQL = """
+        SELECT public.publish_day_attestation_v1($1::uuid,$2::uuid,$3::date,$4::bigint,$5::text,$6::jsonb)::text
+        """
     static let inputGateTrySQL = """
         select pg_try_advisory_lock_shared(hashtextextended('scoring-inputs-v2:' || $1::text, 0))::text as acquired
         """
@@ -568,19 +602,58 @@ struct ScoringLane {
     /// The database accepts the write only for the day's canonical device (`selected_scoring_device_v2`) and
     /// leaves unchanged buckets untouched. That choice is made on the SCORING algorithm's jobs and snapshots, so
     /// `scoringVersion` is the claimed job's version; the series' own version travels inside the payload.
+    /// Classify the `publish_metric_series_v1` reply (pure, unit-tested):
+    ///   - `.applied`   — the write happened (`upserted` + `deleted` rows);
+    ///   - `.superseded` — the fence rejected the write because a NEWER input
+    ///     revision owns the day (T31). Never success, never failure;
+    ///   - `.skipped`   — not the day's selected device, or an unparseable reply
+    ///     (derived side channel; the next scoring pass repairs it);
+    ///   - `.malformed` — the RPC replied with something that is not an object.
+    enum SeriesPublishOutcome: Equatable {
+        case applied(upserted: Int, deleted: Int)
+        case superseded
+        case skipped
+        case malformed
+    }
+    static func classifySeriesOutcome(_ replyText: String?) -> SeriesPublishOutcome {
+        guard let replyText, !replyText.isEmpty, replyText != "null",
+              let data = replyText.data(using: .utf8),
+              let outcome = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .malformed
+        }
+        guard (outcome["applied"] as? Bool) == true else {
+            if (outcome["reason"] as? String) == "superseded" { return .superseded }
+            return .skipped
+        }
+        return .applied(upserted: outcome["upserted"] as? Int ?? 0, deleted: outcome["deleted"] as? Int ?? 0)
+    }
+
+    /// Write the day's dense intraday series. It runs only after the snapshot transaction has committed, as
+    /// its own statement, and it never throws:
+    ///   * the series is derived data, so a failure here must not fail, retry or delay the day's scoring;
+    ///   * it must stay out of the snapshot transaction: that one holds the job-row and scoring-inputs locks
+    ///     uploads already deadlock against (docs/BACKEND.md, known issues), and lengthening it makes it worse;
+    ///   * every pass recomputes the whole day, so a write that is missed is repaired by the next one.
+    /// The database accepts the write only for the day's canonical device (`selected_scoring_device_v2`) and
+    /// only at the input revision this pass CLAIMED (`claim.inputRevision`); a write whose claimed revision is
+    /// older than the day's latest one is fenced as superseded and counted separately, never as a failure.
+    /// That choice is made on the SCORING algorithm's jobs and snapshots, so `scoringVersion` is the claimed
+    /// job's version; the series' own version travels inside the payload.
     private mutating func publishSeries(_ series: [String: Any]?, claim: DayScorer.Claim, scoringVersion: String) {
         guard let series else { return }
         do {
             let reply = try db.callFunctionForJSON(
-                "SELECT public.publish_metric_series_v1($1::uuid,$2::uuid,$3::date,$4::text,$5::jsonb)::text",
-                [claim.userId, claim.deviceId, claim.day, scoringVersion, try jsonText(series)])
-            let outcome = reply.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
-            guard (outcome?["applied"] as? Bool) == true else {
+                ScoringLane.seriesPublishSQL,
+                [claim.userId, claim.deviceId, claim.day, scoringVersion, try jsonText(series), String(claim.inputRevision)])
+            switch Self.classifySeriesOutcome(reply) {
+            case .applied(let upserted, let deleted):
+                stats.seriesPublished += 1
+                stats.seriesRowsWritten += upserted + deleted
+            case .superseded:
+                stats.seriesSuperseded += 1
+            case .skipped, .malformed:
                 stats.seriesSkipped += 1
-                return
             }
-            stats.seriesPublished += 1
-            stats.seriesRowsWritten += (outcome?["upserted"] as? Int ?? 0) + (outcome?["deleted"] as? Int ?? 0)
         } catch {
             stats.seriesFailed += 1
             FileHandle.standardError.write(
@@ -589,18 +662,89 @@ struct ScoringLane {
         }
     }
 
-    /// `scoring_jobs_v2` carries no timezone. Prefer the legacy work item for the
-    /// same (user, device, day), then the physiology work item, then UTC (always a
+    /// Write the day's compact versioned attestation (day_completeness) after a
+    /// successful snapshot publish. Derived bookkeeping, so it never throws and
+    /// never fails, retries or delays the day's scoring. The RPC is fenced on
+    /// input_revision: an older pass cannot overwrite a newer day's attestation,
+    /// and a fenced write is counted as superseded, never as success or failure.
+    private mutating func publishAttestation(_ snapshot: [String: Any], claim: DayScorer.Claim,
+                                             scoringVersion: String, resultRevision: Int64) {
+        let attestation = DayScorer.dayAttestation(claim: claim, snapshot: snapshot,
+                                                   resultRevision: resultRevision,
+                                                   algorithmVersion: scoringVersion)
+        do {
+            let reply = try db.callFunctionForJSON(
+                ScoringLane.dayAttestationSQL,
+                [claim.userId, claim.deviceId, claim.day, String(claim.inputRevision),
+                 claim.timezoneId, try jsonText(attestation)])
+            switch Self.classifySeriesOutcome(reply) {
+            case .applied:
+                stats.attestationWritten += 1
+            case .superseded:
+                stats.attestationSuperseded += 1
+            case .skipped, .malformed:
+                stats.attestationSkipped += 1
+            }
+        } catch {
+            stats.attestationFailed += 1
+            FileHandle.standardError.write(
+                "frwhoop-worker: day attestation failed day=\(claim.day) device=\(claim.deviceId.prefix(8)): \(error)\n"
+                    .data(using: .utf8)!)
+        }
+    }
+
+    /// Bounded zone-aware midnight-closure sweep (G2-attestation item 3 / spec 4.5),
+    /// throttled to at most one per `dayClosureSweepIntervalSeconds`. The due-days
+    /// computation, the v2 enqueue and the pending marker are all inside the SQL
+    /// RPC (one transaction, idempotent), so this hook is a single cheap statement
+    /// on the existing poll loop — never new cron infrastructure. Failures are
+    /// counted and logged; a failed sweep never fails a scoring cycle.
+    static let dayClosureSweepSQL = """
+        select public.scoring_enqueue_due_day_closure($1::integer, $2::text, $3::integer)::text as n
+        """
+    private mutating func maybeSweepDayClosure() {
+        guard dayClosureSweepIntervalSeconds > 0 else { return }
+        let now = Date()
+        if let last = lastDayClosureSweep,
+           now.timeIntervalSince(last) < TimeInterval(dayClosureSweepIntervalSeconds) {
+            return
+        }
+        lastDayClosureSweep = now
+        do {
+            let rows = try db.query(ScoringLane.dayClosureSweepSQL,
+                                    [String(dayClosureBatch), v2AlgorithmVersion, String(dayClosureSettleSeconds)])
+            let n = Int(rows.first?["n"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+            if n > 0 { stats.dayClosureEnqueued += n }
+        } catch {
+            stats.dayClosureFailed += 1
+            FileHandle.standardError.write(
+                "frwhoop-worker: day closure sweep failed: \(error)\n".data(using: .utf8)!)
+        }
+    }
+
+    /// `scoring_jobs_v2` carries no timezone. Resolve the claim's zone in order:
+    /// legacy work item, physiology work item, then the owner's PROFILE timezone
+    /// (the app's phone-local zone authority, contract C2), then UTC (always a
     /// valid `pg_timezone_names` entry, which the snapshot contract requires).
+    /// The profile fallback matters for QUIET days created by the closure sweep:
+    /// they have no work item, so without it their attestation would use UTC day
+    /// bounds even though the closure computed the day in the owner's zone. A
+    /// profile zone that is not in `pg_timezone_names` (garbage/legacy) falls
+    /// back to UTC rather than failing the snapshot's timezone validation.
+    static let resolveTimezoneSQL = """
+        select coalesce(
+            (select timezone_id from public.scoring_work_items
+              where user_id=$1::uuid and device_id=$2::uuid and day=$3::date),
+            (select timezone_id from public.physiology_work_items
+              where user_id=$1::uuid and device_id=$2::uuid and day=$3::date),
+            (select case when exists (select 1 from pg_timezone_names n
+                                        where n.name = nullif(btrim(p.timezone), ''))
+                         then nullif(btrim(p.timezone), '') end
+               from public.profiles p where p.id=$1::uuid),
+            'UTC') as tz
+        """
     private func resolveTimezone(userId: String, deviceId: String, day: String) throws -> String {
-        let rows = try db.query("""
-            select coalesce(
-                (select timezone_id from public.scoring_work_items
-                  where user_id=$1::uuid and device_id=$2::uuid and day=$3::date),
-                (select timezone_id from public.physiology_work_items
-                  where user_id=$1::uuid and device_id=$2::uuid and day=$3::date),
-                'UTC') as tz
-            """, [userId, deviceId, day])
+        let rows = try db.query(ScoringLane.resolveTimezoneSQL, [userId, deviceId, day])
         let tz = rows.first?["tz"] ?? ""
         return tz.isEmpty ? "UTC" : tz
     }

@@ -308,4 +308,37 @@ final class DayScoringAdapterTests: XCTestCase {
         // Non-numeric first elements (malformed) are ignored, never crash.
         XCTAssertEqual(DayScorer.hrvSlotStarts(fromPoints: [["nope", 1.0, 2]]), Set<Int>())
     }
+
+    // MARK: - Zone-correct analyzeDay dayWindow (repair-daybucket wiring)
+
+    /// The call site in `scoreAndBuildPayloads` passes
+    /// `LocalDayWindows(timeZone: tz).window(ofDayKey: claim.day)`. These tests
+    /// pin the VALUE of that expression against the worker's own calendar math
+    /// (`dayStartUnix`/`nextDayStartUnix`), so a regression to the old fixed
+    /// 86,400 window would fail here: on DST days the window must be 23 h / 25 h,
+    /// and its [start, end) must equal the worker's local midnights exactly.
+    func testAnalyzeDayDayWindowAgreesWithWorkerCalendarBounds() throws {
+        let ny = TimeZone(identifier: "America/New_York")!
+        for day in ["2026-03-08", "2026-11-01", "2026-06-15"] {
+            let window = try XCTUnwrap(LocalDayWindows(timeZone: ny).window(ofDayKey: day))
+            let start = try XCTUnwrap(DayScorer.dayStartUnix(day, tz: ny))
+            let end = DayScorer.nextDayStartUnix(after: start, tz: ny)
+            XCTAssertEqual(Int(window.start.timeIntervalSince1970), start,
+                           "dayWindow start must equal the worker's local midnight for \(day)")
+            XCTAssertEqual(Int(window.nextStart.timeIntervalSince1970), end,
+                           "dayWindow nextStart must equal the worker's next local midnight for \(day)")
+        }
+    }
+
+    func testAnalyzeDayDayWindowIsZoneCorrectOnDSTDays() {
+        let ny = TimeZone(identifier: "America/New_York")!
+        let spring = LocalDayWindows(timeZone: ny).window(ofDayKey: "2026-03-08")!
+        XCTAssertEqual(spring.nextStart.timeIntervalSince(spring.start), 23 * 3_600,
+                       "spring-forward day window must be 23 h, not a fixed 86,400 block")
+        let fall = LocalDayWindows(timeZone: ny).window(ofDayKey: "2026-11-01")!
+        XCTAssertEqual(fall.nextStart.timeIntervalSince(fall.start), 25 * 3_600,
+                       "fall-back day window must be 25 h, not a fixed 86,400 block")
+        let normal = LocalDayWindows(timeZone: ny).window(ofDayKey: "2026-06-15")!
+        XCTAssertEqual(normal.nextStart.timeIntervalSince(normal.start), 24 * 3_600)
+    }
 }

@@ -621,23 +621,29 @@ final class CloudJournalStore: @unchecked Sendable {
 
     // MARK: sealing
 
-    /// Pending groups eligible to be sealed, oldest first, one per (device, stream).
-    func pendingGroups(maxRecords: Int, maxBytes: Int, minAgeSeconds: Double, nowMs: Int,
+    /// Pending groups eligible to be sealed, oldest first, one per (device, stream), for ONE owner.
+    ///
+    /// The owner filter is the T23 enforcement point for sealing: the store can legitimately hold
+    /// another owner's unacknowledged rows (a journal that outlived an account switch), and those
+    /// rows must never be sealed into a batch stamped with the current owner. Filtering here keeps
+    /// the sealer owner-scoped even before the coordinator's identity guard sees the candidate.
+    func pendingGroups(ownerId: String, maxRecords: Int, maxBytes: Int, minAgeSeconds: Double, nowMs: Int,
                        limit: Int) throws -> [CloudSealCandidate] {
         let stmt = try prepare("""
         SELECT device_id, stream, MIN(seq), MAX(seq), COUNT(*), MIN(received_at_ms), SUM(LENGTH(payload)),
                MIN(created_at_ms), MIN(window_identity)
         FROM journal_record
-        WHERE state = 0 AND stream != ? AND stream != ?
+        WHERE state = 0 AND owner_id = ? AND stream != ? AND stream != ?
         GROUP BY device_id, stream
         ORDER BY MIN(seq) ASC
         LIMIT ?
         """)
         defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, ownerId, -1, cloudSQLiteTransient)
         // The object lane owns rawBatch and rawImuSession; the NDJSON sealer must never touch them.
-        sqlite3_bind_text(stmt, 1, CloudStreamKind.rawBatch.rawValue, -1, cloudSQLiteTransient)
-        sqlite3_bind_text(stmt, 2, CloudStreamKind.rawImuSession.rawValue, -1, cloudSQLiteTransient)
-        sqlite3_bind_int(stmt, 3, Int32(limit))
+        sqlite3_bind_text(stmt, 2, CloudStreamKind.rawBatch.rawValue, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 3, CloudStreamKind.rawImuSession.rawValue, -1, cloudSQLiteTransient)
+        sqlite3_bind_int(stmt, 4, Int32(limit))
         var out: [CloudSealCandidate] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let deviceId = text(stmt, 0) ?? ""
@@ -663,23 +669,25 @@ final class CloudJournalStore: @unchecked Sendable {
         return out
     }
 
-    /// Every pending record of one (device, stream) up to the group's last committed sequence.
-    func pendingEntries(deviceId: String, stream: CloudStreamKind, upTo lastSeq: Int64,
+    /// Every pending record of one (device, stream) up to the group's last committed sequence, for
+    /// ONE owner (T23 — see `pendingGroups`).
+    func pendingEntries(ownerId: String, deviceId: String, stream: CloudStreamKind, upTo lastSeq: Int64,
                         limit: Int? = nil) throws -> [CloudJournalEntry] {
         let stmt = try prepare("""
         SELECT seq, owner_id, source_id, device_id, stream, encoding, provenance, characteristic,
                family, firmware, received_at_ms, strap_ts, wall_ref, device_ref, window_identity, payload
         FROM journal_record
-        WHERE state = 0 AND device_id = ? AND stream = ? AND seq <= ?
+        WHERE state = 0 AND owner_id = ? AND device_id = ? AND stream = ? AND seq <= ?
         ORDER BY seq ASC
         LIMIT ?
         """)
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, deviceId, -1, cloudSQLiteTransient)
-        sqlite3_bind_text(stmt, 2, stream.rawValue, -1, cloudSQLiteTransient)
-        sqlite3_bind_int64(stmt, 3, lastSeq)
+        sqlite3_bind_text(stmt, 1, ownerId, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 2, deviceId, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 3, stream.rawValue, -1, cloudSQLiteTransient)
+        sqlite3_bind_int64(stmt, 4, lastSeq)
         // SQLite treats a negative LIMIT as "no limit".
-        sqlite3_bind_int64(stmt, 4, Int64(limit ?? -1))
+        sqlite3_bind_int64(stmt, 5, Int64(limit ?? -1))
         var out: [CloudJournalEntry] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             guard let streamRaw = text(stmt, 4), let kind = CloudStreamKind(rawValue: streamRaw),
@@ -765,14 +773,15 @@ final class CloudJournalStore: @unchecked Sendable {
             // registered yet.
             let mark = try prepare("""
             UPDATE journal_record SET batch_id = ?, state = 1
-            WHERE state = 0 AND device_id = ? AND stream = ? AND seq BETWEEN ? AND ?
+            WHERE state = 0 AND owner_id = ? AND device_id = ? AND stream = ? AND seq BETWEEN ? AND ?
             """)
             defer { sqlite3_finalize(mark) }
             sqlite3_bind_text(mark, 1, batchId, -1, cloudSQLiteTransient)
-            sqlite3_bind_text(mark, 2, candidate.deviceId, -1, cloudSQLiteTransient)
-            sqlite3_bind_text(mark, 3, candidate.stream.rawValue, -1, cloudSQLiteTransient)
-            sqlite3_bind_int64(mark, 4, candidate.firstSeq)
-            sqlite3_bind_int64(mark, 5, candidate.lastSeq)
+            sqlite3_bind_text(mark, 2, ownerId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(mark, 3, candidate.deviceId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(mark, 4, candidate.stream.rawValue, -1, cloudSQLiteTransient)
+            sqlite3_bind_int64(mark, 5, candidate.firstSeq)
+            sqlite3_bind_int64(mark, 6, candidate.lastSeq)
             try step(mark)
             try exec("COMMIT;")
         } catch {
@@ -825,16 +834,19 @@ final class CloudJournalStore: @unchecked Sendable {
         try step(stmt)
     }
 
-    /// Bring every failed batch's next attempt forward to `dueAtMs`; a batch already due earlier keeps
-    /// its schedule. Attempt counts are untouched, so the attempt cap still applies.
-    func rescheduleFailed(dueAtMs: Int) throws {
+    /// Bring every failed batch of the configured owner's next attempt forward to `dueAtMs`; a batch
+    /// already due earlier keeps its schedule. Attempt counts are untouched, so the attempt cap still
+    /// applies. Owner-scoped (T23): a failed batch belonging to another owner is not made due by this
+    /// runtime's launch reschedule.
+    func rescheduleFailed(ownerId: String, dueAtMs: Int) throws {
         let stmt = try prepare("""
         UPDATE sealed_batch SET next_attempt_at_ms = ?
-        WHERE state = 'failed' AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms > ?)
+        WHERE owner_id = ? AND state = 'failed' AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms > ?)
         """)
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, Int64(dueAtMs))
-        sqlite3_bind_int64(stmt, 2, Int64(dueAtMs))
+        sqlite3_bind_text(stmt, 2, ownerId, -1, cloudSQLiteTransient)
+        sqlite3_bind_int64(stmt, 3, Int64(dueAtMs))
         try step(stmt)
     }
 
@@ -893,13 +905,16 @@ final class CloudJournalStore: @unchecked Sendable {
         }
     }
 
-    func sealedBatches(states: [CloudBatchState], dueBeforeMs: Int?, limit: Int,
+    /// Sealed batches in the given states for ONE owner (T23). Sending, launch reconciliation,
+    /// blocked-batch re-seal and acked-file cleanup all read through here, so the owner filter keeps
+    /// every one of those paths from ever touching another owner's durable jobs.
+    func sealedBatches(ownerId: String, states: [CloudBatchState], dueBeforeMs: Int?, limit: Int,
                        newestFirst: Bool = false) throws -> [CloudSealedBatch] {
         let placeholders = states.map { _ in "?" }.joined(separator: ",")
         var sql = """
         SELECT batch_id, owner_id, source_id, device_id, stream, first_seq, last_seq, record_count,
                file_path, content_sha256, content_length, created_at_ms, window_identity, attempts
-        FROM sealed_batch WHERE state IN (\(placeholders))
+        FROM sealed_batch WHERE owner_id = ? AND state IN (\(placeholders))
         """
         if dueBeforeMs != nil { sql += " AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)" }
         sql += newestFirst ? " ORDER BY created_at_ms DESC, batch_id DESC LIMIT ?"
@@ -907,6 +922,7 @@ final class CloudJournalStore: @unchecked Sendable {
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         var idx: Int32 = 1
+        sqlite3_bind_text(stmt, idx, ownerId, -1, cloudSQLiteTransient); idx += 1
         for s in states { sqlite3_bind_text(stmt, idx, s.rawValue, -1, cloudSQLiteTransient); idx += 1 }
         if let due = dueBeforeMs { sqlite3_bind_int64(stmt, idx, Int64(due)); idx += 1 }
         sqlite3_bind_int(stmt, idx, Int32(limit))
@@ -1001,21 +1017,24 @@ final class CloudJournalStore: @unchecked Sendable {
         }
     }
 
-    func stats(nowMs: Int, diskPressureBytes: Int) throws -> CloudJournalStats {
+    /// Journal health for the configured owner. Pending-record and batch counts are owner-scoped
+    /// (T23): another owner's retained unacknowledged rows are not this owner's "pending uploads".
+    func stats(ownerId: String, nowMs: Int, diskPressureBytes: Int) throws -> CloudJournalStats {
         var out = CloudJournalStats.empty
         let stmt = try prepare("""
         SELECT COUNT(*), COALESCE(SUM(LENGTH(payload)),0), COALESCE(MIN(received_at_ms), 0)
-        FROM journal_record WHERE state != 2
+        FROM journal_record WHERE state != 2 AND owner_id = ?
         """)
         defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, ownerId, -1, cloudSQLiteTransient)
         if sqlite3_step(stmt) == SQLITE_ROW {
             out.pendingRecords = Int(sqlite3_column_int64(stmt, 0))
             out.pendingBytes = Int(sqlite3_column_int64(stmt, 1))
             let oldest = Int(sqlite3_column_int64(stmt, 2))
             out.oldestPendingAgeSeconds = oldest > 0 ? max(0, (nowMs - oldest) / 1000) : 0
         }
-        out.sealedBatches = try countBatches(state: .sealed) + countBatches(state: .reserved)
-        out.uploadedBatches = try countBatches(state: .uploaded)
+        out.sealedBatches = try countBatches(ownerId: ownerId, state: .sealed) + countBatches(ownerId: ownerId, state: .reserved)
+        out.uploadedBatches = try countBatches(ownerId: ownerId, state: .uploaded)
         out.diskPressure = out.pendingBytes >= diskPressureBytes
         out.historyCursorHeld = (try metaValue("history_cursor_held")).map { $0 == "1" } ?? false
         out.overflowRecords = Int(try metaValue("staging_overflow") ?? "0") ?? 0
@@ -1023,10 +1042,11 @@ final class CloudJournalStore: @unchecked Sendable {
         return out
     }
 
-    private func countBatches(state: CloudBatchState) throws -> Int {
-        let stmt = try prepare("SELECT COUNT(*) FROM sealed_batch WHERE state = ?")
+    private func countBatches(ownerId: String, state: CloudBatchState) throws -> Int {
+        let stmt = try prepare("SELECT COUNT(*) FROM sealed_batch WHERE owner_id = ? AND state = ?")
         defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, state.rawValue, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 1, ownerId, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 2, state.rawValue, -1, cloudSQLiteTransient)
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
     }
 
@@ -1253,12 +1273,13 @@ public actor CloudJournal {
     // MARK: sealing support
 
     public func sealCandidates(limit: Int = 8, nowMs: Int? = nil) async throws -> [CloudSealCandidate] {
-        guard let store else { return [] }
+        // Owner-scoped (T23): only the configured owner's pending groups are ever sealable.
+        guard let store, let config = configuration else { return [] }
         let now = nowMs ?? Int(Date().timeIntervalSince1970 * 1000)
-        let groups = try store.pendingGroups(maxRecords: policy.maxRecords, maxBytes: policy.maxBytes,
+        let groups = try store.pendingGroups(ownerId: config.ownerId,
+                                                   maxRecords: policy.maxRecords, maxBytes: policy.maxBytes,
                                                    minAgeSeconds: policy.activeTargetSeconds,
                                                    nowMs: now, limit: limit)
-        guard let config = configuration else { return groups }
         return groups.map { g in
             CloudSealCandidate(ownerId: config.ownerId, sourceId: config.sourceId, deviceId: g.deviceId,
                                stream: g.stream, firstSeq: g.firstSeq, lastSeq: g.lastSeq,
@@ -1268,9 +1289,9 @@ public actor CloudJournal {
     }
 
     public func entries(for candidate: CloudSealCandidate, limit: Int? = nil) async throws -> [CloudJournalEntry] {
-        guard let store else { return [] }
-        return try store.pendingEntries(deviceId: candidate.deviceId, stream: candidate.stream,
-                                              upTo: candidate.lastSeq, limit: limit)
+        guard let store, let config = configuration else { return [] }
+        return try store.pendingEntries(ownerId: config.ownerId, deviceId: candidate.deviceId,
+                                        stream: candidate.stream, upTo: candidate.lastSeq, limit: limit)
     }
 
     /// Register an immutable payload file as a durable job and mark exactly its membership sealed.
@@ -1316,7 +1337,8 @@ public actor CloudJournal {
     }
 
     public func rescheduleFailed(dueAtMs: Int) async throws {
-        try store?.rescheduleFailed(dueAtMs: dueAtMs)
+        guard let config = configuration else { return }
+        try store?.rescheduleFailed(ownerId: config.ownerId, dueAtMs: dueAtMs)
     }
 
     /// Return a blocked batch's records to the pending pool for re-sealing
@@ -1331,16 +1353,18 @@ public actor CloudJournal {
         try store?.resealMissingPayload(batchId: batchId)
     }
 
-    /// Sealed batches in the given states (async facade over the store).
+    /// Sealed batches in the given states (async facade over the store). Owner-scoped (T23).
     public func sealedBatches(states: [CloudBatchState], dueBeforeMs: Int?, limit: Int) async throws -> [CloudSealedBatch] {
-        return try store?.sealedBatches(states: states, dueBeforeMs: dueBeforeMs, limit: limit) ?? []
+        guard let config = configuration else { return [] }
+        return try store?.sealedBatches(ownerId: config.ownerId, states: states,
+                                        dueBeforeMs: dueBeforeMs, limit: limit) ?? []
     }
 
     public func batches(states: [CloudBatchState], dueBeforeMs: Int? = nil, limit: Int = 16,
                         newestFirst: Bool = false) async throws -> [CloudSealedBatch] {
-        guard let store else { return [] }
-        return try store.sealedBatches(states: states, dueBeforeMs: dueBeforeMs, limit: limit,
-                                       newestFirst: newestFirst)
+        guard let store, let config = configuration else { return [] }
+        return try store.sealedBatches(ownerId: config.ownerId, states: states, dueBeforeMs: dueBeforeMs,
+                                       limit: limit, newestFirst: newestFirst)
     }
 
     public func batchState(_ batchId: String) async throws -> CloudBatchState? {
@@ -1362,13 +1386,14 @@ public actor CloudJournal {
     }
 
     public func stats() async -> CloudJournalStats {
-        guard let store else {
+        guard let store, let config = configuration else {
             var empty = CloudJournalStats.empty
             empty.overflowRecords = staging.overflowCount
             empty.lastError = lastError
             return empty
         }
-        var s = (try? store.stats(nowMs: Int(Date().timeIntervalSince1970 * 1000),
+        var s = (try? store.stats(ownerId: config.ownerId,
+                                       nowMs: Int(Date().timeIntervalSince1970 * 1000),
                                        diskPressureBytes: policy.diskPressureBytes)) ?? .empty
         s.overflowRecords += staging.overflowCount
         if let lastError { s.lastError = lastError }
