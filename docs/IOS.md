@@ -27,8 +27,16 @@ In `Config/BundleIdSecrets.xcconfig`, set:
 
 In `Config/CloudPushSecrets.xcconfig`, set the upload endpoint
 (`https:/$()/<project-ref>.supabase.co/functions/v1/push`; the `$()` keeps xcconfig from reading
-`//` as a comment), the fleet ingest token and the Supabase anon key. A build without these runs
-fully offline and cannot turn on cloud sync.
+`//` as a comment) and `NOOP_SUPABASE_PUBLISHABLE_KEY`, the project's `sb_publishable_…` key from
+Supabase **Project Settings → API Keys**. The publishable key is public by design: it only tells
+Supabase Auth which project a sign-up belongs to. There is no ingest token to configure, and a Supabase
+secret key or `service_role` key must never go in this file because it would ship inside the app.
+A build without these values runs fully offline and cannot sign in or turn on cloud sync.
+
+`NOOP_ALLOW_LEGACY_ENROLLMENT` and `NOOP_LEGACY_FLEET_TOKEN` exist only for a migration build whose phones
+still hold a credential from the old NARA enrollment-code flow and must keep uploading with it until the
+person signs in. The app can no longer redeem a code. Leave both unset for testers; with them unset a
+leftover credential is ignored and no shared token is ever sent.
 
 Run `xcodegen generate` again whenever you add or remove source files, or edit `project.yml`.
 
@@ -54,13 +62,24 @@ xcrun devicectl device install app --device "$D" "/tmp/nara-dd/Build/Products/De
 xcrun devicectl device process launch --device "$D" --terminate-existing com.rahulvijayan.noop
 ```
 
-Installing over an existing copy keeps its data, strap pairing and cloud enrollment.
+Installing over an existing copy keeps its data, strap pairing and signed-in account.
 
-## Turn on cloud sync
+## Create an account and turn on cloud sync
 
-In the app, open **Settings → Nara account**, enter the enrollment code, and turn cloud sync on. The
-app then uploads its strap history and shows the scores the backend computes. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for what happens next.
+In the app, open **Settings → Nara account**, choose **Create account**, and enter an email address and a
+password. Nara emails a one-time code; enter it to confirm the address and you are signed in. **Sign in**
+and **Forgot password?** (which also emails a code) are on the same screen, and **Resend code** sends a
+fresh code if the first did not arrive. Nothing is uploaded until a verified session exists.
+
+After that the app links this phone to your account by itself: there is nothing to paste and no code to
+redeem. Pair the strap as usual and the app confirms it against your account as soon as the strap reports
+its serial number. Turn on **Sync with your account** and the app uploads its strap history and shows the
+scores the backend computes. See [ARCHITECTURE.md](ARCHITECTURE.md) for what happens next.
+
+Signing out stops uploads and removes this account's credential from the Keychain. Data that was already
+recorded stays on the phone under that account, and keeps syncing to it the next time that account signs in.
+It is never uploaded as someone else's. If you sign in as a different person, the phone's saved history
+that belongs to the first account is left alone and is not mixed into the new account.
 
 ## Coach
 
@@ -77,8 +96,13 @@ xcodebuild test -project Strand.xcodeproj -scheme Strand -destination 'platform=
 ```
 
 Two caption tests, `SkinTempAbsoluteDisplayTests` and `SleepCarriedStampTests`, fail on a Mac set to
-Pacific time because they render the previous day. The code they test has not changed since before
-the Nara work.
+Pacific time because they render the previous day. A third,
+`IntradayWordingAndCoachTests.testMinuteBucketsAreDescribedAsMinuteBuckets`, also fails on a clean
+checkout. The code these three test has not changed since before the account work.
+
+`NaraEndToEndTests` skips itself unless a local Supabase stack is running. It signs up through real Supabase
+Auth, reads the emailed code, and follows data all the way to a scored day. See
+[supabase/tests/e2e/README.md](../supabase/tests/e2e/README.md) for how to start the stack and run it.
 
 ## Raw-data collector: activity labels
 

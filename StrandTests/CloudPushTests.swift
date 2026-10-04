@@ -281,7 +281,6 @@ final class CloudPushTests: XCTestCase {
         let other = "33333333-3333-4333-8333-333333333333"
         let repo = ServerScoreRepository(session: ScoreStub.session(),
                                          endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-                                         fleetToken: "noop_test",
                                          directory: directory,
                                          identity: { CloudPushIdentity(ownerId: owner, sourceId: "22222222-2222-4222-8222-222222222222",
                                                                        tokenId: "t", uploadToken: "noop_x") })
@@ -310,7 +309,7 @@ final class CloudPushTests: XCTestCase {
         // A different owner must NOT see it, and the entry must survive for the original owner.
         let otherRepo = ServerScoreRepository(session: ScoreStub.session(),
                                               endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-                                              fleetToken: "noop_test", directory: directory,
+                                              directory: directory,
                                               identity: { CloudPushIdentity(ownerId: other, sourceId: "44444444-4444-4444-8444-444444444444",
                                                                             tokenId: "t", uploadToken: "noop_y") })
         let foreign = await otherRepo.cachedDay(day: "2026-09-01", deviceId: "my-whoop")
@@ -335,7 +334,7 @@ final class CloudPushTests: XCTestCase {
     }
 
     func testFreshnessNeverClaimsAFutureOrAbsentBoundary() async {
-        let repo = ServerScoreRepository(endpoint: nil, fleetToken: "", directory: directory,
+        let repo = ServerScoreRepository(endpoint: nil, directory: directory,
                                          identity: { nil })
         let label = await repo.freshnessLabel(for: nil)
         XCTAssertEqual(label, "No server result yet")

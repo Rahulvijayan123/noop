@@ -8,12 +8,12 @@ import NoopPush
 /// only builds the requests and parses the receiver's responses with the package's own parsers
 /// (`PushObjectIntent.parse`, `PushObjectAck.parse`, `PushCapabilities.parse`).
 ///
-/// Headers mirror `CloudUploadSession.request` (CloudUploadSession.swift:117-141): the per-install
-/// bearer, the fleet token and the capability negotiation header on every receiver request, plus
-/// the manifest body for intents and exactly `intent.requiredHeaders` on the presigned PUT.
+/// Headers mirror `CloudUploadSession`: the installation credential (`CloudReceiverAuth`, which adds the
+/// fleet token only for a legacy enrollment credential) and the capability negotiation header on every
+/// receiver request, plus the manifest body for intents and exactly `intent.requiredHeaders` on the
+/// presigned PUT.
 public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
     private let endpoint: URL
-    private let fleetToken: String
     private let identity: @Sendable () -> CloudPushIdentity?
     private let session: URLSession
     private let lock = NSLock()
@@ -22,11 +22,9 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
     private var protocolVersion = PushProtocol.objectVersion
 
     public init(endpoint: URL,
-                fleetToken: String,
                 identity: @escaping @Sendable () -> CloudPushIdentity?,
                 session: URLSession? = nil) {
         self.endpoint = endpoint
-        self.fleetToken = fleetToken
         self.identity = identity
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
@@ -112,15 +110,14 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
 
     // MARK: - Request construction
 
-    /// The exact receiver header set (`CloudUploadSession.request`, CloudUploadSession.swift:117-141).
+    /// The exact receiver header set `CloudUploadSession` sends.
     private func authRequest(_ url: URL, method: String, contentType: String?) throws -> URLRequest {
         guard let identity = identity() else {
             throw PushTransportException(PushFailure(code: .httpAuth))
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         return request

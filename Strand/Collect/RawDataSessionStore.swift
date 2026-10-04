@@ -299,9 +299,9 @@ final class RawDataSessionStore: ObservableObject {
         if persistedCaptureIntent?.deviceId == deviceId { persistedCaptureIntent = nil }
     }
 
-    /// Clear the persisted intent unconditionally (explicit stop, or the sign-out hook — the app
-    /// should call this from `CloudPushIdentity.signOutCurrentOwner` so a signed-out install never
-    /// re-arms capture on the next connect).
+    /// Clear the persisted intent unconditionally (explicit stop, or sign-out — `NaraAccountController`
+    /// calls this when an account is signed out so a signed-out install never re-arms capture on the
+    /// next connect).
     static func clearPersistedCaptureIntent() {
         persistedCaptureIntent = nil
     }

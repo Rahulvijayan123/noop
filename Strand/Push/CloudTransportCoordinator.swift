@@ -1,7 +1,12 @@
 import Foundation
 import NoopPush
 
-/// One owner-scoped coordinator for sealing, uploading and receipt reconciliation.
+/// One account-scoped coordinator for sealing, uploading and receipt reconciliation.
+///
+/// It is created for exactly one `(owner, source)` scope and never serves another: it only reads the
+/// journal through that scope, only sends with a credential that belongs to that scope, and refuses to
+/// run at all if the credential it is given belongs to someone else. Signing in as a different account
+/// creates a new coordinator; it does not re-aim this one.
 ///
 /// The loop is deliberately small and durable:
 ///
@@ -62,28 +67,32 @@ public actor CloudTransportCoordinator {
         case notConfigured
         case sealFailed(String)
         case unsupportedStream(CloudStreamKind)
+        /// The receiver, the credential or a batch named a different account than this coordinator serves.
+        case ownershipMismatch(String)
 
         public var description: String {
             switch self {
             case .notConfigured: return "cloud: coordinator not configured"
             case .sealFailed(let why): return "cloud: seal failed: \(why)"
             case .unsupportedStream(let s): return "cloud: \(s.rawValue) is not an append stream"
+            case .ownershipMismatch(let why): return "cloud: ownership mismatch: \(why)"
             }
         }
     }
 
     private let journal: CloudJournal
-    private let session: CloudUploadSession
+    private let session: any CloudUploading
+    private let scope: CloudDataScope
     private let payloadDirectory: URL
     private let identity: @Sendable () -> CloudPushIdentity?
     private let projectURL: String
     private let policy: Policy
     private let now: @Sendable () -> Int
-    private let random: @Sendable () -> Double
     /// Whether the master cloud switch is on. Injected so tests can drive it deterministically;
     /// production defaults to `CloudPushSettings.isEnabled` (the D1 gate that stops the upload
     /// cycle the moment the user disables cloud, before the runtime teardown lands).
     private let cloudEnabled: @Sendable () -> Bool
+    private let random: @Sendable () -> Double
 
     /// In-process uploads in flight. The OS-session lane has its own counter (`backgroundInFlight`).
     private var inFlight = 0
@@ -104,8 +113,19 @@ public actor CloudTransportCoordinator {
     }
     private var lastOutcomeAtMs: Int?
     private var lastHeartbeatAtSeconds = 0
+    private var credentialRejectedAtSeconds = 0
 
-    public init(journal: CloudJournal, session: CloudUploadSession, payloadDirectory: URL,
+    /// Called when the receiver refuses this installation's credential (HTTP 401/403). The batch is kept
+    /// and retried; the owner of the callback decides whether to rotate the credential or end the session.
+    /// Throttled to one call per 30 s so a burst of rejected uploads asks once.
+    public var onCredentialRejected: (@Sendable (_ status: Int) -> Void)?
+
+    public func setOnCredentialRejected(_ handler: (@Sendable (_ status: Int) -> Void)?) {
+        onCredentialRejected = handler
+    }
+
+    public init(journal: CloudJournal, session: any CloudUploading, scope: CloudDataScope,
+                payloadDirectory: URL,
                 projectURL: String, identity: @escaping @Sendable () -> CloudPushIdentity?,
                 policy: Policy = Policy(),
                 now: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970) },
@@ -113,6 +133,7 @@ public actor CloudTransportCoordinator {
                 cloudEnabled: @escaping @Sendable () -> Bool = { CloudPushSettings.isEnabled }) {
         self.journal = journal
         self.session = session
+        self.scope = scope
         self.payloadDirectory = payloadDirectory
         self.projectURL = projectURL
         self.identity = identity
@@ -160,6 +181,7 @@ public actor CloudTransportCoordinator {
 
     public func stop() async {
         active = false
+        session.onOutcome = nil
     }
 
     /// Kick a pass. Coalesced: many capture-driven kicks collapse into one pass.
@@ -186,6 +208,11 @@ public actor CloudTransportCoordinator {
         guard cloudEnabled() else { return }
         guard let identity = identity() else {
             lastError = "no installation identity"
+            return
+        }
+        guard identity.scope == scope else {
+            // Fail closed: nothing is sealed or sent with a credential that is not this account's.
+            lastError = "installation credential belongs to a different account"
             return
         }
         var stage = "negotiate"
@@ -233,15 +260,6 @@ public actor CloudTransportCoordinator {
                 // Replace-window / archive streams are not authored by the phone in cloud mode.
                 continue
             }
-            // T23: never seal a pending group under a different owner than the one that acquired it.
-            // The journal already filters groups by its configured owner, but the configured owner can
-            // lag the current identity after an account switch; stamping this candidate with the
-            // CURRENT identity's sourceId would let another owner's records ride a different owner's
-            // sourceId. Leave the group pending instead — it stays quarantined under its own owner.
-            guard candidate.ownerId == identity.ownerId else {
-                lastError = "owner mismatch: not sealing \(candidate.stream.rawValue) group of \(candidate.ownerId) under \(identity.ownerId)"
-                continue
-            }
             let entries = try await journal.entries(for: candidate, limit: policy.sealMaxRecords)
             guard !entries.isEmpty else { continue }
             let protocolVersion = try negotiatedVersion(for: candidate.stream)
@@ -250,7 +268,7 @@ public actor CloudTransportCoordinator {
             let plan: CloudBatchBuilder.Plan
             do {
                 plan = try CloudBatchBuilder.plan(entries: entries, stream: candidate.stream,
-                                                  sourceId: identity.sourceId, deviceId: candidate.deviceId,
+                                                  sourceId: candidate.sourceId, deviceId: candidate.deviceId,
                                                   protocolVersion: protocolVersion,
                                                   startCursorJSON: startCursorJSON)
             } catch {
@@ -358,19 +376,6 @@ public actor CloudTransportCoordinator {
         for batch in queue {
             guard CloudTransportCoordinator.hasRoom(lane: lane, inFlight: inFlight,
                                                     backgroundInFlight: backgroundInFlight, policy: policy) else { break }
-            // T23 / contract C3: the upload token is resolved at SEND time from the current
-            // identity, so a batch whose acquisition-time owner differs from the current owner must
-            // be quarantined, never transmitted. Quarantine retains the records and the file under
-            // the ORIGINAL owner (blocked = kept + surfaced, no automatic retry); the coordinator's
-            // launch reconciliation re-seals blocked work when the original owner returns.
-            guard batch.ownerId == identity.ownerId else {
-                try? await journal.markFailed(
-                    batchId: batch.batchId,
-                    error: "owner mismatch: batch \(batch.batchId) belongs to \(batch.ownerId), "
-                        + "current owner \(identity.ownerId); retained under original owner",
-                    nextAttemptAtMs: nil, blocked: true)
-                continue
-            }
             guard let fileURL = payloadFileURL(for: batch) else {
                 // The file is gone but the records are not acknowledged: re-seal instead of dropping.
                 try await releaseForReseal(batch)
@@ -383,17 +388,14 @@ public actor CloudTransportCoordinator {
                 let sceneIsActive = CloudTransportCoordinator.applicationIsActive()
                 Task { await self.uploadInProcess(batch, fileURL: fileURL, holdExecution: !sceneIsActive) }
             case .background:
-                let taskId = session.enqueueBackground(batchId: batch.batchId, fileURL: fileURL,
-                                                       expectedOwnerId: batch.ownerId)
-                guard taskId >= 0 else {
-                    // The session refused (owner mismatch); keep the records under their owner.
-                    try? await journal.markFailed(
-                        batchId: batch.batchId,
-                        error: "owner mismatch: refusing to enqueue \(batch.batchId) (\(batch.ownerId)) under \(identity.ownerId)",
-                        nextAttemptAtMs: nil, blocked: true)
-                    continue
-                }
                 backgroundInFlight += 1
+                let taskId: Int
+                do {
+                    taskId = try session.enqueueBackground(batchId: batch.batchId, fileURL: fileURL, scope: scope)
+                } catch {
+                    backgroundInFlight = max(0, backgroundInFlight - 1)
+                    throw error
+                }
                 try await journal.markReserved(batchId: batch.batchId, taskId: String(taskId),
                                                taskKind: "background", authExpiresAtMs: nil)
             }
@@ -411,9 +413,15 @@ public actor CloudTransportCoordinator {
             : nil
         var succeeded = false
         do {
-            let outcome = try await session.uploadForeground(batchId: batch.batchId, fileURL: fileURL,
-                                                             expectedOwnerId: batch.ownerId)
+            let outcome = try await session.uploadForeground(batchId: batch.batchId, fileURL: fileURL, scope: scope)
             succeeded = await handle(outcome: outcome)
+        } catch let error as CloudUploadSession.UploadError {
+            switch error {
+            case .missingIdentity, .wrongAccount:
+                await handleCredentialRejection(batch: batch, status: 0, detail: String(describing: error))
+            default:
+                await handleFailure(batch: batch, error: String(describing: error))
+            }
         } catch {
             await handleFailure(batch: batch, error: String(describing: error))
         }
@@ -445,6 +453,10 @@ public actor CloudTransportCoordinator {
 
         if outcome.isTransportFailure {
             await handleFailure(batch: batch, error: outcome.errorDescription ?? "transport")
+            return false
+        }
+        if outcome.statusCode == 401 || outcome.statusCode == 403 {
+            await handleCredentialRejection(batch: batch, status: outcome.statusCode, detail: "HTTP \(outcome.statusCode)")
             return false
         }
         guard outcome.statusCode == 200, let body = outcome.body else {
@@ -486,8 +498,8 @@ public actor CloudTransportCoordinator {
             lastError = "no durability receipt for \(batch.batchId)"
             return false
         }
-        if let rebuilt, let scope = try? AccountScope(projectURL: projectURL, userID: rebuilt.ownerId) {
-            guard receipt.matches(rebuilt.batch, owner: scope) else {
+        if let rebuilt, let accountScope = try? AccountScope(projectURL: projectURL, userID: batch.ownerId) {
+            guard receipt.matches(rebuilt.batch, owner: accountScope) else {
                 lastError = "durability receipt does not match \(batch.batchId)"
                 return false
             }
@@ -525,6 +537,12 @@ public actor CloudTransportCoordinator {
     /// entries are still in the journal, and the builder is deterministic, so the same batch (and the
     /// same batch id) can be reconstructed and used to validate the receipt.
     private func rebuildBatch(_ batch: CloudSealedBatch) async throws -> (batch: PushBatch, ownerId: String, deviceId: String, stream: CloudStreamKind)? {
+        guard let identity = identity() else { return nil }
+        // A receipt is only ever applied to a batch of the account this coordinator serves, and only
+        // on the strength of that account's own credential.
+        guard batch.scope == scope, identity.scope == scope else {
+            throw CoordinatorError.ownershipMismatch("batch \(batch.batchId) is not this account's")
+        }
         let candidate = CloudSealCandidate(ownerId: batch.ownerId, sourceId: batch.sourceId,
                                           deviceId: batch.deviceId, stream: batch.stream,
                                           firstSeq: batch.firstSeq, lastSeq: batch.lastSeq,
@@ -543,14 +561,38 @@ public actor CloudTransportCoordinator {
             lastError = "rebuilt batch id mismatch for \(batch.batchId)"
             return nil
         }
-        // The receipt binds the batch's ACQUISITION-TIME owner (T23): the durability receipt the
-        // receiver returned was issued against the owner the upload was made under, which is the
-        // batch's owner once the send-path guards have run. Using the batch's owner rather than the
-        // current identity keeps this check correct even if the current identity moved on.
         return (plan.batch, batch.ownerId, batch.deviceId, batch.stream)
     }
 
     // MARK: - failure handling
+
+    /// The receiver refused this installation's credential, or there is none to send with.
+    ///
+    /// That says nothing about the batch, so it is never blocked and never counts toward the attempt cap:
+    /// the records stay exactly where they are and the batch is retried after a short wait, by which time
+    /// the account layer will have rotated the credential or ended the session. Without a credential the
+    /// loop idles instead of burning attempts.
+    private func handleCredentialRejection(batch: CloudSealedBatch, status: Int, detail: String) async {
+        let dueAtMs = now() * 1000 + Int(CloudTransportCoordinator.credentialRetrySeconds * 1000)
+        try? await journal.markFailed(batchId: batch.batchId, error: "credential rejected: \(detail)",
+                                      nextAttemptAtMs: dueAtMs, countAttempt: false)
+        lastError = "credential rejected: \(detail)"
+        noteCredentialRejected(status: status)
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(CloudTransportCoordinator.credentialRetrySeconds * 1_000_000_000) + 250_000_000)
+            self?.kick()
+        }
+    }
+
+    /// How long a batch waits after the receiver refused the credential before it is offered again.
+    static let credentialRetrySeconds: Double = 30
+
+    private func noteCredentialRejected(status: Int) {
+        let seconds = now()
+        guard seconds - credentialRejectedAtSeconds >= 30 else { return }
+        credentialRejectedAtSeconds = seconds
+        onCredentialRejected?(status)
+    }
 
     private func handleFailure(batch: CloudSealedBatch, error: String) async {
         if !CloudTransportCoordinator.isRetryable(error: error) {
@@ -675,12 +717,24 @@ public actor CloudTransportCoordinator {
         let stored = CloudTransportCoordinator.storedProtocolVersion(ownerId: identity.ownerId)
         if let stored { negotiatedProtocolVersion = stored; return }
         do {
-            let capabilities = try await session.capabilities()
+            let capabilities = try await session.capabilities(scope: scope)
+            // The credential is bound server-side to exactly one (account, source). A reply that names
+            // anything else means this phone is holding the wrong credential, and nothing may be sealed
+            // or sent until that is resolved.
+            if let userId = capabilities.userId, userId.lowercased() != identity.ownerId.lowercased() {
+                throw CoordinatorError.ownershipMismatch("receiver answered for a different account")
+            }
+            if let sourceId = capabilities.sourceId, sourceId.lowercased() != identity.sourceId.lowercased() {
+                throw CoordinatorError.ownershipMismatch("receiver answered for a different source")
+            }
             negotiatedProtocolVersion = capabilities.protocolVersion
             CloudTransportCoordinator.storeProtocolVersion(capabilities.protocolVersion, ownerId: identity.ownerId)
-            if let userId = capabilities.userId, userId.lowercased() != identity.ownerId.lowercased() {
-                lastError = "receiver reports a different owner than the enrolled identity"
-            }
+        } catch let error as CoordinatorError {
+            lastError = String(describing: error)
+            throw error
+        } catch CloudUploadSession.UploadError.unexpectedStatus(let status, _) where status == 401 || status == 403 {
+            lastError = "credential rejected: HTTP \(status)"
+            noteCredentialRejected(status: status)
         } catch {
             // Keep the deployed default so capture is never blocked by a negotiation failure; the
             // value is renegotiated on a later pass.

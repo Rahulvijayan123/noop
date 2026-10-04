@@ -151,7 +151,7 @@ Deno.test({ name: 'private real scalar recording -> durable local intake -> froz
     ('${owner}',encode(sha256(convert_to('noop_private_replay','UTF8')),'hex'),'installation','${source}','${enrollment}'),
     (null,encode(sha256(convert_to('noop_private_fleet','UTF8')),'hex'),'fleet',null,null);`);
   }
-  const cfg = { supabaseUrl: restUrl, supabaseAnonKey: 'isolated-test-public' };
+  const cfg = { supabaseUrl: restUrl, supabaseAnonKey: 'isolated-test-public', allowLegacyEnrollment: true };
   const installationHeaders = { authorization: 'Bearer noop_private_replay', 'x-noop-fleet-token': 'noop_private_fleet' };
   const registered = await handleScoresRequest(new Request('http://localhost/functions/v1/scores/devices', {
     method: 'POST', headers: { ...installationHeaders, 'content-type': 'application/json' },
@@ -185,7 +185,7 @@ Deno.test({ name: 'private real scalar recording -> durable local intake -> froz
         const header = { type: 'batch', protocolVersion: '1.1', stream, deviceId: externalDevice, sourceId: source,
           batchId: batch, endCursor: { ts: slice.at(-1).ts }, delivery: 'append', recordCount: records.length };
         const bytes = new TextEncoder().encode([header, ...records].map(value => JSON.stringify(value)).join('\n') + '\n');
-        const upload = await resolveUploadIdentity({ rest, headers: new Headers(installationHeaders) });
+        const upload = await resolveUploadIdentity({ rest, allowLegacyEnrollment: true, headers: new Headers(installationHeaders) });
         assert.equal(upload.id, owner); assert.equal(upload.sourceId, source);
         assert.equal(await rest.rpc('admit_noop_request', { p_user: owner, p_source: source }), true);
         const args = { userId: owner, sourceId: source, tokenId: upload.tokenId, authMode: upload.authMode, decodedBody: bytes };

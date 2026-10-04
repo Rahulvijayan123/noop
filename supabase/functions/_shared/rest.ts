@@ -2,6 +2,8 @@
 // In the edge runtime SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are injected by the platform;
 // locally they come from `supabase functions serve --env-file`.
 
+import { namedKey } from './config.ts';
+
 export interface RestConfig {
   supabaseUrl: string;
   supabaseServiceRoleKey: string;
@@ -27,8 +29,21 @@ export function restConfigFromEnv(env: Record<string, string | undefined> = Deno
   };
   return {
     supabaseUrl: pick('SUPABASE_URL', 'PROJECT_URL').replace(/\/$/, ''),
-    supabaseServiceRoleKey: pick('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY'),
+    supabaseServiceRoleKey: pick('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY') ||
+      pick('SUPABASE_SECRET_KEY') ||
+      namedKey(env.SUPABASE_SECRET_KEYS, 'sb_secret_'),
   };
+}
+
+/**
+ * Headers that authenticate the server-side key. Legacy `service_role` keys are JWTs and travel as
+ * a bearer too; new-format `sb_secret_...` keys are opaque, must not be sent as a bearer, and are
+ * accepted on the `apikey` header alone.
+ */
+export function serviceKeyHeaders(key: string): Record<string, string> {
+  return key.startsWith('sb_secret_')
+    ? { apikey: key }
+    : { apikey: key, authorization: `Bearer ${key}` };
 }
 
 export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig; fetchImpl?: typeof fetch }) {
@@ -37,8 +52,7 @@ export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig
 
   function restHeaders() {
     return {
-      apikey: cfg.supabaseServiceRoleKey,
-      authorization: `Bearer ${cfg.supabaseServiceRoleKey}`,
+      ...serviceKeyHeaders(cfg.supabaseServiceRoleKey),
       'content-type': 'application/json',
       prefer: 'return=representation',
     } as Record<string, string>;
@@ -128,10 +142,7 @@ export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig
     async adminDeleteAuthUser(userId: string) {
       const res = await fetchImpl(`${url}/auth/v1/admin/users/${userId}`, {
         method: 'DELETE',
-        headers: {
-          apikey: cfg.supabaseServiceRoleKey,
-          authorization: `Bearer ${cfg.supabaseServiceRoleKey}`,
-        },
+        headers: serviceKeyHeaders(cfg.supabaseServiceRoleKey),
       });
       if (res.status === 404) return { deleted: true, missing: true };
       if (!res.ok) throw new Error(`auth delete failed (${res.status})`);

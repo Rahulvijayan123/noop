@@ -15,7 +15,33 @@ export interface PushFunctionConfig {
   enrollmentPepper: string;
   enrollmentRetryWindowSeconds: number;
   allowLegacyFleetUploads: boolean;
+  /**
+   * Pre-Auth enrollment-code installations (and `/enroll` itself) stay closed unless the
+   * operator opts in for a migration window. Supabase-Auth-provisioned installations never need it.
+   */
+  allowLegacyEnrollment: boolean;
   asyncObjectVerification?: boolean;
+}
+
+/**
+ * Supabase injects named API keys as a JSON object, e.g. `{"default":"sb_publishable_..."}`
+ * (`SUPABASE_PUBLISHABLE_KEYS` / `SUPABASE_SECRET_KEYS`). Prefer `default`, else the first entry.
+ */
+export function namedKey(raw: string | undefined, prefix: string): string {
+  const text = String(raw ?? '').trim();
+  if (!text) return '';
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      const values = Object.entries(parsed as Record<string, unknown>)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].startsWith(prefix));
+      const preferred = values.find(([name]) => name === 'default') ?? values[0];
+      return preferred ? preferred[1].trim() : '';
+    }
+  } catch {
+    // A bare key value is also accepted for hand-managed secrets.
+  }
+  return text.startsWith(prefix) ? text : '';
 }
 
 export function pushConfig(env: Record<string, string | undefined> = Deno.env.toObject()): PushFunctionConfig {
@@ -39,8 +65,12 @@ export function pushConfig(env: Record<string, string | undefined> = Deno.env.to
     : 300;
   return {
     supabaseUrl: pick('SUPABASE_URL', 'PROJECT_URL').replace(/\/$/, ''),
-    supabaseAnonKey: pick('SUPABASE_ANON_KEY', 'ANNON_KEY'),
-    supabaseServiceRoleKey: pick('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY'),
+    supabaseAnonKey: pick('SUPABASE_PUBLISHABLE_KEY') ||
+      namedKey(env.SUPABASE_PUBLISHABLE_KEYS, 'sb_publishable_') ||
+      pick('SUPABASE_ANON_KEY', 'ANNON_KEY'),
+    supabaseServiceRoleKey: pick('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY') ||
+      pick('SUPABASE_SECRET_KEY') ||
+      namedKey(env.SUPABASE_SECRET_KEYS, 'sb_secret_'),
     b2KeyId,
     b2ApplicationKey: pick('B2_APPLICATION_KEY', 'APPLICATION_KEY'),
     b2Bucket: pick('B2_BUCKET', 'BUCKET_NAME') || 'FRWHOOP',
@@ -50,6 +80,7 @@ export function pushConfig(env: Record<string, string | undefined> = Deno.env.to
     enrollmentPepper: pick('NOOP_ENROLLMENT_PEPPER'),
     enrollmentRetryWindowSeconds,
     allowLegacyFleetUploads: pick('NOOP_ALLOW_LEGACY_FLEET_UPLOADS').toLowerCase() === 'true',
+    allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT').toLowerCase() === 'true',
     asyncObjectVerification: pick('NOOP_ASYNC_OBJECT_VERIFICATION') === '1',
   };
 }

@@ -20,6 +20,13 @@ import NoopPush
 /// the DURABLE job table (`sealed_batch.task_id`) rather than from in-memory task state, and a
 /// re-upload of the same bytes is safe: the batch id is derived from the batch's identity and lines,
 /// so the receiver returns the stored acknowledgement instead of accepting the batch twice.
+///
+/// Credentials: every request is authorised by the installation token of the account the caller names
+/// (`scope`). The token is read when the request is built, never cached here, so a rotated credential
+/// takes effect on the next request without restarting anything. The session refuses to build a request
+/// when the token it holds belongs to a different account than the batch being sent. It is created once
+/// per process (a second background session with the same identifier is not valid), and is repointed at
+/// each account's credential with `setIdentityProvider`.
 public final class CloudUploadSession: NSObject, @unchecked Sendable {
 
     public enum Lane: Sendable {
@@ -35,12 +42,20 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         public let body: Data?
         public let errorDescription: String?
         public var isTransportFailure: Bool { errorDescription != nil }
+
+        public init(batchId: String, statusCode: Int, body: Data?, errorDescription: String?) {
+            self.batchId = batchId
+            self.statusCode = statusCode
+            self.body = body
+            self.errorDescription = errorDescription
+        }
     }
 
     public enum UploadError: Error, CustomStringConvertible {
         case notConfigured
         case missingIdentity
-        case ownerMismatch(expected: String, current: String)
+        /// The credential held belongs to a different account than the work being sent.
+        case wrongAccount
         case unexpectedStatus(Int, String?)
         case transport(String)
 
@@ -48,8 +63,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
             switch self {
             case .notConfigured: return "cloud: receiver not configured"
             case .missingIdentity: return "cloud: no installation identity"
-            case .ownerMismatch(let expected, let current):
-                return "cloud: refusing to upload batch owned by \(expected) with the \(current) owner's token"
+            case .wrongAccount: return "cloud: credential belongs to a different account"
             case .unexpectedStatus(let code, let body): return "cloud: HTTP \(code) \(body ?? "")"
             case .transport(let message): return "cloud: transport failure: \(message)"
             }
@@ -63,12 +77,11 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
     }
 
     private let endpoint: URL
-    private let fleetToken: String
     private let identifier: String
-    private let identity: @Sendable () -> CloudPushIdentity?
     private let now: @Sendable () -> Int
 
     private let stateLock = NSLock()
+    private var identityProvider: @Sendable () -> CloudPushIdentity?
     private var taskBatchIds: [Int: String] = [:]
     private var pendingData: [Int: Data] = [:]
     private var foregroundWaiters: [Int: CheckedContinuation<Outcome, Error>] = [:]
@@ -98,31 +111,47 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
     /// Reported for every background task that finishes, including after a relaunch.
     public var onOutcome: (@Sendable (Outcome) -> Void)?
 
-    public init(endpoint: URL, fleetToken: String, bundleIdentifier: String?,
+    public init(endpoint: URL, bundleIdentifier: String?,
                 identity: @escaping @Sendable () -> CloudPushIdentity?,
                 now: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970) }) {
         self.endpoint = endpoint
-        self.fleetToken = fleetToken
         self.identifier = CloudUploadSession.backgroundIdentifier(bundleIdentifier: bundleIdentifier)
-        self.identity = identity
+        self.identityProvider = identity
         self.now = now
         super.init()
+    }
+
+    /// Point the session at a different credential source (a new account signed in on this phone).
+    /// Requests already handed to the OS keep the credential they were built with.
+    public func setIdentityProvider(_ provider: @escaping @Sendable () -> CloudPushIdentity?) {
+        stateLock.lock()
+        identityProvider = provider
+        stateLock.unlock()
+    }
+
+    /// The credential for `scope`, or why there is none. A credential that belongs to a different
+    /// account is never returned: a request for one account must not be authorised as another.
+    private func credential(for scope: CloudDataScope?) throws -> CloudPushIdentity {
+        stateLock.lock()
+        let provider = identityProvider
+        stateLock.unlock()
+        guard let identity = provider() else { throw UploadError.missingIdentity }
+        if let scope, identity.scope != scope { throw UploadError.wrongAccount }
+        return identity
     }
 
     // MARK: - Request construction (the wire contract)
 
     /// The exact header set the deployed receiver requires.
     ///
-    /// `Authorization` is the per-installation `noop_…` bearer and `x-noop-fleet-token` is the
-    /// classified fleet credential. Both are required on every ingest request; the fleet token alone
-    /// cannot authorize personal data, and the installation token is what binds the batch to an owner
-    /// server-side (the body cannot choose another owner).
-    func request(for batch: PushBatch, wireBytes: Int, gzipped: Bool) throws -> URLRequest {
-        guard let identity = identity() else { throw UploadError.missingIdentity }
+    /// `Authorization` is the per-installation `noop_…` bearer. It is what binds the batch to an owner
+    /// server-side (the body cannot choose another owner), and it is sufficient on its own: no shared
+    /// credential is needed for an account-provisioned installation.
+    func request(for batch: PushBatch, wireBytes: Int, gzipped: Bool, scope: CloudDataScope? = nil) throws -> URLRequest {
+        let identity = try credential(for: scope)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
         request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
         if gzipped { request.setValue("gzip", forHTTPHeaderField: "Content-Encoding") }
@@ -131,12 +160,11 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
     }
 
     /// Capability negotiation. `GET` on the receiver root, with the same credentials as ingest.
-    public func capabilities() async throws -> PushCapabilities {
-        guard let identity = identity() else { throw UploadError.missingIdentity }
+    public func capabilities(scope: CloudDataScope? = nil) async throws -> PushCapabilities {
+        let identity = try credential(for: scope)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
         request.timeoutInterval = 20
         let (data, response) = try await foregroundSession.data(for: request)
@@ -151,21 +179,11 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
 
     /// Foreground upload: awaits the receiver's acknowledgement. Used while the app is executing so a
     /// captured record can reach the server within seconds of arriving.
-    ///
-    /// `expectedOwnerId` is the batch's acquisition-time owner (sealed into the journal at capture
-    /// time). The upload token is resolved at SEND time from the CURRENT identity, so this method
-    /// refuses outright when the current owner differs: sending another owner's records under a
-    /// different owner's token is the exact credential confusion T23 forbids. The caller (the
-    /// coordinator) additionally quarantines such a batch, so this is the second line of defence.
-    public func uploadForeground(batchId: String, fileURL: URL, expectedOwnerId: String) async throws -> Outcome {
-        guard let identity = identity() else { throw UploadError.missingIdentity }
-        guard identity.ownerId == expectedOwnerId else {
-            throw UploadError.ownerMismatch(expected: expectedOwnerId, current: identity.ownerId)
-        }
+    public func uploadForeground(batchId: String, fileURL: URL, scope: CloudDataScope? = nil) async throws -> Outcome {
+        let identity = try credential(for: scope)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
         request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
         // The sealed file IS the wire body (gzip applied at seal time), so what we hash, what we
@@ -187,18 +205,12 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
 
     /// Background upload: hands a file task to the stable background session and returns its
     /// identifier. The outcome arrives through `onOutcome` (possibly in a later process lifetime).
-    ///
-    /// Same T23 rule as `uploadForeground`: the token is resolved at send time from the current
-    /// identity, so a batch whose acquisition-time owner differs from the current owner is refused
-    /// here (returns -1; the caller must quarantine it, never send it). This lane is synchronous, so
-    /// refusal is signalled by the invalid task id rather than a thrown error.
     @discardableResult
-    public func enqueueBackground(batchId: String, fileURL: URL, expectedOwnerId: String) -> Int {
+    public func enqueueBackground(batchId: String, fileURL: URL, scope: CloudDataScope? = nil) throws -> Int {
+        let identity = try credential(for: scope)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        guard let identity = identity(), identity.ownerId == expectedOwnerId else { return -1 }
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
         request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
         request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
@@ -251,6 +263,19 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         handler?()
     }
 }
+
+/// What the transport needs from an upload session. `CloudUploadSession` is the production
+/// implementation; tests supply a stub so the coordinator's credential, ownership and retry behaviour
+/// can be exercised without a network.
+public protocol CloudUploading: AnyObject, Sendable {
+    var onOutcome: (@Sendable (CloudUploadSession.Outcome) -> Void)? { get set }
+    func capabilities(scope: CloudDataScope?) async throws -> PushCapabilities
+    func uploadForeground(batchId: String, fileURL: URL, scope: CloudDataScope?) async throws -> CloudUploadSession.Outcome
+    func enqueueBackground(batchId: String, fileURL: URL, scope: CloudDataScope?) throws -> Int
+    func outstandingTasks() async -> [(taskIdentifier: Int, batchId: String?)]
+}
+
+extension CloudUploadSession: CloudUploading {}
 
 extension CloudUploadSession: URLSessionDataDelegate {
     public func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {

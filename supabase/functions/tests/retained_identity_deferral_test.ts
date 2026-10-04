@@ -11,7 +11,7 @@ const TOKEN = 'noop_installationFixture';
 const FLEET = 'noop_fleetFixture';
 const marker = { code: 'PT409', message: 'retained_legacy_identity_v1' };
 
-type Options = { failure?: unknown; failureStatus?: number; at?: string; external?: string; noAuth?: boolean; noFleet?: boolean; revoked?: boolean; admitted?: boolean; success?: unknown };
+type Options = { failure?: unknown; failureStatus?: number; at?: string; external?: string; noAuth?: boolean; noFleet?: boolean; revoked?: boolean; admitted?: boolean; success?: unknown; method?: 'enrollment_code' | 'supabase_auth'; legacyEnrollment?: boolean };
 async function invoke(options: Options = {}) {
   const calls: { path: string; query: string; body: any; method: string }[] = [];
   const rest = createSupabaseRest({ cfg: { supabaseUrl: 'https://retained-fixture.invalid', supabaseServiceRoleKey: 'fixture-service-role' },
@@ -29,7 +29,8 @@ async function invoke(options: Options = {}) {
       if (path === 'noop_ingest_tokens') {
         const fleet = url.searchParams.get('token_hash') === `eq.${hashIngestToken(FLEET)}`;
         assert(fleet || url.searchParams.get('token_hash') === `eq.${hashIngestToken(TOKEN)}`);
-        return Response.json([{ id: fleet ? C : P, user_id: fleet ? null : OWNER, token_kind: fleet ? 'fleet' : 'installation', source_id: fleet ? null : SOURCE }]);
+        return Response.json([{ id: fleet ? C : P, user_id: fleet ? null : OWNER, token_kind: fleet ? 'fleet' : 'installation', source_id: fleet ? null : SOURCE,
+          ...(fleet ? {} : { provisioning_method: options.method ?? 'enrollment_code' }) }]);
       }
       if (path === 'noop_app_installations') return Response.json([{ user_id: OWNER, source_id: SOURCE, revoked_at: options.revoked ? '2026-09-24T00:00:00Z' : null }]);
       if (path === 'devices') return Response.json([{ id: url.searchParams.get('external_device_id')?.includes('installation:') ? P : C }]);
@@ -42,7 +43,7 @@ async function invoke(options: Options = {}) {
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (!options.noAuth) headers.authorization = `Bearer ${TOKEN}`;
   if (!options.noFleet) headers['x-noop-fleet-token'] = FLEET;
-  const response = await createInstallationLifecycle(rest)(new Request('https://receiver.invalid/wearables/confirm', {
+  const response = await createInstallationLifecycle(rest, { allowLegacyEnrollment: options.legacyEnrollment ?? true })(new Request('https://receiver.invalid/wearables/confirm', {
     method: 'POST', headers, body: JSON.stringify({ provisionalExternalDeviceId: options.external ?? 'my-whoop',
       userId: C, sourceId: C, evidence: { method: 'device_information_serial_v1', serial: 'ABCDEF123', receiptSha256: 'a'.repeat(64) } }),
   }), 'confirm');
@@ -109,4 +110,20 @@ Deno.test('retained identity: exact SQL marker requires HTTP409 and cannot mask 
   }
   const conflict = await invoke({ failure: { code: 'PT409', message: 'retained_legacy_identity_source_conflict_v1' } });
   assertEquals(conflict.status, 409); assertEquals(conflict.body, { code: 'lifecycle_conflict' });
+});
+
+Deno.test('retained identity: an Auth-provisioned installation needs no fleet credential and is fenced the same way', async () => {
+  const confirmed = await invoke({ method: 'supabase_auth', noFleet: true, legacyEnrollment: false });
+  assertEquals(confirmed.status, 200);
+  assertEquals(confirmed.body, { userId: OWNER, sourceId: SOURCE, deviceId: C, state: 'confirmed' });
+  const deferred = await invoke({ method: 'supabase_auth', noFleet: true, legacyEnrollment: false, failure: marker });
+  assertEquals(deferred.status, 202);
+  assertEquals(deferred.body.state, 'deferred');
+  assertEquals(deferred.body.userId, OWNER);
+});
+
+Deno.test('retained identity: a pre-Auth enrollment credential is refused while legacy enrollment is off', async () => {
+  const r = await invoke({ legacyEnrollment: false });
+  assertEquals(r.status, 401);
+  assert(!r.calls.some(x => x.path === 'rpc/confirm_noop_wearable'));
 });

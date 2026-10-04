@@ -264,6 +264,8 @@ final class AppModel: ObservableObject {
     private var hostedCatchUpDone = false
     private static let hostedCatchUpSpan = 7
     private static let hostedChangedDaysCap = 32
+    /// The account the revisions above were written for; a different account starts from nothing.
+    private var hostedAccountScope: CloudDataScope?
 
     /// Cloud mode replaces local physiological analysis with server work (spec F4).
     ///
@@ -299,6 +301,10 @@ final class AppModel: ObservableObject {
     func cloudBecameActive() async {
         recomputeTodayDay()
         CloudPushRuntime.shared.setAppIsActive(true)
+        // The account layer links this phone to the signed-in account and starts the runtime for it. The
+        // direct start below is the same idempotent call the background relaunch path makes: it brings the
+        // stored account's runtime up at once, without waiting for the session or the network.
+        NaraAccountController.shared.refresh()
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
         applyPowerSaving()   // cloud mode may have been enabled since launch; the minute cadence follows it
         await CloudPushRuntime.shared.flushAndKick()
@@ -306,10 +312,49 @@ final class AppModel: ObservableObject {
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
-        guard cloudScoringIsAuthoritative else { return }
+        guard cloudScoringIsAuthoritative, CloudPushRuntime.shared.runningScope != nil else { return }
         startHistorySeedIfNeeded()
         await syncHostedResults()
         startHostedRefreshLoop()
+    }
+
+    /// Wire the Nara account layer into the app. It owns "who is signed in" and "is the upload path linked
+    /// to them"; these callbacks are how the rest of the app follows it.
+    private func configureNaraAccount() {
+        let account = NaraAccountController.shared
+        account.deviceIdProvider = { [weak self] in self?.deviceId ?? "my-whoop" }
+        account.onReady = { [weak self] identity in await self?.cloudAccountReady(identity) }
+        account.onAccountEnded = { [weak self] in await self?.cloudAccountEnded() }
+        Task { await account.start() }
+    }
+
+    /// The cloud path is up for `identity`'s account: bring the screens and the one-time jobs along.
+    func cloudAccountReady(_ identity: CloudPushIdentity) async {
+        if hostedAccountScope != identity.scope {
+            hostedWrittenRevision = [:]
+            hostedAccountScope = identity.scope
+        }
+        applyPowerSaving()
+        await CloudPushRuntime.shared.flushAndKick()
+        Task { await profileSync.reconcile() }
+        guard cloudScoringIsAuthoritative else { return }
+        await confirmWearableLinkIfNeeded()
+        startHistorySeedIfNeeded()
+        await syncHostedResults()
+        startHostedRefreshLoop()
+    }
+
+    /// The account's cloud path was stopped (sign-out, a switch of account, or a block). Nothing it read
+    /// may stay on screen or keep running for whoever uses the phone next.
+    func cloudAccountEnded() async {
+        hostedRefreshTask?.cancel()
+        hostedRefreshTask = nil
+        historySeedTask?.cancel()
+        historySeedTask = nil
+        hostedWrittenRevision = [:]
+        hostedAccountScope = nil
+        IntradaySeriesStore.shared.reset()
+        applyPowerSaving()
     }
 
     private var hostedReadDeviceId: String {
@@ -323,10 +368,15 @@ final class AppModel: ObservableObject {
     @discardableResult
     func syncHostedResults(now: Date = Date()) async -> Int {
         guard cloudScoringIsAuthoritative, !hostedSyncInFlight,
+              let account = CloudPushRuntime.shared.runningScope,
               let scores = CloudPushRuntime.shared.scoreRepository(),
               let store = await repo.storeHandle() else { return 0 }
         hostedSyncInFlight = true
         defer { hostedSyncInFlight = false }
+        // The dashboard store is one device-wide cache. The server's numbers are written into it only for
+        // the account that owns this phone's on-device history; another account's results are still read
+        // (they feed the account-scoped server cards) but never overwrite someone else's local days.
+        let writesLocalStore = CloudLocalDataBinding.isOwner(account.ownerId)
         // Uploads are stamped with the strap's own id (the stable serial id once adopted), so that is the
         // device the server scores. Reading the fixed "my-whoop" id would return the frozen result of the
         // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
@@ -356,6 +406,9 @@ final class AppModel: ObservableObject {
         for day in days {
             guard let result = (try? await scores.refresh(day: day, deviceId: readId))?.hostedResult,
                   hostedWrittenRevision[day] != result.resultRevision else { continue }
+            // The account may have changed while this read was in flight; its result is not the new
+            // account's to write.
+            guard writesLocalStore, CloudPushRuntime.shared.runningScope == account else { continue }
             do {
                 try await HostedResultMaterializer.persist(result, store: store, deviceId: deviceId,
                                                            skipWindows: dismissed)
@@ -418,27 +471,19 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// One-shot per serial: link this installation's provisional device to the
+    /// One-shot per (account, serial): link this installation's provisional device to the
     /// wearer's canonical `whoop-<serial>` device via the deployed
     /// `/wearables/confirm` route. Until this succeeds the scores readback route
     /// honestly reports `device_registration_pending`, so the Today server-results
-    /// card would stay empty. No-op when cloud mode is off, when the strap serial
-    /// is not yet known, or after a successful confirm for that serial.
+    /// card would stay empty. No-op when cloud mode is off, when nobody is signed in, when the strap
+    /// serial is not yet known, or after a successful confirm for that serial.
     private func confirmWearableLinkIfNeeded() async {
         guard cloudScoringIsAuthoritative else { return }
         guard let serial = ble.cloudLinkSerial, !serial.isEmpty else { return }
-        let key = "cloud.wearableConfirmed.serial"
-        if UserDefaults.standard.string(forKey: key) == serial { return }
-        let client = CloudEnrollmentClient()
-        do {
-            let deviceId = try await client.confirmWearable(provisionalExternalDeviceId: deviceId, serial: serial)
-            if !deviceId.isEmpty {
-                UserDefaults.standard.set(serial, forKey: key)
-            }
-        } catch {
-            // A failed confirm is surfaced through the transport's lastError path,
-            // retried on the next scene-active opportunity.
-        }
+        // Recorded per (account, source, serial): the strap is linked to THIS account's installation, and the
+        // server refuses to move a strap that another account already holds. A failed confirm is retried the
+        // next time the strap's serial is read or the scene becomes active.
+        await NaraAccountController.shared.confirmWearableIfNeeded(provisionalDeviceId: deviceId, serial: serial)
     }
 
     func cloudWillResignActive() async {
@@ -647,6 +692,7 @@ final class AppModel: ObservableObject {
         // (and the bond sink above re-applies it on every reconnect).
         ble.setKeepRealtimeForData(PuffinExperiment.keepRealtimeForDataEnabled)
         applyPowerSaving()
+        configureNaraAccount()
 
         // Turn the strap's offloaded raw data into dashboard scores on launch and every 15
         // minutes, so recovery / strain / sleep populate from the strap itself with no import.
@@ -875,8 +921,10 @@ final class AppModel: ObservableObject {
         // #1303: adoption re-points the strap onto its stable `whoop-<serial>` id inside BLEManager (which
         // holds only the non-observable store), so mirror it onto the OBSERVABLE registry here or the
         // Devices screen and the source coordinator keep watching an id that no longer exists.
-        self.ble.onSerialIdentityAdopted = { [weak registry] serialId in
+        self.ble.onSerialIdentityAdopted = { [weak registry, weak self] serialId in
             registry?.setActive(serialId)
+            // The strap's real serial is known from here on: link it to the signed-in account at once.
+            Task { @MainActor in await self?.confirmWearableLinkIfNeeded() }
         }
         self.sourceCoordinator = coordinator
         bindOuraFeatureStatusMirror()

@@ -1704,6 +1704,7 @@ struct TodayView: View {
                 // battery (right). Replaces the big title + the full-width day-nav pill (WHOOP-style).
                 todayTopBar
                 HealthAlertBanner()
+                NaraAccountBanner()
                 if CloudPushSettings.isEnabled {
                     ServerScoreTodaySection()
                 }

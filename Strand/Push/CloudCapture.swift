@@ -398,21 +398,37 @@ final class CloudHeartRateLedger: @unchecked Sendable {
 ///
 /// One place decides whether the cloud path is on, and one place owns the objects that must be shared
 /// (the journal, the upload session and the coordinator). Everything is created only when cloud mode
-/// is enabled AND an enrollment identity exists, so an unconfigured or disabled build allocates
-/// nothing and behaves exactly like offline NOOP.
+/// is enabled AND a signed-in account has an installation credential, so an unconfigured or disabled
+/// build allocates nothing and behaves exactly like offline NOOP.
+///
+/// The runtime serves exactly one account at a time, named by its `CloudDataScope`. Changing account is a
+/// `stop()` followed by a `start` for the new one; `start` refuses to re-aim a running runtime, so there is
+/// no moment at which one account's journal, coordinator or credential is serving another.
 public final class CloudPushRuntime: @unchecked Sendable {
     public static let shared = CloudPushRuntime()
+
+    public enum StartError: Error, Equatable {
+        /// A different account's runtime is running; it must be stopped first.
+        case runningForAnotherAccount
+        /// A stop is still in progress.
+        case stopping
+    }
 
     private let lock = NSLock()
     private var _journal: CloudJournal?
     private var _coordinator: CloudTransportCoordinator?
+    private var _scope: CloudDataScope?
+    /// One upload session per process: the OS background session has a fixed identifier and a second
+    /// instance with the same identifier is not valid. It is repointed at each account's credential.
     private var _session: CloudUploadSession?
     private var _scoreRepository: ServerScoreRepository?
     private var _deviceId: String?
+    private var _stopping = false
+    private var _credentialRejected: (@Sendable (CloudDataScope, Int) -> Void)?
     private var skippedPreClock = 0
     private var appIsActive = true
     /// Object-lane pieces for the rawImuSession binary table (CONTRACTS C1). Source, HTTP transport
-    /// and durable progress live for the whole enrollment; the coordinator is built per lane pass
+    /// and durable progress live for the running account; the coordinator is built per lane pass
     /// once capabilities are known, and the lane loop runs on its own task at a bounded cadence.
     private var _objectTransport: ImuObjectTransport?
     private var _objectProgress: ImuPushProgressStore?
@@ -420,11 +436,33 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private var _objectLoopTask: Task<Void, Never>?
     private var _objectCapabilities: PushCapabilities?
     private var _objectCapabilitiesAt: Int = 0
-    /// The D2 retry: re-attempts `journal.activate` when protected data becomes available after a
-    /// locked launch. Cancelled on `stop()` so a disabled/signed-out runtime never re-activates.
+    /// The D2 retry: restarts the cloud path when protected data becomes available after a locked
+    /// launch. Cancelled on `stop()` so a disabled/signed-out runtime never re-activates.
     private var _reactivationTask: Task<Void, Never>?
 
-    private init() {}
+    private let journalSource: CloudJournal
+    private let journalDirectory: URL?
+    private let identityStore: CloudPushIdentityStore
+    private let bundleIdentifier: String?
+
+    private init() {
+        journalSource = .shared
+        journalDirectory = nil
+        identityStore = .shared
+        bundleIdentifier = Bundle.main.bundleIdentifier
+    }
+
+    /// A runtime over its own journal, directory and credential store. The app only ever uses `shared`; this
+    /// exists so a test (or an end-to-end run) can stand up several phones in one process without touching
+    /// the real App Support container or Keychain. Give each its own `bundleIdentifier`: the background
+    /// upload session is named after it, and two sessions may not share a name.
+    init(journal: CloudJournal, journalDirectory: URL, identityStore: CloudPushIdentityStore,
+         bundleIdentifier: String) {
+        journalSource = journal
+        self.journalDirectory = journalDirectory
+        self.identityStore = identityStore
+        self.bundleIdentifier = bundleIdentifier
+    }
 
     /// The running runtime, or nil when cloud mode is off. Read from the BLE path, so it is a plain
     /// lock-guarded read with no allocation.
@@ -437,6 +475,12 @@ public final class CloudPushRuntime: @unchecked Sendable {
         return _coordinator != nil
     }
 
+    /// The account this runtime is serving, or nil when it is not running.
+    public var runningScope: CloudDataScope? {
+        lock.lock(); defer { lock.unlock() }
+        return _coordinator != nil ? _scope : nil
+    }
+
     public var journalIfRunning: CloudJournal? {
         lock.lock(); defer { lock.unlock() }
         return _journal
@@ -447,36 +491,85 @@ public final class CloudPushRuntime: @unchecked Sendable {
         return _coordinator
     }
 
-    /// Start the cloud path for an enrolled identity and the active device.
-    public func start(identity: CloudPushIdentity, deviceId: String) throws {
-        lock.lock()
-        let alreadyRunning = _coordinator != nil
-        lock.unlock()
-        if alreadyRunning { return }
+    /// The credential source for one account. It reads the account's own Keychain entry on every call, so a
+    /// rotated credential is picked up without a restart, and it answers nil unless the stored credential is
+    /// bound to exactly this scope: another account's credential can never be returned from here.
+    static func credentialProvider(for scope: CloudDataScope,
+                                   store: CloudPushIdentityStore = .shared) -> @Sendable () -> CloudPushIdentity? {
+        { store.identity(forOwner: scope.ownerId).flatMap { $0.scope == scope ? $0 : nil } }
+    }
 
+    /// Who to tell when the receiver refuses the running account's credential (HTTP 401/403). The account
+    /// layer decides whether to rotate the credential or end the session; the transport only keeps the data.
+    public func setCredentialRejectionHandler(_ handler: (@Sendable (CloudDataScope, Int) -> Void)?) {
+        lock.lock()
+        _credentialRejected = handler
+        lock.unlock()
+    }
+
+    private func credentialRejected(scope: CloudDataScope, status: Int) {
+        lock.lock()
+        let handler = _credentialRejected
+        let current = _scope
+        lock.unlock()
+        guard current == scope else { return }
+        handler?(scope, status)
+    }
+
+    private func sharedSession(endpoint: URL) -> CloudUploadSession {
+        lock.lock(); defer { lock.unlock() }
+        if let _session { return _session }
+        let created = CloudUploadSession(endpoint: endpoint, bundleIdentifier: bundleIdentifier,
+                                         identity: { nil })
+        _session = created
+        return created
+    }
+
+    /// Start the cloud path for a signed-in account's identity and the active device.
+    ///
+    /// Idempotent for the account that is already running. A different account is refused with
+    /// `StartError.runningForAnotherAccount`: stop first.
+    public func start(identity: CloudPushIdentity, deviceId: String) throws {
         guard let endpoint = CloudPushSettings.receiverURL, CloudPushSettings.isConfigured else {
             throw CloudTransportCoordinator.CoordinatorError.notConfigured
         }
-        let directory = try CloudJournalPaths.defaultDirectory()
+        let scope = identity.scope
+        lock.lock()
+        if _stopping { lock.unlock(); throw StartError.stopping }
+        if let running = _scope {
+            lock.unlock()
+            if running == scope { return }
+            throw StartError.runningForAnotherAccount
+        }
+        _scope = scope
+        lock.unlock()
+
+        let directory: URL
+        do {
+            directory = try journalDirectory ?? CloudJournalPaths.defaultDirectory()
+        } catch {
+            releaseClaim()
+            throw error
+        }
         let payloadDirectory = directory.appendingPathComponent("payload", isDirectory: true)
-        let journal = CloudJournal.shared
-        let configuration = CloudJournal.Configuration(ownerId: identity.ownerId,
-                                                       sourceId: identity.sourceId,
+        let journal = journalSource
+        let configuration = CloudJournal.Configuration(ownerId: scope.ownerId, sourceId: scope.sourceId,
                                                        deviceId: deviceId)
         var policy = CloudJournal.SealPolicy()
         policy.activeTargetSeconds = Self.sealTargetSeconds(sceneActive: appIsActiveValue)
         // Accept records IMMEDIATELY, before the store opens: this method is reached from the app
         // delegate on a Bluetooth relaunch, and the earliest restored notifications can arrive while
-        // the SQLite file is still opening. They stage in order and commit as soon as it is open.
-        CloudJournal.enableStaging()
+        // the SQLite file is still opening. They stage in order, stamped with this account's scope, and
+        // commit as soon as it is open.
+        journal.beginStaging(scope: scope, deviceId: deviceId)
 
-        let session = CloudUploadSession(endpoint: endpoint, fleetToken: CloudPushSettings.fleetToken,
-                                         bundleIdentifier: Bundle.main.bundleIdentifier,
-                                         identity: { CloudPushIdentityStore.current() })
-        let coordinator = CloudTransportCoordinator(journal: journal, session: session,
+        let provider = Self.credentialProvider(for: scope, store: identityStore)
+        let session = sharedSession(endpoint: endpoint)
+        session.setIdentityProvider(provider)
+        let coordinator = CloudTransportCoordinator(journal: journal, session: session, scope: scope,
                                                    payloadDirectory: payloadDirectory,
                                                    projectURL: CloudPushSettings.canonicalProjectURL,
-                                                   identity: { CloudPushIdentityStore.current() })
+                                                   identity: provider)
         // The prompt lane is chosen from the scene phase, which only the app layer knows. Push it in.
         CloudTransportCoordinator.appIsActiveProvider = { [weak self] in
             self?.appIsActiveValue ?? true
@@ -484,45 +577,92 @@ public final class CloudPushRuntime: @unchecked Sendable {
         CloudHeartRateLedger.shared.reset()
         // Object lane (CONTRACTS C1): the rawImuSession binary table is uploaded through the
         // NoopPush object lane, never the NDJSON journal. A failure to open the durable progress
-        // store disables only the object lane for this enrollment (rows stay local) — it must not
-        // block the typed capture path.
+        // store disables only the object lane for this account (rows stay local) — it must not
+        // block the typed capture path. The raw IMU files on this phone belong to the account that
+        // owns its local data (`CloudLocalDataBinding`), so no other account ever uploads them.
         let objectProgress = try? ImuPushProgressStore(directory: directory)
-        let objectTransport = ImuObjectTransport(endpoint: endpoint,
-                                                 fleetToken: CloudPushSettings.fleetToken,
-                                                 identity: { CloudPushIdentityStore.current() })
+        let objectTransport = ImuObjectTransport(endpoint: endpoint, identity: provider)
         let objectSource = ImuObjectSource(store: ImuSessionFileStoreReader(),
-                                           deviceId: { [weak self] in self?._deviceId },
-                                           uploadAllowed: { CloudPushSettings.isEnabled })
+                                           deviceId: { [weak self] in self?.deviceIdValue },
+                                           uploadAllowed: {
+                                               CloudPushSettings.isEnabled
+                                                   && CloudLocalDataBinding.isOwner(scope.ownerId)
+                                           })
         lock.lock()
         _journal = journal
         _coordinator = coordinator
-        _session = session
         _deviceId = deviceId.lowercased()
-        _objectTransport = objectTransport
-        _objectProgress = objectProgress
-        _objectSource = objectProgress != nil ? objectSource : nil
+        _reactivationTask?.cancel()
+        _reactivationTask = nil
+        if objectProgress != nil {
+            _objectTransport = objectTransport
+            _objectProgress = objectProgress
+            _objectSource = objectSource
+            // Started under the lock so a failed activation's `releaseIfCurrent` always sees it.
+            _objectLoopTask = Task { [weak self] in await self?.runObjectLaneLoop() }
+        }
         lock.unlock()
         Task {
+            await coordinator.setOnCredentialRejected { [weak self] status in
+                self?.credentialRejected(scope: scope, status: status)
+            }
             await journal.setCommitObserver { [weak coordinator] _ in coordinator?.kick() }
             do {
-                try await journal.activate(configuration: configuration, policy: policy)
+                try await journal.activate(configuration: configuration, policy: policy, directory: journalDirectory)
                 await Self.activateLedgerFromJournalTail(journal)
             } catch {
-                // A protected-data failure (locked phone before the first unlock) is not fatal: the
-                // journal cannot open yet, so staging stays off. Unlike the previous build, this is
-                // not a dead end: schedule the re-activation retry that fires the moment the
-                // journal's files become readable again (D2), so live seconds captured after a
-                // locked launch still reach the cloud.
-                CloudJournal.disableStaging()
-                scheduleJournalReactivation(journal: journal, configuration: configuration,
-                                            policy: policy, directory: directory)
+                // A protected-data failure (locked phone before the first unlock) is not fatal: records
+                // already staged stay staged and are committed on the next activation attempt. The claim
+                // is released so that attempt can happen, and the D2 retry makes it happen the moment the
+                // journal's files become readable, so live seconds captured after a locked launch still
+                // reach the cloud.
+                journal.endStaging()
+                await self.abandon(coordinator: coordinator, scope: scope)
+                self.scheduleRestartWhenDataAvailable(directory: directory, deviceId: deviceId)
+                return
             }
             await coordinator.start()
         }
-        if objectProgress != nil {
-            let loop = Task { await self.runObjectLaneLoop() }
-            lock.lock(); _objectLoopTask = loop; lock.unlock()
+    }
+
+    private func releaseClaim() {
+        lock.lock()
+        _scope = nil
+        lock.unlock()
+    }
+
+    private func releaseIfCurrent(coordinator: CloudTransportCoordinator, scope: CloudDataScope) {
+        lock.lock()
+        defer { lock.unlock() }
+        if _scope == scope, _coordinator === coordinator {
+            _coordinator = nil
+            _journal = nil
+            _scope = nil
+            _deviceId = nil
+            takeObjectLaneLocked()?.cancel()
         }
+    }
+
+    /// Detach the object lane. Caller holds `lock`; the returned loop is cancelled by the caller.
+    private func takeObjectLaneLocked() -> Task<Void, Never>? {
+        let loop = _objectLoopTask
+        _objectLoopTask = nil
+        _objectTransport = nil
+        _objectProgress = nil
+        _objectSource = nil
+        _objectCapabilities = nil
+        _objectCapabilitiesAt = 0
+        return loop
+    }
+
+    private var deviceIdValue: String? {
+        lock.lock(); defer { lock.unlock() }
+        return _deviceId
+    }
+
+    private func abandon(coordinator: CloudTransportCoordinator, scope: CloudDataScope) async {
+        releaseIfCurrent(coordinator: coordinator, scope: scope)
+        await coordinator.stop()
     }
 
     /// How long records may wait in the journal before they are sealed into a file. Two seconds while
@@ -551,15 +691,17 @@ public final class CloudPushRuntime: @unchecked Sendable {
     ///
     /// A Bluetooth state-restoration relaunch (and a background URLSession relaunch) can reach the app
     /// delegate without ever creating a scene, so this is the path that keeps capture durable in the
-    /// case the whole feature exists for. It is idempotent, and a no-op unless cloud mode is enabled
-    /// AND an enrollment identity exists — an offline install allocates nothing here.
+    /// case the whole feature exists for. It needs no network and no Auth session: the signed-in
+    /// account's installation credential is already in the Keychain, which is exactly what lets a locked
+    /// phone keep uploading. It is idempotent, and a no-op unless cloud mode is enabled AND an account
+    /// is signed in on this phone — an offline install allocates nothing here.
     ///
     /// `fallbackDeviceId` is only the default for records that do not carry their own device id; the
     /// capture seams stamp the real one per record, so a WHOOP-to-WHOOP switch stays correct.
     @discardableResult
     public func startIfEnabled(fallbackDeviceId: String = "my-whoop") -> Bool {
         guard CloudPushSettings.isEnabled, CloudPushSettings.isConfigured else { return false }
-        guard let identity = CloudPushIdentityStore.current() else { return false }
+        guard let identity = identityStore.current() else { return false }
         do {
             try start(identity: identity, deviceId: fallbackDeviceId)
             return true
@@ -589,18 +731,16 @@ public final class CloudPushRuntime: @unchecked Sendable {
         await flush()
     }
 
-    /// The server-score cache for the running owner, created on first use.
+    /// The server-score cache for the running account, created on first use.
     ///
     /// Exposed so the presentation layer can read cached results synchronously and refresh
     /// asynchronously, which is the shape the spec asks for (show cached immediately, fetch behind it).
+    /// It reads with the running account's own credential and is discarded when the runtime stops.
     public func scoreRepository() -> ServerScoreRepository? {
-        guard isRunning else { return nil }
         lock.lock()
-        let existing = _scoreRepository
-        lock.unlock()
-        if let existing { return existing }
-        let created = ServerScoreRepository()
-        lock.lock()
+        guard _coordinator != nil, let scope = _scope else { lock.unlock(); return nil }
+        if let existing = _scoreRepository { lock.unlock(); return existing }
+        let created = ServerScoreRepository(identity: Self.credentialProvider(for: scope, store: identityStore))
         _scoreRepository = created
         lock.unlock()
         return created
@@ -627,27 +767,36 @@ public final class CloudPushRuntime: @unchecked Sendable {
         }
     }
 
+    /// Stop serving the running account. Records already captured are committed first, under the scope they
+    /// were stamped with; nothing new is accepted afterwards, and no credential outlives the call.
     public func stop() async {
+        let (coordinator, journal) = beginStop()
+        CloudHeartRateLedger.shared.reset()
+        await coordinator?.stop()
+        await journal?.deactivate()
+        finishStop()
+    }
+
+    private func beginStop() -> (CloudTransportCoordinator?, CloudJournal?) {
         lock.lock()
-        let coordinator = _coordinator
+        defer { lock.unlock() }
+        _stopping = true
+        let taken = (_coordinator, _journal)
         _coordinator = nil
         _journal = nil
         _deviceId = nil
-        let objectLoop = _objectLoopTask
-        _objectLoopTask = nil
-        let reactivation = _reactivationTask
+        _scoreRepository = nil
+        takeObjectLaneLocked()?.cancel()
+        _reactivationTask?.cancel()
         _reactivationTask = nil
-        _objectTransport = nil
-        _objectProgress = nil
-        _objectSource = nil
-        _objectCapabilities = nil
-        _objectCapabilitiesAt = 0
+        return taken
+    }
+
+    private func finishStop() {
+        lock.lock()
+        _scope = nil
+        _stopping = false
         lock.unlock()
-        CloudHeartRateLedger.shared.reset()
-        objectLoop?.cancel()
-        reactivation?.cancel()
-        await coordinator?.stop()
-        await CloudJournal.shared.deactivate()
     }
 
     // MARK: - journal (re-)activation
@@ -660,39 +809,29 @@ public final class CloudPushRuntime: @unchecked Sendable {
         CloudHeartRateLedger.shared.seed(held)
     }
 
-    /// Retry `journal.activate` until the protected journal becomes readable (D2).
+    /// Restart the cloud path once the protected journal becomes readable (D2).
     ///
     /// A Bluetooth relaunch on a phone that has not been unlocked since boot reaches `start()` while
     /// the journal file is still unreadable (`CloudJournalPaths.isDataAvailable` is false), and the
-    /// first activation throws `protectedDataUnavailable`. Previously that left staging disabled for
-    /// the whole process lifetime, so every live second captured after the locked launch was lost
-    /// from the cloud path. This retry polls the same data-availability signal `activate` itself
-    /// uses — cheap filesystem checks, no network — and re-attempts activation as soon as the first
-    /// unlock makes the file readable, so live seconds after that point reach the cloud. Staged
-    /// records from before the failure (the earliest restored notifications) are committed in the
-    /// same activation. The task is cancelled by `stop()`, so a disabled or signed-out runtime never
-    /// re-activates behind the user's back.
-    private func scheduleJournalReactivation(journal: CloudJournal, configuration: CloudJournal.Configuration,
-                                             policy: CloudJournal.SealPolicy, directory: URL) {
+    /// first activation throws `protectedDataUnavailable`, which releases the claim. Without a retry
+    /// nothing would start the runtime again until the app came to the foreground, so every live second
+    /// captured in the background after the first unlock would miss the cloud path. This polls the same
+    /// data-availability signal `activate` itself uses — cheap filesystem checks, no network — and
+    /// restarts for the signed-in account as soon as the first unlock makes the file readable. The task
+    /// is cancelled by `stop()`, so a disabled or signed-out runtime never restarts behind the user's back.
+    private func scheduleRestartWhenDataAvailable(directory: URL, deviceId: String) {
         let task = Task { [weak self] in
             while !Task.isCancelled {
                 do { try await Task.sleep(nanoseconds: Self.journalReactivationPollNanoseconds) }
                 catch { return }
                 guard CloudJournalPaths.isDataAvailable(at: directory) else { continue }
-                do {
-                    try await journal.activate(configuration: configuration, policy: policy)
-                    await Self.activateLedgerFromJournalTail(journal)
-                    // Activation restarted the journal's drain loop; wake the transport so any
-                    // records that were staged before the failure are sealed and sent now.
-                    self?.coordinatorIfRunning?.kick()
-                    return
-                } catch {
-                    // Still unavailable or a transient failure; retry on the next poll.
-                    continue
-                }
+                guard let self, !Task.isCancelled, !self.isRunning else { return }
+                self.startIfEnabled(fallbackDeviceId: deviceId)
+                return
             }
         }
         lock.lock()
+        _reactivationTask?.cancel()
         _reactivationTask = task
         lock.unlock()
     }
@@ -727,7 +866,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
     }
 
     private func runObjectLanePass() async {
-        // `disableCloud()` only flips the setting; nothing stops the runtime, so ask on every pass.
+        // The master switch can flip before the account layer stops the runtime, so ask on every pass.
         guard isRunning, CloudPushSettings.isEnabled else { return }
         lock.lock()
         let transport = _objectTransport
@@ -735,8 +874,8 @@ public final class CloudPushRuntime: @unchecked Sendable {
         let source = _objectSource
         let deviceId = _deviceId
         lock.unlock()
-        guard let transport, let progress, let source, let deviceId,
-              let identity = CloudPushIdentityStore.current() else { return }
+        guard let transport, let progress, let source, let deviceId, let scope = runningScope,
+              let identity = Self.credentialProvider(for: scope, store: identityStore)() else { return }
 
         let caps = await negotiatedObjectCapabilities(transport: transport)
         guard let caps, PushProtocol.isObjectVersion(caps.protocolVersion),
@@ -753,7 +892,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
             transport: transport,
             progress: progress,
             sourceId: identity.sourceId,
-            destinationStillCurrent: { [weak self] in self?.isRunning ?? false },
+            destinationStillCurrent: { [weak self] in self?.runningScope == scope },
             receiptOwner: receiptOwner,
             objectProtocolVersion: caps.protocolVersion,
             associateReceipt: { _, _, _ in },
@@ -847,8 +986,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
 ///
 /// Earlier builds kept the overnight offload only in the local store, so the server never received a
 /// night to score. This replays a bounded recent span of those rows through the same history encoding
-/// the Backfiller now uses, oldest hour first, and persists its cursor per owner and device so an
-/// interrupted pass resumes where it stopped. Re-sending a row is harmless: the receiver keys rows by
+/// the Backfiller now uses, oldest hour first, and persists its cursor per account, source and device so an
+/// interrupted pass resumes where it stopped. It runs only for the account that owns the on-device history
+/// (see `CloudLocalDataBinding`): another account signing in on the same phone never replays it. Re-sending a row is harmless: the receiver keys rows by
 /// identity, so a row the Backfiller already journaled is a no-op the second time. Heart rate is the
 /// exception the ledger covers: a second the journal already holds is skipped here too, because a copy
 /// with a different bpm is a conflict on the receiver, not a no-op.
@@ -861,8 +1001,8 @@ public enum CloudHistorySeeder {
         var until: Int
     }
 
-    static func defaultsKey(ownerId: String, deviceId: String) -> String {
-        "noop.cloud.historySeed.v1.\(ownerId.lowercased()).\(deviceId.lowercased())"
+    static func defaultsKey(scope: CloudDataScope, deviceId: String) -> String {
+        "noop.cloud.historySeed.v2.\(scope.ownerId).\(scope.sourceId).\(deviceId.lowercased())"
     }
 
     /// Replay what is left of the seed span. Returns the number of records the journal committed on
@@ -879,10 +1019,10 @@ public enum CloudHistorySeeder {
                                    family: DeviceFamily?,
                                    defaults: UserDefaults = .standard,
                                    now: Int = Int(Date().timeIntervalSince1970)) async -> Int {
-        guard CloudPushRuntime.sharedIfRunning != nil,
-              let ownerId = CloudPushIdentityStore.current()?.ownerId else { return 0 }
+        guard let scope = CloudPushRuntime.sharedIfRunning?.runningScope,
+              CloudLocalDataBinding.isOwner(scope.ownerId, defaults: defaults) else { return 0 }
         let uploadId = cloudDeviceId ?? deviceId
-        let key = defaultsKey(ownerId: ownerId, deviceId: uploadId)
+        let key = defaultsKey(scope: scope, deviceId: uploadId)
         var progress = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Progress.self, from: $0) }
             ?? Progress(cursor: now - lookbackSeconds, until: now)
         var committed = 0
@@ -944,8 +1084,8 @@ public enum CloudSpo2Seeder {
 
     /// Keyed by where the rows are read from AND the device they are sent as: the provisional namespace and
     /// the strap's own both replay into the strap's cloud device, and each needs its own cursor.
-    static func defaultsKey(ownerId: String, sourceDeviceId: String, uploadDeviceId: String) -> String {
-        "noop.cloud.spo2Seed.v1.\(ownerId.lowercased()).\(sourceDeviceId.lowercased()).\(uploadDeviceId.lowercased())"
+    static func defaultsKey(scope: CloudDataScope, sourceDeviceId: String, uploadDeviceId: String) -> String {
+        "noop.cloud.spo2Seed.v2.\(scope.ownerId).\(scope.sourceId).\(sourceDeviceId.lowercased()).\(uploadDeviceId.lowercased())"
     }
 
     /// Returns the number of records the journal committed on this pass; 0 once the span is done. A window
@@ -961,10 +1101,10 @@ public enum CloudSpo2Seeder {
                                    family: DeviceFamily?,
                                    defaults: UserDefaults = .standard,
                                    now: Int = Int(Date().timeIntervalSince1970)) async -> Int {
-        guard CloudPushRuntime.sharedIfRunning != nil,
-              let ownerId = CloudPushIdentityStore.current()?.ownerId else { return 0 }
+        guard let scope = CloudPushRuntime.sharedIfRunning?.runningScope,
+              CloudLocalDataBinding.isOwner(scope.ownerId, defaults: defaults) else { return 0 }
         let uploadId = cloudDeviceId ?? deviceId
-        let key = defaultsKey(ownerId: ownerId, sourceDeviceId: deviceId, uploadDeviceId: uploadId)
+        let key = defaultsKey(scope: scope, sourceDeviceId: deviceId, uploadDeviceId: uploadId)
         var progress = defaults.data(forKey: key)
             .flatMap { try? JSONDecoder().decode(CloudHistorySeeder.Progress.self, from: $0) }
             ?? CloudHistorySeeder.Progress(cursor: now - lookbackSeconds, until: now)

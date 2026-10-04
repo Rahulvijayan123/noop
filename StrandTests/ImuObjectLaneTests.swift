@@ -420,7 +420,7 @@ final class ImuObjectLaneTests: XCTestCase {
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.url?.absoluteString, "https://receiver.example/functions/v1/push/objects")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer noop-test-token")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "x-noop-fleet-token"), "noop-fleet")
+        XCTAssertNil(request.value(forHTTPHeaderField: "x-noop-fleet-token"))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
         XCTAssertEqual(request.value(forHTTPHeaderField: "noop-push-accept-version"), PushProtocol.capabilitiesAcceptVersions)
         XCTAssertEqual(body, try manifest.encode())
@@ -464,7 +464,7 @@ final class ImuObjectLaneTests: XCTestCase {
         XCTAssertEqual(request.url?.absoluteString,
                        "https://receiver.example/functions/v1/push/objects/\(objectId)/complete")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer noop-test-token")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "x-noop-fleet-token"), "noop-fleet")
+        XCTAssertNil(request.value(forHTTPHeaderField: "x-noop-fleet-token"))
     }
 
     func testConflictMapsToReceiverCodeAndIsThrown() async throws {
@@ -490,7 +490,6 @@ final class ImuObjectLaneTests: XCTestCase {
     private func makeTransport(session: URLSession) -> ImuObjectTransport {
         ImuObjectTransport(
             endpoint: URL(string: "https://receiver.example/functions/v1/push")!,
-            fleetToken: "noop-fleet",
             identity: {
                 CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
                                   sourceId: "22222222-2222-4222-8222-222222222222",

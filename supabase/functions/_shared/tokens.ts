@@ -11,6 +11,13 @@ export const FLEET_TOKEN_HEADER = 'x-noop-fleet-token';
 
 export type TokenKind = 'legacy_upload' | 'fleet' | 'installation';
 export type UploadAuthMode = 'installation' | 'legacy_fleet';
+/**
+ * Where an installation credential came from. `supabase_auth` credentials are minted by
+ * provisioning behind a verified Supabase session and are the sole upload credential.
+ * `enrollment_code` credentials predate Auth: they additionally need the shared fleet header and
+ * are honored only while the server explicitly enables the legacy compatibility path.
+ */
+export type ProvisioningMethod = 'supabase_auth' | 'enrollment_code';
 
 export class IdentityError extends Error {
   status: number;
@@ -87,7 +94,17 @@ export async function lookupAuthUser({ accessToken, supabaseUrl, anonKey, fetchI
     throw new IdentityError('account authorization unavailable', 503, 'auth_service_unavailable');
   }
   const u = await res.json().catch(() => null);
-  if (u?.id && isUuid(u.id)) return { id: u.id as string, email: u.email || null, source: 'jwt' };
+  if (u?.id && isUuid(u.id)) {
+    return {
+      id: u.id as string,
+      email: u.email || null,
+      source: 'jwt',
+      // GoTrue reports a confirmed address as a non-null timestamp; an anonymous user has no
+      // address at all. Provisioning requires a real, verified account.
+      emailConfirmed: Boolean(u.email) && (u.email_confirmed_at != null || u.confirmed_at != null),
+      anonymous: u.is_anonymous === true,
+    };
+  }
   return null;
 }
 
@@ -95,6 +112,12 @@ function tokenKind(row: any): TokenKind {
   const value = String(row?.token_kind || 'legacy_upload');
   if (value === 'fleet' || value === 'installation') return value;
   return 'legacy_upload';
+}
+
+/** Provenance of an installation token row; anything unrecognized is untrusted (null). */
+export function provisioningMethod(row: any): ProvisioningMethod | null {
+  const value = row?.provisioning_method;
+  return value === 'supabase_auth' || value === 'enrollment_code' ? value : null;
 }
 
 function tokenExpired(row: any, now: Date): boolean {
@@ -116,7 +139,7 @@ export async function lookupOpaqueToken({
   const tokenHash = hashIngestToken(token);
   const rows = await rest.select(
     'noop_ingest_tokens',
-    `token_hash=eq.${tokenHash}&select=id,user_id,label,token_kind,source_id,expires_at,enrollment_code_id,created_at,last_used_at,revoked_at`,
+    `token_hash=eq.${tokenHash}&select=id,user_id,label,token_kind,source_id,expires_at,enrollment_code_id,provisioning_method,created_at,last_used_at,revoked_at`,
   );
   const row = rows?.[0];
   if (row?.revoked_at != null) {
@@ -206,18 +229,23 @@ export async function resolveFleetAuthorization({
 }
 
 /**
- * Upload identity is fail-closed: a personal installation token in Authorization plus a separate
- * fleet/build credential. The optional legacy path applies only when no identity header is present
+ * Upload identity is fail-closed. A Supabase-Auth-provisioned installation token is bound
+ * server-side to exactly (user_id, source_id) and is the whole credential: no shared build/fleet
+ * secret exists on that path. A pre-Auth enrollment-code installation token additionally needs the
+ * separate fleet credential and is honored only while the server explicitly enables
+ * `allowLegacyEnrollment`. The optional legacy path applies only when no identity header is present
  * and is explicitly enabled by the server environment.
  */
 export async function resolveUploadIdentity({
   headers,
   rest,
   allowLegacyFleetUploads = false,
+  allowLegacyEnrollment = false,
 }: {
   headers: Headers;
   rest: SupabaseRest;
   allowLegacyFleetUploads?: boolean;
+  allowLegacyEnrollment?: boolean;
 }) {
   const token = bearerToken(headers);
   if (!token || looksLikeJwt(token)) throw new IdentityError('installation authorization required');
@@ -228,7 +256,16 @@ export async function resolveUploadIdentity({
     if (!identity.user_id || !isUuid(identity.user_id) || !identity.source_id || !isUuid(identity.source_id)) {
       throw new IdentityError('installation authorization required');
     }
-    await resolveFleetAuthorization({ headers, rest });
+    const provisioning = provisioningMethod(identity);
+    if (provisioning === 'enrollment_code') {
+      if (!allowLegacyEnrollment) {
+        throw new IdentityError('legacy enrollment is disabled', 401, 'legacy_enrollment_disabled');
+      }
+      await resolveFleetAuthorization({ headers, rest });
+    } else if (provisioning !== 'supabase_auth') {
+      // Unknown provenance is never trusted: it cannot be classified as either credential model.
+      throw new IdentityError('installation authorization required');
+    }
     const installations = await rest.select(
       'noop_app_installations',
       `user_id=eq.${identity.user_id}&source_id=eq.${identity.source_id}&select=user_id,source_id,revoked_at`,
@@ -253,6 +290,7 @@ export async function resolveUploadIdentity({
       sourceId: identity.source_id as string,
       tokenId: identity.id as string,
       authMode: 'installation' as UploadAuthMode,
+      provisioning: provisioning as ProvisioningMethod,
     };
   }
 

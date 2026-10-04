@@ -37,23 +37,54 @@ the strap's stored history whenever it reconnects. Everything lands in the local
 
 ## 2. Phone to Supabase
 
-Cloud sync is off until the user enrolls the install from **Settings → Nara account**
-(`Strand/Onboarding/CloudEnrollmentView.swift`, `Strand/Push/CloudEnrollment.swift`). Enrollment
-stores an installation credential in the Keychain (`CloudKeychain.swift`). After that, the app treats
-the server as the source of scores (`AppModel.cloudScoringIsAuthoritative`).
+Nothing leaves the phone until a person has signed in. **Settings → Nara account**
+(`Strand/Auth/NaraAccountView.swift`) creates an account with Supabase Auth: an email address and a
+password, then a one-time code that Supabase emails (Resend is only its mail transport) to confirm the
+address. `SupabaseAuthBackend.swift` is the one file that talks to the `supabase-swift` Auth client, and
+the session lives in the Keychain (`NaraKeychainAuthStorage.swift`). The app holds the project's
+publishable key and nothing secret.
+
+A verified session is all the phone needs to link itself, and the chain it builds is fixed:
+
+```
+Supabase auth.users.id  →  account-scoped source id  →  installation credential  →  canonical WHOOP device
+```
+
+- **The account** is `auth.users.id` and is the only cloud user id. No request body ever carries a user
+  id; the server reads it from the verified JWT.
+- **The source id** names this install *for this account*. A phone signed into two accounts has two
+  source ids (`CloudPushIdentityStore`), and the server refuses to hand one account's source to another.
+- **The installation credential** is a high-entropy `noop_…` token. `NaraAccountController` asks for it with
+  `POST /functions/v1/push/installations/provision`, authenticated by the session's JWT. The server stores
+  only its SHA-256 hash, bound to exactly `(user id, source id)`, and returns the token once; the app keeps
+  it in the Keychain. Uploads and score reads authenticate with this token and not with the Auth session,
+  so a locked phone finishing a background sync never depends on refreshing a JWT. There is no shared
+  fleet token on this path.
+- **The WHOOP** is paired as usual. It starts as a provisional device id scoped to this install, and the app
+  confirms it (`POST …/push/wearables/confirm`) as soon as the strap reports its serial number. The canonical
+  device id is derived from the account's user id as well as the serial, so a serial is evidence and never an
+  ownership claim: two accounts that pair the same strap get two separate devices, and neither can read,
+  write or move the other's.
+
+Once the credential is stored, the app treats the server as the source of scores
+(`AppModel.cloudScoringIsAuthoritative`). Signing out removes the credential and stops uploads, and what
+was already queued stays under the account it was recorded for.
 
 The upload path lives in `Strand/Push/`:
 
 | File | Job |
 | --- | --- |
+| `CloudPushIdentity.swift` | The `(account, source id, credential)` triple, and `CloudDataScope`, the `(account, source)` pair that every queued record and cursor is keyed by. The Keychain holds the credential. |
+| `CloudReceiverClient.swift` | The HTTP client for provisioning, wearable confirmation and installation retirement, and the one place that decides which credential headers a request carries. |
 | `CloudCapture.swift` | Turns each notification or history record into wire rows and stages them. It never blocks or throws into the Bluetooth pipeline. A second of heart rate is staged once (`CloudHeartRateLedger`, first sample wins), because the receiver treats two values for one second as a conflict and keeps neither. |
-| `CloudJournal.swift` | A durable SQLite outbox. Rows are journaled per stream with a sequence number, then sealed into batches. |
+| `CloudJournal.swift` | A durable SQLite outbox. Rows are journaled per stream with a sequence number, stamped with the scope they were recorded under at the moment they are submitted, then sealed into batches. Sealed batches never change scope. |
 | `CloudBatchBuilder.swift` | Encodes a sealed batch in the push wire format from `Packages/NoopPush`. |
-| `CloudTransportCoordinator.swift` | Seals batches of at most 2,000 records, uploads at most two at a time (only one of them from the history backlog, so fresh data is not stuck behind it), retries failures with backoff, and makes failed batches due again at launch. |
+| `CloudTransportCoordinator.swift` | Serves exactly one scope at a time. Seals batches of at most 2,000 records, uploads at most two at a time (only one of them from the history backlog, so fresh data is not stuck behind it), retries failures with backoff, and makes failed batches due again at launch. |
 | `CloudUploadSession.swift` | The HTTP client. Requests time out after 90 seconds, because a large batch can take the receiver more than a minute under load. |
+| `CloudLocalDataBinding.swift` | Records which account owns the phone's on-device history. The first verified account claims it, and only that account's cloud path replays it, so signing out A and into B never uploads A's banked history as B's. |
 
 Each batch is a gzip-compressed NDJSON `POST` to `/functions/v1/push`, authenticated with the
-installation's ingest token. When the app first enrolls, `AppModel.startHistorySeedIfNeeded()`
+installation's token. When a phone first links to an account, `AppModel.startHistorySeedIfNeeded()`
 uploads the strap history the phone already had, so the server can score past days too.
 
 ## 3. Supabase receives the batch
@@ -64,6 +95,14 @@ typed tables for each stream (heart rate, R-R intervals, sleep state, and so on)
 confirm the batch landed. Large payloads can take the object lane instead: the function hands back a
 presigned URL, the app uploads the object to B2 storage, and the rows are released once the object
 is verified.
+
+Ownership comes from the credential and never from the request. The token resolves server-side to exactly
+one `(user_id, source_id)`, and the function takes both from there rather than from the batch. The device a
+row lands on is derived from that user, so a row cannot be written into another account's device. Every
+table in `public` has row-level security on, except one shared reference table with no user data; the
+policies on user-owned tables are written in terms of `auth.uid()`; and the service credentials the
+functions and the worker use never leave the server.
+`supabase/functions/tests/auth_isolation_sql_test.ts` checks all of this against the production Postgres image.
 
 Committing rows for a day marks that day's score as stale. A trigger calls
 `invalidate_scoring_stream_v2`, which enqueues or updates a row in `scoring_jobs_v2`.
@@ -111,7 +150,7 @@ those values.
 ## 6. Coach
 
 The Sana tab (the health assistant chat) runs through the backend as well. The phone sends the question to
-`supabase/functions/coach/index.ts`, which checks the same installation and fleet credentials as
+`supabase/functions/coach/index.ts`, which checks the same installation credential as
 `push`, takes one unit of the user's daily quota, and streams the model's answer back. The model
 cannot see the database. When it needs numbers it asks the app for them through a tool call, and
 `Strand/Coach/CoachTools.swift` answers from the days the phone has already read from the server in

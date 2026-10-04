@@ -1,25 +1,35 @@
-// Tracked wrapper so a clean checkout (no fleet credentials) still generates and builds.
+// Tracked wrapper so a clean checkout (no cloud credentials) still generates and builds.
 //
 // CloudPushSecrets.xcconfig is gitignored and user-created (template:
-// CloudPushSecrets.example.xcconfig). It carries the FRWHOOP hosted-compute defaults baked into
-// the app at build time:
-//   NOOP_PUSH_ENDPOINT        — the Supabase Edge Function base (…/functions/v1/push)
-//   NOOP_PUSH_TOKEN           — the fleet ingest token (opaque `noop_…`, NOT a JWT, NOT a B2 key)
-//   NOOP_SUPABASE_ANON_KEY    — Supabase anon key for authenticated score reads
-//   NOOP_SOURCE_REVISION      — the deployed worker/source revision, for diagnostics
-//   NOOP_FINAL_HOSTED_COMPUTE — YES only for a build that must run cloud-only (no local scoring)
-// When the file is absent every $(NOOP_*) reference below resolves to an empty string, so the
-// build has no receiver, `CloudPushSettings.isConfigured` is false, and the app behaves exactly
-// like offline NOOP: no endpoint, no uploads, no cloud-mode toggle.
+// CloudPushSecrets.example.xcconfig). It carries the hosted-compute defaults baked into the app at
+// build time:
+//   NOOP_PUSH_ENDPOINT             — the Supabase Edge Function base (…/functions/v1/push)
+//   NOOP_SUPABASE_PUBLISHABLE_KEY  — the Supabase PUBLISHABLE key (`sb_publishable_…`). Public by design;
+//                                    it identifies the project to Supabase Auth. It is the only Supabase
+//                                    key the app may hold: never put a secret / service-role key here.
+//   NOOP_SUPABASE_ANON_KEY         — DEPRECATED legacy anon JWT; read only as a fallback for the
+//                                    publishable key while a project still issues one.
+//   NOOP_SOURCE_REVISION           — the deployed worker/source revision, for diagnostics
+//   NOOP_FINAL_HOSTED_COMPUTE      — YES only for a build that must run cloud-only (no local scoring)
+//   NOOP_ALLOW_LEGACY_ENROLLMENT   — YES only for a migration build whose phones still hold a NARA
+//                                    enrollment-code credential and must keep using it until sign-in.
+//                                    NO (the default) ignores any such credential.
+//   NOOP_LEGACY_FLEET_TOKEN        — the shared fleet token of the legacy enrollment path. Ignored unless
+//                                    NOOP_ALLOW_LEGACY_ENROLLMENT is YES. Empty in every tester build.
+// When the secrets file is absent every $(NOOP_*) reference below resolves to an empty string, so the
+// build has no receiver, `CloudPushSettings.isConfigured` is false, and the app behaves exactly like
+// offline NOOP: no endpoint, no sign-in, no uploads, no cloud-mode toggle.
 //
-// The fleet token is an ingest credential, not a session: it is extractable from the app bundle by
-// anyone holding the binary, and the server still requires the per-installation `noop_…` bearer
-// before it will accept an owner's data. Do not put any other secret here.
+// Testers authenticate with Supabase Auth (email + password, emailed one-time code). The app then
+// provisions its own per-account installation credential from that verified session, so nothing in this
+// file is a per-user secret and nothing here can act as a user.
 //
 // NB: xcconfig parses "//" as a comment — a URL in a secrets file must be written as https:/$()/…
 NOOP_PUSH_ENDPOINT =
-NOOP_PUSH_TOKEN =
+NOOP_SUPABASE_PUBLISHABLE_KEY =
 NOOP_SUPABASE_ANON_KEY =
 NOOP_SOURCE_REVISION = development
 NOOP_FINAL_HOSTED_COMPUTE = NO
+NOOP_ALLOW_LEGACY_ENROLLMENT = NO
+NOOP_LEGACY_FLEET_TOKEN =
 #include? "CloudPushSecrets.xcconfig"

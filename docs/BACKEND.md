@@ -19,23 +19,24 @@ and checking each part.
 | `supabase/functions/` | Edge functions (Deno/TypeScript). Shared code is in `_shared/`. |
 | `supabase/migrations/` | The schema, as ordered SQL migrations. This is the canonical lineage. |
 | `supabase/history/` | Archived SQL from before the current lineage. Never apply it. |
-| `supabase/tests/` | SQL and shell tests for enrollment and history. |
-| `supabase/config.toml` | Local stack and per-function settings. |
+| `supabase/tests/` | SQL and shell tests for enrollment and history. `tests/e2e/` holds the sign-up-to-scored-day stack and the production-image database harness; see its [README](../supabase/tests/e2e/README.md). |
+| `supabase/config.toml` | Local stack and per-function settings, including the Auth email templates. |
+| `supabase/templates/` | The signup and password-reset emails. Both show the one-time code. |
 
 ### Edge functions
 
 | Function | Called by | Purpose |
 | --- | --- | --- |
-| `push` | the app | Receives upload batches and object-lane uploads, writes rows and receipts. |
-| `scores` | the app | Returns published score snapshots, the changed-days feed and the intraday metric series (`GET /series`). Also handles enrollment-time device registration and sleep edits. |
-| `coach` | the app | Relays Coach questions to the language model and stores the conversation, the coach's memory and the Settings profile (`/profile`). Authenticates like `push` (installation bearer plus the fleet token). |
+| `push` | the app | Receives upload batches and object-lane uploads, writes rows and receipts. Also provisions installation credentials from a Supabase session (`POST /installations/provision`), confirms and hands off wearables, and retires installations. |
+| `scores` | the app | Returns published score snapshots, the changed-days feed and the intraday metric series (`GET /series`). Also handles device registration and sleep edits. Accepts the installation credential or the signed-in account's JWT. |
+| `coach` | the app | Relays Coach questions to the language model and stores the conversation, the coach's memory and the Settings profile (`/profile`). Authenticates like `push` (the installation bearer). |
 | `ingest-verify` | operators | Checks the ingest pipeline end to end. |
 | `reconcile` | scheduled | Reconciles the object manifest against storage. |
 | `retention-sweep` | scheduled (pg_cron) | Deletes expired objects and manifests. |
 | `account-deletion` | scheduled or on demand | Deletes an account: B2 objects, then rows, then the Auth user. |
 
 Every function has `verify_jwt = false` in `config.toml` because each one does its own bearer
-authentication. The app's ingest tokens are not JWTs, so gateway verification would reject them.
+authentication. The app's installation tokens are not JWTs, so gateway verification would reject them.
 The scheduled functions authenticate with the `WORKER_SECRET` function secret.
 
 Deploy a function after linking the project once:
@@ -73,6 +74,95 @@ No migration is involved: the table and its deletion handling already existed.
 The function tests run with Deno from `supabase/functions/`. Some of them need fixtures that are not
 in this repository, such as `EDGE_TEST_ARTIFACTS` or the old `infra/vps` scripts.
 
+### Accounts and installation credentials
+
+Testers sign up with Supabase Auth. There are no enrollment codes and no shared token in the app.
+
+1. The app signs the person up with an email address and password and verifies the one-time code Auth
+   emails (`verifyOTP`, type `signup`). The result is a Supabase session. The app holds only the
+   project's publishable key.
+2. The app calls `POST /functions/v1/push/installations/provision` with the session's JWT as the bearer
+   and `{ sourceId, platform, appVersion }` as the body. The function checks the JWT with Auth
+   (`GET /auth/v1/user`), requires a confirmed, non-anonymous account, generates a 256-bit random `noop_…`
+   token itself, and calls `provision_noop_installation` with only the token's SHA-256 hash. The plaintext
+   never reaches Postgres.
+3. The response says what happened, and a new token is returned once, in `installationToken`, unless the
+   action is `reused`. `created` is the first provisioning of that source for the account (HTTP 201).
+   `reused` means the phone presented its current credential in `x-noop-installation-token` and it is valid
+   for more than 30 days, so nothing new is issued. `rotated` replaces a lost, expired or revoked credential
+   for the account's own source, and `upgraded` adopts the account's old enrollment-code installation.
+   Credentials last a year.
+4. Every later request, including a background upload on a locked phone, authenticates with that token
+   alone. It does not need a fresh JWT.
+
+The user id never comes from a request body. It comes from the verified JWT when provisioning and from the
+credential after that. The token row is bound to `(user_id, source_id)` by a composite foreign key to
+`noop_app_installations`, and a source id belongs to one account for its whole life
+(`noop_installation_immutable`). A device's id is derived from the owner's user id and its external id,
+`devices.user_id` cannot change (`device_owner_immutable`), and a serial number is evidence rather than
+ownership, so two accounts that confirm the same strap hold two separate devices.
+
+Provisioning refuses with these codes:
+
+| Code | Status | Meaning |
+| --- | --- | --- |
+| `email_not_confirmed` | 403 | The JWT is for an unconfirmed or anonymous account. |
+| `installation_unavailable` | 409 | The source id is bound to another account. The app abandons it and picks a new one. |
+| `installation_retired`, `installation_revoked` | 403 | A retired or revoked source is never silently revived. |
+| `account_retired` | 403 | The account is being deleted. |
+| `installation_limit` | 409 | The account already has 25 active installations. |
+| `provision_rate_limited` | 429 | More than 20 credential changes in an hour. Retry after 300 seconds. |
+
+The `NOOP_ALLOW_LEGACY_ENROLLMENT` function secret keeps the pre-Auth enrollment-code credentials working
+alongside the shared fleet header. It is off unless set to `true`; leave it unset. With it off, an
+enrollment-code token is refused with `legacy_enrollment_disabled`, and `/push/enroll` answers 410 with the
+same code.
+
+Row-level security is the second line behind the functions, for anything a signed-in client reads through
+PostgREST. `auth_isolation_sql_test.ts` asserts that every table in `public` has RLS enabled (one shared
+reference table aside), that every policy a client can hit is written in terms of `auth.uid()`, that
+exactly the reviewed functions are executable by `anon` and `authenticated`, and that no view hands a
+client rows its owner's rights could see.
+
+#### Hosted project checklist
+
+Do these once per project, in the dashboard or with `supabase config push`. None of it is applied by
+migrations.
+
+- **Authentication → Sign In / Providers → Email:** enabled, **Confirm email** on, minimum password length
+  8. Anonymous sign-ins stay off.
+- **Authentication → Emails → SMTP Settings:** custom SMTP through Resend: host `smtp.resend.com`, port
+  `465`, username `resend`, password a Resend API key with sending access, and a sender on a domain verified
+  in Resend. Without custom SMTP, Supabase's built-in sender only delivers to addresses on the project's
+  organization team and is limited to 2 messages an hour, so testers would never receive a code. Turning
+  custom SMTP on starts you at 30 messages an hour; raise **Authentication → Rate Limits → Emails** to match
+  the number of testers you expect.
+- **Authentication → Emails → Templates:** *Confirm sign up* and *Reset password* use the files in
+  `supabase/templates/`. They show `{{ .Token }}` and no link. The code length is `otp_length` in
+  `config.toml`; the app accepts 6 to 10 digits.
+- **Function secrets:** leave `NOOP_ALLOW_LEGACY_ENROLLMENT` and `NOOP_ALLOW_LEGACY_FLEET_UPLOADS` unset. The
+  functions read the project's keys from the platform's own variables (`SUPABASE_URL`, plus
+  `SUPABASE_PUBLISHABLE_KEY(S)` or the legacy `SUPABASE_ANON_KEY`, and `SUPABASE_SECRET_KEY(S)` or the legacy
+  `SUPABASE_SERVICE_ROLE_KEY`). A `sb_secret_…` key is opaque and is sent in `apikey`, never as a bearer.
+- **Abuse:** sign-up is open to anyone who can receive email, and every attempt sends a message from your
+  domain. Supabase recommends CAPTCHA for this; the app does not send a CAPTCHA token yet, so turning it on
+  would block sign-up until it does. For a small beta, turn **Allow new users to sign up** off once your
+  testers have registered, or invite them from the dashboard.
+- **Build:** put the `sb_publishable_…` key in `Config/CloudPushSecrets.xcconfig` as
+  `NOOP_SUPABASE_PUBLISHABLE_KEY`. Never put a secret or `service_role` key there.
+
+#### Known limits
+
+- There is no self-service account deletion. `account-deletion` runs on demand or on a schedule, and
+  deleting a user cascades through every owned table. A Supabase *ban* is not propagated to the opaque
+  installation tokens; revoking the installation or deleting the user is.
+- The phone's decoded local store is one device-wide cache. The first verified account claims the
+  on-device history (`CloudLocalDataBinding`); a second account on the same phone starts empty on the
+  server side and never uploads the first account's history. Live capture is stamped with whoever is signed
+  in when it arrives.
+- Two accounts can pair the same physical strap. They get separate devices and cannot see each other's
+  data, but nothing stops both from claiming it.
+
 ### Migrations
 
 > **Do not run `supabase db push` against production.** The production migration history
@@ -88,8 +178,26 @@ To apply a new migration to production:
 3. Record it so the history stops drifting further:
    `supabase migration repair --status applied <version>`
 
-For local development, `supabase db start` followed by `supabase db reset --yes` builds a fresh
-database from the migrations.
+The Supabase Auth change is two migrations, applied in this order:
+
+1. `20261004120000_supabase_auth_installation_provisioning.sql` adds `provisioning_method` to
+   installations and tokens, makes `enrollment_code_id` nullable (a check ties each method to its shape),
+   adds `provision_noop_installation` and its audit and rate-limit ledger, and guards installations bound
+   through Auth against going back to code enrollment. Existing enrollment-code rows are kept and backfilled
+   as `enrollment_code`.
+2. `20261004123000_revoke_client_execute_on_internal_functions.sql` takes `EXECUTE` on
+   `noop_push_consume_ingest_quota` and `http_post_worker` away from `anon` and `authenticated`. Supabase's
+   default privileges grant `EXECUTE` on every new function to those roles, and revoking from `public` does
+   not remove a direct grant. Neither function checks its caller: the first charges an upload against *any*
+   user's ingest quota, which with self-service sign-up would let one account make another's uploads fail,
+   and the second posts to the worker with the worker secret as the bearer. It is guarded, so it is a no-op
+   where a function does not exist.
+
+For a fresh local database, `supabase db reset` does not work: applied in plain lexicographic order, the
+migrations fail at `20260918040000_production_projection_debt.sql`, which alters a column that
+`20260921060000_production_intake_durability.sql` creates. Production never hit it because its history grew
+one migration at a time. Build a local database with the order `supabase/tests/e2e/ordered_migrations.sh`
+prints, applied with `psql -1`; the test harnesses do exactly that.
 
 ## The VPS worker
 
