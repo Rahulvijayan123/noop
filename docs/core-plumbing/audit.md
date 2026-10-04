@@ -168,3 +168,10 @@ Verified-good (no change): durable acquisition chain (persist-before-death, WAL 
 - P2-3 PASS (retirement filter in ALL closure phases; claim-path residual ACCEPTED as a bounded window — new-enqueue sources closed during freeze, reads blocked, cascade self-cleaning, pre-existing behavior; follow-up recommended for a retirement filter in claim_scoring_v2).
 - Round-2 items all PASS (outbox dead-letter, closure visibility ledger with no authenticated exposure, un-quarantine RPC, quiet-day zone resolution). No new issue in the grants/definer/search_path challenge list.
 - Still NOT VERIFIED: automated account-deletion test covering the new tables (SQL-reading only); P2-1 residual starvation untested.
+
+
+## Overnight device check (2026-10-04 00:39, root run via heartbeat)
+
+- PASS (T02-adjacent device evidence): the installed app on the physical iPhone created the 2026-10-04 dailyMetric row after local midnight WITHOUT waiting for cloud data or a new sensor batch (DB copied off device at 00:39; new-day row present with nulls where the day is minutes old, strain accruing, 2026-10-03 fully populated with recovery 21.16 / strain 40.0 / HRV 53.7 / RHR 53). The repaired local-day rollover machinery works on the real device overnight.
+- The installed build predates the round-3 zone-journal internals (which do not affect rollover); the final-build install remains a pending device check on the next reconnection window.
+- On-screen sub-second rollover latency (T01's timing) remains NOT VERIFIED (needs human observation at the boundary).
