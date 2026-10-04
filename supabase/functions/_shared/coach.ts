@@ -16,6 +16,7 @@ export interface CoachConfig {
   models: Record<CoachMode, string>;
   dailyCallLimit: number;
   allowLegacyFleetUploads: boolean;
+  allowLegacyEnrollment?: boolean;
   jevKey: string;
 }
 
@@ -31,6 +32,7 @@ export function coachConfig(env: Record<string, string | undefined> = Deno.env.t
     },
     dailyCallLimit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 400,
     allowLegacyFleetUploads: pick('NOOP_ALLOW_LEGACY_FLEET_UPLOADS', '').toLowerCase() === 'true',
+    allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT', '').toLowerCase() === 'true',
     jevKey: pick('TYPESAFE_API_KEY', ''),
   };
 }
@@ -392,6 +394,7 @@ export async function handleCoachRequest(req: Request, deps: { rest: SupabaseRes
   try {
     const identity = await resolveUploadIdentity({
       headers: req.headers, rest: d.rest, allowLegacyFleetUploads: d.cfg.allowLegacyFleetUploads,
+      allowLegacyEnrollment: d.cfg.allowLegacyEnrollment === true,
     });
     if (identity.authMode !== 'installation') throw new IdentityError('installation authorization required');
     const tail = new URL(req.url).pathname.replace(/^.*\/coach(?=\/|$)/, '').split('/').filter(Boolean);

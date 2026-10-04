@@ -33,6 +33,32 @@ enable_signup = true
 enable_confirmations = true
 max_frequency = "1m0s"
 otp_length = 8
+# 1 hour (the default); the email templates below say so.
+otp_expiry = 3600
+
+# Signup and password-recovery mail carry the one-time code the app asks for ({{ .Token }}); there is no
+# link to tap, so the app never depends on a redirect or deep link. The code length is `otp_length` above.
+[auth.email.template.confirmation]
+subject = "Your Nara verification code"
+content_path = "./supabase/templates/confirmation.html"
+
+[auth.email.template.recovery]
+subject = "Reset your Nara password"
+content_path = "./supabase/templates/recovery.html"
+
+# Production mail is sent by Resend over SMTP; Resend is only Supabase Auth's mail transport (there is no
+# separate verification system). Create a Resend API key with "Sending access", verify the sending domain,
+# then either enter the same values in Dashboard -> Authentication -> Emails -> SMTP Settings or enable this
+# block and run `supabase config push` with RESEND_API_KEY exported. Leave it commented for local work: the
+# local stack delivers to its own inbox and nothing leaves the machine.
+# [auth.email.smtp]
+# enabled = true
+# host = "smtp.resend.com"
+# port = 465
+# user = "resend"
+# pass = "env(RESEND_API_KEY)"
+# admin_email = "no-reply@your-verified-domain.example"
+# sender_name = "Nara"
 
 [auth.mfa]
 max_enrolled_factors = 10
@@ -49,7 +75,7 @@ enabled = true
 [functions.push]
 verify_jwt = false
 
-# In-app coach relay. Does its own installation + fleet bearer auth (same as push), so gateway JWT verification stays off.
+# In-app coach relay. Does its own installation-token bearer auth (same as push), so gateway JWT verification stays off.
 [functions.coach]
 verify_jwt = false
 
@@ -66,6 +92,6 @@ verify_jwt = false
 [functions.ingest-verify]
 verify_jwt = false
 
-# Score readback authenticates the source-bound installation bearer plus fleet header in-function.
+# Score readback authenticates the source-bound installation bearer (or the signed-in account's JWT) in-function.
 [functions.scores]
 verify_jwt = false

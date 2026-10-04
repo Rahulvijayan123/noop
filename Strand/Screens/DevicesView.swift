@@ -278,10 +278,10 @@ private struct DevicesContent: View {
 
             if !removedDevices.isEmpty { removedSection }
 
-            // Hosted-compute ("cloud") enrollment. Device/account-scoped, so it belongs with the
-            // devices. Shown ONLY when this build actually carries a receiver: a clean checkout has
-            // none, and offering a toggle that cannot work would be a lie. Cloud mode stays OFF until
-            // the user enrolls and enables it, so this row changes nothing by existing.
+            // Hosted-compute ("cloud") account. Device/account-scoped, so it belongs with the devices.
+            // Shown ONLY when this build actually carries a receiver and an Auth project: a clean checkout
+            // has neither, and offering a sign-in that cannot work would be a lie. Nothing is uploaded
+            // until someone signs in, so this row changes nothing by existing.
             if CloudPushSettings.isConfigured { cloudSection }
 
             whoopFirstFooter
@@ -453,15 +453,15 @@ private struct DevicesContent: View {
         }
     }
 
-    /// Entry point for the opt-in hosted-compute path. The view owns the enrollment form and the
-    /// enable/disable toggle; this only routes to it.
+    /// Entry point for the hosted-compute path. The account screen owns sign-in and the sync switch;
+    /// this only routes to it.
     private var cloudSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
             sectionHead("CLOUD", trailing: CloudPushSettings.isEnabled
                         ? String(localized: "On")
                         : String(localized: "Off"))
             NavigationLink {
-                CloudEnrollmentView()
+                NaraAccountView()
             } label: {
                 NoopCard {
                     HStack(spacing: NoopMetrics.gap) {
@@ -470,7 +470,7 @@ private struct DevicesContent: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Cloud upload")
                                 .font(.headline)
-                            Text("Send measured strap data to your own hosted project so recovery, strain and sleep are computed there. Off until you enroll and enable it.")
+                            Text("Sign in to your Nara account to send measured strap data to your own space, where recovery, strain and sleep are computed. Nothing is sent until you are signed in.")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .fixedSize(horizontal: false, vertical: true)

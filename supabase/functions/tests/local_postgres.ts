@@ -10,8 +10,9 @@ export const USER_B = '22222222-2222-4222-8222-222222222222';
 const decoder = new TextDecoder();
 
 export async function startLocalPostgres({ scalarProjections = false, auxiliaryIdentity = false,
-  appendCompatibility = false, installationLifecycle = false, objectRepresentations = false, statementTimeoutMs = 0 }:
-  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; statementTimeoutMs?: number } = {}) {
+  appendCompatibility = false, installationLifecycle = false, objectRepresentations = false,
+  authProvisioning = false, statementTimeoutMs = 0 }:
+  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; statementTimeoutMs?: number } = {}) {
   if (!Number.isInteger(statementTimeoutMs) || statementTimeoutMs < 0 || statementTimeoutMs > 600000) {
     throw new Error("invalid_fixture_statement_timeout");
   }
@@ -94,11 +95,12 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
     if (auxiliaryIdentity) migrations.push('20260918070000_production_aux_identity_provenance.sql',
       '20260918080000_production_ppg_input_selection.sql');
     if (appendCompatibility) migrations.push('20260921070000_production_append_stream_compatibility.sql');
-    if (installationLifecycle || objectRepresentations) migrations.push('20260919200000_noop_enrollment_identity.sql',
+    if (installationLifecycle || objectRepresentations || authProvisioning) migrations.push('20260919200000_noop_enrollment_identity.sql',
       '20260921110000_installation_retirement.sql');
     migrations.push('20260922010000_object_copy_intents.sql');
     migrations.push('20260922020000_async_object_verification.sql');
     if (objectRepresentations) migrations.push('20260923180000_object_representation_identity.sql');
+    if (authProvisioning) migrations.push('20261003120000_supabase_auth_installation_provisioning.sql');
     for (const migration of migrations) {
       const file = new URL(`../../migrations/${migration}`, import.meta.url);
       await run(`${bin}/psql`, ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', base, '-U', 'edge_test', '-d', 'postgres', '-f', decodeURIComponent(file.pathname)]);

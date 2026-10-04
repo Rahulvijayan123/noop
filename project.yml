@@ -80,6 +80,13 @@ packages:
   ZIPFoundation:
     url: https://github.com/weichsel/ZIPFoundation.git
     exactVersion: 0.9.20
+  # Supabase Auth client (email + password sign-up, signup/recovery OTP verification, session refresh).
+  # Only the `Auth` product is linked (see the targets below): the app talks to Edge Functions with its own
+  # opaque installation credential and never needs the PostgREST/Realtime/Storage clients. Pinned EXACT
+  # for the same supply-chain reason as the packages above; bump deliberately with Package.resolved.
+  Supabase:
+    url: https://github.com/supabase/supabase-swift.git
+    exactVersion: 2.55.3
 targets:
   Strand:
     type: application
@@ -130,8 +137,16 @@ targets:
         # a clean checkout offline: CloudPushSettings.isConfigured is then false and the cloud mode
         # toggle is refused rather than pointing at nothing. Read at runtime by CloudPushSettings.
         NOOPPushEndpoint: $(NOOP_PUSH_ENDPOINT)
-        NOOPPushToken: $(NOOP_PUSH_TOKEN)
+        # Supabase publishable key (`sb_publishable_…`): the ONLY Supabase key the app ever holds. It is
+        # public by design and is sent as the `apikey` header on Auth requests. A secret/service-role key
+        # must never be placed here. NOOPSupabaseAnonKey is the deprecated legacy anon JWT, read only as a
+        # fallback while a project still issues one.
+        NOOPSupabasePublishableKey: $(NOOP_SUPABASE_PUBLISHABLE_KEY)
         NOOPSupabaseAnonKey: $(NOOP_SUPABASE_ANON_KEY)
+        # Legacy NARA enrollment-code / shared fleet-token compatibility. Both are empty/NO in a tester
+        # build: accounts are provisioned from the Supabase Auth session instead.
+        NOOPAllowLegacyEnrollment: $(NOOP_ALLOW_LEGACY_ENROLLMENT)
+        NOOPLegacyFleetToken: $(NOOP_LEGACY_FLEET_TOKEN)
         NOOPSourceRevision: $(NOOP_SOURCE_REVISION)
         NOOPFinalHostedCompute: $(NOOP_FINAL_HOSTED_COMPUTE)
         # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
@@ -173,6 +188,8 @@ targets:
       - package: OuraProtocol
       - package: PolarProtocol
       - package: NoopPush
+      - package: Supabase
+        product: Auth
   StrandTests:
     type: bundle.unit-test
     platform: macOS
@@ -358,8 +375,16 @@ targets:
         # a clean checkout offline: CloudPushSettings.isConfigured is then false and the cloud-mode
         # toggle is refused rather than pointing at nothing. Read at runtime by CloudPushSettings.
         NOOPPushEndpoint: $(NOOP_PUSH_ENDPOINT)
-        NOOPPushToken: $(NOOP_PUSH_TOKEN)
+        # Supabase publishable key (`sb_publishable_…`): the ONLY Supabase key the app ever holds. It is
+        # public by design and is sent as the `apikey` header on Auth requests. A secret/service-role key
+        # must never be placed here. NOOPSupabaseAnonKey is the deprecated legacy anon JWT, read only as a
+        # fallback while a project still issues one.
+        NOOPSupabasePublishableKey: $(NOOP_SUPABASE_PUBLISHABLE_KEY)
         NOOPSupabaseAnonKey: $(NOOP_SUPABASE_ANON_KEY)
+        # Legacy NARA enrollment-code / shared fleet-token compatibility. Both are empty/NO in a tester
+        # build: accounts are provisioned from the Supabase Auth session instead.
+        NOOPAllowLegacyEnrollment: $(NOOP_ALLOW_LEGACY_ENROLLMENT)
+        NOOPLegacyFleetToken: $(NOOP_LEGACY_FLEET_TOKEN)
         NOOPSourceRevision: $(NOOP_SOURCE_REVISION)
         NOOPFinalHostedCompute: $(NOOP_FINAL_HOSTED_COMPUTE)
         # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
@@ -396,6 +421,8 @@ targets:
       - package: ZIPFoundation
       - package: PolarProtocol
       - package: NoopPush
+      - package: Supabase
+        product: Auth
       - target: NOOPiOSWidgets
       # Embed the watchOS app so the iPhone app carries it (NOOP.app/Watch/NOOPWatch.app). A watch app
       # installs by riding inside its iOS companion; without this it would never reach a paired watch.

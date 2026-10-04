@@ -21,6 +21,9 @@ final class IntradaySeriesStore: ObservableObject {
 
     private let repositoryProvider: @MainActor () -> ServerScoreRepository?
     private var inFlight: Set<String> = []
+    /// Bumped whenever the account that was reading goes away, so a read that was still in flight for it
+    /// can not land in the next account's screens.
+    private var generation = 0
 
     init(repositoryProvider: @escaping @MainActor () -> ServerScoreRepository? = {
         CloudPushRuntime.shared.scoreRepository()
@@ -28,26 +31,41 @@ final class IntradaySeriesStore: ObservableObject {
         self.repositoryProvider = repositoryProvider
     }
 
+    /// Forget everything shown. Called when the signed-in account changes: what is on screen was read with
+    /// the previous account's credential and must not be visible to the next one.
+    func reset() {
+        generation += 1
+        windows = [:]
+        failures = [:]
+        inFlight = []
+        readDeviceId = "my-whoop"
+    }
+
     /// Show the last stored readings for a range, once, without touching the network.
     func loadCached(_ bounds: IntradayRange.Bounds) async {
         guard windows[bounds.key] == nil, let repository = repositoryProvider() else { return }
+        let started = generation
         let cached = await repository.cachedIntradaySeries(cacheKey: bounds.key, deviceId: readDeviceId)
         // A network read that landed while this one was suspended is newer than the file.
+        guard started == generation else { return }
         if let cached, windows[bounds.key] == nil { windows[bounds.key] = cached }
     }
 
     /// Read a range from the server. A failure leaves whatever was already showing in place.
     func refresh(_ metric: IntradayMetric, bounds: IntradayRange.Bounds) async {
         guard !inFlight.contains(bounds.key), let repository = repositoryProvider() else { return }
+        let started = generation
         inFlight.insert(bounds.key)
-        defer { inFlight.remove(bounds.key) }
+        defer { if started == generation { inFlight.remove(bounds.key) } }
         do {
             let window = try await repository.intradaySeries(
                 from: bounds.from, to: bounds.to, deviceId: readDeviceId,
                 metrics: [metric], cacheKey: bounds.key)
+            guard started == generation else { return }
             windows[bounds.key] = window
             failures[bounds.key] = nil
         } catch {
+            guard started == generation else { return }
             failures[bounds.key] = String(describing: error)
         }
     }

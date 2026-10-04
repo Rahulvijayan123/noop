@@ -2,6 +2,7 @@ import {
   bearerToken,
   hashIngestToken,
   IdentityError,
+  provisioningMethod,
   resolveFleetAuthorization,
   resolveUploadIdentity,
 } from "./tokens.ts";
@@ -15,8 +16,13 @@ import type { SupabaseRest } from "./rest.ts";
 import { isSafeExternalDeviceId, isUuid, noopDeviceId } from "./keys.ts";
 
 /** All owner/source arguments come from credentials. Retirement also accepts its own revoked token
- * solely to retrieve the same retirement receipt after a lost response. */
-export function createInstallationLifecycle(rest: SupabaseRest) {
+ * solely to retrieve the same retirement receipt after a lost response. A Supabase-Auth-provisioned
+ * installation token is the whole credential; only pre-Auth enrollment-code tokens also need the
+ * fleet credential, and only while `allowLegacyEnrollment` is on. */
+export function createInstallationLifecycle(
+  rest: SupabaseRest,
+  { allowLegacyEnrollment = false }: { allowLegacyEnrollment?: boolean } = {},
+) {
   return async (
     req: Request,
     action: "retire" | "confirm" | "handoff",
@@ -28,20 +34,36 @@ export function createInstallationLifecycle(rest: SupabaseRest) {
       });
     try {
       if (action === "retire") {
-        await resolveFleetAuthorization({ headers: req.headers, rest });
         const token = bearerToken(req.headers);
         if (!/^noop_[A-Za-z0-9_-]{1,256}$/.test(token)) {
           throw new IdentityError("installation required");
         }
+        const tokenHash = hashIngestToken(token);
+        // Retirement accepts an already-revoked token, so provenance is read from the row itself
+        // rather than through the live-credential lookup.
+        const rows = await rest.select(
+          "noop_ingest_tokens",
+          `token_hash=eq.${tokenHash}&token_kind=eq.installation&select=provisioning_method`,
+        );
+        const provisioning = provisioningMethod(rows?.[0]);
+        if (provisioning === "enrollment_code") {
+          if (!allowLegacyEnrollment) {
+            throw new IdentityError("legacy enrollment is disabled", 401, "legacy_enrollment_disabled");
+          }
+          await resolveFleetAuthorization({ headers: req.headers, rest });
+        } else if (provisioning !== "supabase_auth") {
+          throw new IdentityError("installation required");
+        }
         return reply(
           await rest.rpc("retire_noop_installation", {
-            p_token_hash: hashIngestToken(token),
+            p_token_hash: tokenHash,
           }),
         );
       }
       const identity = await resolveUploadIdentity({
         headers: req.headers,
         rest,
+        allowLegacyEnrollment,
       });
       if (identity.authMode !== "installation") {
         throw new IdentityError("installation required");

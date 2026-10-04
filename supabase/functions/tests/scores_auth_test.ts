@@ -56,7 +56,7 @@ Deno.test('scores HTTP: enrolled owner can read own exact strap without a passwo
   const rest = makeMemRest() as any;
   rest.select = async (table: string, query: string) => {
     if (table === 'noop_ingest_tokens') return query.includes(hashIngestToken('noop_test-token'))
-      ? [{ id: 'tok', token_kind: 'installation', user_id: USER, source_id: SOURCE }]
+      ? [{ id: 'tok', token_kind: 'installation', provisioning_method: 'enrollment_code', user_id: USER, source_id: SOURCE }]
       : [{ id: 'fleet', token_kind: 'fleet' }];
     if (table === 'noop_app_installations') return [{ user_id: USER, source_id: SOURCE }];
     if (table === 'devices') { assert(query.includes(`user_id=eq.${USER}`)); return [{ id: DEVICE }]; }
@@ -69,7 +69,7 @@ Deno.test('scores HTTP: enrolled owner can read own exact strap without a passwo
     }),
     {
       rest,
-      cfg: { supabaseUrl: 'https://example.test', supabaseAnonKey: 'anon' },
+      cfg: { supabaseUrl: 'https://example.test', supabaseAnonKey: 'anon', allowLegacyEnrollment: true },
     },
   );
   assertEquals(res.status, 200);

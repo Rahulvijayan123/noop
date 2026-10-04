@@ -124,7 +124,7 @@ function sleepArguments(value: any, canonicalDevice: string) {
 
 export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetchImpl: _fetchImpl = fetch }: {
   rest: SupabaseRest;
-  cfg: Pick<PushFunctionConfig, 'supabaseUrl' | 'supabaseAnonKey'>;
+  cfg: Pick<PushFunctionConfig, 'supabaseUrl' | 'supabaseAnonKey'> & Partial<Pick<PushFunctionConfig, 'allowLegacyEnrollment'>>;
   fetchImpl?: typeof fetch;
 }): Promise<Response> {
   const url = new URL(req.url);
@@ -167,7 +167,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       }
       user={id:account.id,sourceId:sourceId!};
     } else {
-      const installation=await resolveUploadIdentity({headers:req.headers,rest,allowLegacyFleetUploads:false});
+      const installation=await resolveUploadIdentity({headers:req.headers,rest,allowLegacyFleetUploads:false,
+        allowLegacyEnrollment:_cfg.allowLegacyEnrollment===true});
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
     }

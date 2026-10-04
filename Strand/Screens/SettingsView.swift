@@ -18,6 +18,7 @@ struct SettingsView: View {
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var profile: ProfileStore
     @EnvironmentObject var behavior: BehaviorStore
+    @ObservedObject private var naraAuth = NaraAuthService.shared
 
     /// Profile-photo picker selection (PhotosUI). Cleared back to nil once the bytes are loaded.
     @State private var avatarPickerItem: PhotosPickerItem?
@@ -70,9 +71,19 @@ struct SettingsView: View {
 
     private var accountGroup: some View {
         SettingsGroup("Account") {
-            navRow("Nara account", CloudPushSettings.isEnabled ? String(localized: "Cloud sync on") : nil) {
-                CloudEnrollmentView()
+            navRow("Nara account", accountRowValue) {
+                NaraAccountView()
             }
+        }
+    }
+
+    /// What the account row says at a glance: who is signed in, or that nobody is.
+    private var accountRowValue: String? {
+        guard naraAuth.isAvailable else { return nil }
+        switch naraAuth.phase {
+        case .signedIn(let signedIn): return signedIn.email ?? String(localized: "Signed in")
+        case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode: return String(localized: "Sign in")
+        case .restoring: return nil
         }
     }
 

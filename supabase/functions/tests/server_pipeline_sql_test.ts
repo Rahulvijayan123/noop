@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash, createHmac } from 'node:crypto';
-import { createSupabaseRest } from '../_shared/rest.ts';
+import { createSupabaseRest, RestAuthorityError } from '../_shared/rest.ts';
 import { handleScoresRequest } from '../_shared/serverScores.ts';
 import { createPushArchive, createPushIngest } from '../_shared/ingest.ts';
 import { createPushWalStore } from '../_shared/wal.ts';
@@ -151,7 +151,7 @@ Deno.test({ name: 'real SQL -> enrolled Edge contract, qualification, isolation,
       ('${other}',encode(sha256(convert_to('noop_pipeline_b','UTF8')),'hex'),'installation','${secondSource}','bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'),
       (null,encode(sha256(convert_to('noop_pipeline_fleet','UTF8')),'hex'),'fleet',null,null);
   `);
-  const cfg = { supabaseUrl: restUrl!, supabaseAnonKey: 'isolated-test-public' };
+  const cfg = { supabaseUrl: restUrl!, supabaseAnonKey: 'isolated-test-public', allowLegacyEnrollment: true };
   async function request(device: string, who = 'a', route = '/', body?: unknown) {
     return await handleScoresRequest(new Request(`http://localhost/functions/v1/scores${route}?day=${day}&deviceId=${device}`, {
       method: body === undefined ? 'GET' : 'POST', headers: { authorization: `Bearer noop_pipeline_${who}`,
@@ -343,7 +343,7 @@ Deno.test({ name: 'real SQL -> enrolled Edge contract, qualification, isolation,
           const header={type:'batch',protocolVersion:'1.1',stream,deviceId:identity.externalDeviceId,sourceId:identity.sourceId,
             batchId:batch,endCursor:{ts:inputStart+offset+records.length-1},delivery:'append',recordCount:records.length};
           const decodedBody=new TextEncoder().encode([header,...records].map(value=>JSON.stringify(value)).join('\n')+'\n');
-          const upload=await resolveUploadIdentity({rest,headers:new Headers({
+          const upload=await resolveUploadIdentity({rest,allowLegacyEnrollment:true,headers:new Headers({
             authorization:`Bearer noop_pipeline_${identity.userId===owner?'a':'b'}`,'x-noop-fleet-token':'noop_pipeline_fleet'})});
           assert.equal(upload.id,identity.userId);assert.equal(upload.sourceId,identity.sourceId);
           assert.equal(await rest.rpc('admit_noop_request',{p_user:upload.id,p_source:upload.sourceId}),true);
@@ -679,8 +679,9 @@ Deno.test({ name: 'real SQL -> enrolled Edge contract, qualification, isolation,
   const accountRest = createSupabaseRest({cfg:{supabaseUrl:restUrl!,supabaseServiceRoleKey:accountToken},
     fetchImpl:(input,init)=>fetch(String(input).replace('/rest/v1/','/'),init)});
   assert.deepEqual(await accountRest.rpc('server_scoring_for_day',{p_user:owner,p_day:day}),sqlApproved);
-  await assert.rejects(()=>accountRest.rpc('server_scoring_for_day',{p_user:other,p_day:day}),/403/);
-  await assert.rejects(()=>rest.rpc('server_scoring_for_device_day',{p_user:owner,p_device:identities[2].deviceId,p_day:day}),/403/);
+  const forbidden=(error:unknown)=>error instanceof RestAuthorityError && error.status===403;
+  await assert.rejects(()=>accountRest.rpc('server_scoring_for_day',{p_user:other,p_day:day}),forbidden);
+  await assert.rejects(()=>rest.rpc('server_scoring_for_device_day',{p_user:owner,p_device:identities[2].deviceId,p_day:day}),forbidden);
   await sql(`delete from physiology_source_selection where user_id='${owner}';`);
   await sql("update physiology_feature_defaults set algorithm_version='frwhoop-server-1' where feature<>'sleep';");
   await publish(false,[]);

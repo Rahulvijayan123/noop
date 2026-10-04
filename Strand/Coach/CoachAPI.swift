@@ -195,22 +195,19 @@ struct CoachSSEParser {
 // MARK: - Client
 
 /// Client for the `coach` edge function: model relay, memory, and conversation history. Authenticates
-/// exactly like the score reads do, with the installation token as bearer plus the fleet token header.
+/// exactly like the score reads do, with the signed-in account's installation token as the bearer.
 final class CoachAPI: @unchecked Sendable {
     static let shared = CoachAPI()
 
     private let session: URLSession
     private let endpoint: @Sendable () -> URL?
-    private let fleetToken: @Sendable () -> String
     private let identity: @Sendable () -> CloudPushIdentity?
 
     init(session: URLSession = .shared,
          endpoint: @escaping @Sendable () -> URL? = { CoachAPI.derivedEndpoint() },
-         fleetToken: @escaping @Sendable () -> String = { CloudPushSettings.fleetToken },
          identity: @escaping @Sendable () -> CloudPushIdentity? = { CloudPushIdentityStore.current() }) {
         self.session = session
         self.endpoint = endpoint
-        self.fleetToken = fleetToken
         self.identity = identity
     }
 
@@ -226,7 +223,7 @@ final class CoachAPI: @unchecked Sendable {
         return components.url
     }
 
-    var isAvailable: Bool { endpoint() != nil && !fleetToken().isEmpty && identity() != nil }
+    var isAvailable: Bool { endpoint() != nil && identity() != nil }
 
     static func error(forStatus status: Int, body: Data) -> CoachAPIError {
         let code = (try? JSONSerialization.jsonObject(with: body) as? [String: Any])?["error"] as? String
@@ -240,15 +237,13 @@ final class CoachAPI: @unchecked Sendable {
 
     private func request(_ path: String, method: String = "GET", query: [URLQueryItem] = [],
                          body: Any? = nil, timeout: TimeInterval = 30) throws -> URLRequest {
-        let fleet = fleetToken()
-        guard let base = endpoint(), !fleet.isEmpty, let id = identity() else { throw CoachAPIError.notConfigured }
+        guard let base = endpoint(), let id = identity() else { throw CoachAPIError.notConfigured }
         var components = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)
         if !query.isEmpty { components?.queryItems = query }
         guard let url = components?.url else { throw CoachAPIError.notConfigured }
         var req = URLRequest(url: url, timeoutInterval: timeout)
         req.httpMethod = method
-        req.setValue("Bearer \(id.uploadToken)", forHTTPHeaderField: "Authorization")
-        req.setValue(fleet, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(id, to: &req)
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try JSONSerialization.data(withJSONObject: body)

@@ -28,7 +28,13 @@ final class ProfileCloudSync {
 
     init(profile: ProfileStore,
          debounce: TimeInterval = 2,
-         isAvailable: @escaping () -> Bool = { CloudPushSettings.isEnabled && CoachAPI.shared.isAvailable },
+         isAvailable: @escaping () -> Bool = {
+             // The profile on this phone is one device-wide record. Only the account that owns the phone's
+             // on-device data may exchange it with the cloud; another account signing in on the same phone
+             // must neither upload it as its own nor have it replaced by its own.
+             CloudPushSettings.isEnabled && CoachAPI.shared.isAvailable
+                 && CloudLocalDataBinding.signedInAccountOwnsLocalData()
+         },
          fetch: @escaping () async throws -> CloudProfile? = { try await CoachAPI.shared.profile() },
          save: @escaping (CloudProfile) async throws -> Void = { try await CoachAPI.shared.saveProfile($0) }) {
         self.profile = profile
@@ -54,7 +60,7 @@ final class ProfileCloudSync {
                 profile.applyCloud(remote)
             }
         } catch {
-            // Offline or not enrolled yet: local values stay authoritative and dirty edits stay queued.
+            // Offline or not signed in yet: local values stay authoritative and dirty edits stay queued.
         }
     }
 

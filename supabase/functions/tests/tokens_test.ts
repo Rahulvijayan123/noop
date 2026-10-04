@@ -52,18 +52,21 @@ async function insertToken(rest: ReturnType<typeof makeMemRest>, {
   userId = USER,
   sourceId = null,
   expiresAt = null,
+  provisioning = kind === 'installation' ? 'enrollment_code' : null,
 }: {
   token: string;
   kind: 'legacy_upload' | 'fleet' | 'installation';
   userId?: string | null;
   sourceId?: string | null;
   expiresAt?: string | null;
+  provisioning?: 'enrollment_code' | 'supabase_auth' | null;
 }) {
   const [row] = await rest.upsert('noop_ingest_tokens', {
     user_id: userId,
     source_id: sourceId,
     token_hash: hashIngestToken(token),
     token_kind: kind,
+    provisioning_method: provisioning,
     expires_at: expiresAt,
     revoked_at: null,
   }) as any[];
@@ -129,7 +132,7 @@ Deno.test('tokens: publicIngestTokenRow never exposes the hash', async () => {
   assertEquals(pub?.id, 'x');
 });
 
-Deno.test('tokens: an installation upload requires a second valid fleet credential', async () => {
+Deno.test('tokens: a legacy enrollment-code installation upload requires a second valid fleet credential', async () => {
   const rest = makeMemRest();
   const installation = 'noop_installation-test-token';
   const fleet = 'noop_fleet-test-token';
@@ -152,6 +155,7 @@ Deno.test('tokens: an installation upload requires a second valid fleet credenti
       'x-noop-fleet-token': fleet,
     }),
     rest: rest as any,
+    allowLegacyEnrollment: true,
   });
   assertEquals(identity.id, USER);
   assertEquals(identity.sourceId, SOURCE);
@@ -163,11 +167,20 @@ Deno.test('tokens: an installation upload requires a second valid fleet credenti
     await resolveUploadIdentity({
       headers: new Headers({ authorization: `Bearer ${installation}` }),
       rest: rest as any,
+      allowLegacyEnrollment: true,
     });
   } catch (err) {
     denied = err instanceof IdentityError && err.status === 401;
   }
   assert(denied, 'installation bearer without fleet authorization must fail closed');
+
+  // The compatibility path is closed unless the operator opts in, fleet credential or not.
+  const closed = await assertRejects(() => resolveUploadIdentity({
+    headers: new Headers({ authorization: `Bearer ${installation}`, 'x-noop-fleet-token': fleet }),
+    rest: rest as any,
+  }), IdentityError);
+  assertEquals(closed.status, 401);
+  assertEquals(closed.code, 'legacy_enrollment_disabled');
 });
 
 Deno.test('tokens: legacy bearer-only upload is disabled by default and explicitly marked when enabled', async () => {
@@ -241,6 +254,7 @@ Deno.test('tokens: expired installation credentials fail before fleet authorizat
         'x-noop-fleet-token': fleet,
       }),
       rest: rest as any,
+      allowLegacyEnrollment: true,
     });
   } catch (err) {
     denied = err instanceof IdentityError && err.status === 401;
