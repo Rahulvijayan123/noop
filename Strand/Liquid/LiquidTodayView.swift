@@ -1,15 +1,13 @@
 //  LiquidTodayView.swift
 //  NOOP · Liquid design language — the Today screen, rebuilt in the liquid finish.
 //
-//  This is the FULL Today, re-created faithfully from the locked mockup
-//  (scratchpad/liquid-metal-home.html): sky title + record/add/battery controls,
-//  the three scores as liquid vessels with a card-level source badge, the live heart-rate
-//  thread, the five "your cards" as liquid chips, a greeting + readiness pills,
-//  Synthesis, Recovery Vitals, a Key Metrics grid (incl. steps), Last Workouts
-//  and Data Sources. Every value binds to the SAME real data the classic
-//  TodayView reads (accessors verified against TodayView.swift), and every tap
-//  routes to the same public destination. The sky is a fixed, full-bleed
-//  background (edge-to-edge under the status bar, does not scroll).
+//  The Today screen, re-created from the locked mockup (scratchpad/liquid-metal-home.html): sky
+//  title + settings control, the three scores as liquid vessels, the Start-session entry, Last
+//  Workouts, the live heart-rate thread and Data Sources. Key Metrics, Recovery Vitals and Your Cards
+//  were retired to keep Home to what is read at a glance; their data stays available from Health,
+//  Trends and the metric detail screens. Every value binds to the SAME real data the classic
+//  TodayView reads, and every tap routes to the same public destination. The sky is a fixed,
+//  full-bleed background (edge-to-edge under the status bar, does not scroll).
 
 import SwiftUI
 import StrandDesign
@@ -34,38 +32,11 @@ struct LiquidTodayView: View {
     @ObservedObject private var motion = NoopMotionState.shared
     private var poseStill: Bool { motion.poseStill(reduceMotion) }
 
-    /// Shared with the real Today's card-customise editor so the two stay in sync.
-    @AppStorage(DashboardCardPrefs.selectionKey) private var dashboardCardsRaw = ""
     /// #today-hosted-cards: the ordered Trends/Sleep cards the user has hosted in Today. Empty by default
     /// (opt-in); rendered by the `.addedCards` section. Shared @AppStorage key with Android.
     @AppStorage(HostedCardPrefs.selectionKey) private var hostedCardsRaw = ""
-    /// #989 parity with classic Today + Android: the hydration card is opt-in twice over — the feature
-    /// toggle AND an explicit add in CUSTOMISE. Liquid filtered on neither, so a user who added the card
-    /// and later switched the feature off kept a permanently-blank row.
-    /// The Coach master switch (`noop.coachEnabled`, shared by name with Android). Default ON. Gates the
-    /// Today launcher card here; the tab and the daily brief read the same key.
-    @AppStorage("noop.coachEnabled") private var coachEnabled = true
-    @AppStorage(HydrationStore.enabledKey) private var hydrationEnabled = false
-    /// Today's hydration total + goal (ml), resolved in `load()`. nil → the card shows "—".
-    @State private var hydrationTotalML: Double?
-    @State private var hydrationGoalML: Int?
-
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
-    @State private var stress: Double?             // StressModel(...).score, 0–3
-    @State private var fitnessAge: Double?         // exploreSeries("fitness_age").last
-    @State private var vo2max: Double?             // exploreSeries("vo2max_est").last (#1391)
-    @State private var vitality: Double?           // exploreSeries("vitality").last
-    // Queue 11a: day-keyed "spo2_candidate" metricSeries (WHOOP `spo2_candidate_82` or Oura
-    // ceiling@100 `0x6F`, device-conditional — see `IntelligenceEngine`). Empty when the
-    // experimental toggle is OFF (the engine writes nothing) or the owner has no in-band reading.
-    // Read unconditionally like the classic TodayView's `spo2CandidateSpark` — always empty when
-    // the toggle is off, so no separate gate is needed at fetch time.
-    @State private var spo2CandidateByDay: [String: Double] = [:]
-    @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
-    @State private var importedStepsDay: Int?      // Apple Health steps for the selected day (middle tier)
-    @State private var importedActiveKcalDay: Double?  // #616: Apple Health active energy for the day (calorie fallback)
-    @State private var weightKg: Double?           // #204: Apple Health weight ?: profile fallback
     @State private var hrValues: [Double] = []     // hrBuckets since midnight → 5-min means
     /// Line identity for [hrValues], from the bucket timestamps this used to discard (#2082).
     ///
@@ -91,8 +62,6 @@ struct LiquidTodayView: View {
     // sheets / expanders
     @State private var guideSection: ScoreSection?
     @State private var customizationDestination: TodayCustomizationDestination?
-    /// #1862: the optional Coach launcher sheet. Presentation state only — opening it requests nothing.
-    @State private var showCoachLauncher = false
     @State private var showSettings = false
     @State private var synthesisExpanded = false
     @State private var showLiveSession = false
@@ -108,17 +77,6 @@ struct LiquidTodayView: View {
     private var sectionOrder: [TodaySection] {
         TodayLayoutPrefs.visibleOrder(orderRaw: sectionOrderRaw, hiddenRaw: hiddenSectionsRaw)
     }
-    // #430 parity: the Key-Metrics grid honours the SAME editor selection/order + Detailed-tiles switch as
-    // Android (byte-identical @AppStorage keys). `kSparks` holds the trailing-30-day series the detailed
-    // tiles graph (keyed by metric-catalog key), filled by the loader alongside everything else.
-    @AppStorage(KeyMetricPrefs.layoutKey) private var keyMetricsRaw = ""
-    @AppStorage("today.keyMetricsDetailed") private var keyMetricsDetailed = false
-    /// The detailed graphs' trailing window — 1 week / 2 weeks / 1 month (shared key with Android). The
-    /// loader banks a day-keyed 30-day superset; render filters down, so a window change applies instantly.
-    @AppStorage("today.keyMetricsWindowDays") private var keyMetricsWindowDays = 14
-    @State private var kSparks: [String: [(String, Double)]] = [:]
-    private var enabledKeyMetrics: [KeyMetric] { KeyMetricPrefs.decodeEnabled(keyMetricsRaw) }
-
     /// #1001: TODAY's in-progress Effort, scored live in `load()` over the same window this view already
     /// resolves for its other reads. nil for a navigated past day, and nil when the scorer has too few
     /// readings — every Effort read-out then falls back to the stored row rather than a fabricated value.
@@ -137,15 +95,11 @@ struct LiquidTodayView: View {
     // Resolve both ONCE per data/day change in load() and read the cache in body (O(1)).
     @State private var cachedDisplayDay: DailyMetric?
     @State private var cachedReadiness: ReadinessEngine.Readiness?
-    /// The recovery-INDEPENDENT prior-day vitals carry (HRV / RHR / respiratory), resolved ONCE in load()
-    /// alongside cachedDisplayDay. Fixes the v8 rollover blank: after 04:00, before tonight's sleep scores,
-    /// today's row has no vitals yet, so these fall back to the last night that recorded them. Never
-    /// resolved in body — body rescans repo.days ~23× per pass, and this cache keeps that read O(1).
-    @State private var cachedVitalsDay: DailyMetric?
-    @State private var cachedRespDay: DailyMetric?
-    @State private var cachedHrvDay: DailyMetric?
+    /// The recovery-INDEPENDENT prior-day resting-HR carry, resolved ONCE in load() alongside
+    /// cachedDisplayDay. Fixes the v8 rollover blank: after 04:00, before tonight's sleep scores, today's
+    /// row has no resting HR yet, so this falls back to the last night that recorded it. Never resolved in
+    /// body — body rescans repo.days ~23× per pass, and this cache keeps that read O(1).
     @State private var cachedRestingHrDay: DailyMetric?
-    @State private var cachedSkinTempReadingDay: DailyMetric?
     /// The Charge hero's resolved state (#543 carry + the honest label), resolved ONCE in load() alongside
     /// the other caches. It composes `TodayView.lastScoredRecoveryDay`, which is O(days) — exactly the scan
     /// this cache exists to keep out of body. Never resolved in body.
@@ -167,8 +121,6 @@ struct LiquidTodayView: View {
     /// with the design-system default so the first frame is not laid out against a reserve of zero.
     @State private var headerControlsWidth = NoopMetrics.headerControlReserveWidth
 
-    /// Mock Vitality purple (#9b7bff) has no exact StrandPalette token in this theme.
-    private let liquidPurple = Color(.sRGB, red: 0x9b / 255, green: 0x7b / 255, blue: 0xff / 255, opacity: 1)
     /// The liquid heart pink shared with the sync indicator and LiquidThread.
     private let liquidHeart = StrandPalette.liquidHeart
     /// Hero / session-start chrome uses theme-aware `NoopPanelSurface` (design-system surfaces that
@@ -205,31 +157,11 @@ struct LiquidTodayView: View {
     /// The DailyMetric shown for the selected day — read from the cache resolved in load() (was an
     /// O(days) `.last(where:)` scan referenced ~23× per body pass; now O(1)).
     private var displayDay: DailyMetric? { cachedDisplayDay }
-    /// The prior-day vitals carry (see `cachedVitalsDay`), read O(1) from the cache. Non-nil only at
-    /// offset 0 (today); a navigated past day carries nothing (its own row is the whole story).
-    private var vitalsDay: DailyMetric? { cachedVitalsDay }
-    /// The prior-day RESPIRATORY carry (#1331): staleness-bounded, so a recent missed night reads the last
-    /// real value while a weeks-old one honestly shows "No Data". Non-nil only at offset 0.
-    private var respDay: DailyMetric? { cachedRespDay }
-
-    /// PER-FIELD HRV / resting-HR carries (#1842), read O(1) from the cache like `vitalsDay`. `vitalsDay`'s
-    /// predicate is an OR across HRV / resting-HR / respiratory, so it resolves the freshest row with ANY of
-    /// them — a respiratory-only row blanks HRV and Resting HR on both the vitals card and the Key Metrics
-    /// tiles. Twins of `DailyMetric.lastHrvDay` / `lastRestingHrDay`; mirror the Android per-field rows.
-    private var hrvDay: DailyMetric? { cachedHrvDay }
-
+    /// The prior-day resting-HR carry (#1842), read O(1) from the cache. Non-nil only at offset 0 (today);
+    /// a navigated past day carries nothing (its own row is the whole story). Twin of
+    /// `DailyMetric.lastRestingHrDay`.
     private var restingHrDay: DailyMetric? { cachedRestingHrDay }
 
-    /// The skin-temp reading these cards LEAD with (#1844): today's row if it holds either number, else the
-    /// vitals carry, else the freshest prior row with either. Both numbers come off the SAME row, so an
-    /// absolute is never paired with another night's deviation. Twin of `TodayView.skinTempLeadReading`.
-    private var skinTempLeadReading: SkinTempDisplay.Reading? {
-        let row = [displayDay, vitalsDay, cachedSkinTempReadingDay]
-            .compactMap { $0 }
-            .first { $0.skinTempC != nil || $0.skinTempDevC != nil }
-        return SkinTempDisplay.leadReading(absC: row?.skinTempC, devC: row?.skinTempDevC,
-                                           prefer: SkinTempDisplay.Kind(rawValue: skinTempDisplayRaw) ?? .absolute)
-    }
     /// The Charge hero's resolved state (see `cachedChargeDisplay`), read O(1) from the cache.
     private var chargeDisplay: ChargeDisplay { cachedChargeDisplay }
 
@@ -357,11 +289,8 @@ struct LiquidTodayView: View {
                         case .hero: heroCard
                         case .liveSession: if liveSessionsBeta { liveSessionStartRow }
                         case .synthesis: EmptyView()
-                        case .keyMetrics: keyMetricsSection
                         case .workouts: lastWorkoutsSection
                         case .heartRate: heartRateSection
-                        case .recoveryVitals: recoveryVitalsSection
-                        case .yourCards: yourCardsSection
                         case .menstrualCycle:
                             if selectedDayOffset == 0 { MenstrualCycleHomeCard() }
                         // #656: the persistent journal widget (last-7-days strip + tap-through). Now a
@@ -384,6 +313,7 @@ struct LiquidTodayView: View {
                     // so it renders nothing by default.
                     AutoWorkoutCard()
                     dataSourcesSection
+                    customizeTodayRow
                     Color.clear.frame(height: 90) // floating tab-bar clearance
                 }
                 .padding(.horizontal, NoopMetrics.screenHPadding)
@@ -448,14 +378,11 @@ struct LiquidTodayView: View {
         .liquidSelectionHaptic(trigger: selectedDayOffset)
         // A firm tick when the pull passes the release threshold (the custom liquid refresh).
         .liquidMediumHaptic(trigger: pullHaptic)
-        // hydrationSeq joins the id so logging a drink re-reads the card immediately, the same trigger set
-        // classic TodayView's reloadHydration() uses.
         // G1 (findings/g1-day-ui.md T01; audit-g1-day F1b): the day-rollover + zone-context sequences
         // join the reload key so the liquid Today re-keys to the new local-midnight day within ~1s even
         // at an unchanged refreshSeq (no data refresh, sensor reading, network, or DB revision), and
         // re-keys day-scoped bounds on a same-day timezone change.
-        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.dayRolloverSeq)-\(repo.zoneContextSeq)-\(repo.hydrationSeq)-\(hydrationEnabled)-\(dayCycleModeRaw)") {
-            DashboardCardPrefs.migrateLegacyStepsAverage()
+        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.dayRolloverSeq)-\(repo.zoneContextSeq)-\(dayCycleModeRaw)") {
             await load()
         }
         // G1 (T03): clamp a persisted past-day selection into the current navigable range on appear so a
@@ -472,15 +399,8 @@ struct LiquidTodayView: View {
                 initialDestination: destination,
                 sectionOrderRaw: $sectionOrderRaw,
                 hiddenSectionsRaw: $hiddenSectionsRaw,
-                keyMetricsRaw: $keyMetricsRaw,
-                keyMetricsDetailed: $keyMetricsDetailed,
-                keyMetricsWindowDays: $keyMetricsWindowDays,
-                dashboardCardsRaw: $dashboardCardsRaw,
                 hostedCardsRaw: $hostedCardsRaw
             )
-        }
-        .sheet(isPresented: $showCoachLauncher) {
-            CoachLauncherSheet()
         }
         .sheet(isPresented: $showSettings) {
             NavigationStack {
@@ -736,40 +656,6 @@ struct LiquidTodayView: View {
         }
     }
 
-    // MARK: - Your cards
-
-    private var yourCardsSection: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text("Your cards").font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Spacer()
-                Button { customizationDestination = .yourCards } label: {
-                    // #492 item 4 parity: unify the Your Cards / Key Metrics edit affordance to "EDIT" across
-                    // platforms (Android #563). Reuse the localized "Edit" key, uppercased at display, so this
-                    // stays translated (BEARBEITEN / MODIFIER / …) without a new literal.
-                    Text(String(localized: "Edit")).font(StrandFont.overlineScaled(11))
-                        .foregroundStyle(StrandPalette.accent)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 2)
-            .padding(.top, 4)
-
-            // Data-driven off the SAME @AppStorage the CUSTOMISE editor writes, so add / remove /
-            // reorder in Customise reflects on the home screen live. The hydration filter mirrors classic
-            // TodayView's `enabledDashboardCards` and Android's `it != HYDRATION || hydrationEnabled`.
-            ForEach(DashboardCardPrefs.decodeEnabled(dashboardCardsRaw)
-                        .filter { hydrationEnabled || $0 != .hydration }
-                        // Coach off means the AI is off, so the launcher card goes with the tab: leaving it
-                        // on Today would offer a feature the wearer has just switched off. Same gate shape
-                        // as hydration, so a card they had added keeps its place and returns on re-enable.
-                        .filter { coachEnabled || $0 != .coach }) { card in
-                liquidCard(for: card)
-            }
-        }
-    }
-
     // MARK: - Added cards (#today-hosted-cards)
 
     /// The Trends/Sleep cards the user hosted in Today, in their arranged order. Data-driven off the SAME
@@ -955,172 +841,6 @@ struct LiquidTodayView: View {
         }
     }
 
-    /// One "Your cards" row for a given card type — honours the user's CUSTOMISE selection + order.
-    /// Wired cards show real values; the rest render "–" for now (they still appear, so add/remove/
-    /// reorder is reflected). stress → Stress screen, sleep → Sleep, everything else → Health.
-    @ViewBuilder
-    private func liquidCard(for card: DashboardCard) -> some View {
-        switch card {
-        case .stepsAverage30:
-            RollingStepsAverageCard(day: selectedDayKey)
-        case .stress:
-            cardLink(.stress, title: card.title, sub: card.subtitle,
-                     value: stressText, tint: StrandPalette.accent, frac: fracOver(stress, 3))
-        case .fitnessAge:
-            cardLink(.metric("fitness_age"), title: card.title, sub: card.subtitle,
-                     // Bound symbol as on the Health hero (#2173), so a floored reading does not read
-                     // exact here and bounded there.
-                     value: fitnessAge.map { "\(fitnessAgeBoundSymbol($0))" + unitText($0, card.unit) }
-                         ?? unitText(fitnessAge, card.unit),
-                     tint: StrandPalette.chargeColor, frac: 0.5)
-        case .vo2max:
-            cardLink(.metric("vo2max_est"), title: card.title, sub: card.subtitle,
-                     value: unitText(vo2max, card.unit), tint: StrandPalette.chargeColor, frac: 0.5)
-        case .vitality:
-            cardLink(.metric("vitality"), title: card.title, sub: card.subtitle,
-                     value: intText(vitality), tint: liquidPurple, frac: frac(vitality))
-        case .hrv:
-            cardLink(.metric("hrv"), title: card.title, sub: card.subtitle,
-                     value: unitText(displayDay?.avgHrv, card.unit), tint: StrandPalette.metricCyan,
-                     frac: fracOver(displayDay?.avgHrv, 120))
-        case .restingHr:
-            cardLink(.metric("rhr"), title: card.title, sub: card.subtitle,
-                     value: unitText(displayDay?.restingHr.map(Double.init), card.unit),
-                     tint: StrandPalette.metricRose, frac: fracOver(displayDay?.restingHr.map(Double.init), 100))
-        case .respiratory:
-            cardLink(.metric("resp_rate"), title: card.title, sub: card.subtitle,
-                     value: unitText(displayDay?.respRateBpm, card.unit, decimals: 1),
-                     tint: StrandPalette.accent, frac: fracOver(displayDay?.respRateBpm, 24))
-        case .steps:
-            // Route by the EXACT (key, source) the tile chose to display — measured my-whoop, imported
-            // apple-health, or the my-whoop estimate — NOT by bare key (bare "steps" resolves to
-            // apple-health and would mismatch a WHOOP-measured value). Order-independent.
-            cardLink(.metricSourced(key: stepsDetailKey, source: stepsDetailSource), title: card.title, sub: card.subtitle,
-                     value: stepsText, tint: StrandPalette.metricCyan, frac: fracOver(stepCount, 10000))
-        case .bloodOxygen:
-            // #1627: these two were the last cards still on the "not wired yet" placeholder, so on iOS 26 —
-            // where Liquid Today is the DEFAULT Today screen — Blood Oxygen and Skin Temp read "–" for
-            // everyone while every other card on the same screen showed a real number off the same
-            // `displayDay`. Reported with a clean A/B: turning Liquid Today off restored both immediately.
-            //
-            // The VALUE resolution is copied from the Key Metrics tile below rather than reinvented —
-            // candidate fallback and experimental gating included — so the card and the tile cannot
-            // disagree about the same day's number. The tile's key/route handling is deliberately NOT
-            // copied; see below for why the two are not interchangeable.
-            let spo2Real = displayDay?.spo2Pct ?? vitalsDay?.spo2Pct
-            let spo2CandidateOn = PuffinExperiment.spo2CandidateDisplayEnabled
-            let spo2Candidate = spo2Real == nil && spo2CandidateOn
-                ? spo2CandidateByDay[cachedDisplayDay?.day ?? selectedDayKey]
-                : nil
-            let spo2 = spo2Real ?? spo2Candidate
-            // ALWAYS routes to "spo2", never "spo2_candidate". The Key Metrics tile switches that string,
-            // but there it is a SPARKLINE SERIES key (ktile feeds it to windowedSpark; navigation goes
-            // through its separate detailMetric argument). Here the string is a NAVIGATION route resolved
-            // against MetricCatalog — which has no "spo2_candidate" entry — so switching it would drop the
-            // tap into the Health catch-all instead of the Blood Oxygen detail. Same literal, two different
-            // key spaces.
-            // The candidate MUST carry its label. Every other surface that shows it says "strap estimate
-            // (unverified)" — the Key Metrics tile below, VitalSignsSummary, the classic TodayView — and
-            // PuffinExperiment's own doc says the toggle surfaces it "in the Blood Oxygen tile/card,
-            // labelled". An unlabelled number here would read as a measured SpO2 on the one surface that
-            // is the DEFAULT Today screen on iOS 26. The subtitle is the slot this card has.
-            cardLink(.metric("spo2"),
-                     title: card.title,
-                     sub: spo2Candidate != nil ? String(localized: "strap estimate (unverified)") : card.subtitle,
-                     // Em dash, not the en dash the stub used: the classic Blood Oxygen card and
-                     // skinTempCardValue both return "—", so the stub's "–" would have left the two
-                     // adjacent cards printing different glyphs for the same "no reading" state.
-                     value: spo2.map { String(format: "%.0f%%", locale: AppLanguage.activeLocale, $0) } ?? "—",
-                     tint: StrandPalette.metricCyan, frac: fracOver(spo2, 100))
-        case .skinTemp:
-            // Skin temp has NO Key Metrics tile to mirror (KeyMetric has no skinTemp case), so this uses
-            // the classic card's extracted resolver instead — the same one TodayView calls, which is why
-            // it is a static: the formatting decision is testable without a live view.
-            //
-            // frac stays nil deliberately. A signed deviation has no natural 0–100 fill, and a ring drawn
-            // from one would imply a magnitude the number does not carry.
-            // #1844: lead with the night's measured ABSOLUTE when it has one; deviation nights unchanged.
-            let skin = skinTempLeadReading
-            cardLink(.metric("skin_temp"), title: card.title, sub: card.subtitle,
-                     value: TodayView.skinTempCardValue(reading: skin, fahrenheit: temperatureUnit == .fahrenheit),
-                     tint: StrandPalette.metricAmber, frac: nil)
-        case .calories:
-            // #616: show the resolved imported-first value and route to the matching detail source, like
-            // the Steps card — was a "–" placeholder wired to the imported-only detail.
-            cardLink(.metricSourced(key: caloriesDetailKey, source: caloriesDetailSource), title: card.title, sub: card.subtitle,
-                     value: intText(caloriesCount), tint: StrandPalette.metricAmber, frac: fracOver(caloriesCount, 800))
-        case .sleep:
-            cardLink(.sleep, title: card.title, sub: card.subtitle,
-                     value: sleepText, tint: StrandPalette.restColor, frac: fracOver(displayDay?.totalSleepMin, 480))
-        case .hydration:
-            // #989: was hardcoded "–". `HydrationGoal.cardValueString` is unit-tested and byte-identical to
-            // the Android twin, but classic TodayView was its only caller — so on the DEFAULT screen a
-            // logged drink never appeared. Same "<total> / <goal> L" string and the same goal fraction on
-            // the ring as classic; "—" only when the goal is genuinely underivable.
-            cardLink(.hydration, title: card.title, sub: card.subtitle,
-                     value: hydrationGoalML.map {
-                         HydrationGoal.cardValueString(totalML: hydrationTotalML ?? 0, goalML: $0)
-                     } ?? "—",
-                     tint: StrandPalette.metricCyan,
-                     frac: hydrationGoalML.map {
-                         HydrationGoal.fraction(totalML: hydrationTotalML ?? 0, goalML: $0)
-                     })
-        case .coupled:
-            // A tap-through to the full Coupled day screen. No value.
-            cardLink(.coupled, title: card.title, sub: card.subtitle,
-                     value: "", tint: StrandPalette.chargeColor, frac: 0.6)
-        case .coach:
-            // #1862: a sheet rather than a push — the point of the card is to try Coach WITHOUT
-            // leaving Today.
-            cardAction(title: card.title, sub: card.subtitle, value: "",
-                       tint: StrandPalette.accent, frac: 0.5) { showCoachLauncher = true }
-        }
-    }
-
-    /// One card row pushing its `TabRoute` by value — the first hop off the Today root must ride
-    /// the tab's `NavigationPath` so a re-tap of the Today tab can pop it (#198; see TabRoute.swift).
-    private func cardLink(_ route: TabRoute, title: String, sub: String,
-                          value: String, tint: Color, frac: Double?) -> some View {
-        NavigationLink(value: route) {
-            cardLinkBody(title: title, sub: sub, value: value, tint: tint, frac: frac)
-        }
-        .buttonStyle(LiquidPressStyle())
-    }
-
-    /// The same row, running `action` instead of pushing (#1862). Coach is the one dashboard card that
-    /// opens a SHEET, so it cannot ride `NavigationLink`; sharing `cardLinkBody` keeps the two kinds of
-    /// row from drifting apart visually.
-    private func cardAction(title: String, sub: String, value: String, tint: Color, frac: Double?,
-                            action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            cardLinkBody(title: title, sub: sub, value: value, tint: tint, frac: frac)
-        }
-        .buttonStyle(LiquidPressStyle())
-    }
-
-    @ViewBuilder
-    private func cardLinkBody(title: String, sub: String, value: String,
-                              tint: Color, frac: Double?) -> some View {
-        HStack(spacing: 12) {
-                // tapPassesThrough: the vessel's splash gesture would otherwise swallow the enclosing
-                // Button's tap, leaving a dead 30pt disc on the leading edge of a tappable card row.
-                LiquidVessel(value: frac, tint: tint, animated: false, tapPassesThrough: true)
-                    .frame(width: 30, height: 30)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(title).font(StrandFont.overlineScaled(11))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text(sub).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                }
-                Spacer(minLength: 8)
-                Text(value).font(StrandFont.number(17)).foregroundStyle(StrandPalette.textPrimary)
-                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-        .background(NoopPanelSurface(tint: tint, cornerRadius: 20, surfaceOpacity: cardOpacity))
-    }
-
     // MARK: - Synthesis (greeting + readiness pills + one-liner)
 
     /// Liquid parity with classic `effortZeroNote`: the "no cardio load yet" line shown in the synthesis
@@ -1217,292 +937,6 @@ struct LiquidTodayView: View {
         }
     }
 
-    // MARK: - Recovery vitals
-
-    private var recoveryVitalsSection: some View {
-        // PER-FIELD, today-first carry: each vital reads today's own value, else falls back to the prior
-        // day that recorded THAT vital (#1842 — `vitalsDay` is the freshest row with ANY of the three, so it
-        // blanks one the row lacks). Coalesce ONCE so the number and its fill fraction agree.
-        let hrv = displayDay?.avgHrv ?? hrvDay?.avgHrv
-        let rhr = (displayDay?.restingHr ?? restingHrDay?.restingHr).map(Double.init)
-        let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm
-        return card {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("Recovery vitals").font(StrandFont.overline)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    Spacer()
-                    if let line = vitalsProvenanceLine {
-                        Text(line).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
-                // #706/#684: the same trends the HRV / Resting HR / Respiratory dashboard cards push. These
-                // rows show the SAME three vitals and had no way through, so this card was the one place on
-                // Today where a metric was a dead end. Routes taken from `liquidCard`'s own cases so the two
-                // surfaces cannot send the same vital to different trends.
-                vitalRow(String(localized: "Heart-rate variability"), unitText(hrv, "ms"),
-                         StrandPalette.metricCyan, fracOver(hrv, 120), route: .metric("hrv"))
-                vitalRow(String(localized: "Resting heart rate"), unitText(rhr, "bpm"),
-                         StrandPalette.metricRose, fracOver(rhr, 100), route: .metric("rhr"))
-                vitalRow(String(localized: "Breaths per minute"), unitText(resp, "rpm", decimals: 1),
-                         StrandPalette.accent, fracOver(resp, 24), route: .metric("resp_rate"))
-            }
-        }
-    }
-
-    /// A recovery-vital row, optionally pushing its own metric trend.
-    ///
-    /// `route: nil` renders exactly what shipped before - no link, no chevron - so a row that goes nowhere
-    /// never claims otherwise. `LiquidPressStyle` is not decoration: a bare `NavigationLink` applies the
-    /// default link chrome and would tint the whole row, which is the same reason `cardLink` carries it.
-    private func vitalRow(_ label: String, _ value: String, _ tint: Color, _ frac: Double?,
-                          route: TabRoute? = nil) -> some View {
-        Group {
-            if let route {
-                NavigationLink(value: route) { vitalRowBody(label, value, tint, frac, linked: true) }
-                    .buttonStyle(LiquidPressStyle())
-            } else {
-                vitalRowBody(label, value, tint, frac, linked: false)
-            }
-        }
-    }
-
-    private func vitalRowBody(_ label: String, _ value: String, _ tint: Color, _ frac: Double?,
-                              linked: Bool) -> some View {
-        HStack(spacing: 12) {
-            // Same as cardLinkBody: without this the disc eats the row's NavigationLink tap.
-            LiquidVessel(value: frac, tint: tint, animated: false, tapPassesThrough: true)
-                .frame(width: 26, height: 26)
-            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-            Spacer()
-            Text(value).font(StrandFont.number(15)).foregroundStyle(StrandPalette.textPrimary)
-            if linked {
-                Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-        }
-    }
-
-    // MARK: - Key metrics grid
-
-    /// The chosen detailed-graph window's oldest day key (1 week / 2 weeks / 1 month ending on the
-    /// selected day). The loader banks a 30-day superset; render filters down so a window change in the
-    /// editor applies instantly, no reload.
-    private var sparkWindowCutoffKey: String {
-        let days = (keyMetricsWindowDays == 7 || keyMetricsWindowDays == 30) ? keyMetricsWindowDays : 14
-        let cal = Calendar.current
-        let anchor = cal.startOfDay(for: selectedLogicalDay)
-        return Repository.localDayKey(cal.date(byAdding: .day, value: -(days - 1), to: anchor) ?? anchor)
-    }
-
-    /// A metric's spark values inside the chosen window, oldest → newest.
-    private func windowedSpark(_ key: String) -> [Double] {
-        let cutoff = sparkWindowCutoffKey
-        return (kSparks[key] ?? []).filter { $0.0 >= cutoff }.map { $0.1 }
-    }
-
-    /// The Key-Metrics header's trailing label for the chosen detailed-graph window (Android twin).
-    private var trendWindowLabel: String {
-        switch keyMetricsWindowDays {
-        case 7: return String(localized: "7-day trend")
-        case 30: return String(localized: "30-day trend")
-        default: return String(localized: "14-day trend")
-        }
-    }
-
-    private var keyMetricsSection: some View {
-        // HRV / Rest HR (+ Blood Oxygen / Respiratory) tiles share the recovery vitals' per-field
-        // today-first carry so they don't blank at the rollover while Recovery/Strain/Rest stay strictly
-        // today's own (they are scored surfaces).
-        let hrv = displayDay?.avgHrv ?? hrvDay?.avgHrv
-        let rhr = (displayDay?.restingHr ?? restingHrDay?.restingHr).map(Double.init)
-        return VStack(spacing: 8) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                // The label names the window the DETAILED tiles graph, so it is only honest while they
-                // are drawn: with the trend graphs off (the default) nothing in this section renders a
-                // trend, and the header was still announcing one (#2376).
-                sectionHead("Key metrics", trailing: keyMetricsDetailed ? trendWindowLabel : nil)
-                // #430 parity: the SAME editor the classic grid uses — selection + order + Detailed tiles.
-                Button { customizationDestination = .keyMetrics } label: {
-                    Text(String(localized: "Edit"))
-                        .font(StrandFont.overlineScaled(11))
-                        .foregroundStyle(StrandPalette.accent)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Edit Key Metrics")
-            }
-            // #430 parity: the grid honours the Key-Metrics editor (selection + order, all ten metrics)
-            // instead of a hard-coded six — the bespoke Sleep-hours ktile gives way to the shared REST
-            // score tile, aligning the liquid grid with the classic macOS grid and Android.
-            LazyVGrid(
-                columns: Array(
-                    repeating: GridItem(.flexible(), spacing: NoopMetrics.gap),
-                    count: 2
-                ),
-                spacing: NoopMetrics.gap
-            ) {
-                ForEach(enabledKeyMetrics) { metric in
-                    ktileFor(metric, hrv: hrv, rhr: rhr)
-                }
-            }
-        }
-    }
-
-    /// One editor-selected Key-Metric tile: the metric's value/tint/fill exactly as the old hard-coded
-    /// tiles read them (Android's descriptor map is the twin), plus the metric-catalog `key` that names
-    /// both its 14-day spark series and its tap-through detail. Weight has no liquid value source yet —
-    /// its tile reads "—" but still taps through to the weight trend detail (which has its own series).
-    @ViewBuilder
-    private func ktileFor(_ metric: KeyMetric, hrv: Double?, rhr: Double?) -> some View {
-        switch metric {
-        case .charge:
-            // Reads the SAME resolved Charge the hero draws, not `displayDay?.recovery` raw — the tile and the
-            // hero are the same number, so a carry that reached only one of them would put two answers for
-            // Charge on one screen. (#543: one prior row feeds every recovery-derived read-out.) Strain below
-            // stays raw, matching the Effort hero, which correctly does not carry.
-            ktile(String(localized: "Recovery"), icon: keyMetricIcon(metric), intText(chargeDisplay.pct), "%", StrandPalette.chargeColor, frac(chargeDisplay.pct), key: HeroRingMetric.charge)
-        case .effort:
-            // #492: Effort is a load index (0–100 NOOP / 0–21 WHOOP), NOT a percentage, and the unit was
-            // wrong on either axis. Fixed on Android and in `TodayView` at the time; THIS view kept the old
-            // form, so the tile also ignored the scale toggle — the hero ring above it read ~8 on the WHOOP
-            // axis while this read 38. `effortText` is the same shared formatter the ring and the workout
-            // rows use, so all three now agree by construction.
-            ktile(String(localized: "Strain"), icon: keyMetricIcon(metric), effortText(effortStrain(displayDay)), "", StrandPalette.effortColor, frac(effortStrain(displayDay)), key: HeroRingMetric.effort)
-        case .rest:
-            ktile(String(localized: "Rest"), icon: keyMetricIcon(metric), intText(restScore), "%", StrandPalette.restColor, frac(restScore), key: HeroRingMetric.rest)
-        case .hrv:
-            ktile("HRV", icon: keyMetricIcon(metric), intText(hrv), "ms", StrandPalette.metricCyan, fracOver(hrv, 120), key: "hrv")
-        case .restingHr:
-            ktile(String(localized: "Rest HR"), icon: keyMetricIcon(metric), intText(rhr), "bpm", StrandPalette.metricRose, fracOver(rhr, 100), key: "rhr")
-        case .bloodOxygen:
-            // Queue 11a: the Liquid tile used to read `spo2Pct` only, with no candidate fallback at all
-            // (unlike the classic `TodayView`/`VitalSignsSummary`), so an Oura-only or BLE-only WHOOP
-            // 5/MG install with the experimental toggle ON still saw a bare "—" here. Falls back to the
-            // device-conditional "spo2_candidate" mean (WHOOP: `spo2_candidate_82`; Oura: ceiling@100
-            // `0x6F`, see `AnalyticsEngine.nightlySpo2CeilingMean`) only when `spo2Pct` is nil AND the
-            // toggle is ON — same gating as the classic tile, never as the default.
-            let spo2Real = displayDay?.spo2Pct ?? vitalsDay?.spo2Pct
-            let spo2CandidateOn = PuffinExperiment.spo2CandidateDisplayEnabled
-            let spo2CandidateValue = spo2Real == nil && spo2CandidateOn
-                ? spo2CandidateByDay[cachedDisplayDay?.day ?? selectedDayKey]
-                : nil
-            let spo2 = spo2Real ?? spo2CandidateValue
-            ktile(String(localized: "Blood Oxygen"), icon: keyMetricIcon(metric), intText(spo2), "%", StrandPalette.metricCyan, fracOver(spo2, 100), key: spo2CandidateValue != nil ? "spo2_candidate" : "spo2",
-                  caption: spo2CandidateValue != nil ? String(localized: "strap estimate (unverified)") : nil)
-        case .respiratory:
-            let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm ?? respDay?.respRateBpm
-            ktile(String(localized: "Respiratory"), icon: keyMetricIcon(metric), resp.map { String(format: "%.1f", locale: AppLanguage.activeLocale, $0) } ?? "—", "rpm", StrandPalette.accent, fracOver(resp, 24), key: "resp_rate")
-        case .steps:
-            ktile(String(localized: "Steps"), icon: keyMetricIcon(metric), stepsText, "", StrandPalette.chargeColor,
-                  fracOver(stepCount, 10000), key: stepsDetailKey, detailMetric: stepsDetailMetric)
-        case .weight:
-            let (val, cap) = weightTile(weightKg)
-            ktile(String(localized: "Weight"), icon: keyMetricIcon(metric), val, "", StrandPalette.metricAmber, nil, key: "weight", caption: cap)
-        case .calories:
-            // #616: imported-first value (imported ?: activeKcalEst) + route the tap to the matching
-            // detail source, so the number, its sparkline and the chart it opens all agree.
-            ktile(String(localized: "Calories"), icon: keyMetricIcon(metric), intText(caloriesCount), "kcal", StrandPalette.metricAmber,
-                  fracOver(caloriesCount, 800), key: "energy_kcal", detailMetric: caloriesDetailMetric)
-        case .skinTemp:
-            // Added 2026-08-24 (queue 11c follow-up): first Key Metrics appearance for Skin Temp — was
-            // already a "Your Cards" tile (`DashboardCard.skinTemp`), never a Key Metrics one. Same
-            // 2-level carry the Blood Oxygen case just above uses (displayDay → the cached vitals carry),
-            // and the SAME `SkinTempDisplay` formatter every other skin-temp surface uses so a deviation
-            // reads "+0.1 Δ°C" here exactly as it does on "Your Cards"/the Deep Timeline, never the plain
-            // `%+.1f°` that read a fabricated absolute value for a signed deviation (#622).
-            // #1844: same lead-with-the-absolute resolution as "Your Cards" above, so the two agree.
-            let skinText = TodayView.skinTempCardValue(reading: skinTempLeadReading,
-                                                       fahrenheit: temperatureUnit == .fahrenheit)
-            // The card's own unit is deliberately empty — the value carries "°C"/"Δ°F" itself, same as
-            // the classic TodayView Skin Temp card.
-            ktile(String(localized: "Skin Temp"), icon: keyMetricIcon(metric), skinText, "", StrandPalette.metricAmber, nil, key: "skin_temp")
-        }
-    }
-
-    private func keyMetricIcon(_ metric: KeyMetric) -> String {
-        switch metric {
-        case .charge: return "heart.fill"
-        case .effort: return "bolt.fill"
-        case .rest: return "moon.stars.fill"
-        case .hrv: return "waveform.path.ecg"
-        case .restingHr: return "heart.circle.fill"
-        case .bloodOxygen: return "drop.fill"
-        case .respiratory: return "lungs.fill"
-        case .steps: return "figure.walk"
-        case .weight: return "scalemass.fill"
-        case .calories: return "flame.fill"
-        case .skinTemp: return "thermometer.medium"
-        }
-    }
-
-    private func ktile(_ label: String, icon: String, _ value: String, _ unit: String, _ tint: Color, _ frac: Double?,
-                       key: String? = nil, detailMetric: MetricDescriptor? = nil, caption: String? = nil) -> some View {
-        let displayValue = Self.tileDisplayValue(value, unit: unit)
-        let tile = VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: icon)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(tint.opacity(0.72))
-                    .frame(width: 14)
-                Text(label)
-                    .font(StrandFont.overlineScaled(10))
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
-            }
-            Text(verbatim: displayValue)
-                .font(StrandFont.number(24))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-            // Optional sub-value caveat (queue 11a): only ever set for an unvalidated candidate fallback
-            // (e.g. the SpO₂ strap estimate), so every other `ktile` call site — no `caption` argument —
-            // renders byte-identical to before this parameter existed.
-            if let caption {
-                Text(caption)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
-            LiquidTube(frac: frac ?? 0, tint: tint, height: 9, animated: false,
-                       showsHighlight: false, usesCleanFill: true)
-            // #430 parity: DETAILED tiles grow the trend graph under the bar, tinted to the metric and
-            // windowed to the editor's 1-week / 2-week / 1-month choice (the Android twin). A metric with no
-            // windowed series keeps a clear placeholder of the same height so every tile in a detailed row
-            // stays equal-height with its bars aligned.
-            if keyMetricsDetailed {
-                let spark = key.map { windowedSpark($0) } ?? []
-                if spark.count >= 2 {
-                    Sparkline(values: spark,
-                              gradient: Gradient(colors: [tint.opacity(0.5), tint]))
-                        .frame(height: 22)
-                        .padding(.top, 6)
-                        .accessibilityHidden(true)
-                } else {
-                    Color.clear.frame(height: 22).padding(.top, 6)
-                }
-            }
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .frame(minHeight: keyMetricsDetailed ? 154 : 116, alignment: .topLeading)
-        .background(NoopPanelSurface(tint: tint, cornerRadius: 18, surfaceOpacity: cardOpacity))
-        // #430 parity: tap -> the metric's trend detail (the same Explore dossier its MetricRow pushes,
-        // closure-based NavigationLink per #38). A metric with no catalog entry stays inert.
-        return Group {
-            if let metric = detailMetric ?? key.flatMap({ key in
-                MetricCatalog.all.first(where: { $0.key == key })
-            }) {
-                NavigationLink { MetricDetailView(metric: metric) } label: { tile }
-                    .buttonStyle(.plain)
-            } else {
-                tile
-            }
-        }
-    }
-
     // MARK: - Last workouts
 
     private var lastWorkoutsSection: some View {
@@ -1555,11 +989,26 @@ struct LiquidTodayView: View {
         }
     }
 
+    // MARK: - Customize
+
+    /// The one way into the Arrange sheet now that the sections that carried an Edit button are gone.
+    /// Kept to a single quiet line so it does not read as another section.
+    private var customizeTodayRow: some View {
+        Button { customizationDestination = .today } label: {
+            Label(String(localized: "Customize Today"), systemImage: "slider.horizontal.3")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Reorder or hide the sections on Today")
+    }
+
     // MARK: - Reusable chrome
 
     /// `trailing` is optional so a section can omit it entirely rather than carry a caption for
-    /// something it is not drawing (the Key Metrics window label, when the trend graphs are off).
-    /// Matches the Android twin, whose `SectionHeader` already takes `trailing: String? = null`.
+    /// something it is not drawing. Matches the Android twin, whose `SectionHeader` already takes `trailing: String? = null`.
     private func sectionHead(_ title: String, trailing: String? = nil) -> some View {
         HStack(alignment: .firstTextBaseline) {
             Text(LocalizedStringKey(title)).font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
@@ -1582,28 +1031,15 @@ struct LiquidTodayView: View {
     // MARK: - Data
 
     private func load() async {
-        // #989: today's hydration total + goal. One metricSeries row + a UserDefaults read, same as classic
-        // TodayView.reloadHydration(). Cleared when the feature is off so the card can't show a stale total.
-        if hydrationEnabled {
-            hydrationTotalML = await repo.hydrationTotal(day: Repository.localDayKey(Date()))
-            hydrationGoalML = repo.hydrationGoalML(profileSex: profile.sex)
-        } else {
-            hydrationTotalML = nil
-            hydrationGoalML = nil
-        }
         // Resolve the O(days) lookups ONCE here (not on every body re-render): the selected day and the
         // readiness verdict. Both scan repo.days (up to 599 rows); doing it per-render was the stutter.
         let day = resolveDisplayDay()
         cachedDisplayDay = day
         cachedReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
-        // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
-        // echo today's still-forming row; only on today (a past day's own row is the whole story).
+        // Prior-day resting-HR carry, resolved ONCE here (never in body). Bound to today's own key so it
+        // can't echo today's still-forming row; only on today (a past day's own row is the whole story).
         let tkey = cachedDisplayDay?.day ?? selectedDayKey
-        cachedVitalsDay = (selectedDayOffset == 0) ? Repository.lastVitalsDay(days: repo.days, todayKey: tkey) : nil
-        cachedRespDay = (selectedDayOffset == 0) ? Repository.lastRespDay(days: repo.days, todayKey: tkey) : nil
-        cachedHrvDay = (selectedDayOffset == 0) ? Repository.lastHrvDay(days: repo.days, todayKey: tkey) : nil
         cachedRestingHrDay = (selectedDayOffset == 0) ? Repository.lastRestingHrDay(days: repo.days, todayKey: tkey) : nil
-        cachedSkinTempReadingDay = (selectedDayOffset == 0) ? Repository.lastSkinTempReadingDay(days: repo.days, todayKey: tkey) : nil
         // Charge carry (#543) + the honest label, resolved here for the same reason as the two above: the
         // selector below scans repo.days. Calibration nights come from the SAME `RecoveryScorer` helper the
         // classic Today reads, so the two screens agree on when a wearer is genuinely mid-calibration
@@ -1668,19 +1104,9 @@ struct LiquidTodayView: View {
         liveTodayStrain = liveStrainLocal
 
         async let restA = repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
-        async let stressA = repo.series(key: "stress", source: "my-whoop")
-        async let fitA = repo.exploreSeries(key: "fitness_age", source: "my-whoop")
-        async let vo2A = repo.exploreSeries(key: "vo2max_est", source: "my-whoop")
-        async let vitA = repo.exploreSeries(key: "vitality", source: "my-whoop")
-        async let stepsA = repo.exploreSeries(key: "steps_est", source: "my-whoop")
-        // Queue 11a: SpO₂ candidate fallback (see `spo2CandidateByDay`'s declaration).
-        async let spo2CandA = repo.exploreSeries(key: "spo2_candidate", source: "my-whoop")
-        async let weightA = repo.series(key: "weight", source: "apple-health", days: 91)
-        async let appleA = repo.appleDailyRows()
         async let hrA = repo.hrBuckets(from: from, to: to, bucketSeconds: 300)
         async let wkA = repo.workoutRows()
         let restSeries = await restA
-        let stepsSeries = await stepsA
         let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         // Selected day's Rest; tail fallback only at offset 0 (a past day with no row shows nothing) AND
         // only when the tail night is still fresh. #977: a live 5.0 whose sleep never scores (no overnight
@@ -1691,85 +1117,6 @@ struct LiquidTodayView: View {
             todayValue: restByDay[selectedDayKey], lastDay: restSeries.last?.day,
             lastValue: restSeries.last?.value, isTodaySelected: selectedDayOffset == 0,
             todayKey: selectedDayKey)
-        // StressModel loops the full history to build its baseline — run it OFF the main actor so a big
-        // history doesn't stutter the UI. Snapshot the inputs (value types) into the detached task.
-        let storedStress = await stressA
-        let daysSnapshot = repo.days
-
-        // #430 parity: the day-keyed series the DETAILED Key-Metrics tiles graph — a trailing CALENDAR
-        // window ending on the selected day (not the last-N stored rows, which on an old import showed
-        // months-old data as a fresh trend, issue #23). The loader banks the 30-day SUPERSET; the chosen
-        // 1-week/2-week/1-month window filters at render (windowedSpark), so a picker change applies without
-        // a reload. Keys mirror the metric catalog so a tile's graph, its tap-through detail and Android's
-        // Window all read the same signal. Rest reuses the already-loaded sleep_performance series.
-        let sparkCutoff = Repository.localDayKey(cal.date(byAdding: .day, value: -29, to: dayStart) ?? dayStart)
-        let sparkRows = daysSnapshot.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
-        // #616: imported-first calorie spark (the day's imported Apple active energy ?: NOOP's on-device
-        // estimate) over the window, so a Health-Connect / Apple-only calorie user gets a trend too —
-        // matching the imported-first VALUE. Union of imported days + strap-row days. Mirrors Android's
-        // caloriesSpark (windowed caloriesByDay).
-        let appleRowsForSpark = await appleA
-        // Queue 11a: SpO₂ candidate fallback — day-keyed for the tile's value lookup, windowed for its
-        // detailed-mode sparkline below (same shape as `restByDay`/`kSparks["spo2"]` above).
-        let spo2CandSeries = await spo2CandA
-        spo2CandidateByDay = Dictionary(spo2CandSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        var winImportedKcal: [String: Double] = [:]
-        for r in appleRowsForSpark where r.day >= sparkCutoff && r.day <= selectedDayKey {
-            if let k = r.activeKcal { winImportedKcal[r.day] = max(winImportedKcal[r.day] ?? 0, k) }
-        }
-        var winOnDeviceKcal: [String: Double] = [:]
-        for r in sparkRows { if let k = r.activeKcalEst { winOnDeviceKcal[r.day] = k } }
-        let energyKcalSpark: [(String, Double)] = Set(winImportedKcal.keys).union(winOnDeviceKcal.keys).sorted()
-            .compactMap { day in (winImportedKcal[day] ?? winOnDeviceKcal[day]).map { (day, $0) } }
-        kSparks = [
-            "recovery": sparkRows.compactMap { r in r.recovery.map { (r.day, $0) } },
-            "strain": sparkRows.compactMap { r in r.strain.map { (r.day, $0) } },
-            "hrv": sparkRows.compactMap { r in r.avgHrv.map { (r.day, $0) } },
-            "rhr": sparkRows.compactMap { r in r.restingHr.map { (r.day, Double($0)) } },
-            "spo2": sparkRows.compactMap { r in r.spo2Pct.map { (r.day, $0) } },
-            "spo2_candidate": spo2CandSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey },
-            // Added 2026-08-24 (queue 11c follow-up) for the new Skin Temp Key Metrics tile — already
-            // loaded on `sparkRows` (`daysSnapshot`), same as every other DailyMetric-column tile above.
-            "skin_temp": sparkRows.compactMap { r in r.skinTempDevC.map { (r.day, $0) } },
-            "resp_rate": sparkRows.compactMap { r in r.respRateBpm.map { (r.day, $0) } },
-            "steps": sparkRows.compactMap { r in r.steps.map { (r.day, Double($0)) } },
-            // #616: the Calories tile drew no trend line — this dict had no matching entry, so windowedSpark
-            // returned []. Bank the imported-first calorie series (built above) so the sparkline matches the
-            // tile's imported-first number and a Health-Connect / Apple-only user gets a trend.
-            "energy_kcal": energyKcalSpark,
-            "steps_est": stepsSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
-                .map { ($0.day, $0.value) },
-            "sleep_performance": restSeries.filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey }
-                .map { ($0.day, $0.value) },
-            "weight": (await weightA).filter { $0.day >= sparkCutoff && $0.day <= selectedDayKey },
-        ]
-        stress = await Task.detached(priority: .utility) {
-            StressModel(days: daysSnapshot, stored: storedStress)?.score
-        }.value
-        fitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
-        vo2max = (await vo2A).last?.value        // #1391: latest banked VO₂max estimate
-        vitality = (await vitA).last?.value
-        // Steps is a DAILY metric, so key it to the SELECTED day (like restScore above), not the history-wide
-        // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
-        // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
-        let stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        stepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
-        // Imported Apple Health steps for the SELECTED day (max across rows), the middle tier between the
-        // measured strap count and the motion estimate. Health Connect is Android-only, so apple-health is
-        // the sole import source on iOS. Mirrors Android `stepsForDay` (#377).
-        importedStepsDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.steps }.max()
-        // #616: same-day imported active energy — the calorie fallback when the strap banked no on-device
-        // HR estimate for the day, so the tile/card/detail agree (imported-first, mirrors steps).
-        importedActiveKcalDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.activeKcal }.max()
-
-        // Weight for the SELECTED day: prefers a real Apple-Health reading (today's daily, else the
-        // "weight" series' newest point so a sparse-but-recent value still renders). Falls back to the
-        // user's profile weight in the renderer (weightTile).
-        let appleRows = await appleA
-        let weightSeries = await weightA
-        weightKg = appleRows.filter { $0.day == selectedDayKey }.compactMap { $0.weightKg }.max()
-            ?? weightSeries.last(where: { $0.day <= selectedDayKey })?.value
-
         // Awaited ONCE: the timestamps and the means have to come from the same read, or the segments
         // would describe a different series than the one drawn.
         let hrBuckets = await hrA
@@ -1883,35 +1230,6 @@ struct LiquidTodayView: View {
             : String(localized: "Good evening")
     }
 
-    // Measured strap count ?: imported Apple Health count ?: motion estimate — the same precedence the
-    // detail routing follows below, so the tapped-through source always matches the number shown (#377).
-    private var stepCount: Double? {
-        displayDay?.steps.map(Double.init) ?? importedStepsDay.map(Double.init) ?? stepsEst
-    }
-
-    private var stepsDetailMetric: MetricDescriptor? {
-        MetricCatalog.todayStepsMetric(hasMeasuredSteps: displayDay?.steps != nil,
-                                       hasImportedSteps: importedStepsDay != nil)
-    }
-
-    private var stepsDetailKey: String { stepsDetailMetric?.key ?? "steps_est" }
-    private var stepsDetailSource: String { stepsDetailMetric?.source ?? "my-whoop" }
-
-    // #616: calories resolved IMPORTED-FIRST (the day's imported Apple active energy — the figure these
-    // surfaces already showed — else NOOP's on-device HR estimate `activeKcalEst`) — one number across the
-    // tile, card and the detail it taps to. Mirrors the steps precedence above.
-    private var caloriesCount: Double? {
-        importedActiveKcalDay ?? displayDay?.activeKcalEst
-    }
-
-    private var caloriesDetailMetric: MetricDescriptor? {
-        MetricCatalog.todayCaloriesMetric(hasImportedKcal: importedActiveKcalDay != nil,
-                                          hasOnDeviceKcal: displayDay?.activeKcalEst != nil)
-    }
-
-    private var caloriesDetailKey: String { caloriesDetailMetric?.key ?? "energy_kcal" }
-    private var caloriesDetailSource: String { caloriesDetailMetric?.source ?? "my-whoop" }
-
     private var liveHour: Double {
         let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
         return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
@@ -1920,60 +1238,17 @@ struct LiquidTodayView: View {
     // MARK: - Formatting
 
     private func frac(_ v: Double?) -> Double? { v.map { max(0, min(1, $0 / 100)) } }
-    private func fracOver(_ v: Double?, _ over: Double) -> Double? { v.map { max(0, min(1, $0 / over)) } }
 
     /// What a tile shows when the metric has no value. One constant rather than a dash repeated at each
     /// site, because the unit-suppression below has to recognise it.
     static let noValueDash = "–"
 
-    /// Join a formatted tile value with its unit, dropping the unit when there is no value.
-    ///
-    /// #492 and the `–%` it left behind: a missing metric rendered its placeholder AND its unit, so an
-    /// empty Strain tile read `–%`, which parses as "minus percent" rather than "no data". Android has
-    /// had the guard all along (`unit = if (restScore != null) "%" else ""`, and `withUnit`'s NO_DATA
-    /// check); this is the iOS twin of it. `%` binds tight, every other unit takes a space.
-    static func tileDisplayValue(_ value: String, unit: String) -> String {
-        guard !unit.isEmpty, value != noValueDash else { return value }
-        return unit == "%" ? value + unit : value + " " + unit
-    }
-
-    private func intText(_ v: Double?) -> String { v.map { String(Int($0.rounded())) } ?? Self.noValueDash }
-
-    private func unitText(_ v: Double?, _ unit: String, decimals: Int = 0) -> String {
-        guard let v else { return Self.noValueDash }
-        let n = decimals > 0 ? String(format: "%.\(decimals)f", locale: AppLanguage.activeLocale, v) : String(Int(v.rounded()))
-        return unit.isEmpty ? n : "\(n) \(unit)"
-    }
-
-    private var stressText: String { stress.map { String(Int($0.rounded())) } ?? String(localized: "Calibrating") }
-
-    private var sleepText: String {
-        guard let m = displayDay?.totalSleepMin else { return "–" }
-        return "\(Int(m) / 60)h \(Int(m) % 60)m"
-    }
-
-    private var stepsText: String {
-        guard let s = stepCount else { return "–" }
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        return f.string(from: NSNumber(value: Int(s))) ?? "\(Int(s))"
-    }
-
-    // °C / °F for the Skin Temp card, resolved exactly the way the other six screens that show a
-    // temperature resolve it (TodayView, FullDayChartView, MetricExplorerView x2, SettingsView,
-    // HealthView): the explicit override when set, else derived from the unit system. Liquid Today was
-    // the ONLY one of them missing it — which is why its Skin Temp card could not honour the preference
-    // even once it had a value to show (#1627).
+    // Unit system for the workout card's distance, resolved the way every other screen resolves it.
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
     private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(system: unitSystem, override: distanceSystemRaw)
-    }
-    @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
-    @AppStorage(UnitPrefs.skinTempDisplayKey) private var skinTempDisplayRaw = ""   // #1846
-    private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: unitSystem, override: temperatureRaw)
     }
 
     // The user's Effort display scale (#268), 0–100 by default or the WHOOP 0–21 axis if chosen — the SAME
@@ -1997,16 +1272,6 @@ struct LiquidTodayView: View {
         return UnitFormatter.effortDisplay(s, scale: effortScale)
     }
 
-    /// The Weight tile's display string + an honest caption ("from profile" only on the fallback).
-    /// Always formatted through the shared `UnitFormatter` so the Imperial/Metric toggle reaches this
-    /// tile. Mirrors the classic TodayView's `weightTile`.
-    private func weightTile(_ appleWeightKg: Double?) -> (value: String, caption: String) {
-        if let kg = appleWeightKg {
-            return (UnitFormatter.massFromKilograms(kg, system: unitSystem), String(localized: "latest"))
-        }
-        return (UnitFormatter.massFromKilograms(profile.weightKg, system: unitSystem), String(localized: "from profile"))
-    }
-
     private func workoutSub(_ w: WorkoutRow) -> String {
         var parts: [String] = []
         let secs = w.durationS ?? Double(max(w.endTs - w.startTs, 0))
@@ -2024,26 +1289,6 @@ struct LiquidTodayView: View {
         // the names AND the field order (e.g. fr "mercredi 4 juillet") in the user's locale.
         return selectedLogicalDay.formatted(
             .dateTime.weekday(.wide).day().month(.wide).locale(AppLanguage.activeLocale))
-    }
-
-    /// Provenance caption for the recovery-vitals card, keyed on the row a vital actually came from — NOT a
-    /// hardcoded "yesterday". If ANY shown vital fell back to `vitalsDay` (today's own value is nil and the
-    /// carried row supplies it), it stamps that row's date via the shared `TodayView.carriedCaption`, so a
-    /// genuine post-rollover carry reads "Last night · <date>" and a weeks-old carry relabels to
-    /// "Latest sleep · <date>" (#779) instead of a false "Last night". When every shown vital is today's
-    /// own (or there's nothing to carry), it returns nil — the card must not claim "Last night" at all.
-    private var vitalsProvenanceLine: String? {
-        // Each vital can carry from a DIFFERENT row (#1842), so the one card-level footnote stamps the
-        // OLDEST row any SHOWN carried vital came from — erring old is the only safe direction for a caption
-        // whose job is to stop a stale read passing as today's, and it keeps the "Latest sleep" relabel
-        // (#779) firing on the value that actually is weeks old. A row counts only if it SUPPLIED the value.
-        let fromHrv: DailyMetric? = (displayDay?.avgHrv == nil && hrvDay?.avgHrv != nil) ? hrvDay : nil
-        let fromRhr: DailyMetric? = (displayDay?.restingHr == nil && restingHrDay?.restingHr != nil) ? restingHrDay : nil
-        let fromResp: DailyMetric? = (displayDay?.respRateBpm == nil && vitalsDay?.respRateBpm != nil) ? vitalsDay : nil
-        let sources: [DailyMetric] = [fromHrv, fromRhr, fromResp].compactMap { $0 }
-        guard let carried = sources.min(by: { $0.day < $1.day }) else { return nil }
-        return TodayView.carriedCaption(priorDayKey: carried.day,
-                                        todayKey: displayDay?.day ?? selectedDayKey)
     }
 }
 
@@ -2142,9 +1387,8 @@ private struct HeroScoreCell: View {
     var decimals: Int = 0
     /// Where the GAUGE taps through to, or nil to keep the ring inert (#1995).
     ///
-    /// Same `TabRoute.metric(key)` the Recovery Vitals rows use, so a ring and the Key-Metrics tile for
-    /// the same score land on the identical dossier rather than diverging. The LABEL keeps its own job:
-    /// it opens the scoring guide, which is this screen's only route to that explainer.
+    /// The `TabRoute.metric(key)` of the score's own dossier. The LABEL keeps its own job: it opens the
+    /// scoring guide, which is this screen's only route to that explainer.
     var detailRoute: TabRoute? = nil
 
     /// The gauge, linked when there is somewhere to go.
