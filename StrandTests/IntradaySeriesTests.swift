@@ -61,7 +61,7 @@ final class IntradaySeriesTests: XCTestCase {
         return ServerScoreRepository(
             session: SeriesStub.session(),
             endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-            fleetToken: "noop_test", directory: directory,
+            directory: directory,
             identity: { CloudPushIdentity(ownerId: ownerId, sourceId: "22222222-2222-4222-8222-222222222222",
                                           tokenId: "t", uploadToken: "noop_x") })
     }
@@ -377,7 +377,8 @@ final class IntradaySeriesTests: XCTestCase {
         XCTAssertEqual(query["to"], String(dayStart + 86_400))
         XCTAssertEqual(query["metrics"], "hrv_rmssd_ms,steps")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer noop_x")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "x-noop-fleet-token"), "noop_test")
+        XCTAssertNil(request.value(forHTTPHeaderField: "x-noop-fleet-token"),
+                     "an account's installation credential is the whole credential: no shared token rides along")
 
         // The cache returns exactly what the network read produced.
         let cached = await repo.cachedIntradaySeries(cacheKey: "hrv|live", deviceId: "whoop-MGB0214654")
@@ -438,7 +439,7 @@ final class IntradaySeriesTests: XCTestCase {
     }
 
     func testAnUnconfiguredBuildTouchesNoNetwork() async {
-        let repo = ServerScoreRepository(session: SeriesStub.session(), endpoint: nil, fleetToken: "",
+        let repo = ServerScoreRepository(session: SeriesStub.session(), endpoint: nil,
                                          directory: directory, identity: { nil })
         do {
             _ = try await repo.intradaySeries(from: 1, to: 2, deviceId: "d", cacheKey: "k")
@@ -454,9 +455,19 @@ final class IntradaySeriesTests: XCTestCase {
 
     @MainActor
     func testTheStorePaintsTheCachedWindowFirstAndNeverOverwritesALiveOne() async throws {
-        SeriesStub.body = edgeBody()
+        // F6b (audit-g1-day): loadCached only seeds a `|live` window that REACHES the current local
+        // midnight (a prior-day cache must not paint as today), so the fixture window is current-dated.
+        let now = Int(Date().timeIntervalSince1970)
+        let from = now - 86_400
+        var currentBody = edgeBody()
+        if var series = currentBody["series"] as? [String: Any] {
+            series["from"] = from
+            series["to"] = now
+            currentBody["series"] = series
+        }
+        SeriesStub.body = currentBody
         let repo = repository()
-        let bounds = IntradayRange.Bounds(from: dayStart, to: dayStart + 86_400, key: "hrv_rmssd_ms|live", isLive: true)
+        let bounds = IntradayRange.Bounds(from: from, to: now, key: "hrv_rmssd_ms|live", isLive: true)
         let warm = try await repo.intradaySeries(from: bounds.from, to: bounds.to, deviceId: "my-whoop",
                                                  metrics: [.hrv], cacheKey: bounds.key)
 
@@ -465,7 +476,7 @@ final class IntradaySeriesTests: XCTestCase {
         XCTAssertEqual(store.windows[bounds.key], warm)
 
         // A network read replaces it, and a later cache load does not step back over the newer window.
-        var fresher = edgeBody()
+        var fresher = currentBody
         var series = try XCTUnwrap(fresher["series"] as? [String: Any])
         var metrics = try XCTUnwrap(series["metrics"] as? [String: Any])
         let newer: [[Any]] = [[dayStart, 58.0, 90, 0.7, NSNull()], [dayStart + 600, 70.0, 100, 0.9, NSNull()]]

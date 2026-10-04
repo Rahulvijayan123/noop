@@ -628,9 +628,13 @@ final class IntelligenceEngine: ObservableObject {
         let computedId = deviceId + "-noop"
         let now = Int(Date().timeIntervalSince1970)
         let tzOffset = TimeZone.current.secondsFromGMT()
-        let nowLocalMidnight = Self.midnightLocal(now, offsetSec: tzOffset)
-        let newestDay = AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)
-        let oldestDay = AnalyticsEngine.dayString(nowLocalMidnight - (maxDays - 1) * 86_400, offsetSec: tzOffset)
+        // Zone-correct trailing day keys (see `localDayRun`): a fixed-offset stride over `maxDays` can
+        // name the wrong calendar day around a DST transition, so the range read and the 7-day gate use
+        // the zone's own keys. Byte-identical to the old arithmetic on non-DST days.
+        let dayRun = Self.localDayRun(endingAt: now, count: maxDays, zoneHistory: profile.timezoneHistory)
+        let newestDay = dayRun.first?.date.key ?? AnalyticsEngine.dayString(now, offsetSec: tzOffset)
+        let oldestDay = dayRun.last?.date.key
+            ?? AnalyticsEngine.dayString(now - (maxDays - 1) * 86_400, offsetSec: tzOffset)
         let gate7 = Array((await repo.dailyMetrics(fromDay: oldestDay, toDay: newestDay))
             .sorted { $0.day < $1.day }.suffix(7))
         let rows = Self.fitnessAgeRows(
@@ -901,7 +905,9 @@ final class IntelligenceEngine: ObservableObject {
 
         let up = UserProfile(weightKg: profile.weightKg, heightCm: profile.heightCm,
                              age: Double(profile.age), sex: profile.sex,
-                             stepTicksPerStep: profile.stepTicksPerStep)
+                             stepTicksPerStep: profile.stepTicksPerStep,
+                             measuredRmrKcalPerDay: profile.measuredRmrKcalPerDay > 0
+                                 ? profile.measuredRmrKcalPerDay : nil)
 
         let maxHR = profile.hrMaxOverride > 0 ? Double(profile.hrMaxOverride) : nil
         let now = Int(Date().timeIntervalSince1970)
@@ -979,7 +985,16 @@ final class IntelligenceEngine: ObservableObject {
         // day keys are LOCAL calendar days, consistent with the dashboard's local "today" lookup. A
         // west-of-UTC user's evening crosses midnight UTC; bucketing by UTC put it in the next UTC day,
         // which the local read never found (Toronto/UTC-4 report).
-        let nowLocalMidnight = Self.midnightLocal(now, offsetSec: tzOffset)
+        //
+        // The scan window's boundaries come from the zone's own rules (`LocalDayWindows`), not from one
+        // pass-time offset plus fixed 86,400-second strides: `dayRun[offset]` is the zone-correct key
+        // and half-open `[start, end)` of the local day `offset` days ago (23 h on a spring-forward day,
+        // 25 h on a fall-back day). Byte-identical to the old `midnightLocal`/`dayString` arithmetic on
+        // every non-DST day, and the zone-correct answer on DST days where the old arithmetic was off by
+        // an hour (findings T05/T06; spec §3 half-open local-midnight contract).
+        let dayRun = Self.localDayRun(endingAt: now, count: maxDays, zoneHistory: profile.timezoneHistory)
+        let nowLocalMidnight = dayRun.first.map { Int($0.start.timeIntervalSince1970) }
+            ?? Self.midnightLocal(now, offsetSec: tzOffset)
 
         // ── Learned habitual midsleep (#547) ──────────────────────────────────
         // Compute the user's habitual midsleep ONCE per run from the trailing sleep history so the
@@ -1196,14 +1211,21 @@ final class IntelligenceEngine: ObservableObject {
             var paceMark = DispatchTime.now().uptimeNanoseconds
             for offset in 0..<maxDays {
                 if offset > 0 { await RescoreBackgroundScheduler.paceIfBackgrounded(since: &paceMark) }
-                let dayStart = nowLocalMidnight - offset * 86_400
-                let day = AnalyticsEngine.dayString(dayStart, offsetSec: tzOffset)
+                // The zone-correct day bounds from the run (see `localDayRun`): key, true local midnight,
+                // and the start of the next existing date. Byte-identical to the old fixed-offset
+                // arithmetic on non-DST days; the corrected answer on DST days.
+                guard offset < dayRun.count else { break }
+                let dayStart = Int(dayRun[offset].start.timeIntervalSince1970)
+                let day = dayRun[offset].date.key
+                let dayWindowEnd = Int(dayRun[offset].nextStart.timeIntervalSince1970)
                 // Read a generous window around the night that ends on `day`; the stager finds the span.
                 let from = dayStart - StreamReadCap.lookbackSeconds
-                // Sleep read-window END — see `sleepReadWindowEnd`.
-                let to = Self.sleepReadWindowEnd(dayStart: dayStart,
-                                                 nowLocalMidnight: nowLocalMidnight,
-                                                 now: now)
+                // Sleep read-window END — `sleepReadWindowEnd` with the zone-correct next local midnight
+                // (the function's own `dayStart + 86_400` is a fixed block, an hour short on a 25 h DST
+                // day — an attribution-adjacent read-bound defect in the same class as T06). For every
+                // 24 h day this is exactly `sleepReadWindowEnd`'s answer; for a 25 h day the read reaches
+                // the day's real end, and for a 23 h day it stops an hour earlier than the old superset.
+                let to = dayStart < nowLocalMidnight ? dayWindowEnd : min(dayWindowEnd, now)
 
                 // I2: pick the single device that owns this day, and read ITS streams below. With one device
                 // this resolves to `deviceId` (active strap, has data → priority 0), so nothing changes; with
@@ -1259,7 +1281,11 @@ final class IntelligenceEngine: ObservableObject {
                             // watermark gate above, never this one. Both reads are index-only aggregates
                             // over the same `(deviceId, ts)` keys; a miss costs the 7 full stream reads
                             // this gate exists to skip.
-                            streams: streamFp + "|rrAlias5=\(activeWhoop5RR && owner == Repository.whoopSource)",
+                            // The energy estimate also depends on the body measurements and the measured RMR,
+                            // none of which move a stream fingerprint. `rrAlias5` stays LAST: `missReason`
+                            // reads everything after it.
+                            streams: streamFp + "|energy=\(up.energyInputsSignature)"
+                                + "|rrAlias5=\(activeWhoop5RR && owner == Repository.whoopSource)",
                             // #1575: `hrvTraceActive &&` matters. With the HRV trace OFF no detail
                             // line is ever produced, so the flag describes nothing — but it would still
                             // flip at midnight and invalidate yesterday, charging EVERY user an extra
@@ -1369,14 +1395,15 @@ final class IntelligenceEngine: ObservableObject {
                 let wristOff = AnalyticsEngine.offWristIntervals(events: wristEvents, windowEnd: to, hr: hr)
 
                 // Calendar-day window for the ADDITIVE daily totals (steps + calories). The night window
-                // above is anchored to the current time-of-day and ends at dayStart+12h, so for a PAST
-                // day whose late hours sit after that bound those hours are never read and the totals
-                // undercount. Read exactly [localMidnight(day), localMidnight(day)+86400) and hand it to
-                // analyzeDay's dayHr/daySteps, which use it ONLY for those totals. `dayStart` is already a
-                // LOCAL midnight; midnightLocal is idempotent on it (the store range is inclusive, so end
-                // at -1 s). (#277 , local-day bucketing.)
-                let dayMid = Self.midnightLocal(dayStart, offsetSec: tzOffset)
-                let dayEnd = dayMid + 86_400 - 1
+                // above is anchored to the current time-of-day and ends at the next local midnight, so for
+                // a PAST day whose late hours sit after that bound those hours are never read and the
+                // totals undercount. Read exactly [localMidnight(day), next local midnight) and hand it
+                // to analyzeDay's dayHr/daySteps, which use it ONLY for those totals. `dayMid` is the
+                // run's TRUE local midnight (zone-correct, 23 h/25 h on DST days — the old
+                // `midnightLocal(dayStart, offsetSec:)` re-floor was off by an hour there); the store
+                // range is inclusive, so end at -1 s. (#277 / T06, local-day bucketing.)
+                let dayMid = dayStart   // the run's true local midnight (zone-correct)
+                let dayEnd = dayWindowEnd - 1   // the run's half-open end, inclusive for the store read
                 // Same `owner` as the night window above (I2): the additive day totals must come from the
                 // one device that owns the day, never a mix.
                 // #997 (ryanbr): for a PAST day (20 of 21 in the default scan) the night window above reads
@@ -1515,6 +1542,10 @@ final class IntelligenceEngine: ObservableObject {
                 // the same reason `hrvDiag` is carried on the scan and replayed below. A local buffer
                 // crosses no actor.
                 var strainDiagLines: [String] = []
+                // Pass the zone-correct half-open day window (T05/T06): analyzeDay's day-bucketing
+                // filters use these bounds instead of the fixed-offset + 86,400 block, so a 23 h/25 h
+                // DST day is bucketed by the zone's own rules. The key `day` and this window come from
+                // the same `LocalDayWindows` lookup, so they agree by construction.
                 let res = AnalyticsEngine.analyzeDay(day: day,
                                                      strainDiag: { strainDiagLines.append($0) },
                                                      hr: hr, rr: rr, resp: resp,
@@ -1527,7 +1558,8 @@ final class IntelligenceEngine: ObservableObject {
                                                      skinTempWornToleranceSec: skinWornToleranceSec,   // #1467
                                                      spo2: spo2,                   // #93
                                                      profile: up, baselines: baselines1, maxHROverride: maxHR,
-                                                     tzOffsetSeconds: tzOffset, wristOff: wristOff,
+                                                     tzOffsetSeconds: tzOffset, dayWindow: dayRun[offset],
+                                                     wristOff: wristOff,
                                                      sleepNeedHours: sleepNeedHours,
                                                      sleepConsistency: sleepConsistency,
                                                      habitualMidsleepSec: habitualMidsleepSec,
@@ -1548,7 +1580,10 @@ final class IntelligenceEngine: ObservableObject {
                                                      // ring buffer isn't flooded; every night keeps the summary.
                                                      hrvWindowDetail: dayStart == nowLocalMidnight,
                                                      deepHrvWindow: deepHrvWindow,
-                                                     effortMethod: effortMethodGlobal)
+                                                     effortMethod: effortMethodGlobal,
+                                                     // A day still in progress counts resting energy up to
+                                                     // now; a finished day is unaffected.
+                                                     energyAsOf: now)
                 dayScoreSeconds += Date().timeIntervalSince(tScore0)
                 // #195: whole-night HRV cleaning-pipeline summary for the always-on strap log, so a "reads ~2x
                 // too high" report is triageable without the HRV test mode: RMSSD vs SDNN (rmssd >> sdnn =
@@ -1593,11 +1628,16 @@ final class IntelligenceEngine: ObservableObject {
                             gravCount: grav.count, stepCount: steps.count,
                             providedCount: providedSleep.count,
                             providedEndingOnDay: providedSleep.filter {
-                                AnalyticsEngine.dayString($0.end, offsetSec: tzOffset) == day
+                                // Same zone-correct half-open membership `analyzeDay` uses for its own
+                                // attribution (the key and the window agree by construction).
+                                $0.end >= dayStart && $0.end < dayWindowEnd
                             }.count,
                             providedLongestMin: longestProvided.map { ($0.end - $0.start) / 60 },
                             providedLongestEndDay: longestProvided.map {
-                                AnalyticsEngine.dayString($0.end, offsetSec: tzOffset)
+                                let end = $0.end
+                                return end >= dayStart && end < dayWindowEnd ? day : dayRun.first {
+                                    Int($0.start.timeIntervalSince1970) <= end && end < Int($0.nextStart.timeIntervalSince1970)
+                                }?.date.key ?? day
                             },
                             windowHours: windowHours,
                             skinCount: skin.count)
@@ -1844,8 +1884,7 @@ final class IntelligenceEngine: ObservableObject {
             }
             // #1005: prune the reuse cache to the current 21-day window (the oldest day ages out at
             // midnight) and carry a one-line reuse diagnostic on the same channel as the skipped-day lines.
-            let dayCacheWindow = Set((0..<maxDays).map {
-                AnalyticsEngine.dayString(nowLocalMidnight - $0 * 86_400, offsetSec: tzOffset) })
+            let dayCacheWindow = Set(dayRun.map { $0.date.key })
             dayScanCacheLocal = dayScanCacheLocal.filter { dayCacheWindow.contains($0.key) }
             if let line = skippedSleepDaysLine(skippedSleepDays, minHrSamples: IntelligenceEngine.minHrSamples) {
                 skippedDayLines.append(line)
@@ -2192,15 +2231,16 @@ final class IntelligenceEngine: ObservableObject {
         // each analytics-only/backfill decision can emit one `.workouts` line per derived bout. Diagnostic
         // only; this path no longer publishes or reconciles generic workout rows.
         let workoutsTraceActive = TestCentre.active(.workouts)
-        let oldestDay = AnalyticsEngine.dayString(nowLocalMidnight - (maxDays - 1) * 86_400,
-                                                  offsetSec: tzOffset)
-        let newestDay = AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)
+        // Zone-correct range keys for the pass-2 reads (see `localDayRun`): the fixed-offset stride can
+        // name the wrong calendar day around a DST transition. Byte-identical on non-DST days.
+        let oldestDay = dayRun.last?.date.key ?? AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)
+        let newestDay = dayRun.first?.date.key ?? AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)
         let strictCanonicalAlias = (try? await store.isWhoop5RRSource(deviceId: regActiveId)) ?? true
         let legacySnapshots = await Self.legacyScoreSnapshots(
             store: store, computedId: computedId, from: oldestDay, to: newestDay,
             fresh: scoredNights.map { $0.daily }, ownerByDay: resolvedScoreOwnerByDay,
-            nowLocalMidnight: nowLocalMidnight, now: now, offsetSec: tzOffset,
-            maxDays: maxDays, strictCanonicalAlias: strictCanonicalAlias)
+            dayRun: dayRun, nowLocalMidnight: nowLocalMidnight, now: now,
+            strictCanonicalAlias: strictCanonicalAlias)
         var appliedLegacySnapshots: [String: LegacyScoreSnapshot] = [:]
         var paceMark = DispatchTime.now().uptimeNanoseconds
         for night in scoredNights {
@@ -2210,7 +2250,13 @@ final class IntelligenceEngine: ObservableObject {
             // is stable under a bedtime edit (only the onset/`startTsAdjusted` moves), so end-day is the
             // right key. Filtering here keeps a single-night edit overriding only its OWN night instead of
             // every night. `effectiveStartTs` (the #318 user-corrected onset) is preserved on the row.
-            let dayEditedRows = Self.editedRowsForDay(editedRows, day: night.daily.day, tzOffsetSeconds: tzOffset)
+            // Zone-correct day attribution for edits (end-day key): use the day's window bounds from the
+            // run rather than a fixed-offset `dayString` compare (which can mislabel an endTs around a
+            // DST transition). Byte-identical on non-DST days.
+            let dayEditedRows = Self.editedRowsForDay(editedRows, day: night.daily.day,
+                                                      dayBounds: dayRun.first {
+                                                          $0.date.key == night.daily.day
+                                                      }.map { (Int($0.start.timeIntervalSince1970), Int($0.nextStart.timeIntervalSince1970)) })
             let editsByStart = Dictionary(dayEditedRows.map { ($0.startTs, $0) }, uniquingKeysWith: { a, _ in a })
             var daily = sleepEditedDaily(night.daily, detected: night.cachedSleep, editsByStart: editsByStart,
                                          habitualMidsleepSec: habitualMidsleepSec)
@@ -2669,8 +2715,12 @@ final class IntelligenceEngine: ObservableObject {
         // (the same source the dashboard's `steps` metric reads, Repository.swift). Motion = the
         // [localMidnight, +24h) gravity volume, the same calendar-day window the daily totals use.
         let stepsCalDays = 60
-        let calOldest = AnalyticsEngine.dayString(
-            nowLocalMidnight - (stepsCalDays - 1) * 86_400, offsetSec: tzOffset)
+        // Zone-correct 60-day run (see `localDayRun`): the calibration window's oldest key and each
+        // day's motion window must follow the zone's own local midnights (fixed-offset strides are off
+        // by an hour around a DST transition). Byte-identical to the old arithmetic on non-DST days.
+        let stepsCalRun = Self.localDayRun(endingAt: now, count: stepsCalDays, zoneHistory: profile.timezoneHistory)
+        let calOldest = stepsCalRun.last?.date.key
+            ?? AnalyticsEngine.dayString(nowLocalMidnight - (stepsCalDays - 1) * 86_400, offsetSec: tzOffset)
         // ── FIX 2 (main-actor jank): hoist the 60-day steps-calibration STORE READS off the main actor ──
         // Same residual stall FIX 1 fixed, smaller scale: this class is `@MainActor`, so each `await store.…`
         // below resumes its continuation ON the main actor , the apple-health read + the per-day
@@ -2729,9 +2779,13 @@ final class IntelligenceEngine: ObservableObject {
             var motionFolded = 0
             var motionWindow: Set<String> = []
             for off in 0..<stepsCalDays {
-                let dayMid = Self.midnightLocal(nowLocalMidnight - off * 86_400, offsetSec: tzOffset)
-                let dayEnd = dayMid + 86_400 - 1
-                let dayKey = AnalyticsEngine.dayString(dayMid, offsetSec: tzOffset)
+                // Zone-correct window for this calibration day (see `localDayRun`); a skipped date is
+                // omitted, so the loop simply steps over it. Byte-identical to the old arithmetic on
+                // non-DST days.
+                guard off < stepsCalRun.count else { break }
+                let dayMid = Int(stepsCalRun[off].start.timeIntervalSince1970)
+                let dayEnd = Int(stepsCalRun[off].nextStart.timeIntervalSince1970) - 1
+                let dayKey = stepsCalRun[off].date.key
                 motionWindow.insert(dayKey)
                 let owner = await Self.resolveDayOwner(day: dayKey, from: dayMid, to: dayEnd, store: store,
                                                        devices: regDevices, activeId: regActiveId,
@@ -2945,11 +2999,16 @@ final class IntelligenceEngine: ObservableObject {
             return "[\(s.startTs) -> \(s.endTs)] min=\((s.endTs - s.effectiveStartTs) / 60) segs=\(segs) json=\(json.utf8.count)"
         }
         var healDropped: [CachedSleepSession] = []
+        // The scan window as zone-correct half-open day bounds (see `localDayRun`): a session is
+        // healable when its END falls inside one of the run's local days. The old fixed-offset
+        // `dayString(_:offsetSec:)` compare could mislabel an endTs around a DST transition; the window
+        // membership and the day keys agree by construction.
+        let healDayBounds = dayRun.map { (Int($0.start.timeIntervalSince1970), Int($0.nextStart.timeIntervalSince1970)) }
         for healId in healDeviceIds {
             let storedSessions = (try? await store.sleepSessions(deviceId: healId, from: windowStart,
                                                                  to: now, limit: 4000)) ?? []
-            let healable = storedSessions.filter {
-                (oldestDay...newestDay).contains(AnalyticsEngine.dayString($0.endTs, offsetSec: tzOffset))
+            let healable = storedSessions.filter { s in
+                healDayBounds.contains { $0.0 <= s.endTs && s.endTs < $0.1 }
             }
             let witness = SleepSessionDedup.healWitness(for: healId, computedId: computedId, keptStarts: keptStarts)
             let sweep = SleepSessionDedup.dedupe(healable, freshStarts: witness)
@@ -3238,24 +3297,20 @@ final class IntelligenceEngine: ObservableObject {
     private static func legacyScoreSnapshots(
         store: WhoopStore, computedId: String, from: String, to: String,
         fresh: [DailyMetric], ownerByDay: [String: String],
-        nowLocalMidnight: Int, now: Int, offsetSec: Int, maxDays: Int,
+        dayRun: [LocalDayWindow], nowLocalMidnight: Int, now: Int,
         strictCanonicalAlias: Bool
     ) async -> [String: LegacyScoreSnapshot] {
         let existing = (try? await store.dailyMetrics(deviceId: computedId, from: from, to: to)) ?? []
         let existingByDay = Dictionary(existing.map { ($0.day, $0) }, uniquingKeysWith: { a, _ in a })
         var snapshots: [String: LegacyScoreSnapshot] = [:]
+        // The day's TRUE local midnight from the zone-correct run (a fixed-offset search could match the
+        // wrong day — or none — around a DST transition). Byte-identical on non-DST days.
+        let dayStartByKey = Dictionary(dayRun.map { ($0.date.key, Int($0.start.timeIntervalSince1970)) },
+                                       uniquingKeysWith: { a, _ in a })
         for day in fresh {
             guard day.avgHrv == nil, let old = existingByDay[day.day], let oldHrv = old.avgHrv,
                   let owner = ownerByDay[day.day] else { continue }
-            var dayStart: Int?
-            for offset in 0..<maxDays {
-                let candidate = nowLocalMidnight - offset * 86_400
-                if AnalyticsEngine.dayString(candidate, offsetSec: offsetSec) == day.day {
-                    dayStart = candidate
-                    break
-                }
-            }
-            guard let dayStart else { continue }
+            guard let dayStart = dayStartByKey[day.day] else { continue }
             let readFrom = dayStart - StreamReadCap.lookbackSeconds
             let readTo = sleepReadWindowEnd(dayStart: dayStart, nowLocalMidnight: nowLocalMidnight, now: now)
             let alias = strictCanonicalAlias && owner == Repository.whoopSource
@@ -3384,8 +3439,14 @@ final class IntelligenceEngine: ObservableObject {
     /// block, so one edit / nap leaked its total onto EVERY night. Byte-identical twin of Android
     /// `IntelligenceEngine.editedRowsForDay`.
     static func editedRowsForDay(_ editedRows: [CachedSleepSession], day: String,
-                                 tzOffsetSeconds: Int) -> [CachedSleepSession] {
-        editedRows.filter { AnalyticsEngine.dayString($0.endTs, offsetSec: tzOffsetSeconds) == day }
+                                 dayBounds: (start: Int, end: Int)?) -> [CachedSleepSession] {
+        guard let dayBounds else { return [] }
+        // The zone-correct half-open local-day bounds (from `LocalDayWindows`, see `localDayRun`): an
+        // edit belongs to the day its night ENDS on. When no zone-correct window exists for the day
+        // (malformed/skipped), no row matches — the same empty outcome a fixed-offset compare would
+        // produce for a day the zone never had. Byte-identical to the old `dayString(_:offsetSec:)`
+        // compare on non-DST days.
+        return editedRows.filter { $0.endTs >= dayBounds.start && $0.endTs < dayBounds.end }
     }
 
     private func sleepEditedDaily(_ daily: DailyMetric, detected: [CachedSleepSession],
@@ -3545,6 +3606,68 @@ final class IntelligenceEngine: ObservableObject {
     /// Android IntelligenceEngine.midnightLocal byte-for-byte.
     nonisolated static func midnightLocal(_ ts: Int, offsetSec: Int) -> Int {
         ts - floorMod(ts + offsetSec, 86_400)
+    }
+
+    /// The zone-correct trailing day run ending at `now`: `count` local calendar days, newest first,
+    /// each as its `LocalDayWindow` (key in `date.key`, half-open `[start, nextStart)` bounds) from the
+    /// zone's own rules. On a spring-forward day a window is 23 h, on a fall-back day 25 h, so every day
+    /// is anchored to its OWN local midnight — replacing the single pass-time offset + fixed 86,400-second
+    /// stride that bucketed every historical day with today's offset (wrong by an hour for every day on
+    /// the far side of a DST transition, and on the transition days themselves). Byte-identical to the
+    /// old arithmetic for every non-DST day. A date the zone skipped is omitted, so the run can be
+    /// shorter than `count`.
+    ///
+    /// T06 travel (effective-dated zones): each day's window is resolved in the zone effective for it
+    /// from `zoneHistory` (the phone's `ProfileStore.timezoneHistory` journal, mirrored from the server's
+    /// `scoring_timezone_history`), NOT in `defaultZone` for every day. A past day keeps the zone that
+    /// was in effect when it happened, so after a trip the app's historical bounds agree with SQL for the
+    /// same instants. `zoneHistory` empty (the default) keeps the pre-journal behavior: every day in
+    /// `defaultZone`. One documented bounded divergence: a zone change that lands MID-day buckets the
+    /// whole day in the pre-change zone (all-or-nothing day window), where the server's per-instant
+    /// `scoring_local_day_v2` splits it — the day-boundary ownership is a day-window, not a segment,
+    /// and is intentionally not redesigned here.
+    ///
+    /// The day key and the bounds come from the SAME lookup, so a day's bucket and its key agree by
+    /// construction — the contract spec §3 requires (half-open local-midnight-to-midnight bounds, never
+    /// fixed 86,400-second blocks). The window is also exactly what `AnalyticsEngine.analyzeDay`'s
+    /// `dayWindow:` parameter consumes.
+    nonisolated static func localDayRun(endingAt now: Int, count: Int,
+                                        zoneHistory: [TimezoneChange] = [],
+                                        defaultZone: TimeZone = TimeZone.current) -> [LocalDayWindow] {
+        let reference = LocalDayWindows(timeZone: defaultZone)
+        let today = reference.localDate(of: Date(timeIntervalSince1970: TimeInterval(now)))
+        return (0..<count).compactMap { offset in
+            let date = today.adding(days: -offset)
+            // TODAY is ALWAYS the phone's CURRENT zone (`defaultZone`, i.e. `TimeZone.current` in
+            // production): the dashboard reads Today via `TimeZone.current`, so a stale journal (a zone
+            // change the app has not yet recorded — the ProfileStore launch-append and `dayKeyDidChange`
+            // observer keep it fresh, but the invariant must hold regardless) must never re-key today's
+            // scored data under an old-zone key (round-3 P1 regression, audit-g1-day F3).
+            if offset == 0 {
+                return reference.window(of: date)
+            }
+            // Approximate the past day's start in the default zone, then resolve the journal zone
+            // effective at that instant (the server's effective-dated rule). One iteration is exact for
+            // every day except the single mid-day travel day, whose split is the documented bounded
+            // divergence.
+            guard let approx = reference.start(of: date) else { return nil }
+            let zone = zoneHistory.isEmpty ? defaultZone
+                : Self.zone(at: Int(approx.timeIntervalSince1970), journal: zoneHistory, fallback: defaultZone)
+            return LocalDayWindows(timeZone: zone).window(of: date)
+        }
+    }
+
+    /// Resolve the time zone in effect at `instant` from an effective-dated journal: the LATEST entry
+    /// whose `effectiveFrom` is `<= instant`, else the journal's oldest (pre-journal days), else
+    /// `fallback`. Deterministic and pure; the same assignment rule the server's `scoring_timezone_at`
+    /// applies. `journal` must be chronological (as `ProfileStore.timezoneHistory` maintains it).
+    nonisolated static func zone(at instant: Int,
+                                 journal: [TimezoneChange],
+                                 fallback: TimeZone) -> TimeZone {
+        let zoneId = journal.last(where: { $0.effectiveFrom <= instant })?.zoneId
+            ?? journal.first?.zoneId
+            ?? fallback.identifier
+        return TimeZone(identifier: zoneId) ?? fallback
     }
 
     /// Euclidean modulo (result has the sign of the divisor) , matches Kotlin/Java Math.floorMod, so

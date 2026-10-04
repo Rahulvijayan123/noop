@@ -622,7 +622,20 @@ struct TodayView: View {
     // jump drive this, and every day-scoped read-out (hero synthesis, the Key-Metrics tiles, the HR
     // trend and Rest score) resolves to the selected day instead of always showing today. Mirrors the
     // Android TodayScreen.selectedDayOffset. Loads re-run when this changes (see .task(id:)).
-    @State private var selectedDayOffset = 0
+    // G1 (findings/g1-day-ui.md Q4 / T03): persisted (@AppStorage) so a browsed past day survives a
+    // process restart and a SwiftUI re-mount, and clamped to the navigable range on appear so a stored
+    // offset can never strand the user past the earliest banked day. LiquidTodayView shares the same
+    // key, so the two Today surfaces agree on the selection.
+    @AppStorage(TodayView.selectedDayOffsetKey) private var selectedDayOffset = 0
+    /// The shared persistence key for the Today day-selection offset (0 = today). Shared verbatim by
+    /// `LiquidTodayView` so both surfaces restore the same selection.
+    static let selectedDayOffsetKey = "today.selectedDayOffset"
+    /// G1 restore helper: clamp a persisted offset into the navigable range [0, maxOffset], so a stored
+    /// offset from a session whose history has since been trimmed cannot point past the earliest banked
+    /// day (and never into the future). Pure + injectable for the test suite.
+    static func restoredDayOffset(saved: Int, maxOffset: Int) -> Int {
+        min(max(0, saved), max(0, maxOffset))
+    }
     // #762: the hero ring row's measured width, set by a zero-impact background preference reader so the
     // three rings size off the real available width without a height-clamped GeometryReader clipping the
     // badge under the Rest/Charge ring. 0 until first layout (the row falls back to a sensible default
@@ -746,9 +759,10 @@ struct TodayView: View {
                           todayKey: Repository.logicalDayKey(Date()))
     }
 
-    /// The logical day the selector resolves to: offset 0 is today's logical day (rolls at 04:00 like
-    /// `repo.today`), past offsets count back from it. Presentation-only, used to pick which stored row
-    /// is on screen and to anchor the HR-trend window. Mirrors Android TodayScreen.selectedDay.
+    /// The logical day the selector resolves to: offset 0 is today's logical day (local MIDNIGHT since
+    /// the G1 day-ui audit of 20261003 — `Repository.logicalDayRolloverHour = 0`; the pre-audit 04:00
+    /// boundary is retired), past offsets count back from it. Presentation-only, used to pick which
+    /// stored row is on screen and to anchor the HR-trend window. Mirrors Android TodayScreen.selectedDay.
     private var selectedLogicalDay: Date {
         let base = Repository.logicalDay(Date())
         return Calendar.current.date(byAdding: .day, value: -selectedDayOffset, to: base) ?? base
@@ -1520,6 +1534,24 @@ struct TodayView: View {
                     // clip the calendar grid (anchored to a 13pt label it otherwise sizes too small).
                     .frame(minWidth: 320, minHeight: 360)
             }
+            // G1 (spec §3 / findings T03): an explicit "return to Today" action. Shown only while
+            // browsing a past day, so tapping it is the guaranteed path back to the current day (the
+            // swipe-clamp and the picker are the other, less discoverable ones). Also persists offset 0.
+            if selectedDayOffset > 0 {
+                Button {
+                    withAnimation(StrandMotion.interactive) { selectedDayOffset = 0 }
+                    showDayPicker = false
+                } label: {
+                    Text("Today")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(StrandPalette.accent)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Capsule().fill(StrandPalette.surfaceInset))
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Return to today")
+            }
 
             Spacer(minLength: 8)
 
@@ -1672,6 +1704,7 @@ struct TodayView: View {
                 // battery (right). Replaces the big title + the full-width day-nav pill (WHOOP-style).
                 todayTopBar
                 HealthAlertBanner()
+                NaraAccountBanner()
                 if CloudPushSettings.isEnabled {
                     ServerScoreTodaySection()
                 }
@@ -1679,9 +1712,28 @@ struct TodayView: View {
                 HealthAlertBanner()
                 // Browse past days: chevrons + a date jump capped at today (no future days). Anchored to
                 // the LOGICAL day (the same anchor `selectedLogicalDay` uses) so the full-date label tracks
-                // the data shown in the 00:00-04:00 window instead of jumping a calendar day ahead (#14).
-                DayNavBar(selectedOffset: selectedDayOffset,
-                          today: Repository.logicalDay(Date())) { selectedDayOffset = $0 }
+                // the data shown on screen instead of jumping a calendar day ahead (#14).
+                HStack(spacing: 8) {
+                    DayNavBar(selectedOffset: selectedDayOffset,
+                              today: Repository.logicalDay(Date())) { selectedDayOffset = $0 }
+                    // G1 (spec §3 / findings T03): an explicit "return to Today" action beside the
+                    // navigator, shown only while browsing a past day.
+                    if selectedDayOffset > 0 {
+                        Button {
+                            withAnimation(StrandMotion.interactive) { selectedDayOffset = 0 }
+                        } label: {
+                            Text("Today")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.accent)
+                                .padding(.horizontal, 12).padding(.vertical, 6)
+                                .background(Capsule().fill(StrandPalette.surfaceInset))
+                                .contentShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Return to today")
+                        .help("Return to today")
+                    }
+                }
                 #endif
                 // A "workout in progress" indicator whenever a manual workout is active. A tap routes to Live
                 // and opens the in-exercise screen. Its own leaf owns the AppModel observation + per-second
@@ -1756,7 +1808,8 @@ struct TodayView: View {
         // Reload when the data refreshes OR the selected day changes, the HR trend and Rest score are
         // day-scoped, so navigating must re-fetch them for the newly selected window.
         .task(id: TodayLoadKey(seq: repo.refreshSeq, offset: selectedDayOffset,
-                              dayCycleMode: dayCycleModeRaw)) { await loadAll() }
+                              dayCycleMode: dayCycleModeRaw, rolloverSeq: repo.dayRolloverSeq,
+                              zoneContextSeq: repo.zoneContextSeq)) { await loadAll() }
         // #989: hydration writes don't bump refreshSeq, so the card needs its own triggers, a logged /
         // edited / deleted drink (hydrationSeq) and the Settings feature toggle both re-read just the two
         // hydration fields. Cheap (one metricSeries row), never re-runs the heavy loads.
@@ -1780,6 +1833,10 @@ struct TodayView: View {
         }
         .onAppear {
             DashboardCardPrefs.migrateLegacyStepsAverage()
+            // G1 (T03): a persisted past-day selection is clamped into the current navigable range on
+            // appear, so a stale stored offset can never strand the user past the earliest banked day.
+            let clamped = Self.restoredDayOffset(saved: selectedDayOffset, maxOffset: earliestDayOffset)
+            if clamped != selectedDayOffset { selectedDayOffset = clamped }
             if derivedKey != todayInputKey {
                 derived = buildDerived()
                 derivedKey = todayInputKey
@@ -5177,9 +5234,9 @@ struct TodayView: View {
 
         // HR trend for the SELECTED day, 5-minute bucket means from that logical day's local midnight.
         // For today the window runs to now (an in-progress curve); for a navigated past day it runs the
-        // full 24h to the next midnight. The logical day rolls at 04:00 (Repository.logicalDayStart), so
-        // in the small hours after midnight today still starts at yesterday's midnight rather than
-        // blanking to an empty new-calendar-day axis (#144).
+        // full 24h to the next midnight. Since the G1 day-ui audit (20261003) the logical day rolls at
+        // LOCAL MIDNIGHT (`Repository.logicalDayRolloverHour = 0`), so today's axis starts at today's
+        // 00:00; the pre-audit 04:00 shift (#144) is retired.
         let dayStart = Calendar.current.startOfDay(for: selectedLogicalDay)
         let calendarStart = Int(dayStart.timeIntervalSince1970)
         let calendarEnd: Int = selectedDayOffset == 0
@@ -5620,12 +5677,18 @@ struct TodayView: View {
     static var hrTimeFmt: DateFormatter { AppClock.hourMinuteFormatter() }
 }
 
-/// `.task(id:)` key combining the data refresh sequence with the selected day so a reload runs on
-/// either a data change or a day-navigation change (the HR trend + Rest score are day-scoped).
+/// `.task(id:)` key combining the data refresh sequence, the selected day, the day-cycle mode and the
+/// G1 day-rollover + zone-context sequences so a reload runs on a data change, a day-navigation change
+/// (the HR trend + Rest score are day-scoped), a local-midnight rollover, or a same-day timezone change
+/// (chart bounds / live windows must re-key to the new zone even at an unchanged day — audit-g1-day F1b).
+/// The day-scoped data must re-key at an unchanged `seq`, which is exactly why the rollover/zone seqs
+/// live outside `seq` (findings/g1-day-ui.md T01).
 private struct TodayLoadKey: Equatable {
     let seq: Int
     let offset: Int
     let dayCycleMode: String
+    let rolloverSeq: Int
+    let zoneContextSeq: Int
 }
 
 /// #849: an in-memory snapshot of everything `loadHistoryWide()` computes: the ~40 history-wide reads +

@@ -2,6 +2,8 @@
 // In the edge runtime SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY are injected by the platform;
 // locally they come from `supabase functions serve --env-file`.
 
+import { namedKey } from './config.ts';
+
 export interface RestConfig {
   supabaseUrl: string;
   supabaseServiceRoleKey: string;
@@ -9,8 +11,11 @@ export interface RestConfig {
 
 /** A server authorization/fence rejection, without copying its body into logs. */
 export class RestAuthorityError extends Error {
-  constructor(readonly status: number, readonly receiverCode?: 'intake_admission_scope_mismatch') {
+  /** The receiver's own bounded rejection code when one exists; the generic fallback otherwise. */
+  readonly code: string;
+  constructor(readonly status: number, readonly receiverCode?: string) {
     super(receiverCode ?? 'supabase_authority_rejected');
+    this.code = receiverCode ?? 'supabase_authority_rejected';
   }
 }
 
@@ -24,8 +29,21 @@ export function restConfigFromEnv(env: Record<string, string | undefined> = Deno
   };
   return {
     supabaseUrl: pick('SUPABASE_URL', 'PROJECT_URL').replace(/\/$/, ''),
-    supabaseServiceRoleKey: pick('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY'),
+    supabaseServiceRoleKey: pick('SUPABASE_SERVICE_ROLE_KEY', 'SERVICE_ROLE_KEY') ||
+      pick('SUPABASE_SECRET_KEY') ||
+      namedKey(env.SUPABASE_SECRET_KEYS, 'sb_secret_'),
   };
+}
+
+/**
+ * Headers that authenticate the server-side key. Legacy `service_role` keys are JWTs and travel as
+ * a bearer too; new-format `sb_secret_...` keys are opaque, must not be sent as a bearer, and are
+ * accepted on the `apikey` header alone.
+ */
+export function serviceKeyHeaders(key: string): Record<string, string> {
+  return key.startsWith('sb_secret_')
+    ? { apikey: key }
+    : { apikey: key, authorization: `Bearer ${key}` };
 }
 
 export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig; fetchImpl?: typeof fetch }) {
@@ -34,8 +52,7 @@ export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig
 
   function restHeaders() {
     return {
-      apikey: cfg.supabaseServiceRoleKey,
-      authorization: `Bearer ${cfg.supabaseServiceRoleKey}`,
+      ...serviceKeyHeaders(cfg.supabaseServiceRoleKey),
       'content-type': 'application/json',
       prefer: 'return=representation',
     } as Record<string, string>;
@@ -67,8 +84,18 @@ export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig
       // recovery RPC contains "recovery_", including ordinary object failures.
       if ([401, 403].includes(res.status) || json?.code === '42501' ||
           (json?.code === 'P0001' && typeof json?.message === 'string' && /^recovery_[a-z0-9_]+$/.test(json.message))) {
-        throw new RestAuthorityError(res.status, json?.code === '42501' && json?.message === 'intake_admission_scope_mismatch'
-          ? 'intake_admission_scope_mismatch' : undefined);
+        // Propagate the receiver's own rejection code to callers when it is a
+        // safe, bounded identifier (contract C4): the receiver's condition, not
+        // this client's guess at it. Arbitrary SQL messages/codes remain private
+        // and are never copied into diagnostics. The bounded legacy special case
+        // (`intake_admission_scope_mismatch`) is subsumed by the safe-code rule;
+        // the standard Postgres "permission denied ..." family has no code of its
+        // own, so it surfaces as the canonical bounded phrase instead.
+        const receiverMessage = typeof json?.message === 'string' ? json.message : '';
+        const receiverCode = /^[a-z0-9_]{3,64}$/.test(receiverMessage)
+          ? receiverMessage
+          : (/^permission denied\b/.test(receiverMessage) ? 'permission denied' : undefined);
+        throw new RestAuthorityError(res.status, receiverCode);
       }
       const msg = typeof json === 'string' ? json : (json?.message || json?.hint || text);
       const err: any = new Error(`${method} ${path} failed (${res.status}) ${String(msg || '').slice(0, 180)}`);
@@ -115,10 +142,7 @@ export function createSupabaseRest({ cfg, fetchImpl = fetch }: { cfg: RestConfig
     async adminDeleteAuthUser(userId: string) {
       const res = await fetchImpl(`${url}/auth/v1/admin/users/${userId}`, {
         method: 'DELETE',
-        headers: {
-          apikey: cfg.supabaseServiceRoleKey,
-          authorization: `Bearer ${cfg.supabaseServiceRoleKey}`,
-        },
+        headers: serviceKeyHeaders(cfg.supabaseServiceRoleKey),
       });
       if (res.status === 404) return { deleted: true, missing: true };
       if (!res.ok) throw new Error(`auth delete failed (${res.status})`);

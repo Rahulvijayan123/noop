@@ -470,9 +470,14 @@ enum BodyVitalSigns {
         readings.compactMap(\.day).max().map(BodyVitalReading.dayLabel)
     }
 
-    /// The LOGICAL local day for `now` (rolls at 04:00 local). Self-contained so this helper stays pure
-    /// and independent of the @MainActor Repository — same boundary, mirrored here for the readings build.
-    static func logicalDayKey(_ now: Date, rolloverHour: Int = 4) -> String {
+    /// The LOGICAL local day for `now`. G1 day-ui audit (20261003, docs/core-plumbing/spec.md §3 and
+    /// findings/audit-g1-day.md F2): the logical day now IS the phone-local calendar day and rolls at
+    /// local MIDNIGHT (`rolloverHour = 0`), the same boundary as `Repository.logicalDayKey` (whose
+    /// `logicalDayRolloverHour` is 0). The pre-audit 04:00 shift (retired in Repository and mirrored
+    /// here) made the Health vitals tile and the Sleep headline treat yesterday as "today" between
+    /// midnight and 04:00. Self-contained so this helper stays pure and independent of the @MainActor
+    /// Repository — same boundary, mirrored here for the readings build.
+    static func logicalDayKey(_ now: Date, rolloverHour: Int = 0) -> String {
         localDayFormatter.string(from: now.addingTimeInterval(-Double(rolloverHour) * 3_600))
     }
 
@@ -494,6 +499,8 @@ enum BodyVitalSigns {
     static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
+        // Same zone as `dayParser`: a day key is a calendar date, not an instant to shift.
+        f.timeZone = TimeZone(identifier: "UTC")
         f.dateFormat = "d MMM"
         return f
     }()

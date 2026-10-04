@@ -349,10 +349,79 @@ public enum HRVAnalyzer {
                                     windowSec: Int,
                                     stepSec: Int = 0,
                                     minBeatsPerWindow: Int = 8) -> [RollingRmssdPoint] {
+        // #1448: GAP-AWARE, exactly as the nightly `analyze` above already is. Dropping a beat joins
+        // two intervals that were never adjacent, and their difference is a splice rather than a
+        // physiological delta — the spurious large delta this analyzer's gap-aware pair (#204/#195)
+        // exists to exclude. `cleaned.nn` is byte-identical to `cleanRR` over the same input, so the
+        // survivor gate is unchanged, and `rmssdGapAware` equals `rmssdRaw` on a window with no gaps:
+        // only windows that actually lost a beat move. A window whose survivors share NO adjacent
+        // pair now emits nothing rather than a number built entirely from splices.
+        rollingWindows(rr: rr, windowSec: windowSec, stepSec: stepSec,
+                       minBeatsPerWindow: minBeatsPerWindow) { _, cleaned in
+            rmssdGapAware(cleaned.nn, cleaned.contiguous)
+        }.map { RollingRmssdPoint(ts: $0.ts, rmssd: $0.value) }
+    }
+
+    // MARK: - Rolling / windowed SDNN timeline
+
+    /// One windowed SDNN point: the SDNN (ms) over the trailing `windowSec` of R-R intervals ending at `ts`.
+    public struct RollingSdnnPoint: Equatable, Sendable {
+        /// Wall-clock unix seconds of the last R-R interval folded into this window (the window's right edge).
+        public let ts: Int
+        /// SDNN (ms, sample SD) over the cleaned R-R intervals inside the trailing window.
+        public let sdnn: Double
+        public init(ts: Int, sdnn: Double) { self.ts = ts; self.sdnn = sdnn }
+    }
+
+    /// Clean beats a rolling SDNN window needs. Higher than rMSSD's floor (8): a standard deviation over a
+    /// handful of beats clustered in one burst is a different quantity from the 5-minute short-term SDNN
+    /// the nightly index reports, so a sparse window emits nothing instead of a number that only looks alike.
+    public static let rollingSdnnMinBeats = 20
+
+    /// Pure rolling/windowed SDNN over an R-R series: the SDNN twin of `rollingRmssd`, built on the same
+    /// trailing window, thinning stride and range + Malik ectopic cleaning, so the two lines plotted together
+    /// describe the same beats.
+    ///
+    /// SDNN is the spread of EVERY interval in the window, so unlike a successive-difference statistic it is
+    /// inflated by a beat held twice and by intervals that are not beat-to-beat accurate. A window is refused
+    /// when `beatSpreadIsTrustworthy` (coverage verdict) or `beatValuesAreTrustworthy` (beat accuracy) says
+    /// so, the same two gates the nightly SDNN honours, instead of plotting a spread no heart produced.
+    ///
+    /// Callers should pass a window of about five minutes (`windowSec` 300) for a figure comparable to the
+    /// nightly `sdnnIndex`; a much shorter window reads lower because it holds less slow drift.
+    public static func rollingSdnn(rr: [RRInterval],
+                                   windowSec: Int,
+                                   stepSec: Int = 0,
+                                   minBeatsPerWindow: Int = rollingSdnnMinBeats) -> [RollingSdnnPoint] {
+        rollingWindows(rr: rr, windowSec: windowSec, stepSec: stepSec,
+                       minBeatsPerWindow: minBeatsPerWindow) { window, cleaned in
+            let tsSec = window.map(\.ts)
+            let rrMs = window.map { Double($0.rrMs) }
+            let verdict = classifyCoverage(coverage: rrCoverage(tsSec: tsSec, rrMs: rrMs),
+                                           collapsed: collapsedCoverage(tsSec: tsSec, rrMs: rrMs))
+            guard beatSpreadIsTrustworthy(verdict),
+                  beatValuesAreTrustworthy(beatAccurateFraction: beatAccurateFraction(tsSec: tsSec, rrMs: rrMs))
+            else { return nil }
+            return sdnnRaw(cleaned.nn)
+        }.map { RollingSdnnPoint(ts: $0.ts, sdnn: $0.value) }
+    }
+
+    /// The trailing-window walk `rollingRmssd` and `rollingSdnn` share. For each input interval at `ts` the
+    /// window is `(ts - windowSec, ts]`; its raw values are cleaned with the shared range + Malik ectopic
+    /// pipeline (gap-aware) and a point is emitted only when at least `minBeatsPerWindow` clean intervals
+    /// survive AND `statistic` returns a value for the window (it receives the raw window rows and the cleaned
+    /// series). `stepSec` thins the output to at most one point per stride.
+    private static func rollingWindows(
+        rr: [RRInterval],
+        windowSec: Int,
+        stepSec: Int,
+        minBeatsPerWindow: Int,
+        statistic: (ArraySlice<RRInterval>, CleanSeries) -> Double?
+    ) -> [(ts: Int, value: Double)] {
         guard windowSec > 0, rr.count >= minBeatsPerWindow else { return [] }
         // Stable: preserves the store's #823 emission order for same-second beats, which RMSSD needs.
         let sorted = rr.sortedByTsStable()
-        var out: [RollingRmssdPoint] = []
+        var out: [(ts: Int, value: Double)] = []
         var lastEmitTs: Int? = nil
         var left = 0   // index of the oldest interval still inside the trailing window
         for right in 0..<sorted.count {
@@ -361,21 +430,11 @@ public enum HRVAnalyzer {
             while left < right && edgeTs - sorted[left].ts >= windowSec { left += 1 }
             // Thinning stride: skip emitting until at least `stepSec` has passed since the last emitted point.
             if stepSec > 0, let last = lastEmitTs, edgeTs - last < stepSec { continue }
-            // Clean the window's raw R-R values with the shared range + Malik ectopic pipeline, then
-            // require enough survivors before trusting a windowed rMSSD.
-            //
-            // #1448: GAP-AWARE, exactly as the nightly `analyze` above already is. Dropping a beat joins
-            // two intervals that were never adjacent, and their difference is a splice rather than a
-            // physiological delta — the spurious large delta this analyzer's gap-aware pair (#204/#195)
-            // exists to exclude. `cleaned.nn` is byte-identical to `cleanRR` over the same input, so the
-            // survivor gate is unchanged, and `rmssdGapAware` equals `rmssdRaw` on a window with no gaps:
-            // only windows that actually lost a beat move. A window whose survivors share NO adjacent
-            // pair now emits nothing rather than a number built entirely from splices.
-            let windowRaw = sorted[left...right].map { Double($0.rrMs) }
-            let cleaned = cleanRRGapAware(windowRaw)
+            let window = sorted[left...right]
+            let cleaned = cleanRRGapAware(window.map { Double($0.rrMs) })
             guard cleaned.nn.count >= minBeatsPerWindow,
-                  let r = rmssdGapAware(cleaned.nn, cleaned.contiguous) else { continue }
-            out.append(RollingRmssdPoint(ts: edgeTs, rmssd: r))
+                  let value = statistic(window, cleaned) else { continue }
+            out.append((ts: edgeTs, value: value))
             lastEmitTs = edgeTs
         }
         return out

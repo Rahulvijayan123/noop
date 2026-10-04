@@ -9,12 +9,12 @@ const OTHER = '22222222-2222-4222-8222-222222222222';
 const SOURCE = '33333333-3333-4333-8333-333333333333';
 const LOCAL = 'whoop-ABC123456';
 const DEVICE = noopDeviceId(USER, LOCAL);
-const cfg = { supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'fixture-public' };
+const cfg = { supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'fixture-public', allowLegacyEnrollment: true };
 
 async function fixture() {
   const rest = makeMemRest() as any;
   await rest.upsert('noop_ingest_tokens', [
-    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', user_id: USER, source_id: SOURCE },
+    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', provisioning_method: 'enrollment_code', user_id: USER, source_id: SOURCE },
     { id: 'fleet', token_hash: hashIngestToken('noop_fleet'), token_kind: 'fleet' },
     { id: 'legacy', token_hash: hashIngestToken('noop_legacy'), token_kind: 'legacy_upload', user_id: USER },
   ]);

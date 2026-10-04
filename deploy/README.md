@@ -53,6 +53,64 @@ artifact for rollback. `systemctl restart frwhoop-worker` only after tests pass.
 DB URL + `FRWHOOP_DB_SSLMODE=verify-full` + `FRWHOOP_DB_SSLROOTCERT=/etc/frwhoop/supabase-ca-chain.pem`,
 B2 key id + application key, ingest secret, worker name, source revision, lane budgets.
 
+### Activity context lane (optional, off by default)
+
+The activity lane needs a Python venv and the trained artifacts on the host. This is what runs on
+`frwhoop-worker-2` (Ubuntu 24.04, Python 3.12, CPU only):
+
+```bash
+ssh root@HOST
+apt-get install -y python3.12-venv
+python3 -m venv /var/lib/frwhoop/activity-venv
+PY=/var/lib/frwhoop/activity-venv/bin/python
+$PY -m pip install --index-url https://download.pytorch.org/whl/cpu torch==2.8.0   # CPU wheel, no CUDA stack
+$PY -m pip install numpy==2.2.6 transformers==4.56.0 granite-tsfm==0.3.3 safetensors==0.8.0
+chown -R frwhoop:frwhoop /var/lib/frwhoop/activity-venv
+# artifacts (about 650 KB): config.json, manifest.json and model.safetensors in /var/lib/frwhoop/activity-model
+# check that serve.py loads them as the service user, before touching the live worker:
+printf '%s\n' '{"id":"1","op":"ping"}' '{"id":"2","op":"shutdown"}' | su -s /bin/bash frwhoop -c \
+  "cd /opt/noop/Tools/ActivityContext && HOME=/var/lib/frwhoop $PY -m activity_context.serve \
+   --manifest /var/lib/frwhoop/activity-model/manifest.json --checkpoint /var/lib/frwhoop/activity-model"
+# the ping must answer "model_status": "hart_loaded"; then enable in /etc/frwhoop/worker.env:
+#   FRWHOOP_ACTIVITY_ENABLED=1
+#   FRWHOOP_ACTIVITY_PYTHON=/var/lib/frwhoop/activity-venv/bin/python
+#   FRWHOOP_ACTIVITY_HOME=/opt/noop/Tools/ActivityContext
+#   FRWHOOP_ACTIVITY_MODEL_DIR=/var/lib/frwhoop/activity-model
+#   OMP_NUM_THREADS=2          # torch would otherwise spin all four cores next to the scoring lane
+#   HF_HUB_OFFLINE=1           # the checkpoint is local; never reach for the network
+#   TRANSFORMERS_OFFLINE=1
+systemctl restart frwhoop-worker
+```
+
+Without a model dir the child boots the numpy baseline instead of the HART checkpoint.
+
+Rollback is `FRWHOOP_ACTIVITY_ENABLED` off (or `activity` in `FRWHOOP_DISABLE_LANES`) and a
+restart; the migration is additive and needs no revert.
+
+The lane also stores ActivityContext v2 day documents. Apply the second migration BEFORE (or with) the
+worker upgrade, the same way as every other migration (never `supabase db push`):
+
+```bash
+psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261003130000_activity_context_days.sql
+```
+
+A worker that runs before it still publishes the v1 epochs; only its day document fails (counted in the
+heartbeat as `context_day_failures`). `FRWHOOP_ACTIVITY_CONTEXT_V2=0` turns the day documents off alone.
+Backfill of days that were published before the upgrade is an operator step, see
+[docs/BACKEND.md](../docs/BACKEND.md#day-documents-activitycontext-v2).
+
+The third migration adds the stream days (a day document for every UTC day with stored measurements, not
+only the few with raw IMU) and the read views. Apply it BEFORE the worker that carries the stream stage:
+
+```bash
+psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261003140000_activity_context_stream_days.sql
+```
+
+A worker that runs before it notes `stream_days` once, backs the stage off for a minute and carries on with
+everything else. The stage needs neither Python nor B2, so a host with no venv enables the lane with
+`FRWHOOP_ACTIVITY_ENABLED=1 FRWHOOP_ACTIVITY_IMU=0`. `FRWHOOP_ACTIVITY_STREAMS=0` turns the stage off.
+Python on Ubuntu 24.04 needs `apt-get install python3.12-venv` before `python3 -m venv` works.
+
 ## Operate / verify
 
 ```bash

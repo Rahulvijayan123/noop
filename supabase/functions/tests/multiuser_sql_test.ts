@@ -211,7 +211,9 @@ Deno.test({
           batch_id: batch,
         })),
       });
-    const lifecycle = createInstallationLifecycle(rest);
+    const lifecycle = createInstallationLifecycle(rest, {
+      allowLegacyEnrollment: true,
+    });
     const call = (
       token: string,
       action: "retire" | "confirm" | "handoff",
@@ -794,12 +796,17 @@ Deno.test({
           receipt,
         );
         await assert.rejects(() =>
-          resolveUploadIdentity({ rest, headers: headers("noop_multiuser_a1") })
+          resolveUploadIdentity({
+            rest,
+            headers: headers("noop_multiuser_a1"),
+            allowLegacyEnrollment: true,
+          })
         );
         assert.equal(
           (await resolveUploadIdentity({
             rest,
             headers: headers("noop_multiuser_a2"),
+            allowLegacyEnrollment: true,
           })).id,
           a,
         );
@@ -955,7 +962,11 @@ Deno.test({
         assert.equal((await deletion.run(a)).status, "retry");
         assert.equal(authDeleted, false);
         await assert.rejects(() =>
-          resolveUploadIdentity({ rest, headers: headers("noop_multiuser_a2") })
+          resolveUploadIdentity({
+            rest,
+            headers: headers("noop_multiuser_a2"),
+            allowLegacyEnrollment: true,
+          })
         );
         await sql(
           `update noop_account_retirements set requested_at=clock_timestamp()-interval '1 hour' where user_id='${a}'`,

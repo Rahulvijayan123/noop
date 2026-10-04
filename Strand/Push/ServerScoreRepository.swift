@@ -1,6 +1,7 @@
 import Foundation
 import CryptoKit
 import WhoopProtocol
+import StrandAnalytics
 import WhoopStore
 
 /// One day that the server says has changed, from the pull-based invalidation channel.
@@ -69,9 +70,10 @@ public struct ServerScoreSnapshot: Sendable, Equatable {
 ///    when the PROJECTED tables hold the day's rows. The authoritative surface is the server-computed
 ///    `server_scoring` contract (server_physiology_results + scoring_snapshots_v2, carrying
 ///    result_revision / input_revision and a per-feature status), which the edge route returns.
-///  - Auth is the same installation credential as ingest: `Authorization: Bearer <noop_…>` plus
-///    `x-noop-fleet-token`. No Supabase user session is involved on this route, and `deviceId` is
-///    required (the edge validates it and resolves it to an owned device).
+///  - Auth is the same installation credential as ingest: `Authorization: Bearer <noop_…>`, bound
+///    server-side to exactly one (account, source). No Supabase user session and no shared token is
+///    involved on this route, and `deviceId` is required (the edge validates it and resolves it to a
+///    device that account owns).
 ///  - Invalidation is cursor-based (`/days`), not realtime: a relaunch resumes the cursor, and a
 ///    changed scope revision resets it.
 public actor ServerScoreRepository {
@@ -96,20 +98,20 @@ public actor ServerScoreRepository {
 
     private let session: URLSession
     private let endpoint: URL?
-    private let fleetToken: String
     private let identity: @Sendable () -> CloudPushIdentity?
     private let directory: URL
     private let now: @Sendable () -> Int
 
+    /// `identity` supplies the credential to read with. The default is the signed-in account's; the
+    /// runtime passes one bound to its own scope, so a repository created for account A never reads
+    /// with account B's credential.
     public init(session: URLSession = .shared,
                 endpoint: URL? = nil,
-                fleetToken: String? = nil,
                 directory: URL? = nil,
                 identity: @escaping @Sendable () -> CloudPushIdentity? = { CloudPushIdentityStore.current() },
                 now: @escaping @Sendable () -> Int = { Int(Date().timeIntervalSince1970 * 1000) }) {
         self.session = session
         self.endpoint = endpoint ?? ServerScoreRepository.derivedEndpoint()
-        self.fleetToken = fleetToken ?? CloudPushSettings.fleetToken
         self.directory = directory ?? ((try? CloudJournalPaths.defaultDirectory())
             .map { $0.appendingPathComponent("scores", isDirectory: true) }
             ?? FileManager.default.temporaryDirectory.appendingPathComponent("noop-scores", isDirectory: true))
@@ -177,10 +179,10 @@ public actor ServerScoreRepository {
     /// network) when this build carries no receiver.
     @discardableResult
     public func refresh(day: String, deviceId: String) async throws -> ServerScoreSnapshot {
-        // "Configured" is decided by THIS instance's own endpoint and fleet credential, not by a global
-        // read: an unconfigured build derives no endpoint (so this still fails fast and touches no
-        // network), while a caller that injected an endpoint and token is configured by construction.
-        guard let endpoint, !fleetToken.isEmpty else { throw ReadError.notConfigured }
+        // "Configured" is decided by THIS instance's own endpoint, not by a global read: an unconfigured
+        // build derives no endpoint (so this still fails fast and touches no network), while a caller
+        // that injected one is configured by construction.
+        guard let endpoint else { throw ReadError.notConfigured }
         guard let identity = identity() else { throw ReadError.missingIdentity }
 
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
@@ -202,7 +204,7 @@ public actor ServerScoreRepository {
     /// and restarts at 0, which is what the server contract requires.
     @discardableResult
     public func pollChangedDays(deviceId: String, limit: Int = 32) async throws -> [ServerScoreChange] {
-        guard let endpoint, !fleetToken.isEmpty else { throw ReadError.notConfigured }
+        guard let endpoint else { throw ReadError.notConfigured }
         guard let identity = identity() else { throw ReadError.missingIdentity }
 
         let storedScope = defaults.string(forKey: scopeKey(ownerId: identity.ownerId, deviceId: deviceId))
@@ -241,7 +243,7 @@ public actor ServerScoreRepository {
     @discardableResult
     public func intradaySeries(from: Int, to: Int, deviceId: String, metrics: [IntradayMetric]? = nil,
                                cacheKey: String) async throws -> IntradaySeriesWindow {
-        guard let endpoint, !fleetToken.isEmpty else { throw ReadError.notConfigured }
+        guard let endpoint else { throw ReadError.notConfigured }
         guard let identity = identity() else { throw ReadError.missingIdentity }
 
         var components = URLComponents(url: endpoint.appendingPathComponent("series"),
@@ -310,8 +312,7 @@ public actor ServerScoreRepository {
     private func get(url: URL, identity: CloudPushIdentity) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(fleetToken, forHTTPHeaderField: "x-noop-fleet-token")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw ReadError.malformed("no response") }
@@ -541,6 +542,16 @@ public struct HostedDayResult: Equatable {
     /// published one. Informational only: it is not what Charge or the baselines use.
     public let hrvSeries: [HrvSeriesPoint]
     public let hrvSlotSeconds: Int
+    /// The optional C10 `daily.activity_context` snapshot (server-computed 30-s activity grid).
+    /// Nil when the payload has no key, when the field is malformed, or when this app build has not
+    /// learned a newer schema yet — never fatal. The UI renders nothing when it is nil (feature off).
+    ///
+    /// Cache: this rides inside the `daily` object that `snapshot()` keeps verbatim in `rawJSON`
+    /// (ServerScoreRepository.swift:293-347), so `writeCache` persists it automatically — no new
+    /// cache field. A cached read re-wraps the same payload and re-parses through `snapshot()`,
+    /// so offline renders the exact timeline the network read produced for the same
+    /// owner + device + result revision.
+    public let activityContext: ActivityContextDocument?
 
     init?(day: String, object: [String: Any]) {
         guard let daily = object["daily"] as? [String: Any],
@@ -581,6 +592,7 @@ public struct HostedDayResult: Equatable {
                   let beats = Self.number(point[2]).flatMap({ Int(exactly: $0) }) else { return nil }
             return HrvSeriesPoint(startTs: start, rmssd: rmssd, cleanBeats: beats)
         }.sorted { $0.startTs < $1.startTs }
+        self.activityContext = Self.activityContext(from: daily)
         self.sleep = ((object["sleep"] as? [Any]) ?? []).compactMap { entry -> CachedSleepSession? in
             guard let night = entry as? [String: Any],
                   night["is_nap"] as? Bool != true,
@@ -613,6 +625,20 @@ public struct HostedDayResult: Equatable {
         if let date = formatter.date(from: text) { return Int(date.timeIntervalSince1970) }
         formatter.formatOptions.insert(.withFractionalSeconds)
         return formatter.date(from: text).map { Int($0.timeIntervalSince1970) }
+    }
+
+    /// Decode the optional C10 `daily.activity_context` object into the SHARED StrandAnalytics
+    /// schema (the same types the worker serializes with), so app and server can never drift.
+    ///
+    /// Deliberately non-fatal on every failure mode: a missing key, a non-object value, a future
+    /// schema bump, or a malformed field all return nil and leave the rest of the hosted result
+    /// intact. Old payloads without the key are unaffected (spec-14 §10 "Preserve old clients and
+    /// snapshots with no activity_context field").
+    static func activityContext(from daily: [String: Any]) -> ActivityContextDocument? {
+        guard let raw = daily["activity_context"] else { return nil }
+        guard JSONSerialization.isValidJSONObject(raw) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        return try? JSONDecoder().decode(ActivityContextDocument.self, from: data)
     }
 }
 

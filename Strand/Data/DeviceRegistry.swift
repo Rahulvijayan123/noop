@@ -98,6 +98,7 @@ final class DeviceRegistry: ObservableObject {
         } catch {
             return
         }
+        ActivityContextFileStore.shared.removeAll(forDevice: id)
         reload()
     }
 
@@ -115,6 +116,7 @@ final class DeviceRegistry: ObservableObject {
         } catch {
             return
         }
+        ActivityContextFileStore.shared.removeAll(forDevice: id)
         try? self.store.remove(id)
         reload()
     }

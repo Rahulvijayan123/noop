@@ -18,6 +18,7 @@ struct SettingsView: View {
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var profile: ProfileStore
     @EnvironmentObject var behavior: BehaviorStore
+    @ObservedObject private var naraAuth = NaraAuthService.shared
 
     /// Profile-photo picker selection (PhotosUI). Cleared back to nil once the bytes are loaded.
     @State private var avatarPickerItem: PhotosPickerItem?
@@ -27,6 +28,8 @@ struct SettingsView: View {
     @State private var exportAlertMessage = ""
     @State private var showExportAlert = false
     @State private var showAbout = false
+    /// The current manual strap placement (G4), loaded when Settings appears.
+    @State private var currentPlacement = StrapPlacement.unknown
 
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
     #if os(iOS)
@@ -54,6 +57,28 @@ struct SettingsView: View {
         .sheet(isPresented: $showAbout) {
             HowNoopWorksView(onClose: { showAbout = false })
         }
+        .task { await loadCurrentPlacement() }
+    }
+
+    /// Reads the effective placement at "now" for the active strap from the local store. History
+    /// before the first declaration is UNKNOWN and is never backfilled (spec §6).
+    private func loadCurrentPlacement() async {
+        guard let store = await model.repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        let device = model.repo.deviceId
+        currentPlacement = (try? placementStore.activePlacement(at: Date(), deviceId: device))?.placement
+            ?? .unknown
+        // F5 (audit-g34-g7-context): pull server-side placement corrections back at the Settings
+        // appear cadence. Best-effort and non-blocking; reconcile() self-skips while any local
+        // change is still unsynced, so an offline declaration is never overwritten.
+        await reconcilePlacement(placementStore)
+    }
+
+    /// Best-effort pull of the server's placement intervals (same authenticated route pattern).
+    private func reconcilePlacement(_ placementStore: PlacementStore) async {
+        guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil else { return }
+        let sync = PlacementCloudSync(store: { placementStore })
+        _ = try? await sync.reconcile()
     }
 
     private func navRow<Dest: View>(_ label: LocalizedStringKey, _ value: String? = nil,
@@ -70,9 +95,20 @@ struct SettingsView: View {
 
     private var accountGroup: some View {
         SettingsGroup("Account") {
-            navRow("Nara account", CloudPushSettings.isEnabled ? String(localized: "Cloud sync on") : nil) {
-                CloudEnrollmentView()
+            navRow("Nara account", accountRowValue) {
+                NaraAccountView()
             }
+        }
+    }
+
+    /// What the account row says at a glance: who is signed in, or that nobody is.
+    private var accountRowValue: String? {
+        guard naraAuth.isAvailable else { return nil }
+        switch naraAuth.phase {
+        case .signedIn(let signedIn): return signedIn.email ?? String(localized: "Signed in")
+        case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode: return String(localized: "Sign in")
+        case .choosingSetup: return String(localized: "Finish setup")
+        case .restoring: return nil
         }
     }
 
@@ -99,6 +135,8 @@ struct SettingsView: View {
             navRow("Height", heightValue) { heightEditor }
             SettingsDivider()
             navRow("Waist", waistValue) { waistEditor }
+            SettingsDivider()
+            navRow("Resting metabolic rate", rmrValue) { rmrEditor }
         }
     }
 
@@ -133,6 +171,54 @@ struct SettingsView: View {
         return unitSystem == .imperial
             ? "\(Int(UnitFormatter.cmToInches(profile.waistCm).rounded())) in"
             : "\(Int(profile.waistCm.rounded())) cm"
+    }
+
+    /// 0 = unset: a measured resting metabolic rate is optional, and the calorie estimate falls back to the
+    /// population equation without it.
+    private var rmrValue: String {
+        guard profile.measuredRmrKcalPerDay > 0 else { return String(localized: "Not set") }
+        return "\(Int(profile.measuredRmrKcalPerDay.rounded())) kcal/day"
+    }
+
+    private var rmrEditor: some View {
+        let set = profile.measuredRmrKcalPerDay > 0
+        let equation = MetabolicEstimator.resolveRMR(profile: UserProfile(
+            weightKg: profile.weightKg, heightCm: profile.heightCm, age: Double(profile.age), sex: profile.sex))
+        return SettingsEditPage("Resting metabolic rate",
+                                footnote: "Optional: your resting energy from a lab or metabolic-cart test, in kcal per day. It sets the resting part of your daily calories; without it Nara uses an equation (about \(Int(equation.kcalPerDay.rounded())) kcal/day for your profile).") {
+            FormRow(label: "Resting metabolic rate") {
+                HStack(spacing: NoopMetrics.space2) {
+                    HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
+                        Text(set ? "\(Int(profile.measuredRmrKcalPerDay.rounded()))" : String(localized: "Not set"))
+                            .font(StrandFont.bodyNumber)
+                            .foregroundStyle(set ? StrandPalette.textPrimary : StrandPalette.textTertiary)
+                            .frame(minWidth: NoopMetrics.formValueColumnWidth, alignment: .center)
+                        if set {
+                            Text("kcal/day")
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .fixedSize()
+                        }
+                    }
+                    .fixedSize()
+                    Stepper("Resting metabolic rate in kilocalories per day") {
+                        // From unset the first step lands on the equation's value, a sensible place to start.
+                        profile.measuredRmrKcalPerDay = min(4000, set
+                            ? profile.measuredRmrKcalPerDay + 10
+                            : (equation.kcalPerDay / 10).rounded() * 10)
+                    } onDecrement: {
+                        let next = profile.measuredRmrKcalPerDay - 10
+                        profile.measuredRmrKcalPerDay = next < 800 ? 0 : next
+                    }
+                    .labelsHidden()
+                    .accessibilityLabel(set
+                        ? "Resting metabolic rate, \(Int(profile.measuredRmrKcalPerDay.rounded())) kilocalories per day"
+                        : "Resting metabolic rate not set")
+                }
+                .fixedSize()
+            }
+            .padding(NoopMetrics.space4)
+        }
     }
 
     private var nameEditor: some View {
@@ -412,8 +498,21 @@ struct SettingsView: View {
                             chevron: false)
                 SettingsDivider()
             }
+            SettingsDivider()
+            navRow("Wear placement",
+                   currentPlacement == .unknown ? String(localized: "Not set") : currentPlacement.displayName) {
+                placementEditor
+            }
+            SettingsDivider()
             navRow("Manage strap") { strapEditor }
         }
+    }
+
+    /// Manual, effective-dated placement (G4). Picking a row declares the placement effective at the
+    /// moment it is saved, offline-safe; corrections close the overlapping interval in the local
+    /// store and are journaled for upload.
+    private var placementEditor: some View {
+        PlacementEditorView()
     }
 
     private var strapEditor: some View {
@@ -1247,3 +1346,57 @@ private struct FormRow<Control: View>: View {
         .preferredColorScheme(.dark)
 }
 #endif
+
+
+// MARK: - Placement editor (G4)
+
+/// Sets the current strap placement. Loads the effective placement when it appears; picking a row
+/// declares the change effective at save time (offline-safe), folds it into the local interval
+/// model, and best-effort uploads the journal through the same authenticated route pattern as the
+/// profile/scores routes. "Not set"/Unknown is the honest state for unannotated history.
+private struct PlacementEditorView: View {
+    @EnvironmentObject var model: AppModel
+    @State private var selection = StrapPlacement.unknown.rawValue
+    @State private var loaded = false
+
+    var body: some View {
+        SettingsEditPage("Wear placement",
+                         footnote: "Where you wear your strap. Placement-aware metric eligibility uses this; days before the first declaration stay unknown.") {
+            SettingsOptions(selection: $selection, options: [
+                (StrapPlacement.wrist.rawValue, "Wrist"),
+                (StrapPlacement.bicep.rawValue, "Bicep"),
+                (StrapPlacement.other.rawValue, "Other"),
+                (StrapPlacement.unknown.rawValue, "Unknown"),
+            ])
+        }
+        .task { await load() }
+        .onChange(of: selection) { newValue in
+            guard loaded, newValue != StrapPlacement.unknown.rawValue else { return }
+            Task { await save(raw: newValue) }
+        }
+    }
+
+    private func load() async {
+        guard let store = await model.repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        let active = (try? placementStore.activePlacement(at: Date(), deviceId: model.repo.deviceId))?.placement
+        selection = (active ?? .unknown).rawValue
+        loaded = true
+    }
+
+    private func save(raw: String) async {
+        guard let placement = StrapPlacement(rawValue: raw) else { return }
+        guard let store = await model.repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        try? placementStore.setCurrent(placement, deviceId: model.repo.deviceId)
+        // Best-effort upload of the journal; the edge route is the parent integration point
+        // (see docs/core-plumbing/findings/g34-wear-placement.md). A failure leaves the rows
+        // unsynced and the next save/launch retries them.
+        guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil else { return }
+        let sync = PlacementCloudSync(store: { placementStore })
+        _ = try? await sync.pushPending()
+        // Pull the server state back after the push so a server-side correction (e.g. a
+        // future-dated cap) reaches this install. Best-effort; pending rows block the pull.
+        _ = try? await sync.reconcile()
+    }
+}

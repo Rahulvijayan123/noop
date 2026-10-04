@@ -8,11 +8,11 @@ const user = '11111111-1111-4111-8111-111111111111';
 const source = '33333333-3333-4333-8333-333333333333';
 const local = 'whoop-ABC123456';
 const device = noopDeviceId(user, local);
-const cfg = { supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'fixture-public' };
-async function fixture() {
+const cfg = { supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'fixture-public', allowLegacyEnrollment: true };
+async function fixture(method: 'enrollment_code' | 'supabase_auth' = 'enrollment_code') {
   const rest = makeMemRest() as any;
   await rest.upsert('noop_ingest_tokens', [
-    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', user_id: user, source_id: source },
+    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', provisioning_method: method, user_id: user, source_id: source },
     { id: 'fleet', token_hash: hashIngestToken('noop_fleet'), token_kind: 'fleet' },
   ]);
   await rest.upsert('noop_app_installations', { user_id: user, source_id: source });
@@ -26,10 +26,10 @@ async function fixture() {
   };
   return { rest, calls };
 }
-function request(query = '', account = false) {
+function request(query = '', account = false, fleet = true) {
   return new Request(`https://test.invalid/functions/v1/scores/days?deviceId=${local}${query}`, {
     headers: { authorization: `Bearer ${account ? 'header.payload.signature' : 'noop_personal'}`,
-      'x-noop-fleet-token': 'noop_fleet', 'x-noop-source-id': source },
+      ...(fleet ? { 'x-noop-fleet-token': 'noop_fleet' } : {}), 'x-noop-source-id': source },
   });
 }
 Deno.test('result days: both authorized routes use exact canonical identity and preserve old-day cursor', async () => {
@@ -65,4 +65,16 @@ Deno.test('result days: unknown device cannot fall back to another device', asyn
   rest.tables.set('devices', []);
   assertEquals((await handleScoresRequest(request(), { rest, cfg })).status, 409);
   assertEquals(calls.length, 0);
+});
+Deno.test('result days: an Auth-provisioned installation needs no fleet credential, and legacy enrollment is closed by default', async () => {
+  const authProvisioned = await fixture('supabase_auth');
+  const closed = { supabaseUrl: cfg.supabaseUrl, supabaseAnonKey: cfg.supabaseAnonKey };
+  const ok = await handleScoresRequest(request('', false, false), { rest: authProvisioned.rest, cfg: closed });
+  assertEquals(ok.status, 200);
+  assertEquals((await ok.json()).identity.deviceId, device);
+  assertEquals(authProvisioned.calls.length, 1);
+
+  const legacy = await fixture('enrollment_code');
+  assertEquals((await handleScoresRequest(request(), { rest: legacy.rest, cfg: closed })).status, 401);
+  assertEquals(legacy.calls.length, 0, 'a refused credential never reaches the discovery RPC');
 });

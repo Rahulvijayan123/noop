@@ -16,6 +16,7 @@ export interface CoachConfig {
   models: Record<CoachMode, string>;
   dailyCallLimit: number;
   allowLegacyFleetUploads: boolean;
+  allowLegacyEnrollment?: boolean;
   jevKey: string;
 }
 
@@ -31,6 +32,7 @@ export function coachConfig(env: Record<string, string | undefined> = Deno.env.t
     },
     dailyCallLimit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 400,
     allowLegacyFleetUploads: pick('NOOP_ALLOW_LEGACY_FLEET_UPLOADS', '').toLowerCase() === 'true',
+    allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT', '').toLowerCase() === 'true',
     jevKey: pick('TYPESAFE_API_KEY', ''),
   };
 }
@@ -280,7 +282,7 @@ async function messagesRoute(req: Request, userId: string, { rest }: Deps): Prom
 }
 
 const PROFILE_SEXES = new Set(['male', 'female', 'nonbinary']);
-const PROFILE_COLUMNS = 'display_name,date_of_birth,sex_model,height_cm,weight_kg,updated_at';
+const PROFILE_COLUMNS = 'display_name,date_of_birth,sex_model,height_cm,weight_kg,timezone,updated_at';
 
 export function ageOn(dob: string, now: Date): number {
   const [y, m, d] = dob.split('-').map(Number);
@@ -321,17 +323,36 @@ function profileInput(body: any): Record<string, unknown> {
   }
   if ('heightCm' in body) row.height_cm = profileNumber(body.heightCm, 50, 260);
   if ('weightKg' in body) row.weight_kg = profileNumber(body.weightKg, 20, 350);
+  if ('timezone' in body) {
+    // The phone's local IANA zone is the day/time authority (spec G1/C2). Null is accepted as
+    // no-change; a string must be a plausible IANA id — the database's scoring_record_timezone
+    // trigger is the authority that rejects unknown ids against pg_timezone_names, surfaced
+    // by the route as a 400.
+    if (body.timezone == null) {
+      // no-change
+    } else if (typeof body.timezone !== 'string') {
+      throw fail('invalid_profile', 400);
+    } else {
+      const zone = body.timezone.trim();
+      if (zone.length < 1 || zone.length > 64 || !/^[A-Za-z0-9_+/-]{1,64}$/.test(zone)) {
+        throw fail('invalid_profile', 400);
+      }
+      row.timezone = zone;
+    }
+  }
   if (!Object.keys(row).length) throw fail('invalid_profile', 400);
   return row;
 }
 
 /** null until the owner has saved something: the row exists from sign-up with every field empty. */
 function publicProfile(r: any) {
-  if (!r || (!r.display_name && r.date_of_birth == null && r.sex_model == null && r.height_cm == null && r.weight_kg == null)) return null;
+  if (!r || (!r.display_name && r.date_of_birth == null && r.sex_model == null && r.height_cm == null
+      && r.weight_kg == null && r.timezone == null)) return null;
   const num = (v: unknown) => (v == null ? null : Number(v));
   return {
     displayName: r.display_name ?? '', dateOfBirth: r.date_of_birth ?? null, sex: r.sex_model ?? null,
-    heightCm: num(r.height_cm), weightKg: num(r.weight_kg), updatedAt: r.updated_at ?? null,
+    heightCm: num(r.height_cm), weightKg: num(r.weight_kg),
+    timezone: r.timezone ?? null, updatedAt: r.updated_at ?? null,
   };
 }
 
@@ -345,7 +366,15 @@ async function profileRoute(req: Request, userId: string, { rest }: Deps): Promi
   }
   if (req.method === 'PUT') {
     const row = profileInput(await readJson(req));
-    const [saved] = await rest.upsert('profiles', { id: userId, ...row, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    let saved: any;
+    try {
+      [saved] = await rest.upsert('profiles', { id: userId, ...row, updated_at: new Date().toISOString() }, { onConflict: 'id' });
+    } catch (err: any) {
+      // The profiles.timezone trigger (scoring_record_timezone, 20260918050000) rejects unknown
+      // zones against pg_timezone_names; surface that authority's rejection as a 400.
+      if (/timezone/i.test(String(err?.message ?? ''))) throw fail('invalid_profile', 400);
+      throw err;
+    }
     return Response.json({ profile: publicProfile(saved) });
   }
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
@@ -392,6 +421,7 @@ export async function handleCoachRequest(req: Request, deps: { rest: SupabaseRes
   try {
     const identity = await resolveUploadIdentity({
       headers: req.headers, rest: d.rest, allowLegacyFleetUploads: d.cfg.allowLegacyFleetUploads,
+      allowLegacyEnrollment: d.cfg.allowLegacyEnrollment === true,
     });
     if (identity.authMode !== 'installation') throw new IdentityError('installation authorization required');
     const tail = new URL(req.url).pathname.replace(/^.*\/coach(?=\/|$)/, '').split('/').filter(Boolean);

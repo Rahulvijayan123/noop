@@ -80,6 +80,9 @@ android/noop-release.jks
 
 # ── Personal data — NEVER publish (real WHOOP/Apple Health exports) ──
 Fixtures/
+# Synthetic golden frames and model manifests the activity-context tests read (no personal data).
+# The rule above matches `fixtures/` on a case-insensitive filesystem and was hiding them.
+!Tools/ActivityContext/fixtures/
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm

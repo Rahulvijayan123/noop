@@ -8,14 +8,14 @@ const OTHER = '22222222-2222-4222-8222-222222222222';
 const SOURCE = '33333333-3333-4333-8333-333333333333';
 const OTHER_SOURCE = '44444444-4444-4444-8444-444444444444';
 
-const cfg = coachConfig({ FIREWORKS_AI_API_KEY: 'fw-test-key', COACH_DAILY_CALL_LIMIT: '3' });
+const cfg = coachConfig({ FIREWORKS_AI_API_KEY: 'fw-test-key', COACH_DAILY_CALL_LIMIT: '3', NOOP_ALLOW_LEGACY_ENROLLMENT: 'true' });
 
 /** makeMemRest for the auth tables; the coach tables get just enough PostgREST semantics (eq/in/order/limit/offset). */
 async function fixture() {
   const base = makeMemRest() as any;
   await base.upsert('noop_ingest_tokens', [
-    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', user_id: USER, source_id: SOURCE },
-    { id: 'other', token_hash: hashIngestToken('noop_other'), token_kind: 'installation', user_id: OTHER, source_id: OTHER_SOURCE },
+    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', provisioning_method: 'enrollment_code', user_id: USER, source_id: SOURCE },
+    { id: 'other', token_hash: hashIngestToken('noop_other'), token_kind: 'installation', provisioning_method: 'enrollment_code', user_id: OTHER, source_id: OTHER_SOURCE },
     { id: 'fleet', token_hash: hashIngestToken('noop_fleet'), token_kind: 'fleet' },
   ]);
   await base.upsert('noop_app_installations', [{ user_id: USER, source_id: SOURCE }, { user_id: OTHER, source_id: OTHER_SOURCE }]);
@@ -332,7 +332,8 @@ Deno.test('coach profile: saved fields read back, partial updates keep the rest,
   assertEquals(put.status, 200);
   const saved = (await put.json()).profile;
   assertEquals({ ...saved, updatedAt: null }, {
-    displayName: 'Rahul', dateOfBirth: '1990-04-12', sex: 'male', heightCm: 180.5, weightKg: 77.1107, updatedAt: null,
+    displayName: 'Rahul', dateOfBirth: '1990-04-12', sex: 'male', heightCm: 180.5, weightKg: 77.1107,
+    timezone: null, updatedAt: null,
   });
 
   await handleCoachRequest(call('profile', { method: 'PUT', body: { weightKg: 80 } }), deps);

@@ -181,6 +181,8 @@ struct SleepModel {
     private static let shortDayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = AppLanguage.activeLocale
+        // Same zone as `dayKeyParser`: a day key is a calendar date, not an instant to shift.
+        f.timeZone = TimeZone(identifier: "UTC")
         f.setLocalizedDateFormatFromTemplate("dMMM")
         return f
     }()
@@ -407,8 +409,10 @@ extension SleepModel {
             return (d.day, v)
         }
         let series = points.map(\.value)
-        // `BodyVitalSigns.logicalDayKey` rather than `Repository.logicalDayKey`: same 04:00 boundary,
-        // but self-contained, so this stays pure and independent of the @MainActor Repository.
+        // `BodyVitalSigns.logicalDayKey` rather than `Repository.logicalDayKey`: same boundary (local
+        // midnight, since the G1 day-ui audit of 20261003 — audit-g1-day F2 aligned this twin with
+        // `Repository.logicalDayRolloverHour = 0`), but self-contained, so this stays pure and
+        // independent of the @MainActor Repository.
         let fresh = Baselines.freshestCarried(points, todayKey: BodyVitalSigns.logicalDayKey(now))
         // #1946: track the day the carried value came from so the tile can stamp it. nil when there is
         // no carried value, or when the carried value IS today's own (no stamp needed for today's read).

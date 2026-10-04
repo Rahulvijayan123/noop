@@ -334,6 +334,24 @@ final class PostgresClient {
         txDepth = 0
     }
 
+    /// Run `body` so a SQL error inside it cannot abort the enclosing transaction. Postgres refuses
+    /// every later statement of an aborted transaction (25P02), so an optional read that may fail
+    /// has to run under a savepoint it can roll back to. Outside a transaction there is nothing
+    /// to protect and `body` simply runs.
+    func isolatingFailures<T>(_ body: () throws -> T) throws -> T {
+        guard txDepth > 0 else { return try body() }
+        try runRaw("SAVEPOINT isolated_read")
+        do {
+            let out = try body()
+            try runRaw("RELEASE SAVEPOINT isolated_read")
+            return out
+        } catch {
+            try? runRaw("ROLLBACK TO SAVEPOINT isolated_read")
+            try? runRaw("RELEASE SAVEPOINT isolated_read")
+            throw error
+        }
+    }
+
     private func finishTransaction<T>(_ body: () throws -> T) throws -> T {
         do {
             let out = try body()

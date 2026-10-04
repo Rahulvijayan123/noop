@@ -281,7 +281,6 @@ final class CloudPushTests: XCTestCase {
         let other = "33333333-3333-4333-8333-333333333333"
         let repo = ServerScoreRepository(session: ScoreStub.session(),
                                          endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-                                         fleetToken: "noop_test",
                                          directory: directory,
                                          identity: { CloudPushIdentity(ownerId: owner, sourceId: "22222222-2222-4222-8222-222222222222",
                                                                        tokenId: "t", uploadToken: "noop_x") })
@@ -310,7 +309,7 @@ final class CloudPushTests: XCTestCase {
         // A different owner must NOT see it, and the entry must survive for the original owner.
         let otherRepo = ServerScoreRepository(session: ScoreStub.session(),
                                               endpoint: URL(string: "https://example.invalid/functions/v1/scores")!,
-                                              fleetToken: "noop_test", directory: directory,
+                                              directory: directory,
                                               identity: { CloudPushIdentity(ownerId: other, sourceId: "44444444-4444-4444-8444-444444444444",
                                                                             tokenId: "t", uploadToken: "noop_y") })
         let foreign = await otherRepo.cachedDay(day: "2026-09-01", deviceId: "my-whoop")
@@ -335,7 +334,7 @@ final class CloudPushTests: XCTestCase {
     }
 
     func testFreshnessNeverClaimsAFutureOrAbsentBoundary() async {
-        let repo = ServerScoreRepository(endpoint: nil, fleetToken: "", directory: directory,
+        let repo = ServerScoreRepository(endpoint: nil, directory: directory,
                                          identity: { nil })
         let label = await repo.freshnessLabel(for: nil)
         XCTAssertEqual(label, "No server result yet")
@@ -890,6 +889,253 @@ final class CloudPushTests: XCTestCase {
         XCTAssertNil(try result(["spo2_candidate_pct": 96, "spo2_candidate_samples": 0]).spo2Candidate)
         XCTAssertNil(try result(["spo2_candidate_pct": true, "spo2_candidate_samples": 40]).spo2Candidate)
     }
+    // MARK: - D1: cloud-off stops staging and the upload cycle (consent/privacy)
+
+    /// The full D1 staging contract: disabling staging stops NEW records from entering the journal,
+    /// already-committed records are retained, and re-enabling resumes without deleting anything.
+    func testDisablingCloudStopsStagingAndReEnableResumesIt() async throws {
+        let owner = "11111111-1111-4111-8111-111111111111"
+        let source = "22222222-2222-4222-8222-222222222222"
+        let journal = try await makeJournal(ownerId: owner, sourceId: source)
+        journal.submit([hrRecord(ts: 10, bpm: 60)])
+        _ = await journal.flush()
+        var stats = await journal.stats()
+        XCTAssertEqual(stats.pendingRecords, 1)
+
+        // Cloud off: this is exactly what `CloudPushRuntime.stop()` -> `CloudJournal.deactivate()`
+        // does when the master switch flips. Staging stops accepting NEW records; nothing is deleted.
+        await journal.deactivate(flushFirst: false)
+        XCTAssertNil(journal.acceptingScope)
+        journal.submit([hrRecord(ts: 11, bpm: 61)])
+
+        // Re-enable: `start()` -> `activate()` resumes staging and the retained record is still there.
+        // A deactivated journal reports no scope at all, so what was staged while off is read back here.
+        try await journal.activate(configuration: .init(ownerId: owner, sourceId: source, deviceId: "my-whoop"),
+                                   directory: directory)
+        _ = await journal.flush()
+        stats = await journal.stats()
+        XCTAssertEqual(stats.pendingRecords, 1,
+                       "while cloud is off, no new record may be staged")
+        journal.submit([hrRecord(ts: 12, bpm: 62)])
+        _ = await journal.flush()
+        let resumed = await journal.stats()
+        XCTAssertEqual(resumed.pendingRecords, 2,
+                       "re-enabling must resume staging with the retained records intact")
+    }
+
+    /// The D1 upload-cycle gate: with the master switch off, a cycle pass must not seal, upload or
+    /// otherwise touch the durable work; flipping the switch back on resumes it.
+    func testDisabledCloudStopsTheUploadCycleAndReEnableResumesIt() async throws {
+        let owner = "11111111-1111-4111-8111-111111111111"
+        let source = "22222222-2222-4222-8222-222222222222"
+        let journal = try await makeJournal(ownerId: owner, sourceId: source)
+        journal.submit([hrRecord(ts: 1_700_000_000, bpm: 60)])
+        _ = await journal.flush()
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let candidate = try await journal.sealCandidates(nowMs: now)[0]
+        let plan = try CloudBatchBuilder.plan(entries: try await journal.entries(for: candidate),
+                                              stream: .hrSample, sourceId: candidate.sourceId,
+                                              deviceId: candidate.deviceId, protocolVersion: "1.1",
+                                              startCursorJSON: nil)
+        let file = directory.appendingPathComponent("\(plan.batch.batchId).ndjson.gz")
+        try Data("sealed".utf8).write(to: file)
+        try await journal.registerSeal(candidate, batchId: plan.batch.batchId, filePath: file.path,
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: 6, protocolVersion: "1.1", endCursorJSON: nil)
+
+        let identity = CloudPushIdentity(ownerId: owner, sourceId: source, tokenId: "t", uploadToken: "noop_t")
+        let session = CloudUploadSession(
+            endpoint: URL(string: "http://127.0.0.1:1/functions/v1/push")!,
+            bundleIdentifier: "com.test.\(UUID().uuidString)",
+            identity: { identity })
+        var enabled = false
+        let coordinator = CloudTransportCoordinator(journal: journal, session: session, scope: identity.scope,
+                                                    payloadDirectory: directory,
+                                                    projectURL: "http://127.0.0.1",
+                                                    identity: { identity },
+                                                    cloudEnabled: { enabled })
+        // Start with cloud off: the launch reconciliation may run, but the cycle must no-op.
+        await coordinator.start()
+        let offState = try await journal.batchState(plan.batch.batchId)
+        XCTAssertEqual(offState, .sealed, "a disabled cloud must not upload a sealed batch")
+        let offStats = await journal.stats()
+        XCTAssertEqual(offStats.pendingRecords, 1,
+                       "the sealed batch's records are retained while cloud is off")
+
+        // Re-enable: the very next pass must pick the retained batch back up. The endpoint refuses
+        // connections, so the attempt fails as a retryable transport error — the assertion is that
+        // the batch LEFT `sealed` (the cycle ran), not that the upload succeeded.
+        enabled = true
+        await coordinator.cycle()
+        let deadline = Date().addingTimeInterval(10)
+        var state = try await journal.batchState(plan.batch.batchId)
+        while state == .sealed, Date() < deadline {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            state = try await journal.batchState(plan.batch.batchId)
+        }
+        XCTAssertNotEqual(state, .sealed, "re-enabling must resume the upload cycle")
+        let retained = await journal.stats()
+        XCTAssertEqual(retained.pendingRecords, 1,
+                       "a failed upload attempt must never delete the records")
+    }
+
+    // MARK: - D2: journal re-activation once protected data becomes available
+
+    /// A locked-before-first-unlock launch fails `activate` with `protectedDataUnavailable`; the
+    /// re-activation retry must succeed the moment the journal file becomes readable again, and
+    /// capture must resume (live seconds after a locked launch reach the cloud).
+    func testJournalReactivationSucceedsOnceProtectedDataIsAvailable() async throws {
+        let config = CloudJournal.Configuration(ownerId: "11111111-1111-4111-8111-111111111111",
+                                                sourceId: "22222222-2222-4222-8222-222222222222",
+                                                deviceId: "my-whoop")
+        let journal = CloudJournal()
+        // The journal file exists (the OS created it earlier) but is unreadable while locked.
+        let dbFile = directory.appendingPathComponent("journal.sqlite")
+        try Data().write(to: dbFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: dbFile.path)
+        guard !FileManager.default.isReadableFile(atPath: dbFile.path) else {
+            throw XCTSkip("running with privileges that ignore file permissions; cannot simulate a locked journal")
+        }
+        do {
+            try await journal.activate(configuration: config, directory: directory)
+            XCTFail("activating over an unreadable journal must fail with protectedDataUnavailable")
+        } catch {
+            guard case CloudJournalError.protectedDataUnavailable = error else {
+                return XCTFail("expected protectedDataUnavailable, got \(error)")
+            }
+        }
+        let lockedStats = await journal.stats()
+        XCTAssertFalse(lockedStats.historyCursorHeld)
+        XCTAssertEqual(lockedStats.pendingRecords, 0,
+                       "nothing is staged while the journal cannot open")
+
+        // First unlock: the same data-availability signal the D2 retry polls becomes true.
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: dbFile.path)
+        try await journal.activate(configuration: config, directory: directory)
+        journal.submit([hrRecord(ts: 10, bpm: 60)])
+        let committed = await journal.flush()
+        XCTAssertEqual(committed, 1, "live seconds after unlock must reach the cloud journal")
+        let stats = await journal.stats()
+        XCTAssertEqual(stats.pendingRecords, 1)
+    }
+
+    // MARK: - T23: acquisition-time owner isolation on the seal/send paths
+
+    /// The journal's seal and batch views are scoped to the CONFIGURED owner: after an account
+    /// switch on the same store, owner A's pending records are not sealable (or even visible) under
+    /// owner B, while B's own records flow normally.
+    func testJournalSealAndBatchViewsAreScopedToTheConfiguredOwner() async throws {
+        let ownerA = "11111111-1111-4111-8111-111111111111"
+        let ownerB = "33333333-3333-4333-8333-333333333333"
+        let source = "22222222-2222-4222-8222-222222222222"
+        let journal = try await makeJournal(ownerId: ownerA, sourceId: source)
+        journal.submit([hrRecord(ts: 10, bpm: 60)])
+        _ = await journal.flush()
+
+        // Switch to owner B on the SAME store (the T23 account-switch shape).
+        try await journal.activate(configuration: .init(ownerId: ownerB, sourceId: source, deviceId: "my-whoop"),
+                                   directory: directory)
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let aUnderB = try await journal.sealCandidates(nowMs: now)
+        XCTAssertTrue(aUnderB.isEmpty,
+                      "owner A's pending records must never be sealable under owner B")
+
+        // Owner B's own records are sealable and carry B's owner stamp.
+        journal.submit([hrRecord(ts: 11, bpm: 61)])
+        _ = await journal.flush()
+        let bCandidates = try await journal.sealCandidates(nowMs: now)
+        XCTAssertEqual(bCandidates.count, 1)
+        XCTAssertEqual(bCandidates.first?.ownerId, ownerB)
+        let entries = try await journal.entries(for: bCandidates.first!)
+        XCTAssertEqual(entries.map(\.ownerId), [ownerB])
+        XCTAssertEqual(entries.map(\.record.strapTs), [11])
+
+        // A's records are still retained under A (never deleted), just not visible to B.
+        try await journal.activate(configuration: .init(ownerId: ownerA, sourceId: source, deviceId: "my-whoop"),
+                                   directory: directory)
+        let aCandidates = try await journal.sealCandidates(nowMs: now)
+        XCTAssertEqual(aCandidates.map(\.stream), [.hrSample])
+        XCTAssertEqual(aCandidates.first?.recordCount, 1,
+                       "the original owner's pending records must survive the switch")
+    }
+
+    /// A coordinator serving owner B never sends a batch owner A sealed: it is not even visible to B's
+    /// scope, so it stays sealed and retained under A, payload file included (contract C3).
+    func testCrossOwnerBatchIsRetainedNotUploadedUnderADifferentOwner() async throws {
+        let ownerA = "11111111-1111-4111-8111-111111111111"
+        let ownerB = "33333333-3333-4333-8333-333333333333"
+        let source = "22222222-2222-4222-8222-222222222222"
+        let journal = try await makeJournal(ownerId: ownerA, sourceId: source)
+        journal.submit([hrRecord(ts: 1_700_000_000, bpm: 60)])
+        _ = await journal.flush()
+        let now = Int(Date().timeIntervalSince1970 * 1000) + 5_000
+        let candidate = try await journal.sealCandidates(nowMs: now)[0]
+        let plan = try CloudBatchBuilder.plan(entries: try await journal.entries(for: candidate),
+                                              stream: .hrSample, sourceId: candidate.sourceId,
+                                              deviceId: candidate.deviceId, protocolVersion: "1.1",
+                                              startCursorJSON: nil)
+        let file = directory.appendingPathComponent("\(plan.batch.batchId).ndjson.gz")
+        try Data("sealed".utf8).write(to: file)
+        try await journal.registerSeal(candidate, batchId: plan.batch.batchId, filePath: file.path,
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: 6, protocolVersion: "1.1", endCursorJSON: nil)
+
+        // The runtime now runs under owner B while the journal still holds owner A's sealed batch.
+        let identityB = CloudPushIdentity(ownerId: ownerB, sourceId: source, tokenId: "t", uploadToken: "noop_b")
+        let session = CloudUploadSession(
+            endpoint: URL(string: "http://127.0.0.1:1/functions/v1/push")!,
+            bundleIdentifier: "com.test.\(UUID().uuidString)",
+            identity: { identityB })
+        let coordinator = CloudTransportCoordinator(journal: journal, session: session, scope: identityB.scope,
+                                                    payloadDirectory: directory,
+                                                    projectURL: "http://127.0.0.1",
+                                                    identity: { identityB },
+                                                    cloudEnabled: { true })
+        await coordinator.start()
+        await coordinator.cycle()
+
+        // The cross-owner batch is never transmitted under B's token.
+        let state = try await journal.batchState(plan.batch.batchId)
+        XCTAssertEqual(state, .sealed,
+                       "another owner's batch must stay sealed, not be uploaded under a different owner")
+        try await journal.activate(configuration: .init(ownerId: ownerA, sourceId: source, deviceId: "my-whoop"),
+                                   directory: directory)
+        let retained = await journal.stats()
+        XCTAssertEqual(retained.pendingRecords, 1,
+                       "the records stay retained under the original owner")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path),
+                      "the payload file must be kept, not deleted")
+    }
+
+    /// The upload session refuses to send a batch for one account with another account's credential at
+    /// SEND time (the T23 token-resolution rule), even when the coordinator guard is bypassed.
+    func testUploadSessionRefusesToSendAnotherOwnersBatch() async throws {
+        let ownerA = "11111111-1111-4111-8111-111111111111"
+        let ownerB = "33333333-3333-4333-8333-333333333333"
+        let source = "22222222-2222-4222-8222-222222222222"
+        let session = CloudUploadSession(
+            endpoint: URL(string: "http://127.0.0.1:1/functions/v1/push")!,
+            bundleIdentifier: "com.test.\(UUID().uuidString)",
+            identity: { CloudPushIdentity(ownerId: ownerB, sourceId: source,
+                                          tokenId: "t", uploadToken: "noop_b") })
+        let file = directory.appendingPathComponent("batch.ndjson.gz")
+        try Data("sealed".utf8).write(to: file)
+        let scopeA = CloudDataScope(ownerId: ownerA, sourceId: source)
+        do {
+            _ = try await session.uploadForeground(batchId: "b1", fileURL: file, scope: scopeA)
+            XCTFail("uploading owner A's batch with owner B's token must be refused")
+        } catch let error as CloudUploadSession.UploadError {
+            guard case .wrongAccount = error else {
+                return XCTFail("expected wrongAccount, got \(error)")
+            }
+        } catch {
+            XCTFail("expected wrongAccount, got \(error)")
+        }
+        XCTAssertThrowsError(try session.enqueueBackground(batchId: "b2", fileURL: file, scope: scopeA),
+                             "the background lane must refuse it too")
+    }
+
+
 
 }
 

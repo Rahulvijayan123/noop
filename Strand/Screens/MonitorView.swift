@@ -221,142 +221,415 @@ func naraDurationText(_ seconds: TimeInterval) -> String {
     return minutes < 60 ? "\(minutes) min" : "\(minutes / 60)h \(minutes % 60)m"
 }
 
-// MARK: - Screen
+// MARK: - G7 pipeline diagnostics (owner-scoped)
 
-struct MonitorView: View {
-    var snapshot: MonitorSnapshot = .sample
+/// One honest row of the /scores/diagnostics contract. Every value is what the server
+/// measured (or an explicit `not_measured` / `not_observed`); nothing is fabricated.
+/// The client decodes with `convertFromSnakeCase`; the models below only carry the
+/// fields the surface shows, unknown server fields are ignored.
+struct PipelineDayBounds: Decodable, Hashable {
+    struct Segment: Decodable, Hashable {
+        let startTs: Int
+        let endTs: Int
+        let timezoneId: String?
+    }
+    let segments: [Segment]
+    let zone: String?
+    let zoneSource: String?
+    let boundsHalfOpen: Bool?
+    let zonePolicy: String?
+}
 
-    var body: some View {
-        ScreenScaffold(title: "Monitor", trailing: { HeaderSettingsButton() }) {
-            VStack(alignment: .leading, spacing: 34) {
-                baselines
-                episodes
-                quality
-            }
-        }
+struct PipelineSignalWindow: Decodable, Hashable {
+    let windows: Int?
+    let receivedRecords: Int?
+    let expectedRecords: Int?
+    let meanCoverage: Double?
+    let lastValidTs: Int?
+}
+
+struct PipelineStreamCount: Decodable, Hashable {
+    let received: Int?
+}
+
+struct PipelineLargestGap: Decodable, Hashable {
+    let status: String?
+    let stream: String?
+    let seconds: Int?
+    let reason: String?
+}
+
+struct PipelineStreams: Decodable, Hashable {
+    let status: String?
+    let signalWindows: [String: PipelineSignalWindow]
+    let coverage: [String: [String: PipelineStreamCount]]
+    let largestGap: PipelineLargestGap?
+}
+
+struct PipelineQueueV2: Decodable, Hashable {
+    let status: String?
+    let pending: Int?
+    let deadLettered: Int?
+    let invalidationSuppressed: Int?
+    let eligible: Int?
+    let inputRevision: Int?
+    let completedRevision: Int?
+    let oldestDirtyAgeSeconds: Int?
+    let oldestEligibleAgeSeconds: Int?
+    let nextAttemptAt: String?
+}
+
+struct PipelineQueue: Decodable, Hashable {
+    let scoringV2: PipelineQueueV2?
+}
+
+struct PipelineProjection: Decodable, Hashable {
+    let status: String?
+    let publishedRevision: Int?
+    let requiredRevision: Int?
+    let behind: Bool?
+}
+
+struct PipelineArchive: Decodable, Hashable {
+    let durablePublished: Int?
+    let verified: Int?
+    let oldestVerifiedAgeSeconds: Int?
+    let statuses: [String: Int]
+}
+
+enum PipelineDetail: Decodable, Hashable {
+    case string(String)
+    case number(Int)
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        if let s = try? c.decode(String.self) { self = .string(s) }
+        else if let n = try? c.decode(Int.self) { self = .number(n) }
+        else { self = .string("") }
     }
 
-    // MARK: Baselines
+    var text: String {
+        switch self {
+        case .string(let s): return s
+        case .number(let n): return "\(n)"
+        }
+    }
+}
 
-    private var baselines: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            NaraSectionHeader(title: String(localized: "Baselines"),
-                              subtitle: String(localized: "Last 28 days"),
-                              seeAll: .metricExplorer)
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible())], spacing: 14) {
-                ForEach(snapshot.baselines) { baseline in
-                    NavigationLink(value: TabRoute.metric(baseline.id)) { baselineCard(baseline) }
-                        .buttonStyle(LiquidPressStyle())
+struct PipelineBlocker: Decodable, Hashable {
+    let code: String?
+    let detail: PipelineDetail?
+}
+
+struct PipelineStage: Decodable, Hashable {
+    let status: String?
+    let reason: String?
+    let receipts: Int?
+}
+
+/// The full /scores/diagnostics response (schema_version 2). `fetchedAt` is client-side.
+struct PipelineDiagnostics: Decodable, Hashable {
+    let schemaVersion: Int?
+    let day: String?
+    let scope: String?
+    let countsTruncated: Bool?
+    let dayBounds: PipelineDayBounds?
+    let streams: PipelineStreams?
+    let stages: [String: PipelineStage]
+    let queue: PipelineQueue?
+    let projection: PipelineProjection?
+    let archive: PipelineArchive?
+    let blockers: [PipelineBlocker]
+    var fetchedAt: Date?
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, day, scope, countsTruncated, dayBounds, streams,
+             stages, queue, projection, archive, blockers
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion)
+        day = try c.decodeIfPresent(String.self, forKey: .day)
+        scope = try c.decodeIfPresent(String.self, forKey: .scope)
+        countsTruncated = try c.decodeIfPresent(Bool.self, forKey: .countsTruncated)
+        dayBounds = try c.decodeIfPresent(PipelineDayBounds.self, forKey: .dayBounds)
+        streams = try c.decodeIfPresent(PipelineStreams.self, forKey: .streams)
+        stages = try c.decodeIfPresent([String: PipelineStage].self, forKey: .stages) ?? [:]
+        queue = try c.decodeIfPresent(PipelineQueue.self, forKey: .queue)
+        projection = try c.decodeIfPresent(PipelineProjection.self, forKey: .projection)
+        archive = try c.decodeIfPresent(PipelineArchive.self, forKey: .archive)
+        blockers = try c.decodeIfPresent([PipelineBlocker].self, forKey: .blockers) ?? []
+        fetchedAt = nil
+    }
+}
+
+/// Fetches the owner-scoped diagnostics route with the SAME installation credential as
+/// every other score read (`CloudReceiverAuth`, deviceId=my-whoop),
+/// matching `ServerScoreRepository`'s single-source-of-truth endpoint derivation.
+enum PipelineDiagnosticsClient {
+    struct Unavailable: Error, CustomStringConvertible {
+        let reason: String
+        var description: String { reason }
+    }
+
+    static func load(day: String) async throws -> PipelineDiagnostics {
+        guard let identity = CloudPushIdentityStore.current() else {
+            throw Unavailable(reason: "no enrolled Nara account")
+        }
+        guard let base = ServerScoreRepository.derivedEndpoint(),
+              var components = URLComponents(url: base, resolvingAgainstBaseURL: false) else {
+            throw Unavailable(reason: "cloud endpoint not configured")
+        }
+        components.path += "/diagnostics"
+        components.queryItems = [
+            URLQueryItem(name: "day", value: day),
+            URLQueryItem(name: "deviceId", value: "my-whoop"),
+        ]
+        guard let url = components.url else { throw Unavailable(reason: "cloud endpoint not configured") }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        CloudReceiverAuth.apply(identity, to: &request)
+        request.timeoutInterval = 20
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw Unavailable(reason: "no response") }
+        guard http.statusCode == 200 else {
+            throw Unavailable(reason: "HTTP \(http.statusCode)")
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        var diagnostics = try decoder.decode(PipelineDiagnostics.self, from: data)
+        diagnostics.fetchedAt = Date()
+        return diagnostics
+    }
+}
+
+// MARK: - Screen
+
+/// The Monitor tab is Nara's single owner-scoped diagnostic surface (spec G7): it shows
+/// what the server actually measured for this installation — day bounds/zone, stream
+/// status, coverage, largest gap, v2 queue age, projection revision, durable acceptance
+/// vs verified archival, and explicit blockers. No fabricated numbers.
+struct MonitorView: View {
+    @State private var diagnostics: PipelineDiagnostics?
+    @State private var failure: String?
+    @State private var loading = false
+
+    var body: some View {
+        ScreenScaffold(title: "Monitor", subtitle: "Nara pipeline diagnostics", trailing: { HeaderSettingsButton() }) {
+            VStack(alignment: .leading, spacing: 24) {
+                toolbar
+                if let diagnostics {
+                    surface(diagnostics)
+                } else if let failure {
+                    emptyState(failure)
+                } else {
+                    loadingState
                 }
             }
         }
+        .task { await load() }
     }
 
-    private func baselineCard(_ b: MonitorBaseline) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Image(systemName: b.symbol)
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(b.tone.color)
-                Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
+    private var toolbar: some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(localDayKey())
+                    .font(StrandFont.subhead.weight(.semibold))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                if let zone = diagnostics?.dayBounds?.zone {
+                    Text(zone)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
             }
-            Text(b.title)
+            Spacer()
+            Button {
+                Task { await load() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(StrandPalette.metricPurple)
+            }
+            .buttonStyle(.plain)
+            .disabled(loading)
+        }
+    }
+
+    @MainActor
+    private func load() async {
+        loading = true
+        defer { loading = false }
+        do {
+            diagnostics = try await PipelineDiagnosticsClient.load(day: localDayKey())
+            failure = nil
+        } catch {
+            failure = (error as? PipelineDiagnosticsClient.Unavailable)?.reason
+                ?? "Nara diagnostics unavailable"
+        }
+    }
+
+    private var loadingState: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+            Text("Loading Nara diagnostics…")
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textSecondary)
-                .lineLimit(1).minimumScaleFactor(0.8)
-                .padding(.top, 4)
-            (Text(b.valueText).font(StrandFont.rounded(26)).monospacedDigit()
-                + Text(b.unit.isEmpty ? "" : " \(b.unit)").font(StrandFont.caption))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            Text(b.usualText)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
-            BaselineSparkline(series: b.series, low: b.usualLow, high: b.usualHigh, tint: b.tone.color)
-                .frame(height: 52)
-                .padding(.top, 8)
         }
-        .padding(16)
+        .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .naraCard()
     }
 
-    // MARK: Watchdog episodes
+    private func emptyState(_ reason: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Nara diagnostics unavailable")
+                .font(StrandFont.subhead.weight(.semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+            Text(reason)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .naraCard()
+    }
 
-    private var episodes: some View {
+    // MARK: Surface
+
+    private func surface(_ d: PipelineDiagnostics) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            NaraSectionHeader(title: String(localized: "Recent watchdog episodes"), seeAll: .watchdog)
-            VStack(spacing: 0) {
-                ForEach(Array(snapshot.episodes.prefix(3).enumerated()), id: \.element.id) { index, episode in
-                    if index > 0 { Divider().overlay(StrandPalette.hairline) }
-                    NavigationLink(value: TabRoute.watchdog) { WatchdogEpisodeRow(episode: episode, showsChevron: true) }
-                        .buttonStyle(.plain)
+            NaraSectionHeader(title: String(localized: "Day bounds"))
+            diagnosticsCard {
+                row("Zone", d.dayBounds?.zone ?? "not_measured")
+                row("Policy", d.dayBounds?.zonePolicy ?? "local_calendar_midnight")
+                if let first = d.dayBounds?.segments.first, let zoneId = first.timezoneId {
+                    row("Start", dayTime(first.startTs) + " " + zoneId)
                 }
-                if snapshot.episodes.isEmpty {
-                    Text("No episodes")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(18)
+                if d.countsTruncated == true {
+                    row("Counts", "truncated")
                 }
             }
-            .naraCard()
-        }
-    }
 
-    // MARK: Monitoring quality
-
-    private var quality: some View {
-        let q = snapshot.quality
-        return VStack(alignment: .leading, spacing: 16) {
-            NaraSectionHeader(title: String(localized: "Monitoring quality"), seeAll: .dataSources)
-            HStack(spacing: 0) {
-                VStack(spacing: 8) {
-                    CoverageRing(fraction: q.coverage)
-                        .frame(width: 64, height: 64)
-                    qualityLabel("Coverage")
-                }
-                .frame(maxWidth: .infinity)
-                qualityDivider
-                VStack(spacing: 8) {
-                    Text(percent(q.validWear))
-                        .font(StrandFont.rounded(26))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .frame(height: 64)
-                    qualityLabel("Valid wear")
-                }
-                .frame(maxWidth: .infinity)
-                qualityDivider
-                VStack(spacing: 8) {
-                    HStack(spacing: 7) {
-                        Circle().fill(q.status.color).frame(width: 9, height: 9)
-                        Text(q.status.label)
-                            .font(StrandFont.rounded(22))
-                            .foregroundStyle(StrandPalette.textPrimary)
+            NaraSectionHeader(title: String(localized: "Streams"))
+            diagnosticsCard {
+                row("Status", d.streams?.status ?? "not_measured")
+                let windows = d.streams?.signalWindows ?? [:]
+                if windows.isEmpty {
+                    row("Signal windows", "not_measured")
+                } else {
+                    ForEach(windows.sorted(by: { $0.key < $1.key }), id: \.key) { stream, window in
+                        row(stream, "\(window.windows ?? 0) windows · \(window.receivedRecords ?? 0) received · \(coverageText(window.meanCoverage)) covered")
                     }
-                    .frame(height: 64)
-                    qualityLabel("Status")
                 }
-                .frame(maxWidth: .infinity)
+                if let gap = d.streams?.largestGap, gap.status == "measured", let seconds = gap.seconds {
+                    row("Largest gap", "\(seconds) s" + (gap.stream.map { " (\($0))" } ?? ""))
+                } else {
+                    row("Largest gap", "not_measured")
+                }
             }
-            .padding(.vertical, 20)
-            .padding(.horizontal, 8)
-            .naraCard()
+
+            NaraSectionHeader(title: String(localized: "Pipeline"))
+            diagnosticsCard {
+                let q = d.queue?.scoringV2
+                row("Queue", q?.status ?? "none")
+                if let q {
+                    if let pending = q.pending, pending > 0 {
+                        row("Pending jobs", "\(pending)")
+                    }
+                    if let age = q.oldestEligibleAgeSeconds {
+                        row("Oldest eligible", durationText(age))
+                    }
+                    row("Revisions", "\(q.inputRevision ?? 0) in → \(q.completedRevision ?? 0) done")
+                }
+                let p = d.projection
+                row("Projection", p?.status ?? "not_observed")
+                if let p, let published = p.publishedRevision {
+                    row("Revision", "published \(published)" + (p.requiredRevision.map { " · required \($0)" } ?? ""))
+                }
+                if let archive = d.archive {
+                    row("Durable accepted", "\(archive.durablePublished ?? 0)")
+                    row("Verified archived", "\(archive.verified ?? 0)")
+                    if let failed = archive.statuses["failed"], failed > 0 {
+                        row("Archive failed", "\(failed)")
+                    }
+                }
+            }
+
+            NaraSectionHeader(title: String(localized: "Blockers"))
+            diagnosticsCard {
+                if d.blockers.isEmpty {
+                    row("None", "")
+                } else {
+                    ForEach(Array(d.blockers.enumerated()), id: \.offset) { _, blocker in
+                        row(blocker.code ?? "blocker", blocker.detail?.text ?? "")
+                    }
+                }
+            }
+
+            if let stage = d.stages["accepted"] {
+                NaraSectionHeader(title: String(localized: "Acceptance"))
+                diagnosticsCard {
+                    row("Accepted", stage.status ?? "not_measured")
+                    if let receipts = stage.receipts {
+                        row("Receipts", "\(receipts)")
+                    }
+                }
+            }
         }
     }
 
-    private func qualityLabel(_ text: LocalizedStringKey) -> some View {
-        Text(text).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+    private func diagnosticsCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .naraCard()
     }
 
-    private var qualityDivider: some View {
-        Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 70)
+    private func row(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(title)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textSecondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(StrandFont.caption.weight(.semibold))
+                .foregroundStyle(value == "not_measured" || value == "not_observed" || value == "none"
+                    ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+                .multilineTextAlignment(.trailing)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .overlay(alignment: .bottom) { Divider().overlay(StrandPalette.hairline) }
     }
 
-    private func percent(_ fraction: Double) -> String { "\(Int((fraction * 100).rounded()))%" }
+    // MARK: Formatting
+
+    private func localDayKey() -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private func dayTime(_ seconds: Int) -> String {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(seconds)))
+    }
+
+    private func durationText(_ seconds: Int) -> String {
+        if seconds < 90 { return "\(seconds) s" }
+        let minutes = seconds / 60
+        return minutes < 60 ? "\(minutes) min" : "\(minutes / 60)h \(minutes % 60)m"
+    }
+
+    private func coverageText(_ fraction: Double?) -> String {
+        guard let fraction else { return "?" }
+        return "\(Int((fraction * 100).rounded()))%"
+    }
 }
 
 // MARK: - Watchdog page

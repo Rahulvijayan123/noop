@@ -124,7 +124,7 @@ function sleepArguments(value: any, canonicalDevice: string) {
 
 export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetchImpl: _fetchImpl = fetch }: {
   rest: SupabaseRest;
-  cfg: Pick<PushFunctionConfig, 'supabaseUrl' | 'supabaseAnonKey'>;
+  cfg: Pick<PushFunctionConfig, 'supabaseUrl' | 'supabaseAnonKey'> & Partial<Pick<PushFunctionConfig, 'allowLegacyEnrollment'>>;
   fetchImpl?: typeof fetch;
 }): Promise<Response> {
   const url = new URL(req.url);
@@ -137,7 +137,10 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
   const isComputeSubmit = req.method === 'POST' && route === '/compute-requests';
   const isComputeRead = req.method === 'GET' && route === '/compute-requests';
-  if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit && !isComputeRead) {
+  const isPlacementPost = req.method === 'POST' && route === '/placement';
+  const isPlacementGet = req.method === 'GET' && route === '/placement';
+  if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit
+      && !isComputeRead && !isPlacementPost && !isPlacementGet) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -167,17 +170,28 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       }
       user={id:account.id,sourceId:sourceId!};
     } else {
-      const installation=await resolveUploadIdentity({headers:req.headers,rest,allowLegacyFleetUploads:false});
+      const installation=await resolveUploadIdentity({headers:req.headers,rest,allowLegacyFleetUploads:false,
+        allowLegacyEnrollment:_cfg.allowLegacyEnrollment===true});
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
     }
-    const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead ? null : await boundedBody(req);
+    const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead || isPlacementGet
+      ? null : await boundedBody(req);
     const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead
-      ? url.searchParams.get('deviceId') : requestBody?.deviceId;
-    if (!isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
+      ? url.searchParams.get('deviceId')
+      : isPlacementGet ? null
+      : isPlacementPost ? (requestBody?.device_id ?? null)
+      : requestBody?.deviceId;
+    // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
+    // user-level declaration (the RPC's NULL device scope).
+    if (!isPlacementGet && !(isPlacementPost && externalDeviceId == null)
+        && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
+    // Placement resolves its own device scope inside the handlers (POST with device_id,
+    // user-level when absent; GET is owner-scoped and never device-scoped).
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
+      : (isPlacementPost || isPlacementGet) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -225,6 +239,56 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (result?.result) result.result={...result.result,project};
       return Response.json({...result,identity},{headers:{'cache-control':'no-store'}});
     }
+    if (isPlacementPost) {
+      // G4 manual placement declaration (spec §6). The edge resolves the OWNER from the
+      // installation identity and passes it to set_placement_interval — a client-supplied
+      // owner is never accepted. Same auth as every other score read; no new auth path.
+      const body = requestBody ?? {};
+      const placement = body?.placement;
+      const effectiveStart = body?.effective_start;
+      const suppliedDevice = body?.device_id ?? null;
+      if (typeof placement !== 'string' || !['wrist', 'bicep', 'other', 'unknown'].includes(placement)) {
+        throw fail('invalid_placement', 400);
+      }
+      if (typeof effectiveStart !== 'string' || !Number.isFinite(Date.parse(effectiveStart))) {
+        throw fail('invalid_effective_start', 400);
+      }
+      if (suppliedDevice != null && !isSafeExternalDeviceId(suppliedDevice)) throw fail('invalid_device_id', 400);
+      let scopeDevice: string | null = null;
+      if (suppliedDevice != null) {
+        scopeDevice = await findNoopDevice({ rest, userId: user.id, sourceId: user.sourceId,
+          externalDeviceId: suppliedDevice });
+        if (!scopeDevice) throw fail('device_registration_pending', 409);
+      }
+      const interval = await rest.rpc('set_placement_interval', {
+        p_owner: user.id, p_placement: placement, p_effective_start: effectiveStart, p_device: scopeDevice,
+      });
+      return Response.json({ interval }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isPlacementGet) {
+      // Owner-scoped read for reconciliation. device_id is returned as the EXTERNAL device id
+      // (the id the phone registered and sends on ingest), so the phone's per-device grouping
+      // in PlacementCloudSync.reconcile matches its local store.
+      const rows = (await rest.select('placement_intervals',
+        `owner=eq.${user.id}&select=id,device_id,placement,effective_start,effective_end,source,revision&order=effective_start.asc`)) ?? [];
+      const internalIds = [...new Set(rows.map((r: any) => r.device_id).filter(Boolean))];
+      let externalById: Record<string, string | null> = {};
+      if (internalIds.length > 0) {
+        const devices = (await rest.select('devices',
+          `user_id=eq.${user.id}&id=in.(${internalIds.join(',')})&select=id,external_device_id`)) ?? [];
+        for (const d of devices) externalById[d.id] = d.external_device_id ?? null;
+      }
+      const intervals = rows.map((r: any) => ({
+        id: r.id,
+        device_id: r.device_id != null ? (externalById[r.device_id] ?? r.device_id) : null,
+        placement: r.placement,
+        effective_start: r.effective_start,
+        effective_end: r.effective_end ?? null,
+        source: r.source,
+        revision: r.revision,
+      }));
+      return Response.json({ intervals }, { headers: { 'cache-control': 'no-store' } });
+    }
     if (isOverride) {
       if (!deviceId) throw fail('device_registration_pending', 409);
       const args = sleepArguments(requestBody?.arguments, deviceId);
@@ -236,6 +300,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       const parsed = new Date(day);
       if (!DAY_RE.test(day) || !Number.isFinite(parsed.getTime()) || utcDay(parsed) !== day) throw fail('invalid_day', 400);
       if (!deviceId) throw fail('device_registration_pending', 409);
+      // G7 single owner-scoped diagnostic surface. The RPC (schema_version 2) reports
+      // day bounds/zone, stream status + coverage + largest gap, scoring_jobs_v2 queue
+      // age, projection revision, durable-vs-verified archive, and explicit blockers,
+      // all for THIS owner/source/device/day only. Same auth as every other score read;
+      // no new auth paths, and NO owner/device identity in the payload (the route is
+      // owner-scoped by auth, exactly as before).
       const diagnostics = await rest.rpc('server_pipeline_diagnostics', {
         p_user: user.id, p_source: user.sourceId, p_device: deviceId, p_day: day,
       });

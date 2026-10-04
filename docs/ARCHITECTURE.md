@@ -37,23 +37,54 @@ the strap's stored history whenever it reconnects. Everything lands in the local
 
 ## 2. Phone to Supabase
 
-Cloud sync is off until the user enrolls the install from **Settings → Nara account**
-(`Strand/Onboarding/CloudEnrollmentView.swift`, `Strand/Push/CloudEnrollment.swift`). Enrollment
-stores an installation credential in the Keychain (`CloudKeychain.swift`). After that, the app treats
-the server as the source of scores (`AppModel.cloudScoringIsAuthoritative`).
+Nothing leaves the phone until a person has signed in. **Settings → Nara account**
+(`Strand/Auth/NaraAccountView.swift`) creates an account with Supabase Auth: an email address and a
+password, then a one-time code that Supabase emails (Resend is only its mail transport) to confirm the
+address. `SupabaseAuthBackend.swift` is the one file that talks to the `supabase-swift` Auth client, and
+the session lives in the Keychain (`NaraKeychainAuthStorage.swift`). The app holds the project's
+publishable key and nothing secret.
+
+A verified session is all the phone needs to link itself, and the chain it builds is fixed:
+
+```
+Supabase auth.users.id  →  account-scoped source id  →  installation credential  →  canonical WHOOP device
+```
+
+- **The account** is `auth.users.id` and is the only cloud user id. No request body ever carries a user
+  id; the server reads it from the verified JWT.
+- **The source id** names this install *for this account*. A phone signed into two accounts has two
+  source ids (`CloudPushIdentityStore`), and the server refuses to hand one account's source to another.
+- **The installation credential** is a high-entropy `noop_…` token. `NaraAccountController` asks for it with
+  `POST /functions/v1/push/installations/provision`, authenticated by the session's JWT. The server stores
+  only its SHA-256 hash, bound to exactly `(user id, source id)`, and returns the token once; the app keeps
+  it in the Keychain. Uploads and score reads authenticate with this token and not with the Auth session,
+  so a locked phone finishing a background sync never depends on refreshing a JWT. There is no shared
+  fleet token on this path.
+- **The WHOOP** is paired as usual. It starts as a provisional device id scoped to this install, and the app
+  confirms it (`POST …/push/wearables/confirm`) as soon as the strap reports its serial number. The canonical
+  device id is derived from the account's user id as well as the serial, so a serial is evidence and never an
+  ownership claim: two accounts that pair the same strap get two separate devices, and neither can read,
+  write or move the other's.
+
+Once the credential is stored, the app treats the server as the source of scores
+(`AppModel.cloudScoringIsAuthoritative`). Signing out removes the credential and stops uploads, and what
+was already queued stays under the account it was recorded for.
 
 The upload path lives in `Strand/Push/`:
 
 | File | Job |
 | --- | --- |
+| `CloudPushIdentity.swift` | The `(account, source id, credential)` triple, and `CloudDataScope`, the `(account, source)` pair that every queued record and cursor is keyed by. The Keychain holds the credential. |
+| `CloudReceiverClient.swift` | The HTTP client for provisioning, wearable confirmation and installation retirement, and the one place that decides which credential headers a request carries. |
 | `CloudCapture.swift` | Turns each notification or history record into wire rows and stages them. It never blocks or throws into the Bluetooth pipeline. A second of heart rate is staged once (`CloudHeartRateLedger`, first sample wins), because the receiver treats two values for one second as a conflict and keeps neither. |
-| `CloudJournal.swift` | A durable SQLite outbox. Rows are journaled per stream with a sequence number, then sealed into batches. |
+| `CloudJournal.swift` | A durable SQLite outbox. Rows are journaled per stream with a sequence number, stamped with the scope they were recorded under at the moment they are submitted, then sealed into batches. Sealed batches never change scope. |
 | `CloudBatchBuilder.swift` | Encodes a sealed batch in the push wire format from `Packages/NoopPush`. |
-| `CloudTransportCoordinator.swift` | Seals batches of at most 2,000 records, uploads at most two at a time (only one of them from the history backlog, so fresh data is not stuck behind it), retries failures with backoff, and makes failed batches due again at launch. |
+| `CloudTransportCoordinator.swift` | Serves exactly one scope at a time. Seals batches of at most 2,000 records, uploads at most two at a time (only one of them from the history backlog, so fresh data is not stuck behind it), retries failures with backoff, and makes failed batches due again at launch. |
 | `CloudUploadSession.swift` | The HTTP client. Requests time out after 90 seconds, because a large batch can take the receiver more than a minute under load. |
+| `CloudLocalDataBinding.swift` | Records which account owns the phone's on-device history. The first verified account claims it, and only that account's cloud path replays it, so signing out A and into B never uploads A's banked history as B's. |
 
 Each batch is a gzip-compressed NDJSON `POST` to `/functions/v1/push`, authenticated with the
-installation's ingest token. When the app first enrolls, `AppModel.startHistorySeedIfNeeded()`
+installation's token. When a phone first links to an account, `AppModel.startHistorySeedIfNeeded()`
 uploads the strap history the phone already had, so the server can score past days too.
 
 ## 3. Supabase receives the batch
@@ -64,6 +95,14 @@ typed tables for each stream (heart rate, R-R intervals, sleep state, and so on)
 confirm the batch landed. Large payloads can take the object lane instead: the function hands back a
 presigned URL, the app uploads the object to B2 storage, and the rows are released once the object
 is verified.
+
+Ownership comes from the credential and never from the request. The token resolves server-side to exactly
+one `(user_id, source_id)`, and the function takes both from there rather than from the batch. The device a
+row lands on is derived from that user, so a row cannot be written into another account's device. Every
+table in `public` has row-level security on, except one shared reference table with no user data; the
+policies on user-owned tables are written in terms of `auth.uid()`; and the service credentials the
+functions and the worker use never leave the server.
+`supabase/functions/tests/auth_isolation_sql_test.ts` checks all of this against the production Postgres image.
 
 Committing rows for a day marks that day's score as stale. A trigger calls
 `invalidate_scoring_stream_v2`, which enqueues or updates a row in `scoring_jobs_v2`.
@@ -82,6 +121,8 @@ The worker runs independent lanes, each on its own thread and database connectio
 | archive | `scoring_archive_jobs_v2` | Copies each published snapshot to private B2 storage. |
 | verify | object arrivals | Reconciles objects uploaded through the object lane that were never verified. |
 | projection | `noop_projection_debt` | Replays stored objects into the typed tables. Turned off in production; see [BACKEND.md](BACKEND.md). |
+| activity | `activity_context_jobs` | (Off by default; `FRWHOOP_ACTIVITY_ENABLED=1`.) Downloads verified `rawImuSession` objects, decodes the NPB1 IMU payloads, splits contiguous runs, classifies each 4-second window through a persistent local Python process (HART, `Tools/ActivityContext`), folds the day through the same `ActivityContextPolicy` the app links, and publishes 30-second activity epochs under a fenced lease. Publishing re-dirties the day's score, so the next scoring pass attaches `daily.activity_context` to the snapshot. In the same transaction it also stores a decoded ActivityContext v2 day document in `activity_context_days` (the window probabilities and IMU features plus the day's stored heart rate, gravity, steps, wear events, sleep and workouts, through the app's own `StrandAnalytics` decoder); a failure there is counted and never blocks the epoch publish. See [BACKEND.md](BACKEND.md#day-documents-activitycontext-v2). |
+
 
 The worker also writes a heartbeat to `scoring_service_heartbeats` every 15 seconds.
 
@@ -109,7 +150,7 @@ those values.
 ## 6. Coach
 
 The Sana tab (the health assistant chat) runs through the backend as well. The phone sends the question to
-`supabase/functions/coach/index.ts`, which checks the same installation and fleet credentials as
+`supabase/functions/coach/index.ts`, which checks the same installation credential as
 `push`, takes one unit of the user's daily quota, and streams the model's answer back. The model
 cannot see the database. When it needs numbers it asks the app for them through a tool call, and
 `Strand/Coach/CoachTools.swift` answers from the days the phone has already read from the server in
@@ -120,6 +161,25 @@ drawn by a second model pass on the server, which fact-checks them against the f
 The same function stores the Settings profile (name, date of birth, sex, height, weight) in the owner's
 `profiles` row, the row server-side scoring reads. The phone uploads an edit shortly after it is made and
 loads the stored profile when the app opens, so the values survive a reinstall and a second device.
+
+## 7. Activity context
+
+Raw IMU (the strap's 100 Hz six-axis stream) rides the same path with one extra hop: a bounded raw
+capture session records the strap's one-second frames durably on the phone (`ImuSessionFileStore`),
+the phone packs them into `rawImuSession` objects through the NoopPush object lane (verified objects
+only), and the worker's activity lane (off by default) classifies each 4-second window and publishes
+30-second activity epochs (`activity_context_epochs`). Scoring then attaches an `activity_context`
+object to the day's snapshot `daily`, and the app shows an activity ribbon and a context line
+("Walking", "Low movement; posture unknown", "Recent activity") on the metric pages. Unknown is a
+first-class label: the classifier abstains below its confidence thresholds, posture stays unknown
+until a validated head exists, and quiet wrists never prove the strap is worn. The first automatic
+labels are shadow-only: they have not met the promotion gates on held-out data, so the lane runs
+disabled by default and no physiological value depends on it.
+
+The phone also decodes a richer, granular version of the day on its own (posture, locomotion and arm
+heads, transitions) for the heart-rate day page. The worker produces the same document from the same
+decoder and stores it per UTC day, but nothing serves it to the phone yet; the app still draws its
+local result.
 
 ## What each score needs
 

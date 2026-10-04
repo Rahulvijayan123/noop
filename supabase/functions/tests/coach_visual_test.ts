@@ -112,12 +112,12 @@ Deno.test('visual pipeline: pure text cards skip the fact-check call', async () 
 
 const USER = '11111111-1111-4111-8111-111111111111';
 const SOURCE = '33333333-3333-4333-8333-333333333333';
-const cfg = coachConfig({ FIREWORKS_AI_API_KEY: 'fw-test-key', COACH_DAILY_CALL_LIMIT: '2' });
+const cfg = coachConfig({ FIREWORKS_AI_API_KEY: 'fw-test-key', COACH_DAILY_CALL_LIMIT: '2', NOOP_ALLOW_LEGACY_ENROLLMENT: 'true' });
 
 async function handlerFixture() {
   const base = makeMemRest() as any;
   await base.upsert('noop_ingest_tokens', [
-    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', user_id: USER, source_id: SOURCE },
+    { id: 'personal', token_hash: hashIngestToken('noop_personal'), token_kind: 'installation', provisioning_method: 'enrollment_code', user_id: USER, source_id: SOURCE },
     { id: 'fleet', token_hash: hashIngestToken('noop_fleet'), token_kind: 'fleet' },
   ]);
   await base.upsert('noop_app_installations', [{ user_id: USER, source_id: SOURCE }]);

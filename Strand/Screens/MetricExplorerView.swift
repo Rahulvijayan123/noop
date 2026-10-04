@@ -752,6 +752,19 @@ struct MetricDetailView: View {
     /// reads it, so it can lag the rest of the screen by a second without anyone noticing.
     @State private var correlationsLoaded = false
 
+    // MARK: Activity context (optional, feature-off default)
+    //
+    // Hosted `daily.activity_context` for the LATEST day of this metric's series, loaded only for the
+    // metrics with explicit support intervals (HRV / respiratory rate / SpO2). All three stay nil until
+    // a server payload carries the key, so builds with no activity data render exactly as before.
+    private static let activityMetrics: Set<String> = ["hrv", "resp_rate", "spo2"]
+    @State private var activityContext: ActivityContextDocument?
+    @State private var activityInterval: [Int]?
+    @State private var activityDayWindow: [Int]?
+    /// "day|resultRevision" the cached context was loaded from — a new server result revision for the
+    /// same day reloads; an unchanged day does not refetch on every body refresh.
+    @State private var activityLoadedKey: String?
+
     /// #1848: the skin-temp explorer's explanatory note (nil when none is needed). Set in `load()`
     /// alongside the series, from the same `repo.days` scan that decides which kind to lead with.
     /// Two notes, mutually exclusive: (1) the user asked for temperatures but the window has none,
@@ -981,6 +994,15 @@ struct MetricDetailView: View {
                     // scores) or a big SF-Rounded headline, floated over the domain's starfield,
                     // with the range pill. Then the frosted chart / stat tiles / correlations.
                     heroHeader(effectiveRange: effRange, windowed: win, windowFellBack: fellBack)
+                    // Activity context line (HRV / resp / SpO2 only, and only when the hosted snapshot
+                    // carried a `daily.activity_context`): one line under the metric value + the day
+                    // ribbon, tapping through to the detail sheet. Feature-off builds render nothing.
+                    if let context = activityContext,
+                       let interval = activityInterval,
+                       let dayWindow = activityDayWindow {
+                        ActivityContextLine(document: context, interval: interval,
+                                            dayStart: dayWindow[0], dayEnd: dayWindow[1])
+                    }
                     intradaySection
                     if let dual = hrvDualPoints(windowed: win) {
                         hrvDualHeroChart(points: dual, effectiveRange: effRange, windowFellBack: fellBack)
@@ -1234,6 +1256,11 @@ struct MetricDetailView: View {
         }
         loaded = true
 
+        // Optional activity context for the latest day (HRV / resp / SpO2 only). Runs AFTER the visible
+        // screen is up, reading the hosted snapshot cache like TodayView; a nil result leaves the screen
+        // byte-identical to a feature-off build.
+        await loadActivityContext()
+
         // Phase 2 — the cross-catalog scan behind the correlation card, now that the screen is up.
         // `Task.isCancelled` is checked per metric so navigating away mid-scan stops it: the task is
         // bound to `loadTaskID`, and without the check a quick in-and-out would keep 59 main-actor
@@ -1255,6 +1282,40 @@ struct MetricDetailView: View {
         correlationsLoaded = true
         // First correlation build, now that `series`/`others` exist.
         recomputeCorrelations()
+    }
+
+    // MARK: Activity context (detail-page line + ribbon)
+
+    /// Load the hosted `daily.activity_context` for the LATEST day of this metric's series, then
+    /// pick the support interval the read-out joins on (see `ActivityContextSelection`).
+    ///
+    /// Mirrors `TodayView.ServerScoreTodaySection.load` (TodayView.swift:350-367): cache-first read of
+    /// `CloudPushRuntime.shared.scoreRepository()` with the same "my-whoop" device id the ingest lane
+    /// registers. Every failure mode leaves the three @State fields nil and the screen renders exactly
+    /// as a feature-off build.
+    private func loadActivityContext() async {
+        guard Self.activityMetrics.contains(metric.key) else { return }
+        guard let latestDay = series.last?.day else { return }
+        guard CloudPushIdentityStore.current() != nil,
+              let repository = CloudPushRuntime.shared.scoreRepository(),
+              let dayWindow = ActivityContextSelection.dayWindow(day: latestDay) else { return }
+        // Cache-first, exactly like TodayView (TodayView.swift:350): the awaited read is stored to a
+        // local before chaining, so the actor isolation boundary is explicit.
+        guard let cached = await repository.cachedDay(day: latestDay, deviceId: "my-whoop") else { return }
+        // Reload only when the day or its server result revision changed; the cache is rewritten by
+        // `refresh` under the same owner+device+revision keying, so an unchanged revision is the same
+        // timeline (spec §11 "Local caching must include owner/device/model/result revision").
+        let loadKey = "\(latestDay)|\(cached.resultRevision ?? "")"
+        guard loadKey != activityLoadedKey else { return }
+        guard let hosted = cached.hostedResult, let document = hosted.activityContext else { return }
+        let sessions = hosted.sleep.map { (start: $0.startTs, end: $0.endTs) }
+        activityContext = document
+        activityInterval = ActivityContextSelection.interval(metricKey: metric.key,
+                                                             document: document,
+                                                             dayWindow: dayWindow,
+                                                             sleepSessions: sessions)
+        activityDayWindow = dayWindow
+        activityLoadedKey = loadKey
     }
 
     // MARK: Scenic hero

@@ -236,6 +236,72 @@ final class HRVAnalyzerTests: XCTestCase {
         XCTAssertEqual(pts.map(\.ts), [4, 6, 8, 10])
     }
 
+    // MARK: - Rolling / windowed SDNN timeline
+
+    /// Beats one second apart whose lengths alternate 900/1100 ms: wall-clock gap and interval agree to
+    /// within the beat-accuracy tolerance, the series covers the time it spans, and the beat-to-beat spread
+    /// is a known 100 ms.
+    private func alternatingBeats(count: Int, start: Int = 5_000) -> [RRInterval] {
+        (0..<count).map { RRInterval(ts: start + $0, rrMs: $0.isMultiple(of: 2) ? 900 : 1_100) }
+    }
+
+    func testRollingSdnnReadsTheSpreadOfASteadyWindow() throws {
+        let rr = alternatingBeats(count: 120)
+        let pts = HRVAnalyzer.rollingSdnn(rr: rr, windowSec: 60, stepSec: 0)
+        XCTAssertFalse(pts.isEmpty)
+        for p in pts {
+            // Population spread is exactly 100 ms; the sample (n-1) estimator sits just above it, by
+            // sqrt(n/(n-1)) — 2.6 % at the 20-beat floor, 0.8 % at the full 60.
+            XCTAssertEqual(p.sdnn, 100, accuracy: 3.0)
+        }
+        // The last window is the 60 beats ending at the last timestamp, so its value is the library's own SDNN.
+        let last = try XCTUnwrap(pts.last)
+        let lastWindow = rr.filter { $0.ts > last.ts - 60 && $0.ts <= last.ts }.map { Double($0.rrMs) }
+        XCTAssertEqual(last.sdnn, try XCTUnwrap(HRVAnalyzer.sdnnRaw(lastWindow)), accuracy: 1e-9)
+        XCTAssertEqual(pts.map(\.ts), pts.map(\.ts).sorted())
+    }
+
+    func testRollingSdnnNeedsMoreBeatsThanRollingRmssd() {
+        // Ten beats in a 10 s window are enough for the 8-beat rMSSD floor but not for a 20-beat SDNN.
+        let rr = alternatingBeats(count: 10)
+        XCTAssertFalse(HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 10).isEmpty)
+        XCTAssertTrue(HRVAnalyzer.rollingSdnn(rr: rr, windowSec: 10).isEmpty)
+        XCTAssertTrue(HRVAnalyzer.rollingSdnn(rr: alternatingBeats(count: 5), windowSec: 0).isEmpty)
+    }
+
+    func testRollingSdnnRefusesAnOverCountedWindowThatRmssdStillReads() {
+        // Every beat stored twice: the capture claims twice the heart-time the wall clock holds, so its
+        // spread is a number no heart produced. The windowed SDNN omits it; the successive-difference line
+        // keeps its own rules.
+        let rr = alternatingBeats(count: 120).flatMap { [$0, $0] }
+        XCTAssertTrue(HRVAnalyzer.rollingSdnn(rr: rr, windowSec: 60).isEmpty)
+    }
+
+    func testRollingSdnnRefusesIntervalsThatAreNotBeatAccurate() {
+        // Six intervals stamped on one coarse timestamp every six seconds: the heart-time tiles the clock
+        // (coverage near 1, so the over-count gate passes) but the individual values are not beat-to-beat
+        // measurements, which is what a banked ring stream looks like.
+        var rr: [RRInterval] = []
+        for k in 0..<30 {
+            for j in 0..<6 { rr.append(RRInterval(ts: 7_000 + k * 6, rrMs: j.isMultiple(of: 2) ? 850 : 950)) }
+        }
+        let ts = rr.map(\.ts), ms = rr.map { Double($0.rrMs) }
+        XCTAssertTrue(HRVAnalyzer.beatSpreadIsTrustworthy(
+            HRVAnalyzer.classifyCoverage(coverage: HRVAnalyzer.rrCoverage(tsSec: ts, rrMs: ms),
+                                         collapsed: HRVAnalyzer.collapsedCoverage(tsSec: ts, rrMs: ms))),
+            "the fixture must pass the over-count gate so that only the beat-accuracy gate can refuse it")
+        XCTAssertTrue(HRVAnalyzer.rollingSdnn(rr: rr, windowSec: 60).isEmpty)
+    }
+
+    func testRollingSdnnStepThinsEmissionAndSortsInput() {
+        var rr = alternatingBeats(count: 120)
+        let dense = HRVAnalyzer.rollingSdnn(rr: rr, windowSec: 60)
+        rr.shuffle()
+        let thinned = HRVAnalyzer.rollingSdnn(rr: rr, windowSec: 60, stepSec: 15)
+        XCTAssertLessThan(thinned.count, dense.count)
+        for i in 1..<thinned.count { XCTAssertGreaterThanOrEqual(thinned[i].ts - thinned[i - 1].ts, 15) }
+    }
+
     func testAnalyzeWindowFiltersByTimestamp() {
         // RR rows across two windows; only [1000,1010] should be analyzed.
         var rr: [RRInterval] = []

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "energy-models"
+version = "0.1.0"
+description = "Nara motion-based metabolic evidence: WristMET (reproduced from public code and data) and the pretrained wrist CNN, numpy-only inference"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "PolyForm Noncommercial 1.0.0 (see repo LICENSE); WristMET code MIT; WristMET training data CC BY 4.0; wrist-CNN weights are NOT redistributed (upstream repository ships no licence)" }
+dependencies = [
+    "numpy==2.2.6",
+]
+
+[project.optional-dependencies]
+# Each extra is owned by exactly one workstream so parallel edits do not collide.
+wristmet-build = []   # pandas / scikit-learn / xgboost / openpyxl ... pinned by the WristMET build
+cnn-convert = []      # h5py ... pinned by the wrist-CNN weight conversion
+dev = [
+    "pytest>=8.0,<10",
+]
+
+[project.scripts]
+energy-evidence = "energy_models.evidence:main"
+
+[tool.setuptools.packages.find]
+include = ["energy_models*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

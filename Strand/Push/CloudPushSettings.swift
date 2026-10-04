@@ -3,13 +3,22 @@ import Foundation
 /// Build-time and user-overridable configuration for the hosted-compute ("cloud") path.
 ///
 /// Values are baked into Info.plist from `Config/CloudPush.xcconfig` (which `#include?`s the
-/// gitignored `Config/CloudPushSecrets.xcconfig`), exactly as the FRWHOOP fleet client does. A
-/// clean checkout therefore resolves every key to an empty string, `isConfigured` is false, and
-/// the app behaves as offline NOOP — no endpoint, no uploads.
+/// gitignored `Config/CloudPushSecrets.xcconfig`). A clean checkout therefore resolves every key to an
+/// empty string, `isConfigured` is false, and the app behaves as offline NOOP: no endpoint, no sign-in,
+/// no uploads.
+///
+/// The build carries exactly two cloud facts: where the receiver lives and the project's Supabase
+/// PUBLISHABLE key. Neither identifies a user. A tester authenticates with Supabase Auth, and the app then
+/// provisions its own per-account installation credential from that verified session; nothing shared is
+/// needed to upload. The legacy shared fleet token only exists for an explicit migration build
+/// (`NOOPAllowLegacyEnrollment`), and every accessor for it returns empty otherwise.
 public enum CloudPushSettings {
     public static let endpointInfoKey = "NOOPPushEndpoint"
-    public static let fleetTokenInfoKey = "NOOPPushToken"
+    public static let publishableKeyInfoKey = "NOOPSupabasePublishableKey"
+    /// Deprecated legacy anon JWT, honoured only as a fallback for the publishable key.
     public static let anonKeyInfoKey = "NOOPSupabaseAnonKey"
+    public static let allowLegacyEnrollmentInfoKey = "NOOPAllowLegacyEnrollment"
+    public static let legacyFleetTokenInfoKey = "NOOPLegacyFleetToken"
     public static let sourceRevisionInfoKey = "NOOPSourceRevision"
     public static let finalHostedComputeInfoKey = "NOOPFinalHostedCompute"
 
@@ -17,7 +26,13 @@ public enum CloudPushSettings {
     private static let enabledOverrideKey = "noop.cloud.enabled.override"
     private static let endpointOverrideKey = "noop.cloud.endpoint.override"
 
+    /// Test seam: lets a test supply Info.plist values without a bundle. Nil in production.
+    nonisolated(unsafe) static var bundleStringOverride: (@Sendable (String) -> String?)?
+
     public static func bundleString(_ key: String) -> String {
+        if let override = bundleStringOverride, let value = override(key) {
+            return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
         let raw = (Bundle.main.object(forInfoDictionaryKey: key) as? String) ?? ""
         return raw.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -37,13 +52,42 @@ public enum CloudPushSettings {
         return url
     }
 
-    /// The fleet credential (`noop_…`), sent as `x-noop-fleet-token` on every receiver request and
-    /// as the bearer for enrollment. It is an ingest credential, not a session: it is extractable
-    /// from the app bundle by anyone holding the binary, which the consented-fleet model accepts.
-    public static var fleetToken: String { bundleString(fleetTokenInfoKey) }
+    /// The Supabase publishable key (`sb_publishable_…`) used as the `apikey` on Auth requests.
+    ///
+    /// Public by design, but it must still be the PUBLISHABLE key: a Supabase secret / service-role key
+    /// is refused here so a misconfigured build cannot ship one inside the app.
+    public static var publishableKey: String {
+        let configured = bundleString(publishableKeyInfoKey)
+        let candidate = configured.isEmpty ? bundleString(anonKeyInfoKey) : configured
+        return isForbiddenServerKey(candidate) ? "" : candidate
+    }
 
-    /// Supabase anon key, used only for authenticated score reads (never for ingest).
-    public static var anonKey: String { bundleString(anonKeyInfoKey) }
+    /// True for key shapes that grant server-side privileges and must never be embedded in an app.
+    static func isForbiddenServerKey(_ key: String) -> Bool {
+        if key.hasPrefix("sb_secret_") { return true }
+        // A legacy service_role JWT carries `"role":"service_role"` in its payload.
+        let parts = key.split(separator: ".")
+        guard parts.count == 3 else { return false }
+        var payload = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        while payload.count % 4 != 0 { payload.append("=") }
+        guard let data = Data(base64Encoded: payload),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let role = object["role"] as? String else { return false }
+        return role == "service_role"
+    }
+
+    /// Whether this build may keep using a pre-Auth NARA enrollment credential already stored on the phone.
+    /// Off for every tester build, and there is no way to redeem a new code.
+    public static var allowLegacyEnrollment: Bool {
+        let raw = bundleString(allowLegacyEnrollmentInfoKey).lowercased()
+        return raw == "true" || raw == "yes" || raw == "1"
+    }
+
+    /// The legacy shared fleet credential. Empty unless the build explicitly allows legacy enrollment, so
+    /// a stray value in a local secrets file can never put a shared token on the wire.
+    public static var fleetToken: String {
+        allowLegacyEnrollment ? bundleString(legacyFleetTokenInfoKey) : ""
+    }
 
     public static var sourceRevision: String {
         let v = bundleString(sourceRevisionInfoKey)
@@ -63,6 +107,9 @@ public enum CloudPushSettings {
     /// with `NOOPFinalHostedCompute = YES` is the exception — that build is hosted-compute-only and
     /// starts enabled. Either way, an unconfigured build can never be enabled: there is no receiver
     /// to point at, and the toggle is refused rather than silently accepted.
+    ///
+    /// Enabled does not mean uploading: nothing leaves the phone until an account is signed in and has an
+    /// installation credential (see `CloudPushIdentityStore.current()`).
     public static var isEnabled: Bool {
         guard isConfigured else { return false }
         let defaults = UserDefaults.standard
@@ -88,11 +135,31 @@ public enum CloudPushSettings {
         return components.string ?? ""
     }
 
-    public static func setEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: enabledOverrideKey)
+    /// The Supabase Auth base (`<origin>/auth/v1`), or nil when no receiver is configured.
+    public static var authURL: URL? {
+        let origin = canonicalProjectURL
+        guard !origin.isEmpty else { return nil }
+        return URL(string: origin)?.appendingPathComponent("auth").appendingPathComponent("v1")
     }
 
-    public static var isConfigured: Bool { receiverURL != nil && !fleetToken.isEmpty }
+    public static func setEnabled(_ enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: enabledOverrideKey)
+        // The master switch is a lifecycle control, not just a flag. Flipping it off must stop the
+        // runtime's capture staging AND its upload cycle the moment the user asks (D1): the durable
+        // journal and any already-sealed batches are retained and resume on re-enable, so nothing is
+        // deleted or uploaded while cloud is off. Flipping it on resumes an enrolled install. Both
+        // calls are idempotent and a no-op when the runtime is already in the target state, and the
+        // runtime paths additionally gate on `isEnabled` so there is no window between the flag flip
+        // and the runtime reacting.
+        if enabled {
+            Task { CloudPushRuntime.shared.startIfEnabled() }
+        } else {
+            Task { await CloudPushRuntime.shared.stop() }
+        }
+    }
+
+    /// A build is configured once it knows where the receiver is and which project's Auth to talk to.
+    public static var isConfigured: Bool { receiverURL != nil && !publishableKey.isEmpty }
 
     /// Resolves a receiver route against the configured base, e.g. `enroll` -> `…/push/enroll`.
     public static func route(_ subpath: String) -> URL? {

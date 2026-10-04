@@ -47,6 +47,7 @@ export const DELETION_TABLES = [
   'noop_standard_hr_receipts',
   'physiology_buckets', 'daily_physiology_series', 'ingest_gaps', 'measurements',
   'sleep_details', 'events', 'sessions', 'daily_metrics', 'metric_runs', 'object_manifests',
+  'activity_context_jobs', 'activity_context_epochs',
   'sensor_objects', 'derived_objects', 'live_windows', 'sleep_nights', 'coach_messages',
   'coach_sessions', 'coach_memories', 'coach_memory_items', 'coach_usage', 'user_documents', 'algorithm_results', 'user_settings',
   'integration_connections', 'user_sync_state', 'devices', 'profiles',
@@ -125,6 +126,11 @@ export async function reconcileObjects({
   const staleBefore = new Date(now().getTime() - STALE_PENDING_MS).toISOString();
 
   for (const row of manifests as any[]) {
+    // Quarantined manifests can never verify (deterministic digest/RPC failure, durably
+    // recorded via noop_quarantine_manifest_verification). Stop re-reconciling them, with
+    // the SAME exclusion as VerificationLane.candidateSQL (verification_failure_code IS NULL),
+    // so the edge scan and the worker agree about what stays eligible.
+    if (row.verification_failure_code != null) continue;
     // Raw intake has its own paginated, byte-verifying, atomic-index reconciler. HEAD is not
     // evidence of a digest or a durable window and must never promote these manifests.
     if (row.object_class === 'raw') continue;

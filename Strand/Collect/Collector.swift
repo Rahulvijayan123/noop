@@ -395,7 +395,15 @@ final class Collector {
         rawCapture.open(at: monotonic(), duration: seconds)
     }
 
-    private func recordGroundTruthImu(_ frame: [UInt8]) {
+    /// C8 Fix A: feed one complete frame's raw-IMU payload into the durable IMU store ONLY — no
+    /// HR/RR ingestion, no cloud capture, no buffering. Mirrors Android `recordGroundTruthImuFrame`
+    /// (WhoopBleClient.kt:2645): decode, not the transport packet type, is authoritative, and the
+    /// store gates on the exact 1244-byte shape, so this is a no-op for every non-IMU frame.
+    ///
+    /// This is the seam the WHOOP 5/MG live loop uses INSTEAD of the full `ingest(frame:parsed:)`:
+    /// a 5/MG must keep 0x2A37 as the single authoritative live HR/RR source (see the BLEManager
+    /// explicit-decline comment), so only the raw-IMU record path is routed here.
+    func recordGroundTruthImu(_ frame: [UInt8]) {
         _ = ImuSessionFileStore.shared.append(deviceId: deviceId, frame: frame,
             receivedAtMs: Int64(Date().timeIntervalSince1970 * 1_000))
     }

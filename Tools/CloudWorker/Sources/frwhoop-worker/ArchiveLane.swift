@@ -32,6 +32,9 @@ struct ArchiveLane {
     var leaseSeconds: Int = 300
     var snapshotRetentionDays: Int = 3650
     var outboxRetentionDays: Int = 90
+    /// Cap on outbox claim/release attempts before a row is dead-lettered
+    /// (mirrors projection debt's 16). A poisoned outbox row cannot retry forever.
+    static let outboxMaxAttempts = 16
 
     struct Stats {
         var uploaded = 0
@@ -132,6 +135,7 @@ struct ArchiveLane {
               SELECT id
               FROM public.physiology_archive_outbox
               WHERE status IN ('pending','retry','uploading')
+                AND NOT dead_letter
                 AND coalesce(next_attempt_at, '-infinity'::timestamptz) <= now()
                 AND (lease_expires_at IS NULL OR lease_expires_at <= now())
               ORDER BY id LIMIT 1 FOR UPDATE SKIP LOCKED
@@ -188,7 +192,17 @@ struct ArchiveLane {
             return false
         }
 
-        try storage.upload(objectKey: key, bytes: compressed, contentType: "application/json")
+        do {
+            try storage.upload(objectKey: key, bytes: compressed, contentType: "application/json")
+        } catch {
+            // Upload failed: release the lease with the backoff/dead-letter
+            // accounting instead of silently holding it until lease expiry, so a
+            // persistently-failing row converges (backoff, then dead-letter) rather
+            // than looping on the 300 s lease. Best-effort: a release failure still
+            // rethrows the upload error and the lease expiry recovers the row.
+            try? releaseOutboxLease(id: id, token: token, error: "upload failed: \(error)")
+            throw error
+        }
 
         // Manifest registration + outbox completion in ONE transaction.
         try db.beginTransaction(.readCommitted)
@@ -251,13 +265,21 @@ struct ArchiveLane {
     /// Release an outbox lease through the fenced update so the row can be retried
     /// (bounded by the outbox's own next_attempt_at policy).
     private func releaseOutboxLease(id: String, token: String, error: String) throws {
+        // `attempts` was incremented at claim time, so `attempts >= cap` means THIS
+        // attempt reached the terminal threshold: dead-letter it (status 'failed',
+        // which the CHECK admits) instead of backing off for the 31st time.
         _ = try db.query("""
             UPDATE public.physiology_archive_outbox
-               SET status='retry', lease_token=NULL, lease_expires_at=NULL,
-                   next_attempt_at = now() + make_interval(secs => 30), last_error=$3::text
+               SET status = CASE WHEN attempts >= $3::integer THEN 'failed' ELSE 'retry' END,
+                   dead_letter = (attempts >= $3::integer),
+                   dead_letter_reason = CASE WHEN attempts >= $3::integer THEN 'archive_upload_exhausted' ELSE NULL END,
+                   lease_token=NULL, lease_expires_at=NULL,
+                   next_attempt_at = now() + make_interval(secs =>
+                       CASE WHEN attempts >= $3::integer THEN 0 ELSE 30 END),
+                   last_error=$4::text
              WHERE id=$1::bigint AND lease_token=$2::uuid AND lease_expires_at > now()
             RETURNING id::text
-            """, [id, token, String(error.prefix(2000))])
+            """, [id, token, String(Self.outboxMaxAttempts), String(error.prefix(2000))])
     }
 
     private func zstdCompress(_ data: Data) throws -> Data {

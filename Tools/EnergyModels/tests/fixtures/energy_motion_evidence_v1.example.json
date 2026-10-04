@@ -1,0 +1,101 @@
+{
+ "schema": "energy-motion-evidence-v1",
+ "minutes": [
+  {
+   "t": 1790035200,
+   "imu_s": 60,
+   "wristmet": {
+    "met": 1.0,
+    "p_active": 0.0004,
+    "ood": 0.278,
+    "model": "wristmet-v1-9135f0a2"
+   },
+   "demog_ood": 0.0
+  },
+  {
+   "t": 1790035260,
+   "imu_s": 60,
+   "wristmet": {
+    "met": 3.713,
+    "p_active": 0.9996,
+    "ood": 0.0,
+    "model": "wristmet-v1-9135f0a2"
+   },
+   "cnn": {
+    "met": 3.3,
+    "ood": 0.0,
+    "model": "wrist-cnn-9ca77ea"
+   },
+   "demog_ood": 0.0
+  },
+  {
+   "t": 1790035320,
+   "imu_s": 60,
+   "wristmet": {
+    "met": 5.318,
+    "p_active": 0.9998,
+    "ood": 0.0,
+    "model": "wristmet-v1-9135f0a2"
+   },
+   "cnn": {
+    "met": 3.3,
+    "ood": 0.0,
+    "model": "wrist-cnn-9ca77ea"
+   },
+   "demog_ood": 0.0
+  }
+ ],
+ "provenance": {
+  "wristmet": {
+   "model": "wristmet-v1-9135f0a2",
+   "artifact_sha256": "9135f0a2b665d4c8927ab49950e43c9e9e85d4a8c57f8315f30564c521f0f6e5",
+   "ran": true,
+   "validated_rmse_met": {
+    "overall": 0.7646,
+    "sedentary": 0.3165,
+    "non_sedentary_regressor": 1.3088,
+    "source": "artifact manifest, leave-one-participant-out, 60 s windows"
+   }
+  },
+  "cnn": {
+   "model": "wrist-cnn-9ca77ea",
+   "upstream_commit": "9ca77ea104074ad82c648ec75c3a48e2bd82deeb",
+   "policy": "active",
+   "label_source": "waist-ActiGraph-derived energy expenditure, not calorimetry"
+  },
+  "axis_map": {
+   "acc_source": [
+    0,
+    1,
+    2
+   ],
+   "acc_sign": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "gyr_source": [
+    0,
+    1,
+    2
+   ],
+   "gyr_sign": [
+    1.0,
+    1.0,
+    1.0
+   ],
+   "is_identity": true
+  },
+  "cnn_axis_transform": null,
+  "wrist": "right",
+  "counts": {
+   "minutes_with_imu": 3,
+   "wristmet": 3,
+   "cnn": 2,
+   "skipped_short_imu": 0,
+   "skipped_gap_or_late_start": 0,
+   "skipped_cnn_invalid_window": 0
+  }
+ },
+ "note": "Test fixture. WristMET values are real output for three public windows of the Zenodo 14858226 dataset; the 'cnn' values are a constant stub (3.3), not model output."
+}

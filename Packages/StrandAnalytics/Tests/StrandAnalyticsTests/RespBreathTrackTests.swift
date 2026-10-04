@@ -125,6 +125,40 @@ final class RespBreathTrackTests: XCTestCase {
         XCTAssertEqual(SleepStager.respBreathTrack(junk).runs, reference.runs)
     }
 
+    // MARK: - Rolling breaths-per-minute timeline
+
+    func testRollingRateFollowsTheBreathingRateAcrossAStretch() throws {
+        let pts = SleepStager.rollingRespRate(rsa(perMinute: 14, runs: [(0, 1_200)]), windowSec: 120, stepSec: 30)
+        XCTAssertGreaterThan(pts.count, 25, "an unbroken 20-minute stretch should answer almost every step")
+        XCTAssertEqual(HRVAnalyzer.median(pts.map(\.breathsPerMinute)), 14, accuracy: 1.5)
+        XCTAssertEqual(pts.map(\.ts), pts.map(\.ts).sorted())
+        for p in pts {
+            XCTAssertEqual(p.ts % 30, 0, "points sit on the step grid so panning does not shimmer")
+            XCTAssertTrue(SleepStager.respPlausibleRangeBpm.contains(p.breathsPerMinute))
+        }
+    }
+
+    func testRollingRateLeavesAGapWhereTheBeatsStop() {
+        let rr = rsa(perMinute: 15, runs: [(0, 400), (1_200, 400)])
+        let pts = SleepStager.rollingRespRate(rr, windowSec: 120, stepSec: 30)
+        XCTAssertFalse(pts.isEmpty)
+        XCTAssertTrue(pts.allSatisfy { $0.ts <= t0 + 400 + 30 || $0.ts >= t0 + 1_200 },
+                      "no point may be drawn across the 800 s with no beats")
+    }
+
+    func testRollingRateIsInertForSparseOrDegenerateInput() {
+        XCTAssertTrue(SleepStager.rollingRespRate([], windowSec: 120, stepSec: 30).isEmpty)
+        let rr = rsa(perMinute: 15, runs: [(0, 600)])
+        XCTAssertTrue(SleepStager.rollingRespRate(rr, windowSec: 0, stepSec: 30).isEmpty)
+        XCTAssertTrue(SleepStager.rollingRespRate(rr, windowSec: 120, stepSec: 0).isEmpty)
+        XCTAssertTrue(SleepStager.rollingRespRate(Array(rr.prefix(20)), windowSec: 120, stepSec: 30).isEmpty)
+    }
+
+    func testRollingRateRefusesAnOverCountedStream() {
+        let doubled = rsa(perMinute: 15, runs: [(0, 600)]).flatMap { [$0, $0] }
+        XCTAssertTrue(SleepStager.rollingRespRate(doubled, windowSec: 120, stepSec: 30).isEmpty)
+    }
+
     func testALongUnbrokenStretchIsReadMinuteByMinute() throws {
         let track = SleepStager.respBreathTrack(rsa(perMinute: 13, runs: [(0, 7_200)]))
         var estimates: [Double] = []

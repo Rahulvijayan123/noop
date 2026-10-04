@@ -44,11 +44,28 @@ registries; the test execution above has no external network permission.
 Entry-point type check (same sanitized DENO_DIR/TMPDIR environment):
 `deno check --frozen --lock=deno.lock push/index.ts reconcile/index.ts ingest-verify/index.ts`.
 
+## Accounts, isolation and the Docker-gated suites
+
+These need Docker and are skipped without the variables `supabase/tests/e2e/pipeline_db.sh` exports; its
+[README](../../tests/e2e/README.md) says how to start it and which suites run against it.
+
+| Test | What it proves |
+|---|---|
+| `auth_provisioning_integration_test.ts` | Provisioning end to end on real PostgreSQL and PostgREST: the JWT decides the owner, the credential is stored hashed and bound to `(user, source)`, a source never changes hands, retirement is permanent, and rate and installation limits hold. Runs in the hermetic harness. |
+| `auth_credentials_test.ts` | Credential resolution: Auth-provisioned tokens need nothing else, enrollment-code tokens are refused unless `NOOP_ALLOW_LEGACY_ENROLLMENT` is on, and unknown provenance is never trusted. Runs in the hermetic harness. |
+| `auth_isolation_sql_test.ts` | On the production Postgres image through PostgREST: the catalogue audit (RLS on every table, caller-scoped policies, an exact list of client-executable functions, no leaking views) and the two-account run (two users, two installations, two devices; reads, writes, RPCs, re-pointing, revocation and deletion). |
+| `multiuser_sql_test.ts` | The earlier lifecycle and capacity checks; they opt in to legacy enrollment explicitly. |
+| `server_pipeline_sql_test.ts` | Real SQL through the enrolled Edge contract and the signed-in-account route against a live GoTrue; it opts in to legacy enrollment explicitly because its fixtures are enrollment-code installations. |
+
+A fixture that models a pre-Auth installation marks its token and installation `enrollment_code` and
+passes `allowLegacyEnrollment: true`. Without both, the credential is refused, which is the production
+default.
+
 ## Evidence boundary
 
 | Acceptance | Native evidence | Still external to this gate |
 |---|---|---|
-| W2 owner/device isolation | Signed synthetic authenticated/anon JWTs through real PostgREST; ownership trigger; reads, writes and RPC denials | Deployed Auth configuration and mobile account transitions |
+| W2 owner/device isolation | Signed synthetic authenticated/anon JWTs through real PostgREST; ownership trigger; reads, writes and RPC denials. `auth_isolation_sql_test.ts` repeats this on the production image with two real accounts, and `StrandTests/NaraEndToEndTests` covers account switching on one phone | Deployed Auth configuration (SMTP, Confirm email) |
 | W3 intake idempotency | PostgreSQL reservation races and crash-before-ACK replay; permanent digest reservation; one logical projection | Other services' writers and full fleet load |
 | W3.5 object durability | Real HTTP copy/GET; gzip/zstd decoding; both digests/sizes; SQL index-failure rollback; concurrent completion; retry repair | Actual B2 permissions, compatibility, latency and retention setup |
 | W3.5 reconciliation | Persistent bounded cursor; legacy ready/missing-index repair without reupload; one-time legacy provenance binding | Deployment schedule, backlog drain rate, alerts and representative query plans |

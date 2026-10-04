@@ -17,6 +17,12 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
     /// 800+ day imported history (#345). Defaults to `false` so every existing caller keeps
     /// the eager `VStack` and its identical layout/scroll behaviour.
     var lazy: Bool = false
+    /// Pins the content to exactly the width of the screen. `.basedOnSize` (#697) allows a horizontal bounce
+    /// as soon as the content overflows at all, and SwiftUI has no way to switch that bounce off, so a page
+    /// whose content can run a fraction of a point wider than the screen slides sideways under a drag. With
+    /// the width pinned there is no overflow to bounce on. Defaults to `false`: every other screen is
+    /// unchanged.
+    var lockHorizontalScroll: Bool = false
     /// Optional full-bleed view drawn behind the scroll content at the TOP of the screen (e.g. Today's
     /// day-cycle scene). Defaults to nil so other screens stay on the flat canvas; nil renders nothing.
     var topBackground: AnyView? = nil
@@ -58,6 +64,7 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
             .frame(maxWidth: hSizeClass == .regular ? 700 : .infinity,
                    alignment: hSizeClass == .regular ? .center : .leading)
             .frame(maxWidth: .infinity, alignment: .center)
+            .modifier(ViewportWidthLock(active: lockHorizontalScroll))
             #else
             .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -136,12 +143,29 @@ extension ScreenScaffold where Trailing == EmptyView {
     /// Convenience init for the common case with no header trailing element — keeps every existing
     /// call site (which never passed `trailing`) source-compatible.
     init(title: LocalizedStringKey?, subtitle: LocalizedStringKey? = nil,
-         onRefresh: (() async -> Void)? = nil, lazy: Bool = false, topBackground: AnyView? = nil,
+         onRefresh: (() async -> Void)? = nil, lazy: Bool = false, lockHorizontalScroll: Bool = false,
+         topBackground: AnyView? = nil,
          @ViewBuilder content: @escaping () -> Content) {
         self.init(title: title, subtitle: subtitle, onRefresh: onRefresh, lazy: lazy,
+                  lockHorizontalScroll: lockHorizontalScroll,
                   topBackground: topBackground, trailing: { EmptyView() }, content: content)
     }
 }
+
+#if os(iOS)
+/// Sizes the content to the scroll view's own width, whatever the content asks for. Without it, one child
+/// that cannot compress below the screen width makes the whole column wider than the viewport.
+private struct ViewportWidthLock: ViewModifier {
+    let active: Bool
+    func body(content: Content) -> some View {
+        if active {
+            content.containerRelativeFrame(.horizontal, alignment: .leading)
+        } else {
+            content
+        }
+    }
+}
+#endif
 
 /// Applies `.refreshable` only when a refresh hook is provided. A ViewModifier (rather than an
 /// inline `if`) keeps the two branches the same opaque type, and means nil callers — every macOS

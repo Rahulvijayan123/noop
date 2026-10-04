@@ -371,7 +371,20 @@ final class Backfiller {
             chunk.removeAll(keepingCapacity: true)
             chunkOpen = false
         case .other:
-            if chunkOpen { chunk.append(frame) }
+            if chunkOpen {
+                // C8 Fix B: banked/offload raw-IMU (the 1244-byte 5/MG shape) must reach the durable
+                // IMU store BEFORE the trim cursor advances past this chunk — finishChunk →
+                // setCursor → ackTrim frees the strap's copy ("raw durable before its source is
+                // marked captured", spec §6). Feeding happens at frame arrival, so it always
+                // precedes the ack. The store gates on the exact 1244-byte shape (decode is
+                // authoritative, mirroring Android recordGroundTruthImuFrame); the cheap
+                // rawColumns gate here keeps non-IMU data frames from touching the window store.
+                if Whoop5RawImu.rawColumns(frame) != nil {
+                    _ = ImuSessionFileStore.shared.append(deviceId: deviceId, frame: frame,
+                        receivedAtMs: Int64(Date().timeIntervalSince1970 * 1_000))
+                }
+                chunk.append(frame)
+            }
         }
     }
 

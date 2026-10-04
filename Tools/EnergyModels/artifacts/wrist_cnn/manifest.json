@@ -1,0 +1,332 @@
+{
+  "schema": 1,
+  "name": "wrist_cnn",
+  "description": "Pretrained 1-D CNN heads (energy-expenditure regression and 3-class activity intensity) for 60 s of raw wrist-worn tri-axial accelerometry, ported to a numpy-only forward pass.",
+  "intended_use": "supporting evidence for activity intensity / energy expenditure; not ground truth",
+  "redistribution": {
+    "weights_in_repository": false,
+    "reason": "upstream declares no licence, so all rights are reserved by the authors",
+    "policy": "weights are fetched from the upstream repository at the pinned commit, accepted only if their sha256 equals the digests below, converted locally to float32 .npz, and kept in the git-ignored artifacts directory; they are never committed or redistributed"
+  },
+  "upstream": {
+    "repository": "https://github.com/razmik/cnn-wrist-model-freeliving",
+    "pinned_commit": "9ca77ea104074ad82c648ec75c3a48e2bd82deeb",
+    "pinned_commit_date_utc": "2020-04-14T01:38:43Z",
+    "licence": {
+      "declared": null,
+      "evidence": [
+        "GitHub repository API reports license: null for razmik/cnn-wrist-model-freeliving.",
+        "No LICENSE, COPYING or NOTICE file exists in the tree at the pinned commit.",
+        "The upstream README states no licence and no terms of reuse."
+      ]
+    },
+    "paper": {
+      "citation": "Nawaratne R, Alahakoon D, De Silva D, O'Halloran PD, Montoye AHK, Staley K, Nicholson M, Kingsley MIC. Deep learning to predict energy expenditure and activity intensity in free living conditions using wrist-specific accelerometry. Journal of Sports Sciences 2021;39(6):683-690.",
+      "doi": "10.1080/02640414.2020.1841394"
+    },
+    "files": {
+      "regression": {
+        "path": "pre-trained-models/regression/window-6000-overlap-3000/best_model.013-0.28.h5",
+        "url": "https://raw.githubusercontent.com/razmik/cnn-wrist-model-freeliving/9ca77ea104074ad82c648ec75c3a48e2bd82deeb/pre-trained-models/regression/window-6000-overlap-3000/best_model.013-0.28.h5",
+        "size_bytes": 17524696,
+        "sha256": "31a5769b14514996d114af462e7f2d142ed17ebdce7b4a70596499e0955a5d8c",
+        "git_blob_sha1": "94c1e6f4143397614b262a1f6c086b1098c08b1c"
+      },
+      "classification": {
+        "path": "pre-trained-models/classification/window-6000-overlap-3000/best_model.007-0.36.h5",
+        "url": "https://raw.githubusercontent.com/razmik/cnn-wrist-model-freeliving/9ca77ea104074ad82c648ec75c3a48e2bd82deeb/pre-trained-models/classification/window-6000-overlap-3000/best_model.007-0.36.h5",
+        "size_bytes": 17530824,
+        "sha256": "83b04e0946e2a2999918a64db992431f9a1d591225380b2ca87a16dd661c7747",
+        "git_blob_sha1": "bbbefc44c5e24c019d79d66a201f553bfa544eb7"
+      }
+    }
+  },
+  "converted": {
+    "regression": {
+      "filename": "wrist_cnn_regression_f32.npz",
+      "size_bytes": 5825782,
+      "sha256": "4c5af0c81fb44a118c71280eaba64f04529c4aaf8c896b7722a84c113f5db7ef",
+      "dtype": "float32",
+      "tensors": 14,
+      "parameters": 1455621,
+      "container": "numpy .npz written byte-deterministically (stored zip, fixed timestamps, sorted keys, version-1.0 .npy headers); conv kernels are [kernel, in, out], dense kernel [in, out]"
+    },
+    "classification": {
+      "filename": "wrist_cnn_classification_f32.npz",
+      "size_bytes": 5827710,
+      "sha256": "9b545f211bfaff6b2c49f0380e9b51bf2e1bab73baa0e3984f588f99fe40d4fc",
+      "dtype": "float32",
+      "tensors": 14,
+      "parameters": 1456103,
+      "container": "numpy .npz written byte-deterministically (stored zip, fixed timestamps, sorted keys, version-1.0 .npy headers); conv kernels are [kernel, in, out], dense kernel [in, out]"
+    }
+  },
+  "fetch": {
+    "command": "scripts/fetch_wrist_cnn.sh",
+    "module": "python -m energy_models.wrist_cnn.fetch",
+    "download_hosts": [
+      "raw.githubusercontent.com"
+    ],
+    "refusal": "a download whose size or sha256 differs from its pin is discarded and the run aborts with exit status 2; a cached copy that fails verification is deleted and re-fetched (refused with --offline); the converted .npz is verified against its own pin and re-verified before every load",
+    "converter_requirements": "requirements-cnn-convert.txt (h5py is needed only to convert)",
+    "inference_requirements": "numpy only"
+  },
+  "architecture": {
+    "origin": "Keras 2.2.4 Sequential (read from the model_config of each .h5)",
+    "layers": [
+      {
+        "layer": "Reshape",
+        "input": [
+          18000
+        ],
+        "output": [
+          6000,
+          3
+        ]
+      },
+      {
+        "layer": "Conv1D",
+        "filters": 80,
+        "kernel_size": 10,
+        "strides": 1,
+        "padding": "valid",
+        "activation": "relu"
+      },
+      {
+        "layer": "Conv1D",
+        "filters": 100,
+        "kernel_size": 10,
+        "strides": 1,
+        "padding": "valid",
+        "activation": "relu"
+      },
+      {
+        "layer": "MaxPooling1D",
+        "pool_size": 3,
+        "strides": 3,
+        "padding": "valid"
+      },
+      {
+        "layer": "Conv1D",
+        "filters": 160,
+        "kernel_size": 10,
+        "strides": 1,
+        "padding": "valid",
+        "activation": "relu"
+      },
+      {
+        "layer": "Conv1D",
+        "filters": 180,
+        "kernel_size": 10,
+        "strides": 1,
+        "padding": "valid",
+        "activation": "relu"
+      },
+      {
+        "layer": "MaxPooling1D",
+        "pool_size": 3,
+        "strides": 3,
+        "padding": "valid"
+      },
+      {
+        "layer": "Conv1D",
+        "filters": 220,
+        "kernel_size": 10,
+        "strides": 1,
+        "padding": "valid",
+        "activation": "relu"
+      },
+      {
+        "layer": "Conv1D",
+        "filters": 240,
+        "kernel_size": 10,
+        "strides": 1,
+        "padding": "valid",
+        "activation": "relu"
+      },
+      {
+        "layer": "GlobalMaxPooling1D"
+      },
+      {
+        "layer": "Dropout",
+        "rate": 0.5,
+        "inference": "identity"
+      },
+      {
+        "layer": "Dense",
+        "units": {
+          "regression": 1,
+          "classification": 3
+        },
+        "activation": {
+          "regression": "linear",
+          "classification": "softmax"
+        }
+      }
+    ],
+    "time_lengths_after_stage": {
+      "conv1": 5991,
+      "conv2": 5982,
+      "pool_after_conv2": 1994,
+      "conv3": 1985,
+      "conv4": 1976,
+      "pool_after_conv4": 658,
+      "conv5": 649,
+      "conv6": 640
+    },
+    "note": "the second pooling floors 1976 -> 658 (two trailing steps dropped), exactly as Keras 'valid' pooling does",
+    "parameters": {
+      "regression": 1455621,
+      "classification": 1456103
+    },
+    "multiply_accumulates_per_window": {
+      "regression": 1974550640,
+      "classification": 1974551120
+    },
+    "heads": "two separate networks (no shared weights): regression (MET) and 3-class intensity"
+  },
+  "input": {
+    "units": "g (standard gravity)",
+    "gravity": "included (no high-pass, no band-pass, no standardisation)",
+    "sample_rate_hz": 100,
+    "window_samples": 6000,
+    "window_seconds": 60,
+    "training_window_overlap": 0.5,
+    "axes": 3,
+    "training_sensor": "ActiGraph GT3X+ on the wrist, raw export: 3 decimals, steps of 3-4 mg, rails at +-8 g (largest value in the public sample 7.996 g)",
+    "layout": "upstream layout: preprocess/prepare_train_data.py reshapes [x(6000), y(6000), z(6000)] to (6000, 3) without a transpose, so the network sees the axes concatenated in time and re-chopped into rows of three; it is NOT [time, axis]. Feeding [time, axis] to the same weights gives RMSE 2.21 MET instead of 0.74 on the public sample."
+  },
+  "output": {
+    "regression": "one float, MET-like energy-expenditure index (linear head, not clipped)",
+    "classification": "softmax over 3 classes, upstream names SED/LPA/MVPA",
+    "class_semantics": "measured on the public sample: the head follows the energy bands <1.5, 1.5-<3, >=3 MET (91% agreement); the sample's own activity_classes codes do not follow that scheme (48% agreement)"
+  },
+  "labels": {
+    "reference": "waist-worn ActiGraph energy-expenditure estimate ('waist_ee'): upstream's ReferenceMethod.update_reference_ee applies the Freedson VM3 Combination (11) equation to waist activity counts (MET = 0.001092 x VA + 1.336129, capped at 2.9999, while VM3 < 2453 counts/min; 0.000863 x VM3 + 0.668876 above), plus its intensity class ('waist_intensity')",
+    "indirect_calorimetry": false,
+    "consequence": "outputs are an activity-intensity index calibrated to a waist-accelerometer estimate, not a calorimetric energy cost",
+    "label_floor_met": 1.336,
+    "quiet_window_output_met": 1.402
+  },
+  "whoop_mismatch_risks": [
+    "axis orientation / sign of the device frame is not the ActiGraph wrist frame (measured: sign flips shift the mean output by up to 0.17 MET and single windows by up to 2.9 MET on the public sample)",
+    "WHOOP raw resolution (1/4096 g) is finer than the training data (3-4 mg steps); behaviour of the network on finer or differently filtered signals was not measured",
+    "wear site differs (training: wrist; a WHOOP strap may be worn on the upper arm)",
+    "training used 60 s windows with exactly 100 Hz sampling; gaps must be reported, not interpolated silently",
+    "labels are waist-ActiGraph estimates from one free-living cohort, not calorimetry"
+  ],
+  "verification": {
+    "measured_on": "2026-10-03",
+    "numpy_vs_keras": {
+      "reference": "tf_keras 2.21.0 (legacy Keras 2 API) on tensorflow 2.21.0, CPU, float32",
+      "numpy_version": "2.2.6",
+      "platform": "Darwin arm64",
+      "tolerance_abs": 0.0001,
+      "all_within_tolerance": true,
+      "input_set_sizes": {
+        "edge": 5,
+        "gaussian": 12,
+        "real": 96,
+        "synthetic": 15,
+        "uniform_noise": 4
+      },
+      "max_abs_diff_realistic_inputs": {
+        "regression_met": 1.0967254638671875e-05,
+        "classification_probability": 5.066394805908203e-07
+      },
+      "max_abs_diff_stress_inputs": {
+        "regression_met": 3.814697265625e-06,
+        "classification_probability": 5.960464477539063e-08
+      },
+      "float64_reference_max_abs_diff": {
+        "regression": {
+          "numpy_float32_vs_float64": 2.7512693412390377e-07,
+          "keras_float32_vs_float64": 3.94336223674685e-07
+        },
+        "classification": {
+          "numpy_float32_vs_float64": 2.2453401948840934e-07,
+          "keras_float32_vs_float64": 1.66033183757186e-07
+        }
+      }
+    },
+    "public_sample": {
+      "caveat": "ONE participant (LSM146, one day, 7 segments) from the upstream repository's training-ready sample; the repository gives no train/test split, so treat this as IN-SAMPLE, not held-out performance. The paper reports r = 0.86 and 83.7% intensity accuracy on held-out participants.",
+      "n_windows": 1292,
+      "regression_vs_window_mean_energy_label": {
+        "rmse_met": 0.7409117057364678,
+        "mae_met": 0.4520304281270795,
+        "bias_met": 0.07407537512722467,
+        "pearson_r": 0.9406902793751221,
+        "r2": 0.8616163994577186
+      },
+      "regression_in_natural_layout_for_contrast": {
+        "rmse_met": 2.2125967559219926,
+        "bias_met": -1.5390086478088434,
+        "pearson_r": 0.7694986225531169
+      },
+      "classification_head_vs_energy_bands": {
+        "accuracy": 0.9102167182662538,
+        "balanced_accuracy": 0.8701808175952023,
+        "majority_baseline": 0.5131578947368421
+      },
+      "classification_head_vs_sample_activity_codes": {
+        "accuracy": 0.47987616099071206,
+        "note": "the sample's codes do not follow the head's class scheme (see output.class_semantics)"
+      },
+      "source_file_sha256": {
+        "LSM146 Wrist (2016-10-19)_row-150000_to_210000_train_ready.npy": "dac15e10a03e39a18b861b9fd4036a76d5c78f444a974f1154a8d7dd9ad1c3aa",
+        "LSM146 Wrist (2016-10-19)_row-240000_to_300000_train_ready.npy": "345b43c6723f548ff2f1428cf95d742d85ff65446faa664075ef7e786dd3b37d",
+        "LSM146 Wrist (2016-10-19)_row-300_to_45000_train_ready.npy": "a66ee4c211e9f1c468e1668ae6054a4f344a51a1d55c2133422028a79546507d",
+        "LSM146 Wrist (2016-10-19)_row-330000_to_375000_train_ready.npy": "90132a2af9ce59839d67d7d5faef45b16562e6bd05c88f9935861420c5aaea08",
+        "LSM146 Wrist (2016-10-19)_row-420000_to_465000_train_ready.npy": "ff845ce9d6d11dfa2c9a31dfa3dd714bbeb6ec26fdc7def36129544b27f37268",
+        "LSM146 Wrist (2016-10-19)_row-495000_to_540000_train_ready.npy": "ccb1d4a4cf3b55477974f26e22430d3497eac7ece5a0474463089828d49407ef",
+        "LSM146 Wrist (2016-10-19)_row-582600_to_606285_train_ready.npy": "3d78942071642d2aa21b7dd1eb25c789d8ca45a7cf59ca6aed21edacaf593289"
+      }
+    },
+    "ood_signal": {
+      "in_sample_fraction_score_gt_0.5": 0.07739938080495357,
+      "in_sample_flat_component_fraction_gt_0.5": 0.07739938080495357,
+      "leave_one_segment_out_fraction_gt_0.5": 0.09442724458204334,
+      "leave_one_segment_out_fraction_gt_0.5_excluding_flat": 0.017027863777089782,
+      "spearman_score_vs_abs_error": -0.09561549723722738,
+      "synthetic": {
+        "still": 0.0,
+        "walking-like 1.8 Hz": 0.0,
+        "running-like 2.8 Hz": 0.4033,
+        "saturated +-8 g": 0.995,
+        "flat (constant)": 1.0,
+        "NaN block": 1.0
+      },
+      "caveat": "the score is a plausibility signal, not a calibrated error predictor; its envelope comes from one participant and one day"
+    }
+  },
+  "performance": {
+    "measured_on": "2026-10-03",
+    "host": "Apple M4 Max, Python 3.11.13, numpy 2.2.6",
+    "accelerate_numpy_wheel": {
+      "ms_per_window_wall": 3.6,
+      "ms_per_window_cpu": 5.2,
+      "seconds_per_1440_windows_per_head": 5.2,
+      "note": "numpy macOS arm64 wheel built against Apple Accelerate, default threading"
+    },
+    "accelerate_single_thread": {
+      "ms_per_window_wall": 4.8,
+      "seconds_per_1440_windows_per_head": 6.9,
+      "note": "same wheel with VECLIB_MAXIMUM_THREADS=1"
+    },
+    "openblas_numpy_wheel": {
+      "ms_per_window_wall": 41.5,
+      "seconds_per_1440_windows_per_head": 59.8,
+      "note": "numpy macosx_11_0_arm64 wheel (scipy-openblas 0.3.29, generic NEON kernels), same machine, best of 3 batches of 16; expect this order of magnitude on any host without a tuned BLAS. x86 hosts were not measured."
+    },
+    "keras_reference": {
+      "ms_per_window_wall": 6.2,
+      "note": "tf_keras 2.21.0 / TensorFlow 2.21.0 on the same machine, batch 12, multi-threaded"
+    },
+    "ood_signal_ms_per_window": 0.17,
+    "quiet_mask_ms_per_window": 0.04,
+    "prepare_windows_24h_100hz_seconds": 0.12,
+    "scratch_memory_mb_per_thread": 58.9,
+    "weights_resident_mb_per_head_float32": 5.82
+  }
+}

@@ -2249,17 +2249,69 @@ public final class BLEManager: NSObject, ObservableObject {
         }
     }
 
-    /// Start a manually stopped 5/MG raw-data session. Returns false when another capture is active.
+    /// Result of asking the BLE layer to open a ground-truth raw-data session.
+    public enum GroundTruthCaptureStart: Equatable {
+        /// Transport armed (START_RAW_DATA + TOGGLE_IMU_MODE sent).
+        case started
+        /// Another bounded/ground-truth capture is already running; the request was ignored.
+        case alreadyInFlight
+        /// The connected strap family has no qualified high-rate IMU store path (WHOOP 4.0 emits
+        /// the 1917-byte REALTIME_RAW_DATA variant, which the 1244-byte NOOPIMU2 store does not
+        /// record) — the session UI must say so and never claim a recording that stores nothing.
+        case unsupportedDeviceFamily
+        /// The link isn't up, so the writes were no-ops. The durable capture intent re-arms the
+        /// transport on the next connect (C8 Fix D).
+        case notConnected
+    }
+
+    /// Start a manually stopped 5/MG raw-data session (C8 Fix C). The 5/MG family is the ONLY one
+    /// with a qualified 1244-byte raw-IMU path; a WHOOP 4.0 gets `.unsupportedDeviceFamily` so the
+    /// UI never silently records nothing while it says "recording" (spec §6: devices without
+    /// qualified high-rate IMU return unknown or a clearly named coarse fallback).
+    ///
+    /// WHOOP 4.0 behavior is otherwise PRESERVED: the legacy transport writes still go out (the
+    /// `rawCaptureInFlight` latch is set so they pass the send() allowlist exactly as before), and
+    /// the caller rolls the session back with `stopGroundTruthRawCapture()` when it sees the
+    /// `.unsupportedDeviceFamily` result.
     @discardableResult
-    public func startGroundTruthRawCapture(sessionId: String) -> Bool {
-        guard !rawCaptureInFlight else { return false }
+    public func startGroundTruthRawCapture(sessionId: String) -> GroundTruthCaptureStart {
+        guard !rawCaptureInFlight else { return .alreadyInFlight }
+        guard selectedModel.deviceFamily == .whoop5 else {
+            rawCaptureInFlight = true
+            send(.startRawData, payload: [0x01], writeType: .withResponse)
+            send(.toggleIMUMode, payload: [0x01], writeType: .withResponse)
+            log("Raw-data session: declined for \(selectedModel.deviceFamily) — no 100 Hz IMU store path")
+            return .unsupportedDeviceFamily
+        }
+        guard state.connected else { return .notConnected }
         rawCaptureInFlight = true
         send(.startRawData, payload: [0x01], writeType: .withResponse)
-        send(.toggleIMUMode,
-             payload: selectedModel.deviceFamily == .whoop5 ? [0x01, 0x01] : [0x01],
-             writeType: .withResponse)
+        send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
         log("Raw-data session: started")
-        return true
+        return .started
+    }
+
+    /// C8 Fix D: re-arm a persisted ground-truth capture after the link (re)connects or the process
+    /// restores, so the START_RAW_DATA/TOGGLE_IMU_MODE transport survives WITHOUT RawDataCollectorView
+    /// being alive (the view's `.task`/`onChange` was previously the only re-arm). Mirrors the
+    /// realtime-HR re-arm pattern (`wantsRealtime` at the post-bond arm sites): the want is durable
+    /// (RawDataSessionStore.persistedCaptureIntent), and we only re-arm while it still refers to an
+    /// ACTIVE session on the connected 5/MG strap. Stops being a candidate when the session was
+    /// stopped (marker cleared), the strap was unpaired (device delete clears the marker + files),
+    /// or the family cannot feed the 1244-byte IMU store.
+    private func rearmGroundTruthRawCaptureIfWanted() {
+        // Cheap short-circuit: this runs from the 5/MG post-bond block, which re-enters on EVERY
+        // .withResponse ack during an offload — once armed, there is nothing to re-arm.
+        guard !rawCaptureInFlight else { return }
+        guard let intent = RawDataSessionStore.persistedCaptureIntent,
+              RawDataSessionStore.persistedCaptureIntentIsActive else { return }
+        guard intent.deviceId == deviceId else { return }   // the intent belongs to another strap
+        guard selectedModel.deviceFamily == .whoop5 else {
+            log("Raw-data session: capture intent set but \(selectedModel.deviceFamily) cannot feed the 1244-byte IMU store — not re-arming")
+            return
+        }
+        guard state.bonded, state.connected else { return }
+        _ = startGroundTruthRawCapture(sessionId: intent.sessionId)
     }
 
     /// Stop and flush the current manually controlled raw-data session.
@@ -6509,6 +6561,10 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             // there would be skipped for a restored link — the very path a radio toggle and a relaunch take.
             // After `bootstrapStore`, because it is what creates `registryStore`.
             if let p = self.peripheral ?? self.restoredPeripheral { self.adoptSourceIdentity(for: p) }
+            // C8 Fix D: OS state restoration is another reconnect — re-arm a persisted ground-truth
+            // capture here so a backgrounded/relaunched app keeps its raw-IMU session streaming
+            // without RawDataCollectorView being open.
+            rearmGroundTruthRawCaptureIfWanted()
         }
         if p.state == .connected {
             state.connected = true
@@ -6925,6 +6981,11 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 log("WHOOP 5/MG: arming realtime HR (puffin TOGGLE_REALTIME_HR)")
                 send(.toggleRealtimeHR, payload: [0x01])
             }
+            // C8 Fix D: a persisted ground-truth capture (durable 'want' marker + active session)
+            // re-arms its START_RAW_DATA/TOGGLE_IMU_MODE transport on this (re)connect, independent
+            // of any view. Idempotent: `startGroundTruthRawCapture` no-ops while a capture is in
+            // flight, and the marker is cleared when the session is stopped/deleted/unpaired.
+            rearmGroundTruthRawCaptureIfWanted()
             startKeepAlive()                                    // re-subscribe + liveness watchdog
             // Kick the historical offload ONCE per connection — this is the 5/MG edition of the WHOOP4
             // connect-handshake (lines below). didWriteValueFor re-enters this `.whoop5` branch on EVERY
@@ -7589,12 +7650,21 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                         // Flip to true once a real 5.0/MG strap confirms the newest/oldest are correct.
                         handleDataRangeResponse(frame, cmdOff: 10, feedsSync: false)
                     }
-                    // NOTE: we deliberately do NOT ingest live 5/MG REALTIME_DATA into the Collector
-                    // here. For a 5/MG the standard 0x2A37 Heart-Rate profile is already the RELIABLE,
-                    // continuously-persisted live source (see didUpdateValueFor 0x2A37 → ingestStandardHR);
-                    // decoding HR a second time off the puffin stream stored a duplicate row per heartbeat
-                    // at a slightly different second (strap-unix vs Mac-receive), inflating the sample
-                    // store. 0x2A37 stays the single authoritative live HR/RR source for 5/MG.
+                    // C8 Fix A: route the live 5/MG raw-IMU payload to the durable IMU store through
+                    // the Collector's dedicated IMU seam (`recordGroundTruthImu` → ImuSessionFileStore
+                    // append; the store gates on the exact 1244-byte shape, so this is a no-op for any
+                    // non-IMU frame). Mirror of Android's `recordGroundTruthImuFrame`
+                    // (WhoopBleClient.kt:8019), which also records every completed live frame.
+                    collector?.recordGroundTruthImu(frame)
+                    // NOTE: we deliberately do NOT feed live 5/MG REALTIME_DATA into the Collector's
+                    // full ingest (HR/RR ingestion) here — the rationale above stands: for a 5/MG the
+                    // standard 0x2A37 Heart-Rate profile is already the RELIABLE, continuously-persisted
+                    // live source (see didUpdateValueFor 0x2A37 → ingestStandardHR); decoding HR a second
+                    // time off the puffin stream stored a duplicate row per heartbeat at a slightly
+                    // different second (strap-unix vs Mac-receive), inflating the sample store. 0x2A37
+                    // stays the single authoritative live HR/RR source for 5/MG. ONLY the raw-IMU
+                    // record path is routed here — no HR/RR rows, no cloud capture, no inference/network
+                    // work in the delegate (spec §6).
                     // Capture for protocol mapping (no-op unless the Settings toggle is on). PR #20.
                     puffinRecorder.capture(frame: frame, char: characteristic.uuid)
                 }

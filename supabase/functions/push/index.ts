@@ -5,10 +5,15 @@
 //   POST /                        inline NDJSON batch (gzip optional)
 //   POST /objects                 object-lane intent → presigned B2 PUT
 //   POST /objects/:objectId/complete   byte-count check → release device rows
+//   POST /installations/provision   Supabase-Auth-verified installation credential (JWT bearer)
+//   POST /account/recover         move a verified sign-in onto its pre-Auth account (JWT + enrollment code)
+//   POST /installation/retire, /wearables/confirm, /wearables/handoff   installation lifecycle
 //
 // Auth is handled here, so the function is deployed with --no-verify-jwt. Uploads require a
-// source-bound `noop_` installation bearer plus a separate fleet credential; enrollment uses the
-// fleet bearer, and token management alone accepts a Supabase JWT.
+// source-bound `noop_` installation bearer minted by provisioning behind a verified Supabase
+// session; there is no shared fleet secret on that path. Provisioning and token management accept
+// a Supabase JWT. Pre-Auth enrollment-code installations (and `/enroll`) are honored only while
+// NOOP_ALLOW_LEGACY_ENROLLMENT=true.
 //
 // Differences from the Node original, all deliberate:
 //   - replacement staging is Postgres-backed (isolates are stateless), same state machine;
@@ -41,6 +46,8 @@ import {
   createIngestTokenStore,
 } from '../_shared/tokens.ts';
 import { createEnrollmentService, EnrollmentError } from '../_shared/enrollment.ts';
+import { createInstallationProvisioning } from '../_shared/provisioning.ts';
+import { createAccountRecovery } from '../_shared/accountRecovery.ts';
 import { createNoopDeviceResolver } from '../_shared/devices.ts';
 import { createUploadReceiptStore } from '../_shared/receipts.ts';
 import { projectEnrolledAppend } from '../_shared/appendProjection.ts';
@@ -66,7 +73,20 @@ const enrollmentService = createEnrollmentService({
 });
 const receiptStore = createUploadReceiptStore({ rest });
 const resolveDeviceId = createNoopDeviceResolver({ rest });
-const installationLifecycle = createInstallationLifecycle(rest);
+const installationLifecycle = createInstallationLifecycle(rest, {
+  allowLegacyEnrollment: cfg.allowLegacyEnrollment,
+});
+const installationProvisioning = createInstallationProvisioning({
+  rest,
+  supabaseUrl: cfg.supabaseUrl,
+  anonKey: cfg.supabaseAnonKey,
+});
+const accountRecovery = createAccountRecovery({
+  rest,
+  supabaseUrl: cfg.supabaseUrl,
+  anonKey: cfg.supabaseAnonKey,
+  pepper: cfg.enrollmentPepper,
+});
 const raw = cfg.b2KeyId && cfg.b2ApplicationKey && cfg.b2Bucket && cfg.b2S3Endpoint
   ? createS3({
     endpoint: cfg.b2S3Endpoint,
@@ -132,6 +152,7 @@ async function authenticateUpload(req: Request) {
       headers: req.headers,
       rest,
       allowLegacyFleetUploads: cfg.allowLegacyFleetUploads,
+      allowLegacyEnrollment: cfg.allowLegacyEnrollment,
     });
     if (req.method !== 'GET' && identity.sourceId &&
         !await rest.rpc('admit_noop_request',{p_user:identity.id,p_source:identity.sourceId})) {
@@ -307,6 +328,9 @@ async function handleInlineBatch(req: Request): Promise<Response> {
 
 async function handleEnroll(req: Request): Promise<Response> {
   try {
+    if (!cfg.allowLegacyEnrollment) {
+      return json({ type: 'error', protocolVersion: '1.1', code: 'legacy_enrollment_disabled' }, 410);
+    }
     await authorizeEnrollment(req);
     if (!enrollmentService.configured) {
       return json({ type: 'error', protocolVersion: '1.1', code: 'enrollment_not_configured' }, 503);
@@ -348,6 +372,12 @@ Deno.serve(async (req: Request) => {
   }
   if (req.method === 'POST' && sub === '/enroll') {
     return handleEnroll(req);
+  }
+  if (req.method === 'POST' && sub === '/installations/provision') {
+    return installationProvisioning(req);
+  }
+  if (req.method === 'POST' && sub === '/account/recover') {
+    return accountRecovery(req);
   }
   if (req.method === 'POST' && sub === '/installation/retire') return installationLifecycle(req, 'retire');
   if (req.method === 'POST' && sub === '/wearables/confirm') return installationLifecycle(req, 'confirm');

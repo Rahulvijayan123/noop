@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "model_version": "hart-wisdm-v0",
+  "preprocessing_version": "1.0.0",
+  "model_kind": "hart",
+  "checkpoint": {
+    "commit": "122b4a8b07758deedfcf3b1e87f03eed5ad55967",
+    "license": "MIT",
+    "files": {
+      "model.safetensors": {
+        "url": "https://github.com/EdgeIntelligenceLab/HART/raw/122b4a8b07758deedfcf3b1e87f03eed5ad55967/finetuning_HART/pretrained_checkpoint/model.safetensors",
+        "sha256": "88b8d1790a43cb5c96c5bba5da60c81ae08657024f9747cbe52d45c2acfd2e6d",
+        "size": 856744
+      }
+    }
+  },
+  "scaler": {
+    "mean": [
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    "scale": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "sha256": "3ad2c7ea440691a0962da8b011869493240e6ab4f9a4ea3b4d9234403ed9c8f5",
+    "fit": "train-subjects-sessions-only"
+  },
+  "class_map": [
+    "A",
+    "B",
+    "D"
+  ],
+  "thresholds": {
+    "max_prob": 0.8,
+    "margin": 0.15
+  },
+  "units": {
+    "input_accel": "g",
+    "input_gyro": "deg/s",
+    "train_accel": "g",
+    "train_gyro": "deg/s"
+  },
+  "window": {
+    "samples": 120,
+    "hop": 60,
+    "hz": 30
+  },
+  "label_mapping": {
+    "A": "walking",
+    "B": "running",
+    "C": "other_movement",
+    "D": "stationary",
+    "E": "stationary",
+    "F": "stationary",
+    "G": "other_movement",
+    "H": "other_movement",
+    "I": "other_movement",
+    "J": "other_movement",
+    "K": "other_movement",
+    "L": "other_movement",
+    "M": "other_movement",
+    "O": "other_movement",
+    "P": "other_movement",
+    "Q": "stationary",
+    "R": "stationary",
+    "S": "stationary"
+  },
+  "seed": 0,
+  "deps": {
+    "numpy": "2.2.6",
+    "torch": "2.8.0",
+    "transformers": "4.56.0",
+    "granite-tsfm": "0.3.3"
+  }
+}

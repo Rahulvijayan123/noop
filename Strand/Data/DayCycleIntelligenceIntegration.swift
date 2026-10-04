@@ -213,7 +213,16 @@ import WhoopStore
                     hrWitness.append("\(owner)=\(fp.map { "\($0.count):\($0.maxTs)" } ?? "unread")")
                 }
             }
+            // The cycle's energy also reads the day owner's motion channels, so their arrival (like a late
+            // HR row) must invalidate the cached figure.
+            var motionWitness = "none"
+            if hrEndInclusive >= window.onset {
+                let gravity = try? await store.gravityFingerprint(deviceId: fallback, from: window.onset, to: hrEndInclusive)
+                let steps = await store.stepDataRevisionSignature(deviceId: fallback, from: window.onset, to: window.endExclusive)
+                motionWitness = "grav=\(gravity.map { "\($0.count):\($0.maxTs)" } ?? "unread")|steps=\(steps)"
+            }
             let loadKey = "\(window.onset)-\(window.endExclusive)|\(hrWitness.joined(separator: ","))"
+                + "|\(motionWitness)|energy=\(profile.energyInputsSignature)"
                 + "|rhr=\(restingHR)|max=\(effectiveMaxHR.map { "\($0)" } ?? "nil")|\(effortMethod)|\(profile.cacheKey)"
             let load: CachedLoad
             if let hit = cache.loads[window.sleepId], hit.key == loadKey, !hrWitness.contains(where: { $0.hasSuffix("=unread") }) {
@@ -228,12 +237,38 @@ import WhoopStore
                     }
                 }
                 let cycleHR = hrByTimestamp.values.sorted { $0.ts < $1.ts }
+                var cycleCalories: Double? = nil
+                if !cycleHR.isEmpty {
+                    let active = window.endExclusive == now
+                    let cycleStart = window.onset
+                    let motionEnd = window.endExclusive - 1
+                    let gravity = (try? await store.gravitySamples(
+                        deviceId: fallback, from: cycleStart, to: motionEnd, limit: 200_000)) ?? []
+                    let steps = (try? await store.stepSamples(
+                        deviceId: fallback, from: cycleStart, to: motionEnd, limit: 200_000)) ?? []
+                    let sleeps = sleepContexts
+                        .filter { $0.end > cycleStart && $0.start < window.endExclusive }
+                        .map { EnergyInterval(start: $0.start, end: $0.end) }
+                    let persisted = workouts
+                        .filter { $0.startTs < window.endExclusive && $0.endTs > cycleStart }
+                        .map { EnergyWorkoutInterval(start: $0.startTs, end: $0.endTs, coarseClass: nil) }
+                    let detected = nights.flatMap(\.workouts)
+                        .filter { $0.start < window.endExclusive && $0.end > cycleStart }
+                        .filter { d in !persisted.contains { d.start < $0.end && $0.start < d.end } }
+                        .map { EnergyWorkoutInterval(start: $0.start, end: $0.end, coarseClass: nil) }
+                    cycleCalories = MetabolicEstimator.estimate(EnergyDayInput(
+                        dayStart: cycleStart,
+                        // The open cycle is projected over a full day; a closed one is its own length.
+                        dayEnd: active ? max(window.endExclusive, cycleStart + 86_400) : window.endExclusive,
+                        asOf: active ? now : nil,
+                        hr: cycleHR, gravity: gravity, steps: steps, profile: profile, hrmax: effectiveMaxHR,
+                        restingHR: restingHR, sleepIntervals: sleeps, workouts: persisted + detected)).totalKcal
+                }
                 load = CachedLoad(
                     key: loadKey,
                     strain: StrainScorer.strain(cycleHR, maxHR: effectiveMaxHR, restingHR: restingHR,
                                                 method: effortMethod, sex: profile.sex),
-                    calories: cycleHR.isEmpty ? nil : Calories.estimateDayCalories(
-                        cycleHR, profile: profile, hrmax: effectiveMaxHR, restingHR: restingHR))
+                    calories: cycleCalories)
                 cache.loads[window.sleepId] = load
             }
             if let strain = load.strain { strains[day] = strain }

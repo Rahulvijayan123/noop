@@ -209,20 +209,7 @@ struct HRVDualChart: View {
         .chartOverlay { proxy in
             GeometryReader { geo in
                 let plot = proxy.plotRectCompat(in: geo)
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
-                    // Press-and-hold before dragging, so a plain swipe on the chart still scrolls the page.
-                    .gesture(
-                        LongPressGesture(minimumDuration: 0.15)
-                            .sequenced(before: DragGesture(minimumDistance: 0))
-                            .onChanged { state in
-                                if case .second(true, let drag?) = state {
-                                    select(x: drag.location.x, proxy: proxy, plot: plot)
-                                }
-                            }
-                            .onEnded { _ in selectedDay = nil }
-                    )
+                scrubSurface(proxy: proxy, plot: plot)
                     .onContinuousHover(coordinateSpace: .local) { phase in
                         switch phase {
                         case .active(let location): select(x: location.x, proxy: proxy, plot: plot)
@@ -232,6 +219,32 @@ struct HRVDualChart: View {
             }
         }
         .frame(height: height)
+    }
+
+    /// The touch surface over the plot. On iOS the chart sits inside a vertical scroll view, so only a
+    /// sideways drag may scrub; anything else must reach the page.
+    @ViewBuilder
+    private func scrubSurface(proxy: ChartProxy, plot: CGRect) -> some View {
+        #if os(iOS)
+        HorizontalScrubSurface(
+            onScrub: { select(x: $0, proxy: proxy, plot: plot) },
+            onEnd: { selectedDay = nil }
+        )
+        #else
+        Rectangle()
+            .fill(Color.clear)
+            .contentShape(Rectangle())
+            .gesture(
+                LongPressGesture(minimumDuration: 0.15)
+                    .sequenced(before: DragGesture(minimumDistance: 0))
+                    .onChanged { state in
+                        if case .second(true, let drag?) = state {
+                            select(x: drag.location.x, proxy: proxy, plot: plot)
+                        }
+                    }
+                    .onEnded { _ in selectedDay = nil }
+            )
+        #endif
     }
 
     private func select(x: CGFloat, proxy: ChartProxy, plot: CGRect) {
