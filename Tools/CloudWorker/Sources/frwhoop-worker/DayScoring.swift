@@ -701,14 +701,17 @@ struct DayScorer {
         let ontologyVersion = published.ontologyVersion
         let maxEnd = published.maxEnd
 
+        // The epochs above come from the raw-IMU job. A stream-day job for the same day shares the table and
+        // counts its own revisions, so it must not be picked here.
         let inputRevision: Int64
         do {
             let jobRows = try db.isolatingFailures { try db.query("""
                 select input_revision::text as rev from public.activity_context_jobs
                  where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
+                   and algorithm_version <> $4
                  order by input_revision desc
                  limit 1
-                """, [userId, deviceId, day]) }
+                """, [userId, deviceId, day, ActivityContextDays.streamsAlgorithmVersion]) }
             inputRevision = Int64(jobRows.first?["rev"] ?? "") ?? 0
         } catch {
             inputRevision = 0
