@@ -31,6 +31,8 @@ enum NaraSignUpResult: Equatable, Sendable {
     case verificationRequired
     /// The project does not require confirmation and returned a session straight away.
     case signedIn(NaraAuthSessionInfo)
+    /// The email already belongs to a verified account; no code was sent.
+    case alreadyRegistered
 }
 
 enum NaraAuthCodePurpose: Sendable {
@@ -63,6 +65,12 @@ public enum NaraAuthError: Error, LocalizedError, Equatable, Sendable {
     case sessionEnded
     case notSignedIn
     case notAwaitingCode
+    case accountExists
+    case malformedEnrollmentCode
+    case enrollmentCodeInvalid
+    case recoveryAlreadyUsed
+    case recoveryAccountActive
+    case recoveryAccountNotEmpty
     case network
     case other
 
@@ -83,6 +91,16 @@ public enum NaraAuthError: Error, LocalizedError, Equatable, Sendable {
         case .sessionEnded: return String(localized: "You were signed out. Sign in again to continue.")
         case .notSignedIn: return String(localized: "Sign in to your Nara account first.")
         case .notAwaitingCode: return String(localized: "Start again from the sign-in screen.")
+        case .accountExists: return String(localized: "An account with this email already exists. Sign in instead.")
+        case .malformedEnrollmentCode:
+            return String(localized: "Enter the whole enrollment code. It starts with NARA and has 20 more letters and digits.")
+        case .enrollmentCodeInvalid: return String(localized: "That enrollment code isn't valid. Check it and try again.")
+        case .recoveryAlreadyUsed:
+            return String(localized: "That account was already recovered. Sign in with the email you used then.")
+        case .recoveryAccountActive:
+            return String(localized: "That account already has a sign-in. Sign in with its email and password instead.")
+        case .recoveryAccountNotEmpty:
+            return String(localized: "This sign-in already has its own data, so it can't take over another account.")
         case .network: return String(localized: "Couldn't reach Nara. Check your connection and try again.")
         case .other: return String(localized: "Something went wrong. Try again.")
         }
@@ -110,6 +128,16 @@ protocol NaraAuthBackend: Sendable {
     func sessionEvents() -> AsyncStream<NaraAuthSessionEvent>
 }
 
+/// The receiver call that lets a newly verified sign-up take over the account an enrollment code created
+/// before Nara had sign-ins. `CloudReceiverClient` is the production implementation.
+protocol NaraAccountRecovering: Sendable {
+    /// The user id of the account the code belongs to. It is the caller's own id when the code was already
+    /// theirs; otherwise the session behind `accessToken` no longer exists.
+    func recoverAccount(accessToken: String, enrollmentCode: String) async throws -> String
+}
+
+extension CloudReceiverClient: NaraAccountRecovering {}
+
 // MARK: - Service
 
 /// Email + password accounts on Supabase Auth, verified with an emailed one-time code.
@@ -119,6 +147,11 @@ protocol NaraAuthBackend: Sendable {
 /// Resend is only Supabase's SMTP delivery provider. There is no Nara-side verification or token system:
 /// a session exists only after Supabase itself has confirmed the email, and `phase == .signedIn` is the
 /// one fact the rest of the app (installation provisioning, the upload runtime) is allowed to build on.
+///
+/// A brand-new sign-up stops at `.choosingSetup` first: someone who used Nara before accounts existed
+/// can move their old enrollment-code account onto the new sign-in there. That choice must come before
+/// anything is linked, because linking claims the phone's history and gives the new account data of its
+/// own, which the server then refuses to merge.
 @MainActor
 public final class NaraAuthService: ObservableObject {
 
@@ -130,11 +163,22 @@ public final class NaraAuthService: ObservableObject {
         case awaitingSignupCode(email: String)
         /// A password reset code was requested; waiting for code + new password.
         case awaitingRecoveryCode(email: String)
+        /// A newly verified account that has not yet chosen between starting fresh and recovering an
+        /// enrollment-code account. Nothing is linked to it yet.
+        case choosingSetup(NaraAccount)
         case signedIn(NaraAccount)
 
         public var account: NaraAccount? {
             if case .signedIn(let account) = self { return account }
             return nil
+        }
+
+        /// Nobody is fully signed in yet, so the app should put the account screen in front.
+        public var needsAccountSetup: Bool {
+            switch self {
+            case .restoring, .signedIn: return false
+            case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode, .choosingSetup: return true
+            }
         }
     }
 
@@ -146,20 +190,31 @@ public final class NaraAuthService: ObservableObject {
     @Published public private(set) var failure: NaraAuthError?
     @Published public private(set) var notice: String?
     @Published public private(set) var resendAvailableAt: Date?
+    /// The email to prefill on the sign-in form after a flow that ends signed out (a recovery that needs a
+    /// fresh sign-in, or an email that already has an account).
+    @Published public private(set) var suggestedEmail: String?
 
     private let backend: (any NaraAuthBackend)?
+    private let recovery: (any NaraAccountRecovering)?
+    private let defaults: UserDefaults
     private let now: @Sendable () -> Date
     private var started = false
     private var eventsTask: Task<Void, Never>?
+    /// The sign-up's credentials, held in memory only until the setup choice is made, so a recovery can
+    /// sign straight into the recovered account. Gone after a relaunch, which then asks for a sign-in.
+    private var pendingCredentials: (email: String, password: String)?
 
     /// The service the app uses: real Supabase Auth when the build carries a project + publishable key,
     /// otherwise unavailable (and the app is offline NOOP).
     public static let shared: NaraAuthService = {
-        NaraAuthService(backend: SupabaseAuthBackend.makeConfigured())
+        NaraAuthService(backend: SupabaseAuthBackend.makeConfigured(), recovery: CloudReceiverClient())
     }()
 
-    init(backend: (any NaraAuthBackend)?, now: @escaping @Sendable () -> Date = { Date() }) {
+    init(backend: (any NaraAuthBackend)?, recovery: (any NaraAccountRecovering)? = nil,
+         defaults: UserDefaults = .standard, now: @escaping @Sendable () -> Date = { Date() }) {
         self.backend = backend
+        self.recovery = recovery
+        self.defaults = defaults
         self.now = now
     }
 
@@ -179,7 +234,7 @@ public final class NaraAuthService: ObservableObject {
             return
         }
         if let info = await backend.restoreSession(), info.isVerifiedAccount {
-            phase = .signedIn(info.account)
+            phase = settledPhase(for: info.account)
         } else {
             phase = .signedOut
         }
@@ -198,12 +253,21 @@ public final class NaraAuthService: ObservableObject {
             // A refresh or profile update for the account that is already signed in changes nothing.
             // A session for a DIFFERENT account only ever arrives through this service's own sign-in
             // paths, which set the phase themselves; ignoring it here keeps the bound account stable.
-            if case .signedIn(let current) = phase, current.userId != info.account.userId { return }
-            if case .signedIn = phase { phase = .signedIn(info.account) }
+            switch phase {
+            case .signedIn(let current) where current.userId == info.account.userId:
+                phase = .signedIn(info.account)
+            case .choosingSetup(let current) where current.userId == info.account.userId:
+                phase = .choosingSetup(info.account)
+            default:
+                break
+            }
         case .ended:
-            if case .signedIn = phase {
+            switch phase {
+            case .signedIn, .choosingSetup:
                 phase = .signedOut
                 notice = NaraAuthError.sessionEnded.errorDescription
+            default:
+                break
             }
         }
     }
@@ -217,11 +281,16 @@ public final class NaraAuthService: ObservableObject {
             try Self.checkPassword(password)
             switch try await backend.signUp(email: email, password: password) {
             case .verificationRequired:
+                self.pendingCredentials = (email, password)
                 self.phase = .awaitingSignupCode(email: email)
                 self.resendAvailableAt = self.now().addingTimeInterval(Self.resendCooldown)
                 self.notice = String(localized: "We emailed you a code. Enter it to finish creating your account.")
             case .signedIn(let info):
-                try self.adopt(info)
+                self.pendingCredentials = (email, password)
+                try self.adopt(info, isNewAccount: true)
+            case .alreadyRegistered:
+                self.suggestedEmail = email
+                throw NaraAuthError.accountExists
             }
         }
     }
@@ -232,7 +301,61 @@ public final class NaraAuthService: ObservableObject {
             guard case .awaitingSignupCode(let email) = self.phase else { throw NaraAuthError.notAwaitingCode }
             let code = try Self.normalizedCode(rawCode)
             let info = try await backend.verifyCode(email: email, code: code, purpose: .signup)
-            try self.adopt(info)
+            // An account that only now verified its email has never been linked to anything.
+            try self.adopt(info, isNewAccount: true)
+        }
+    }
+
+    // MARK: setup choice
+
+    /// Start the newly verified account fresh: link this phone to it as it is.
+    public func continueAsNewAccount() {
+        guard case .choosingSetup(let account) = phase else { return }
+        defaults.removeObject(forKey: Self.setupChoiceKey(account.userId))
+        pendingCredentials = nil
+        failure = nil
+        notice = nil
+        phase = .signedIn(account)
+    }
+
+    /// Move the account an enrollment code created before Nara had sign-ins onto the newly verified sign-in.
+    /// The server gives the old account this sign-up's email and password and deletes the empty sign-up, so
+    /// the person then signs in to the recovered account with the same credentials.
+    public func recoverAccount(enrollmentCode rawCode: String) async {
+        await run {
+            guard let backend = self.backend, let recovery = self.recovery else { throw NaraAuthError.notConfigured }
+            guard case .choosingSetup(let fresh) = self.phase else { throw NaraAuthError.notAwaitingCode }
+            let code = try Self.normalizedEnrollmentCode(rawCode)
+            let recoveredId: String
+            do {
+                let token = try await backend.validAccessToken()
+                recoveredId = try await recovery.recoverAccount(accessToken: token, enrollmentCode: code)
+            } catch {
+                let failure = Self.recoveryFailure(error)
+                if failure == .sessionEnded { self.handle(.ended) }
+                throw failure
+            }
+            self.defaults.removeObject(forKey: Self.setupChoiceKey(fresh.userId))
+            if recoveredId == fresh.userId {
+                self.pendingCredentials = nil
+                self.phase = .signedIn(fresh)
+                return
+            }
+            let email = self.pendingCredentials?.email ?? fresh.email
+            if let credentials = self.pendingCredentials {
+                self.pendingCredentials = nil
+                if let info = try? await backend.signIn(email: credentials.email, password: credentials.password),
+                   info.isVerifiedAccount, info.account.userId == recoveredId {
+                    try self.adopt(info)
+                    self.notice = String(localized: "Your account is back, with all of its data, under this sign-in.")
+                    return
+                }
+            }
+            // The session this phone held belonged to the sign-up, which no longer exists.
+            self.phase = .signedOut
+            await backend.signOutLocal()
+            self.suggestedEmail = email
+            self.notice = String(localized: "Your account was recovered. Sign in with the same email and password to finish.")
         }
     }
 
@@ -259,6 +382,7 @@ public final class NaraAuthService: ObservableObject {
                 try self.adopt(info)
             } catch NaraAuthError.emailNotConfirmed {
                 // The account exists but never finished verification: send a fresh code and ask for it.
+                self.pendingCredentials = (email, password)
                 self.phase = .awaitingSignupCode(email: email)
                 try? await backend.resendSignupCode(email: email)
                 self.resendAvailableAt = self.now().addingTimeInterval(Self.resendCooldown)
@@ -271,6 +395,7 @@ public final class NaraAuthService: ObservableObject {
         isBusy = true
         defer { isBusy = false }
         await backend?.signOutLocal()
+        pendingCredentials = nil
         failure = nil
         notice = nil
         phase = .signedOut
@@ -278,7 +403,11 @@ public final class NaraAuthService: ObservableObject {
 
     /// Leave a code-entry screen without finishing it.
     public func cancelPending() {
-        if case .signedIn = phase { return }
+        switch phase {
+        case .signedIn, .choosingSetup: return
+        default: break
+        }
+        pendingCredentials = nil
         failure = nil
         notice = nil
         phase = .signedOut
@@ -335,11 +464,40 @@ public final class NaraAuthService: ObservableObject {
 
     // MARK: plumbing
 
-    private func adopt(_ info: NaraAuthSessionInfo) throws {
+    /// Take a verified session. A new account (or one that signed out before choosing) goes to the setup
+    /// choice; anything else is signed in.
+    private func adopt(_ info: NaraAuthSessionInfo, isNewAccount: Bool = false) throws {
         guard info.isVerifiedAccount else { throw NaraAuthError.emailNotConfirmed }
-        phase = .signedIn(info.account)
+        if isNewAccount { defaults.set(true, forKey: Self.setupChoiceKey(info.account.userId)) }
+        phase = settledPhase(for: info.account)
+        if case .signedIn = phase { pendingCredentials = nil }
         failure = nil
         resendAvailableAt = nil
+        suggestedEmail = nil
+    }
+
+    private func settledPhase(for account: NaraAccount) -> Phase {
+        defaults.bool(forKey: Self.setupChoiceKey(account.userId)) ? .choosingSetup(account) : .signedIn(account)
+    }
+
+    static func setupChoiceKey(_ userId: String) -> String {
+        "nara.auth.setupChoicePending.\(userId.lowercased())"
+    }
+
+    static func recoveryFailure(_ error: Error) -> NaraAuthError {
+        if let known = error as? NaraAuthError { return known }
+        guard let receiver = error as? CloudReceiverError else { return .other }
+        switch receiver {
+        case .recoveryCodeInvalid: return .enrollmentCodeInvalid
+        case .recoveryAlreadyUsed: return .recoveryAlreadyUsed
+        case .recoveryAccountActive: return .recoveryAccountActive
+        case .recoveryAccountNotEmpty: return .recoveryAccountNotEmpty
+        case .rateLimited: return .rateLimited
+        case .transport: return .network
+        case .sessionRejected: return .sessionEnded
+        case .notConfigured: return .notConfigured
+        default: return .other
+        }
     }
 
     private func run(_ operation: @escaping @MainActor () async throws -> Void) async {
@@ -377,5 +535,25 @@ public final class NaraAuthService: ObservableObject {
             throw NaraAuthError.malformedCode
         }
         return stripped
+    }
+
+    private static let enrollmentAlphabet = Set("0123456789ABCDEFGHJKMNPQRSTVWXYZ")
+
+    /// An enrollment code in its canonical form (`NARA` + 20 symbols), read the way the server reads it:
+    /// spaces and hyphens dropped, case ignored, and the look-alikes I/L and O taken as 1 and 0.
+    static func normalizedEnrollmentCode(_ raw: String) throws -> String {
+        let canonical = String(raw.uppercased().compactMap { character -> Character? in
+            if character.isWhitespace || character == "-" { return nil }
+            switch character {
+            case "I", "L": return "1"
+            case "O": return "0"
+            default: return character
+            }
+        })
+        guard canonical.count == 24, canonical.hasPrefix("NARA"),
+              canonical.dropFirst(4).allSatisfy({ enrollmentAlphabet.contains($0) }) else {
+            throw NaraAuthError.malformedEnrollmentCode
+        }
+        return canonical
     }
 }

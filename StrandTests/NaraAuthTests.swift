@@ -90,6 +90,24 @@ final class FakeAuthBackend: NaraAuthBackend, @unchecked Sendable {
     }
 }
 
+/// The receiver's account-recovery route, scripted by the test.
+final class FakeAccountRecovery: NaraAccountRecovering, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _requests: [(accessToken: String, code: String)] = []
+
+    var result: Result<String, Error> = .failure(CloudReceiverError.recoveryCodeInvalid)
+
+    var requests: [(accessToken: String, code: String)] {
+        lock.lock(); defer { lock.unlock() }
+        return _requests
+    }
+
+    func recoverAccount(accessToken: String, enrollmentCode: String) async throws -> String {
+        lock.lock(); _requests.append((accessToken, enrollmentCode)); lock.unlock()
+        return try result.get()
+    }
+}
+
 final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var current: Date
@@ -110,9 +128,11 @@ final class TestClock: @unchecked Sendable {
 final class NaraAuthTests: XCTestCase {
 
     private let clock = TestClock()
+    private let defaults = isolatedDefaults()
+    private let recovery = FakeAccountRecovery()
 
     private func service(_ backend: FakeAuthBackend?) -> NaraAuthService {
-        NaraAuthService(backend: backend, now: { [clock] in clock.now })
+        NaraAuthService(backend: backend, recovery: recovery, defaults: defaults, now: { [clock] in clock.now })
     }
 
     // MARK: sign up -> emailed code -> session
@@ -134,9 +154,169 @@ final class NaraAuthTests: XCTestCase {
         await auth.verifySignupCode(" 123 456 ")
         XCTAssertEqual(backend.calls.last, "verify:new.user@example.com:123456:signup",
                        "the code is verified as a signup code, for the address that signed up")
+        guard case .choosingSetup(let fresh) = auth.phase else {
+            return XCTFail("a new account chooses how to start before it is signed in, got \(auth.phase)")
+        }
+        XCTAssertNil(auth.phase.account, "nothing may bind to an account that has not chosen yet")
+
+        auth.continueAsNewAccount()
         guard case .signedIn(let account) = auth.phase else { return XCTFail("expected signed in, got \(auth.phase)") }
+        XCTAssertEqual(account, fresh)
         XCTAssertEqual(account.userId, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "the canonical user id is lowercased")
         XCTAssertEqual(account.email, "new.user@example.com")
+    }
+
+    // MARK: setup choice and enrollment-code recovery
+
+    private let freshId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    private let legacyId = "c4383464-0000-4000-8000-000000000001"
+
+    /// Sign up and verify, leaving the service at the setup choice for `freshId`.
+    private func verifiedNewAccount(_ backend: FakeAuthBackend, _ auth: NaraAuthService) async {
+        await auth.start()
+        await auth.signUp(email: "me@example.com", password: "password-123")
+        backend.verifyResult = .success(FakeAuthBackend.session(userId: freshId, email: "me@example.com"))
+        backend.tokenResult = .success("jwt-for-new")
+        await auth.verifySignupCode("12345678")
+    }
+
+    func testThePendingSetupChoiceSurvivesARelaunchAndContinuingEndsIt() async {
+        let backend = FakeAuthBackend()
+        let auth = service(backend)
+        await verifiedNewAccount(backend, auth)
+        XCTAssertEqual(auth.phase, .choosingSetup(NaraAccount(userId: freshId, email: "me@example.com")))
+
+        backend.stored = FakeAuthBackend.session(userId: freshId, email: "me@example.com")
+        let relaunched = service(backend)
+        await relaunched.start()
+        XCTAssertEqual(relaunched.phase, .choosingSetup(NaraAccount(userId: freshId, email: "me@example.com")),
+                       "quitting the app must not skip the choice")
+
+        relaunched.continueAsNewAccount()
+        let again = service(backend)
+        await again.start()
+        XCTAssertEqual(again.phase.account?.userId, freshId, "once chosen, the account restores signed in")
+    }
+
+    func testAnExistingAccountSigningInIsNotAskedToChoose() async {
+        let backend = FakeAuthBackend()
+        backend.signInResult = .success(FakeAuthBackend.session(userId: legacyId))
+        let auth = service(backend)
+        await auth.start()
+        await auth.signIn(email: "a@example.com", password: "password-123")
+        XCTAssertEqual(auth.phase.account?.userId, legacyId)
+    }
+
+    func testRecoveringWithAnEnrollmentCodeSignsIntoTheRecoveredAccount() async {
+        let backend = FakeAuthBackend()
+        let auth = service(backend)
+        await verifiedNewAccount(backend, auth)
+        recovery.result = .success(legacyId)
+        backend.signInResult = .success(FakeAuthBackend.session(userId: legacyId, email: "me@example.com"))
+
+        await auth.recoverAccount(enrollmentCode: " nara-abcd-efgh-jkmn-pqrs-tvwx ")
+        XCTAssertNil(auth.failure)
+        XCTAssertEqual(recovery.requests.map(\.accessToken), ["jwt-for-new"],
+                       "the recovery is authorised by the new sign-up's own session")
+        XCTAssertEqual(recovery.requests.map(\.code), ["NARAABCDEFGHJKMNPQRSTVWX"], "the code is sent canonical")
+        XCTAssertEqual(backend.calls.last, "signIn:me@example.com",
+                       "the sign-up's credentials now open the recovered account")
+        XCTAssertEqual(auth.phase.account?.userId, legacyId)
+
+        backend.stored = FakeAuthBackend.session(userId: legacyId, email: "me@example.com")
+        let relaunched = service(backend)
+        await relaunched.start()
+        XCTAssertEqual(relaunched.phase.account?.userId, legacyId, "a recovered account is not asked to choose again")
+    }
+
+    func testARecoveryAfterARelaunchAsksForAFreshSignInWithTheEmailFilledIn() async {
+        let backend = FakeAuthBackend()
+        let first = service(backend)
+        await verifiedNewAccount(backend, first)
+        backend.stored = FakeAuthBackend.session(userId: freshId, email: "me@example.com")
+        let auth = service(backend)
+        await auth.start()
+        recovery.result = .success(legacyId)
+
+        await auth.recoverAccount(enrollmentCode: "NARA-ABCD-EFGH-JKMN-PQRS-TVWX")
+        XCTAssertNil(auth.failure)
+        XCTAssertEqual(auth.phase, .signedOut, "the password is not kept across launches, so sign in again")
+        XCTAssertEqual(auth.suggestedEmail, "me@example.com")
+        XCTAssertEqual(backend.calls.last, "signOut", "the deleted sign-up's session is dropped")
+        XCTAssertNotNil(auth.notice)
+    }
+
+    func testARefusedRecoveryStaysOnTheChoiceWithTheReason() async {
+        let backend = FakeAuthBackend()
+        let auth = service(backend)
+        await verifiedNewAccount(backend, auth)
+        let cases: [(CloudReceiverError, NaraAuthError)] = [
+            (.recoveryCodeInvalid, .enrollmentCodeInvalid),
+            (.recoveryAlreadyUsed, .recoveryAlreadyUsed),
+            (.recoveryAccountActive, .recoveryAccountActive),
+            (.recoveryAccountNotEmpty, .recoveryAccountNotEmpty),
+            (.rateLimited(retryAfter: 3600), .rateLimited),
+            (.transport, .network),
+        ]
+        for (refusal, expected) in cases {
+            recovery.result = .failure(refusal)
+            await auth.recoverAccount(enrollmentCode: "NARAABCDEFGHJKMNPQRSTVWX")
+            XCTAssertEqual(auth.failure, expected)
+            XCTAssertEqual(auth.phase, .choosingSetup(NaraAccount(userId: freshId, email: "me@example.com")))
+        }
+        XCTAssertFalse(backend.calls.contains("signOut"))
+    }
+
+    func testARejectedSessionDuringRecoverySignsOut() async {
+        let backend = FakeAuthBackend()
+        let auth = service(backend)
+        await verifiedNewAccount(backend, auth)
+        recovery.result = .failure(CloudReceiverError.sessionRejected)
+
+        await auth.recoverAccount(enrollmentCode: "NARAABCDEFGHJKMNPQRSTVWX")
+        XCTAssertEqual(auth.failure, .sessionEnded)
+        XCTAssertEqual(auth.phase, .signedOut)
+    }
+
+    func testAMalformedEnrollmentCodeNeverReachesTheServer() async {
+        let backend = FakeAuthBackend()
+        let auth = service(backend)
+        await verifiedNewAccount(backend, auth)
+        for bad in ["", "NARA", "NARA-ABCD-EFGH-JKMN-PQRS-TVW", "NARA-ABCD-EFGH-JKMN-PQRS-TVWXY",
+                    "NOPE-ABCD-EFGH-JKMN-PQRS-TVWX", "NARA-ABCD-EFGH-JKMN-PQRS-TVWU"] {
+            await auth.recoverAccount(enrollmentCode: bad)
+            XCTAssertEqual(auth.failure, .malformedEnrollmentCode, "\(bad) is not an enrollment code")
+        }
+        XCTAssertTrue(recovery.requests.isEmpty)
+    }
+
+    func testEnrollmentCodesAreReadTheWayTheServerReadsThem() throws {
+        XCTAssertEqual(try NaraAuthService.normalizedEnrollmentCode("nara-1lo0-abcd-efgh-jkmn-pqrs"),
+                       "NARA1100ABCDEFGHJKMNPQRS", "I/L read as 1 and O as 0, like the server")
+        XCTAssertEqual(try NaraAuthService.normalizedEnrollmentCode("NARA ABCD\tEFGH JKMN PQRS TVWX"),
+                       "NARAABCDEFGHJKMNPQRSTVWX")
+    }
+
+    func testRecoveryIsOnlyOfferedAtTheSetupChoice() async {
+        let backend = FakeAuthBackend()
+        backend.stored = FakeAuthBackend.session(userId: legacyId)
+        let auth = service(backend)
+        await auth.start()
+        await auth.recoverAccount(enrollmentCode: "NARAABCDEFGHJKMNPQRSTVWX")
+        XCTAssertEqual(auth.failure, .notAwaitingCode)
+        XCTAssertTrue(recovery.requests.isEmpty)
+        XCTAssertEqual(auth.phase.account?.userId, legacyId)
+    }
+
+    func testSigningUpWithARegisteredEmailSuggestsSigningIn() async {
+        let backend = FakeAuthBackend()
+        backend.signUpResult = .success(.alreadyRegistered)
+        let auth = service(backend)
+        await auth.start()
+        await auth.signUp(email: "Me@Example.com", password: "password-123")
+        XCTAssertEqual(auth.failure, .accountExists)
+        XCTAssertEqual(auth.phase, .signedOut)
+        XCTAssertEqual(auth.suggestedEmail, "me@example.com")
     }
 
     func testAWrongCodeKeepsTheSignUpWaitingAndNeverSignsIn() async {

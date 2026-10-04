@@ -41,6 +41,9 @@ struct SupabaseAuthBackend: NaraAuthBackend {
             if let session = response.session {
                 return .signedIn(Self.info(session.user))
             }
+            // With confirmations on, Supabase answers a sign-up for an already-confirmed email with a
+            // stand-in user that has no identities, and sends no code.
+            if response.user.identities?.isEmpty == true { return .alreadyRegistered }
             return .verificationRequired
         } catch {
             throw Self.map(error)

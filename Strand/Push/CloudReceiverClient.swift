@@ -41,6 +41,14 @@ public enum CloudReceiverError: Error, LocalizedError, Equatable, Sendable {
     /// The server answered for a different account or source than the one asked about.
     case ownershipMismatch
     case unsupportedVersion
+    /// Account recovery: no live enrollment code matches what was entered.
+    case recoveryCodeInvalid
+    /// Account recovery: the code's account was already taken over by an earlier sign-up.
+    case recoveryAlreadyUsed
+    /// Account recovery: the code's account already has its own sign-in.
+    case recoveryAccountActive
+    /// Account recovery: the signed-in account already holds data of its own.
+    case recoveryAccountNotEmpty
     case rejected(code: String?, status: Int)
 
     public var isTransient: Bool {
@@ -68,6 +76,13 @@ public enum CloudReceiverError: Error, LocalizedError, Equatable, Sendable {
         case .malformedResponse: return String(localized: "The Nara service sent an unexpected reply.")
         case .ownershipMismatch: return String(localized: "The Nara service answered for a different account. Nothing was changed.")
         case .unsupportedVersion: return String(localized: "This version of Nara isn't supported by the service. Update the app.")
+        case .recoveryCodeInvalid: return String(localized: "That enrollment code isn't valid. Check it and try again.")
+        case .recoveryAlreadyUsed:
+            return String(localized: "That account was already recovered. Sign in with the email you used then.")
+        case .recoveryAccountActive:
+            return String(localized: "That account already has a sign-in. Sign in with its email and password instead.")
+        case .recoveryAccountNotEmpty:
+            return String(localized: "This sign-in already has its own data, so it can't take over another account.")
         case .rejected: return String(localized: "The Nara service rejected the request.")
         }
     }
@@ -82,6 +97,10 @@ public enum CloudReceiverError: Error, LocalizedError, Equatable, Sendable {
         case ("installation_limit", _): self = .installationLimit
         case ("provision_rate_limited", _), (_, 429): self = .rateLimited(retryAfter: retryAfter)
         case ("unsupported_version", _): self = .unsupportedVersion
+        case ("invalid_code", _), ("malformed_enrollment_code", _): self = .recoveryCodeInvalid
+        case ("already_recovered", _): self = .recoveryAlreadyUsed
+        case ("account_active", _): self = .recoveryAccountActive
+        case ("account_not_empty", _): self = .recoveryAccountNotEmpty
         case (_, 401): self = .rejected(code: code, status: 401)
         case (_, 500...): self = .serverFault(status)
         default: self = .rejected(code: code, status: status)
@@ -135,6 +154,7 @@ public enum CloudReceiverProtocol {
 /// Client for the receiver's account endpoints.
 ///
 ///   POST <base>/installations/provision   (Supabase access token)  → installation credential
+///   POST <base>/account/recover           (Supabase access token)  → pre-Auth account taken over
 ///   POST <base>/wearables/confirm         (installation credential) → canonical device link
 ///   GET  <base>                           (installation credential) → capability negotiation
 ///
@@ -215,6 +235,37 @@ public struct CloudReceiverClient: Sendable {
         let expiry = (object["expiresAt"] as? String).flatMap(Self.parseDate)
         return CloudInstallationGrant(userId: userId, sourceId: echoedSource, tokenId: tokenId, action: action,
                                       expiresAt: expiry, installationToken: token)
+    }
+
+    // MARK: - Account recovery
+
+    /// Move the verified sign-up behind `accessToken` onto the account an enrollment code created before Nara
+    /// had sign-ins. Returns that account's user id; it differs from the caller's only when recovery
+    /// happened, and then the session that made this call no longer exists and the person must sign in again.
+    public func recoverAccount(accessToken: String, enrollmentCode: String) async throws -> String {
+        guard let url = route("account/recover") else { throw CloudReceiverError.notConfigured }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 20
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let apiKey = publishableKey ?? CloudPushSettings.publishableKey
+        if !apiKey.isEmpty { request.setValue(apiKey, forHTTPHeaderField: "apikey") }
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["code": enrollmentCode])
+        let (data, status, retryAfter) = try await send(request)
+        if status == 401 { throw CloudReceiverError.sessionRejected }
+        guard status == 200 else {
+            throw CloudReceiverError(code: Self.errorCode(from: data), status: status, retryAfter: retryAfter)
+        }
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["type"] as? String == "accountRecovery",
+              let outcome = object["status"] as? String, outcome == "recovered" || outcome == "same_account",
+              let userId = (object["userId"] as? String)?.lowercased(),
+              UUID(uuidString: userId) != nil else {
+            throw CloudReceiverError.malformedResponse
+        }
+        return userId
     }
 
     // MARK: - Wearable confirmation

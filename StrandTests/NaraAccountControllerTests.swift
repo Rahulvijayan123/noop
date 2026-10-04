@@ -38,7 +38,7 @@ final class NaraAccountControllerTests: XCTestCase {
     }
 
     private func makeControllerStack() {
-        auth = NaraAuthService(backend: backend, now: { [clock] in clock!.now })
+        auth = NaraAuthService(backend: backend, defaults: defaults, now: { [clock] in clock!.now })
         controller = NaraAccountController(
             auth: auth, provisioner: server, runtime: runtime, store: store, defaults: defaults,
             appVersion: "1.0 (1)",
@@ -278,7 +278,7 @@ final class NaraAccountControllerTests: XCTestCase {
 
     func testARateLimitIsNotRetriedBeforeTheServerSaidItMayBe() async throws {
         let delays = DelayRecorder()
-        auth = NaraAuthService(backend: backend, now: { [clock] in clock!.now })
+        auth = NaraAuthService(backend: backend, defaults: defaults, now: { [clock] in clock!.now })
         controller = NaraAccountController(
             auth: auth, provisioner: server, runtime: runtime, store: store, defaults: defaults,
             appVersion: "1.0 (1)", isConfigured: { true }, uploadsEnabled: { true }, setUploadsFlag: { _ in },
@@ -373,6 +373,35 @@ final class NaraAccountControllerTests: XCTestCase {
         await signIn(ownerA)
         XCTAssertTrue(controller.ownsLocalHistory)
         XCTAssertTrue(CloudLocalDataBinding.signedInAccountOwnsLocalData(store: store, defaults: defaults))
+    }
+
+    // MARK: setup choice
+
+    func testANewAccountLinksNothingUntilItChoosesHowToStart() async throws {
+        uploadsOn = false
+        await controller.start()
+        await auth.signUp(email: "b@example.com", password: "password-123")
+        backend.verifyResult = .success(FakeAuthBackend.session(userId: ownerB, email: "b@example.com"))
+        backend.tokenResult = .success("jwt-for-\(ownerB)")
+        await auth.verifySignupCode("12345678")
+        controller.refresh()
+        await controller.settle()
+
+        guard case .choosingSetup = auth.phase else { return XCTFail("expected the setup choice, got \(auth.phase)") }
+        XCTAssertEqual(controller.bootstrap, .idle)
+        XCTAssertTrue(server.calls.isEmpty, "provisioning first would give the account data and rule out recovery")
+        XCTAssertNil(CloudLocalDataBinding.owner(defaults: defaults), "the phone's history is not claimed yet")
+        XCTAssertNil(runtime.runningScope)
+        XCTAssertFalse(uploadsOn)
+
+        auth.continueAsNewAccount()
+        for _ in 0..<100 where controller.bootstrap != .ready { try await Task.sleep(nanoseconds: 10_000_000) }
+        await controller.settle()
+        XCTAssertTrue(uploadsOn, "choosing is the person's decision to use the cloud account")
+        XCTAssertEqual(controller.bootstrap, .ready)
+        XCTAssertEqual(server.calls.map(\.expectedOwnerId), [ownerB])
+        XCTAssertEqual(CloudLocalDataBinding.owner(defaults: defaults), ownerB)
+        XCTAssertEqual(runtime.runningScope?.ownerId, ownerB)
     }
 
     // MARK: wearable link

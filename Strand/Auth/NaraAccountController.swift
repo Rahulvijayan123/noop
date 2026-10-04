@@ -168,7 +168,7 @@ public final class NaraAccountController: ObservableObject {
         // upload path on. A session that is merely restored at launch leaves their setting alone.
         if case .signedIn = phase {
             switch previous {
-            case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode:
+            case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode, .choosingSetup:
                 setUploadsFlag(true)
                 notice = nil
             default:
@@ -207,7 +207,9 @@ public final class NaraAccountController: ObservableObject {
             return
         case .signedIn(let account):
             await bind(account)
-        case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode:
+        case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode, .choosingSetup:
+            // A new account that has not chosen between starting fresh and recovering is not linked yet:
+            // claiming the history or provisioning now would make it ineligible for recovery.
             await unbind()
         }
     }
@@ -374,7 +376,8 @@ public final class NaraAccountController: ObservableObject {
         case .notConfigured:
             bootstrap = .idle
         case .ownershipMismatch, .malformedResponse, .unsupportedVersion, .rejected, .credentialRejected,
-             .installationUnavailable, .installationRetired, .notSignedIn:
+             .installationUnavailable, .installationRetired, .notSignedIn, .recoveryCodeInvalid,
+             .recoveryAlreadyUsed, .recoveryAccountActive, .recoveryAccountNotEmpty:
             await stopForBlock()
             bootstrap = .blocked(receiver.errorDescription ?? "")
         case .rateLimited(let retryAfter):

@@ -6,6 +6,7 @@
 //   POST /objects                 object-lane intent → presigned B2 PUT
 //   POST /objects/:objectId/complete   byte-count check → release device rows
 //   POST /installations/provision   Supabase-Auth-verified installation credential (JWT bearer)
+//   POST /account/recover         move a verified sign-in onto its pre-Auth account (JWT + enrollment code)
 //   POST /installation/retire, /wearables/confirm, /wearables/handoff   installation lifecycle
 //
 // Auth is handled here, so the function is deployed with --no-verify-jwt. Uploads require a
@@ -46,6 +47,7 @@ import {
 } from '../_shared/tokens.ts';
 import { createEnrollmentService, EnrollmentError } from '../_shared/enrollment.ts';
 import { createInstallationProvisioning } from '../_shared/provisioning.ts';
+import { createAccountRecovery } from '../_shared/accountRecovery.ts';
 import { createNoopDeviceResolver } from '../_shared/devices.ts';
 import { createUploadReceiptStore } from '../_shared/receipts.ts';
 import { projectEnrolledAppend } from '../_shared/appendProjection.ts';
@@ -78,6 +80,12 @@ const installationProvisioning = createInstallationProvisioning({
   rest,
   supabaseUrl: cfg.supabaseUrl,
   anonKey: cfg.supabaseAnonKey,
+});
+const accountRecovery = createAccountRecovery({
+  rest,
+  supabaseUrl: cfg.supabaseUrl,
+  anonKey: cfg.supabaseAnonKey,
+  pepper: cfg.enrollmentPepper,
 });
 const raw = cfg.b2KeyId && cfg.b2ApplicationKey && cfg.b2Bucket && cfg.b2S3Endpoint
   ? createS3({
@@ -367,6 +375,9 @@ Deno.serve(async (req: Request) => {
   }
   if (req.method === 'POST' && sub === '/installations/provision') {
     return installationProvisioning(req);
+  }
+  if (req.method === 'POST' && sub === '/account/recover') {
+    return accountRecovery(req);
   }
   if (req.method === 'POST' && sub === '/installation/retire') return installationLifecycle(req, 'retire');
   if (req.method === 'POST' && sub === '/wearables/confirm') return installationLifecycle(req, 'confirm');

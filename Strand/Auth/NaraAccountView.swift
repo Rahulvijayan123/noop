@@ -1,8 +1,9 @@
 import SwiftUI
 import StrandDesign
 
-/// The Nara account screen: create an account, enter the emailed code, sign in, reset a password, and, once
-/// signed in, see that this phone is linked and switch cloud sync on or off.
+/// The Nara account screen: create an account, enter the emailed code, choose between starting fresh and
+/// recovering an enrollment-code account, sign in, reset a password, and, once signed in, see that this phone
+/// is linked and switch cloud sync on or off.
 ///
 /// Every state shown here comes from `NaraAuthService` (who is signed in) and `NaraAccountController` (is this
 /// phone linked to them). The view holds no account logic of its own.
@@ -12,13 +13,15 @@ public struct NaraAccountView: View {
     @ObservedObject private var account: NaraAccountController
 
     private enum Mode: Hashable { case create, signIn }
-    private enum Field: Hashable { case email, password, code, newPassword }
+    private enum Field: Hashable { case email, password, code, newPassword, enrollmentCode }
 
     @State private var mode: Mode = .create
     @State private var email = ""
     @State private var password = ""
     @State private var code = ""
     @State private var newPassword = ""
+    @State private var enrollmentCode = ""
+    @State private var showsRecoveryEntry = false
     @State private var confirmSignOut = false
     @FocusState private var focus: Field?
 
@@ -50,6 +53,8 @@ public struct NaraAccountView: View {
                         signupCodeCard(email: pending)
                     case .awaitingRecoveryCode(let pending):
                         recoveryCard(email: pending)
+                    case .choosingSetup(let fresh):
+                        setupChoiceCard(fresh)
                     case .signedIn(let signedIn):
                         signedInCards(signedIn)
                     }
@@ -61,6 +66,8 @@ public struct NaraAccountView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
+        .onAppear { applySuggestedEmail(auth.suggestedEmail) }
+        .onChangeCompat(of: auth.suggestedEmail) { suggested in applySuggestedEmail(suggested) }
         .confirmationDialog("Sign out of Nara?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) {
                 Task { await account.signOut() }
@@ -69,6 +76,14 @@ public struct NaraAccountView: View {
         } message: {
             Text("Data already recorded stays on this phone and keeps syncing to your account the next time you sign in.")
         }
+    }
+
+    /// A flow that ended at the sign-in form (an email that already has an account, a recovery that needs
+    /// a fresh sign-in) hands over the address so the person only types their password.
+    private func applySuggestedEmail(_ suggested: String?) {
+        guard let suggested else { return }
+        email = suggested
+        mode = .signIn
     }
 
     // MARK: Cards
@@ -311,6 +326,86 @@ public struct NaraAccountView: View {
         .frame(maxWidth: 520)
     }
 
+    // MARK: Setup choice
+
+    private func setupChoiceCard(_ fresh: NaraAccount) -> some View {
+        StrandCard {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        StatePill("Email verified", tone: .positive)
+                        Spacer()
+                    }
+                    Text("Set up your account").font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .padding(.top, 6)
+                    Text("\(fresh.email ?? String(localized: "Your account")) is ready. New to Nara? Continue. If you used Nara before sign-ins existed, recover that account with your enrollment code to bring all of its data into this sign-in.")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if showsRecoveryEntry {
+                    enrollmentCodeField
+
+                    messages
+
+                    NoopButton("Recover account", systemImage: "arrow.uturn.backward.circle", kind: .primary,
+                               fullWidth: true) {
+                        focus = nil
+                        Task {
+                            await auth.recoverAccount(enrollmentCode: enrollmentCode)
+                            if auth.failure == nil { enrollmentCode = "" }
+                            if case .signedIn = auth.phase { password = "" }
+                        }
+                    }
+                    .disabled(auth.isBusy || enrollmentCode.isEmpty)
+                    .accessibilityIdentifier("nara.setup.recover")
+
+                    NoopButton("Back", kind: .tertiary, fullWidth: true) {
+                        focus = nil
+                        enrollmentCode = ""
+                        showsRecoveryEntry = false
+                    }
+                    .disabled(auth.isBusy)
+                } else {
+                    messages
+
+                    NoopButton("Continue", systemImage: "arrow.right.circle", kind: .primary, fullWidth: true) {
+                        password = ""
+                        auth.continueAsNewAccount()
+                    }
+                    .disabled(auth.isBusy)
+                    .accessibilityIdentifier("nara.setup.continue")
+
+                    NoopButton("Recover account from enrollment code", systemImage: "key.horizontal",
+                               kind: .secondary, fullWidth: true) {
+                        showsRecoveryEntry = true
+                        focus = .enrollmentCode
+                    }
+                    .disabled(auth.isBusy)
+                    .accessibilityIdentifier("nara.setup.showRecover")
+                }
+            }
+        }
+        .frame(maxWidth: 520)
+    }
+
+    private var enrollmentCodeField: some View {
+        TextField("NARA-XXXX-XXXX-XXXX-XXXX-XXXX", text: $enrollmentCode)
+            .textFieldStyle(.plain)
+            .font(StrandFont.mono)
+            .autocorrectionDisabled()
+            #if os(iOS)
+            .textInputAutocapitalization(.characters)
+            .textContentType(.oneTimeCode)
+            #endif
+            .focused($focus, equals: .enrollmentCode)
+            .padding(12)
+            .background(NoopPanelSurface(cornerRadius: 10))
+            .accessibilityIdentifier("nara.setup.enrollmentCode")
+    }
+
     // MARK: Signed in
 
     @ViewBuilder
@@ -465,6 +560,8 @@ public struct NaraAccountBanner: View {
             return nil
         case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode:
             return (String(localized: "Sign in to Nara to sync your strap data and see your scores."), .accent)
+        case .choosingSetup:
+            return (String(localized: "Finish setting up your Nara account."), .accent)
         case .signedIn:
             switch account.bootstrap {
             case .retrying(let text): return (text, .warning)

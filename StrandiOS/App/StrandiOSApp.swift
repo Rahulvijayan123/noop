@@ -472,6 +472,9 @@ private struct iOSRootView: View {
     /// Starts false so a cold-launch external action can't race this view's onAppear decision about the
     /// automatic What's New sheet. It becomes true only when no sheet is due or its dismissal completes.
     @State private var automaticLaunchSheetResolved = false
+    @ObservedObject private var naraAuth = NaraAuthService.shared
+    /// "Not now" on the launch account prompt lasts until the next launch; Settings still opens the screen.
+    @State private var accountPromptDismissed = false
 
     var body: some View {
         #if DEBUG
@@ -529,6 +532,23 @@ private struct iOSRootView: View {
                 showWhatsNew = false
             })
         }
+        .sheet(isPresented: Binding(get: { accountPromptDue },
+                                    set: { if !$0 { accountPromptDismissed = true } })) {
+            NavigationStack {
+                NaraAccountView()
+                    .navigationTitle("Nara account")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        if !accountSetupInProgress {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Not now") { accountPromptDismissed = true }
+                                    .accessibilityIdentifier("nara.prompt.notNow")
+                            }
+                        }
+                    }
+            }
+            .interactiveDismissDisabled(accountSetupInProgress)
+        }
         // The Terms gate must stay "over everything" — don't pop What's New on top of it after a
         // combined terms+version update. Gate on terms being current, and re-check when they're
         // accepted (onAppear already fired before acceptance), so What's New shows right after.
@@ -559,6 +579,21 @@ private struct iOSRootView: View {
         #else
         return false
         #endif
+    }
+
+    /// The account screen comes up by itself at launch while nobody is signed in, once the first-run gates
+    /// and What's New are out of the way.
+    private var accountPromptDue: Bool {
+        guard !demoBypass, onboarded, acceptedTerms == Terms.currentVersion, automaticLaunchSheetResolved,
+              !showWhatsNew, naraAuth.isAvailable, CloudPushSettings.isConfigured else { return false }
+        return accountSetupInProgress || (!accountPromptDismissed && naraAuth.phase.needsAccountSetup)
+    }
+
+    /// A new account that has not yet chosen between starting fresh and recovering: nothing is linked until it
+    /// does, so the prompt stays up.
+    private var accountSetupInProgress: Bool {
+        if case .choosingSetup = naraAuth.phase { return true }
+        return false
     }
 
     private func showWhatsNewIfDue() {

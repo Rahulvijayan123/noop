@@ -107,6 +107,7 @@ struct SettingsView: View {
         switch naraAuth.phase {
         case .signedIn(let signedIn): return signedIn.email ?? String(localized: "Signed in")
         case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode: return String(localized: "Sign in")
+        case .choosingSetup: return String(localized: "Finish setup")
         case .restoring: return nil
         }
     }

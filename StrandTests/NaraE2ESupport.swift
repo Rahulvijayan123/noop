@@ -270,13 +270,13 @@ final class E2EPhone {
         store = CloudPushIdentityStore(defaults: defaults, secrets: secrets)
         let backend = SupabaseAuthBackend(authURL: env.authURL, publishableKey: env.publishableKey,
                                           storage: authStorage)
-        auth = NaraAuthService(backend: backend)
+        let receiver = CloudReceiverClient(session: .shared, endpoint: env.pushEndpoint,
+                                           publishableKey: env.publishableKey)
+        auth = NaraAuthService(backend: backend, recovery: receiver, defaults: defaults)
         runtime = CloudPushRuntime(journal: CloudJournal(),
                                    journalDirectory: directory.appendingPathComponent("journal"),
                                    identityStore: store,
                                    bundleIdentifier: "com.noopapp.e2e.\(label).\(UUID().uuidString.prefix(6).lowercased())")
-        let receiver = CloudReceiverClient(session: .shared, endpoint: env.pushEndpoint,
-                                           publishableKey: env.publishableKey)
         let box = uploadFlag
         controller = NaraAccountController(
             auth: auth, provisioner: receiver, runtime: runtime, store: store, defaults: defaults,
@@ -341,8 +341,12 @@ final class E2EPhone {
         }
         let code = try await mailbox.code(for: address, since: since)
         await auth.verifySignupCode(code)
+        guard case .choosingSetup = auth.phase else {
+            throw E2EError("verification did not reach the setup choice: phase \(auth.phase) failure \(String(describing: auth.failure))")
+        }
+        auth.continueAsNewAccount()
         guard case .signedIn(let account) = auth.phase else {
-            throw E2EError("verification did not sign in: phase \(auth.phase) failure \(String(describing: auth.failure))")
+            throw E2EError("continuing did not sign in: phase \(auth.phase) failure \(String(describing: auth.failure))")
         }
         lastEmail = address
         lastPassword = password

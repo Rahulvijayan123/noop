@@ -905,15 +905,18 @@ final class CloudPushTests: XCTestCase {
         // Cloud off: this is exactly what `CloudPushRuntime.stop()` -> `CloudJournal.deactivate()`
         // does when the master switch flips. Staging stops accepting NEW records; nothing is deleted.
         await journal.deactivate(flushFirst: false)
+        XCTAssertNil(journal.acceptingScope)
         journal.submit([hrRecord(ts: 11, bpm: 61)])
+
+        // Re-enable: `start()` -> `activate()` resumes staging and the retained record is still there.
+        // A deactivated journal reports no scope at all, so what was staged while off is read back here.
+        try await journal.activate(configuration: .init(ownerId: owner, sourceId: source, deviceId: "my-whoop"),
+                                   directory: directory)
+        _ = await journal.flush()
         stats = await journal.stats()
         XCTAssertEqual(stats.pendingRecords, 1,
                        "while cloud is off, no new record may be staged")
-
-        // Re-enable: `start()` -> `activate()` resumes staging and the retained record is still there.
-        try await journal.activate(configuration: .init(ownerId: owner, sourceId: source, deviceId: "my-whoop"),
-                                   directory: directory)
-        journal.submit([hrRecord(ts: 11, bpm: 61)])
+        journal.submit([hrRecord(ts: 12, bpm: 62)])
         _ = await journal.flush()
         let resumed = await journal.stats()
         XCTAssertEqual(resumed.pendingRecords, 2,
