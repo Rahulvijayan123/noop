@@ -166,12 +166,6 @@ struct RootTabView: View {
             .simultaneousGesture(tabSwipeGesture,
                                  including: tabPaths[selectedTab].isEmpty ? .all : .subviews)
         .task {
-            if ProcessInfo.processInfo.arguments.contains("-zOpenHR") {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                tabPaths[0].append(TabRoute.heartRateDay)
-            }
-        }
-        .task {
             await repo.refresh()
             // Backup & Sync: on-launch catch-up (see RootView). Detached + utility priority so a
             // 100MB+ whole-DB ZIP never blocks startup; gated on the auto toggle (default OFF). (Must-fix #4.)

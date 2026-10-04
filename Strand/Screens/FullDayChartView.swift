@@ -101,7 +101,8 @@ struct FullDayChartView: View {
     var body: some View {
         ScreenScaffold(title: showsActivityTimeline ? "Heart rate" : "Deep Timeline",
                        subtitle: showsActivityTimeline ? "Your whole day, and what you were doing."
-                                                       : "Every second of your day, zoomable.") {
+                                                       : "Every second of your day, zoomable.",
+                       lockHorizontalScroll: showsActivityTimeline) {
             if !showsActivityTimeline { metricPills }
             dayNav
             if !showsActivityTimeline { sourcePill }
@@ -136,9 +137,6 @@ struct FullDayChartView: View {
                 .buttonStyle(.plain)
             }
         }
-        #if os(iOS)
-        .background { if showsActivityTimeline { PopGestureLock().frame(width: 0, height: 0) } }
-        #endif
         .task(id: taskKey) { await reload() }
         .task(id: annotationKey) { await reloadAnnotations() }
         .task(id: annotationKey) {
@@ -333,10 +331,12 @@ struct FullDayChartView: View {
             height: 280,
             // #979 spin-off — iPhone touch scrub: hold to pin the crosshair, drag to read values under
             // the finger (the Mac pointer hover's readout, made reachable on touch). Opt-in here only.
-            touchScrub: true,
+            // Not on the Heart rate day page: the gesture claims the touch, so a finger that lands on this
+            // large chart cannot scroll the page (measured with injected touches: those drags never scroll).
+            touchScrub: !showsActivityTimeline,
             zoomDomain: $zoomDomain,
-            // #986: Deep Timeline pans across a rolling 3-day window. The Heart rate day page is one fixed day:
-            // no zoom bounds means no drag-to-pan or pinch on the chart, so a drag can't slide it sideways.
+            // #986: Deep Timeline pans across a rolling 3-day window. The Heart rate day page is one fixed day,
+            // so its chart takes no drag-to-pan or pinch and a finger that lands on it scrolls the page.
             // Tapping an activity below still sets the window through the `zoomDomain` binding.
             zoomBounds: showsActivityTimeline ? nil : panBounds,
             valueFormat: { format($0) },
@@ -415,7 +415,7 @@ struct FullDayChartView: View {
             // #979 spin-off: name the hold-to-scrub affordance — a hidden gesture nobody tries is a
             // feature that doesn't exist. (On the Mac the pointer hover is self-discovering.)
             if showsActivityTimeline {
-                Text(zoomDomain == nil ? "Hold to read · tap an activity to zoom" : "Zoomed in · hold to read")
+                Text(zoomDomain == nil ? "Tap an activity to zoom" : "Zoomed in")
             } else {
                 Text(zoomDomain == nil ? "Pinch to zoom · drag to pan · hold to read" : "Zoomed in. Drag to pan · hold to read")
             }

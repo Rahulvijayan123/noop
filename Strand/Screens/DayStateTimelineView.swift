@@ -191,18 +191,7 @@ struct DayStateTimelineSection: View {
     }
 
     private var legend: some View {
-        let present = DayState.displayOrder.filter { (totals[$0] ?? 0) > 0 }
-        return HStack(spacing: NoopMetrics.space3) {
-            ForEach(present, id: \.self) { s in
-                HStack(spacing: 5) {
-                    RoundedRectangle(cornerRadius: 2).fill(s.color).frame(width: 10, height: 10)
-                    Text(s.title).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
-                }
-            }
-            Spacer(minLength: 0)
-        }
-        .lineLimit(1)
-        .minimumScaleFactor(0.7)
+        DayStateLegend(states: DayState.displayOrder.filter { (totals[$0] ?? 0) > 0 })
     }
 
     private var summaryGrid: some View {
@@ -242,8 +231,10 @@ struct DayStateTimelineSection: View {
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(s.color.opacity(0.35), lineWidth: 1))
     }
 
+    /// Lazy: a busy day has a couple of hundred stretches, which built eagerly made this page about 20,000
+    /// points tall and laid every card out up front.
     private var episodes: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        LazyVStack(alignment: .leading, spacing: 10) {
             Text("Through the day")
                 .font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.textPrimary)
@@ -331,5 +322,27 @@ struct DayStateTimelineSection: View {
     /// Short stretches show seconds, since "2:23 PM – 2:23 PM" says nothing about a 16 second walk.
     static func clock(_ d: Date, seconds: Bool = false) -> String {
         seconds ? d.formatted(.dateTime.hour().minute().second()) : d.formatted(.dateTime.hour().minute())
+    }
+}
+
+/// Colour key for the day-state lane.
+///
+/// A wrapping grid, not a single row. Up to nine states can be present on one day, and a row of single-line
+/// labels that cannot shrink asked for more width than a phone column has (about 358.3 pt where 358 was on
+/// offer). The activity lane's legend uses the same adaptive grid.
+struct DayStateLegend: View {
+    let states: [DayState]
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8, alignment: .leading)],
+                  alignment: .leading, spacing: 6) {
+            ForEach(states, id: \.self) { s in
+                HStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 2).fill(s.color).frame(width: 10, height: 10)
+                    Text(s.title).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                        .lineLimit(1).minimumScaleFactor(0.8)
+                }
+            }
+        }
     }
 }
