@@ -234,6 +234,33 @@ public actor ServerScoreRepository {
         return changes
     }
 
+    /// Whether the server already holds `deviceId` for this account.
+    ///
+    /// Asks the change feed for a single entry WITHOUT a cursor and keeps nothing from the answer, so it never
+    /// moves the cursor `pollChangedDays` reads from. The route resolves `deviceId` to a device the account owns
+    /// and answers `409 device_registration_pending` when there is none; that one answer is "no", and any other
+    /// failure is thrown so a caller can tell "no" from "could not ask".
+    public func holdsDevice(_ deviceId: String) async throws -> Bool {
+        guard let endpoint else { throw ReadError.notConfigured }
+        guard let identity = identity() else { throw ReadError.missingIdentity }
+        var components = URLComponents(url: endpoint.appendingPathComponent("days"),
+                                       resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "deviceId", value: deviceId),
+                                  URLQueryItem(name: "limit", value: "1")]
+        guard let url = components?.url else { throw ReadError.malformed("days endpoint") }
+        do {
+            _ = try await get(url: url, identity: identity)
+            return true
+        } catch ReadError.http(let status, let body) where ServerScoreRepository.isUnregisteredDevice(status: status, body: body) {
+            return false
+        }
+    }
+
+    /// The server's "this account has no such device" answer, as opposed to any other failure.
+    static func isUnregisteredDevice(status: Int, body: String?) -> Bool {
+        status == 409 && (body?.contains("device_registration_pending") ?? false)
+    }
+
     // MARK: - intraday series
 
     /// The dense intraday series between two instants (`GET scores/series`), cached under `cacheKey`.

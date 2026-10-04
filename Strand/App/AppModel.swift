@@ -59,6 +59,8 @@ final class AppModel: ObservableObject {
     let live: LiveState
     /// CoreBluetooth engine , scans, connects, bonds, streams.
     let ble: BLEManager
+    /// Decides whether a strap's saved history is this account's to read before the first offload runs.
+    private(set) var historyGate: HistoryIntakeGate?
     /// Read model over the on-device store (dashboard + detail screens).
     let repo: Repository
     /// G1 day-boundary driver (audit 20261003): recomputes the local "Today" key on launch/resume/
@@ -340,6 +342,7 @@ final class AppModel: ObservableObject {
             hostedAccountScope = identity.scope
         }
         applyPowerSaving()
+        historyGate?.evaluateSoon()
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         guard cloudScoringIsAuthoritative else { return }
@@ -377,10 +380,44 @@ final class AppModel: ObservableObject {
 
     private var hostedReadDeviceId: String { hostedReadCandidates[0] }
 
+    /// Install the gate that holds a strap's first offload until its saved history is known to be this
+    /// account's (see `HistoryIntakeGate`). Cloud mode only; everywhere else it answers `.keep`.
+    private func configureHistoryGate() {
+        let gate = HistoryIntakeGate(environment: .init(
+            cloudEnabled: { CloudPushSettings.isEnabled },
+            account: { CloudPushRuntime.shared.runningScope?.ownerId },
+            localOwner: { CloudLocalDataBinding.owner() },
+            localDeviceId: { [weak self] in self?.hostedLocalDeviceId ?? "my-whoop" },
+            serial: { [weak self] in self?.ble.cloudLinkSerial },
+            hasHistory: { [weak self] localId, before in await self?.localHeartRateExists(deviceId: localId, before: before) },
+            holdsDevice: { [weak self] cloudId in await self?.accountHoldsDevice(cloudId) ?? .unreachable },
+            now: { Int(Date().timeIntervalSince1970) }))
+        gate.log = { [weak self] line in self?.live.append(log: line) }
+        gate.onDecided = { [weak self] in self?.ble.requestSync(.connect) }
+        ble.historyIntake = { [weak gate] in gate?.intake() ?? .keep }
+        ble.onHistoryDiscarded = { [weak gate] report in gate?.recordDiscarded(report) }
+        historyGate = gate
+    }
+
+    /// Whether this phone holds heart-rate rows for `deviceId` older than `before`. nil when the store cannot
+    /// be read: an unreadable store is never evidence that there is no history.
+    private func localHeartRateExists(deviceId: String, before: Int) async -> Bool? {
+        if CloudStrapSerialStore.shared.hasReplacedStrap(forLocalId: deviceId) { return false }
+        guard let store = await repo.storeHandle() else { return nil }
+        return try? await store.hasHeartRate(deviceId: deviceId, before: before)
+    }
+
+    private func accountHoldsDevice(_ cloudId: String) async -> HistoryProbe {
+        guard let scores = CloudPushRuntime.shared.scoreRepository() else { return .unreachable }
+        do { return try await scores.holdsDevice(cloudId) ? .holds : .absent }
+        catch { return .unreachable }
+    }
+
     /// The strap's serial was read. Remember it, and when it changes which device the cloud files this
     /// strap under, re-run the one-time seed and the server read so the very next sync already uses it.
     func strapSerialKnown(localDeviceId: String, serial: String) {
         let change = CloudStrapSerialStore.shared.record(serial: serial, forLocalId: localDeviceId)
+        historyGate?.evaluateSoon()
         guard change != .unchanged else { return }
         switch change {
         case .learned:
@@ -648,6 +685,7 @@ final class AppModel: ObservableObject {
         ble.onStrapSerialKnown = { [weak self] localId, serial in
             self?.strapSerialKnown(localDeviceId: localId, serial: serial)
         }
+        configureHistoryGate()
         // Re-arm the next day's firmware alarm the moment the strap reports it fired (if/when the
         // firmware pushes STRAP_DRIVEN_ALARM_EXECUTED). Gated on enabled inside applySmartAlarm.
         live.onSmartAlarmFired = { [weak self] in

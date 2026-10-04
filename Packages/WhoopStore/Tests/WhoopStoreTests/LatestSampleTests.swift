@@ -60,4 +60,34 @@ final class LatestSampleTests: XCTestCase {
         let c = try await store.latestHRSampleTs(deviceId: "c")
         XCTAssertNil(c)
     }
+
+    /// "Has this store met the strap before this moment?" decides whether a strap's saved days are this
+    /// phone's own, so the boundary and the device scope both have to be exact.
+    func testHasHeartRateBeforeIsStrictlyBeforeAndScopedToTheDevice() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "a", mac: nil, name: nil)
+        try await store.upsertDevice(id: "b", mac: nil, name: nil)
+        let none = try await store.hasHeartRate(deviceId: "a", before: 1_000)
+        XCTAssertFalse(none, "an empty store has not met the strap")
+
+        _ = try await store.insert(Streams(hr: [HRSample(ts: 500, bpm: 60)]), deviceId: "a")
+        let after = try await store.hasHeartRate(deviceId: "a", before: 501)
+        let atBoundary = try await store.hasHeartRate(deviceId: "a", before: 500)
+        let earlier = try await store.hasHeartRate(deviceId: "a", before: 100)
+        XCTAssertTrue(after)
+        XCTAssertFalse(atBoundary, "a row dated exactly at the boundary is not before it")
+        XCTAssertFalse(earlier)
+
+        let otherDevice = try await store.hasHeartRate(deviceId: "b", before: 10_000)
+        XCTAssertFalse(otherDevice, "another strap's rows are not evidence about this one")
+    }
+
+    func testHasHeartRateBeforeCountsPpgFallbackRows() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertDevice(id: "d", mac: nil, name: nil)
+        _ = try await store.insert(
+            Streams(ppgHr: [PpgHrSample(ts: 300, bpm: 62, conf: 0.8)]), deviceId: "d")
+        let seen = try await store.hasHeartRate(deviceId: "d", before: 1_000)
+        XCTAssertTrue(seen, "a WHOOP 5 night with only PPG-derived heart rate is still history")
+    }
 }
