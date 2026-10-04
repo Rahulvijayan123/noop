@@ -707,7 +707,7 @@ private struct ContributorBar: View {
 /// The "Fitness Age" section: a weekly, on-device fitness comparison (NOT a biological age) computed by
 /// IntelligenceEngine from the Nes/HUNT model and read back from the "fitness_age" metricSeries under the
 /// strap source. Depends only on `repo` (the weekly value + the recent dailies that drive the readiness
-/// checklist) and `profile` (age/sex/waist), so the ~1Hz live HR stream never re-renders it.
+/// checklist) and `profile` (age/sex/body measurements), so the ~1Hz live HR stream never re-renders it.
 ///
 /// Two states, both honest about coverage:
 ///   • a value exists → a scenic hero "Fitness Age N" + a younger/older-than-your-age subtitle and a faint
@@ -716,7 +716,7 @@ private struct ContributorBar: View {
 ///   • no value yet → the checklist card directly, with required-missing inputs deep-linking to Settings.
 ///
 /// The checklist groups inputs by ROLE exactly as the engine reports them: "Drives your Fitness Age"
-/// (age/sex/resting-HR/activity) vs "Sharpens your VO₂max" (height+weight/waist) — never implying the body
+/// (age/sex/resting-HR/activity) vs "Sharpens your VO₂max" (height+weight) — never implying the body
 /// measurements sharpen the age (the body term cancels in the model).
 private struct FitnessAgeSection: View {
     @EnvironmentObject var repo: Repository
@@ -802,9 +802,6 @@ private struct FitnessAgeSection: View {
     @ViewBuilder private var content: some View {
         if let age = fitnessAge {
             heroCard(age: age)
-            // Nudge on WAIST being unset (the sole gate). VO₂max is already shown (the Uth fallback), so
-            // the prompt offers to sharpen it to the Nes waist-based estimate, not to reveal a missing number.
-            if profile.waistCm <= 0 { vo2maxSharpenPrompt }
             if showReadiness {
                 ReadinessChecklistCard(readiness: readiness,
                                        lead: nil,
@@ -871,29 +868,6 @@ private struct FitnessAgeSection: View {
     /// The shown-value hero: a scenic Charge-world backdrop, the big Fitness Age number, a
     /// younger/older-than-your-age subtitle, the optional VO₂max, the ±band disclaimer, and the two
     /// affordances (tap-through to the trend + the "How accurate is this?" disclosure).
-    /// VO₂max is already shown from heart rate alone (the Uth fallback), so this nudges the user to add a
-    /// waist to upgrade it to the more accurate Nes waist-based estimate. Tapping opens Settings — a
-    /// one-step sharpen, shown only while no waist is set.
-    private var vo2maxSharpenPrompt: some View {
-        Button { fitnessSheet = .settings } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "lungs.fill")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(StrandPalette.metricCyan)
-                Text("Add your waist for a more accurate VO₂max")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityHint("Opens Settings to add your waist measurement")
-    }
-
     private func heroCard(age: Double) -> some View {
         let shown = Int(age.rounded())
         let bound = fitnessAgeBoundSymbol(age)
@@ -1064,7 +1038,11 @@ private struct ReadinessChecklistCard: View {
     var refreshing: Bool = false
 
     private var drivesAge: [FitnessReadinessItem] { readiness.items.filter { $0.role == .drivesAge } }
-    private var unlocksVO2: [FitnessReadinessItem] { readiness.items.filter { $0.role == .unlocksVO2max } }
+    /// The engine still reports an optional waist row, but Settings no longer has a waist field, so the
+    /// checklist leaves it out rather than listing an input the user has no way to provide.
+    private var unlocksVO2: [FitnessReadinessItem] {
+        readiness.items.filter { $0.role == .unlocksVO2max && $0.key != "waist" }
+    }
 
     var body: some View {
         NoopCard(tint: StrandPalette.chargeColor) {
@@ -1128,10 +1106,10 @@ private struct ReadinessChecklistCard: View {
     @ViewBuilder
     private func readinessRow(_ item: FitnessReadinessItem) -> some View {
         // A required/optional input that's still unsatisfied earns a "Fix in Settings" affordance, but
-        // only when it's actually fixable there (age/sex/body metrics/waist) — resting-HR and activity
+        // only when it's actually fixable there (age/sex/body metrics) — resting-HR and activity
         // coverage come from wearing the strap, so those get no fix button.
         let fixable = item.status != .satisfied
-            && (item.key == "age" || item.key == "sex" || item.key == "bodyMetrics" || item.key == "waist")
+            && (item.key == "age" || item.key == "sex" || item.key == "bodyMetrics")
         let row = HStack(alignment: .firstTextBaseline, spacing: 12) {
             Image(systemName: statusIcon(item.status))
                 .font(.system(size: 14, weight: .semibold))

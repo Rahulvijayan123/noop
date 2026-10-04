@@ -133,10 +133,6 @@ struct SettingsView: View {
             navRow("Weight", weightValue) { weightEditor }
             SettingsDivider()
             navRow("Height", heightValue) { heightEditor }
-            SettingsDivider()
-            navRow("Waist", waistValue) { waistEditor }
-            SettingsDivider()
-            navRow("Resting metabolic rate", rmrValue) { rmrEditor }
         }
     }
 
@@ -163,62 +159,6 @@ struct SettingsView: View {
             return "\(parts.feet)′ \(parts.inches)″"
         }
         return String(format: "%.0f cm", profile.heightCm)
-    }
-
-    /// 0 = unset: the waist is optional, unlike the other body measurements.
-    private var waistValue: String {
-        guard profile.waistCm > 0 else { return String(localized: "Not set") }
-        return unitSystem == .imperial
-            ? "\(Int(UnitFormatter.cmToInches(profile.waistCm).rounded())) in"
-            : "\(Int(profile.waistCm.rounded())) cm"
-    }
-
-    /// 0 = unset: a measured resting metabolic rate is optional, and the calorie estimate falls back to the
-    /// population equation without it.
-    private var rmrValue: String {
-        guard profile.measuredRmrKcalPerDay > 0 else { return String(localized: "Not set") }
-        return "\(Int(profile.measuredRmrKcalPerDay.rounded())) kcal/day"
-    }
-
-    private var rmrEditor: some View {
-        let set = profile.measuredRmrKcalPerDay > 0
-        let equation = MetabolicEstimator.resolveRMR(profile: UserProfile(
-            weightKg: profile.weightKg, heightCm: profile.heightCm, age: Double(profile.age), sex: profile.sex))
-        return SettingsEditPage("Resting metabolic rate",
-                                footnote: "Optional: your resting energy from a lab or metabolic-cart test, in kcal per day. It sets the resting part of your daily calories; without it Nara uses an equation (about \(Int(equation.kcalPerDay.rounded())) kcal/day for your profile).") {
-            FormRow(label: "Resting metabolic rate") {
-                HStack(spacing: NoopMetrics.space2) {
-                    HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
-                        Text(set ? "\(Int(profile.measuredRmrKcalPerDay.rounded()))" : String(localized: "Not set"))
-                            .font(StrandFont.bodyNumber)
-                            .foregroundStyle(set ? StrandPalette.textPrimary : StrandPalette.textTertiary)
-                            .frame(minWidth: NoopMetrics.formValueColumnWidth, alignment: .center)
-                        if set {
-                            Text("kcal/day")
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                                .fixedSize()
-                        }
-                    }
-                    .fixedSize()
-                    Stepper("Resting metabolic rate in kilocalories per day") {
-                        // From unset the first step lands on the equation's value, a sensible place to start.
-                        profile.measuredRmrKcalPerDay = min(4000, set
-                            ? profile.measuredRmrKcalPerDay + 10
-                            : (equation.kcalPerDay / 10).rounded() * 10)
-                    } onDecrement: {
-                        let next = profile.measuredRmrKcalPerDay - 10
-                        profile.measuredRmrKcalPerDay = next < 800 ? 0 : next
-                    }
-                    .labelsHidden()
-                    .accessibilityLabel(set
-                        ? "Resting metabolic rate, \(Int(profile.measuredRmrKcalPerDay.rounded())) kilocalories per day"
-                        : "Resting metabolic rate not set")
-                }
-                .fixedSize()
-            }
-            .padding(NoopMetrics.space4)
-        }
     }
 
     private var nameEditor: some View {
@@ -294,7 +234,7 @@ struct SettingsView: View {
     }
 
     private var unitsEditor: some View {
-        SettingsEditPage("Units", footnote: "Used for weight, height and waist.") {
+        SettingsEditPage("Units", footnote: "Used for weight and height.") {
             SettingsOptions(selection: $unitSystemRaw, options: [
                 (UnitSystem.metric.rawValue, "Metric"), (UnitSystem.imperial.rawValue, "Imperial"),
             ])
@@ -327,24 +267,6 @@ struct SettingsView: View {
                     measureField(value: $profile.heightCm, unit: "cm",
                                  range: 120...230, step: 1, format: "%.0f",
                                  accessibility: String(localized: "Height in centimetres"))
-                }
-            }
-            .padding(NoopMetrics.space4)
-        }
-    }
-
-    // VO₂max is ALWAYS offered (the Uth HR-ratio fallback needs no waist, #1391); a waist just upgrades it
-    // to the more accurate Nes waist-based estimate. It does NOT sharpen the Fitness Age itself (the body
-    // term cancels in the Nes model), so the note says it makes VO₂max more accurate rather than implying
-    // it tunes the age.
-    private var waistEditor: some View {
-        SettingsEditPage("Waist",
-                         footnote: "Optional: VO₂max builds from about 4 nights of heart rate; a waist makes it more accurate. The Fitness Age itself doesn't need it. Measure around your middle, at the navel.") {
-            FormRow(label: "Waist") {
-                if unitSystem == .imperial {
-                    waistInchesField(waistCm: $profile.waistCm)
-                } else {
-                    waistCentimetresField(waistCm: $profile.waistCm)
                 }
             }
             .padding(NoopMetrics.space4)
@@ -420,72 +342,6 @@ struct SettingsView: View {
         .fixedSize()
     }
 
-    /// Metric waist entry: 0 = unset (shows a muted "Not set" rather than a misleading 0 cm). Steps in
-    /// 1-cm increments; the first increment from unset lands at a sensible 80 cm so the stepper doesn't
-    /// crawl up from the range floor. Mirrors `measureField` but tolerant of the optional empty state.
-    private func waistCentimetresField(waistCm: Binding<Double>) -> some View {
-        let set = waistCm.wrappedValue > 0
-        return HStack(spacing: NoopMetrics.space2) {
-            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
-                Text(set ? String(format: "%.0f", waistCm.wrappedValue) : String(localized: "Not set"))
-                    .font(StrandFont.bodyNumber)
-                    .foregroundStyle(set ? StrandPalette.textPrimary : StrandPalette.textTertiary)
-                    .frame(minWidth: NoopMetrics.formValueColumnWidth, alignment: .center)
-                if set {
-                    Text("cm")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize()
-                }
-            }
-            .fixedSize()
-            Stepper("Waist in centimetres") {
-                waistCm.wrappedValue = min(160, (set ? waistCm.wrappedValue : 79) + 1)
-            } onDecrement: {
-                // Stepping below the 60-cm floor clears it back to unset (optional).
-                let next = waistCm.wrappedValue - 1
-                waistCm.wrappedValue = next < 60 ? 0 : next
-            }
-                .labelsHidden()
-                .accessibilityLabel(set ? "Waist, \(Int(waistCm.wrappedValue.rounded())) centimetres" : "Waist not set")
-        }
-        .fixedSize()
-    }
-
-    /// Imperial waist entry: 0 = unset (muted "Not set"); otherwise shows whole inches and stores the cm
-    /// equivalent — the same metric/imperial treatment as Height. First increment from unset lands near a
-    /// sensible 31″. Range mirrors the metric 60…160 cm (≈24…63 in).
-    private func waistInchesField(waistCm: Binding<Double>) -> some View {
-        let set = waistCm.wrappedValue > 0
-        let inches = set ? UnitFormatter.cmToInches(waistCm.wrappedValue).rounded() : 0
-        return HStack(spacing: NoopMetrics.space2) {
-            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
-                Text(set ? "\(Int(inches))" : "Not set")
-                    .font(StrandFont.bodyNumber)
-                    .foregroundStyle(set ? StrandPalette.textPrimary : StrandPalette.textTertiary)
-                    .frame(minWidth: NoopMetrics.formValueColumnWidth, alignment: .center)
-                if set {
-                    Text("in")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize()
-                }
-            }
-            .fixedSize()
-            Stepper("Waist in inches") {
-                let nextIn = (set ? inches : 30) + 1
-                waistCm.wrappedValue = min(160, nextIn * UnitFormatter.centimetersPerInch)
-            } onDecrement: {
-                let nextIn = inches - 1
-                // Stepping below the ~24″ floor clears it back to unset (optional).
-                waistCm.wrappedValue = nextIn < 24 ? 0 : nextIn * UnitFormatter.centimetersPerInch
-            }
-                .labelsHidden()
-                .accessibilityLabel(set ? "Waist, \(Int(inches)) inches" : "Waist not set")
-        }
-        .fixedSize()
-    }
-
     // MARK: - Device
 
     private var deviceGroup: some View {
@@ -498,13 +354,12 @@ struct SettingsView: View {
                             chevron: false)
                 SettingsDivider()
             }
-            SettingsDivider()
             navRow("Wear placement",
                    currentPlacement == .unknown ? String(localized: "Not set") : currentPlacement.displayName) {
                 placementEditor
             }
             SettingsDivider()
-            navRow("Manage strap") { strapEditor }
+            navRow("Pair & connect") { StrapConnectionView() }
         }
     }
 
@@ -515,79 +370,8 @@ struct SettingsView: View {
         PlacementEditorView()
     }
 
-    private var strapEditor: some View {
-        SettingsEditPage("Strap") {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                HStack(spacing: NoopMetrics.space2) {
-                    StatePill("\(strapStatusTitle)", tone: strapTone, pulsing: live.connected)
-                    if let pct = live.batteryPct {
-                        StatePill("Battery \(Int(pct.rounded()))%", tone: batteryTone(pct), showsDot: false)
-                    }
-                    Spacer(minLength: 0)
-                }
-                Text(strapStatusDetail)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                HStack(spacing: NoopMetrics.space2) {
-                    NoopButton("Re-scan", systemImage: "arrow.clockwise", fullWidth: true) {
-                        model.scan()
-                    }
-                    NoopButton("Buzz", systemImage: "waveform", kind: .secondary, fullWidth: true) {
-                        model.buzzStrapOnce()
-                    }
-                    .disabled(!live.connected)
-                    NoopButton("Disconnect", systemImage: "xmark", kind: .secondary, fullWidth: true) {
-                        model.disconnect()
-                    }
-                    .disabled(!live.connected)
-                }
-            }
-            .padding(NoopMetrics.space4)
-        }
-    }
-
     // Shares LiveState.connectionStatus* with the sidebar footer (RootView) so the two never drift (#266).
     private var strapStatusTitle: String { live.connectionStatusLabel }
-
-    private var strapTone: StrandTone {
-        if live.connectionStatusIsActive { return .positive }
-        if live.connectionStatusIsIdle { return .warning }
-        return .critical
-    }
-
-    private var strapStatusDetail: String {
-        // encryptedBond, not bonded — see LiveState.connectionStatusLabel. Saying "is paired" for a
-        // live-HR-only link contradicts both LiveView's pill and the buzz/alarm rows on this same screen,
-        // which correctly refuse and explain that they need the full encrypted bond.
-        //
-        // A live-HR link falls through to the pairing hint when one is set, and otherwise to "Finishing
-        // the secure pairing handshake…", which is accurate HERE because this platform still retries the
-        // CLIENT_HELLO on every connect. The #1635 suppression is now ported here too, so once it latches
-        // nothing is finishing any more and the old fall-through would describe a handshake that is no
-        // longer being attempted. The `bonded && connected` arm below is that fix, matching the Android
-        // twin (`SettingsLogic.strapStatusLine`).
-        if live.encryptedBond && live.connected {
-            return String(localized: "Your strap is paired and sending data. Open Live for a real-time heart rate.")
-        }
-        // An actionable hint outranks the generic arm: the suppression hint names the one action that
-        // restores the handshake, which "not fully paired" alone does not.
-        if live.connected, let hint = live.pairingHint { return hint }
-        // Live HR over the UNBONDED standard profile (#69). True whenever the handshake is suppressed or
-        // simply has not landed, and the honest description either way.
-        if live.bonded && live.connected {
-            return String(localized: "Live heart rate is streaming, but your strap is not fully paired. The encrypted pairing is what carries motion, skin temperature, SpO₂ and respiratory rate — without it, sleep is staged from heart rate alone. Buzz, alarms and history sync need it too.")
-        }
-        if live.connected { return String(localized: "Connected. Finishing the secure pairing handshake…") }
-        if live.bonded { return String(localized: "Previously paired but not currently connected. Re-scan to reconnect.") }
-        return String(localized: "No strap connected. Put your WHOOP nearby and tap Re-scan to pair.")
-    }
-
-    private func batteryTone(_ pct: Double) -> StrandTone {
-        if pct <= 15 { return .critical }
-        if pct <= 30 { return .warning }
-        return .positive
-    }
 
     // MARK: - Automations
 
@@ -692,7 +476,7 @@ struct SettingsView: View {
 
 /// A rounded card of rows under a small all-caps title. `footer` is a muted note beneath the card.
 /// With no title it is just the card, which the edit pages reuse.
-private struct SettingsGroup<Content: View>: View {
+struct SettingsGroup<Content: View>: View {
     let title: LocalizedStringKey?
     let footer: LocalizedStringKey?
     @ViewBuilder var content: () -> Content
@@ -770,7 +554,7 @@ private struct SettingsRow: View {
 }
 
 /// Hairline between rows, inset from the leading edge so it starts under the label text.
-private struct SettingsDivider: View {
+struct SettingsDivider: View {
     var body: some View {
         Rectangle()
             .fill(StrandPalette.hairline)
@@ -779,7 +563,7 @@ private struct SettingsDivider: View {
     }
 }
 
-private struct SettingsRowStyle: ButtonStyle {
+struct SettingsRowStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label.opacity(configuration.isPressed ? 0.55 : 1)
     }

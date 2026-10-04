@@ -42,10 +42,12 @@ final class ProfileStore: ObservableObject {
     }
     /// Optional waist circumference (cm); 0 = not set. Only used to ALSO show an estimated VO₂max
     /// alongside Fitness Age — the Fitness Age itself does not need it (the body term cancels).
+    /// Settings no longer edits it; a value saved earlier is still honoured.
     @Published var waistCm: Double { didSet { d.set(waistCm, forKey: K.waist) } }
     /// Optional measured resting metabolic rate (kcal/day, from indirect calorimetry); 0 = not set. When set it
     /// replaces the population equation as the 24 h resting-energy term of the calorie estimate. Anything
     /// outside 800…5000 is ignored by the estimator, so a stale or mistyped value cannot distort a day.
+    /// Settings no longer edits it; a value saved earlier is still honoured.
     @Published var measuredRmrKcalPerDay: Double {
         didSet { d.set(min(max(measuredRmrKcalPerDay, 0), 5000), forKey: K.measuredRmr) }
     }

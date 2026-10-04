@@ -1432,7 +1432,46 @@ final class AppModel: ObservableObject {
             ?? .whoop4
         ble.connect(model: chosen)
     }
-    func disconnect() { ble.disconnect() }
+    func disconnect() {
+        cancelPendingReconnect()
+        ble.disconnect()
+    }
+
+    /// The scan that `reconnectStrap()` schedules once the old link is down. Held so a Disconnect or a
+    /// release in that gap cancels it instead of being undone a moment later.
+    private var pendingReconnect: Task<Void, Never>?
+
+    private func cancelPendingReconnect() {
+        pendingReconnect?.cancel()
+        pendingReconnect = nil
+    }
+
+    /// "Reconnect" as one gesture. A link that is already up is dropped first, because `scan()` on its
+    /// own is a no-op against a connected-but-stalled strap; the pause lets CoreBluetooth finish tearing
+    /// the old link down before the new connect starts. With no link it just scans.
+    func reconnectStrap() {
+        cancelPendingReconnect()
+        guard live.connected else {
+            scan()
+            return
+        }
+        ble.disconnect()
+        pendingReconnect = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            self?.pendingReconnect = nil
+            self?.scan()
+        }
+    }
+
+    /// First step of re-pairing: stop reconnecting and drop the link so the strap is free to enter
+    /// pairing mode. BLE-layer only, so the strap stays in the device list and none of its recorded data is
+    /// touched; `scan()` afterwards pairs it again.
+    func releaseStrapForRepair() {
+        cancelPendingReconnect()
+        ble.forgetDevice(nil)
+    }
+
     /// Restart the connected strap (user-initiated, confirmation-gated in DevicesView). Non-destructive —
     /// the strap keeps its data and re-advertises after boot; NOOP auto-reconnects. See BLEManager.rebootStrap().
     func rebootStrap() { ble.rebootStrap() }
