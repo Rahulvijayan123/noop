@@ -44,6 +44,8 @@ struct FullDayChartView: View {
 
     @State private var dayStates: [DayStateSegment] = []
     @State private var dayStatesLoading = false
+    @State private var activityContext: ActivityContextDayDocument? = nil
+    @State private var activityContextLoading = false
 
     @State private var metric: Repository.TimelineMetric = .hr
     // Imperial/Metric temperature preference (#101) — mirrors MetricExplorerView so skin temp here
@@ -102,6 +104,14 @@ struct FullDayChartView: View {
             chartCard
             zoomHint
             if showsActivityTimeline {
+                ActivityContextSection(
+                    document: activityContext,
+                    loading: activityContextLoading,
+                    window: visibleWindow,
+                    axisLabelPlaceholder: valueRange(displayPoints).upperBound >= 99.5 ? "000" : "00",
+                    onSelect: { range in withAnimation(StrandMotion.interactive) { zoomDomain = range } }
+                )
+                .id(Int(dayStart.timeIntervalSince1970))
                 DayStateTimelineSection(
                     segments: dayStates,
                     loading: dayStatesLoading,
@@ -127,10 +137,25 @@ struct FullDayChartView: View {
         .task(id: annotationKey) {
             guard showsActivityTimeline else { return }
             dayStatesLoading = true
-            let result = await repo.dayStateTimeline(dayStart: dayStart)
+            activityContextLoading = true
+            let streams = await repo.dayStreams(dayStart: dayStart)
             guard !Task.isCancelled else { return }
-            dayStates = result
+            guard let streams else {
+                dayStates = []
+                activityContext = nil
+                dayStatesLoading = false
+                activityContextLoading = false
+                return
+            }
+            // The strap-label timeline is quick, so it lands first; the richer decode follows.
+            let timeline = await repo.dayStateTimeline(from: streams)
+            guard !Task.isCancelled else { return }
+            dayStates = timeline
             dayStatesLoading = false
+            let context = await repo.activityContext(from: streams)
+            guard !Task.isCancelled else { return }
+            activityContext = context
+            activityContextLoading = false
         }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
