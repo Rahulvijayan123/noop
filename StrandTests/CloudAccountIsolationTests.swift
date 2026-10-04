@@ -526,7 +526,8 @@ final class CloudAccountIsolationTests: XCTestCase {
                                  identity: CloudPushIdentity?) -> CloudTransportCoordinator {
         CloudTransportCoordinator(journal: journal, session: uploader, scope: scope,
                                   payloadDirectory: directory.appendingPathComponent("payloads-\(scope.ownerId.prefix(4))"),
-                                  projectURL: "https://example.supabase.co", identity: { identity })
+                                  projectURL: "https://example.supabase.co", identity: { identity },
+                                  cloudEnabled: { true })
     }
 
     func testACoordinatorOnlyEverSendsItsOwnAccountsBatchesWithItsOwnScope() async throws {

@@ -499,6 +499,8 @@ enum BodyVitalSigns {
     static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
+        // Same zone as `dayParser`: a day key is a calendar date, not an instant to shift.
+        f.timeZone = TimeZone(identifier: "UTC")
         f.dateFormat = "d MMM"
         return f
     }()

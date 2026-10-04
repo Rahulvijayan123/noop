@@ -149,6 +149,7 @@ const CLIENT_CALLABLE_FUNCTIONS = [
   "server_scoring_read_contract_before_signals",
   "server_scoring_read_contract_v1",
   "set_physiology_sleep_override",
+  "set_placement_interval",
   "sleep_day_availability",
   "step_validation_events_are_valid",
   "sync_daily_metric_aliases",
@@ -169,6 +170,7 @@ const SERVICE_ONLY_FUNCTIONS = [
   "noop_push_consume_ingest_quota",
   "http_post_worker",
   "scoring_claim_one",
+  "recover_noop_account_from_enrollment",
 ];
 
 Deno.test({
