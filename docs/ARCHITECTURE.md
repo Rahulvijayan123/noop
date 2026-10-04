@@ -82,7 +82,7 @@ The worker runs independent lanes, each on its own thread and database connectio
 | archive | `scoring_archive_jobs_v2` | Copies each published snapshot to private B2 storage. |
 | verify | object arrivals | Reconciles objects uploaded through the object lane that were never verified. |
 | projection | `noop_projection_debt` | Replays stored objects into the typed tables. Turned off in production; see [BACKEND.md](BACKEND.md). |
-| activity | `activity_context_jobs` | (Off by default; `FRWHOOP_ACTIVITY_ENABLED=1`.) Downloads verified `rawImuSession` objects, decodes the NPB1 IMU payloads, splits contiguous runs, classifies each 4-second window through a persistent local Python process (HART, `Tools/ActivityContext`), folds the day through the same `ActivityContextPolicy` the app links, and publishes 30-second activity epochs under a fenced lease. Publishing re-dirties the day's score, so the next scoring pass attaches `daily.activity_context` to the snapshot. |
+| activity | `activity_context_jobs` | (Off by default; `FRWHOOP_ACTIVITY_ENABLED=1`.) Downloads verified `rawImuSession` objects, decodes the NPB1 IMU payloads, splits contiguous runs, classifies each 4-second window through a persistent local Python process (HART, `Tools/ActivityContext`), folds the day through the same `ActivityContextPolicy` the app links, and publishes 30-second activity epochs under a fenced lease. Publishing re-dirties the day's score, so the next scoring pass attaches `daily.activity_context` to the snapshot. In the same transaction it also stores a decoded ActivityContext v2 day document in `activity_context_days` (the window probabilities and IMU features plus the day's stored heart rate, gravity, steps, wear events, sleep and workouts, through the app's own `StrandAnalytics` decoder); a failure there is counted and never blocks the epoch publish. See [BACKEND.md](BACKEND.md#day-documents-activitycontext-v2). |
 
 
 The worker also writes a heartbeat to `scoring_service_heartbeats` every 15 seconds.
@@ -136,6 +136,11 @@ first-class label: the classifier abstains below its confidence thresholds, post
 until a validated head exists, and quiet wrists never prove the strap is worn. The first automatic
 labels are shadow-only: they have not met the promotion gates on held-out data, so the lane runs
 disabled by default and no physiological value depends on it.
+
+The phone also decodes a richer, granular version of the day on its own (posture, locomotion and arm
+heads, transitions) for the heart-rate day page. The worker produces the same document from the same
+decoder and stores it per UTC day, but nothing serves it to the phone yet; the app still draws its
+local result.
 
 ## What each score needs
 

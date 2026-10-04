@@ -154,6 +154,50 @@ final class ActivityPythonServiceTests: XCTestCase {
         XCTAssertEqual(lastEcho?["n_tail_run"] as? Int, 2, "run.tail_b64 present")
     }
 
+    // MARK: - IMU features (ActivityContext v2)
+
+    /// The per-window `imu-feat-1` facts and the schema stamp come through the parse.
+    func testInferParsesPerWindowImuFeaturesAndSchema() throws {
+        service = try makeService()
+        _ = try service.ping()
+        let result = try service.infer(run: emptyRun(start: 500, end: 504))
+        XCTAssertEqual(result.featureSchema, "imu-feat-1")
+        let window = try XCTUnwrap(result.windows.first)
+        XCTAssertEqual(window.features["accel_rms_g"] ?? -1, 0.012, accuracy: 1e-12)
+        XCTAssertEqual(window.features["gyro_rms_dps"] ?? -1, 3.5, accuracy: 1e-12)
+        XCTAssertEqual(window.features["jerk_rms"] ?? -1, 0.04, accuracy: 1e-12)
+        XCTAssertEqual(window.features["cadence_hz"] ?? -1, 1.8, accuracy: 1e-12)
+        XCTAssertEqual(window.features["cadence_strength"] ?? -1, 0.31, accuracy: 1e-12)
+        XCTAssertEqual(window.features["orientation_change_deg"] ?? -1, 2.5, accuracy: 1e-12)
+    }
+
+    /// JSON null (a feature the window could not compute) leaves the key out instead of reading as zero.
+    func testInferLeavesNullFeaturesOut() throws {
+        service = try makeService()
+        _ = try service.ping()
+        var request = emptyRun()
+        request.extra = ["feat_nulls": true]
+        let window = try XCTUnwrap(try service.infer(run: request).windows.first)
+        XCTAssertNil(window.features["cadence_hz"])
+        XCTAssertNil(window.features["orientation_change_deg"])
+        XCTAssertNotNil(window.features["accel_rms_g"])
+        XCTAssertEqual(window.features.count, 4)
+    }
+
+    /// An older serve.py has no `feat` or `feature_schema`; the parse still succeeds.
+    func testInferAgainstAnOlderServiceWithoutFeatures() throws {
+        service = try makeService()
+        _ = try service.ping()
+        var request = emptyRun()
+        request.extra = ["legacy_no_feat": true]
+        let result = try service.infer(run: request)
+        XCTAssertTrue(result.ok)
+        XCTAssertNil(result.featureSchema)
+        let window = try XCTUnwrap(result.windows.first)
+        XCTAssertTrue(window.features.isEmpty)
+        XCTAssertEqual(window.label, "stationary")
+    }
+
     func testInferModelMissingIsReportedAndRemembersModelState() throws {
         service = try makeService()
         _ = try service.ping()
@@ -209,6 +253,18 @@ final class ActivityPythonServiceTests: XCTestCase {
         let ping = try service.ping()
         XCTAssertTrue(ping.ok)
         XCTAssertTrue(service.isRunning)
+    }
+
+    /// Starting the service arms a process-wide SIGPIPE ignore. Without it, the one request line that races a
+    /// child's exit would kill the worker itself; with it, the write comes back as an error. If the guard is
+    /// ever lost, this test ends the test process with signal 13 instead of failing politely.
+    func testAWriteToAGoneReaderIsAnErrorNotASignal() throws {
+        service = try makeService()
+        _ = try service.ping()
+
+        let pipe = Pipe()
+        try pipe.fileHandleForReading.close()
+        XCTAssertThrowsError(try pipe.fileHandleForWriting.write(contentsOf: Data("x\n".utf8)))
     }
 
     func testRestartCapBlocksUntilCooldown() throws {

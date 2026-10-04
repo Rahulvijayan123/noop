@@ -1,13 +1,17 @@
 -- Activity-context DB contract (contracts C5 + C10). Runs inside the isolated, fully migrated
--- test database with 20261003120000_activity_context.sql applied. Every fixture change rolls
--- back; no deployed credentials or data are touched. Statement timeout keeps a misbehaving
--- assertion from hanging a disposable cluster.
+-- test database with 20261003120000_activity_context.sql (sections 1-11),
+-- 20261003130000_activity_context_days.sql (section 12, the ActivityContext v2 day documents) and
+-- 20261003140000_activity_context_stream_days.sql (section 13, stream days and the read surface)
+-- applied. Every fixture change rolls back; no deployed credentials or data are touched.
+-- Statement timeout keeps a misbehaving assertion from hanging a disposable cluster.
 --
 -- Run against a disposable cluster the way the other *.sql tests run:
---   psql -X -qAt -v ON_ERROR_STOP=1 -f ../../migrations/20261003120000_activity_context.sql -f activity_context_contract.sql
--- (the migration must apply to a fully migrated Supabase-style schema first; the fixtures here
+--   psql -X -qAt -v ON_ERROR_STOP=1 -f ../../migrations/20261003120000_activity_context.sql \
+--        -f ../../migrations/20261003130000_activity_context_days.sql \
+--        -f ../../migrations/20261003140000_activity_context_stream_days.sql -f activity_context_contract.sql
+-- (the migrations must apply to a fully migrated Supabase-style schema first; the fixtures here
 -- only need base_schema, production_persistence, scoring_service_state, physiology_revisions,
--- the devices_owner_identity unique constraint and this migration).
+-- the devices_owner_identity unique constraint and these migrations).
 \set ON_ERROR_STOP on
 begin;
 set local statement_timeout = '60s';
@@ -754,6 +758,922 @@ begin
               and preprocessing_version='1.0.0'),
     'publish must stamp the payload versions onto the epoch rows';
   raise notice 'PASS 11 publish stamps resolved versions';
+end;
+$$;
+
+rollback;
+
+
+-- 12. ActivityContext v2 day documents (20261003130000_activity_context_days.sql): the fenced
+-- publish stores one decoded document per (owner, device, UTC day, algorithm) next to the v1
+-- epochs, never completes the job itself, and a rejected document cannot block the v1 publish.
+begin;
+set local statement_timeout = '120s';
+insert into auth.users(id) values
+ ('a0000000-0000-4000-8000-000000000001'),
+ ('a0000000-0000-4000-8000-000000000002');
+insert into public.devices(id,user_id,source_kind) values
+ ('a0000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','noop_push'),
+ ('a0000000-0000-4000-8000-000000000012','a0000000-0000-4000-8000-000000000002','noop_push'),
+ ('a0000000-0000-4000-8000-000000000013','a0000000-0000-4000-8000-000000000001','noop_push');
+
+create function pg_temp.day_run(p_s bigint, p_e bigint, p_label text default 'sitting') returns jsonb
+language sql as $$
+  select jsonb_build_object('s',p_s,'e',p_e,
+    'posture',jsonb_build_object('seated_likely',0.8,'unknown',0.2),
+    'locomotion',jsonb_build_object('stationary',0.9,'walking',0.1),
+    'arm_behavior',jsonb_build_object('desk_like',0.7),
+    'intensity',0.02,'overall_confidence',0.81,'overall_uncertainty',0.3,
+    'display_context',p_label,'sleep','awake','wear','on_wrist','n',((p_e-p_s)/5)::integer)
+$$;
+create function pg_temp.day_doc(p_day date, p_runs jsonb default null, p_events jsonb default null)
+returns jsonb language sql as $$
+  select jsonb_build_object(
+    'schema_version',2,
+    'versions',jsonb_build_object('schema',2,'ontology','v2.0','decoder','hsmm-1.1',
+      'feature_schema','imu-feat-1','encoder','hart','encoder_version','hart-activity-v1'),
+    'day_start',extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint,
+    'day_end',extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 86400,
+    'publish_interval_s',5,'generated_at',1790000000,
+    'data_through',extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 3600,
+    'observed_s',3600,'sleep_known_outside',false,'context_fp','abc123',
+    'runs',coalesce(p_runs,jsonb_build_array(
+      pg_temp.day_run(extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint,
+                      extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 1800),
+      jsonb_set(pg_temp.day_run(extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 1800,
+                                extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 3600),
+                '{display_context}','null'::jsonb))),
+    'events',coalesce(p_events,jsonb_build_array(jsonb_build_object('kind','sit_to_stand_like','probability',0.7,
+      'ts',extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 1800))),
+    'latest',null,
+    'summary',jsonb_build_object('label_s',jsonb_build_object('sitting',1800),'unclear_s',1800,'mean_confidence',0.81))
+$$;
+create function pg_temp.day_payload(p_day date, p_doc jsonb default null) returns jsonb language sql as $$
+  select jsonb_build_object('day',p_day::text,'model_version','hart-activity-v1',
+    'preprocessing_version','hart-activity-preprocess-v1','document',coalesce(p_doc,pg_temp.day_doc(p_day)))
+$$;
+-- The v1 publish that completes a job, as the worker issues it right after the day document.
+create function pg_temp.complete_v1(p_tok uuid, p_rev bigint, p_day date) returns bigint
+language sql as $$
+  select public.publish_activity_context_v2(p_tok, p_rev,
+    jsonb_build_object('day',p_day::text,'epochs','[]'::jsonb), 10)
+$$;
+-- True when the publish raised exactly the expected stable message.
+create function pg_temp.rejects(p_tok uuid, p_rev bigint, p_payload jsonb, p_msg text) returns boolean
+language plpgsql as $$
+begin
+  begin
+    perform public.publish_activity_context_day(p_tok, p_rev, p_payload);
+  exception when others then
+    return sqlerrm = p_msg;
+  end;
+  return false;
+end $$;
+
+-- 12.1 Fenced publish stores the document; the job stays claimed until the v1 publish completes it.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-20';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp text; j record; tok uuid; rev bigint; v1rev bigint; r record;
+begin
+  fp := public.activity_context_fingerprint(array[repeat('1',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('1',64)],fp);
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  rev := public.publish_activity_context_day(tok, j.input_revision, pg_temp.day_payload(v_day));
+  assert rev is not null and rev >= 1, 'a valid day document must return a result revision';
+  select * into r from public.activity_context_days where user_id=u and device_id=dev and day=v_day;
+  assert found, 'the day document row must exist';
+  assert r.algorithm_version='hart-activity-1' and r.schema_version=2 and r.ontology_version='v2.0'
+     and r.decoder_version='hsmm-1.1' and r.feature_schema='imu-feat-1', 'version stamps must be denormalized';
+  assert r.encoder_id='hart' and r.encoder_version='hart-activity-v1', 'encoder identity must be denormalized';
+  assert r.model_version='hart-activity-v1' and r.preprocessing_version='hart-activity-preprocess-v1',
+    'lane-resolved versions must be stamped';
+  assert r.job_fingerprint=fp and r.input_revision=j.input_revision, 'row must record the job lineage';
+  assert r.run_count=2 and r.event_count=1 and r.unclear_s=1800 and r.observed_s=3600
+     and r.data_through=lo+3600 and r.publish_interval_s=5 and r.context_fp='abc123',
+    'scalar columns must mirror the document';
+  assert abs(r.mean_confidence-0.81)<0.0001, 'mean confidence must be mirrored';
+  assert r.document = pg_temp.day_doc(v_day), 'the document must be stored verbatim';
+  assert r.result_revision=rev and r.computed_at is not null, 'result revision and computed_at must be stamped';
+  -- The v2 write is not a completion: the lease is intact and scoring is not dirtied by it.
+  assert (select lease_token=tok and completed_revision=0 from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day), 'the day publish must not complete the job or clear the lease';
+  assert not exists(select 1 from public.scoring_work_items where user_id=u and device_id=dev and day=v_day),
+    'the day publish alone must not dirty scoring';
+  -- The v1 publish (same transaction, as the worker does) still completes the job as before.
+  v1rev := public.publish_activity_context_v2(tok, j.input_revision,
+    jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(
+      jsonb_build_object('s',lo,'e',lo+30,'m','stationary','p','sitting','ex','false','sl','awake',
+        'ec','resting_candidate','w','on_wrist','c',0.9,'os',30,'vs',30))),100);
+  assert v1rev is not null, 'the v1 publish must still succeed after the day publish';
+  assert (select completed_revision=j.input_revision and lease_token is null from public.activity_context_jobs
+    where user_id=u and device_id=dev and day=v_day), 'only the v1 publish completes the job';
+  assert exists(select 1 from public.scoring_work_items where user_id=u and device_id=dev and day=v_day),
+    'the v1 publish must dirty the scoring day';
+  assert (select count(*)=1 from public.activity_context_epochs where user_id=u and device_id=dev and day=v_day),
+    'v1 epochs must be unaffected by the day document';
+  assert (select document = pg_temp.day_doc(v_day) from public.activity_context_days
+    where user_id=u and device_id=dev and day=v_day), 'the v1 publish must not touch the day document';
+  raise notice 'PASS 12.1 day document stored, job completion left to v1';
+end;
+$$;
+
+-- 12.2 Fence: stale revision, unknown token, expired lease return NULL and write nothing.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-21';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp text; j record; tok uuid; rev bigint;
+begin
+  fp := public.activity_context_fingerprint(array[repeat('2',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('2',64)],fp);
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  assert j.day=v_day, 'test must have claimed its own job';
+  assert public.publish_activity_context_day(tok, j.input_revision+1, pg_temp.day_payload(v_day)) is null,
+    'stale revision must publish NULL';
+  assert public.publish_activity_context_day(gen_random_uuid(), j.input_revision, pg_temp.day_payload(v_day)) is null,
+    'unknown token must publish NULL';
+  update public.activity_context_jobs set lease_until=clock_timestamp()-interval '1 second'
+    where user_id=u and device_id=dev and day=v_day;
+  assert public.publish_activity_context_day(tok, j.input_revision, pg_temp.day_payload(v_day)) is null,
+    'expired lease must publish NULL';
+  -- A malformed payload with a dead lease is fenced out before validation: still NULL, no error.
+  assert public.publish_activity_context_day(tok, j.input_revision, '[]'::jsonb) is null,
+    'fence must be evaluated before payload validation';
+  assert not exists(select 1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'a fenced-out publish must not write a row';
+  update public.activity_context_jobs set lease_until=clock_timestamp()+interval '10 minutes'
+    where user_id=u and device_id=dev and day=v_day;
+  rev := public.publish_activity_context_day(tok, j.input_revision, pg_temp.day_payload(v_day));
+  assert rev is not null, 'restored lease must publish';
+  -- A superseded worker (revision bumped by a late object) cannot overwrite the newer lineage.
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid(),gen_random_uuid()],
+    array[repeat('2',64),repeat('3',64)],repeat('f',64));
+  assert public.publish_activity_context_day(tok, j.input_revision,
+    pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(), jsonb_build_array()))) is null,
+    'a superseded revision must publish NULL';
+  assert (select result_revision=rev and run_count=2 from public.activity_context_days
+    where user_id=u and device_id=dev and day=v_day), 'a fenced-out publish must not modify the stored row';
+  raise notice 'PASS 12.2 fence';
+end;
+$$;
+
+-- 12.3 Payload contract: every malformed document is rejected with a stable message and writes nothing.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-22';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp text; j record; tok uuid; rev bigint; doc jsonb; good_run jsonb; too_many jsonb;
+begin
+  fp := public.activity_context_fingerprint(array[repeat('4',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('4',64)],fp);
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  rev := j.input_revision;
+  doc := pg_temp.day_doc(v_day);
+  good_run := pg_temp.day_run(lo, lo+30);
+
+  -- Envelope.
+  assert pg_temp.rejects(tok,rev,'[]'::jsonb,'invalid_activity_day_payload'), 'non-object payload';
+  assert pg_temp.rejects(tok,rev,jsonb_build_object('day',v_day::text),'invalid_activity_day_payload'), 'missing document';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload('2026-10-23'),'invalid_activity_day_payload'), 'payload for another day';
+  assert pg_temp.rejects(tok,rev,jsonb_set(pg_temp.day_payload(v_day),'{day}','"garbage"'),'invalid_activity_day_payload'), 'unparseable day';
+  assert pg_temp.rejects(tok,rev,jsonb_set(pg_temp.day_payload(v_day),'{document}','[]'),'invalid_activity_day_payload'), 'document must be an object';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, doc || jsonb_build_object('snapshot', repeat('x', 17000000))),
+    'invalid_activity_day_size'), 'oversized payload';
+
+  -- Document header.
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{day_start}',to_jsonb(lo+1))),'invalid_activity_day_document'), 'day_start must match the job day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{day_end}',to_jsonb(lo+86399))),'invalid_activity_day_document'), 'day_end must match the job day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{schema_version}','1')),'invalid_activity_day_document'), 'schema 1 belongs to the v1 document';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{schema_version}','2.5')),'invalid_activity_day_document'), 'schema must be an integer';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{observed_s}','90000')),'invalid_activity_day_document'), 'observed_s beyond a day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{publish_interval_s}','0')),'invalid_activity_day_document'), 'publish interval below 1';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{runs}','{}')),'invalid_activity_day_document'), 'runs must be an array';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{events}','"x"')),'invalid_activity_day_document'), 'events must be an array';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{data_through}',to_jsonb(lo+90000))),'invalid_activity_day_document'), 'data_through beyond the day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{summary,label_s}','[]')),'invalid_activity_day_document'), 'summary.label_s must be an object';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, doc - 'summary'),'invalid_activity_day_document'), 'summary is required';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{summary,mean_confidence}','1.5')),'invalid_activity_day_document'), 'mean confidence above 1';
+
+  -- Version stamps.
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{versions,ontology}','"bad value!"')),'invalid_activity_day_versions'), 'ontology must be an identifier';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{versions}', (doc->'versions') - 'decoder')),'invalid_activity_day_versions'), 'decoder version is required';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{versions,schema}','3')),'invalid_activity_day_versions'), 'versions.schema must agree with schema_version';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{versions,encoder}','"a b"')),'invalid_activity_day_versions'), 'encoder must be an identifier';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, jsonb_set(doc,'{context_fp}','"XYZ"')),'invalid_activity_day_versions'), 'context_fp must be hex';
+
+  -- Runs and events.
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(pg_temp.day_run(lo, lo+86401)))),'invalid_activity_day_run'), 'run beyond the day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(pg_temp.day_run(lo-5, lo+30)))),'invalid_activity_day_run'), 'run before the day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(jsonb_set(good_run,'{e}',to_jsonb(lo))))),'invalid_activity_day_run'), 'run with e <= s';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(jsonb_set(good_run,'{posture}','[]')))),'invalid_activity_day_run'), 'head must be an object';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(jsonb_set(good_run,'{overall_confidence}','1.2')))),'invalid_activity_day_run'), 'confidence above 1';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(good_run - 'wear'))),'invalid_activity_day_run'), 'wear is required';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(jsonb_set(good_run,'{s}','"x"')))),'invalid_activity_day_run'), 'start must be a number';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(jsonb_set(good_run,'{display_context}',to_jsonb(repeat('d',65)))))),'invalid_activity_day_run'), 'display label too long';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, null, jsonb_build_array(jsonb_build_object('kind','walk_start','probability',0.5,'ts',lo-1)))),'invalid_activity_day_event'), 'event before the day';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, null, jsonb_build_array(jsonb_build_object('kind','walk_start','probability',2,'ts',lo+5)))),'invalid_activity_day_event'), 'event probability above 1';
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, null, jsonb_build_array(jsonb_build_object('probability',0.5,'ts',lo+5)))),'invalid_activity_day_event'), 'event kind is required';
+  select jsonb_agg(good_run) into too_many from generate_series(1, 20001);
+  assert pg_temp.rejects(tok,rev,pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, too_many)),'invalid_activity_day_count'), 'more runs than a day can hold';
+
+  assert not exists(select 1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'no rejected document may leave a row';
+  -- The boundaries themselves are accepted: first and last second of the day, empty arrays,
+  -- null optional fields, and no encoder identity at all (no encoder spoke).
+  rev := public.publish_activity_context_day(tok, j.input_revision, pg_temp.day_payload(v_day,
+    (pg_temp.day_doc(v_day, jsonb_build_array(pg_temp.day_run(lo, lo+5), pg_temp.day_run(lo+86395, lo+86400)),
+                     jsonb_build_array())
+      || jsonb_build_object('data_through', null, 'context_fp', null, 'observed_s', 0))
+      #- '{versions,encoder}' #- '{versions,encoder_version}'));
+  assert rev is not null, 'boundary document must be accepted';
+  assert (select run_count=2 and event_count=0 and data_through is null and context_fp is null
+            and encoder_id is null and encoder_version is null and observed_s=0
+          from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'optional fields must be stored as NULL';
+  raise notice 'PASS 12.3 payload validation';
+end;
+$$;
+
+-- 12.4 Republish replaces the row (one row per lineage); other days and devices are untouched.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-24';
+  other date := '2026-10-25';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp1 text; fp2 text; j record; tok uuid; rev1 bigint; rev2 bigint; rev_other bigint; old_computed timestamptz;
+begin
+  fp1 := public.activity_context_fingerprint(array[repeat('5',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  fp2 := public.activity_context_fingerprint(array[repeat('6',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,other,array[gen_random_uuid()],array[repeat('5',64)],fp1);
+  select * into j from public.claim_activity_context_v2(300);
+  rev_other := public.publish_activity_context_day(j.lease_token, j.input_revision, pg_temp.day_payload(other));
+  assert pg_temp.complete_v1(j.lease_token, j.input_revision, other) is not null, 'neighbour job must complete';
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('5',64)],fp1);
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  assert j.day=v_day, 'test must have claimed its own job';
+  rev1 := public.publish_activity_context_day(tok, j.input_revision, pg_temp.day_payload(v_day));
+  assert pg_temp.complete_v1(tok, j.input_revision, v_day) is not null, 'first revision must complete';
+  select computed_at into old_computed from public.activity_context_days where user_id=u and device_id=dev and day=v_day;
+  -- Late verified object: new fingerprint, revision 2, new document with a different shape.
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid(),gen_random_uuid()],array[repeat('5',64),repeat('6',64)],fp2);
+  select * into j from public.claim_activity_context_v2(300);
+  assert j.day=v_day and j.input_revision=2, 'the bumped job must be claimable at revision 2';
+  rev2 := public.publish_activity_context_day(j.lease_token, j.input_revision,
+    pg_temp.day_payload(v_day, pg_temp.day_doc(v_day, jsonb_build_array(pg_temp.day_run(lo, lo+600, 'walking')), jsonb_build_array())));
+  assert rev2 > rev1, 'a republish must stamp a newer result revision';
+  assert (select count(*)=1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'a republish must replace the row, not add one';
+  assert (select job_fingerprint=fp2 and input_revision=2 and run_count=1 and event_count=0
+            and result_revision=rev2 and computed_at>=old_computed
+            and document->'runs'->0->>'display_context'='walking'
+          from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'the row must carry the newest lineage and document';
+  assert (select result_revision=rev_other and job_fingerprint=fp1 from public.activity_context_days
+    where user_id=u and device_id=dev and day=other), 'another day must be untouched';
+  raise notice 'PASS 12.4 republish replaces, neighbours untouched';
+end;
+$$;
+
+-- 12.5 Pairing with the v1 publish: a rejected day document cannot block v1 (the worker runs it under a
+--      savepoint), and a day document written in a unit that later fails rolls back with it.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-26';
+  lo bigint := extract(epoch from (v_day::timestamp at time zone 'UTC'))::bigint;
+  fp text; j record; tok uuid; v1rev bigint; rejected boolean := false;
+begin
+  fp := public.activity_context_fingerprint(array[repeat('8',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('8',64)],fp);
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  begin
+    perform public.publish_activity_context_day(tok, j.input_revision, '{"day":"2026-10-26","document":{}}'::jsonb);
+  exception when others then rejected := true;
+  end;
+  assert rejected, 'a malformed document must raise';
+  assert not exists(select 1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'a rejected document must leave no row';
+  -- Lease and revision are intact after the rejection, so the v1 publish proceeds.
+  v1rev := public.publish_activity_context_v2(tok, j.input_revision,
+    jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(
+      jsonb_build_object('s',lo,'e',lo+30,'m','stationary','p','sitting','ex','false','sl','awake',
+        'ec','resting_candidate','w','on_wrist','c',0.9,'os',30,'vs',30))),100);
+  assert v1rev is not null, 'a rejected day document must not block the v1 publish';
+  -- Atomic pair: the day document written in a unit that then fails is rolled back with it.
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid(),gen_random_uuid()],array[repeat('8',64),repeat('9',64)],repeat('e',64));
+  select * into j from public.claim_activity_context_v2(300); tok := j.lease_token;
+  begin
+    perform public.publish_activity_context_day(tok, j.input_revision, pg_temp.day_payload(v_day));
+    assert exists(select 1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+      'the day document is visible inside its own unit';
+    raise exception 'simulated v1 publish failure';
+  exception when others then
+    if sqlerrm <> 'simulated v1 publish failure' then raise; end if;
+  end;
+  assert not exists(select 1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
+    'a day document must roll back together with a failed unit';
+  raise notice 'PASS 12.5 pairing with the v1 publish';
+end;
+$$;
+
+-- 12.6 Owner isolation and privileges.
+insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+  decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+  publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+values
+ ('a0000000-0000-4000-8000-000000000002','a0000000-0000-4000-8000-000000000012','2026-10-27','hart-activity-1',2,'v2.0',
+  'hsmm-1.1','imu-feat-1','m','p',repeat('a',64),1,5,0,0,0,0,0,'{}'::jsonb,1,clock_timestamp());
+set local role authenticated;
+select set_config('request.jwt.claim.sub','a0000000-0000-4000-8000-000000000001',true);
+select set_config('request.jwt.claim.role','authenticated',true);
+do $$
+declare n bigint;
+begin
+  select count(*) into n from public.activity_context_days;
+  assert n>0, 'an owner must see their own day documents';
+  assert (select count(*)=0 from public.activity_context_days where user_id='a0000000-0000-4000-8000-000000000002'),
+    'an owner must not see another owner''s day documents';
+  begin
+    insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+      decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+      publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+    values ('a0000000-0000-4000-8000-000000000001','a0000000-0000-4000-8000-000000000011','2026-10-28','hart-activity-1',2,'v2.0',
+      'hsmm-1.1','imu-feat-1','m','p',repeat('a',64),1,5,0,0,0,0,0,'{}'::jsonb,1,clock_timestamp());
+    raise exception 'authenticated insert allowed';
+  exception when insufficient_privilege then null; end;
+  begin
+    update public.activity_context_days set run_count=99 where user_id='a0000000-0000-4000-8000-000000000001';
+    raise exception 'authenticated update allowed';
+  exception when insufficient_privilege then null; end;
+  begin
+    delete from public.activity_context_days where user_id='a0000000-0000-4000-8000-000000000001';
+    raise exception 'authenticated delete allowed';
+  exception when insufficient_privilege then null; end;
+  begin
+    perform public.publish_activity_context_day(gen_random_uuid(), 1, '{}'::jsonb);
+    raise exception 'authenticated day publish allowed';
+  exception when insufficient_privilege then null; end;
+end;
+$$;
+reset role;
+set local role anon;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claim.role','anon',true);
+do $$
+begin
+  begin
+    perform count(*) from public.activity_context_days;
+    raise exception 'anon day read allowed';
+  exception when insufficient_privilege then null; end;
+  begin
+    perform public.publish_activity_context_day(gen_random_uuid(), 1, '{}'::jsonb);
+    raise exception 'anon day publish allowed';
+  exception when insufficient_privilege then null; end;
+end;
+$$;
+reset role;
+set local role service_role;
+do $$
+begin
+  assert (select count(*)>0 from public.activity_context_days), 'the service role must see the day documents';
+  assert public.publish_activity_context_day(gen_random_uuid(), 1, '{}'::jsonb) is null,
+    'the service role may call the fenced publish (unknown token fences out)';
+  begin
+    perform internal.activity_day_num_ok('1'::jsonb, 0, 2, true);
+    raise exception 'service role reached an internal helper';
+  exception when insufficient_privilege then null; end;
+end;
+$$;
+reset role;
+do $$ begin raise notice 'PASS 12.6 owner isolation and privileges'; end $$;
+
+-- 12.7 Device and account deletion cascade to day documents.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001';
+  dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  devtmp uuid := 'a0000000-0000-4000-8000-000000000013';
+  v_day date := '2026-10-29';
+  n integer;
+begin
+  insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+    decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+    publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+  values (u,devtmp,v_day,'hart-activity-1',2,'v2.0','hsmm-1.1','imu-feat-1','m','p',repeat('a',64),1,5,0,0,0,0,0,'{}'::jsonb,1,clock_timestamp());
+  delete from public.devices where id=devtmp;
+  select count(*) into n from public.activity_context_days where user_id=u and device_id=devtmp;
+  assert n=0, 'device deletion must cascade day documents';
+  assert exists(select 1 from public.activity_context_days where user_id=u and device_id=dev),
+    'other devices keep their day documents';
+  delete from auth.users where id=u;
+  select count(*) into n from public.activity_context_days where user_id=u;
+  assert n=0, 'account deletion must cascade day documents';
+  assert exists(select 1 from public.activity_context_days where user_id='a0000000-0000-4000-8000-000000000002'),
+    'another account keeps its day documents';
+  raise notice 'PASS 12.7 deletion cascade';
+end;
+$$;
+
+rollback;
+
+-- 13. Stream days (20261003140000_activity_context_stream_days.sql): one day document for every UTC day
+-- that has stored measurements, driven by completed scoring work; the raw-IMU queue and the stream queue
+-- never hand out each other's jobs; the read surface answers "what was the user doing at second T".
+begin;
+set local statement_timeout = '120s';
+insert into auth.users(id) values
+ ('a0000000-0000-4000-8000-000000000001'),
+ ('a0000000-0000-4000-8000-000000000002');
+insert into public.devices(id,user_id,source_kind) values
+ ('a0000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','noop_push'),
+ ('a0000000-0000-4000-8000-000000000012','a0000000-0000-4000-8000-000000000002','noop_push'),
+ ('a0000000-0000-4000-8000-000000000013','a0000000-0000-4000-8000-000000000001','noop_push');
+
+create function pg_temp.s_lo(p_day date) returns bigint language sql as $$
+  select extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint
+$$;
+create function pg_temp.s_run(p_s bigint, p_e bigint, p_label text, p_conf numeric default 0.8) returns jsonb
+language sql as $$
+  select jsonb_build_object('s',p_s,'e',p_e,
+    'posture',jsonb_build_object('seated_likely',0.8,'unknown',0.2),
+    'locomotion',jsonb_build_object('stationary',0.9,'walking',0.1),
+    'arm_behavior',jsonb_build_object('desk_like',0.7),
+    'intensity',0.02,'overall_confidence',p_conf,'overall_uncertainty',0.3,
+    'display_context',p_label,'sleep','awake','wear','on_wrist','n',((p_e-p_s)/5)::integer)
+$$;
+-- A stream-day document: no encoder windows, so the encoder identity is JSON null.
+create function pg_temp.s_doc(p_day date, p_runs jsonb, p_events jsonb default '[]'::jsonb) returns jsonb
+language sql as $$
+  select jsonb_build_object(
+    'schema_version',2,
+    'versions',jsonb_build_object('schema',2,'ontology','v2.0','decoder','hsmm-1.1',
+      'feature_schema','imu-feat-1','encoder',null,'encoder_version',null),
+    'day_start',pg_temp.s_lo(p_day),'day_end',pg_temp.s_lo(p_day) + 86400,
+    'publish_interval_s',5,'generated_at',1790000000,'data_through',pg_temp.s_lo(p_day) + 3600,
+    'observed_s',3600,'sleep_known_outside',false,'context_fp','abc123',
+    'runs',p_runs,'events',p_events,'latest',null,
+    'summary',jsonb_build_object('label_s',jsonb_build_object('sitting',100),'unclear_s',40,'mean_confidence',0.7))
+$$;
+create function pg_temp.s_payload(p_day date, p_doc jsonb) returns jsonb language sql as $$
+  select jsonb_build_object('day',p_day::text,'model_version','streams-activity-1',
+    'preprocessing_version','streams-v1','document',p_doc)
+$$;
+-- True when the statement raised exactly the expected stable message.
+create function pg_temp.s_raises(p_sql text, p_msg text) returns boolean language plpgsql as $$
+begin
+  begin
+    execute p_sql;
+  exception when others then
+    return sqlerrm = p_msg;
+  end;
+  return false;
+end $$;
+
+-- 13.1 Enqueue: completed scoring work becomes one job per owner / device / UTC day, replays are no-ops,
+--      a changed scoring revision bumps exactly the days that depend on it, rebuilds are rate limited,
+--      and the failure state of a dead-lettered day is only reset by a real change.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; u2 uuid := 'a0000000-0000-4000-8000-000000000002';
+  d1 uuid := 'a0000000-0000-4000-8000-000000000011'; d2 uuid := 'a0000000-0000-4000-8000-000000000012';
+  d0 date := (clock_timestamp() at time zone 'UTC')::date - 6;
+  n integer; r record; dirty0 timestamptz; fp0 text;
+begin
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u1,d1,d0,'frwhoop-server-1',2,2,clock_timestamp()),
+         (u1,d1,d0+1,'frwhoop-server-1',1,1,clock_timestamp()),
+         (u1,d1,d0+3,'frwhoop-server-1',1,0,null),
+         (u2,d2,d0,'frwhoop-server-1',1,1,clock_timestamp()),
+         (u1,d1,date '2019-12-31','frwhoop-server-1',1,1,clock_timestamp()),
+         (u1,d1,date '1969-12-31','frwhoop-server-1',1,1,clock_timestamp());
+  n := public.enqueue_activity_stream_days();
+  assert n = 7, 'u1/d1 depends on d0-1..d0+2 (4 days), u2/d2 on d0-1..d0+1 (3 days); got ' || n;
+  assert (select count(*) = 7 from public.activity_context_jobs where algorithm_version = 'streams-activity-1'),
+    'one stream job per owner/device/UTC day';
+  assert (select count(*) = 4 from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and algorithm_version = 'streams-activity-1'
+            and day between d0 - 1 and d0 + 2), 'a UTC day depends on the scoring days either side of it';
+  assert not exists(select 1 from public.activity_context_jobs
+          where algorithm_version = 'streams-activity-1' and (day > d0 + 2 or day < d0 - 1)),
+    'a scoring day that never completed, and epoch-era artifact days, must not create jobs';
+  select * into r from public.activity_context_jobs
+    where user_id = u1 and device_id = d1 and day = d0 and algorithm_version = 'streams-activity-1';
+  assert r.input_revision = 1 and r.completed_revision = 0 and r.reason = 'streams' and not r.dead_letter
+     and r.fingerprint ~ '^[0-9a-f]{64}$' and r.input_object_ids = '{}'::uuid[] and r.input_digests = '{}'::text[]
+     and r.model_version = 'streams-activity-1' and r.preprocessing_version = 'streams-v1'
+     and r.ontology_version = 'v2.0' and r.lease_token is null, 'a fresh stream job carries no input objects';
+
+  -- Replay: nothing changed, nothing written.
+  select dirty_at, fingerprint into dirty0, fp0 from public.activity_context_jobs
+    where user_id = u1 and device_id = d1 and day = d0 and algorithm_version = 'streams-activity-1';
+  n := public.enqueue_activity_stream_days();
+  assert n = 0, 'an unchanged marker must be a no-op; got ' || n;
+  assert (select dirty_at = dirty0 and fingerprint = fp0 and input_revision = 1 from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and day = d0 and algorithm_version = 'streams-activity-1'),
+    'a replay must not touch the job';
+
+  -- A new scoring revision for d0 changes the three UTC days that depend on d0, and only those.
+  update public.activity_context_jobs set completed_revision = input_revision, last_completed_at = clock_timestamp()
+    where algorithm_version = 'streams-activity-1';
+  update public.scoring_jobs_v2 set input_revision = 3, completed_revision = 3, last_completed_at = clock_timestamp()
+    where user_id = u1 and device_id = d1 and day = d0 and algorithm_version = 'frwhoop-server-1';
+  n := public.enqueue_activity_stream_days();
+  assert n = 3, 'a new scoring revision must refresh the three dependent UTC days; got ' || n;
+  assert (select count(*) = 3 from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and algorithm_version = 'streams-activity-1'
+            and day between d0 - 1 and d0 + 1 and input_revision = 2 and completed_revision = 1 and fingerprint <> fp0),
+    'dependent days must get a new fingerprint and revision';
+  assert (select input_revision = 1 from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and day = d0 + 2 and algorithm_version = 'streams-activity-1'),
+    'a day that does not depend on d0 must be left alone';
+  assert (select bool_and(not_before > clock_timestamp() + interval '9 minutes')
+          from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and algorithm_version = 'streams-activity-1'
+            and day between d0 - 1 and d0 + 1), 'a rebuild must wait the minimum interval after the last build';
+  update public.activity_context_jobs set completed_revision = input_revision
+    where algorithm_version = 'streams-activity-1' and not (user_id = u1 and device_id = d1 and day between d0 - 1 and d0 + 1);
+  assert not exists(select 1 from public.claim_activity_stream_day(60)), 'held-back days must not be claimable yet';
+
+  -- No minimum interval: a changed day is due at once.
+  update public.activity_context_jobs set completed_revision = input_revision, last_completed_at = clock_timestamp()
+    where algorithm_version = 'streams-activity-1';
+  update public.scoring_jobs_v2 set input_revision = 4, completed_revision = 4, last_completed_at = clock_timestamp()
+    where user_id = u1 and device_id = d1 and day = d0 and algorithm_version = 'frwhoop-server-1';
+  n := public.enqueue_activity_stream_days(interval '36 hours', 25, interval '0');
+  assert n = 3, 'got ' || n;
+  assert (select count(*) = 3 from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and algorithm_version = 'streams-activity-1'
+            and input_revision = 3 and not_before <= clock_timestamp()), 'with no minimum interval a changed day is due at once';
+
+  -- Dead-letter stickiness: only a changed marker resets the failure state.
+  update public.activity_context_jobs set dead_letter = true, consecutive_failures = 8, last_error = 'x'
+    where user_id = u2 and device_id = d2 and day = d0 and algorithm_version = 'streams-activity-1';
+  n := public.enqueue_activity_stream_days();
+  assert n = 0, 'got ' || n;
+  assert (select dead_letter and consecutive_failures = 8 from public.activity_context_jobs
+          where user_id = u2 and device_id = d2 and day = d0 and algorithm_version = 'streams-activity-1'),
+    'a replay must not resurrect a dead-lettered stream day';
+  update public.scoring_jobs_v2 set input_revision = 2, completed_revision = 2, last_completed_at = clock_timestamp()
+    where user_id = u2 and device_id = d2 and day = d0 and algorithm_version = 'frwhoop-server-1';
+  n := public.enqueue_activity_stream_days();
+  assert n = 3, 'got ' || n;
+  assert (select not dead_letter and consecutive_failures = 0 and last_error is null
+          from public.activity_context_jobs
+          where user_id = u2 and device_id = d2 and day = d0 and algorithm_version = 'streams-activity-1'),
+    'a changed marker must reset the failure state';
+
+  -- Argument validation.
+  assert pg_temp.s_raises('select public.enqueue_activity_stream_days(interval ''-1 hour'')', 'invalid_arguments'), 'negative lookback';
+  assert pg_temp.s_raises('select public.enqueue_activity_stream_days(interval ''36 hours'', -1)', 'invalid_arguments'), 'negative limit';
+  assert pg_temp.s_raises('select public.enqueue_activity_stream_days(interval ''36 hours'', 1001)', 'invalid_arguments'), 'oversized limit';
+  assert pg_temp.s_raises('select public.enqueue_activity_stream_days(interval ''36 hours'', 25, interval ''2 days'')', 'invalid_arguments'), 'oversized interval';
+  assert pg_temp.s_raises('select public.enqueue_activity_stream_days(null)', 'invalid_arguments'), 'null lookback';
+  raise notice 'PASS 13.1 stream days are enqueued from completed scoring work';
+end;
+$$;
+
+-- 13.1b Backfill is bounded and newest first; a scoring day ahead of the UTC date never creates a future job.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d3 uuid := 'a0000000-0000-4000-8000-000000000013';
+  today date := (clock_timestamp() at time zone 'UTC')::date;
+  d0 date := (clock_timestamp() at time zone 'UTC')::date - 30;
+  n integer;
+begin
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u1,d3,d0,'frwhoop-server-1',1,1,clock_timestamp() - interval '40 days');
+  n := public.enqueue_activity_stream_days(interval '36 hours', 0);
+  assert n = 0, 'no recent work and a zero backfill limit must create nothing; got ' || n;
+  n := public.enqueue_activity_stream_days(interval '36 hours', 1);
+  assert n = 1 and exists(select 1 from public.activity_context_jobs
+          where user_id = u1 and device_id = d3 and day = d0 + 1 and algorithm_version = 'streams-activity-1'),
+    'the backfill takes the newest missing day first; got ' || n;
+  n := public.enqueue_activity_stream_days(interval '36 hours', 5);
+  assert n = 2 and (select count(*) = 3 from public.activity_context_jobs
+          where user_id = u1 and device_id = d3 and algorithm_version = 'streams-activity-1'),
+    'the next call backfills only what is still missing; got ' || n;
+  n := public.enqueue_activity_stream_days(interval '36 hours', 5);
+  assert n = 0, 'a finished backfill is a no-op; got ' || n;
+
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u1,d3,today + 1,'frwhoop-server-1',1,1,clock_timestamp());
+  perform public.enqueue_activity_stream_days();
+  assert exists(select 1 from public.activity_context_jobs
+          where user_id = u1 and device_id = d3 and day = today and algorithm_version = 'streams-activity-1'),
+    'the UTC day a scoring day ahead of UTC overlaps is built';
+  assert not exists(select 1 from public.activity_context_jobs
+          where user_id = u1 and device_id = d3 and day > today and algorithm_version = 'streams-activity-1'),
+    'a UTC day that has not started must not get a job';
+
+  -- The days ahead of the UTC date stay candidates forever (they can never get a job); they must not
+  -- use up the backfill limit and starve the older days that can.
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u1,d3,d0 + 15,'frwhoop-server-1',1,1,clock_timestamp() - interval '40 days');
+  n := public.enqueue_activity_stream_days(interval '36 hours', 1);
+  assert n = 1 and exists(select 1 from public.activity_context_jobs
+          where user_id = u1 and device_id = d3 and day = d0 + 16 and algorithm_version = 'streams-activity-1'),
+    'days ahead of the UTC date must not consume the backfill limit; got ' || n;
+  raise notice 'PASS 13.1b bounded backfill and no future days';
+end;
+$$;
+
+-- 13.2 The two queues never hand out each other's jobs.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  d0 date := (clock_timestamp() at time zone 'UTC')::date - 6;
+  lo bigint; fp text; j record;
+begin
+  lo := pg_temp.s_lo(d0);
+  fp := public.activity_context_fingerprint(array[repeat('a',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1');
+  update public.activity_context_jobs set completed_revision = input_revision, lease_token = null, lease_until = null
+    where algorithm_version = 'streams-activity-1' and day <> d0;
+  perform public.enqueue_activity_context(u1,d1,d0 + 10,array[gen_random_uuid()],array[repeat('a',64)],fp);
+  select * into j from public.claim_activity_context_v2(60);
+  assert j.algorithm_version = 'hart-activity-1', 'the raw-IMU claim must hand out the raw-IMU job, got ' || coalesce(j.algorithm_version, 'nothing');
+  assert not exists(select 1 from public.claim_activity_context_v2(60)),
+    'the raw-IMU claim must never hand out a stream day while one is due';
+  select * into j from public.claim_activity_stream_day(60);
+  assert j.algorithm_version = 'streams-activity-1' and j.lease_token is not null and j.claim_count = 1,
+    'the stream claim must hand out a stream day with a lease';
+  perform public.enqueue_activity_context(u1,d1,d0 + 11,array[gen_random_uuid()],array[repeat('b',64)],
+    public.activity_context_fingerprint(array[repeat('b',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1'));
+  update public.activity_context_jobs set completed_revision = input_revision, lease_token = null, lease_until = null
+    where algorithm_version = 'streams-activity-1';
+  assert not exists(select 1 from public.claim_activity_stream_day(60)),
+    'the stream claim must never hand out a raw-IMU job';
+  assert exists(select 1 from public.claim_activity_context_v2(60)), 'the raw-IMU job is still claimable';
+  assert pg_temp.s_raises('select public.claim_activity_stream_day(0)', 'invalid_lease'), 'lease bounds are enforced';
+  raise notice 'PASS 13.2 queue separation';
+end;
+$$;
+
+-- 13.3 Completion: the document and the completion are one unit; no document also completes; the fence holds;
+--      a rejected document completes nothing; only stream days can be completed this way.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := (clock_timestamp() at time zone 'UTC')::date - 2;
+  lo bigint := pg_temp.s_lo((clock_timestamp() at time zone 'UTC')::date - 2);
+  j record; rev bigint; r record; runs jsonb; imu record;
+begin
+  delete from public.activity_context_jobs;
+  delete from public.activity_context_days;
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u1,d1,v_day,'frwhoop-server-1',1,1,clock_timestamp()) on conflict do nothing;
+  perform public.enqueue_activity_stream_days();
+  delete from public.activity_context_jobs where day <> v_day;
+  runs := jsonb_build_array(pg_temp.s_run(lo+100, lo+200, 'sitting'), pg_temp.s_run(lo+200, lo+260, 'walking', 0.64));
+
+  select * into j from public.claim_activity_stream_day(300);
+  rev := public.complete_activity_stream_day(j.lease_token, j.input_revision,
+    pg_temp.s_payload(v_day, pg_temp.s_doc(v_day, runs)), 7);
+  assert rev is not null and rev >= 1, 'a stored document returns its result revision';
+  select * into r from public.activity_context_days where user_id = u1 and device_id = d1 and day = v_day;
+  assert found and r.algorithm_version = 'streams-activity-1' and r.model_version = 'streams-activity-1'
+     and r.preprocessing_version = 'streams-v1' and r.encoder_id is null and r.encoder_version is null
+     and r.job_fingerprint = j.fingerprint and r.input_revision = j.input_revision and r.run_count = 2
+     and r.result_revision = rev, 'the document is stored under the stream lineage with a null encoder';
+  assert (select completed_revision = j.input_revision and lease_token is null and lease_until is null
+            and success_count = 1 and last_duration_ms = 7 and consecutive_failures = 0 and last_completed_at is not null
+          from public.activity_context_jobs where user_id = u1 and device_id = d1 and day = v_day),
+    'the completion happens in the same call as the document';
+  assert not exists(select 1 from public.scoring_work_items where user_id = u1 and device_id = d1 and day = v_day),
+    'a stream day must never dirty scoring';
+  assert (select count(*) = 0 from public.activity_context_epochs where user_id = u1 and device_id = d1),
+    'stream days write no v1 epochs';
+
+  -- No measurements: completes without a document, and leaves an earlier document alone.
+  update public.activity_context_jobs set input_revision = input_revision + 1, dirty_at = clock_timestamp(),
+    not_before = clock_timestamp() where user_id = u1 and device_id = d1 and day = v_day;
+  select * into j from public.claim_activity_stream_day(300);
+  assert public.complete_activity_stream_day(j.lease_token, j.input_revision, null, 1) = 0,
+    'completing with no document returns 0';
+  assert (select completed_revision = j.input_revision and lease_token is null from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and day = v_day), 'the empty day is completed';
+  assert (select result_revision = rev and run_count = 2 from public.activity_context_days
+          where user_id = u1 and device_id = d1 and day = v_day), 'an earlier document is left alone';
+  update public.activity_context_jobs set input_revision = input_revision + 1, not_before = clock_timestamp()
+    where user_id = u1 and device_id = d1 and day = v_day;
+  select * into j from public.claim_activity_stream_day(300);
+  assert public.complete_activity_stream_day(j.lease_token, j.input_revision, 'null'::jsonb, 1) = 0,
+    'a JSON null payload also means no document';
+
+  -- Fence: a revision that moved on, an unknown token and an expired lease write nothing.
+  update public.activity_context_jobs set input_revision = input_revision + 1, not_before = clock_timestamp()
+    where user_id = u1 and device_id = d1 and day = v_day;
+  select * into j from public.claim_activity_stream_day(300);
+  update public.activity_context_jobs set input_revision = input_revision + 1
+    where user_id = u1 and device_id = d1 and day = v_day;
+  assert public.complete_activity_stream_day(j.lease_token, j.input_revision,
+    pg_temp.s_payload(v_day, pg_temp.s_doc(v_day, runs)), 1) is null, 'a moved revision is fenced';
+  assert public.complete_activity_stream_day(j.lease_token, j.input_revision, null, 1) is null,
+    'a moved revision is fenced for a day without a document too';
+  assert public.complete_activity_stream_day(gen_random_uuid(), 1, null, 1) is null, 'an unknown token is fenced';
+  assert (select completed_revision < input_revision and lease_token = j.lease_token from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and day = v_day), 'a fenced call must not complete or release the job';
+  assert (select result_revision = rev from public.activity_context_days
+          where user_id = u1 and device_id = d1 and day = v_day), 'a fenced call must not write the document';
+  update public.activity_context_jobs set lease_until = clock_timestamp() - interval '1 second'
+    where user_id = u1 and device_id = d1 and day = v_day;
+  assert public.complete_activity_stream_day(j.lease_token, j.input_revision + 1, null, 1) is null, 'an expired lease is fenced';
+
+  -- A rejected document raises, completes nothing and writes nothing.
+  update public.activity_context_jobs set not_before = clock_timestamp(), lease_token = null, lease_until = null
+    where user_id = u1 and device_id = d1 and day = v_day;
+  select * into j from public.claim_activity_stream_day(300);
+  assert pg_temp.s_raises(format('select public.complete_activity_stream_day(%L, %s, %L::jsonb, 1)',
+      j.lease_token, j.input_revision,
+      pg_temp.s_payload(v_day, pg_temp.s_doc(v_day, jsonb_build_array(pg_temp.s_run(lo+100, lo+86401, 'sitting'))))::text),
+    'invalid_activity_day_run'), 'a run past the day end is rejected with the stable message';
+  assert (select completed_revision < input_revision and lease_token = j.lease_token from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and day = v_day), 'a rejected document completes nothing';
+  assert (select result_revision = rev from public.activity_context_days
+          where user_id = u1 and device_id = d1 and day = v_day), 'a rejected document writes nothing';
+
+  -- Only stream days complete this way.
+  perform public.enqueue_activity_context(u1,d1,v_day - 20,array[gen_random_uuid()],array[repeat('c',64)],
+    public.activity_context_fingerprint(array[repeat('c',64)],lo,lo+86399,'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1'));
+  select * into imu from public.claim_activity_context_v2(60);
+  assert pg_temp.s_raises(format('select public.complete_activity_stream_day(%L, %s, null, 1)', imu.lease_token, imu.input_revision),
+    'not_a_stream_day_job'), 'a raw-IMU job cannot be completed as a stream day';
+  raise notice 'PASS 13.3 completion, empty days, fence and rejection';
+end;
+$$;
+
+-- 13.4 The read surface: runs, transitions, the at-timestamp lookup and the measurement join.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  u2 uuid := 'a0000000-0000-4000-8000-000000000002'; d2 uuid := 'a0000000-0000-4000-8000-000000000012';
+  v_day date := (clock_timestamp() at time zone 'UTC')::date - 2;
+  lo bigint := pg_temp.s_lo((clock_timestamp() at time zone 'UTC')::date - 2);
+  runs jsonb; evs jsonb; r record; src uuid := gen_random_uuid(); got text[];
+begin
+  delete from public.activity_context_jobs;
+  delete from public.activity_context_days;
+  runs := jsonb_build_array(
+    pg_temp.s_run(lo+100, lo+200, 'sitting', 0.82),
+    pg_temp.s_run(lo+200, lo+260, 'walking', 0.64),
+    jsonb_set(pg_temp.s_run(lo+260, lo+300, 'x', 0.31), '{display_context}', 'null'::jsonb));
+  evs := jsonb_build_array(jsonb_build_object('kind','sit_to_stand_like','probability',0.7,'ts',lo+200));
+  insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+    decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+    publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+  values (u1,d1,v_day,'streams-activity-1',2,'v2.0','hsmm-1.1','imu-feat-1','streams-activity-1','streams-v1',repeat('a',64),1,
+          5,3600,3,1,40,0.7,pg_temp.s_doc(v_day, runs, evs),1,clock_timestamp()),
+         (u2,d2,v_day,'streams-activity-1',2,'v2.0','hsmm-1.1','imu-feat-1','streams-activity-1','streams-v1',repeat('b',64),1,
+          5,3600,1,0,0,0.7,pg_temp.s_doc(v_day, jsonb_build_array(pg_temp.s_run(lo+100, lo+200, 'lying'))),2,clock_timestamp());
+
+  assert (select count(*) = 3 from public.activity_context_runs where user_id = u1 and device_id = d1 and day = v_day),
+    'one row per run';
+  select * into r from public.activity_context_runs where user_id = u1 and device_id = d1 and start_ts = lo + 100;
+  assert r.end_ts = lo + 200 and r.duration_s = 100 and r.display_context = 'sitting'
+     and abs(r.confidence - 0.82) < 0.001 and abs(r.uncertainty - 0.3) < 0.001 and abs(r.intensity - 0.02) < 0.001
+     and r.sleep_state = 'awake' and r.wear_state = 'on_wrist' and r.states = 20
+     and r.algorithm_version = 'streams-activity-1' and r.source_rank = 2 and r.day = v_day
+     and r.start_at = to_timestamp(lo + 100) and r.end_at = to_timestamp(lo + 200)
+     and r.posture ? 'seated_likely' and (r.locomotion ->> 'stationary')::numeric = 0.9 and r.arm_behavior ? 'desk_like'
+     and r.model_version = 'streams-activity-1' and r.decoder_version = 'hsmm-1.1' and r.ontology_version = 'v2.0'
+     and r.result_revision = 1 and r.computed_at is not null, 'the run row carries exact times, confidence and head probabilities';
+  assert (select display_context is null and abs(confidence - 0.31) < 0.001 from public.activity_context_runs
+          where user_id = u1 and device_id = d1 and start_ts = lo + 260), 'an unclear run keeps a NULL label and its confidence';
+  select * into r from public.activity_context_transitions where user_id = u1 and device_id = d1;
+  assert r.ts = lo + 200 and r.at = to_timestamp(lo + 200) and r.kind = 'sit_to_stand_like'
+     and abs(r.probability - 0.7) < 0.001 and r.source_rank = 2 and r.day = v_day, 'the transition row carries the exact time and probability';
+  assert (select count(*) = 1 from public.activity_context_transitions where user_id = u1 and device_id = d1), 'one row per event';
+
+  -- The at-timestamp lookup is half-open [start, end).
+  assert (select display_context from public.activity_context_at(u1, d1, lo + 150)) = 'sitting', 'inside the first run';
+  assert (select display_context from public.activity_context_at(u1, d1, lo + 100)) = 'sitting', 'a run includes its first second';
+  assert (select display_context from public.activity_context_at(u1, d1, lo + 200)) = 'walking', 'a run excludes its end second';
+  assert (select count(*) = 0 from public.activity_context_at(u1, d1, lo + 99)), 'before the first run';
+  assert (select count(*) = 0 from public.activity_context_at(u1, d1, lo + 300)), 'after the last run';
+  assert (select count(*) = 0 from public.activity_context_at(u1, d1, lo + 86400 + 150)), 'a day without a document';
+  assert (select count(*) = 0 from public.activity_context_at(u1, d2, lo + 150)), 'another owner''s device is never matched';
+
+  -- A raw-IMU document for the same day answers first.
+  insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+    decoder_version,feature_schema,encoder_id,encoder_version,model_version,preprocessing_version,job_fingerprint,
+    input_revision,publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+  values (u1,d1,v_day,'hart-activity-1',2,'v2.0','hsmm-1.1','imu-feat-1','hart','hart-activity-v1','hart-activity-v1',
+          'hart-activity-preprocess-v1',repeat('c',64),1,5,3600,1,0,0,0.9,
+          pg_temp.s_doc(v_day, jsonb_build_array(pg_temp.s_run(lo+150, lo+250, 'standing', 0.9))),3,clock_timestamp());
+  select array_agg(display_context order by source_rank) into got
+    from public.activity_context_runs where user_id = u1 and device_id = d1 and start_ts <= lo + 160 and lo + 160 < end_ts;
+  assert got = array['standing','sitting'], 'both sources cover the second, the raw-IMU document first: ' || got::text;
+  assert (select array_agg(display_context) from public.activity_context_at(u1, d1, lo + 160)) = array['standing','sitting'],
+    'the lookup lists the raw-IMU document first';
+
+  -- Labelling stored measurements by joining on their exact timestamp.
+  insert into public.noop_hr_samples(user_id,device_id,source_id,ts,bpm,batch_id)
+  values (u1,d1,src,lo + 120,62,src), (u1,d1,src,lo + 210,95,src), (u1,d1,src,lo + 400,70,src);
+  select array_agg(coalesce(x.display_context, '-') order by x.ts) into got from (
+    select h.ts, ctx.display_context
+      from public.noop_hr_samples h
+      left join public.activity_context_runs ctx
+        on ctx.user_id = h.user_id and ctx.device_id = h.device_id
+       and ctx.day = (to_timestamp(h.ts) at time zone 'UTC')::date
+       and ctx.algorithm_version = 'streams-activity-1' and h.ts >= ctx.start_ts and h.ts < ctx.end_ts
+     where h.user_id = u1 and h.device_id = d1) x;
+  assert got = array['sitting','walking','-'], 'each stored measurement lands in exactly one run, or none: ' || got::text;
+  assert (select reloptions @> array['security_invoker=true'] from pg_class where oid = 'public.activity_context_runs'::regclass),
+    'the runs view must run with the caller''s rights';
+  assert (select reloptions @> array['security_invoker=true'] from pg_class where oid = 'public.activity_context_transitions'::regclass),
+    'the transitions view must run with the caller''s rights';
+  raise notice 'PASS 13.4 read surface';
+end;
+$$;
+
+-- 13.5 Owner isolation and privileges.
+set local role authenticated;
+select set_config('request.jwt.claim.sub','a0000000-0000-4000-8000-000000000001',true);
+select set_config('request.jwt.claim.role','authenticated',true);
+do $$
+declare
+  u2 uuid := 'a0000000-0000-4000-8000-000000000002'; d2 uuid := 'a0000000-0000-4000-8000-000000000012';
+  lo bigint := extract(epoch from (((clock_timestamp() at time zone 'UTC')::date - 2)::timestamp at time zone 'UTC'))::bigint;
+begin
+  assert (select count(*) > 0 from public.activity_context_runs), 'an owner sees their own runs';
+  assert (select count(*) = 0 from public.activity_context_runs where user_id = u2), 'an owner must not see another owner''s runs';
+  assert (select count(*) > 0 from public.activity_context_transitions), 'an owner sees their own transitions';
+  assert (select count(*) = 0 from public.activity_context_transitions where user_id = u2), 'nor their transitions';
+  assert (select count(*) > 0 from public.activity_context_at('a0000000-0000-4000-8000-000000000001',
+            'a0000000-0000-4000-8000-000000000011', lo + 150)), 'an owner can ask what they were doing';
+  assert (select count(*) = 0 from public.activity_context_at(u2, d2, lo + 150)),
+    'the lookup must not leak another owner''s context';
+  begin perform public.enqueue_activity_stream_days(); raise exception 'authenticated enqueue allowed';
+  exception when insufficient_privilege then null; end;
+  begin perform public.claim_activity_stream_day(60); raise exception 'authenticated stream claim allowed';
+  exception when insufficient_privilege then null; end;
+  begin perform public.complete_activity_stream_day(gen_random_uuid(), 1, null, 1); raise exception 'authenticated completion allowed';
+  exception when insufficient_privilege then null; end;
+  begin perform public.claim_activity_context_v2(60); raise exception 'authenticated raw-IMU claim allowed';
+  exception when insufficient_privilege then null; end;
+end;
+$$;
+reset role;
+set local role anon;
+select set_config('request.jwt.claim.sub','',true);
+select set_config('request.jwt.claim.role','anon',true);
+do $$
+begin
+  begin perform count(*) from public.activity_context_runs; raise exception 'anon runs read allowed';
+  exception when insufficient_privilege then null; end;
+  begin perform count(*) from public.activity_context_transitions; raise exception 'anon transitions read allowed';
+  exception when insufficient_privilege then null; end;
+  begin perform * from public.activity_context_at(gen_random_uuid(), gen_random_uuid(), 1); raise exception 'anon lookup allowed';
+  exception when insufficient_privilege then null; end;
+  begin perform public.enqueue_activity_stream_days(); raise exception 'anon enqueue allowed';
+  exception when insufficient_privilege then null; end;
+end;
+$$;
+reset role;
+set local role service_role;
+do $$
+begin
+  assert (select count(*) >= 2 from (select distinct user_id from public.activity_context_runs) x),
+    'the service role reads every owner''s runs';
+  perform public.enqueue_activity_stream_days();
+  assert not exists(select 1 from public.claim_activity_stream_day(60) c where c.algorithm_version <> 'streams-activity-1'),
+    'the service role may use the stream queue functions';
+end;
+$$;
+reset role;
+do $$ begin raise notice 'PASS 13.5 owner isolation and privileges'; end $$;
+
+-- 13.6 Device and account deletion cascade to stream jobs and documents.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d3 uuid := 'a0000000-0000-4000-8000-000000000013';
+  v_day date := (clock_timestamp() at time zone 'UTC')::date - 4;
+begin
+  insert into public.activity_context_jobs(user_id,device_id,day,algorithm_version,fingerprint,input_revision)
+  values (u1,d3,v_day,'streams-activity-1',repeat('a',64),1);
+  insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+    decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+    publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+  values (u1,d3,v_day,'streams-activity-1',2,'v2.0','hsmm-1.1','imu-feat-1','m','p',repeat('a',64),1,5,0,0,0,0,0,'{}'::jsonb,9,clock_timestamp());
+  delete from public.devices where id = d3;
+  assert not exists(select 1 from public.activity_context_jobs where device_id = d3), 'device deletion cascades stream jobs';
+  assert not exists(select 1 from public.activity_context_days where device_id = d3), 'device deletion cascades stream documents';
+  delete from auth.users where id = u1;
+  assert not exists(select 1 from public.activity_context_jobs where user_id = u1), 'account deletion cascades stream jobs';
+  assert not exists(select 1 from public.activity_context_days where user_id = u1), 'account deletion cascades documents';
+  assert exists(select 1 from public.activity_context_days where user_id = 'a0000000-0000-4000-8000-000000000002'),
+    'another account keeps its documents';
+  raise notice 'PASS 13.6 deletion cascade';
 end;
 $$;
 

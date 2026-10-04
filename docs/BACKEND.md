@@ -279,11 +279,13 @@ phone raw capture (ImuSessionFileStore) -> rawImuSession NPB1 objects (object la
   endpoint, no GPU). Model loading and inference happen outside Postgres transactions; the lane
   renews its lease around each run's inference. A missing model fails soft (`model_unavailable`),
   never blocks BLE, ingest, scoring, sleep, recovery or archive.
-- Deployment needs the migration `20261003120000_activity_context.sql` applied with `psql`
-  (never `supabase db push`; see Migrations), the `Tools/ActivityContext` tree plus a Python 3.10
-  venv on the host (`uv venv && uv pip install -r Tools/ActivityContext/requirements` style pins in
-  the package README), and the trained model artifacts copied to `FRWHOOP_ACTIVITY_MODEL_DIR`
-  (fetch/build commands in the package README; nothing is committed to git).
+- Deployment needs the migrations `20261003120000_activity_context.sql` and (for the day documents
+  below) `20261003130000_activity_context_days.sql` and `20261003140000_activity_context_stream_days.sql`
+  applied with `psql` (never `supabase db push`; see Migrations), the `Tools/ActivityContext` tree plus a
+  Python 3.10+ venv on the host (`uv venv && uv pip install -r Tools/ActivityContext/requirements` style
+  pins in the package README), and the trained model artifacts copied to `FRWHOOP_ACTIVITY_MODEL_DIR`
+  (fetch/build commands in the package README; nothing is committed to git). The stream days below need
+  only the third migration: a host with no Python runs them with `FRWHOOP_ACTIVITY_IMU=0`.
 - Rollback: set `FRWHOOP_ACTIVITY_ENABLED` off (or add `activity` to `FRWHOOP_DISABLE_LANES`) and
   restart the worker. The tables keep their rows; snapshots simply stop carrying
   `activity_context` after the next scoring pass, and old clients are unaffected either way. The
@@ -293,6 +295,196 @@ phone raw capture (ImuSessionFileStore) -> rawImuSession NPB1 objects (object la
   so automatic labels stay in shadow mode until a WHOOP-labeled pilot passes those gates. Posture
   and new activities have separate gates. The `RestingEligibility` policy is exported but rejects by
   default (wear/sleep evidence is unknown in v1), so no physiological baseline behavior changed.
+
+### Day documents (ActivityContext v2)
+
+The same job also stores one decoded document per UTC day in `activity_context_days`. It is the
+document the app builds on the phone for its heart-rate day page: probabilistic posture, locomotion
+and arm-behavior heads coalesced into runs, transition events and a day summary
+(`ActivityContextDayDocument`, schema 2, ontology `v2.0`, decoder `hsmm-1.1`). The server runs the
+SAME decoder (`StrandAnalytics.ActivityContextTrackBuilder`), so a phone-built and a server-built
+document of one day differ only in their inputs.
+
+```text
+activity job (unchanged claim / download / decode / lease renewal)
+  -> Python service, per 4-s window: HART (or baseline) probabilities + imu-feat-1 IMU features
+  -> Postgres, for the UTC day: HR, gravity, steps, WRIST_OFF/ON events (6 h reach-back),
+     sleep sessions, workouts
+  -> ActivityContextTrackBuilder -> ActivityContextDayDocument (no decoder snapshot)
+  -> ONE transaction: publish_activity_context_day (fenced, under a savepoint)
+                      -> publish_activity_context_v2 (unchanged: epochs, job completion)
+  -> scoring_dirty_span
+```
+
+- **Storage.** One row per `(user_id, device_id, day, algorithm_version)`; a republish replaces it, so
+  readers never merge versions. The `document` jsonb is the source of truth; scalar columns repeat
+  the version stamps (`schema_version`, `ontology_version`, `decoder_version`, `feature_schema`,
+  `encoder_id`, `encoder_version`) and `observed_s`, `data_through`, `run_count`, `event_count` for
+  filtering. RLS lets an owner select their own rows; only `service_role` writes.
+- **Fence.** `publish_activity_context_day(token, revision, payload)` uses the v1 fence (live lease and
+  current `input_revision`, otherwise NULL and nothing is written). It validates the document before
+  writing (day and version stamps, 16 MiB, at most 20 000 runs and 10 000 events, every run inside the
+  day) and raises a stable `invalid_activity_day_*` error otherwise. It does NOT complete the job,
+  clear the lease or dirty scoring: the v1 publish stays the only thing that does.
+- **v2 can never block v1.** A failure at any v2 step (stream read, decode, a rejected document, the
+  migration not applied yet) is counted and skipped, and the v1 epochs, the job completion and the
+  scoring invalidation happen exactly as before. The v2 row and the v1 epochs share one transaction,
+  so a v1 publish that rolls back takes the day document with it. A fenced publish (lease lost) is
+  ignored for both. Heartbeat counters: `context_days_published` (stored) and `context_day_failures`
+  (skipped). A skip is logged to stderr as
+  `activity context v2 day skipped (v1 publish unaffected): <reason>` whenever its reason differs from
+  the previous one, so a failure that repeats on every job does not flood the journal. Reasons never
+  contain the document.
+- **Knob.** `FRWHOOP_ACTIVITY_CONTEXT_V2=0` turns only the day documents off (default on while the
+  lane is on). Inference is unchanged: the same windows (4 s, 2-s hop) feed both the v1 epochs and the
+  day document, and the only new work per job is reading the day's streams and the decode (cost under
+  "Known limits"). Windows from a service that does not report `feature_schema` `imu-feat-1` (an older
+  `serve.py`) are decoded without IMU features, never with shifted ones.
+- **What a document covers.** The UTC day `[00:00, 24:00)`. For the day in progress it covers up to
+  the time the job ran (`data_through`), and a WRIST_OFF that has no WRIST_ON yet is open only up to
+  then. Runs are clamped to the day; the neighbouring day's document starts where this one stops.
+  Time outside logged sleep sessions stays "unknown" (the server does not infer sleep from stillness).
+- **Deploy order.** Apply the migration BEFORE (or together with) the worker upgrade. A worker that
+  runs first still publishes v1 as before; its v2 write fails with a missing-function error under the
+  savepoint, which is counted on every job and logged once.
+- **Check.**
+
+  ```sql
+  select day, schema_version, ontology_version, decoder_version, feature_schema, encoder_id,
+         publish_interval_s, observed_s, run_count, event_count, computed_at
+  from public.activity_context_days order by computed_at desc limit 10;
+
+  -- Completed days that have no v2 document yet (published before the upgrade):
+  select j.day, j.last_completed_at
+  from public.activity_context_jobs j
+  left join public.activity_context_days d
+    on (d.user_id, d.device_id, d.day, d.algorithm_version) = (j.user_id, j.device_id, j.day, j.algorithm_version)
+  where j.completed_revision = j.input_revision and d.day is null
+  order by j.day desc limit 20;
+  ```
+
+- **Backfill (operator step, optional).** Completed jobs are not re-run on their own. To give
+  recent days a v2 document, mark them due again; the lane recomputes the whole UTC day from the
+  stored objects and publishes both v1 and v2:
+
+  ```sql
+  update public.activity_context_jobs
+     set input_revision = input_revision + 1, dirty_at = clock_timestamp(),
+         not_before = clock_timestamp(), reason = 'v2-backfill'
+   where algorithm_version = 'hart-activity-1' and completed_revision = input_revision
+     and not dead_letter and day >= current_date - 14;
+  ```
+
+- **Rollback.** Set `FRWHOOP_ACTIVITY_CONTEXT_V2=0` and restart the worker. The table keeps its rows and
+  nothing reads it, so the migration needs no revert. Account deletion removes the rows through the
+  foreign keys to `auth.users` and `devices`, so the table is not listed in the edge function's
+  explicit deletion tables.
+- **Not built yet.** No edge route serves these documents and the app does not fetch them: the phone
+  still draws its own locally decoded document. A route (`GET scores/activity-context`), stitching of
+  the UTC-day documents into the phone's local day, and a choice between local and server results are
+  the follow-up.
+- **Known limits.** The document is rebuilt from the stored streams every time the day's job runs
+  (a job runs when raw IMU for that day arrives), so HR, gravity or sleep that reaches the server
+  later than the last IMU upload shows up at the next job, not immediately. Days are UTC days, not the
+  wearer's local days. Decoding is cheap next to inference: a full busy day (a transition every few
+  minutes: 1,075 runs, 523 events, 450 KB of JSON) is built in about 0.8 s in a release build. The same
+  code takes about 19 s in a debug build, so time it with the release binary the worker runs.
+
+### Stream days (a document for every day with measurements)
+
+Raw IMU is uploaded for only a handful of sessions, but heart rate, gravity, steps and wear events are
+stored for every day the strap was worn. Stream days give each of those UTC days the same day document,
+decoded from the stored measurements alone (no encoder windows, so `encoder_id` is null and the HART/IMU
+evidence is absent). The lineage is `algorithm_version = 'streams-activity-1'`; a day that also has a raw
+IMU document (`hart-activity-1`) keeps both rows and the read surface lists the IMU one first.
+
+```text
+scoring_jobs_v2 completed work (any revision)
+  -> enqueue_activity_stream_days(lookback, backfill limit, min rebuild interval)   [every 2 min]
+       one activity_context_jobs row per (owner, device, UTC day), algorithm 'streams-activity-1';
+       the job for day d depends on the scoring of d-1, d and d+1 (a UTC day's measurements reach the
+       scorer's local day boundaries), so any of them completing again marks it for a rebuild
+  -> claim_activity_stream_day (lease, fairness across owners)
+  -> worker: HR, gravity, steps, WRIST_OFF/ON (6 h reach-back), sleep and workout sessions of the day
+  -> ActivityContextTrackBuilder (same decoder as the phone) -> ActivityContextDayDocument
+  -> complete_activity_stream_day (fenced): publish_activity_context_day + complete the job
+```
+
+- **Needs neither Python nor B2.** It runs while the model is down, and a host with no Python venv can run
+  it alone with `FRWHOOP_ACTIVITY_IMU=0`.
+- **Never touches scoring or the v1 tables.** It writes no epochs and calls no `scoring_dirty_span`.
+  `claim_activity_context_v2` skips stream jobs, so an older worker never receives one.
+- **When a day is built.** Only days that have completed scoring work get a job (the same days the app can
+  show), at most one rebuild per job per 10 minutes, and days from 2020-01-01 to today only. An empty day
+  (scoring ran, no stored measurements) completes without a document and is not retried until its scoring
+  changes. The first run walks backwards from the newest completed day, 25 days per call, so a database
+  with a long history fills in over a few hours without starving the live day. A day still in progress is
+  rebuilt about every 10 minutes while new scoring completes.
+- **Knobs.** `FRWHOOP_ACTIVITY_STREAMS=0` stops the stream stage, `FRWHOOP_ACTIVITY_STREAM_BUDGET`
+  (default 4) is jobs per wake, `FRWHOOP_ACTIVITY_IMU=0` stops the raw-IMU stage. Heartbeat counters:
+  `stream_days_enqueued`, `stream_days_claimed`, `stream_days_published`, `stream_days_empty`,
+  `stream_days_superseded`, `stream_day_failures`. A failing claim (the migration is not applied, a grant is
+  missing) is logged once, shows as `last_error_kind = stream_days`, and the stage backs off for a minute;
+  the raw-IMU stage is unaffected.
+- **Deploy order.** Apply `20261003140000_activity_context_stream_days.sql` BEFORE the worker upgrade.
+  Rollback: `FRWHOOP_ACTIVITY_STREAMS=0` and a restart; the migration is additive, and
+  `delete from public.activity_context_jobs where algorithm_version = 'streams-activity-1'` removes the queue
+  rows (the documents stay readable).
+- **Coverage and honesty.** Time is described in 5-second states, coalesced into runs whenever the state does
+  not change; the per-tick probabilities are not kept, the per-run confidence and uncertainty are. A stream
+  day has no raw-motion evidence, so posture and arm behavior lean on heart rate, gravity and the step
+  counter and are less certain than on a raw-IMU day; the stored `overall_confidence` and
+  `overall_uncertainty` say so per run. Days are UTC days, not the wearer's local days. Nothing is stored
+  for seconds the strap sent nothing (wrist off is an explicit state, a gap is simply uncovered).
+
+#### Reading it downstream
+
+Everything below is read-only and security-invoker, so an owner sees only their own rows (RLS on
+`activity_context_days`); `service_role` sees all.
+
+| Object | One row per | Columns of interest |
+| --- | --- | --- |
+| `public.activity_context_runs` | state run | `start_ts`, `end_ts` (exact UTC epoch seconds, half-open), `start_at`, `end_at`, `duration_s`, `display_context`, `confidence`, `uncertainty`, `intensity`, `sleep_state`, `wear_state`, `states`, `posture`, `locomotion`, `arm_behavior` (head probabilities), version columns, `source_rank` (1 = raw-IMU document, 2 = stream document) |
+| `public.activity_context_transitions` | transition event | `ts`, `at`, `kind`, `probability`, version columns, `source_rank` |
+| `public.activity_context_at(user, device, ts)` | the run containing `ts` | the run columns above, best source first |
+
+```sql
+-- What was the user doing at one exact second?
+select * from public.activity_context_at(:user, :device, :ts);
+
+-- Label a range of stored heart-rate samples with the state at their exact second (best source first;
+-- the day predicate lets Postgres open only that day's document):
+select distinct on (h.ts) h.ts, h.bpm, r.display_context, r.confidence, r.uncertainty, r.algorithm_version
+from public.noop_hr_samples h
+join public.activity_context_runs r
+  on r.user_id = h.user_id and r.device_id = h.device_id
+ and r.day = (to_timestamp(h.ts) at time zone 'UTC')::date
+ and h.ts >= r.start_ts and h.ts < r.end_ts
+where h.user_id = :user and h.device_id = :device and h.ts between :from and :to
+order by h.ts, r.source_rank;
+
+-- Every change of state with its time and confidence, for one day:
+select start_at, display_context, confidence, duration_s
+from public.activity_context_runs
+where user_id = :user and device_id = :device and day = :day and source_rank = 2
+order by start_ts;
+
+-- Which days have a stream document, and how complete is each?
+select day, observed_s, run_count, event_count, computed_at
+from public.activity_context_days
+where algorithm_version = 'streams-activity-1' and user_id = :user
+order by day desc;
+```
+
+#### Where the data lives
+
+| Data | Store | Notes |
+| --- | --- | --- |
+| Raw strap batches, per-sample heart rate, gravity, steps, events, RR, skin temperature, sleep sessions, workouts, scoring snapshots | Backblaze B2 (objects) and Supabase Postgres (typed tables, indexed by timestamp) | Ingest writes both; the object manifest ties them together |
+| Raw IMU sessions | Backblaze B2 only | NPB1 objects, verified by digest; only sessions the phone chose to upload |
+| ActivityContext v2 day documents (runs, events, confidence, uncertainty, provenance) | Supabase Postgres only (`activity_context_days`) | There is no B2 copy; the table is the store of record |
+| v1 30-second epochs (raw-IMU days) | Supabase Postgres (`activity_context_epochs`) | |
+| Phone-built documents | The phone only | They are never uploaded; the server rebuilds the same document from the stored streams |
 
 ## Health checks
 

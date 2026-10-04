@@ -117,6 +117,10 @@ final class ActivityPythonService {
         var label: String
         var probs: [String: Double]
         var baseline: Bool
+        /// Encoder-independent IMU facts for the window (`imu-feat-1`: accel_rms_g, gyro_rms_dps,
+        /// jerk_rms, cadence_hz, cadence_strength, orientation_change_deg). A key is absent when the
+        /// service sent null for it or did not send `feat` at all (an older serve.py).
+        var features: [String: Double] = [:]
     }
 
     struct InferResult {
@@ -126,6 +130,8 @@ final class ActivityPythonService {
         var windows: [WindowPrediction]
         var error: String?
         var errorKind: String?
+        /// `feature_schema` the service stamped on the window features (nil from an older serve.py).
+        var featureSchema: String? = nil
     }
 
     /// One run request per C10 serve protocol. `columnsB64` is one base64
@@ -170,6 +176,11 @@ final class ActivityPythonService {
     /// the request shape), used by tests to pin the wire contract.
     private(set) var lastEcho: [String: Any]?
     private var sequence = 0
+
+    /// A child that has exited leaves a pipe nobody reads. The next request line written to it has to come
+    /// back as an error (`processDied`, then a respawn), not as SIGPIPE, whose default action ends the whole
+    /// worker and every other lane with it. Process-wide; set once before the first child is started.
+    private static let ignoreBrokenPipes: Void = { _ = signal(SIGPIPE, SIG_IGN) }()
 
     init(config: Config) {
         self.config = config
@@ -231,6 +242,7 @@ final class ActivityPythonService {
             throw ServiceError.launchFailed("FRWHOOP_ACTIVITY_HOME \(config.activityHome) does not exist")
         }
 
+        _ = Self.ignoreBrokenPipes
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: config.pythonBin)
         proc.arguments = config.serveArgs
@@ -572,8 +584,17 @@ final class ActivityPythonService {
                         if let d = v as? Double { probs[k] = d }
                     }
                 }
+                // JSON null (a feature the window could not compute) is NSNull, which does not bridge to
+                // Double, so it simply stays absent.
+                var features: [String: Double] = [:]
+                if let rawFeat = w["feat"] as? [String: Any] {
+                    for (k, v) in rawFeat {
+                        if let d = v as? Double, d.isFinite { features[k] = d }
+                    }
+                }
                 windows.append(WindowPrediction(start: s, end: e, label: label,
-                                                probs: probs, baseline: (w["baseline"] as? Bool) ?? false))
+                                                probs: probs, baseline: (w["baseline"] as? Bool) ?? false,
+                                                features: features))
             }
         }
         return InferResult(
@@ -582,6 +603,7 @@ final class ActivityPythonService {
             preprocessingVersion: obj["preprocessing_version"] as? String,
             windows: windows,
             error: obj["error"] as? String,
-            errorKind: obj["kind"] as? String)
+            errorKind: obj["kind"] as? String,
+            featureSchema: obj["feature_schema"] as? String)
     }
 }

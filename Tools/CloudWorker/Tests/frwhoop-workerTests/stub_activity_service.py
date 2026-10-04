@@ -11,7 +11,8 @@ Ops:
                "model_version":"stub-model","preprocessing_version":"stub-preprocess"}
   infer    -> {"id":..., "ok":true, "model_version":"stub-model",
                "preprocessing_version":"stub-preprocess",
-               "windows":[one 4 s stationary window at run.start_ts],
+               "feature_schema":"imu-feat-1",
+               "windows":[one 4 s stationary window at run.start_ts, with "feat"],
                "echo":{...run fields echoed back...}}
   shutdown -> respond ok then exit(0)
 
@@ -19,6 +20,9 @@ Test knobs (fields on any request):
   "die": true        -> exit(2) without a response (crash/restart test)
   "sleep_seconds": N -> sleep N before responding (timeout test)
   "respond_ok": false-> {"ok":false,"kind":"model_missing","error":"..."}
+  "legacy_no_feat": true     -> an older serve.py: no "feat", no "feature_schema"
+  "feature_schema": "x"      -> stamp "x" instead of imu-feat-1 (layout mismatch test)
+  "feat_nulls": true         -> cadence_hz and orientation_change_deg are JSON null
 """
 import json
 import sys
@@ -61,9 +65,10 @@ def main():
                         "error": "stub model missing"}
             else:
                 start_ts = run.get("start_ts")
+                legacy = bool(req.get("legacy_no_feat"))
                 windows = []
                 if start_ts is not None:
-                    windows.append({
+                    window = {
                         "s": float(start_ts),
                         "e": float(start_ts) + 4.0,
                         "label": "stationary",
@@ -71,7 +76,18 @@ def main():
                                   "running": 0.03, "other_movement": 0.02,
                                   "unknown": 0.0},
                         "baseline": False,
-                    })
+                    }
+                    if not legacy:
+                        nulls = bool(req.get("feat_nulls"))
+                        window["feat"] = {
+                            "accel_rms_g": 0.012,
+                            "gyro_rms_dps": 3.5,
+                            "jerk_rms": 0.04,
+                            "cadence_hz": None if nulls else 1.8,
+                            "cadence_strength": 0.31,
+                            "orientation_change_deg": None if nulls else 2.5,
+                        }
+                    windows.append(window)
                 resp = {
                     "id": rid,
                     "ok": True,
@@ -94,6 +110,8 @@ def main():
                         "n_tail_run": len(run.get("tail_b64") or []),
                     },
                 }
+                if not legacy:
+                    resp["feature_schema"] = req.get("feature_schema") or "imu-feat-1"
         elif op == "shutdown":
             sys.stdout.write(json.dumps({"id": rid, "ok": True}) + "\n")
             sys.stdout.flush()

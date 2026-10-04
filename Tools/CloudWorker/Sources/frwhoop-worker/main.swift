@@ -30,6 +30,16 @@ import FoundationNetworking
 //   FRWHOOP_ACTIVITY_MODEL_DIR   model directory passed to the service (optional)
 //   FRWHOOP_ACTIVITY_TIMEOUT_SECONDS  per-inference timeout for the python child (default 60)
 //   FRWHOOP_ACTIVITY_LEASE_SECONDS    activity job lease length (default 300)
+//   FRWHOOP_ACTIVITY_CONTEXT_V2  "0" stops the lane from also building and storing the ActivityContext v2
+//                                day document (default ON when the activity lane is on; a database
+//                                without public.activity_context_days just counts the skip)
+//   FRWHOOP_ACTIVITY_STREAMS     "0" stops the lane from building a day document for every UTC day that has
+//                                stored measurements (stream days; default ON when the activity lane is on;
+//                                needs 20261003140000_activity_context_stream_days.sql, otherwise the lane
+//                                notes the error once and retries every minute)
+//   FRWHOOP_ACTIVITY_STREAM_BUDGET    stream-day jobs per wake (default 4)
+//   FRWHOOP_ACTIVITY_IMU         "0" skips the raw-IMU jobs (no Python child, no model) and runs only the stream
+//                                days; for a host that has neither (default ON)
 //   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity);
 //                                "series" keeps scoring but stops building and writing the dense intraday series
 //   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
@@ -71,6 +81,10 @@ struct WorkerConfig {
     let activityModelDir: String?
     let activityTimeoutSeconds: Double
     let activityLeaseSeconds: Int
+    let activityContextV2: Bool
+    let activityImu: Bool
+    let activityStreams: Bool
+    let activityStreamBudget: Int
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -113,6 +127,10 @@ struct WorkerConfig {
             .flatMap { $0.isEmpty ? nil : $0 }
         self.activityTimeoutSeconds = Double(environment["FRWHOOP_ACTIVITY_TIMEOUT_SECONDS"] ?? "60") ?? 60
         self.activityLeaseSeconds = Int(environment["FRWHOOP_ACTIVITY_LEASE_SECONDS"] ?? "300") ?? 300
+        self.activityContextV2 = (environment["FRWHOOP_ACTIVITY_CONTEXT_V2"] ?? "1") != "0"
+        self.activityImu = (environment["FRWHOOP_ACTIVITY_IMU"] ?? "1") != "0"
+        self.activityStreams = (environment["FRWHOOP_ACTIVITY_STREAMS"] ?? "1") != "0"
+        self.activityStreamBudget = max(1, Int(environment["FRWHOOP_ACTIVITY_STREAM_BUDGET"] ?? "4") ?? 4)
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -342,7 +360,11 @@ var activity = ActivityLane(
         maxResponseLineBytes: 16 * 1024 * 1024,
         restartCap: 8,
         restartCooldownSeconds: 30)),
-    leaseSeconds: config.activityLeaseSeconds)
+    leaseSeconds: config.activityLeaseSeconds,
+    imuJobsEnabled: config.activityImu,
+    contextDaysEnabled: config.activityContextV2,
+    streamDaysEnabled: config.activityStreams,
+    streamDayBudget: config.activityStreamBudget)
 
 let laneQueue = DispatchQueue(label: "frwhoop.lanes", attributes: .concurrent)
 
@@ -440,6 +462,8 @@ if activityState.read().enabled {
     laneQueue.async {
         runLane(activityState, cycle: {
             let before = activity.stats.completed + activity.stats.superseded
+                + activity.stats.streamDaysPublished + activity.stats.streamDaysEmpty
+                + activity.stats.streamDaysSuperseded
             activity.drain(budget: config.activityBudget)
             activityState.update {
                 $0.counters = [
@@ -452,12 +476,22 @@ if activityState.read().enabled {
                     "failures_unsettled": activity.stats.failuresUnsettled,
                     "model_unavailable": activity.stats.modelUnavailable,
                     "windows_inferred": activity.stats.windowsInferred,
+                    "context_days_published": activity.stats.contextDaysPublished,
+                    "context_day_failures": activity.stats.contextDayFailures,
+                    "stream_days_enqueued": activity.stats.streamDaysEnqueued,
+                    "stream_days_claimed": activity.stats.streamDaysClaimed,
+                    "stream_days_published": activity.stats.streamDaysPublished,
+                    "stream_days_empty": activity.stats.streamDaysEmpty,
+                    "stream_days_superseded": activity.stats.streamDaysSuperseded,
+                    "stream_day_failures": activity.stats.streamDayFailures,
                 ]
                 $0.lastError = activity.stats.lastError
                 $0.lastErrorKind = activity.stats.lastErrorKind
                 $0.lastActivityAt = activity.stats.lastActivityAt
             }
-            return (activity.stats.completed + activity.stats.superseded) > before
+            return (activity.stats.completed + activity.stats.superseded
+                + activity.stats.streamDaysPublished + activity.stats.streamDaysEmpty
+                + activity.stats.streamDaysSuperseded) > before
         }, ensureConnected: { try dbActivity.ensureConnected() })
     }
 }

@@ -32,6 +32,24 @@ import StrandAnalytics
 ///   8. after commit, re-dirties the affected scoring day(s) at coalesced
 ///      cadence via `public.scoring_dirty_span` (worker-schema §3.3, route 2).
 ///
+/// ActivityContext v2 rides along (`ActivityContextDays`): after inference the
+/// same windows, their IMU features and the day's stored heart-rate, gravity,
+/// step, sleep, workout and wear streams go through the shared probabilistic
+/// decoder, and the day document is written by the fenced
+/// `publish_activity_context_day` RPC inside the step-7 transaction, before the
+/// v1 publish. It is best effort: any failure of it is counted and skipped, so
+/// the v1 epochs, the scoring invalidation and job completion are exactly what
+/// they were without it. `FRWHOOP_ACTIVITY_CONTEXT_V2=0` switches it off.
+///
+/// Stream days (`streams-activity-1` jobs) cover every other day: raw IMU is uploaded for only a few
+/// sessions, but heart rate, gravity, steps and wear events are stored for every day the strap was
+/// worn. `enqueue_activity_stream_days` turns completed scoring work into one job per (owner, device,
+/// UTC day); the lane claims those through `claim_activity_stream_day`, decodes the stored streams with
+/// no encoder windows (the same decoder, the same inputs as the phone's day timeline) and completes the
+/// job through `complete_activity_stream_day`, which stores the day document. That path needs neither
+/// B2 nor Python, so it keeps running while the model is down (`FRWHOOP_ACTIVITY_IMU=0` runs it alone on a
+/// host with no Python). `FRWHOOP_ACTIVITY_STREAMS=0` stops it.
+///
 /// The claim commits BEFORE inference (a lease, not a transaction), so the
 /// long B2/Python work holds no transaction. `model_unavailable` / a dead
 /// Python process fail the lane soft: the drain does not claim while the
@@ -44,6 +62,15 @@ struct ActivityLane {
     var leaseSeconds: Int = 300
     var maxFailures: Int = 8
     var publishAttempts: Int = 3
+    /// Process raw-IMU jobs (needs the Python service and, for HART, its model). A host without them
+    /// turns this off and still stores stream days.
+    var imuJobsEnabled: Bool = true
+    /// Build and store the ActivityContext v2 day document next to the v1 epochs.
+    var contextDaysEnabled: Bool = true
+    /// Build and store a day document for every UTC day that has stored measurements (stream days).
+    var streamDaysEnabled: Bool = true
+    /// Stream-day jobs processed per wake.
+    var streamDayBudget: Int = 4
     /// Extra seconds before/after a run sent to Python for resample filter
     /// state (C10 serve protocol: up to 3).
     static let boundarySeconds = 3
@@ -79,6 +106,24 @@ struct ActivityLane {
         /// Soft failures while the model was unavailable.
         var modelUnavailable = 0
         var windowsInferred = 0
+        /// ActivityContext v2 day documents stored.
+        var contextDaysPublished = 0
+        /// Day documents not stored because building or writing them failed (the v1 publish was
+        /// unaffected). A migration that was not applied shows up here.
+        var contextDayFailures = 0
+        var lastContextDayError: String?
+        /// Stream-day jobs created or refreshed by `enqueue_activity_stream_days`.
+        var streamDaysEnqueued = 0
+        var streamDaysClaimed = 0
+        /// Stream-day documents stored.
+        var streamDaysPublished = 0
+        /// Stream-day jobs completed because the day held nothing to describe.
+        var streamDaysEmpty = 0
+        /// Stream-day claims the queue had already moved past (nothing written, no failure recorded).
+        var streamDaysSuperseded = 0
+        /// Stream-day jobs that failed and were settled with backoff (dead-letter at the queue's cap).
+        var streamDayFailures = 0
+        var lastStreamDayError: String?
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -89,6 +134,22 @@ struct ActivityLane {
     /// the RPC is idempotent and the trigger covers the common path).
     var lastReconcileAt: Date?
     static let reconcileIntervalSeconds: TimeInterval = 60
+    /// The reconcile call and its lookback. The parameter is bound as text and cast by Postgres, so it
+    /// must be a bare interval literal: a quoted `'7 days'::interval` is not one and made every call fail.
+    static let reconcileSQL = "SELECT public.reconcile_activity_context($1::interval)::text"
+    static let reconcileLookback = "7 days"
+    /// Stream days are re-derived from scoring completions; checking every couple of minutes keeps a live
+    /// day fresh without scanning the scoring table on every idle wake.
+    var lastStreamEnqueueAt: Date?
+    static let streamEnqueueIntervalSeconds: TimeInterval = 120
+    static let streamLookback = "36 hours"
+    static let streamBackfillPerCall = 25
+    static let streamMinRebuildInterval = "10 minutes"
+    static let streamEnqueueSQL = "SELECT public.enqueue_activity_stream_days($1::interval,$2::integer,$3::interval)::text"
+    /// A stream-day source that errors at claim time (the migration is not applied yet, say) is left
+    /// alone for this long, without affecting the raw-IMU path.
+    var streamBackoffUntil: Date?
+    static let streamBackoffSeconds: TimeInterval = 60
 
     enum ActivityError: Error, CustomStringConvertible {
         /// A deterministic input violation: bounded retry through the fail
@@ -112,7 +173,7 @@ struct ActivityLane {
         case failed
     }
 
-    private struct ActivityJob {
+    struct ActivityJob {
         var userId: String
         var deviceId: String
         var day: String
@@ -143,7 +204,14 @@ struct ActivityLane {
 
     // MARK: - Drain
 
+    /// One wake: the raw-IMU jobs first (they need the model), then the stream days (they do not, so a
+    /// missing model or Python never holds them back).
     mutating func drain(budget: Int) {
+        if imuJobsEnabled { drainImuJobs(budget: budget) }
+        if streamDaysEnabled { drainStreamDays(budget: streamDayBudget) }
+    }
+
+    private mutating func drainImuJobs(budget: Int) {
         for _ in 0..<max(1, budget) {
             do {
                 try db.ensureConnected()
@@ -173,9 +241,7 @@ struct ActivityLane {
                Date().timeIntervalSince(last) < Self.reconcileIntervalSeconds {
             } else {
                 lastReconcileAt = Date()
-                _ = try? db.callFunctionForJSON(
-                    "SELECT public.reconcile_activity_context($1::interval)::text",
-                    ["'7 days'::interval"])
+                _ = try? db.callFunctionForJSON(Self.reconcileSQL, [Self.reconcileLookback])
             }
             do {
                 switch try cycle() {
@@ -227,6 +293,167 @@ struct ActivityLane {
                 throw ActivityError.retryable("model_unavailable: \(ping.modelStatus)")
             }
         }
+    }
+
+    // MARK: - Stream days
+
+    /// The stream-day half of a wake (internal so a scratch database can drive it without Python or B2).
+    mutating func drainStreamDays(budget: Int) {
+        if let until = streamBackoffUntil, Date() < until { return }
+        do {
+            try db.ensureConnected()
+        } catch {
+            record(error)
+            return
+        }
+        enqueueStreamDaysIfDue()
+        for _ in 0..<max(1, budget) {
+            do {
+                switch try streamCycle() {
+                case .empty:
+                    return
+                case .completed:
+                    stats.lastActivityAt = Date()
+                case .superseded, .failed:
+                    break
+                }
+            } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+                record(e)
+                return
+            } catch {
+                // The claim itself failed (the stream-day migration is not applied, a grant is missing):
+                // say so once and leave the stream source alone for a while. The raw-IMU path is separate.
+                let why = ActivityContextDays.safeReason(error)
+                noteStreamDayFailure(why)
+                stats.lastError = "stream_days_claim: \(why)"
+                stats.lastErrorKind = "stream_days"
+                streamBackoffUntil = Date().addingTimeInterval(Self.streamBackoffSeconds)
+                return
+            }
+        }
+    }
+
+    /// Create or refresh stream-day jobs from the scoring work completed since the last look. Best effort
+    /// and idempotent: a failed call is noted and retried on the next interval.
+    mutating func enqueueStreamDaysIfDue() {
+        if let last = lastStreamEnqueueAt,
+           Date().timeIntervalSince(last) < Self.streamEnqueueIntervalSeconds { return }
+        lastStreamEnqueueAt = Date()
+        do {
+            let out = try db.callFunctionForJSON(
+                Self.streamEnqueueSQL,
+                [Self.streamLookback, String(Self.streamBackfillPerCall), Self.streamMinRebuildInterval])
+            stats.streamDaysEnqueued += Int(out ?? "") ?? 0
+        } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+            record(e)
+        } catch {
+            noteStreamDayFailure(ActivityContextDays.safeReason(error))
+        }
+    }
+
+    /// Claim and process one stream-day job. Job-level failures are settled here (bounded backoff,
+    /// dead-letter at the queue's cap); only a failed claim or a lost connection propagates.
+    private mutating func streamCycle() throws -> Cycle {
+        let rows = try db.query("select * from public.claim_activity_stream_day($1::integer)",
+                                [String(leaseSeconds)])
+        guard let r = rows.first else { return .empty }
+        stats.streamDaysClaimed += 1
+        guard let job = Self.parseStreamJob(r) else {
+            if let token = r["lease_token"], !token.isEmpty, let rev = Int64(r["input_revision"] ?? "") {
+                stats.streamDayFailures += 1
+                try settleFailure(token: token, revision: rev,
+                                  error: ActivityError.deterministic("malformed_job_row"))
+            }
+            return .failed
+        }
+        do {
+            switch try processStreamDay(job: job, started: Date()) {
+            case .stored:
+                stats.streamDaysPublished += 1
+                return .completed
+            case .empty:
+                stats.streamDaysEmpty += 1
+                return .completed
+            case .fenced:
+                stats.streamDaysSuperseded += 1
+                stats.notCompleted += 1
+                try? releaseLease(job: job)
+                return .superseded
+            }
+        } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+            stats.failuresUnsettled += 1
+            throw e  // lease expiry hands the job back to the queue
+        } catch {
+            let kind = (error as? PostgresClient.Error)?.kind ?? .other
+            if kind == .serialization || kind == .stale {
+                stats.streamDaysSuperseded += 1
+                return .superseded
+            }
+            stats.streamDayFailures += 1
+            noteStreamDayFailure(ActivityContextDays.safeReason(error))
+            do {
+                try settleFailure(job: job, error: error)
+            } catch {
+                stats.failuresUnsettled += 1
+            }
+            return .failed
+        }
+    }
+
+    /// Decode one UTC day from the stored measurements and complete the job. Reads and decodes outside any
+    /// transaction; the only write is the one fenced completion at the end.
+    private mutating func processStreamDay(job: ActivityJob,
+                                           started: Date) throws -> ActivityContextDays.StreamDayOutcome {
+        guard let dayBounds = Self.utcDayBounds(job.day) else {
+            throw ActivityError.deterministic("invalid_job_day \(job.day)")
+        }
+        guard try renewLease(job: job) else {
+            throw PostgresClient.Error(message: "activity lease lost before the stream day decode",
+                                       sqlstate: "55000", kind: .stale)
+        }
+        let asleep = try loadIntervals(kindClause: "kind = 'sleep'", user: job.userId, device: job.deviceId,
+                                       dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let exercise = try loadIntervals(kindClause: "kind in ('workout','manual_workout')",
+                                         user: job.userId, device: job.deviceId,
+                                         dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let streams = try ActivityContextDays.loadStreams(
+            db: db, userId: job.userId, deviceId: job.deviceId,
+            dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let built = try ActivityContextDays.buildStreamDay(
+            day: job.day, dayBounds: dayBounds, streams: streams, sleep: asleep, exercise: exercise,
+            now: Int(Date().timeIntervalSince1970))
+        guard try renewLease(job: job) else {
+            throw PostgresClient.Error(message: "activity lease lost before the stream day completion",
+                                       sqlstate: "55000", kind: .stale)
+        }
+        return try ActivityContextDays.completeStreamDay(
+            db: db, token: job.leaseToken, revision: job.inputRevision, payload: built?.payloadText,
+            durationMS: Int(Date().timeIntervalSince(started) * 1000))
+    }
+
+    /// A claimed stream-day row. Unlike a raw-IMU job it has no input objects: its inputs are the stored
+    /// measurement streams, identified by the day alone.
+    static func parseStreamJob(_ r: [String: String]) -> ActivityJob? {
+        let uid = r["user_id"] ?? ""
+        let dev = r["device_id"] ?? ""
+        let day = r["day"] ?? ""
+        let tok = r["lease_token"] ?? ""
+        guard !uid.isEmpty, !dev.isEmpty, !day.isEmpty, !tok.isEmpty,
+              let revision = Int64(r["input_revision"] ?? ""), revision > 0,
+              (r["algorithm_version"] ?? "") == ActivityContextDays.streamsAlgorithmVersion else { return nil }
+        return ActivityJob(userId: uid, deviceId: dev, day: day,
+                           algorithmVersion: ActivityContextDays.streamsAlgorithmVersion,
+                           objectIds: [], digests: [], fingerprint: r["fingerprint"] ?? "",
+                           inputRevision: revision, leaseToken: tok)
+    }
+
+    /// Count a stream-day problem and say why on stderr, once per distinct reason.
+    private mutating func noteStreamDayFailure(_ why: String) {
+        if stats.lastStreamDayError != why {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: activity stream day: \(why)\n").data(using: .utf8)!)
+        }
+        stats.lastStreamDayError = why
     }
 
     // MARK: - One job
@@ -362,7 +589,7 @@ struct ActivityLane {
                 }
                 if let mv = result.modelVersion, !mv.isEmpty { versions.model = mv }
                 if let pv = result.preprocessingVersion, !pv.isEmpty { versions.preprocessing = pv }
-                windows.append(contentsOf: result.windows)
+                windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
                 stats.windowsInferred += result.windows.count
             }
         }
@@ -385,20 +612,53 @@ struct ActivityLane {
         // day (20261003120000_activity_context.sql), so the C10 document is
         // stamped with the job day before it is sealed.
         let payloadText = try Self.dayStampedJSONText(doc: &doc, day: job.day)
+
+        // 6b. ActivityContext v2: the same windows plus their IMU features and the day's stored
+        //     streams through the shared probabilistic decoder. Best effort — see the type comment.
+        let dayDocument = try buildContextDay(
+            job: job, dayBounds: dayBounds, windows: windows, versions: versions,
+            asleep: asleep, exercise: exercise)
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
-        // 7. Fenced publish in one short transaction. NULL is never success.
+        // 7–8. Fenced publish, then the scoring re-dirty.
+        return try publishDay(job: job, payloadText: payloadText, dayDocument: dayDocument,
+                              durationMS: durationMS, dayBounds: dayBounds)
+    }
+
+    /// Steps 7–8 as a unit (internal so a scratch database can exercise it without B2 or Python).
+    ///
+    /// 7. Fenced publish in one short transaction. NULL is never success. The ActivityContext v2 day
+    ///    document, when there is one, is written first under a savepoint: it shares the v1 publish's
+    ///    fence and commits or rolls back with it, but a rejection of it never reaches the v1 publish.
+    /// 8. After commit, the coalesced re-dirty of the affected scoring day(s) (worker-schema §3.3
+    ///    route 2). Best effort: the next cycle handles a transient failure.
+    ///
+    /// Returns true when the v1 publish committed.
+    mutating func publishDay(job: ActivityJob, payloadText: String,
+                             dayDocument: ActivityContextDays.Built?, durationMS: Int,
+                             dayBounds: (start: Int, end: Int)) throws -> Bool {
         try db.beginTransaction(.readCommitted)
         do {
+            var dayStored = false
+            if let dayDocument {
+                switch try ActivityContextDays.publish(
+                    db: db, token: job.leaseToken, revision: job.inputRevision,
+                    payload: dayDocument.payloadText) {
+                case .stored:
+                    dayStored = true
+                case .fenced:
+                    break
+                case .rejected(let why):
+                    noteContextDayFailure(why)
+                }
+            }
             let publishJSON = try db.callFunctionForJSONRaw(
                 "SELECT public.publish_activity_context_v2($1::uuid,$2::bigint,$3::jsonb,$4::bigint)::text",
                 [job.leaseToken, String(job.inputRevision), payloadText, String(durationMS)])
             let revision = Int64(publishJSON ?? "")
             if let revision, revision > 0 {
                 try db.commitTransaction()
-                // 8. Coalesced re-dirty of the affected scoring day(s), after
-                //    commit (worker-schema §3.3 route 2). Best effort: the
-                //    next cycle handles a transient failure.
+                if dayStored { stats.contextDaysPublished += 1 }
                 _ = try? db.callFunctionForJSON(
                     "SELECT public.scoring_dirty_span($1::uuid,$2::uuid,$3::bigint,$4::bigint)::text",
                     [job.userId, job.deviceId, String(dayBounds.start), String(dayBounds.end)])
@@ -412,6 +672,52 @@ struct ActivityLane {
             db.rollbackTransaction()
             throw error
         }
+    }
+
+    /// The ActivityContext v2 day document for this job, or nil when v2 is switched off or building it
+    /// failed. Reads the day's streams and decodes outside any transaction. Only a lost lease or a lost
+    /// connection is allowed to end the job; every other failure is counted and the v1 publish proceeds.
+    mutating func buildContextDay(
+        job: ActivityJob, dayBounds: (start: Int, end: Int),
+        windows: [ActivityPythonService.WindowPrediction],
+        versions: (model: String, preprocessing: String),
+        asleep: [(start: Int, end: Int)],
+        exercise: [(start: Int, end: Int)]) throws -> ActivityContextDays.Built? {
+        guard contextDaysEnabled else { return nil }
+        do {
+            guard try renewLease(job: job) else {
+                throw PostgresClient.Error(message: "activity lease lost before the context decode",
+                                           sqlstate: "55000", kind: .stale)
+            }
+            let streams = try ActivityContextDays.loadStreams(
+                db: db, userId: job.userId, deviceId: job.deviceId,
+                dayStart: dayBounds.start, dayEnd: dayBounds.end)
+            let now = Int(Date().timeIntervalSince1970)
+            let input = ActivityContextDays.trackInput(
+                windows: windows, streams: streams, sleep: asleep, exercise: exercise,
+                dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
+                encoderVersion: versions.model)
+            return try ActivityContextDays.build(
+                input: input, day: job.day, modelVersion: versions.model,
+                preprocessingVersion: versions.preprocessing, generatedAt: now)
+        } catch let e as PostgresClient.Error where e.kind == .connectionLost || e.kind == .stale {
+            throw e
+        } catch {
+            noteContextDayFailure(ActivityContextDays.safeReason(error))
+            return nil
+        }
+    }
+
+    /// Count a skipped v2 day and say why on stderr, once per distinct reason: a migration that was not
+    /// applied would otherwise repeat the same line for every job.
+    private mutating func noteContextDayFailure(_ why: String) {
+        stats.contextDayFailures += 1
+        if stats.lastContextDayError != why {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: activity context v2 day skipped (v1 publish unaffected): \(why)\n")
+                    .data(using: .utf8)!)
+        }
+        stats.lastContextDayError = why
     }
 
     /// Persist the failure through the fenced contract in its own committed
@@ -537,7 +843,7 @@ struct ActivityLane {
 
     // MARK: - Job row parsing
 
-    private static func parseJob(_ r: [String: String]) -> ActivityJob? {
+    static func parseJob(_ r: [String: String]) -> ActivityJob? {
         let uid = r["user_id"] ?? ""
         let dev = r["device_id"] ?? ""
         let day = r["day"] ?? ""
