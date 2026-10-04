@@ -8,10 +8,28 @@ import WhoopStore
 // is in, and the six things a person might need to do about it (connect, disconnect, buzz, restart, re-pair,
 // pair a different strap). Every decision about wording and which button is live comes from
 // `StrapConnectionStatus`; this file only lays it out and wires the buttons to `AppModel`.
+//
+// The layout is fixed. Connecting, dropping, searching and pairing change what the page says, never where
+// anything sits: see `StableLayout.swift` for how each piece of text gets a slot sized for the most it can say.
 
+/// The entry point. It holds the app-wide objects without watching them: `LiveState` publishes every time a
+/// heart-rate sample arrives, and a view that observes it re-runs its body at that rate. The page below is
+/// gated on the identity of those objects, and reads the few link values it shows through `StrapLinkObserver`,
+/// which only publishes when one of them actually changes.
 struct StrapConnectionView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var live: LiveState
+
+    var body: some View {
+        StrapConnectionPage(model: model, live: live).equatable()
+    }
+}
+
+private struct StrapConnectionPage: View, Equatable {
+    let model: AppModel
+    let live: LiveState
+
+    @StateObject private var link: StrapLinkObserver
     @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
 
     /// Set when the user asks for a connection, cleared once a link is up or they stop it. The BLE layer scans
@@ -34,9 +52,23 @@ struct StrapConnectionView: View {
     /// transfer before it reboots is not reported as having ignored the command.
     private static let restartCheckSeconds: UInt64 = 15
 
+    init(model: AppModel, live: LiveState) {
+        self.model = model
+        self.live = live
+        _link = StateObject(wrappedValue: StrapLinkObserver.bound(to: live, model: model))
+    }
+
+    static func == (lhs: StrapConnectionPage, rhs: StrapConnectionPage) -> Bool {
+        lhs.model === rhs.model && lhs.live === rhs.live
+    }
+
     private var status: StrapConnectionStatus {
-        .current(live: live, model: model, searching: searchStartedAt != nil, searchIsSlow: searchIsSlow,
-                 userDisconnected: userDisconnected)
+        StrapConnectionStatus(link: link.inputs, searching: searchStartedAt != nil, searchIsSlow: searchIsSlow,
+                              userDisconnected: userDisconnected)
+    }
+
+    private var notes: StrapActionNotes {
+        StrapActionNotes(buzzSent: buzzSentAt != nil, restartIgnored: restartIgnored)
     }
 
     private var strapModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
@@ -46,7 +78,11 @@ struct StrapConnectionView: View {
         return ScreenScaffold(title: "Pair & connect",
                               subtitle: "Connect, test and re-pair your WHOOP strap.") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                statusCard(current)
+                StrapStatusCard(status: current,
+                                link: link.inputs,
+                                selectedModel: strapModel,
+                                onPickModel: pickModel,
+                                onLead: { performLead(current.lead) })
                 connectionGroup(current)
                 strapGroup(current)
                 pairingGroup(current)
@@ -59,18 +95,18 @@ struct StrapConnectionView: View {
             Text("It disconnects for about 30 seconds while it restarts, then reconnects on its own. Your recorded data is kept.")
         }
         .sheet(isPresented: $showingRepair) {
-            StrapRepairSheet(searchStartedAt: $searchStartedAt, searchIsSlow: $searchIsSlow) {
+            StrapRepairSheet(model: model, live: live,
+                             searchStartedAt: $searchStartedAt, searchIsSlow: $searchIsSlow) {
                 showingRepair = false
             }
-            .environmentObject(model)
-            .environmentObject(live)
         }
         .sheet(isPresented: $showingAddStrap) {
             AddDeviceWizard(live: live) { showingAddStrap = false }
                 .environmentObject(model)
                 .environmentObject(live)
         }
-        .onChange(of: live.connected) { connected in
+        .onAppear { link.refresh() }
+        .onChangeCompat(of: link.inputs.connected) { connected in
             if connected {
                 endSearch()
                 userDisconnected = false
@@ -98,101 +134,14 @@ struct StrapConnectionView: View {
         }
     }
 
-    // MARK: Status
+    // MARK: Status card
 
-    private func statusCard(_ status: StrapConnectionStatus) -> some View {
-        StrandCard(padding: NoopMetrics.space4) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                HStack(spacing: NoopMetrics.space2) {
-                    StatePill("\(status.title)", tone: status.tone, pulsing: status.isBusy)
-                    batteryPill
-                    Spacer(minLength: 0)
-                }
-                if showsModelPicker(status) {
-                    modelPicker
-                } else {
-                    Text(strapSummary)
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-                Text(status.detail)
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let leadTitle = status.leadTitle {
-                    NoopButton("\(leadTitle)", systemImage: leadSymbol(status.lead), fullWidth: true) {
-                        performLead(status.lead)
-                    }
-                }
-            }
-        }
-    }
-
-    /// Which strap family to look for. Only offered while nothing is connected or in flight, because
-    /// switching drops the current strap's bond so the new family pairs fresh.
-    private func showsModelPicker(_ status: StrapConnectionStatus) -> Bool {
-        switch status.phase {
-        case .disconnected, .unpaired, .needsRepair: return true
-        default: return false
-        }
-    }
-
-    private var modelPicker: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            Text("Strap model")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textSecondary)
-            SegmentedPillControl(
-                WhoopModel.allCases,
-                selection: Binding(
-                    get: { strapModel },
-                    set: { picked in
-                        guard picked.rawValue != selectedModelRaw else { return }
-                        selectedModelRaw = picked.rawValue
-                        endSearch()
-                        model.prepareStrapSwitch()
-                    }
-                ),
-                adaptsToAvailableWidth: true,
-                label: { $0.displayName }
-            )
-        }
-    }
-
-    /// "WHOOP 5.0 / MG · Firmware 50.40.1.0" while a link is up, just the model otherwise.
-    private var strapSummary: String {
-        guard live.connected, let firmware = live.strapFirmware, !firmware.isEmpty else {
-            return strapModel.displayName
-        }
-        return strapModel.displayName + " · " + String(localized: "Firmware \(firmware)")
-    }
-
-    @ViewBuilder private var batteryPill: some View {
-        if let pct = live.batteryPct {
-            let rounded = Int(pct.rounded())
-            if !live.connected {
-                StatePill("Last battery \(rounded)%", tone: batteryTone(pct), showsDot: false)
-            } else if live.charging == true {
-                StatePill("Battery \(rounded)% · Charging", tone: batteryTone(pct), showsDot: false)
-            } else {
-                StatePill("Battery \(rounded)%", tone: batteryTone(pct), showsDot: false)
-            }
-        }
-    }
-
-    private func batteryTone(_ pct: Double) -> StrandTone {
-        if pct <= 15 { return .critical }
-        if pct <= 30 { return .warning }
-        return .positive
-    }
-
-    private func leadSymbol(_ lead: StrapConnectionStatus.LeadAction?) -> String? {
-        switch lead {
-        case .connect: return "arrow.clockwise"
-        case .findStrap: return "magnifyingglass"
-        case .repair: return "link"
-        case nil: return nil
-        }
+    private func pickModel(_ picked: WhoopModel) {
+        guard picked.rawValue != selectedModelRaw else { return }
+        selectedModelRaw = picked.rawValue
+        endSearch()
+        model.prepareStrapSwitch()
+        link.refresh()
     }
 
     private func performLead(_ lead: StrapConnectionStatus.LeadAction?) {
@@ -207,83 +156,37 @@ struct StrapConnectionView: View {
 
     private func connectionGroup(_ status: StrapConnectionStatus) -> some View {
         SettingsGroup("Connection") {
-            StrapActionRow(symbol: "arrow.clockwise",
-                           title: status.reconnectTitle,
-                           detail: status.reconnect.reason ?? reconnectHint(status),
-                           isEnabled: status.reconnect.isAvailable,
-                           isBusy: status.phase == .searching,
-                           action: connect)
+            row(.reconnect, symbol: "arrow.clockwise", status, busy: status.phase == .searching, perform: connect)
             SettingsDivider()
-            StrapActionRow(symbol: "xmark.circle",
-                           title: status.disconnectTitle,
-                           detail: status.disconnect.reason ?? disconnectHint(status),
-                           isEnabled: status.disconnect.isAvailable,
-                           action: disconnect)
+            row(.disconnect, symbol: "xmark.circle", status, perform: disconnect)
         }
     }
 
     private func strapGroup(_ status: StrapConnectionStatus) -> some View {
         SettingsGroup("Strap") {
-            StrapActionRow(symbol: "waveform",
-                           title: String(localized: "Buzz strap"),
-                           detail: buzzHint(status),
-                           isEnabled: status.buzz.isAvailable,
-                           action: buzz)
+            row(.buzz, symbol: "waveform", status, perform: buzz)
             SettingsDivider()
-            StrapActionRow(symbol: "power",
-                           title: String(localized: "Restart strap"),
-                           detail: restartHint(status),
-                           isEnabled: status.restart.isAvailable) {
-                confirmingRestart = true
-            }
+            row(.restart, symbol: "power", status) { confirmingRestart = true }
         }
     }
 
     private func pairingGroup(_ status: StrapConnectionStatus) -> some View {
         SettingsGroup("Pairing", footer: "None of these actions delete your recorded data.") {
-            StrapActionRow(symbol: "link",
-                           title: String(localized: "Re-pair strap"),
-                           detail: status.pairing.reason
-                               ?? String(localized: "Guided fix for a strap that won't connect, drops right away or isn't fully paired."),
-                           isEnabled: status.pairing.isAvailable) {
-                showingRepair = true
-            }
+            row(.repair, symbol: "link", status) { showingRepair = true }
             SettingsDivider()
-            StrapActionRow(symbol: "plus.circle",
-                           title: String(localized: "Pair a different strap"),
-                           detail: status.pairing.reason
-                               ?? String(localized: "Add another WHOOP or a heart-rate strap."),
-                           isEnabled: status.pairing.isAvailable) {
-                showingAddStrap = true
-            }
+            row(.pairDifferent, symbol: "plus.circle", status) { showingAddStrap = true }
         }
     }
 
-    private func reconnectHint(_ status: StrapConnectionStatus) -> String {
-        if status.phase == .searching { return String(localized: "Looking for your strap…") }
-        return status.connected
-            ? String(localized: "Drops the Bluetooth link and connects again. Try this first when data stops flowing.")
-            : String(localized: "Looks for your strap and connects to it.")
-    }
-
-    private func disconnectHint(_ status: StrapConnectionStatus) -> String {
-        status.phase == .searching
-            ? String(localized: "Cancels the search.")
-            : String(localized: "Ends the Bluetooth link. Nara stays quiet until you tap Connect.")
-    }
-
-    private func buzzHint(_ status: StrapConnectionStatus) -> String {
-        if let reason = status.buzz.reason { return reason }
-        if buzzSentAt != nil { return String(localized: "Buzz sent. You should feel it on your wrist.") }
-        return String(localized: "Vibrates the strap once so you know it's the right one.")
-    }
-
-    private func restartHint(_ status: StrapConnectionStatus) -> String {
-        if let reason = status.restart.reason { return reason }
-        if restartIgnored {
-            return String(localized: "The strap didn't restart. Try again, or use Re-pair strap if it keeps happening.")
-        }
-        return String(localized: "Reboots the strap. It reconnects by itself in about 30 seconds and keeps your data.")
+    private func row(_ action: StrapAction, symbol: String, _ status: StrapConnectionStatus,
+                     busy: Bool? = nil, perform: @escaping () -> Void) -> some View {
+        StrapActionRow(symbol: symbol,
+                       title: status.title(of: action),
+                       detail: status.detail(of: action, notes: notes),
+                       possibleDetails: action.possibleDetails,
+                       isEnabled: status.availability(of: action).isAvailable,
+                       busy: busy,
+                       action: perform)
     }
 
     // MARK: Actions
@@ -318,53 +221,22 @@ struct StrapConnectionView: View {
     }
 }
 
-// MARK: - Live status adapter
-
-extension StrapConnectionStatus {
-    /// Reads the live link into the plain-value model. The radio message is the one `BLEManager` sets for
-    /// Bluetooth off / not allowed / unsupported; no other sync error mentions Bluetooth.
-    @MainActor
-    static func current(live: LiveState, model: AppModel, searching: Bool, searchIsSlow: Bool,
-                        userDisconnected: Bool = false) -> StrapConnectionStatus {
-        let registeredWhoop = model.deviceRegistry?.devices.contains {
-            SourceCoordinator.isWhoop($0) && $0.status != .archived
-        } ?? false
-        let rememberedStrap = UserDefaults.standard.string(forKey: BLEManager.lastConnectedPeripheralKey) != nil
-        var knownStrap = registeredWhoop || rememberedStrap
-        #if DEBUG
-        if let forced = StrapDemoSeed.knownStrapOverride { knownStrap = forced }
-        #endif
-        // The BLE layer only learns a model change on its next scan, so until a link is up the model the person
-        // picked is the one that matters; once connected, what the radio is talking to is.
-        let chosenModel = UserDefaults.standard.string(forKey: "selectedWhoopModel")
-            .flatMap(WhoopModel.init(rawValue:)) ?? .whoop4
-        return StrapConnectionStatus(
-            connected: live.connected,
-            bonded: live.bonded,
-            encryptedBond: live.encryptedBond,
-            restarting: live.rebootInProgress,
-            searching: searching,
-            searchIsSlow: searchIsSlow,
-            knownStrap: knownStrap,
-            pairingHint: live.pairingHint,
-            hasReconnectGuide: live.reconnectGuide != nil,
-            radioProblem: live.lastSyncError.flatMap { $0.contains("Bluetooth") ? $0 : nil },
-            isWhoop4: live.connected ? model.ble.isWhoop4 : chosenModel == .whoop4,
-            batteryPct: live.batteryPct,
-            userDisconnected: userDisconnected)
-    }
-}
-
 // MARK: - Action row
 
 /// One tappable action: an icon tile, a title, and a line that either says what it does or, when the action
 /// is unavailable, why. The reason stays at full contrast so a greyed-out row never leaves anyone guessing.
-private struct StrapActionRow: View {
+///
+/// `possibleDetails` is every line this row can show; the row is as tall as the tallest, so the line changing
+/// (a reason appearing, a hint turning into "Buzz sent") does not move the rows below it. `busy` is nil for a
+/// row that never shows a spinner, and otherwise keeps the spinner's width whether or not it is spinning, so
+/// the text wraps the same either way.
+struct StrapActionRow: View {
     let symbol: String
     let title: String
     let detail: String
+    var possibleDetails: [String] = []
     let isEnabled: Bool
-    var isBusy = false
+    var busy: Bool?
     let action: () -> Void
 
     var body: some View {
@@ -383,14 +255,18 @@ private struct StrapActionRow: View {
                     Text(title)
                         .font(StrandFont.body)
                         .foregroundStyle(isEnabled ? StrandPalette.textPrimary : StrandPalette.textTertiary)
-                    Text(detail)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(isEnabled ? StrandPalette.textTertiary : StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .lineLimit(1)
+                    ReservedText(text: detail,
+                                 alternatives: possibleDetails,
+                                 font: StrandFont.footnote,
+                                 color: isEnabled ? StrandPalette.textTertiary : StrandPalette.textSecondary)
                 }
                 Spacer(minLength: NoopMetrics.space2)
-                if isBusy {
-                    ProgressView().controlSize(.small).tint(StrandPalette.accent)
+                if let busy {
+                    ZStack {
+                        if busy { ProgressView().controlSize(.small).tint(StrandPalette.accent) }
+                    }
+                    .frame(width: 20, height: 20)
                 }
             }
             .padding(.horizontal, NoopMetrics.space4)
@@ -412,29 +288,47 @@ private struct StrapActionRow: View {
 /// result instead of a paragraph to follow by hand. Releasing the strap and searching again are the two
 /// steps the app can do itself; clearing the phone's old pairing and the strap's pairing mode are
 /// manual, so they are spelled out.
+///
+/// Like the page behind it, nothing here changes size as the guide moves along. A step's line and button
+/// swap in place, and the result box under "Start pairing" is there from the start (empty until a search is
+/// running) so that starting a search, finding the strap and finishing never push the steps above it around.
 private struct StrapRepairSheet: View {
-    @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var live: LiveState
+    let model: AppModel
+    let live: LiveState
     @Binding var searchStartedAt: Date?
     @Binding var searchIsSlow: Bool
     let onClose: () -> Void
 
+    @StateObject private var link: StrapLinkObserver
     @State private var released: Bool
     @State private var startedPairing: Bool
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    private static let releaseLine = String(localized: "Nara drops the link and stops reconnecting, so the strap can be paired from scratch.")
+    private static let releasedLine = String(localized: "Released. Nara has stopped reconnecting, so the strap is free to pair again.")
+    private static let releaseFirstLine = String(localized: "Release the strap in step 1 first.")
+    private static let readyLine = String(localized: "Ready. Start once the strap's lights are flashing blue.")
+    private static let notStartedLine = String(localized: "Once you start, what Nara finds shows up here.")
+    private static let pairedLine = String(localized: "Paired. Your strap is connected and fully paired.")
+
     /// `released` and `startedPairing` only exist so a screenshot can open the guide part-way through.
-    init(searchStartedAt: Binding<Date?>, searchIsSlow: Binding<Bool>,
+    init(model: AppModel, live: LiveState,
+         searchStartedAt: Binding<Date?>, searchIsSlow: Binding<Bool>,
          released: Bool = false, startedPairing: Bool = false,
          onClose: @escaping () -> Void) {
+        self.model = model
+        self.live = live
         _searchStartedAt = searchStartedAt
         _searchIsSlow = searchIsSlow
         _released = State(initialValue: released)
         _startedPairing = State(initialValue: startedPairing)
+        _link = StateObject(wrappedValue: StrapLinkObserver.bound(to: live, model: model))
         self.onClose = onClose
     }
 
     private var status: StrapConnectionStatus {
-        .current(live: live, model: model, searching: searchStartedAt != nil, searchIsSlow: searchIsSlow)
+        StrapConnectionStatus(link: link.inputs, searching: searchStartedAt != nil, searchIsSlow: searchIsSlow)
     }
 
     var body: some View {
@@ -456,6 +350,7 @@ private struct StrapRepairSheet: View {
             }
         }
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
+        .onAppear { link.refresh() }
         #if os(macOS)
         .frame(minWidth: 460, minHeight: 620)
         #endif
@@ -483,17 +378,17 @@ private struct StrapRepairSheet: View {
 
     private var releaseStep: some View {
         RepairStep(number: 1, title: String(localized: "Let go of the strap"), done: released) {
-            if released {
-                StepText("Released. Nara has stopped reconnecting, so the strap is free to pair again.")
-            } else {
-                StepText("Nara drops the link and stops reconnecting, so the strap can be paired from scratch.")
-                NoopButton("Release strap", systemImage: "xmark.circle", fullWidth: true) {
-                    released = true
-                    searchStartedAt = nil
-                    searchIsSlow = false
-                    model.releaseStrapForRepair()
-                }
+            ReservedText(text: released ? Self.releasedLine : Self.releaseLine,
+                         alternatives: [Self.releaseLine, Self.releasedLine])
+            NoopButton(released ? "Released" : "Release strap",
+                       systemImage: released ? "checkmark" : "xmark.circle",
+                       fullWidth: true) {
+                released = true
+                searchStartedAt = nil
+                searchIsSlow = false
+                model.releaseStrapForRepair()
             }
+            .disabled(released)
         }
     }
 
@@ -515,10 +410,10 @@ private struct StrapRepairSheet: View {
     }
 
     private var pairStep: some View {
-        RepairStep(number: 4, title: String(localized: "Pair"), done: status.phase == .paired && startedPairing) {
-            if !released {
-                StepText("Release the strap in step 1 first.")
-            }
+        let current = status
+        return RepairStep(number: 4, title: String(localized: "Pair"), done: current.phase == .paired && startedPairing) {
+            ReservedText(text: released ? Self.readyLine : Self.releaseFirstLine,
+                         alternatives: [Self.readyLine, Self.releaseFirstLine])
             NoopButton(startedPairing ? "Search again" : "Start pairing",
                        systemImage: "dot.radiowaves.left.and.right",
                        fullWidth: true) {
@@ -528,19 +423,45 @@ private struct StrapRepairSheet: View {
                 model.scan()
             }
             .disabled(!released)
-            if startedPairing { result }
+            result(current)
         }
     }
 
-    @ViewBuilder private var result: some View {
-        let current = status
-        if current.phase == .paired {
-            StepText("Paired. Your strap is connected and fully paired.")
+    /// The outcome of the search, in a box that is always there and always the same size.
+    private func result(_ current: StrapConnectionStatus) -> some View {
+        let finished = startedPairing && current.phase == .paired
+        return VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            HStack {
+                Group {
+                    if startedPairing {
+                        StatePill("\(current.title)", tone: current.tone, pulsing: current.isBusy)
+                            .id(current.phase)
+                    } else {
+                        StatePill("Not started yet", tone: .neutral, showsDot: false)
+                    }
+                }
+                .lineLimit(1)
+                .transition(.opacity)
+                Spacer(minLength: 0)
+            }
+            FixedMessageArea(text: resultMessage(current), lines: 3)
             NoopButton("Done", fullWidth: true, action: onClose)
-        } else {
-            StatePill("\(current.title)", tone: current.tone, pulsing: current.isBusy)
-            StepText(verbatim: resultDetail(current))
+                .hidden()
+                .accessibilityHidden(true)
+                .overlay {
+                    if finished {
+                        NoopButton("Done", fullWidth: true, action: onClose)
+                            .transition(.opacity)
+                    }
+                }
         }
+        .animation(reduceMotion ? nil : PairingMotion.settle, value: startedPairing ? current.phase : nil)
+    }
+
+    private func resultMessage(_ current: StrapConnectionStatus) -> String {
+        guard startedPairing else { return Self.notStartedLine }
+        if current.phase == .paired { return Self.pairedLine }
+        return resultDetail(current)
     }
 
     /// The generic "paired but out of reach" copy is written for the main page. Here the person has just
@@ -667,13 +588,24 @@ enum StrapDemoSeed {
     }
 }
 
-/// `--demo-screen strap`: the page itself.
+/// `--demo-screen strap`: the page itself. With `--demo-strap-cycle` it walks through every state, a couple of
+/// seconds apart, so the layout can be filmed or inspected as the strap connects, drops and pairs.
 struct StrapConnectionDemoScreen: View {
     @EnvironmentObject private var live: LiveState
+
+    private static let cycle = ["unpaired", "disconnected", "connecting", "partial", "hint", "paired",
+                                "restarting", "repair", "radio", "paired"]
 
     var body: some View {
         StrapConnectionView()
             .task {
+                if CommandLine.arguments.contains("--demo-strap-cycle") {
+                    for state in Self.cycle {
+                        StrapDemoSeed.apply(state, to: live)
+                        try? await Task.sleep(nanoseconds: 2_500_000_000)
+                    }
+                    return
+                }
                 // BLEManager reports the simulator's missing radio shortly after launch; seed again once it has.
                 for _ in 0..<3 {
                     StrapDemoSeed.apply(StrapDemoSeed.requestedState, to: live)
@@ -686,6 +618,7 @@ struct StrapConnectionDemoScreen: View {
 /// `--demo-screen straprepair`: the re-pair guide, part-way through when `--demo-repair-step` says so
 /// (`start`, `released`, `searching`, `nothing`, `paired`).
 struct StrapRepairDemoScreen: View {
+    @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var live: LiveState
 
     private var step: String {
@@ -696,7 +629,8 @@ struct StrapRepairDemoScreen: View {
 
     var body: some View {
         let step = step
-        return StrapRepairSheet(searchStartedAt: .constant(step == "searching" ? Date() : nil),
+        return StrapRepairSheet(model: model, live: live,
+                                searchStartedAt: .constant(step == "searching" ? Date() : nil),
                                 searchIsSlow: .constant(false),
                                 released: step != "start",
                                 startedPairing: ["searching", "nothing", "paired"].contains(step)) { }

@@ -653,6 +653,7 @@ enum DemoScreens {
         case "devices":  return AnyView(DevicesView())
         case "strap":    return AnyView(StrapConnectionDemoScreen())
         case "straprepair": return AnyView(StrapRepairDemoScreen())
+        case "onboardingscan": return AnyView(OnboardingScanDemoScreen())
         case "devicescatalog": return AnyView(DeviceCardCatalog())
         case "fitnessage": return AnyView(FitnessAgeDemoScreen())
         case "vitality": return AnyView(VitalityDemoScreen())
