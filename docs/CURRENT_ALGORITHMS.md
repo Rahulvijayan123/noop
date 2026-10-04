@@ -390,11 +390,53 @@ So the shipped number is a **five-minute floor** of the main night, not the aver
 
 ## 8. Calories
 
-**What it is.** An HR-based energy estimate: revised Harris–Benedict resting metabolism plus Keytel 2005 active energy. Not calorimetry, not Apple or WHOOP cloud parity.
+**What it is.** The day's energy expenditure: 24 hours of resting metabolism plus active energy read from a per-minute MET timeline that fuses several independent signals. Not calorimetry, not Apple or WHOOP cloud parity.
 
-**Source.** `Calories` in `WorkoutDetector.swift`.
+**Source.** `MetabolicEstimator.estimate` in `Packages/StrandAnalytics/Sources/StrandAnalytics/Energy/`, chosen by `AnalyticsEngine.analyzeDay(energyModel:)` (default `.fusion`). The previous HR-only estimator is `Calories` in `WorkoutDetector.swift` (`.legacyHR`), kept for A/B comparison and rollback and described at the end of this section. **The Android twins still run only the legacy estimator**, so Android and iOS / hosted-worker calorie totals differ until that port is done.
 
-The value stored on the day (`activeKcalEst`) is **`restingKcal + activeKcal`**, the whole observed-day total. The field name is historical.
+The value stored on the day (`activeKcalEst`) is **`restingKcal + activeKcal`**, the whole-day total. The field name is historical. `DayResult.energy` carries the same figures with the per-minute MET and confidence, the workout subset, coverage and the evidence mix.
+
+### Resting and active energy are kept apart
+
+- **Resting** = RMR / 1440 for every elapsed minute of the day, whether or not the strap was worn. Metabolism does not stop when a sensor does. RMR is the wearer's measured value (Settings, accepted in 800–5000 kcal/day) when set, otherwise the revised Harris–Benedict equation below (`RmrSource` records which). A day still in progress counts resting energy up to now (`energyAsOf`) and projects the rest in `projectedTotalKcal`.
+- **Active** = `max(0, MET − 1) × 3.5 × kg / 200` kcal per minute, summed only over minutes with evidence. A minute with no usable heart rate or motion, or an off-wrist minute, contributes no active energy: a gap is never filled with "sedentary" nor extrapolated from its neighbours, and the uncovered minutes are reported (`gapMinutes`, `restingGapKcal`). Sleep is RMR-level (1 MET). A sleep interval is somebody's claim about a time span, so a minute whose heart rate is 25 bpm above the sleeper's own resting level is not treated as sleep.
+- **Workouts are labels on the same timeline**, not a second source: `workoutKcal` is the part of `activeKcal` that falls inside workout windows and is never added again.
+
+### The per-minute estimate
+
+For every minute the estimator builds an **activity belief** and then weighs independent **evidence families**, each expressed as a MET with a one-sigma in METs:
+
+1. **Activity belief.** From the existing activity classifier's epochs when the day has them (the classifier is read, never retrained or reimplemented here); otherwise from the step counter's cadence and class; otherwise from gravity-removed motion magnitude. Each source carries its own confidence. The belief is a probability over stationary / walking / running / other movement / unknown.
+2. **Motion family.** WristMET and the wrist CNN when raw IMU exists for the minute (below), step cadence (walking and running equations of height and cadence), and, only when no model speaks, a motion-magnitude proxy. Estimators that read the same wrist acceleration share error, so their combined variance is inflated by `1 + 0.5 (k − 1)` rather than treated as independent, and the family is never vaguer than its best member. Cadence and wrist motion cannot see grade, stairs, carrying or a hand on a rail: when heart rate stays well above the motion estimate for a sustained period in a context where movement should support it, the motion family's sigma is widened (upward only, up to 2.5×, ramping over 1–3 METs of excess and 4–12 minutes of elevation).
+3. **GPS family.** ACSM walking / running equations from ground speed and grade, when the day has a route.
+4. **Cardiac family: continuous, not a gate.** `MET = 1.2 + (METmax − 1.2) · x^1.4`, where `x` is the share of heart-rate reserve above the wearer's **quiet-awake baseline** (a low percentile of the day's own quiet awake minutes, clamped to resting + 3…25 bpm), after a per-activity allowance for non-metabolic elevation. `METmax` comes from the Uth ratio, clamped 8–16. Heart-rate slope leads the reading (40 % of the slope, ±8 bpm), recovery from a recent peak widens the sigma, and the sigma is tight at baseline (0.25 MET) and widens to the light-intensity scatter over the first 12 % of reserve, so a minute at baseline reads as rest while a stroll is not erased. Sustained elevation (8+ minutes) narrows it; elevation with no movement behind it is narrowed less (0.92 vs 0.8 of sigma).
+5. **Activity-aware routing.** Each family's sigma is multiplied by an activity-dependent factor, blended over the activity belief (`EvidenceRouter`). WristMET gets its tightest sigma for stationary and walking minutes, 1.25× for running, and 1.8× for other movement (cycling, lifting and similar, where the arms say little about the legs' work); the wrist CNN's factors are 1.0 / 1.0 / 1.2 / 1.6. Heart rate gets the tightest sigma in running (0.85×) and other movement (0.9×), a wider one when the person is still or walking (1.1×), and a per-activity allowance for non-metabolic elevation (8 bpm when stationary, 3 walking, 2 running). The result then updates an **activity-conditional prior**, a Gaussian mixture built from Compendium of Physical Activities values: stationary 1.25 ± 0.20 METs, walking 3.4 ± 0.9, running 9.8 ± 1.8, other movement a wide 2.3 / 5.0 mixture. Every activity keeps a heavy-tail component (stationary: 14 % at 4.0 ± 2.2) so strong, sustained physiological evidence can overrule a still wrist instead of a gate deciding for it. Inside a detected workout the prior is blended at 0.6 with that workout class's Compendium value. Elevated heart rate without supporting movement is therefore reduced, never zeroed and never credited as full exercise.
+
+### Motion models (WristMET, wrist CNN)
+
+Both need raw wrist IMU, which no stored day contains, so they run offline in `Tools/EnergyModels` (numpy only) and hand Swift one record per minute (`energy-motion-evidence-v1`, `MotionEvidence.swift`). **A day without raw IMU has no motion-model evidence; its estimate runs on heart rate, the step counter, gravity motion and the activity context, and its confidence says so.** WHOOP 4.0 and older straps are heart-rate only.
+
+- **WristMET** (Wei et al., Sci Rep 2025) is the primary motion estimator. The authors publish no trained weights, so it was retrained from their public code (MIT) and data (Zenodo 14858226, CC BY 4.0). It did not reproduce the paper's accuracy: leave-one-participant-out 60 s RMSE is 0.76 MET (paper 0.28), 0.32 on sedentary windows and 1.31 on non-sedentary ones. Its 26 training participants are aged 25–64 with BMI 30.5–46.2, so a younger or leaner wearer is out of its cohort and `demog_ood` widens the sigma. The sigma used is the classifier-probability-weighted blend of 0.32 and 1.31, widened by the signal and demographic out-of-distribution scores. The accelerometer axis mapping is assumed to be the identity and is recorded in the evidence file's provenance.
+- **Wrist CNN** (Nawaratne et al., J Sports Sci 2021) is supporting evidence: its labels are a waist-ActiGraph proxy, not calorimetry (0.74 MET RMSE against those labels on the public sample), its weights have no licence and are fetched at a pinned commit and never committed, and by default it only runs on minutes WristMET calls non-sedentary (its regression head reads about 1.4 MET on motionless input).
+- The two run independently; neither sees the other's output. Disagreement lowers confidence instead of being averaged away.
+
+### Temporal consistency
+
+The per-minute estimates go through a Kalman filter with a Rauch–Tung–Striebel smoother: random-walk process noise of 0.10 MET/min while the belief is steady, up to 2.5 MET across an activity transition (scaled by the size of the belief change), outlier innovations beyond 3 sigma down-weighted, and a hard slew limit of 4 METs/min. Metabolic cost therefore moves with the physiology of oxygen-uptake kinetics rather than jumping minute to minute.
+
+### Confidence
+
+Each minute has a confidence in 0.05–1: the product of components raised to weights (agreement between estimators by a Cochran-Q test, activity-belief confidence, heart-rate and IMU quality including missingness, distance of each model's input from its training distribution, physiological plausibility, and the posterior's precision). The weights sum to more than the normalizer on purpose, so one poor component pulls the product down. The day's confidence is the active-energy-weighted mean of the minutes' confidences, discounted by coverage; it describes the active estimate, since resting energy is the equation or the measurement.
+
+### Verifying it
+
+`Tools/EnergyBench` replays exported days through the legacy estimator and this one and checks, from independently defined bouts, that sustained moderate activity below the old heart-rate gate is now credited and that light days are not over-counted (PAL ≤ 1.55). It has no ground truth; it checks plausibility and parity with the app, not accuracy.
+
+**Known limits.** No separate thermic-effect-of-food or NEAT term; the equation RMR can be off by hundreds of kcal for an individual, which is why a measured value is accepted; days with no detected sleep price the night at quiet-awake (about +160 kcal) because nothing says the wearer was asleep; the heart-rate curve is population-level without individual calibration.
+
+### Legacy HR-only estimator (`energyModel: .legacyHR`)
+
+An HR-based energy estimate: revised Harris–Benedict resting metabolism plus Keytel 2005 active energy, resting energy counted only over the time the strap observed.
 
 ### Profile defaults when a field is missing
 
@@ -483,6 +525,9 @@ A low-HRV + low-RHR pattern is detected as a possible parasympathetic-saturation
 | Charge | `RecoveryScorer.swift` |
 | Baselines | `Baselines.swift` |
 | Steps | `StepsCounter.swift` |
-| Calories | `Calories` in `WorkoutDetector.swift` |
+| Calories (default) | `Packages/StrandAnalytics/Sources/StrandAnalytics/Energy/` (`MetabolicEstimator.swift`, `EnergyFusion.swift`, `MetabolicPriors.swift`, `EnergyConfig.swift`) |
+| Calories (legacy HR-only) | `Calories` in `WorkoutDetector.swift` |
+| Motion-model evidence (WristMET, wrist CNN) | `Tools/EnergyModels`, decoded by `Energy/MotionEvidence.swift` |
+| Calorie evaluation harness | `Tools/EnergyBench` |
 | Primary-session RHR shadow | `PrimarySessionRestingHR.swift` |
 | Live wiring (which flags are on) | `Strand/Data/IntelligenceEngine.swift`, `Strand/BLE/PuffinExperiment.swift` |

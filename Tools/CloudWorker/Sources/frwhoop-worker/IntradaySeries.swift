@@ -132,6 +132,9 @@ enum IntradaySeries {
         var profile: UserProfile
         /// The day's resting heart rate as the scorer used it for the energy model.
         var restingHR: Int?
+        /// The scorer's metabolic timeline for the day. When present the calorie series is read straight from
+        /// it, so the buckets sum to the published daily total; nil keeps the heart-rate-only apportioning.
+        var energy: DayEnergy?
         var tuning = Tuning()
     }
 
@@ -163,8 +166,13 @@ enum IntradaySeries {
         out[.restingHR] = restingPoints(hr: hr, motion: motion, layout: layout, tuning: inputs.tuning)
         out[.steps] = stepPoints(steps: steps, motion: fineMotion, layout: fine, profile: inputs.profile,
                                  tuning: inputs.tuning)
-        out[.calories] = caloriePoints(hr: hr, motion: fineMotion, layout: fine, profile: inputs.profile,
-                                       restingHR: inputs.restingHR, tuning: inputs.tuning)
+        if let energy = inputs.energy {
+            out[.calories] = energyCaloriePoints(energy: energy, hr: hr, motion: fineMotion, layout: fine,
+                                                 tuning: inputs.tuning)
+        } else {
+            out[.calories] = caloriePoints(hr: hr, motion: fineMotion, layout: fine, profile: inputs.profile,
+                                           restingHR: inputs.restingHR, tuning: inputs.tuning)
+        }
         for (metric, points) in out {
             guard let range = plausibleRange[metric] else { continue }
             out[metric] = points.filter { $0.value.isFinite && range.contains($0.value) }
@@ -499,6 +507,34 @@ enum IntradaySeries {
         for b in 0..<layout.count where samples[b] > 0 {
             out.append(Point(ts: layout.start(b), value: round(kcal[b], 6), samples: samples[b],
                              coverage: round(min(1.0, seconds[b] / Double(layout.length(b))), 3),
+                             motion: motion[b].share(minRecords: tuning.motionMinRecords(forSeconds: layout.width))
+                                 .map { round($0, 3) }))
+        }
+        return out
+    }
+
+    /// One point per elapsed minute of the scorer's metabolic timeline: that minute's resting plus active
+    /// energy, so the buckets still sum to the daily total (`DayEnergy.totalKcal`) the snapshot publishes.
+    ///
+    /// A minute the strap did not cover still carries its resting energy (metabolism does not stop with the
+    /// sensor), reported with `samples == 0` and `coverage == 0` so a consumer can tell it from a measured
+    /// minute and shade or skip it. Only minutes aligned to a bucket start are emitted; on a 23 h or 25 h day
+    /// the 24 h energy window and the calendar day disagree by an hour at one end, and that hour is simply
+    /// not drawn rather than shifted.
+    static func energyCaloriePoints(energy: DayEnergy, hr: [HRSample], motion: [Motion], layout: Layout,
+                                    tuning: Tuning) -> [Point] {
+        var samples = [Int](repeating: 0, count: layout.count)
+        for sample in hr {
+            let b = layout.index(sample.ts)
+            if b >= 0, b < layout.count { samples[b] += 1 }
+        }
+        var out: [Point] = []
+        out.reserveCapacity(energy.minutes.count)
+        for minute in energy.minutes {
+            let b = layout.index(minute.startTs)
+            guard b >= 0, b < layout.count, layout.start(b) == minute.startTs else { continue }
+            out.append(Point(ts: minute.startTs, value: round(minute.totalKcal, 6), samples: samples[b],
+                             coverage: round(min(1.0, Double(samples[b]) / Double(layout.length(b))), 3),
                              motion: motion[b].share(minRecords: tuning.motionMinRecords(forSeconds: layout.width))
                                  .map { round($0, 3) }))
         }

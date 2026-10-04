@@ -131,10 +131,10 @@ struct DayStateTimelineSection: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("What you were doing")
+            Text("What the strap reported")
                 .font(StrandFont.title2)
                 .foregroundStyle(StrandPalette.textPrimary)
-            Text("Worked out from your wrist data. Tap a box to zoom the graph to that stretch.")
+            Text("Only the strap's own labels, your logged sleep and workouts, and wrist on and off. A cross-check on the activity context above. Tap a box to zoom the graph.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
@@ -309,7 +309,7 @@ struct DayStateTimelineSection: View {
 
     private var limitations: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label("Sitting and standing look the same from the wrist, so both show as Still.",
+            Label("This view has no way to tell sitting from standing, so both show as Still. The activity context above weighs how you moved just before and for how long.",
                   systemImage: "info.circle")
             Text("Walking and running show up from 10 seconds, when the strap labels it and its step counter agrees. Still and Moving are judged by the minute, and off wrist comes from the strap's own wrist on and off events.")
         }

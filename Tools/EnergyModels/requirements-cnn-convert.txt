@@ -1,0 +1,17 @@
+# Build-time only: converting the pinned upstream Keras .h5 weights into the compact float32 .npz
+# that energy_models.wrist_cnn loads. The inference path needs numpy alone; do not add h5py,
+# TensorFlow or Keras to the application environment.
+#
+# scripts/fetch_wrist_cnn.sh installs these two pins into a throwaway virtualenv when h5py is
+# missing and deletes that environment afterwards. By hand:
+#
+#   python3.11 -m venv /tmp/wrist-cnn-convert
+#   /tmp/wrist-cnn-convert/bin/pip install -r requirements-cnn-convert.txt
+#   /tmp/wrist-cnn-convert/bin/python -m energy_models.wrist_cnn.fetch
+#
+# The converter's output depends only on the stored float32 values, and every run is checked against
+# a pinned sha256. The same digests were reproduced with h5py 3.14.0 / numpy 2.2.6 / Python 3.11 and
+# with h5py 3.16.0 / numpy 2.5.3 / Python 3.13, so these pins are for reproducibility, not correctness.
+# For the optional Keras parity check see requirements-cnn-verify.txt.
+numpy==2.2.6
+h5py==3.14.0

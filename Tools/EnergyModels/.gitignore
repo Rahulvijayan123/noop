@@ -1,0 +1,15 @@
+# EnergyModels — local/runtime artifacts. Third-party weights are never committed
+# (the wrist-CNN upstream ships no licence); derived artifacts are fetched or built.
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+.pytest_cache/
+*.part
+artifacts/**
+!artifacts/**/
+!artifacts/**/manifest.json
+!artifacts/**/NOTICE.md
+# Test fixtures are synthetic or public-dataset excerpts (see artifacts/*/NOTICE.md); the repo-wide
+# `Fixtures/` rule (personal exports) also matches this directory on a case-insensitive filesystem.
+!tests/fixtures/
