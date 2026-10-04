@@ -577,6 +577,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (`DeviceRegistry`, and the coordinator that watches it) follows too — the store write above is not
     /// observable, so without this the UI would keep showing the old id until relaunch.
     var onSerialIdentityAdopted: ((String) -> Void)?
+    /// Fired each time the connected strap's serial is read: the id new samples persist under, then the
+    /// serial. Unlike `onSerialIdentityAdopted` it also fires for the legacy `my-whoop` seed, which never
+    /// adopts a serial id locally, so the cloud layer can still file that strap under its own identity.
+    var onStrapSerialKnown: ((_ localDeviceId: String, _ serial: String) -> Void)?
     private var registryStore: DeviceRegistryStore?
     /// #716: true once the seeded "WHOOP" model has been stamped to the correct family.
     private var modelStamped = false
@@ -5332,7 +5336,17 @@ public final class BLEManager: NSObject, ObservableObject {
         // existing consumer — nothing about framing or decode reads this.
         state.whoop5Variant = variant.label
         reconcileModelFromAttestation(variant)
+        publishStrapSerialIfKnown()
         adoptWhoopSerialIdentity()
+    }
+
+    /// Tell the app layer which serial the connected strap reported, so cloud capture and readback can use the
+    /// strap's own identity. Repeats on every reconnect by design: the receiver treats an unchanged serial as
+    /// a no-op, and a missed first delivery must not be lost for the life of the process.
+    private func publishStrapSerialIfKnown() {
+        guard let serial = adoptableSerial, WhoopSerialIdentity.adoptedId(serial: serial) != nil else { return }
+        let localId = deviceId
+        Task { @MainActor [weak self] in self?.onStrapSerialKnown?(localId, serial) }
     }
 
     /// The serial this pairing may adopt: the 5/MG's DIS read, or a 4.0's twice-seen hello serial.
@@ -5354,6 +5368,7 @@ public final class BLEManager: NSObject, ObservableObject {
         guard registryStore != nil else { return }
         guard let confirmed = harvardSerialGate.offer(serial) else { return }
         harvardSerialConfirmed = confirmed
+        publishStrapSerialIfKnown()
         adoptWhoopSerialIdentity()
     }
 

@@ -47,6 +47,7 @@ public enum CloudCapture {
             runtime.noteSkippedPreClock(1)
             return .preClock
         }
+        let deviceId = CloudStrapSerialStore.shared.cloudId(forLocalId: deviceId)
         var streams = extractStreams([frame], deviceClockRef: ref.device, wallClockRef: ref.wall,
                                      family: family)
         if let ledger = journalLedger { streams = freshHeartRates(streams, deviceId: deviceId, ledger: ledger) }
@@ -78,6 +79,7 @@ public enum CloudCapture {
                                         characteristic: String = "2A37") -> Skip? {
         // Same master-switch gate as `record(frame:)` — see the comment there (D1).
         guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else { return .notRunning }
+        let deviceId = CloudStrapSerialStore.shared.cloudId(forLocalId: deviceId)
         let records = standardHRRecords(hr: hr, rr: rr, contact: contact, family: family, at: ts,
                                         deviceId: deviceId, receivedAtMs: receivedAtMs,
                                         characteristic: characteristic, ledger: journalLedger)
@@ -138,6 +140,7 @@ public enum CloudCapture {
         // Same master-switch gate as `record(frame:)` (D1). Returns 0 so the caller retries the
         // window on the next pass instead of treating it as fully sent.
         guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else { return 0 }
+        let deviceId = CloudStrapSerialStore.shared.cloudId(forLocalId: deviceId)
         let fresh = journalLedger.map { freshHeartRates(streams, deviceId: deviceId, ledger: $0) } ?? streams
         let alreadyHeld = streams.hr.count - fresh.hr.count
         let receivedAtMs = Int(Date().timeIntervalSince1970 * 1000)

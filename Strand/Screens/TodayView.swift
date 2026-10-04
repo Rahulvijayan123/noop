@@ -341,12 +341,11 @@ struct ServerScoreTodaySection: View {
     private func load() async {
         guard let repository = CloudPushRuntime.shared.scoreRepository(),
               CloudPushIdentityStore.current() != nil else { return }
-        // The readback route resolves the owner's active device; the app's own
-        // device id ("my-whoop") matches what ingest registers it as.
-        let deviceId = "my-whoop"
+        // The strap's own device first, then the installation's: the same candidates the app model syncs.
+        let deviceIds = await IntradaySeriesStore.shared.readCandidates
         let day = dayKeyForToday()
         // Cache-first: the cached snapshot renders immediately.
-        snapshot = await repository.cachedDay(day: day, deviceId: deviceId)
+        snapshot = await repository.cachedDay(day: day, deviceIds: deviceIds)
         freshness = await freshnessLabel(snapshot, repository: repository)
         // The app model refreshes this day whenever it writes server results (which bumps
         // `refreshSeq` and re-runs this), so a cache read that recent needs no second request.
@@ -355,7 +354,7 @@ struct ServerScoreTodaySection: View {
             return
         }
         do {
-            let fresh = try await repository.refresh(day: day, deviceId: deviceId)
+            let fresh = try await repository.refresh(day: day, deviceIds: deviceIds)
             snapshot = fresh
             freshness = await freshnessLabel(fresh, repository: repository)
         } catch {

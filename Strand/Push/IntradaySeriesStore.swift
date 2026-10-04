@@ -18,6 +18,17 @@ final class IntradaySeriesStore: ObservableObject {
     /// the strap it reads scores for (`AppModel.hostedReadDeviceId`); `my-whoop` is the provisional
     /// device every install registers.
     var readDeviceId = "my-whoop"
+    /// Every device id the server may hold this strap's results under, best first; `readDeviceId` leads. The
+    /// screens that read a single day walk this list, so a day published under the installation's id (before
+    /// the strap's own device had one) still shows.
+    var readCandidates = ["my-whoop"]
+
+    /// Point every screen at the ids the app model reads. `candidates` is best first and never empty.
+    func setReadCandidates(_ candidates: [String]) {
+        guard let first = candidates.first else { return }
+        readDeviceId = first
+        readCandidates = candidates
+    }
 
     private let repositoryProvider: @MainActor () -> ServerScoreRepository?
     private var inFlight: Set<String> = []
@@ -70,6 +81,7 @@ final class IntradaySeriesStore: ObservableObject {
         failures = [:]
         inFlight = []
         readDeviceId = "my-whoop"
+        readCandidates = ["my-whoop"]
     }
 
     /// Show the last stored readings for a range, once, without touching the network.
