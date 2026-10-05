@@ -69,8 +69,14 @@ struct ContextLane {
         /// Input reads, per job.
         var loadMsTotal = 0
         var loadMsMax = 0
+        /// Stored bytes per job: summary document + every envelope table (contracts §6.1 stored form).
         var docBytesTotal = 0
         var docBytesMax = 0
+        var summaryBytesTotal = 0
+        var summaryBytesMax = 0
+        /// All envelope tables of one job together.
+        var tableBytesTotal = 0
+        var tableBytesMax = 0
         var inputsRowsMax = 0
         var measurementsMax = 0
         /// `Engine.causalView` exclusions (telemetry only: the document never records them).
@@ -104,6 +110,10 @@ struct ContextLane {
                 "load_ms_total": loadMsTotal, "load_ms_max": loadMsMax,
                 "doc_bytes_total": docBytesTotal, "doc_bytes_max": docBytesMax,
                 "doc_bytes_mean": builds > 0 ? docBytesTotal / builds : 0,
+                "summary_bytes_total": summaryBytesTotal, "summary_bytes_max": summaryBytesMax,
+                "summary_bytes_mean": builds > 0 ? summaryBytesTotal / builds : 0,
+                "table_bytes_total": tableBytesTotal, "table_bytes_max": tableBytesMax,
+                "table_bytes_mean": builds > 0 ? tableBytesTotal / builds : 0,
                 "inputs_rows_max": inputsRowsMax, "measurements_max": measurementsMax,
                 "causal_excluded_observations": causalExcludedObservations,
                 "causal_excluded_records": causalExcludedRecords,
@@ -283,14 +293,14 @@ struct ContextLane {
         let buildStarted = Date()
         let assembled = ContextInputs.assemble(loaded, job: job, windows: windows)
         let document = PC.Engine.buildDay(assembled.input, history: assembled.history, policy: policy)
-        let documentText = String(decoding: try PC.encoder().encode(document), as: UTF8.self)
+        let products = try Self.encodeProducts(document)
         let buildMS = Self.millis(since: buildStarted)
         // The job's duration (reads + build) rides along for the queue's `last_duration_ms`.
-        let built = try Self.publishPayload(document: document, snapshot: loaded.snapshot,
-                                            durationMS: loadMS + buildMS, documentText: documentText)
+        let built = Self.publishPayload(products, snapshot: loaded.snapshot, durationMS: loadMS + buildMS)
         noteTelemetry(loadMS: loadMS, buildMS: buildMS, built: built, assembled: assembled, loaded: loaded)
         do {
-            try Self.checkDocumentSize(bytes: built.documentBytes, envelopes: document.envelopes.count)
+            try Self.checkDocumentSize(bytes: built.summaryBytes, envelopes: document.envelopes.count)
+            try Self.checkDocumentSize(bytes: built.maxTableBytes, envelopes: document.envelopes.count)
         } catch {
             stats.documentsTooLarge += 1
             throw error
@@ -365,16 +375,6 @@ struct ContextLane {
         var versions: PC.PolicyVersions
     }
 
-    struct Built {
-        var payloadText: String
-        var documentBytes: Int
-        var header: PublishHeader
-        /// The encoded document (reused when the payload is rebuilt with the job duration).
-        var documentText: String
-        /// Daily values / bouts left out of the normalized rows because another day (or mode) owns them.
-        var outOfDay: Int
-    }
-
     static func header(of d: PC.DayDocument) -> PublishHeader {
         PublishHeader(mode: d.header.interpretation.mode, day: d.header.identity.day,
                       finality: d.header.interpretation.finality, status: d.status,
@@ -385,39 +385,85 @@ struct ContextLane {
                       versions: d.header.versions)
     }
 
-    /// `{header, document, scoring_result_revision, scoring_input_revision, duration_ms, daily_values[], bouts[],
-    /// episodes[], new_frozen_references[]}` (`publish_physiology_context_v1`). Every part is encoded with
-    /// `PhysiologyContext.encoder()` (snake_case, sorted keys) and the document is embedded byte for byte.
-    ///
-    /// The normalized rows the publish REPLACES for the day are the document's daily values and bouts owned by the
-    /// job's day and mode (the RPC rejects any other): a bout another day owns stays in this document but is
-    /// that day's row to write.
-    static func publishPayload(document d: PC.DayDocument, snapshot: ContextInputs.Snapshot?,
-                               durationMS: Int? = nil, documentText: String? = nil) throws -> Built {
+    /// The encoded products of one document, in the stored form (contracts §6.1): the summary document (envelopes
+    /// split off, `envelope_index` set) and one interned `EnvelopeTable` per metric (`StoredDocument.split`).
+    struct EncodedProducts {
+        var header: PublishHeader
+        var summaryText: String
+        /// `(metric raw value, envelope count, table JSON)` in `MetricKind` order.
+        var tables: [(metric: String, count: Int, text: String)]
+        var boutsText: String
+        var dailyValuesText: String
+        var episodesText: String
+        var frozenText: String
+        /// Daily values / bouts left out of the normalized rows because another day (or mode) owns them.
+        var outOfDay: Int
+    }
+
+    struct Built {
+        var payloadText: String
+        /// Summary document bytes (the `document` the RPC stores and caps).
+        var summaryBytes: Int
+        /// All envelope tables together, and the largest one.
+        var tableBytes: Int
+        var maxTableBytes: Int
+        var header: PublishHeader
+        var outOfDay: Int
+        /// Summary + tables: what one revision stores.
+        var documentBytes: Int { summaryBytes + tableBytes }
+    }
+
+    /// Split and encode with `PhysiologyContext.encoder()` (snake_case, sorted keys). The normalized `daily_values`
+    /// and `bouts` are the document's items owned by the job's day (and mode for values): the RPC rejects any other,
+    /// and a bout another day owns stays in this document but is that day's row to write.
+    static func encodeProducts(_ d: PC.DayDocument) throws -> EncodedProducts {
         let encoder = PC.encoder()
         func text<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
-        let documentText = try documentText ?? text(d)
-        let header = Self.header(of: d)
+        let (summary, tables) = PC.StoredDocument.split(d)
         let day = d.header.identity.day, mode = d.header.interpretation.mode
         let values = d.dailyValues.filter { $0.day == day && $0.mode == mode }
         let bouts = d.bouts.filter { $0.day == day }
-        let revision = snapshot.map { String($0.resultRevision) } ?? "null"
-        let input = snapshot.map { String($0.inputRevision) } ?? "null"
+        return EncodedProducts(
+            header: header(of: d), summaryText: try text(summary),
+            tables: try tables.map { (metric: $0.metric.rawValue, count: $0.rows.count, text: try text($0)) },
+            boutsText: try text(bouts), dailyValuesText: try text(values), episodesText: try text(d.episodes),
+            frozenText: try text(d.newFrozenReferences),
+            outOfDay: (d.dailyValues.count - values.count) + (d.bouts.count - bouts.count))
+    }
+
+    /// `{bouts, daily_values, document, duration_ms, envelope_tables, episodes, header, new_frozen_references,
+    /// scoring_input_revision, scoring_result_revision}` (`publish_physiology_context_v1`, contracts §6/§6.1).
+    /// `document` is the summary; `envelope_tables` is `[{envelope_count, metric, table}]`. The encoded parts are
+    /// embedded byte for byte.
+    static func publishPayload(_ p: EncodedProducts, snapshot: ContextInputs.Snapshot?,
+                               durationMS: Int? = nil) -> Built {
+        let header = (try? String(decoding: PC.encoder().encode(p.header), as: UTF8.self)) ?? "{}"
+        let tables = p.tables.map { "{\"envelope_count\":\($0.count),\"metric\":\"\($0.metric)\",\"table\":\($0.text)}" }
         var parts: [(String, String)] = [
-            ("bouts", try text(bouts)),
-            ("daily_values", try text(values)),
-            ("document", documentText),
-            ("episodes", try text(d.episodes)),
-            ("header", try text(header)),
-            ("new_frozen_references", try text(d.newFrozenReferences)),
-            ("scoring_input_revision", input),
-            ("scoring_result_revision", revision),
+            ("bouts", p.boutsText),
+            ("daily_values", p.dailyValuesText),
+            ("document", p.summaryText),
         ]
-        if let durationMS { parts.insert(("duration_ms", String(max(0, durationMS))), at: 3) }
+        if let durationMS { parts.append(("duration_ms", String(max(0, durationMS)))) }
+        parts += [
+            ("envelope_tables", "[" + tables.joined(separator: ",") + "]"),
+            ("episodes", p.episodesText),
+            ("header", header),
+            ("new_frozen_references", p.frozenText),
+            ("scoring_input_revision", snapshot.map { String($0.inputRevision) } ?? "null"),
+            ("scoring_result_revision", snapshot.map { String($0.resultRevision) } ?? "null"),
+        ]
         let body = parts.map { "\"\($0.0)\":\($0.1)" }.joined(separator: ",")
-        return Built(payloadText: "{" + body + "}", documentBytes: documentText.utf8.count, header: header,
-                     documentText: documentText,
-                     outOfDay: (d.dailyValues.count - values.count) + (d.bouts.count - bouts.count))
+        let sizes = p.tables.map { $0.text.utf8.count }
+        return Built(payloadText: "{" + body + "}", summaryBytes: p.summaryText.utf8.count,
+                     tableBytes: sizes.reduce(0, +), maxTableBytes: sizes.max() ?? 0, header: p.header,
+                     outOfDay: p.outOfDay)
+    }
+
+    /// Encode and assemble in one step (tests, tools).
+    static func publishPayload(document d: PC.DayDocument, snapshot: ContextInputs.Snapshot?,
+                               durationMS: Int? = nil) throws -> Built {
+        publishPayload(try encodeProducts(d), snapshot: snapshot, durationMS: durationMS)
     }
 
     struct PublishResult: Equatable {
@@ -461,6 +507,10 @@ struct ContextLane {
         stats.loadMsMax = max(stats.loadMsMax, loadMS)
         stats.docBytesTotal += built.documentBytes
         stats.docBytesMax = max(stats.docBytesMax, built.documentBytes)
+        stats.summaryBytesTotal += built.summaryBytes
+        stats.summaryBytesMax = max(stats.summaryBytesMax, built.summaryBytes)
+        stats.tableBytesTotal += built.tableBytes
+        stats.tableBytesMax = max(stats.tableBytesMax, built.tableBytes)
         stats.inputsRowsMax = max(stats.inputsRowsMax, assembled.rowCount)
         stats.measurementsMax = max(stats.measurementsMax, assembled.measurementCount)
         for d in assembled.causalExcluded {

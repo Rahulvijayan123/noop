@@ -164,12 +164,15 @@ final class ContextLaneProfileTests: XCTestCase {
             let assembleMS = ms { assembled = ContextInputs.assemble(loaded, job: j, windows: w) }
             let buildMS = ms { doc = PC.Engine.buildDay(assembled.input, history: assembled.history) }
             let encodeMS = try ms { built = try ContextLane.publishPayload(document: doc, snapshot: loaded.snapshot) }
+            let plainBytes = try PC.encoder().encode(doc).count
             print("context-profile: case=\(name) mode=\(mode.rawValue) rows=\(loaded.rowCount) "
                   + "hr=\(loaded.heartRate.count) beats=\(loaded.beatIntervals.count) "
                   + "beats_selected=\(assembled.input.beatIntervals.count) motion=\(loaded.motion.count) "
                   + "measurements=\(assembled.measurementCount) envelopes=\(doc.envelopes.count) "
                   + "assemble_ms=\(Int(assembleMS)) build_ms=\(Int(buildMS)) encode_ms=\(Int(encodeMS)) "
-                  + "total_ms=\(Int(assembleMS + buildMS + encodeMS)) doc_bytes=\(built.documentBytes) "
+                  + "total_ms=\(Int(assembleMS + buildMS + encodeMS)) plain_doc_bytes=\(plainBytes) "
+                  + "summary_bytes=\(built.summaryBytes) table_bytes=\(built.tableBytes) "
+                  + "max_table_bytes=\(built.maxTableBytes) "
                   + "payload_bytes=\(built.payloadText.utf8.count)")
             XCTAssertGreaterThan(doc.envelopes.count, 0)
         }

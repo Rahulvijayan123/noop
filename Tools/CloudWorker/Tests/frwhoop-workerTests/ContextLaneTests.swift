@@ -468,8 +468,9 @@ final class ContextLaneTests: XCTestCase {
         let doc = PC.Engine.buildDay(a.input, history: a.history)
         let built = try ContextLane.publishPayload(document: doc, snapshot: l.snapshot)
         let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(built.payloadText.utf8)) as? [String: Any])
-        XCTAssertEqual(Set(obj.keys), ["header", "document", "scoring_result_revision", "scoring_input_revision",
-                                       "daily_values", "bouts", "episodes", "new_frozen_references"])
+        XCTAssertEqual(Set(obj.keys), ["header", "document", "envelope_tables", "scoring_result_revision",
+                                       "scoring_input_revision", "daily_values", "bouts", "episodes",
+                                       "new_frozen_references"])
         XCTAssertEqual(obj["scoring_result_revision"] as? Int, 41)
         XCTAssertEqual(obj["scoring_input_revision"] as? Int, 9)
         let header = try XCTUnwrap(obj["header"] as? [String: Any])
@@ -484,14 +485,27 @@ final class ContextLaneTests: XCTestCase {
         XCTAssertEqual(header["contract_version"] as? String, PC.contractVersion)
         XCTAssertEqual((header["versions"] as? [String: Any])?["feature_registry"] as? String,
                        PC.FeatureRegistry.version)
-        // The document is the encoder's bytes, unchanged, and decodes back into the shared type.
-        let docBytes = try PC.encoder().encode(doc)
-        XCTAssertEqual(built.documentBytes, docBytes.count)
-        XCTAssertTrue(built.payloadText.contains("\"document\":" + String(decoding: docBytes, as: UTF8.self) + ","))
-        let roundTrip = try PC.decoder().decode(PC.DayDocument.self,
-                                                from: JSONSerialization.data(withJSONObject: obj["document"]!))
-        XCTAssertEqual(roundTrip.header.inputFingerprint, doc.header.inputFingerprint)
-        XCTAssertEqual(roundTrip.envelopes.count, doc.envelopes.count)
+        // Stored form (contracts §6.1): `document` is the summary, embedded as the encoder wrote it; the envelopes
+        // travel as one interned table per metric, and joining them back gives the document itself.
+        let (summary, tables) = PC.StoredDocument.split(doc)
+        let summaryBytes = try PC.encoder().encode(summary)
+        XCTAssertEqual(built.summaryBytes, summaryBytes.count)
+        XCTAssertTrue(built.payloadText.contains("\"document\":" + String(decoding: summaryBytes, as: UTF8.self) + ","))
+        let storedSummary = try PC.decoder().decode(PC.DayDocument.self,
+                                                    from: JSONSerialization.data(withJSONObject: obj["document"]!))
+        XCTAssertTrue(storedSummary.envelopes.isEmpty)
+        XCTAssertEqual(storedSummary.envelopeIndex?.map(\.metric), tables.map(\.metric))
+        let entries = try XCTUnwrap(obj["envelope_tables"] as? [[String: Any]])
+        XCTAssertEqual(entries.map { $0["metric"] as? String }, tables.map { $0.metric.rawValue })
+        XCTAssertEqual(entries.map { $0["envelope_count"] as? Int }, tables.map { $0.rows.count })
+        XCTAssertEqual(entries.compactMap { $0["envelope_count"] as? Int }.reduce(0, +), doc.envelopes.count)
+        let decodedTables = try entries.map {
+            try PC.decoder().decode(PC.EnvelopeTable.self, from: JSONSerialization.data(withJSONObject: $0["table"]!))
+        }
+        XCTAssertEqual(PC.StoredDocument.join(summary: storedSummary, tables: decodedTables), doc,
+                       "summary + tables rebuild the document")
+        XCTAssertEqual(built.tableBytes, try tables.map { try PC.encoder().encode($0).count }.reduce(0, +))
+        XCTAssertEqual(built.documentBytes, built.summaryBytes + built.tableBytes)
         // The job duration is sent when known.
         let timed = try ContextLane.publishPayload(document: doc, snapshot: l.snapshot, durationMS: 1_234)
         let timedObj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(timed.payloadText.utf8)) as? [String: Any])

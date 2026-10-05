@@ -49,7 +49,16 @@ final class ContextLaneDatabaseTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        for user in owners { try? db?.exec("delete from auth.users where id = '\(user)'") }
+        for user in owners {
+            // `sessions` rows first: their delete trigger (`bump_user_revision`) upserts `user_sync_state` for the
+            // user, which fails inside the account cascade and would leave the owner (and its queued work) behind.
+            try? db?.exec("delete from public.sessions where user_id = '\(user)'")
+            do {
+                try db?.exec("delete from auth.users where id = '\(user)'")
+            } catch {
+                XCTFail("fixture owner \(user) was not removed: \(error)")
+            }
+        }
         owners = []
     }
 
@@ -198,6 +207,27 @@ final class ContextLaneDatabaseTests: XCTestCase {
             """, [o.user, o.device, day, mode])
     }
 
+    /// The stored revision as clients rebuild it: the summary document joined with its envelope tables
+    /// (`physiology_context_envelope_tables`, contracts §6.1) when the database has them; the summary alone
+    /// otherwise (`tables` false).
+    func storedDocument(revision: String) throws -> (doc: PC.DayDocument, tables: Bool) {
+        let text = try XCTUnwrap(try db.query(
+            "select document::text as doc from public.physiology_context_days where context_revision = $1::bigint",
+            [revision]).first?["doc"])
+        let summary = try PC.decoder().decode(PC.DayDocument.self, from: Data(text.utf8))
+        guard try envelopeTablesInstalled() else { return (summary, false) }
+        let tables = try db.query("""
+            select envelope_table::text as t from public.physiology_context_envelope_tables
+            where context_revision = $1::bigint order by metric
+            """, [revision]).map { try PC.decoder().decode(PC.EnvelopeTable.self, from: Data(($0["t"] ?? "").utf8)) }
+        return (PC.StoredDocument.join(summary: summary, tables: tables), true)
+    }
+
+    func envelopeTablesInstalled() throws -> Bool {
+        try db.query("select (to_regclass('public.physiology_context_envelope_tables') is not null)::text as p",
+                     []).first?["p"] == "true"
+    }
+
     func job(_ o: Owner, mode: String = "retrospective", day: String? = nil) throws -> [String: String] {
         try db.query("""
             select input_revision::text as rev, completed_revision::text as done,
@@ -265,15 +295,25 @@ final class ContextLaneDatabaseTests: XCTestCase {
             from public.physiology_context_days where context_revision = $1::bigint
             """, [current["rev"] ?? "0"]).first)
         XCTAssertEqual(docText["srev"], snap["rev"])
-        let doc = try PC.decoder().decode(PC.DayDocument.self, from: Data((docText["doc"] ?? "").utf8))
+        let summary = try PC.decoder().decode(PC.DayDocument.self, from: Data((docText["doc"] ?? "").utf8))
+        XCTAssertTrue(summary.envelopes.isEmpty, "the stored document is the summary (contracts §6.1)")
+        let index = try XCTUnwrap(summary.envelopeIndex)
+        XCTAssertTrue(Set(index.map(\.metric)).isSuperset(of: [.heartRate, .restingHeartRate, .respiratoryRate]),
+                      "\(index)")
+        let (doc, joined) = try storedDocument(revision: current["rev"] ?? "0")
         XCTAssertEqual(doc.header.identity.deviceScope, o.device)
         XCTAssertEqual(doc.header.interpretation.mode, .retrospective)
         let methods = Set(doc.envelopes.map(\.method.id))
-        XCTAssertTrue(methods.contains("series.resting_hr.60min_min5"), "\(methods)")
-        XCTAssertTrue(methods.contains(PC.Engine.heartRateWindowMethod.id))
-        for e in doc.envelopes where e.method.id == "series.resting_hr.60min_min5" {
-            XCTAssertLessThanOrEqual(e.support.duration, 3_600)
-            XCTAssertEqual(e.displayBucket?.duration, 300)
+        if joined {
+            XCTAssertEqual(doc.envelopes.count, index.map(\.envelopeCount).reduce(0, +))
+            XCTAssertTrue(methods.contains("series.resting_hr.60min_min5"), "\(methods)")
+            XCTAssertTrue(methods.contains(PC.Engine.heartRateWindowMethod.id))
+            for e in doc.envelopes where e.method.id == "series.resting_hr.60min_min5" {
+                XCTAssertLessThanOrEqual(e.support.duration, 3_600)
+                XCTAssertEqual(e.displayBucket?.duration, 300)
+            }
+        } else {
+            print("context-v17: physiology_context_envelope_tables is not installed; envelope tables not verified")
         }
 
         // Normalized products match the document.
@@ -299,7 +339,7 @@ final class ContextLaneDatabaseTests: XCTestCase {
         }
 
         let eligible = doc.envelopes.filter { $0.eligibility.contains { $0.state == .eligible } }.count
-        print("context-v17: envelopes=\(doc.envelopes.count) eligible_envelopes=\(eligible) "
+        print("context-v17: envelopes=\(index.map(\.envelopeCount).reduce(0, +)) joined=\(joined) eligible_envelopes=\(eligible) "
               + "daily_values=\(doc.dailyValues.count) bouts=\(doc.bouts.count) episodes=\(doc.episodes.count) "
               + "sleep_episodes=\(doc.sleep.episodes.count) status=\(doc.status.rawValue) "
               + "methods=\(methods.sorted().joined(separator: ","))")
@@ -493,19 +533,30 @@ final class ContextLaneDatabaseTests: XCTestCase {
         XCTAssertEqual(lane.stats.failed, 0, lane.stats.lastError ?? "")
 
         func document(_ o: Owner) throws -> PC.DayDocument? {
-            guard let text = try db.query("""
-                select document::text as doc from public.physiology_context_days
+            guard let rev = try db.query("""
+                select context_revision::text as rev from public.physiology_context_days
                 where user_id = $1::uuid and device_id = $2::uuid and day = $3::date and superseded_by is null
-                """, [o.user, o.device, day]).first?["doc"] else { return nil }
-            return try PC.decoder().decode(PC.DayDocument.self, from: Data(text.utf8))
+                """, [o.user, o.device, day]).first?["rev"] else { return nil }
+            return try storedDocument(revision: rev).doc
+        }
+        func envelopeCount(_ d: PC.DayDocument) -> Int {
+            d.envelopes.isEmpty ? (d.envelopeIndex ?? []).map(\.envelopeCount).reduce(0, +) : d.envelopes.count
         }
         let docA = try XCTUnwrap(try document(a))
-        XCTAssertFalse(docA.envelopes.isEmpty)
+        XCTAssertGreaterThan(envelopeCount(docA), 0)
         for other in [a2, b] {
             guard let doc = try document(other) else { continue }
             XCTAssertEqual(doc.header.identity.deviceScope, other.device)
-            XCTAssertTrue(doc.envelopes.isEmpty, "no other device's or owner's observations leak in")
+            XCTAssertEqual(envelopeCount(doc), 0, "no other device's or owner's observations leak in")
             XCTAssertNotEqual(doc.header.inputFingerprint, docA.header.inputFingerprint)
+        }
+        if try envelopeTablesInstalled() {
+            let foreignTables = try db.query("""
+                select count(*)::text as n from public.physiology_context_envelope_tables t
+                join public.physiology_context_days d on d.context_revision = t.context_revision
+                where t.user_id <> d.user_id or t.device_id <> d.device_id
+                """, []).first?["n"]
+            XCTAssertEqual(foreignTables, "0")
         }
         // Every stored product row belongs to the owner and device it was computed for.
         let foreign = try db.query("""
@@ -590,7 +641,8 @@ final class ContextLaneDatabaseTests: XCTestCase {
               + "seed_s=\(Int(seedS)) scoring_wall_ms_all_dirty_days=\(scoringWallMS) scoring_day_compute_ms=\(scoringJob) "
               + "context_wall_ms=\(contextWallMS) context_load_ms=\(lane.stats.loadMsMax) "
               + "context_build_ms=\(lane.stats.buildMsMax) context_rows=\(lane.stats.inputsRowsMax) "
-              + "context_measurements=\(lane.stats.measurementsMax) doc_bytes_encoded=\(lane.stats.docBytesMax) "
+              + "context_measurements=\(lane.stats.measurementsMax) summary_bytes=\(lane.stats.summaryBytesMax) "
+              + "table_bytes=\(lane.stats.tableBytesMax) doc_bytes_encoded=\(lane.stats.docBytesMax) "
               + "doc_bytes_stored=\(stored["bytes"] ?? "")")
     }
 
