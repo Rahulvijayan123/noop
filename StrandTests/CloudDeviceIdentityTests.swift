@@ -221,6 +221,61 @@ final class CloudDeviceIdentityTests: XCTestCase {
         XCTAssertFalse(line?.contains("MGB") ?? true)
     }
 
+    // MARK: days to ask for again
+
+    func testWhichFailuresCanClearOnTheirOwn() {
+        for token in ["network-1001", "network-1009", "http-500", "http-503", "http-408", "http-425", "http-429",
+                      "cancelled", "error"] {
+            XCTAssertTrue(HostedDayRead.isTransient(token), token)
+        }
+        for token in ["http-401", "http-403", "http-404", "http-409", "http-", "http-abc", "malformed",
+                      "no-identity", "not-configured", "owner-mismatch"] {
+            XCTAssertFalse(HostedDayRead.isTransient(token), token)
+        }
+    }
+
+    func testADayThatFailedOnTheNetworkIsAskedForAgainUntilItIsServed() {
+        var ledger = HostedRetryLedger()
+        ledger.record([outcome("2026-09-21", [.failed("network-1009"), .noResult]), outcome("2026-10-03", [.result])])
+        XCTAssertEqual(ledger.days, ["2026-09-21"])
+        ledger.record([outcome("2026-09-21", [.result])])
+        XCTAssertTrue(ledger.isEmpty)
+    }
+
+    func testDaysThatWillAnswerTheSameWayAgainAreNotRetried() {
+        var ledger = HostedRetryLedger()
+        ledger.record([outcome("2026-09-21", [.failed("http-409"), .failed("http-404")]),
+                       outcome("2026-09-22", [.noResult, .noResult])])
+        XCTAssertTrue(ledger.isEmpty, "a refused day and a day not scored yet are not worth asking for again")
+    }
+
+    func testARetryIsBoundedSoABrokenDayIsNotAskedForForever() {
+        var ledger = HostedRetryLedger()
+        for pass in 1..<HostedRetryLedger.attempts {
+            ledger.record([outcome("2026-09-21", [.failed("http-503")])])
+            XCTAssertEqual(ledger.days, ["2026-09-21"], "still being retried after pass \(pass)")
+        }
+        ledger.record([outcome("2026-09-21", [.failed("http-503")])])
+        XCTAssertTrue(ledger.isEmpty)
+    }
+
+    func testADayServedByAnyCandidateIsDoneEvenIfAnotherFailed() {
+        var ledger = HostedRetryLedger()
+        ledger.record([outcome("2026-09-21", [.failed("http-503")])])
+        ledger.record([outcome("2026-09-21", [.failed("http-503"), .result])])
+        XCTAssertTrue(ledger.isEmpty)
+    }
+
+    func testADayThatWasServedButCouldNotBeStoredIsKeptUntilItIs() {
+        var ledger = HostedRetryLedger()
+        let served = outcome("2026-09-21", [.result])
+        ledger.record([served])
+        ledger.recordStoreFailure(day: "2026-09-21")
+        XCTAssertEqual(ledger.days, ["2026-09-21"])
+        ledger.record([served])
+        XCTAssertTrue(ledger.isEmpty, "stored on the next pass, so there is nothing left to retry")
+    }
+
     // MARK: the screens' multi-id read
 
     private let owner = "11111111-1111-4111-8111-111111111111"

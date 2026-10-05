@@ -60,6 +60,19 @@ struct HostedDayRead {
         var failureTokens: [String] {
             attempts.compactMap { if case .failed(let token) = $0.attempt { return token } else { return nil } }
         }
+
+        /// No candidate had a result and at least one failed in a way that asking again could fix.
+        var failedTransiently: Bool {
+            result == nil && failureTokens.contains(where: HostedDayRead.isTransient)
+        }
+    }
+
+    /// Whether a failure token describes something that can clear on its own: the network, a busy or failing
+    /// server, or a cancelled request. A refused or unknown day will answer the same way next time.
+    static func isTransient(_ token: String) -> Bool {
+        if token.hasPrefix("network") || token == "cancelled" || token == "error" { return true }
+        guard token.hasPrefix("http-"), let status = Int(token.dropFirst("http-".count)) else { return false }
+        return status >= 500 || status == 408 || status == 425 || status == 429
     }
 
     static func read(day: String,
@@ -122,5 +135,44 @@ struct HostedDayRead {
         }
         if candidateCount > 1 { parts.append("asked \(candidateCount) ids") }
         return parts.joined(separator: " · ")
+    }
+}
+
+/// Days whose server result could not be read on the pass that was asked for them, and so have to be asked for
+/// again.
+///
+/// The server's change feed moves its cursor as soon as a page is polled. A day it announced and whose read then
+/// failed (a dropped connection, a busy server) is never announced a second time, so without this it would stay
+/// empty in the app until the next launch's catch-up, or for good if it is older than that. A day stays here
+/// only while its failure looks temporary, and for a bounded number of passes.
+struct HostedRetryLedger: Equatable {
+    static let attempts = 8
+
+    private var attemptsLeft: [String: Int] = [:]
+
+    var days: [String] { attemptsLeft.keys.sorted() }
+    var isEmpty: Bool { attemptsLeft.isEmpty }
+
+    /// Note how a pass went: a day that was served, or failed for good, is done with; one that failed in a way that
+    /// can clear is kept, with one fewer attempt left.
+    mutating func record(_ outcomes: [HostedDayRead.Outcome]) {
+        for outcome in outcomes {
+            guard outcome.failedTransiently else {
+                attemptsLeft[outcome.day] = nil
+                continue
+            }
+            spendAttempt(on: outcome.day)
+        }
+    }
+
+    /// A day whose result was read but could not be written to the store. Call after `record`, which would
+    /// otherwise see the read succeed and let the day go.
+    mutating func recordStoreFailure(day: String) {
+        spendAttempt(on: day)
+    }
+
+    private mutating func spendAttempt(on day: String) {
+        let remaining = (attemptsLeft[day] ?? Self.attempts) - 1
+        attemptsLeft[day] = remaining > 0 ? remaining : nil
     }
 }

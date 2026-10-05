@@ -465,6 +465,8 @@ final class CloudAccountIsolationTests: XCTestCase {
         var capabilitiesUserId: String?
         var capabilitiesSourceId: String?
         var status = 401
+        /// The body of the receiver's reply to a batch, by batch id. Nil sends none.
+        var reply: (@Sendable (String) -> Data?)?
 
         var uploads: [Upload] { lock.lock(); defer { lock.unlock() }; return _uploads }
         var capabilityScopes: [CloudDataScope?] { lock.lock(); defer { lock.unlock() }; return _capabilityScopes }
@@ -478,7 +480,8 @@ final class CloudAccountIsolationTests: XCTestCase {
 
         func uploadForeground(batchId: String, fileURL: URL, scope: CloudDataScope?) async throws -> CloudUploadSession.Outcome {
             record(upload: Upload(batchId: batchId, scope: scope))
-            return CloudUploadSession.Outcome(batchId: batchId, statusCode: status, body: nil, errorDescription: nil)
+            return CloudUploadSession.Outcome(batchId: batchId, statusCode: status, body: reply?(batchId),
+                                              errorDescription: nil)
         }
 
         func enqueueBackground(batchId: String, fileURL: URL, scope: CloudDataScope?) throws -> Int { 1 }
@@ -579,6 +582,41 @@ final class CloudAccountIsolationTests: XCTestCase {
         XCTAssertTrue(blocked.isEmpty, "a revoked credential never strands the data behind it")
         let stats = await journal.stats()
         XCTAssertEqual(stats.pendingRecords, 2, "nothing was released")
+        await journal.deactivate()
+    }
+
+    /// A 200 whose acknowledgement is not "accepted" used to leave the batch in `uploaded`, a state the send
+    /// pass never looks at, with its records held back for good. It goes back to be sent again instead.
+    func testAnAcknowledgementThatIsNotAcceptedLeavesTheBatchToBeSentAgainRatherThanStranded() async throws {
+        let owner = UUID().uuidString.lowercased()
+        let journal = try await journalReady(for: owner, source: sourceA)
+        let uploader = StubUploader()
+        uploader.capabilitiesUserId = owner
+        uploader.capabilitiesSourceId = sourceA
+        uploader.status = 200
+        uploader.reply = { batchId in
+            Data("""
+            {"protocolVersion":"1.2","batchId":"\(batchId)","stream":"hrSample","deviceId":"my-whoop",\
+            "endCursor":null,"acceptedRows":0,"status":"rejected"}
+            """.utf8)
+        }
+        let identity = CloudPushIdentity(ownerId: owner, sourceId: sourceA, tokenId: UUID().uuidString,
+                                         uploadToken: "noop_a")
+        let coordinator = makeCoordinator(journal: journal, uploader: uploader, scope: identity.scope, identity: identity)
+        defer { UserDefaults.standard.removeObject(forKey: "noop.cloud.protocolVersion.\(owner)") }
+
+        await coordinator.start()
+        let requeued = await eventually {
+            ((try? await journal.batches(states: [.failed], dueBeforeMs: nil, limit: 10)) ?? []).count == 1
+        }
+        await coordinator.stop()
+
+        XCTAssertTrue(requeued, "the batch is queued for another attempt")
+        let stranded = try await journal.batches(states: [.uploaded], dueBeforeMs: nil, limit: 10)
+        XCTAssertTrue(stranded.isEmpty, "nothing is left in a state that is never sent again")
+        let stats = await journal.stats()
+        XCTAssertEqual(stats.uploadedBatches, 0)
+        XCTAssertEqual(stats.pendingRecords, 2, "the records were never released")
         await journal.deactivate()
     }
 

@@ -465,7 +465,14 @@ public actor CloudTransportCoordinator {
         }
         do {
             try await journal.markUploaded(batchId: batch.batchId)
-            return try await applyReceipt(batch: batch, body: body)
+            let acknowledged = try await applyReceipt(batch: batch, body: body)
+            if !acknowledged {
+                // A 200 whose acknowledgement does not match this batch is not delivery. `uploaded` is not a
+                // state the send pass looks at again, so leaving the batch there would hold its records back
+                // for good. The receiver deduplicates by batch id, so sending it again is safe.
+                await handleFailure(batch: batch, error: lastError ?? "receipt not confirmed", forceRetry: true)
+            }
+            return acknowledged
         } catch {
             await handleFailure(batch: batch, error: String(describing: error))
             return false
@@ -594,8 +601,8 @@ public actor CloudTransportCoordinator {
         onCredentialRejected?(status)
     }
 
-    private func handleFailure(batch: CloudSealedBatch, error: String) async {
-        if !CloudTransportCoordinator.isRetryable(error: error) {
+    private func handleFailure(batch: CloudSealedBatch, error: String, forceRetry: Bool = false) async {
+        if !forceRetry, !CloudTransportCoordinator.isRetryable(error: error) {
             // A rejected batch will not become acceptable by waiting. The bytes and their records are
             // kept (an unacknowledged input is never pruned) but the batch stops consuming retries and
             // the condition is surfaced.

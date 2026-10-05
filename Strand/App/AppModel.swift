@@ -263,6 +263,8 @@ final class AppModel: ObservableObject {
     private var hostedSyncInFlight = false
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
+    /// Days the change feed announced whose read failed for a reason that can clear; asked for again next pass.
+    private var hostedRetry = HostedRetryLedger()
     private var hostedCatchUpDone = false
     /// The last sync summary written to the strap log, so an unchanged state is said once, not every 30 s.
     private var lastHostedSyncLine: String?
@@ -339,6 +341,7 @@ final class AppModel: ObservableObject {
     func cloudAccountReady(_ identity: CloudPushIdentity) async {
         if hostedAccountScope != identity.scope {
             hostedWrittenRevision = [:]
+            hostedRetry = HostedRetryLedger()
             hostedAccountScope = identity.scope
         }
         applyPowerSaving()
@@ -360,6 +363,7 @@ final class AppModel: ObservableObject {
         historySeedTask?.cancel()
         historySeedTask = nil
         hostedWrittenRevision = [:]
+        hostedRetry = HostedRetryLedger()
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
         applyPowerSaving()
@@ -474,6 +478,7 @@ final class AppModel: ObservableObject {
         // and stayed a stale stub, which left the baseline a night short.
         let catchUpDays = hostedCatchUpDone ? [] : (2...Self.hostedCatchUpSpan).map { dayKey(daysBack: $0) }
         for day in catchUpDays where !days.contains(day) { days.append(day) }
+        for day in hostedRetry.days where !days.contains(day) { days.append(day) }
         // Every candidate's change feed counts: days the server rescored under the strap's own device and
         // under the installation id both need re-reading. Each feed is paged until it runs dry (bounded), so a
         // feed that starts at zero on a fresh install reaches the whole history, not just its first page.
@@ -496,6 +501,7 @@ final class AppModel: ObservableObject {
         let dismissed = repo.dismissedSleepWindows()
         var written = 0
         var outcomes: [HostedDayRead.Outcome] = []
+        var unstoredDays: [String] = []
         for day in days {
             let outcome = await HostedDayRead.read(day: day, candidates: candidates) { id in
                 try await scores.refresh(day: day, deviceId: id).hostedResult
@@ -513,9 +519,14 @@ final class AppModel: ObservableObject {
                 written += 1
             } catch {
                 live.append(log: "Cloud: could not store the server result for \(day): \(error)")
+                unstoredDays.append(day)
             }
         }
         hostedCatchUpDone = true
+        if CloudPushRuntime.shared.runningScope == account {
+            hostedRetry.record(outcomes)
+            for day in unstoredDays { hostedRetry.recordStoreFailure(day: day) }
+        }
         reportHostedSync(outcomes: outcomes, written: written, candidateCount: candidates.count,
                          feedFailures: feedFailures)
         if written > 0 { await repo.refresh() }
