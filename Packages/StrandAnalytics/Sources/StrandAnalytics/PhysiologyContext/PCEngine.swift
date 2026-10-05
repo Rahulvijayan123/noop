@@ -329,8 +329,21 @@ extension PhysiologyContext {
                 .sorted { $0.day < $1.day }
                 .map { DayCoverage(day: $0.day, interval: dayInterval($0.day, timezoneId: identity.timezoneId),
                                    observedS: Int($0.value)) }
-            let observed = max(covered(strap, identity.dayWindow), covered(hart, identity.dayWindow))
-            out.append(DayCoverage(day: identity.day, interval: identity.dayWindow, observedS: observed))
+            // Today's observed seconds are the union of both heart-rate independent tracks' covered spans, kept as
+            // intervals so a trailing window can clip the day exactly instead of prorating it.
+            let spans = (strap.spans + hart.spans).compactMap { $0.interval.intersection(identity.dayWindow) }.sorted()
+            var union: [Interval] = []
+            for s in spans {
+                if var last = union.last, s.start <= last.end {
+                    last.end = max(last.end, s.end)
+                    union[union.count - 1] = last
+                } else {
+                    union.append(s)
+                }
+            }
+            let observed = union.reduce(0) { $0 + $1.duration }
+            out.append(DayCoverage(day: identity.day, interval: identity.dayWindow, observedS: observed,
+                                   observedIntervals: union))
             return out
         }
 
