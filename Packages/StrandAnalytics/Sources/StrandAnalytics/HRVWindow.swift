@@ -357,3 +357,28 @@ public enum HRVWindowBuilder {
         return best
     }
 }
+
+// MARK: - Diagnostics
+
+/// A one-line, human-readable summary of a day's windows for an always-on log — so a caller that wires
+/// `HRVWindowBuilder` into a real pipeline has something observable to confirm it ran against live data,
+/// without needing a UI or a persisted history. Named plainly (not `hrv diag`): that token is already the
+/// nightly sleep-scoring pipeline's own always-on trace line (see `AnalyticsEngine`/`CaptureCompleteness`),
+/// a different subsystem with its own parsers; this is the daytime ActivityContext coordinator's line.
+public enum HRVWindowSummary {
+    public static func diagLine(_ windows: [HRVWindow], kind: HRVWindowKind, day: String) -> String {
+        guard !windows.isEmpty else { return "HRV windows for \(day): no \(kind.rawValue) windows (no R-R data)" }
+        let eligible = windows.filter(\.eligibleForBaseline)
+        let withMotion = windows.filter { $0.motionRmsG != nil }.count
+        let withGyro = windows.filter { $0.gyroRmsDps != nil }.count
+        func mean(_ xs: [Double]) -> Double? { xs.isEmpty ? nil : xs.reduce(0, +) / Double(xs.count) }
+        var line = "HRV windows for \(day): \(windows.count) \(kind.rawValue) windows, \(eligible.count) eligible for baseline"
+        if let r = mean(eligible.compactMap(\.rmssd)), let s = mean(eligible.compactMap(\.sdnn)) {
+            line += " (mean rmssd \(oneDecimal(r)) ms, mean sdnn \(oneDecimal(s)) ms)"
+        }
+        line += ", motion data \(withMotion)/\(windows.count), gyro data \(withGyro)/\(windows.count)"
+        return line
+    }
+
+    private static func oneDecimal(_ x: Double) -> String { String(format: "%.1f", x) }
+}

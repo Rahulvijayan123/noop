@@ -255,4 +255,32 @@ final class HRVWindowTests: XCTestCase {
         XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(artifactFraction: 0.9)))
         XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(trustworthy: false)))
     }
+
+    // MARK: Diagnostic summary
+
+    func testDiagLineReportsCountsAndMeansOverEligibleWindowsOnly() {
+        var eligible = baseEligibleWindow(motionRmsG: 0.01)
+        eligible.eligibleForBaseline = HRVWindowBuilder.isEligibleForBaseline(eligible)
+        var ineligible = baseEligibleWindow(phase: .transition)
+        ineligible.eligibleForBaseline = HRVWindowBuilder.isEligibleForBaseline(ineligible)
+        ineligible.rmssd = 999 // must not leak into the eligible-only means
+        let line = HRVWindowSummary.diagLine([eligible, ineligible], kind: .canonical5m, day: "2026-10-05")
+        XCTAssertTrue(line.contains("2 canonical_5m windows"))
+        XCTAssertTrue(line.contains("1 eligible for baseline"))
+        XCTAssertTrue(line.contains("mean rmssd 30.0 ms"), line)
+        XCTAssertFalse(line.contains("999"))
+        XCTAssertTrue(line.contains("motion data 2/2"))
+        XCTAssertTrue(line.contains("gyro data 0/2"))
+    }
+
+    func testDiagLineHandlesNoWindowsAndNoEligibleWindows() {
+        XCTAssertEqual(HRVWindowSummary.diagLine([], kind: .canonical5m, day: "2026-10-05"),
+                       "HRV windows for 2026-10-05: no canonical_5m windows (no R-R data)")
+        var ineligible = baseEligibleWindow(phase: .transition)
+        ineligible.eligibleForBaseline = HRVWindowBuilder.isEligibleForBaseline(ineligible)
+        let allIneligible = [ineligible]
+        let line = HRVWindowSummary.diagLine(allIneligible, kind: .canonical5m, day: "2026-10-05")
+        XCTAssertTrue(line.contains("0 eligible for baseline"))
+        XCTAssertFalse(line.contains("mean rmssd"), "no eligible windows means no mean to report")
+    }
 }
