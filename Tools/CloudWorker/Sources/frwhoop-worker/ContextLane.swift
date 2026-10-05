@@ -1,0 +1,489 @@
+import Foundation
+import StrandAnalytics
+
+/// Lane 7: physiology context (docs/physiology-context/contracts.md §7). OFF unless `FRWHOOP_CONTEXT_ENABLED=1`.
+///
+/// One wake:
+///   1. guard: the queue table and RPCs must exist (`to_regclass` / `to_regprocedure`); without them the lane
+///      idles and says so (`context_tables_missing`), re-probing once a minute;
+///   2. every `enqueueInterval` (default 120 s): `enqueue_physiology_context_days_v1` turns scoring completions,
+///      placement and exposure revisions into context jobs (idempotent, bounded);
+///   3. up to `budget` jobs: claim (a lease, committed before any long work) → renew → read every input in one
+///      read-only snapshot (`ContextInputs.load`) → renew → `Engine.buildDay` (pure, no clock) → encode with
+///      `PhysiologyContext.encoder()` → `publish_physiology_context_v1` (fenced on the live lease and the claimed
+///      revision; idempotent on the (policy, input) fingerprint pair).
+///
+/// Settlement mirrors `ActivityLane`: a publish that did not apply (NULL, `applied=false`: lease lost or revision
+/// moved) releases the lease through renew + fail with the CLAIMED revision, which the queue treats as a clean
+/// release when the revision moved; a lost lease mid-job is `.stale` and nothing is failed; every other error is
+/// settled through `fail_physiology_context_v1` with a sanitized one-line reason (bounded backoff, dead letter at
+/// the queue's cap); a lost connection leaves the lease to expire.
+///
+/// Isolation: own connection, own thread, own lane state. The lane writes nothing but its own RPCs: never a
+/// `noop_*`, `sessions`, scoring or series table, never `scoring_dirty_span` / `enqueue_scoring_v2`, never inside
+/// a scoring transaction. A context failure is counted and retried and cannot reach scoring, series, BLE or
+/// uploads.
+struct ContextLane {
+    typealias PC = PhysiologyContext
+
+    let db: PostgresClient
+    /// Recorded by the claim RPC (`p_worker`).
+    var workerName: String = "frwhoop-worker"
+    var leaseSeconds: Int = 300
+    var enqueueIntervalSeconds: TimeInterval = 120
+    /// Jobs one enqueue call may create or bump.
+    var enqueueLimit: Int = 200
+    var policy: PC.Policy = .default
+
+    static let tablesProbeIntervalSeconds: TimeInterval = 60
+    static let claimBackoffSeconds: TimeInterval = 60
+    static let maxErrorLength = 300
+
+    struct Stats {
+        var claimed = 0
+        /// A new context revision was stored.
+        var published = 0
+        /// The publish matched the current revision's fingerprints: nothing new was stored.
+        var unchanged = 0
+        var failed = 0
+        /// Later retrospective days the publish invalidated because this day's daily values changed.
+        var cascaded = 0
+        /// Publish did not apply (lease lost / revision moved); the lease was released.
+        var notCompleted = 0
+        /// The lease was lost (or a race was lost) before the publish; the queue owns the job again.
+        var superseded = 0
+        var failuresPersisted = 0
+        var failuresUnsettled = 0
+        var enqueued = 0
+        var enqueueFailures = 0
+        var claimFailures = 0
+        /// Wakes that found the queue table or RPCs missing (the lane idles).
+        var tablesMissing = 0
+        /// Assemble + build + encode, per job.
+        var builds = 0
+        var buildMsTotal = 0
+        var buildMsMax = 0
+        /// Input reads, per job.
+        var loadMsTotal = 0
+        var loadMsMax = 0
+        var docBytesTotal = 0
+        var docBytesMax = 0
+        var inputsRowsMax = 0
+        var measurementsMax = 0
+        /// `Engine.causalView` exclusions (telemetry only: the document never records them).
+        var causalExcludedObservations = 0
+        var causalExcludedRecords = 0
+        var causalExcludedExposures = 0
+        /// Optional inputs that could not be read, summed over jobs.
+        var inputsUnavailable = 0
+        var rowsSkipped = 0
+        var lastError: String?
+        var lastErrorKind: String?
+        var lastActivityAt: Date?
+
+        /// The heartbeat's per-lane counters.
+        var counters: [String: Int] {
+            [
+                "claimed": claimed, "published": published, "unchanged": unchanged, "failed": failed,
+                "cascaded": cascaded, "not_completed": notCompleted, "superseded": superseded,
+                "failures_persisted": failuresPersisted, "failures_unsettled": failuresUnsettled,
+                "enqueued": enqueued, "enqueue_failures": enqueueFailures, "claim_failures": claimFailures,
+                "context_tables_missing": tablesMissing,
+                "builds": builds, "build_ms_total": buildMsTotal, "build_ms_max": buildMsMax,
+                "build_ms_mean": builds > 0 ? buildMsTotal / builds : 0,
+                "load_ms_total": loadMsTotal, "load_ms_max": loadMsMax,
+                "doc_bytes_total": docBytesTotal, "doc_bytes_max": docBytesMax,
+                "doc_bytes_mean": builds > 0 ? docBytesTotal / builds : 0,
+                "inputs_rows_max": inputsRowsMax, "measurements_max": measurementsMax,
+                "causal_excluded_observations": causalExcludedObservations,
+                "causal_excluded_records": causalExcludedRecords,
+                "causal_excluded_exposure_revisions": causalExcludedExposures,
+                "inputs_unavailable": inputsUnavailable, "rows_skipped": rowsSkipped,
+            ]
+        }
+    }
+    var stats = Stats()
+
+    var tablesPresent: Bool?
+    var tablesCheckedAt: Date?
+    var lastEnqueueAt: Date?
+    var backoffUntil: Date?
+    /// Last reason written to stderr, so a failure that repeats on every wake is logged once.
+    var lastLoggedReason: String?
+
+    init(db: PostgresClient, workerName: String = "frwhoop-worker", leaseSeconds: Int = 300,
+         enqueueIntervalSeconds: TimeInterval = 120, policy: PC.Policy = .default) {
+        self.db = db
+        self.workerName = workerName
+        self.leaseSeconds = leaseSeconds
+        self.enqueueIntervalSeconds = enqueueIntervalSeconds
+        self.policy = policy
+    }
+
+    enum ContextError: Error, CustomStringConvertible {
+        case deterministic(String)
+        var description: String {
+            switch self { case .deterministic(let d): return "context_deterministic: \(d)" }
+        }
+    }
+
+    enum Outcome: Equatable {
+        case published(revision: Int64, cascaded: Int)
+        case unchanged(revision: Int64)
+        /// The fenced publish did not apply; the lease was released.
+        case fenced(reason: String)
+    }
+
+    private enum Cycle { case empty, done }
+
+    // MARK: - Drain
+
+    mutating func drain(budget: Int) {
+        if let until = backoffUntil, Date() < until { return }
+        do {
+            try db.ensureConnected()
+        } catch {
+            record(error)
+            return
+        }
+        guard checkTables() else { return }
+        enqueueIfDue()
+        for _ in 0..<max(1, budget) {
+            do {
+                if case .empty = try cycle() { return }
+            } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+                record(e)
+                return
+            } catch {
+                // The claim itself failed (a grant, a migration half applied): back off, say why once.
+                stats.claimFailures += 1
+                let why = Self.sanitize(error)
+                note("claim failed: \(why)")
+                stats.lastError = "context_claim: \(why)"
+                stats.lastErrorKind = "context_claim"
+                backoffUntil = Date().addingTimeInterval(Self.claimBackoffSeconds)
+                if Self.isMissingObject(error) { tablesPresent = nil }
+                return
+            }
+        }
+    }
+
+    /// The deploy-order guard: true when the queue and RPCs exist. Re-probed every minute while missing.
+    mutating func checkTables() -> Bool {
+        if tablesPresent == true { return true }
+        if let at = tablesCheckedAt, tablesPresent == false,
+           Date().timeIntervalSince(at) < Self.tablesProbeIntervalSeconds {
+            stats.tablesMissing += 1
+            return false
+        }
+        tablesCheckedAt = Date()
+        let present = (try? db.query(ContextSQL.tablesPresent, []))?.first?["present"].map(isTrue) ?? false
+        tablesPresent = present
+        if present, stats.lastErrorKind == "context_tables_missing" { clearError() }
+        if !present {
+            stats.tablesMissing += 1
+            stats.lastError = "context_tables_missing"
+            stats.lastErrorKind = "context_tables_missing"
+            note("physiology_context tables are not installed; the context lane idles")
+        }
+        return present
+    }
+
+    mutating func enqueueIfDue() {
+        if let last = lastEnqueueAt, Date().timeIntervalSince(last) < enqueueIntervalSeconds { return }
+        lastEnqueueAt = Date()
+        do {
+            let out = try db.callFunctionForJSON(ContextSQL.enqueue, [String(enqueueLimit)])
+            stats.enqueued += Int((out ?? "").trimmingCharacters(in: .whitespaces)) ?? 0
+        } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+            record(e)
+        } catch {
+            stats.enqueueFailures += 1
+            note("enqueue failed: \(Self.sanitize(error))")
+        }
+    }
+
+    // MARK: - One job
+
+    private mutating func cycle() throws -> Cycle {
+        guard let row = try claimRow() else { return .empty }
+        stats.claimed += 1
+        guard let job = ContextInputs.parseJob(row) else {
+            stats.failed += 1
+            if let token = row["lease_token"], !token.isEmpty, let rev = Int64(row["input_revision"] ?? "") {
+                settle(token: token, revision: rev, reason: "context_deterministic: malformed_job_row")
+            }
+            return .done
+        }
+        do {
+            switch try process(job) {
+            case .published(_, let cascaded):
+                stats.published += 1
+                stats.cascaded += cascaded
+                stats.lastActivityAt = Date()
+                clearError()
+            case .unchanged:
+                stats.unchanged += 1
+                stats.lastActivityAt = Date()
+                clearError()
+            case .fenced:
+                stats.notCompleted += 1
+            }
+        } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+            stats.failuresUnsettled += 1
+            throw e  // the lease expires and the queue hands the job out again
+        } catch {
+            let kind = (error as? PostgresClient.Error)?.kind ?? .other
+            if kind == .stale || kind == .serialization {
+                stats.superseded += 1
+                return .done
+            }
+            stats.failed += 1
+            let reason = Self.sanitize(error)
+            note("job failed: \(reason)")
+            stats.lastError = reason
+            stats.lastErrorKind = "context_job"
+            settle(token: job.leaseToken, revision: job.inputRevision, reason: reason)
+        }
+        return .done
+    }
+
+    /// The claim runs in its own committed transaction (with the service-role claim set), before any long work.
+    func claimRow() throws -> [String: String]? {
+        try db.withTransaction {
+            try db.exec("SELECT set_config('request.jwt.claims', '{\"role\":\"service_role\"}', true)")
+            return try db.query(ContextSQL.claim, [workerName, String(leaseSeconds)]).first
+        }
+    }
+
+    /// Load, build and publish one claimed job. Internal so a scratch database can drive it directly.
+    mutating func process(_ job: ContextInputs.Job) throws -> Outcome {
+        guard let windows = ContextInputs.windows(day: job.day, timezoneId: job.timezoneId) else {
+            throw ContextError.deterministic("invalid_job_day")
+        }
+        guard try renew(job) else { throw Self.leaseLost("before the input reads") }
+        let loadStarted = Date()
+        let loaded = try ContextInputs.load(db: db, job: job, windows: windows)
+        let loadMS = Self.millis(since: loadStarted)
+        guard try renew(job) else { throw Self.leaseLost("before the build") }
+
+        let buildStarted = Date()
+        let assembled = ContextInputs.assemble(loaded, job: job, windows: windows)
+        let document = PC.Engine.buildDay(assembled.input, history: assembled.history, policy: policy)
+        let built = try Self.publishPayload(document: document, snapshot: loaded.snapshot)
+        let buildMS = Self.millis(since: buildStarted)
+        noteTelemetry(loadMS: loadMS, buildMS: buildMS, built: built, assembled: assembled, loaded: loaded)
+
+        return try publish(job, payload: built.payloadText)
+    }
+
+    /// The fenced publish in its own transaction. NULL and `applied=false` are never success.
+    mutating func publish(_ job: ContextInputs.Job, payload: String) throws -> Outcome {
+        let text = try db.callFunctionForJSON(ContextSQL.publish,
+                                              [job.leaseToken, String(job.inputRevision), payload])
+        let result = Self.parsePublishResult(text)
+        if result.applied, let revision = result.revision {
+            return result.unchanged ? .unchanged(revision: revision)
+                : .published(revision: revision, cascaded: result.cascadedDays)
+        }
+        try releaseLease(job, reason: result.reason)
+        return .fenced(reason: result.reason)
+    }
+
+    private func renew(_ job: ContextInputs.Job) throws -> Bool {
+        isTrue(try db.callFunctionForJSON(ContextSQL.renew, [job.leaseToken, String(leaseSeconds)]))
+    }
+
+    /// No bare release RPC: confirm the lease is still ours, then fail with the CLAIMED revision. The queue treats
+    /// a revision mismatch as a clean release (no backoff); an unchanged revision counts one honest backoff.
+    private mutating func releaseLease(_ job: ContextInputs.Job, reason: String) throws {
+        guard try renew(job) else { return }
+        _ = try db.callFunctionForJSON(
+            ContextSQL.fail,
+            [job.leaseToken, String(job.inputRevision), Self.releaseReason(claimedRevision: job.inputRevision,
+                                                                           reason: reason)])
+    }
+
+    static func releaseReason(claimedRevision: Int64, reason: String) -> String {
+        "context_publish_not_applied:claimed_revision=\(claimedRevision):\(sanitize(reason: reason))"
+    }
+
+    /// Persist a failure (bounded backoff / dead letter) in its own transaction; never throws.
+    private mutating func settle(token: String, revision: Int64, reason: String) {
+        do {
+            _ = try db.callFunctionForJSON(ContextSQL.fail, [token, String(revision), reason])
+            stats.failuresPersisted += 1
+        } catch {
+            stats.failuresUnsettled += 1
+        }
+    }
+
+    // MARK: - Payload (contracts §6 publish_physiology_context_v1)
+
+    /// The publish header: the document's identity, interpretation and version stamps.
+    struct PublishHeader: Encodable, Equatable {
+        var mode: PC.ProcessingMode
+        var day: String
+        var finality: PC.Finality
+        var status: PC.ProductStatus
+        var availabilityCutoff: Int
+        var generatedAt: Int
+        var contractVersion: String
+        var schemaVersion: Int
+        var policyFingerprint: String
+        var inputFingerprint: String
+        var versions: PC.PolicyVersions
+    }
+
+    struct Built {
+        var payloadText: String
+        var documentBytes: Int
+        var header: PublishHeader
+    }
+
+    static func header(of d: PC.DayDocument) -> PublishHeader {
+        PublishHeader(mode: d.header.interpretation.mode, day: d.header.identity.day,
+                      finality: d.header.interpretation.finality, status: d.status,
+                      availabilityCutoff: d.header.interpretation.availabilityCutoff,
+                      generatedAt: d.header.interpretation.generatedAt,
+                      contractVersion: d.header.contractVersion, schemaVersion: d.header.schemaVersion,
+                      policyFingerprint: d.header.policyFingerprint, inputFingerprint: d.header.inputFingerprint,
+                      versions: d.header.versions)
+    }
+
+    /// `{header, document, scoring_result_revision, scoring_input_revision, daily_values[], bouts[], episodes[],
+    /// new_frozen_references[]}`. Every part is encoded with `PhysiologyContext.encoder()` (snake_case, sorted
+    /// keys); the document is embedded byte for byte, so `document_bytes` is the encoded document's length.
+    static func publishPayload(document d: PC.DayDocument, snapshot: ContextInputs.Snapshot?) throws -> Built {
+        let encoder = PC.encoder()
+        func text<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
+        let documentData = try encoder.encode(d)
+        let header = Self.header(of: d)
+        let revision = snapshot.map { String($0.resultRevision) } ?? "null"
+        let input = snapshot.map { String($0.inputRevision) } ?? "null"
+        let parts: [(String, String)] = [
+            ("bouts", try text(d.bouts)),
+            ("daily_values", try text(d.dailyValues)),
+            ("document", String(decoding: documentData, as: UTF8.self)),
+            ("episodes", try text(d.episodes)),
+            ("header", try text(header)),
+            ("new_frozen_references", try text(d.newFrozenReferences)),
+            ("scoring_input_revision", input),
+            ("scoring_result_revision", revision),
+        ]
+        let body = parts.map { "\"\($0.0)\":\($0.1)" }.joined(separator: ",")
+        return Built(payloadText: "{" + body + "}", documentBytes: documentData.count, header: header)
+    }
+
+    struct PublishResult: Equatable {
+        var applied: Bool
+        var revision: Int64?
+        var reason: String
+        var cascadedDays: Int
+        var unchanged: Bool
+    }
+
+    /// `{applied, context_revision, reason, cascaded_days}`; NULL / unparsable → not applied.
+    static func parsePublishResult(_ text: String?) -> PublishResult {
+        guard let text, let data = text.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return PublishResult(applied: false, revision: nil, reason: "null_result", cascadedDays: 0,
+                                 unchanged: false)
+        }
+        let applied = (obj["applied"] as? Bool) ?? false
+        let revision = (obj["context_revision"] as? NSNumber)?.int64Value
+            ?? (obj["context_revision"] as? String).flatMap { Int64($0) }
+        let reason = (obj["reason"] as? String) ?? (applied ? "published" : "not_applied")
+        let cascaded: Int
+        if let n = obj["cascaded_days"] as? NSNumber { cascaded = n.intValue }
+        else if let a = obj["cascaded_days"] as? [Any] { cascaded = a.count }
+        else { cascaded = 0 }
+        return PublishResult(applied: applied, revision: revision, reason: reason, cascadedDays: cascaded,
+                             unchanged: applied && unchangedReasons.contains(reason))
+    }
+
+    /// Reasons with which an applied publish reports "identical fingerprints, nothing new stored".
+    static let unchangedReasons: Set<String> = ["unchanged", "identical", "duplicate", "idempotent", "noop",
+                                                "no_op", "same_fingerprint"]
+
+    // MARK: - Telemetry and errors
+
+    private mutating func noteTelemetry(loadMS: Int, buildMS: Int, built: Built,
+                                        assembled: ContextInputs.Assembled, loaded: ContextInputs.Loaded) {
+        stats.builds += 1
+        stats.buildMsTotal += buildMS
+        stats.buildMsMax = max(stats.buildMsMax, buildMS)
+        stats.loadMsTotal += loadMS
+        stats.loadMsMax = max(stats.loadMsMax, loadMS)
+        stats.docBytesTotal += built.documentBytes
+        stats.docBytesMax = max(stats.docBytesMax, built.documentBytes)
+        stats.inputsRowsMax = max(stats.inputsRowsMax, assembled.rowCount)
+        stats.measurementsMax = max(stats.measurementsMax, assembled.measurementCount)
+        for d in assembled.causalExcluded {
+            switch d.name {
+            case "causal_excluded_observations": stats.causalExcludedObservations += Int(d.value)
+            case "causal_excluded_records": stats.causalExcludedRecords += Int(d.value)
+            case "causal_excluded_exposure_revisions": stats.causalExcludedExposures += Int(d.value)
+            default: break
+            }
+        }
+        stats.inputsUnavailable += loaded.unavailable.count
+        stats.rowsSkipped += loaded.skippedRows
+    }
+
+    private mutating func clearError() {
+        stats.lastError = nil
+        stats.lastErrorKind = nil
+        lastLoggedReason = nil
+    }
+
+    private mutating func record(_ error: Error) {
+        stats.lastError = Self.sanitize(error)
+        stats.lastErrorKind = (error as? PostgresClient.Error)?.kind.rawValue ?? "other"
+    }
+
+    /// Write a lane problem to stderr once per distinct reason.
+    private mutating func note(_ reason: String) {
+        guard reason != lastLoggedReason else { return }
+        lastLoggedReason = reason
+        FileHandle.standardError.write("frwhoop-worker: context lane: \(reason)\n".data(using: .utf8)!)
+    }
+
+    static func leaseLost(_ when: String) -> PostgresClient.Error {
+        PostgresClient.Error(message: "context lease lost \(when)", sqlstate: "55000", kind: .stale)
+    }
+
+    static func millis(since start: Date) -> Int { max(0, Int(Date().timeIntervalSince(start) * 1000)) }
+
+    /// A missing relation / function (the migration is not, or only partly, applied).
+    static func isMissingObject(_ error: Error) -> Bool {
+        guard let e = error as? PostgresClient.Error else { return false }
+        return e.sqlstate == "42P01" || e.sqlstate == "42883"
+    }
+
+    /// A one-line, bounded reason that never carries row data: the first line of the message (Postgres DETAIL /
+    /// CONTEXT lines can quote values), control characters removed, UUIDs masked, at most 300 characters,
+    /// prefixed with the error kind.
+    static func sanitize(_ error: Error) -> String {
+        let kind: String
+        if let e = error as? PostgresClient.Error { kind = e.kind.rawValue }
+        else if error is ContextError { kind = "deterministic" }
+        else { kind = "other" }
+        let message: String
+        if let e = error as? PostgresClient.Error { message = e.message + (e.sqlstate.map { " sqlstate=\($0)" } ?? "") }
+        else { message = String(describing: error) }
+        return "context_\(kind): " + sanitize(reason: message)
+    }
+
+    static func sanitize(reason text: String) -> String {
+        let firstLine = text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }).first.map(String.init) ?? ""
+        var cleaned = String(firstLine.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+            .map(Character.init))
+        if let regex = try? NSRegularExpression(
+            pattern: "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}") {
+            cleaned = regex.stringByReplacingMatches(in: cleaned, range: NSRange(cleaned.startIndex..., in: cleaned),
+                                                     withTemplate: "<uuid>")
+        }
+        return String(cleaned.prefix(maxErrorLength))
+    }
+}

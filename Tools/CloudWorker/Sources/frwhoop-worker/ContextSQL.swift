@@ -1,0 +1,265 @@
+import Foundation
+import WhoopProtocol
+
+/// Every SQL statement the physiology-context lane runs, in one place (the pattern of `PhysiologyCandidateSQL`).
+///
+/// Rules the statements follow:
+///  - Parameters are text and cast in SQL (`$1::uuid`); a SQL NULL comes back as "" and an optional parameter
+///    is sent as "" and turned into NULL with `nullif`.
+///  - Every raw-stream read is scoped by `user_id` AND `device_id`, bounded by the read window, and ORDERED BY
+///    the table's full identity, so two loads of the same rows produce the same arrays (determinism).
+///  - Availability is `ceil(extract(epoch from ingested_at))`: the first whole second at which the row is
+///    known to have been stored. Rounding up keeps a causal cutoff conservative (a row ingested at 100.4 s is not
+///    treated as available to a decision taken at 100 s).
+///  - The lane only reads raw streams, published products and its own tables, and only writes through the
+///    fenced `*_physiology_context_v1` RPCs. Nothing here writes a `noop_*`, `sessions`, scoring or series
+///    table, or calls `scoring_dirty_span` / `enqueue_scoring_v2`.
+enum ContextSQL {
+
+    // MARK: - Presence guard (deploy order: the worker may run before the migration)
+
+    /// Whether the lane's queue and RPCs exist. The heartbeat's queue-age entry and the lane both use it.
+    static let tablesPresent = """
+        select (to_regclass('public.physiology_context_jobs') is not null
+                and to_regclass('public.physiology_context_days') is not null
+                and to_regprocedure('public.claim_physiology_context_v1(text,integer)') is not null
+                and to_regprocedure('public.publish_physiology_context_v1(uuid,bigint,jsonb)') is not null)::text
+               as present
+        """
+
+    // MARK: - Queue RPCs (contracts §6)
+
+    static let enqueue = "select public.enqueue_physiology_context_days_v1($1::integer)::text"
+
+    /// The claim, plus the database clock at the claim (the job's causal cutoff and `generatedAt`). The clock is
+    /// the database's so it is on the same timeline as `ingested_at`.
+    static let claim = """
+        select c.user_id::text as user_id, c.device_id::text as device_id, c.day::text as day,
+               c.mode::text as mode, c.input_revision::text as input_revision,
+               c.lease_token::text as lease_token, coalesce(c.timezone_id::text, '') as timezone_id,
+               coalesce(c.cutoff_override::text, '') as cutoff_override,
+               floor(extract(epoch from clock_timestamp()))::bigint::text as claimed_at
+          from public.claim_physiology_context_v1($1::text, $2::integer) c
+        """
+
+    static let renew = "select public.renew_physiology_context_v1($1::uuid, $2::integer)::text"
+    static let fail = "select public.fail_physiology_context_v1($1::uuid, $2::bigint, $3::text)::text"
+    static let publish = "select public.publish_physiology_context_v1($1::uuid, $2::bigint, $3::jsonb)::text"
+
+    /// Heartbeat queue-age entry (appended only when `tablesPresent`; a static reference to a missing table fails
+    /// the whole heartbeat query at parse time). Same gates as the claim.
+    static let queueAgeEntry = """
+          union all
+          select 'context', count(*), min(j.not_before)
+            from public.physiology_context_jobs j
+           where j.completed_revision < j.input_revision and not j.dead_letter
+             and j.not_before <= now() and (j.lease_until is null or j.lease_until <= now())
+        """
+
+    // MARK: - Raw streams over the read window [$3, $4)
+
+    static let heartRate = """
+        select ts::text as ts, bpm::text as bpm,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_hr_samples
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+         order by ts
+        """
+
+    /// Same exclusions as scoring (`DayScorer.loadRR`): the Oura SpO2 beat train and rows whose timestamp the
+    /// receiver flagged. Transport selection (`DayScorer.oneTransportPerHour`) runs in Swift afterwards.
+    static let beatIntervals = """
+        select ts::text as ts, "rrMs"::text as rr, seq::text as seq, coalesce(ord::text, '') as ord,
+               coalesce("srcChannel"::text, '') as ch,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_rr_intervals
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+           and ("srcChannel" is null or "srcChannel" <> \(RRSourceChannel.spo2Ibi.rawValue))
+           and ("tsSuspect" is null or "tsSuspect" <> 1)
+         order by ts, seq, "rrMs"
+        """
+
+    static let gravity = """
+        select ts::text as ts, x::text as x, y::text as y, z::text as z,
+               coalesce("dynAccel"::text, '') as dyn,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_gravity_samples
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+         order by ts
+        """
+
+    static let steps = """
+        select ts::text as ts, counter::text as counter, coalesce("activityClass"::text, '') as ac,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_step_samples
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+         order by ts
+        """
+
+    static let skinTemperature = """
+        select ts::text as ts, raw::text as raw,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_skin_temp_samples
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+         order by ts
+        """
+
+    static let wearEvents = """
+        select ts::text as ts, kind,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_events
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+           and (left(kind, 9) = 'WRIST_OFF' or left(kind, 8) = 'WRIST_ON')
+         order by ts, kind
+        """
+
+    static let bandSleepState = """
+        select ts::text as ts, state::text as state,
+               ceil(extract(epoch from ingested_at))::bigint::text as at
+          from public.noop_sleep_state_samples
+         where user_id = $1::uuid and device_id = $2::uuid and ts >= $3::bigint and ts < $4::bigint
+         order by ts
+        """
+
+    // MARK: - Published products
+
+    /// The latest snapshot of the day published by `$5` (unix seconds; `cutoff`). A causal replay passes its
+    /// cutoff so a snapshot published after it is never read; a retrospective or live job passes the claim time.
+    static let latestSnapshot = """
+        select s.result_revision::text as result_revision, s.input_revision::text as input_revision,
+               ceil(extract(epoch from s.computed_at))::bigint::text as at, s.payload::text as payload
+          from public.scoring_snapshots_v2 s
+         where s.user_id = $1::uuid and s.device_id = $2::uuid and s.day = $3::date
+           and s.algorithm_version = $4::text and s.computed_at <= to_timestamp($5::bigint)
+         order by s.result_revision desc
+         limit 1
+        """
+
+    /// The latest snapshot's sleep sessions for each earlier day in `[$3, $4]` published by `$6`.
+    static let priorSnapshotSleep = """
+        select distinct on (s.day) s.day::text as day, s.result_revision::text as result_revision,
+               ceil(extract(epoch from s.computed_at))::bigint::text as at,
+               coalesce((s.payload -> 'sleep')::text, '[]') as sleep
+          from public.scoring_snapshots_v2 s
+         where s.user_id = $1::uuid and s.device_id = $2::uuid and s.day >= $3::date and s.day <= $4::date
+           and s.algorithm_version = $5::text and s.computed_at <= to_timestamp($6::bigint)
+         order by s.day, s.result_revision desc
+        """
+
+    /// Logged and detected workouts of this device overlapping the read window. Availability is the last write.
+    static let workouts = """
+        select id::text as id, kind, extract(epoch from start_at)::bigint::text as s,
+               extract(epoch from end_at)::bigint::text as e,
+               coalesce(summary ->> 'type', summary ->> 'kind', '') as label,
+               ceil(extract(epoch from greatest(created_at, updated_at)))::bigint::text as at
+          from public.sessions
+         where user_id = $1::uuid and device_id = $2::uuid and kind in ('workout', 'manual_workout')
+           and start_at < to_timestamp($4::bigint) and end_at > to_timestamp($3::bigint)
+         order by start_at, end_at, id
+        """
+
+    /// v1 HART epochs overlapping the read window, every published revision (the engine resolves overlaps by
+    /// revision, then availability, then a stable id).
+    static let activityEpochs = """
+        select start_ts::text as s, end_ts::text as e, motion_label, posture, exercise_session, sleep_state,
+               exertion_context, wear_state, confidence::text as confidence, observed_s::text as observed_s,
+               valid_s::text as valid_s, result_revision::text as revision,
+               ceil(extract(epoch from computed_at))::bigint::text as at
+          from public.activity_context_epochs
+         where user_id = $1::uuid and device_id = $2::uuid and start_ts < $4::bigint and end_ts > $3::bigint
+         order by start_ts, result_revision, fingerprint
+        """
+
+    /// v2 decoder runs overlapping the read window, from the best document of each UTC day (raw-IMU before
+    /// stream days, `source_rank`), so two documents of one day never compete. `$5`/`$6` bound the UTC days.
+    static let activityRuns = """
+        with best as (
+          select day, min(source_rank) as source_rank
+            from public.activity_context_runs
+           where user_id = $1::uuid and device_id = $2::uuid and day >= $5::date and day <= $6::date
+           group by day
+        )
+        select r.start_ts::text as s, r.end_ts::text as e, coalesce(r.activity_class, 'unknown') as class,
+               coalesce(r.class_confidence, r.confidence, 0)::text as confidence,
+               coalesce(r.sleep_state, '') as sleep, coalesce(r.wear_state, '') as wear,
+               r.result_revision::text as revision,
+               ceil(extract(epoch from r.computed_at))::bigint::text as at
+          from public.activity_context_runs r
+          join best b on b.day = r.day and b.source_rank = r.source_rank
+         where r.user_id = $1::uuid and r.device_id = $2::uuid and r.day >= $5::date and r.day <= $6::date
+           and r.start_ts < $4::bigint and r.end_ts > $3::bigint
+         order by r.start_ts, r.end_ts, r.result_revision
+        """
+
+    /// Placement records in effect anywhere in the read window: the device's own and the owner's device-less
+    /// (user-level) declarations. Nothing before the first record is invented.
+    static let placements = """
+        select extract(epoch from effective_start)::bigint::text as s,
+               coalesce(extract(epoch from effective_end)::bigint::text, '') as e,
+               placement, source, revision::text as revision,
+               ceil(extract(epoch from recorded_at))::bigint::text as at,
+               (device_id is null)::text as user_level
+          from public.placement_intervals
+         where owner = $1::uuid and (device_id = $2::uuid or device_id is null)
+           and effective_start < to_timestamp($4::bigint)
+           and (effective_end is null or effective_end > to_timestamp($3::bigint))
+         order by effective_start, (device_id is null) desc, revision, recorded_at, id
+        """
+
+    static let device = """
+        select coalesce(device_family, '') as family, coalesce(firmware, '') as firmware,
+               coalesce(source_kind, '') as source_kind
+          from public.devices
+         where id = $1::uuid and user_id = $2::uuid
+        """
+
+    /// Same columns and defaults as `DayScorer.loadProfile`.
+    static let profile = """
+        select coalesce(height_cm::text, '') as h, coalesce(weight_kg::text, '') as w,
+               coalesce(date_of_birth::text, '') as dob, coalesce(sex_model, 'nonbinary') as sex
+          from public.profiles where id = $1::uuid
+        """
+
+    // MARK: - Exposures and history (contracts §6 tables)
+
+    /// Every revision of the owner's exposure events whose occurrence overlaps `[$2, $3)` (unix seconds). All
+    /// revisions are read: the engine picks the latest available one at the cutoff and keeps the history.
+    static let exposureRevisions = """
+        select r.event_id::text as event_id, r.revision::text as revision, r.kind, r.label,
+               r.occurred_start::text as s, r.occurred_end::text as e, r.time_precision,
+               r.recorded_at::text as recorded_at,
+               coalesce(ceil(extract(epoch from r.received_at))::bigint::text, '') as received_at,
+               r.source, r.confirmation,
+               coalesce(r.dose_amount::text, '') as dose_amount, coalesce(r.dose_unit, '') as dose_unit,
+               coalesce(r.dose_provenance, '') as dose_provenance
+          from public.exposure_event_revisions r
+         where r.owner = $1::uuid and r.occurred_start < $3::bigint and r.occurred_end > $2::bigint
+         order by r.event_id, r.revision
+        """
+
+    /// Earlier days' daily values of the same device and mode, `[$4, $5]`.
+    static let historyDailyValues = """
+        select v.value::text as value
+          from public.physiology_context_daily_values v
+         where v.user_id = $1::uuid and v.device_id = $2::uuid and v.mode = $3::text
+           and v.day >= $4::date and v.day <= $5::date
+         order by v.day, v.series_key, v.regime_key
+        """
+
+    /// Earlier days' bouts of the same device and mode, `[$4, $5]`.
+    static let historyBouts = """
+        select b.bout::text as bout
+          from public.physiology_context_bouts b
+         where b.user_id = $1::uuid and b.device_id = $2::uuid and b.mode = $3::text
+           and b.day >= $4::date and b.day <= $5::date
+         order by b.day, b.bout_id
+        """
+
+    /// Every frozen reference registered for the device.
+    static let frozenReferences = """
+        select f.reference::text as reference
+          from public.physiology_context_frozen_references f
+         where f.user_id = $1::uuid and f.device_id = $2::uuid
+         order by f.series_key, f.regime_key, f.version, f.reference_id
+        """
+}
