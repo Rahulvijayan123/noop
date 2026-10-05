@@ -1,0 +1,2 @@
+# wristmet-v1.json.gz is small enough to be committed (<= 3 MB gz); it is rebuilt by scripts/build_wristmet.py
+!wristmet-v1.json.gz
