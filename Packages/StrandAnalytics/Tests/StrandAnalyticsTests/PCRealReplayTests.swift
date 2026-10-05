@@ -132,7 +132,7 @@ final class PCRealReplayTests: XCTestCase {
         let nights = Self.loadNights()
         try XCTSkipIf(nights.isEmpty, "set PC_REAL_REPLAY_DIR to a directory of night exports")
         let zone = ProcessInfo.processInfo.environment["PC_REAL_REPLAY_TZ"] ?? "America/Los_Angeles"
-        var lines: [String] = ["night | envelopes | valid | degraded | invalid | missing | sleep-eligible | awake-eligible | unknown-awake | doc KB | build ms"]
+        var lines: [String] = ["night | envelopes | valid | degraded | invalid | missing | sleep-eligible | awake-eligible | unknown-awake | doc KB | stored KB | build ms"]
         for n in nights {
             let input = Self.dayInput(n, timezoneId: zone, mode: .retrospective, cutoff: nil)
             let t0 = Date()
@@ -141,6 +141,9 @@ final class PCRealReplayTests: XCTestCase {
             let data = try PC.encoder().encode(doc)
             XCTAssertEqual(try PC.decoder().decode(PC.DayDocument.self, from: data), doc, n.name)
             XCTAssertEqual(try PC.encoder().encode(PC.Engine.buildDay(input, history: .empty)), data, "\(n.name) determinism")
+            let (summary, tables) = PC.StoredDocument.split(doc)
+            XCTAssertEqual(PC.StoredDocument.join(summary: summary, tables: tables), doc, "\(n.name) stored form")
+            let storedKB = (try PC.encoder().encode(summary).count + tables.reduce(0) { $0 + ((try? PC.encoder().encode($1).count) ?? 0) }) / 1024
             for e in doc.envelopes {
                 XCTAssertTrue(PC.IntervalAlgebra.reconciles(e.activity), "\(n.name) \(e.id)")
                 XCTAssertEqual(e.activity.intervalS, e.support.duration)
@@ -150,7 +153,7 @@ final class PCRealReplayTests: XCTestCase {
             let sleepOK = verdicts.filter { $0.comparison == .sleepMeasurement && $0.state == .eligible }.count
             let awakeOK = verdicts.filter { $0.comparison == .stableAwakeRest && $0.state == .eligible }.count
             let awakeUnknown = verdicts.filter { $0.comparison == .stableAwakeRest && $0.state == .unknown }.count
-            lines.append("\(n.name) | \(doc.envelopes.count) | \(count(.valid)) | \(count(.degraded)) | \(count(.invalid)) | \(count(.missing)) | \(sleepOK) | \(awakeOK) | \(awakeUnknown) | \(data.count / 1024) | \(Int(ms))")
+            lines.append("\(n.name) | \(doc.envelopes.count) | \(count(.valid)) | \(count(.degraded)) | \(count(.invalid)) | \(count(.missing)) | \(sleepOK) | \(awakeOK) | \(awakeUnknown) | \(data.count / 1024) | \(storedKB) | \(Int(ms))")
 
             // Causal replay: a cutoff in the middle of the night, then the same cutoff with all later data present.
             if let mid = n.hr.dropFirst(n.hr.count / 2).first?.ts {
