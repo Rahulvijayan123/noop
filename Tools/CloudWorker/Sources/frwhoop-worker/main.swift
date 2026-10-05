@@ -40,7 +40,14 @@ import FoundationNetworking
 //   FRWHOOP_ACTIVITY_STREAM_BUDGET    stream-day jobs per wake (default 4)
 //   FRWHOOP_ACTIVITY_IMU         "0" skips the raw-IMU jobs (no Python child, no model) and runs only the stream
 //                                days; for a host that has neither (default ON)
-//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity);
+//   FRWHOOP_CONTEXT_ENABLED      "1" runs the physiology-context lane (default OFF; exactly "1", and the lane
+//                                only runs when enabled AND "context" is not in DISABLE_LANES). Needs
+//                                20261005120000_physiology_context.sql; without it the lane idles and
+//                                reports context_tables_missing
+//   FRWHOOP_CONTEXT_BUDGET       context jobs per wake (default 2)
+//   FRWHOOP_CONTEXT_LEASE_SECONDS     context job lease length (default 300)
+//   FRWHOOP_CONTEXT_ENQUEUE_INTERVAL_SECONDS  seconds between enqueue_physiology_context_days_v1 calls (default 120)
+//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity,context);
 //                                "series" keeps scoring but stops building and writing the dense intraday series
 //   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
 //                                (default 20; 0 claims them immediately, as the queue did originally)
@@ -101,6 +108,11 @@ struct WorkerConfig {
     let activityImu: Bool
     let activityStreams: Bool
     let activityStreamBudget: Int
+    /// Physiology-context lane (contracts §7). OFF unless FRWHOOP_CONTEXT_ENABLED is exactly "1".
+    let contextEnabled: Bool
+    let contextBudget: Int
+    let contextLeaseSeconds: Int
+    let contextEnqueueIntervalSeconds: Int
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -115,6 +127,9 @@ struct WorkerConfig {
 
     /// True only when a sidecar URL is configured.
     var inferenceEnabled: Bool { inferenceURL != nil }
+
+    /// The context lane runs only when enabled AND not listed in FRWHOOP_DISABLE_LANES.
+    var contextLaneRuns: Bool { contextEnabled && !disabledLanes.contains("context") }
 
     init(environment: [String: String]) throws {
         guard let dbURL = environment["FRWHOOP_DB_URL"], !dbURL.isEmpty else {
@@ -154,6 +169,13 @@ struct WorkerConfig {
         self.activityImu = (environment["FRWHOOP_ACTIVITY_IMU"] ?? "1") != "0"
         self.activityStreams = (environment["FRWHOOP_ACTIVITY_STREAMS"] ?? "1") != "0"
         self.activityStreamBudget = max(1, Int(environment["FRWHOOP_ACTIVITY_STREAM_BUDGET"] ?? "4") ?? 4)
+        // The physiology-context lane is OFF by default, like the activity lane: only the exact value "1"
+        // turns it on, so "true", "yes" or a typo leave it off.
+        self.contextEnabled = (environment["FRWHOOP_CONTEXT_ENABLED"] ?? "") == "1"
+        self.contextBudget = max(1, Int(environment["FRWHOOP_CONTEXT_BUDGET"] ?? "") ?? 2)
+        self.contextLeaseSeconds = max(30, Int(environment["FRWHOOP_CONTEXT_LEASE_SECONDS"] ?? "") ?? 300)
+        self.contextEnqueueIntervalSeconds = max(
+            1, Int(environment["FRWHOOP_CONTEXT_ENQUEUE_INTERVAL_SECONDS"] ?? "") ?? 120)
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -213,6 +235,20 @@ do {
     exit(3)
 }
 
+// The context lane's connection exists only when the lane runs, and failing to open it never stops the worker:
+// the lane then reports itself blocked in the heartbeat and every other lane carries on.
+var dbContext: PostgresClient?
+var contextStartupError: String?
+if config.contextLaneRuns {
+    do {
+        dbContext = try PostgresClient(options: dbOptions)
+    } catch {
+        contextStartupError = String(describing: error).prefix(2000).description
+        FileHandle.standardError.write(
+            "frwhoop-worker: context lane connection failed; the lane stays off: \(error)\n".data(using: .utf8)!)
+    }
+}
+
 let startupLine = "frwhoop-worker: started name=\(config.workerName) revision=\(config.sourceRevision) "
     + "sslmode=\(dbOptions.sslMode) sslrootcert=\(dbOptions.sslRootCert ?? "(system store)")\n"
 FileHandle.standardOutput.write(startupLine.data(using: .utf8)!)
@@ -270,6 +306,14 @@ let verifyState = LaneState(LaneSnapshot(name: "verify", enabled: laneEnabled("v
 let activityState = LaneState(LaneSnapshot(
     name: "activity",
     enabled: config.activityEnabled && laneEnabled("activity")))
+// The physiology-context lane is opt-in in the same way (FRWHOOP_CONTEXT_ENABLED=1 and not "context" in
+// FRWHOOP_DISABLE_LANES); off, it is never started and opens no connection.
+let contextState = LaneState(LaneSnapshot(
+    name: "context",
+    enabled: config.contextLaneRuns,
+    // A context-only startup failure is reported on the lane, never as a blocked database for the worker.
+    lastError: contextStartupError,
+    lastErrorKind: contextStartupError == nil ? nil : "context_connection"))
 
 let startedAt = Date()
 let processInstanceID = UUID().uuidString.lowercased()
@@ -583,6 +627,33 @@ if activityState.read().enabled {
     }
 }
 
+if contextState.read().enabled, let dbContext {
+    var context = ContextLane(db: dbContext, workerName: config.workerName,
+                              leaseSeconds: config.contextLeaseSeconds,
+                              enqueueIntervalSeconds: TimeInterval(config.contextEnqueueIntervalSeconds))
+    FileHandle.standardOutput.write(
+        ("frwhoop-worker: context lane enabled budget=\(config.contextBudget) "
+         + "lease_seconds=\(config.contextLeaseSeconds) "
+         + "enqueue_interval_seconds=\(config.contextEnqueueIntervalSeconds)\n").data(using: .utf8)!)
+    laneQueue.async {
+        runLane(contextState, cycle: {
+            func settled() -> Int {
+                context.stats.published + context.stats.unchanged + context.stats.failed
+                    + context.stats.notCompleted + context.stats.superseded
+            }
+            let before = settled()
+            context.drain(budget: config.contextBudget)
+            contextState.update {
+                $0.counters = context.stats.counters
+                $0.lastError = context.stats.lastError
+                $0.lastErrorKind = context.stats.lastErrorKind
+                $0.lastActivityAt = context.stats.lastActivityAt
+            }
+            return settled() > before
+        }, ensureConnected: { try dbContext.ensureConnected() })
+    }
+}
+
 // MARK: - Heartbeat
 
 /// Cached sidecar readiness for the heartbeat payload.
@@ -695,7 +766,7 @@ func inferenceHeartbeatMeta() -> Any {
 /// that target's `main`, so a test bundle that never runs `main` reads
 /// uninitialized storage (crash/garbage). Keeping the composition pure makes
 /// the pre/post-migration behavior directly unit-testable.
-func queueAgeQuery(includeActivity: Bool) -> String {
+func queueAgeQuery(includeActivity: Bool, includeContext: Bool = false) -> String {
     let base = """
 with q as (
   select 'scoring_legacy' as lane, count(*) as n, min(w.next_attempt_at) as oldest
@@ -758,7 +829,8 @@ select lane, n::text as n,
             else greatest(0, extract(epoch from (now() - oldest))::bigint)::text end as age_seconds
   from q
 """
-    return base + (includeActivity ? activity : "") + closing
+    return base + (includeActivity ? activity : "") + (includeContext ? ContextSQL.queueAgeEntry + "\n" : "")
+        + closing
 }
 
 
@@ -776,7 +848,13 @@ func queueAge() throws -> QueueAge {
     let activityTablePresent = (try? dbHeartbeat.query(
         "select to_regclass('public.activity_context_jobs') is not null as present", []))?
         .first?["present"] == "t"
-    let rows = try dbHeartbeat.query(queueAgeQuery(includeActivity: activityTablePresent), [])
+    // The context entry follows the same rule, and is added only while the context lane runs, so a backlog
+    // nobody drains (lane off) never turns the poll state to "working".
+    let contextTablePresent = config.contextLaneRuns && (try? dbHeartbeat.query(
+        "select to_regclass('public.physiology_context_jobs') is not null as present", []))?
+        .first?["present"] == "t"
+    let rows = try dbHeartbeat.query(queueAgeQuery(includeActivity: activityTablePresent,
+                                                   includeContext: contextTablePresent), [])
     var out = QueueAge()
     for row in rows {
         let lane = row["lane"] ?? ""
@@ -805,7 +883,7 @@ var heartbeatFailures = 0
 
 func heartbeat(final: Bool = false) {
     let lanes = [projectionState.read(), scoringState.read(), archiveState.read(),
-                 verifyState.read(), activityState.read()]
+                 verifyState.read(), activityState.read(), contextState.read()]
     var dbError: String?
     var queue: QueueAge?
     do {
@@ -850,6 +928,7 @@ func heartbeat(final: Bool = false) {
             "verify": config.verifyBudget,
             "reconcile": config.reconcileBudget,
             "activity": config.activityBudget,
+            "context": config.contextBudget,
         ],
         "db": dbHeartbeat.connectionFacts(),
         // Inference readiness: JSON null when the candidate lane is off.
