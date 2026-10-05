@@ -1,8 +1,9 @@
 # Physiology context — worker lane
 
-Owner: worker. Branch `pc/worker`. Contract: [contracts.md](../contracts.md) §2, §3, §6, §7. Migration read:
-`supabase/migrations/20261005120000_physiology_context.sql` (backend-db, merged at 13161df2). Lead branch merged at
-6c1f48c2 (systems C, D, E, G real; A, B, F still skeletons at the time of these notes).
+Owner: worker. Branch `pc/worker`. Contract: [contracts.md](../contracts.md) §2, §3, §6, §6.1, §7. Migration read:
+`supabase/migrations/20261005120000_physiology_context.sql` (backend-db). Lead branch merged through 272d8c06
+(stored form; systems A, B, C, D, E, G real; F — references and change detection — still a skeleton when these
+numbers were taken).
 
 ## 1. Files
 
@@ -147,15 +148,19 @@ revision, `availableAt` = snapshot `computed_at`:
 `sessionId` is set when the support is one session (resting HR always; the others when the day has one session).
 `skin_temp_dev_c` is a deviation, not a measurement, and is not mapped. With one session the hull is the session.
 
-## 6. Publish payload
+## 6. Publish payload (stored form, contracts §6.1)
 
-`{bouts, daily_values, document, duration_ms, episodes, header, new_frozen_references, scoring_input_revision,
-scoring_result_revision}`, each part encoded with `PhysiologyContext.encoder()`; the document is embedded byte for
-byte. `header` = `{mode, day, finality, status, availability_cutoff, generated_at, contract_version,
-schema_version, policy_fingerprint, input_fingerprint, versions}` taken from the document. `scoring_*_revision`
-are the day snapshot's (JSON null without one). `duration_ms` = load + build. The normalized `daily_values` and
-`bouts` are the document's items owned by the job's day (and mode for values) — the RPC rejects others; any left
-out are counted as `products_out_of_day` and stay in the document.
+`{bouts, daily_values, document, duration_ms, envelope_tables, episodes, header, new_frozen_references,
+scoring_input_revision, scoring_result_revision}`, each part encoded with `PhysiologyContext.encoder()` and embedded
+byte for byte. `document` is the SUMMARY from `StoredDocument.split(doc)` (envelopes empty, `envelope_index` set);
+`envelope_tables` = `[{envelope_count, metric, table}]`, one interned `EnvelopeTable` per metric in `MetricKind`
+order (`join(summary, tables) == doc`, unit-tested on the payload itself). `header` = `{mode, day, finality, status,
+availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint, input_fingerprint,
+versions}` from the document. `scoring_*_revision` are the day snapshot's (JSON null without one). `duration_ms` =
+load + build. The normalized `daily_values` and `bouts` are the document's items owned by the job's day (and mode
+for values) — the RPC rejects others; any left out are counted as `products_out_of_day` and stay in the document.
+Before sending, the summary and the largest table must each fit the 16 MiB jsonb cap, else `documents_too_large`
+(deterministic failure).
 
 ## 7. Failure isolation
 
@@ -171,7 +176,9 @@ out are counted as `products_out_of_day` and stay in the document.
 `claimed, published, unchanged, failed, cascaded, not_completed, superseded, failures_persisted,
 failures_unsettled, enqueued, enqueue_failures, claim_failures, context_tables_missing, builds, build_ms_total,
 build_ms_max, build_ms_mean, load_ms_total, load_ms_max, doc_bytes_total, doc_bytes_max, doc_bytes_mean,
-inputs_rows_max, measurements_max, causal_excluded_observations, causal_excluded_records,
+summary_bytes_total, summary_bytes_max, summary_bytes_mean, table_bytes_total, table_bytes_max, table_bytes_mean
+(per job, all tables together; `doc_bytes_*` = summary + tables), inputs_rows_max, measurements_max,
+causal_excluded_observations, causal_excluded_records,
 causal_excluded_exposure_revisions, inputs_unavailable, rows_skipped, products_out_of_day, day_window_mismatch,
 documents_too_large`. `budgets.context` is added to the heartbeat; the queue-age entry `context` is added only
 while the lane runs and the table exists.
@@ -220,20 +227,22 @@ DB tests (each creates its own owners/devices and deletes them):
 
 ## 10. Profiling (release build, Apple Silicon development machine)
 
-Systems C, D, E, G real; A, B, F skeletons at measurement time — rerun after integration.
+After merging the lead branch through 272d8c06 (systems A, B, C, D, E, G real; F skeleton). Times are
+assemble + `Engine.buildDay` + split/encode; "plain" is the unsplit document.
 
-| Case | Rows read | Measurements / envelopes | Context time | Document | Scoring on the same streams |
+| Case | Rows read | Measurements / envelopes | Context time | Stored form | Scoring on the same streams |
 | --- | --- | --- | --- | --- | --- |
-| Representative day, in memory (86,400 HR, 92,775 beats, 86,400 gravity and steps, 90 days of history), retrospective | 353,095 | 2,020 / 2,308 | assemble 50 + build 109 + encode 304 = **465 ms** | **9.5 MB** | analyzeDay + series 115 ms (in memory) |
-| same, causal_live at 20:00 | 353,095 | 1,682 / 1,917 | **378 ms** | 8.0 MB | — |
-| Largest read window, in memory (all streams 1 Hz over 60 h, two R-R transports, 7,200 HART epochs, 2,000 decoder runs, 200 exposure revisions), retrospective | 1,426,902 | 2,016 / 2,304 | 71 + 374 + 1,408 = **1,854 ms** | **42.9 MB — over the 16 MiB publish cap** (refused by the worker) | 69 ms |
-| same, causal_live | 1,426,902 | 1,678 / 1,912 | 1,377 ms | 35.3 MB | — |
-| Stored full day through both lanes (scratch Postgres; 108,000 HR, 115,839 beats, 108,000 gravity) | 439,841 | 2,018 | load **731 ms** + build **809 ms**, wall 1.75 s (claim → publish) | 6.1 MB encoded, 6.7 MB stored | scoring day `last_duration_ms` **1,352 ms**; scoring wall for the 4 dirty days 7.0 s |
+| Representative day, in memory (86,400 HR, 92,775 beats, 86,400 gravity and steps; 90 days of history), retrospective | 353,095 | 2,020 / 2,308 | 73 + 432 + 559 = **1,065 ms** | summary **42 KB** + tables **3.9 MB** (largest 2.3 MB, respiratory); plain 13.7 MB | analyzeDay + series 108 ms (in memory) |
+| same, causal_live at 20:00 | 353,095 | 1,682 / 1,917 | **781 ms** | 38 KB + 3.2 MB (plain 11.4 MB) | — |
+| Largest read window, in memory (all streams 1 Hz over 60 h, two R-R transports, 7,200 HART epochs, 2,000 decoder runs, 200 exposure revisions), retrospective | 1,426,902 | 2,016 / 2,304 | 67 + 691 + 2,335 = **3,094 ms** | 314 KB + **32.5 MB** (respiratory table **20.2 MB > 16 MiB**: refused); plain 46.5 MB | 59 ms |
+| same, causal_live | 1,426,902 | 1,678 / 1,912 | 2,426 ms | 252 KB + 27.0 MB (largest 16.8 MB: refused) | — |
+| Stored full day through both lanes (scratch Postgres; 108,000 HR, 115,839 beats, 108,000 gravity) | 439,841 | 2,018 | load **776 ms** + build **990 ms**, wall 1.83 s (claim → publish) | summary 40 KB + tables 3.35 MB | scoring day `last_duration_ms` **1,121 ms**; scoring wall for the 4 dirty days 5.9 s |
 
-Before the systems were merged (all skeletons) the same representative day built in 201 ms with a 3.4 MB
-document: the size growth is the per-envelope context (≈ 2.7 KB per envelope: `history` ≈ 1 KB, `sleep_wear`
-≈ 0.5 KB, `activity`, `preceding`), times ≈ 2,300 envelopes a day, 1,440 of them one-minute respiratory points;
-exposure references multiply `history` (the largest case). A debug build is 5–10× slower; time the release binary.
+Earlier points: with every system a skeleton the representative day built in 201 ms (3.4 MB plain); with C, D, E, G
+real and before the stored form, 465 ms and 9.5 MB plain. The plain size is per-envelope context (≈ 2.7–6 KB per
+envelope) × ≈ 2,300 envelopes a day (1,440 one-minute respiratory points); the stored form interns the repeated
+sub-objects. Exposure references still multiply the respiratory table (largest case). A debug build is 5–10× slower;
+time the release binary.
 
 ## 11. Whole-suite run after all merges
 
@@ -241,10 +250,11 @@ Recorded at the end of the session: see the final report (`swift test` with `FRW
 
 ## 12. Deviations and open issues (for the lead)
 
-1. **Document size (blocking at scale).** A typical day is 6–10 MB of jsonb; with a few exposure events a day the
-   per-envelope `history.exposures` pushes documents past the RPC's 16 MiB cap, which the lane then dead-letters
-   after 8 attempts. Options: shared per-day reference tables inside the document (envelopes keep ids), fewer
-   respiratory envelopes (e.g. every 5th minute), or compressing `document`. Not changed here (engine/backend).
+1. **Table size with many exposures.** The stored form brings a representative day to 42 KB + 3.9 MB, but the
+   largest read-window case (200 exposure revisions over D−4..D+1) still yields a 20 MB respiratory table: the
+   per-row `exposures` / `exposureCoverage` pools do not intern well when every minute sees a different set. The
+   lane refuses a table over 16 MiB as a deterministic failure (dead letter after 8). Engine/System E decision:
+   intern exposure refs per event, or cap respiratory envelopes.
 2. **Retrospective finality loop.** `Engine.inputFingerprint` ignores the cutoff in retrospective mode, so the
    provisional → final rebuild that `enqueue_physiology_context_days_v1` triggers (`finality_due`) publishes
    `unchanged`; the stored row stays `provisional` with its old cutoff, and the next enqueue bumps it again — an
