@@ -467,10 +467,12 @@ struct VerificationLane {
     /// digest is authoritative there, so we must decode to verify the content
     /// sha). Mirrors Inflator's output cap. Uses CZstd; no existing helper.
     static func zstdDecompress(_ data: Data) throws -> Data {
-        let bound = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> Int in
-            Int(CZstd.ZSTD_decompressBound(ptr.baseAddress, ptr.count))
+        // Bytes that are not a zstd frame report ZSTD_CONTENTSIZE_ERROR (2^64 - 2), which does not fit an Int:
+        // converting it unchecked traps and takes the whole worker down, so it is an error like any other.
+        let rawBound = data.withUnsafeBytes { (ptr: UnsafeRawBufferPointer) -> UInt64 in
+            UInt64(CZstd.ZSTD_decompressBound(ptr.baseAddress, ptr.count))
         }
-        guard bound > 0, bound <= Inflator.maxOutputBytes else {
+        guard let bound = Int(exactly: rawBound), bound > 0, bound <= Inflator.maxOutputBytes else {
             throw WorkerError.io("zstd output exceeds cap")
         }
         var dst = [UInt8](repeating: 0, count: bound)

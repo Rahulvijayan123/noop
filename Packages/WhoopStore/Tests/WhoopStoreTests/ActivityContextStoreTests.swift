@@ -51,7 +51,8 @@ final class ActivityContextStoreTests: XCTestCase {
             posture: "upright", locomotion: "walking", armBehavior: "swinging",
             sleepState: "awake", wearState: "on_wrist", intensity: 0.62, stepTicks: 610, cadenceSpm: 121.5,
             hrSamples: 298, hrMean: 112.4, hrMin: 98, hrMax: 131, hrSlope: 3.25,
-            rmssd: 31.5, rrBeats: 540, respRateBpm: 17.2, respBreaths: 83)
+            rmssd: 31.5, rrBeats: 540, rrDiffSqSumMs2: 535_491.0, rrDiffCount: 539,
+            respRateBpm: 17.2, respBreaths: 83)
     }
 
     // MARK: - Migration
@@ -90,7 +91,7 @@ final class ActivityContextStoreTests: XCTestCase {
     }
 
     func testMigrationIsRegisteredLast() {
-        XCTAssertEqual(WhoopStore.makeMigrator().migrations.last, "v48-activity-context")
+        XCTAssertEqual(WhoopStore.makeMigrator().migrations.last, "v49-rr-diff-components")
     }
 
     // MARK: - Replace / read

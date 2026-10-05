@@ -107,6 +107,22 @@ final class ActivityPythonServiceTests: XCTestCase {
         XCTAssertTrue(service.modelAvailable)
     }
 
+    /// serve.py answers ping `ok:true` with `hart_unavailable` when the HART manifest is present but the
+    /// model failed to load. That is no model: the lane must not claim jobs it can only fail.
+    func testPingTreatsAHartModelThatFailedToLoadAsUnavailable() {
+        let failed = ActivityPythonService.parsePing(
+            ["ok": true, "model_status": "hart_unavailable", "error": "ModuleNotFoundError: torch"])
+        XCTAssertTrue(failed.ok)
+        XCTAssertFalse(failed.modelAvailable)
+        XCTAssertEqual(failed.modelStatus, "hart_unavailable")
+        for status in ["model_missing", "missing"] {
+            XCTAssertFalse(ActivityPythonService.parsePing(["ok": true, "model_status": status]).modelAvailable)
+        }
+        for status in ["hart_loaded", "baseline", "loaded"] {
+            XCTAssertTrue(ActivityPythonService.parsePing(["ok": true, "model_status": status]).modelAvailable)
+        }
+    }
+
     func testInferRequestShapeAndResponseParsing() throws {
         service = try makeService()
         _ = try service.ping()
