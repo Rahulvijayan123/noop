@@ -5,7 +5,7 @@ import XCTest
 /// reorder, and the never-hide "insert missing section at its default position" invariant — pinned on both
 /// platforms so the byte-identical "today.sectionOrder" wire format can't drift.
 ///
-/// Key metrics, Recovery vitals and Your cards were retired from the Apple Today screens. Orders and hidden
+/// Start session, Recovery vitals and Your cards were retired from the Apple Today screens. Orders and hidden
 /// sets saved while they existed must still decode cleanly, so several cases below feed the retired tokens
 /// in on purpose.
 final class TodayLayoutPrefsTests: XCTestCase {
@@ -17,22 +17,22 @@ final class TodayLayoutPrefsTests: XCTestCase {
 
     func testEncodeDecodeRoundTripsAReorderedList() {
         let reordered: [TodaySection] = [
-            .heartRate, .hero, .liveSession, .synthesis, .workouts, .journal, .menstrualCycle, .addedCards,
+            .heartRate, .hero, .synthesis, .keyMetrics, .workouts, .journal, .menstrualCycle, .addedCards,
         ]
         let encoded = TodayLayoutPrefs.encode(reordered)
-        XCTAssertEqual(encoded, "heartRate,hero,liveSession,synthesis,workouts,journal,menstrualCycle,addedCards")
+        XCTAssertEqual(encoded, "heartRate,hero,synthesis,keyMetrics,workouts,journal,menstrualCycle,addedCards")
         XCTAssertEqual(TodayLayoutPrefs.decodeOrder(encoded), reordered)
     }
 
-    /// The v1 upgrade path: an order saved by the FIRST cut (six sections — no hero/liveSession, which were
-    /// pinned then, and three that have since been retired) must surface the two pinned sections at the TOP
-    /// (their default position), not teleport them to the bottom of the user's saved order, and must drop
-    /// the retired tokens without disturbing what remains.
+    /// The v1 upgrade path: an order saved by the FIRST cut (six sections — no hero, which was pinned then,
+    /// and two that have since been retired) must surface the hero at the TOP (its default position), not
+    /// teleport it to the bottom of the user's saved order, and must drop the retired tokens without
+    /// disturbing what remains.
     func testSavedOrderFromFirstCutInsertsHeroAndSessionAtTheirDefaultPosition() {
         let firstCut = "synthesis,keyMetrics,workouts,heartRate,recoveryVitals,yourCards"
         XCTAssertEqual(
             TodayLayoutPrefs.decodeOrder(firstCut),
-            [.hero, .liveSession, .synthesis, .workouts, .heartRate, .menstrualCycle, .journal, .addedCards]
+            [.hero, .synthesis, .keyMetrics, .workouts, .heartRate, .menstrualCycle, .journal, .addedCards]
         )
     }
 
@@ -40,7 +40,7 @@ final class TodayLayoutPrefsTests: XCTestCase {
         let partial = "heartRate,synthesis,keyMetrics,recoveryVitals"
         XCTAssertEqual(
             TodayLayoutPrefs.decodeOrder(partial),
-            [.hero, .liveSession, .workouts, .heartRate, .synthesis, .menstrualCycle, .journal, .addedCards]
+            [.hero, .workouts, .heartRate, .synthesis, .keyMetrics, .menstrualCycle, .journal, .addedCards]
         )
     }
 
@@ -48,22 +48,32 @@ final class TodayLayoutPrefsTests: XCTestCase {
         let messy = "heartRate,BOGUS,heartRate,workouts, ,workouts"
         XCTAssertEqual(
             TodayLayoutPrefs.decodeOrder(messy),
-            [.hero, .liveSession, .synthesis, .heartRate, .workouts, .menstrualCycle, .journal, .addedCards]
+            [.hero, .synthesis, .keyMetrics, .heartRate, .workouts, .menstrualCycle, .journal, .addedCards]
         )
     }
 
     /// An order that names ONLY retired sections is as good as junk: the user sees the default Today, not an
     /// empty one.
     func testAnOrderNamingOnlyRetiredSectionsYieldsDefaultOrder() {
-        XCTAssertEqual(TodayLayoutPrefs.decodeOrder("keyMetrics,recoveryVitals,yourCards"), TodaySection.defaultOrder)
+        XCTAssertEqual(TodayLayoutPrefs.decodeOrder("liveSession,recoveryVitals,yourCards"), TodaySection.defaultOrder)
     }
 
     func testRetiredSectionsCanNeverComeBack() {
-        let retired = ["keyMetrics", "recoveryVitals", "yourCards"]
+        let retired = ["liveSession", "recoveryVitals", "yourCards"]
         for token in retired {
             XCTAssertNil(TodaySection(rawValue: token), "\(token) was retired from Today")
         }
         XCTAssertFalse(TodayLayoutPrefs.decodeOrder(retired.joined(separator: ",")).isEmpty)
+    }
+
+    /// An order saved by the previous build, which had Key Metrics removed, must bring Key Metrics back at
+    /// its default place rather than leaving the user without their numbers.
+    func testAnOrderSavedWithoutKeyMetricsBringsThemBackAtTheirDefaultPosition() {
+        let saved = "hero,liveSession,synthesis,workouts,heartRate,menstrualCycle,journal,addedCards"
+        XCTAssertEqual(
+            TodayLayoutPrefs.decodeOrder(saved),
+            [.hero, .synthesis, .keyMetrics, .workouts, .heartRate, .menstrualCycle, .journal, .addedCards]
+        )
     }
 
     func testAllJunkYieldsDefaultOrder() {
@@ -78,18 +88,18 @@ final class TodayLayoutPrefsTests: XCTestCase {
 
     /// A section hidden before it was retired is simply gone from the set; nothing else is hidden by accident.
     func testHiddenSetDropsRetiredSections() {
-        XCTAssertEqual(TodayLayoutPrefs.decodeHidden("keyMetrics,recoveryVitals,yourCards,workouts"), [.workouts])
-        XCTAssertEqual(TodayLayoutPrefs.decodeHidden("keyMetrics,yourCards"), [])
+        XCTAssertEqual(TodayLayoutPrefs.decodeHidden("liveSession,recoveryVitals,yourCards,workouts"), [.workouts])
+        XCTAssertEqual(TodayLayoutPrefs.decodeHidden("liveSession,yourCards"), [])
     }
 
     func testVisibleOrderFiltersHiddenWithoutChangingSavedOrder() {
-        let order = "heartRate,hero,liveSession,synthesis,workouts,journal"
+        let order = "heartRate,hero,synthesis,keyMetrics,workouts,journal"
         XCTAssertEqual(
             TodayLayoutPrefs.visibleOrder(orderRaw: order, hiddenRaw: "hero,workouts"),
-            [.heartRate, .liveSession, .synthesis, .menstrualCycle, .journal, .addedCards]
+            [.heartRate, .synthesis, .keyMetrics, .menstrualCycle, .journal, .addedCards]
         )
         XCTAssertEqual(TodayLayoutPrefs.decodeOrder(order), [
-            .heartRate, .hero, .liveSession, .synthesis, .workouts, .menstrualCycle, .journal, .addedCards,
+            .heartRate, .hero, .synthesis, .keyMetrics, .workouts, .menstrualCycle, .journal, .addedCards,
         ])
     }
 
@@ -116,7 +126,7 @@ final class TodayLayoutPrefsTests: XCTestCase {
         // (Android still defines the three retired keys; they are simply absent here).
         XCTAssertEqual(
             raws,
-            ["hero", "liveSession", "synthesis", "workouts", "heartRate", "menstrualCycle", "journal", "addedCards"]
+            ["hero", "synthesis", "keyMetrics", "workouts", "heartRate", "menstrualCycle", "journal", "addedCards"]
         )
     }
 

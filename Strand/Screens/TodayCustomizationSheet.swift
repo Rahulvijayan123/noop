@@ -6,6 +6,7 @@ import StrandDesign
 /// Every Today editing entry point presents the same sheet and optionally deep-links to one child editor.
 enum TodayCustomizationDestination: String, Identifiable, Hashable {
     case today
+    case keyMetrics
     case addedCards
 
     var id: String { rawValue }
@@ -15,39 +16,60 @@ struct TodayCustomizationSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private enum Route: Hashable {
+        case keyMetrics
         case addedCards
     }
 
     private let initialSectionDraft: EditableLayoutDraft<TodaySection>
+    private let initialKeyMetricDraft: EditableLayoutDraft<KeyMetric>
     private let initialHostedDraft: EditableLayoutDraft<HostedCard>
+    private let initialDetailed: Bool
+    private let initialWindowDays: Int
 
     @Binding private var sectionOrderRaw: String
     @Binding private var hiddenSectionsRaw: String
+    @Binding private var keyMetricsRaw: String
+    @Binding private var keyMetricsDetailed: Bool
+    @Binding private var keyMetricsWindowDays: Int
     @Binding private var hostedCardsRaw: String
 
     @State private var path: [Route]
     @State private var sectionDraft: EditableLayoutDraft<TodaySection>
+    @State private var keyMetricDraft: EditableLayoutDraft<KeyMetric>
     @State private var hostedDraft: EditableLayoutDraft<HostedCard>
+    @State private var detailed: Bool
+    @State private var windowDays: Int
 
     private var currentDestination: TodayCustomizationDestination {
         switch path.last {
+        case .keyMetrics: return .keyMetrics
         case .addedCards: return .addedCards
         case nil: return .today
         }
     }
 
     private var isDirty: Bool {
-        sectionDraft != initialSectionDraft || hostedDraft != initialHostedDraft
+        sectionDraft != initialSectionDraft
+            || keyMetricDraft != initialKeyMetricDraft
+            || hostedDraft != initialHostedDraft
+            || detailed != initialDetailed
+            || windowDays != initialWindowDays
     }
 
     init(
         initialDestination: TodayCustomizationDestination = .today,
         sectionOrderRaw: Binding<String>,
         hiddenSectionsRaw: Binding<String>,
+        keyMetricsRaw: Binding<String>,
+        keyMetricsDetailed: Binding<Bool>,
+        keyMetricsWindowDays: Binding<Int>,
         hostedCardsRaw: Binding<String>
     ) {
         _sectionOrderRaw = sectionOrderRaw
         _hiddenSectionsRaw = hiddenSectionsRaw
+        _keyMetricsRaw = keyMetricsRaw
+        _keyMetricsDetailed = keyMetricsDetailed
+        _keyMetricsWindowDays = keyMetricsWindowDays
         _hostedCardsRaw = hostedCardsRaw
 
         let fullSectionOrder = TodayLayoutPrefs.decodeOrder(sectionOrderRaw.wrappedValue)
@@ -56,20 +78,32 @@ struct TodayCustomizationSheet: View {
             visible: fullSectionOrder.filter { !hiddenSectionSet.contains($0) },
             hidden: fullSectionOrder.filter { hiddenSectionSet.contains($0) }
         )
+        let metrics = EditableLayoutDraft(
+            visible: KeyMetricPrefs.decodeEnabled(keyMetricsRaw.wrappedValue),
+            allItems: KeyMetric.defaultOrder
+        )
         let hosted = EditableLayoutDraft(
             visible: HostedCardPrefs.decodeEnabled(hostedCardsRaw.wrappedValue),
             allItems: HostedCard.canonicalOrder
         )
 
         initialSectionDraft = sections
+        initialKeyMetricDraft = metrics
         initialHostedDraft = hosted
+        initialDetailed = keyMetricsDetailed.wrappedValue
+        initialWindowDays = keyMetricsWindowDays.wrappedValue
 
         _sectionDraft = State(initialValue: sections)
+        _keyMetricDraft = State(initialValue: metrics)
         _hostedDraft = State(initialValue: hosted)
+        _detailed = State(initialValue: keyMetricsDetailed.wrappedValue)
+        _windowDays = State(initialValue: keyMetricsWindowDays.wrappedValue)
 
         switch initialDestination {
         case .today:
             _path = State(initialValue: [])
+        case .keyMetrics:
+            _path = State(initialValue: [.keyMetrics])
         case .addedCards:
             _path = State(initialValue: [.addedCards])
         }
@@ -79,6 +113,7 @@ struct TodayCustomizationSheet: View {
         NavigationStack(path: $path) {
             TodaySectionsCustomizationPage(
                 draft: $sectionDraft,
+                keyMetricCount: keyMetricDraft.visible.count,
                 hostedCardCount: hostedDraft.visible.count,
                 onConfigure: openConfiguration,
                 onReset: resetCurrentLayout
@@ -88,6 +123,16 @@ struct TodayCustomizationSheet: View {
             }
             .navigationDestination(for: Route.self) { route in
                 switch route {
+                case .keyMetrics:
+                    KeyMetricsCustomizationPage(
+                        draft: $keyMetricDraft,
+                        detailed: $detailed,
+                        windowDays: $windowDays,
+                        onReset: resetCurrentLayout
+                    )
+                    .toolbar {
+                        customizationToolbar(showCancel: false)
+                    }
                 case .addedCards:
                     HostedCardsCustomizationPage(
                         draft: $hostedDraft,
@@ -111,6 +156,8 @@ struct TodayCustomizationSheet: View {
 
     private func openConfiguration(_ section: TodaySection) {
         switch section {
+        case .keyMetrics:
+            path.append(.keyMetrics)
         case .addedCards:
             path.append(.addedCards)
         default:
@@ -125,6 +172,13 @@ struct TodayCustomizationSheet: View {
                 visible: TodaySection.defaultOrder,
                 allItems: TodaySection.defaultOrder
             )
+        case .keyMetrics:
+            keyMetricDraft = EditableLayoutDraft(
+                visible: KeyMetric.defaultOrder,
+                allItems: KeyMetric.defaultOrder
+            )
+            detailed = false
+            windowDays = 14
         case .addedCards:
             hostedDraft = EditableLayoutDraft(
                 visible: HostedCard.defaultSelection,
@@ -140,6 +194,9 @@ struct TodayCustomizationSheet: View {
     private func save() {
         sectionOrderRaw = TodayLayoutPrefs.encode(sectionDraft.visible + sectionDraft.hidden)
         hiddenSectionsRaw = TodayLayoutPrefs.encodeHidden(sectionDraft.hidden)
+        keyMetricsRaw = KeyMetricPrefs.encode(keyMetricDraft.visible)
+        keyMetricsDetailed = detailed
+        keyMetricsWindowDays = windowDays
         hostedCardsRaw = HostedCardPrefs.encode(hostedDraft.visible)
         dismiss()
     }
@@ -161,6 +218,7 @@ struct TodayCustomizationSheet: View {
 
 private struct TodaySectionsCustomizationPage: View {
     @Binding var draft: EditableLayoutDraft<TodaySection>
+    let keyMetricCount: Int
     let hostedCardCount: Int
     let onConfigure: (TodaySection) -> Void
     let onReset: () -> Void
@@ -188,6 +246,8 @@ private struct TodaySectionsCustomizationPage: View {
 
     private func subtitle(for section: TodaySection) -> String? {
         switch section {
+        case .keyMetrics:
+            return String(localized: "\(keyMetricCount) metrics shown")
         case .addedCards:
             return hostedCardCount == 0
                 ? String(localized: "None added yet")
@@ -199,11 +259,58 @@ private struct TodaySectionsCustomizationPage: View {
 
     private func configurationLabel(for section: TodaySection) -> String? {
         switch section {
-        case .addedCards:
+        case .keyMetrics, .addedCards:
             return String(localized: "Edit")
         default:
             return nil
         }
+    }
+}
+
+private struct KeyMetricsCustomizationPage: View {
+    @Binding var draft: EditableLayoutDraft<KeyMetric>
+    @Binding var detailed: Bool
+    @Binding var windowDays: Int
+    let onReset: () -> Void
+
+    var body: some View {
+        EditableLayoutList(
+            draft: $draft,
+            shownTitle: String(localized: "Shown"),
+            hiddenTitle: String(localized: "Hidden"),
+            title: \.title,
+            subtitle: { _ in nil },
+            icon: \.customizationIcon,
+            tint: \.customizationTint,
+            configurationLabel: { _ in nil },
+            onConfigure: { _ in },
+            onReset: onReset
+        ) {
+            Section("Display") {
+                Toggle(isOn: $detailed) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                        Text("Detailed tiles")
+                        Text("Show a trend graph beneath each metric.")
+                            .font(StrandFont.caption)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                }
+                .accessibilityLabel("Detailed tiles")
+
+                if detailed {
+                    Picker("Trend window", selection: $windowDays) {
+                        Text("1 week").tag(7)
+                        Text("2 weeks").tag(14)
+                        Text("1 month").tag(30)
+                    }
+                    .pickerStyle(.segmented)
+                }
+            }
+        }
+        .navigationTitle("Key Metrics")
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
     }
 }
 
@@ -243,6 +350,9 @@ private struct HostedCardsCustomizationPage: View {
     TodayCustomizationSheet(
         sectionOrderRaw: .constant(""),
         hiddenSectionsRaw: .constant(""),
+        keyMetricsRaw: .constant(""),
+        keyMetricsDetailed: .constant(false),
+        keyMetricsWindowDays: .constant(14),
         hostedCardsRaw: .constant("")
     )
     .preferredColorScheme(.dark)
