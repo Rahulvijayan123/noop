@@ -79,7 +79,8 @@ extension PhysiologyContext {
             if hart.spans.isEmpty && strap.spans.isEmpty { statusReasons.append(activityUnavailable) }
 
             let timeline = SignalValidityEngine.regimeTimeline(input, config: policy.validity)
-            let episodes = SleepRhythm.episodes(sessions: input.sleepSessions, identity: identity, mode: mode,
+            let episodes = SleepRhythm.episodes(sessions: input.sleepSessions, priorSleep: history.value.priorSleep,
+                                                identity: identity, mode: mode,
                                                 cutoff: input.availabilityCutoff, config: policy.sleep)
             if episodes.isEmpty { statusReasons.append(sleepUnavailable) }
             let events = Exposures.current(input.exposures, mode: mode, cutoff: input.availabilityCutoff)
@@ -149,7 +150,7 @@ extension PhysiologyContext {
             let finality = documentFinality(input, policy: policy)
             for i in envelopes.indices { envelopes[i].finality = finality }
 
-            let sleep = SleepRhythm.summary(episodes: episodes, priorSleep: rawHistory.priorSleep, identity: identity,
+            let sleep = SleepRhythm.summary(episodes: episodes, priorSleep: history.value.priorSleep, identity: identity,
                                             observations: observations, mode: mode,
                                             cutoff: input.availabilityCutoff, config: policy.sleep)
             let functional = Functional.daySummary(identity: identity, bouts: bouts, hart: hart, strap: strap,
@@ -255,7 +256,10 @@ extension PhysiologyContext {
             out.skinTemperature = input.skinTemperature.filter { ok($0.ts, $0.availableAt) }
             out.wearEvents = input.wearEvents.filter { ok($0.ts, $0.availableAt) }
             out.bandSleepStates = input.bandSleepStates.filter { ok($0.ts, $0.availableAt) }
-            out.sleepSessions = input.sleepSessions.filter { ok($0.interval.start, $0.availableAt) }
+            // A published session is known only once it was published; unknown publication means "at its end".
+            out.sleepSessions = input.sleepSessions.filter {
+                $0.interval.start < c && ($0.availableAt ?? $0.interval.end) <= c
+            }
             out.workouts = input.workouts.filter { ok($0.interval.start, $0.availableAt) }
             out.activityEpochs = input.activityEpochs.filter { ok($0.epoch.startTs, $0.availableAt) }
             out.activityIntervals = input.activityIntervals.filter { ok($0.interval.start, $0.availableAt) }
