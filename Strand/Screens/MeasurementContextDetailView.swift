@@ -539,15 +539,32 @@ struct MeasurementContextDetailView: View {
     }
 
     /// Where the exposure list / editor opens from (contracts.md §10: the timed-event editor is reachable from
-    /// the context detail view).
+    /// the context detail view). Corrections go through the same revisioned events the journal and caffeine log
+    /// feed, so an edit here invalidates the affected context on the server.
     @ViewBuilder
     private func exposureEditorHook(_ model: MeasurementContextDetailModel) -> some View {
-        // LEAD-INTEGRATION: exposure list/editor navigation — push the exposures workstream's
-        // `ExposureEventListView(window: model.exposureWindow ?? <day window>)` from a row here, e.g.
-        //   NavigationLink { ExposureEventListView(window: window) } label: { Label("Recorded exposures", …) }
-        //       .buttonStyle(LiquidPressStyle())
-        // The type lives on the exposures branch, so nothing is rendered until it is merged.
-        EmptyView()
+        if let window = model.exposureWindow {
+            NavigationLink {
+                ExposureEventListView(window: window)
+            } label: {
+                NoopCard {
+                    HStack(spacing: NoopMetrics.space2) {
+                        Image(systemName: "list.bullet.clipboard")
+                            .foregroundStyle(StrandPalette.accent)
+                            .accessibilityHidden(true)
+                        Text("Recorded events")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Spacer(minLength: NoopMetrics.space2)
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+            .buttonStyle(LiquidPressStyle())
+        }
     }
 
     private var historyLink: some View {

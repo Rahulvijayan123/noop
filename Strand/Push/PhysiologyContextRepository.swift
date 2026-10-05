@@ -351,11 +351,12 @@ public actor PhysiologyContextRepository {
 
     // MARK: - Transport
 
-    /// GET with the account's installation bearer only: no shared fleet token rides on these routes.
+    /// GET with the account's credential through the same `CloudReceiverAuth` path as every other score read
+    /// (the installation bearer; the fleet header only for a legacy-enrollment install that still needs it).
     private func get(url: URL, identity: CloudPushIdentity) async throws -> [String: Any] {
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.setValue("Bearer \(identity.uploadToken)", forHTTPHeaderField: "Authorization")
+        CloudReceiverAuth.apply(identity, to: &request)
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.timeoutInterval = 20
         let (data, response) = try await session.data(for: request)

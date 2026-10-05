@@ -329,7 +329,7 @@ final class AppModel: ObservableObject {
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
-        // LEAD-INTEGRATION: ExposureEventCloudSync.flush()   // exposure revisions saved while offline
+        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
@@ -361,7 +361,7 @@ final class AppModel: ObservableObject {
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
-        // LEAD-INTEGRATION: ExposureEventCloudSync.flush()   // exposure revisions saved before the account was ready
+        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
         guard cloudScoringIsAuthoritative else { return }
         await confirmWearableLinkIfNeeded()
         startHistorySeedIfNeeded()

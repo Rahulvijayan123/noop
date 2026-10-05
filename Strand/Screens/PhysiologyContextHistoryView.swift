@@ -28,6 +28,8 @@ struct ContextHistoryBoutRow: Identifiable, Equatable {
     let duration: String
     let status: String
     let ongoing: Bool
+    /// Measured heart-rate response, when any was measured.
+    let response: String?
 }
 
 struct PhysiologyContextHistoryModel: Equatable {
@@ -38,7 +40,7 @@ struct PhysiologyContextHistoryModel: Equatable {
     var allText: [String] {
         (metricEpisodes + otherEpisodes).flatMap { [$0.title, $0.state, $0.dates, $0.direction, $0.reasons]
             .compactMap { $0 } + $0.badges.map(\.text) }
-            + bouts.flatMap { [$0.title, $0.when, $0.duration, $0.status] }
+            + bouts.flatMap { [$0.title, $0.when, $0.duration, $0.status, $0.response].compactMap { $0 } }
     }
 
     static func build(_ history: PhysiologyContextHistory, metric: PhysiologyContext.MetricKind, zone: TimeZone,
@@ -56,7 +58,8 @@ struct PhysiologyContextHistoryModel: Equatable {
             ContextHistoryBoutRow(
                 id: b.id, title: W.boutKind(b.kind),
                 when: "\(W.dayAndTime(b.interval.start, zone: zone, locale: locale))\u{2013}\(W.time(b.interval.end, zone: zone, locale: locale))",
-                duration: W.duration(b.durationS), status: W.boutStatus(b), ongoing: b.status == .ongoing)
+                duration: W.duration(b.durationS), status: W.boutStatus(b), ongoing: b.status == .ongoing,
+                response: W.boutResponse(b, locale: locale))
         }
         return PhysiologyContextHistoryModel(metricEpisodes: episodes.filter { ownIds.contains($0.id) },
                                              otherEpisodes: episodes.filter { !ownIds.contains($0.id) },
@@ -256,9 +259,12 @@ struct PhysiologyContextHistoryView: View {
                 .font(StrandFont.footnote)
                 .foregroundStyle(row.ongoing ? StrandPalette.accent : StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-            // LEAD-INTEGRATION: heart-rate response summary per bout (pre-bout reference, during-bout summary,
-            // signed return toward the reference at supported offsets) once the responses workstream adds those
-            // fields to `PhysiologyContext.ExertionBout`; the contract type carries none yet.
+            if let response = row.response {
+                Text(response)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .accessibilityElement(children: .combine)
     }

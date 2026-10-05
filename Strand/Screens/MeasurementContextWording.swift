@@ -495,6 +495,35 @@ enum PhysiologyContextWording {
         }
     }
 
+    /// The measured heart-rate response of a bout in plain words, or nil when nothing was measured. Describes
+    /// observations only: the rise against the minutes before, the decline at the first observed offset, and the
+    /// time back near the earlier level only when it was actually seen. Never a judgement of fitness or health.
+    static func boutResponse(_ bout: PhysiologyContext.ExertionBout, locale: Locale = .current) -> String? {
+        var parts: [String] = []
+        if let rise = bout.response?.hrRiseBpm, rise.isFinite {
+            let delta = signedDifference(rise, units: "bpm", locale: locale)
+            if let ref = bout.preBout?.hrReferenceBpm, ref.isFinite {
+                let level = Int(ref.rounded())
+                parts.append(String(localized: "Heart rate \(delta) vs the minutes before (\(level) bpm)"))
+            } else {
+                parts.append(String(localized: "Heart rate \(delta) vs the minutes before"))
+            }
+        } else if let median = bout.response?.hrMedianBpm, median.isFinite {
+            parts.append(String(localized: "Heart rate during: \(Int(median.rounded())) bpm"))
+        }
+        if let first = bout.recovery?.observations.first(where: { $0.state == .observed && $0.declineBpm != nil }),
+           let decline = first.declineBpm, decline.isFinite {
+            let after = duration(first.offsetS)
+            let amount = Int(abs(decline).rounded())
+            parts.append(decline >= 0 ? String(localized: "\(after) after: \(amount) bpm lower")
+                                      : String(localized: "\(after) after: \(amount) bpm higher"))
+        }
+        if let back = bout.recovery?.timeToReturnS {
+            parts.append(String(localized: "Back near the earlier level after \(duration(back))"))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    }
+
     // MARK: Exposures
 
     static func exposureKind(_ kind: PhysiologyContext.ExposureKind) -> String {
