@@ -1184,6 +1184,20 @@ extension WhoopStore {
 
             for sql in ActivityContextViews.createStatements { try db.execute(sql: sql) }
         }
+        // v49-rr-diff-components: the successive-difference components behind an interval's `rmssd`
+        // (`rmssd` itself only, averaging already-square-rooted RMSSD values is not how a root-mean-square
+        // statistic composes — see `ActivityContextAggregator`'s header comment). Additive and nullable
+        // in intent: `rrDiffCount` defaults to 0 like its sibling `rrBeats`, and a 0 reads as "this row
+        // predates the column" to `ActivityContextAggregator`, which recovers an approximation from the
+        // legacy `rmssd`/`rrBeats` pair rather than dropping the row from a rollup. No backfill: existing
+        // intervals re-fill with real components the next time their day is (re)decoded, same as every
+        // other derived activity-context column.
+        migrator.registerMigration("v49-rr-diff-components") { db in
+            try db.alter(table: "activityContextInterval") { t in
+                t.add(column: "rrDiffSqSumMs2", .double).notNull().defaults(to: 0)
+                t.add(column: "rrDiffCount", .integer).notNull().defaults(to: 0)
+            }
+        }
         return migrator
     }
 }
