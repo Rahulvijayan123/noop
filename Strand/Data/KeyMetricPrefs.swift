@@ -27,9 +27,10 @@ enum KeyMetric: String, CaseIterable, Identifiable {
     case weight
     case calories
     /// Added 2026-08-24 (queue 11c follow-up): Skin Temp was already a "Your Cards" (`DashboardCard`)
-    /// option, but was never offered as a Key Metrics tile — not a bug, just never added. New case, NOT
-    /// added to `defaultOrder` below, so an existing user's saved layout (and a fresh install's default)
-    /// is byte-identical to before; only opts in via the layout editor.
+    /// option, but was never offered as a Key Metrics tile. It began life outside `defaultOrder`, which
+    /// also kept it out of the layout editor (the editor's universe IS `defaultOrder`), so nobody could
+    /// switch it on. It is now a default tile; `migrateSkinTempAndBloodOxygenShown` adds it (and Blood
+    /// Oxygen) once to layouts saved before this.
     case skinTemp
 
     var id: String { rawValue }
@@ -56,7 +57,7 @@ enum KeyMetric: String, CaseIterable, Identifiable {
     /// The original, hard-coded grid order — the default when the user hasn't customised the layout.
     static let defaultOrder: [KeyMetric] = [
         .charge, .effort, .rest, .hrv, .restingHr,
-        .bloodOxygen, .respiratory, .steps, .weight, .calories,
+        .bloodOxygen, .skinTemp, .respiratory, .steps, .weight, .calories,
     ]
 }
 
@@ -65,6 +66,36 @@ enum KeyMetric: String, CaseIterable, Identifiable {
 enum KeyMetricPrefs {
     /// UserDefaults key — a comma-joined list of `KeyMetric` rawValues in display order.
     static let layoutKey = "today.keyMetrics"
+
+    /// Set once `migrateSkinTempAndBloodOxygenShown` has run, so a user who later hides either tile keeps it hidden.
+    static let skinTempBloodOxygenMigrationKey = "today.keyMetrics.skinTempBloodOxygenShown.v1"
+
+    /// The layout string a saved layout becomes when Blood Oxygen and Skin Temp are added to it, or nil when
+    /// nothing changes: no saved layout (a blank one already decodes to `defaultOrder`, which has both) or a
+    /// layout that already shows both. The missing tiles go on the END so nothing the user arranged moves.
+    static func layoutAddingBloodOxygenAndSkinTemp(savedLayout raw: String) -> String? {
+        guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
+        var enabled = decodeEnabled(raw)
+        let missing = [KeyMetric.bloodOxygen, .skinTemp].filter { !enabled.contains($0) }
+        guard !missing.isEmpty else { return nil }
+        enabled.append(contentsOf: missing)
+        return encode(enabled)
+    }
+
+    /// One-time: a layout saved before Skin Temp joined `defaultOrder` never offered it, and Blood Oxygen
+    /// may have been dropped from it, so neither tile would ever appear for that user. Adds whichever is
+    /// missing, once; after that the layout editor owns the choice. Idempotent. Run from app `init()`, before
+    /// any `@AppStorage` reads the layout (the `PuffinExperiment` migrations' pattern). Returns whether the
+    /// saved layout changed.
+    @discardableResult
+    static func migrateSkinTempAndBloodOxygenShown(defaults: UserDefaults = .standard) -> Bool {
+        guard !defaults.bool(forKey: skinTempBloodOxygenMigrationKey) else { return false }
+        defer { defaults.set(true, forKey: skinTempBloodOxygenMigrationKey) }
+        guard let migrated = layoutAddingBloodOxygenAndSkinTemp(savedLayout: defaults.string(forKey: layoutKey) ?? "")
+        else { return false }
+        defaults.set(migrated, forKey: layoutKey)
+        return true
+    }
 
     /// Encode an ordered list of enabled tiles into the stored comma-joined string.
     static func encode(_ metrics: [KeyMetric]) -> String {

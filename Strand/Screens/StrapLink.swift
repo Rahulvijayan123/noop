@@ -108,10 +108,6 @@ extension StrapLinkInputs {
         #if DEBUG
         if let forced = StrapDemoSeed.knownStrapOverride { knownStrap = forced }
         #endif
-        // The BLE layer only learns a model change on its next scan, so until a link is up the model the person
-        // picked is the one that matters; once connected, what the radio is talking to is.
-        let chosenModel = UserDefaults.standard.string(forKey: "selectedWhoopModel")
-            .flatMap(WhoopModel.init(rawValue:)) ?? .whoop4
         return StrapLinkInputs(
             connected: live.connected,
             bonded: live.bonded,
@@ -124,6 +120,6 @@ extension StrapLinkInputs {
             charging: live.charging,
             firmware: live.strapFirmware,
             knownStrap: knownStrap,
-            isWhoop4: live.connected ? model.ble.isWhoop4 : chosenModel == .whoop4)
+            isWhoop4: live.connected && model.ble.isWhoop4)
     }
 }

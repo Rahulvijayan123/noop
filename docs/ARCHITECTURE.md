@@ -201,4 +201,12 @@ it stays quiet when the rolling window (50 minutes by default) held a minute of 
   history carries an SpO₂ byte, but the strap fills it only while the wearer is asleep and still (roughly
   400 to 500 readings a night, none by day), and it is not established that the byte is a calibrated
   percentage. The worker averages the night's readings into `spo2_candidate_pct`; the card says "strap
-  estimate (unverified)" and no score uses it. See the Blood oxygen entry in the backend runbook.
+  estimate (unverified)" and no score uses it. See the Blood oxygen entry in the backend runbook. The Key
+  Metrics tile's caption counts the readings the phone banked for that night (`KeyMetricReadings`, which
+  counts with the function that builds the uploaded `SPO2_STRAP_EST` rows, so the two cannot differ), and
+  says "Measured during sleep" when there are none.
+- **Skin temperature** is a per-second sample in the strap's history, banked on the phone and uploaded as
+  `skinTempSample` rows. The Key Metrics tile shows the newest banked sample with its age while a 5.0/MG is
+  on the wrist (a worn-range reading, under 30 minutes old, and only when Settings asks for the absolute
+  scale); otherwise it shows the nightly value, as before. The 4.0's register is a provisional map, so it
+  never gets a live absolute reading.

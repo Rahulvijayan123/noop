@@ -67,7 +67,7 @@ final class StrapPairingLayoutTests: XCTestCase {
     }
 
     private func card(_ status: StrapConnectionStatus, _ link: StrapLinkInputs) -> some View {
-        StrapStatusCard(status: status, link: link, selectedModel: .whoop4, onPickModel: { _ in }, onLead: { })
+        StrapStatusCard(status: status, link: link, selectedModel: .whoop5mg, onPickModel: { _ in }, onLead: { })
     }
 
     func testStatusCardKeepsTheSameHeightInEveryState() {

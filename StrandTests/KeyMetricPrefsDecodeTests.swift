@@ -45,16 +45,68 @@ final class KeyMetricPrefsDecodeTests: XCTestCase {
         XCTAssertEqual(KeyMetricPrefs.decodeEnabled(""), KeyMetric.defaultOrder)
     }
 
-    /// Queue 11c follow-up (2026-08-24): `.skinTemp` is a NEW persisted case (Skin Temp was already a
-    /// "Your Cards" `DashboardCard` option, never a Key Metrics one). Pins the two contract points that
-    /// matter for adding a case without disturbing anyone's saved layout: the raw token round-trips
-    /// ("skinTemp", byte-identical to Kotlin's `KeyMetric.SKIN_TEMP.raw`), and it does NOT join
-    /// `defaultOrder` — a fresh install's default (and an existing user's saved layout) stays
-    /// byte-identical to before this case existed.
-    func testSkinTempRawTokenRoundTripsAndIsNotInDefaultOrder() {
+    /// `.skinTemp` is a persisted case whose raw token must stay byte-identical to Kotlin's
+    /// `KeyMetric.SKIN_TEMP.raw`. It began outside `defaultOrder`, which also kept it out of the layout
+    /// editor (the editor's universe IS `defaultOrder`), so nobody could ever switch it on. It is now a
+    /// default tile, sitting right after Blood Oxygen, and a fresh install shows it.
+    func testSkinTempRawTokenRoundTripsAndIsADefaultTile() throws {
         XCTAssertEqual(KeyMetric(rawValue: "skinTemp"), .skinTemp)
         XCTAssertEqual(KeyMetric.skinTemp.rawValue, "skinTemp")
-        XCTAssertFalse(KeyMetric.defaultOrder.contains(.skinTemp))
-        XCTAssertFalse(KeyMetricPrefs.decodeEnabled("").contains(.skinTemp))
+        XCTAssertTrue(KeyMetric.defaultOrder.contains(.skinTemp))
+        XCTAssertTrue(KeyMetricPrefs.decodeEnabled("").contains(.skinTemp))
+        let blood = try XCTUnwrap(KeyMetric.defaultOrder.firstIndex(of: .bloodOxygen))
+        XCTAssertEqual(KeyMetric.defaultOrder.firstIndex(of: .skinTemp), blood + 1)
+        XCTAssertEqual(Set(KeyMetric.defaultOrder), Set(KeyMetric.allCases),
+                       "the editor offers only defaultOrder, so a case outside it can never be switched on")
+        XCTAssertEqual(KeyMetric.defaultOrder.count, KeyMetric.allCases.count, "no tile listed twice")
+    }
+
+    // MARK: - one-time migration of a layout saved before Skin Temp was a default
+
+    private func isolatedDefaults(_ name: String = #function) throws -> UserDefaults {
+        let suite = "KeyMetricPrefsDecodeTests.\(name)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    func testSavedLayoutGainsBloodOxygenAndSkinTempAtTheEnd() {
+        XCTAssertEqual(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "effort,charge,steps"),
+                       "effort,charge,steps,bloodOxygen,skinTemp")
+    }
+
+    func testSavedLayoutOnlyGainsWhatIsMissing() {
+        XCTAssertEqual(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "charge,skinTemp,steps"),
+                       "charge,skinTemp,steps,bloodOxygen")
+        XCTAssertEqual(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "bloodOxygen,charge"),
+                       "bloodOxygen,charge,skinTemp")
+    }
+
+    func testLayoutAlreadyShowingBothOrNotSavedIsLeftAlone() {
+        XCTAssertNil(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "skinTemp,bloodOxygen,charge"))
+        XCTAssertNil(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: ""),
+                     "a blank layout already decodes to defaultOrder, which has both")
+        XCTAssertNil(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "   "))
+    }
+
+    func testMigrationRewritesTheSavedLayoutOnceAndThenLeavesTheUsersChoiceAlone() throws {
+        let defaults = try isolatedDefaults()
+        defaults.set("charge,effort", forKey: KeyMetricPrefs.layoutKey)
+        XCTAssertTrue(KeyMetricPrefs.migrateSkinTempAndBloodOxygenShown(defaults: defaults))
+        XCTAssertEqual(defaults.string(forKey: KeyMetricPrefs.layoutKey), "charge,effort,bloodOxygen,skinTemp")
+
+        // The user then hides Skin Temp in the editor. A second launch must not put it back.
+        defaults.set("charge,effort,bloodOxygen", forKey: KeyMetricPrefs.layoutKey)
+        XCTAssertFalse(KeyMetricPrefs.migrateSkinTempAndBloodOxygenShown(defaults: defaults))
+        XCTAssertEqual(defaults.string(forKey: KeyMetricPrefs.layoutKey), "charge,effort,bloodOxygen")
+    }
+
+    func testMigrationOnAFreshInstallWritesNoLayoutButStillStampsTheFlag() throws {
+        let defaults = try isolatedDefaults()
+        XCTAssertFalse(KeyMetricPrefs.migrateSkinTempAndBloodOxygenShown(defaults: defaults))
+        XCTAssertNil(defaults.string(forKey: KeyMetricPrefs.layoutKey), "unset stays unset so the default order applies")
+        XCTAssertTrue(defaults.bool(forKey: KeyMetricPrefs.skinTempBloodOxygenMigrationKey))
+        XCTAssertTrue(KeyMetricPrefs.decodeEnabled(defaults.string(forKey: KeyMetricPrefs.layoutKey) ?? "")
+            .contains(.skinTemp))
     }
 }

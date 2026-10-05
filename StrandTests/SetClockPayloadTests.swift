@@ -38,18 +38,50 @@ final class SetClockPayloadTests: XCTestCase {
     }
 }
 
-/// Pins the BLE scan-family fallback rotation (PR#195): a service-filtered scan that finds nothing
-/// rotates to the OTHER WHOOP family in case the persisted preference went stale after an update/restore.
+/// WHOOP 4.0 is retired from this app: 5.0/MG is the only WHOOP model. These pin what that means for the
+/// scan (nowhere to rotate to) and for a selection saved before the retirement (it must resolve, not break).
 final class WhoopModelFallbackTests: XCTestCase {
 
-    func testFallbackRotatesBetweenFamilies() {
-        XCTAssertEqual(WhoopModel.whoop4.fallbackScanModel, .whoop5mg)
-        XCTAssertEqual(WhoopModel.whoop5mg.fallbackScanModel, .whoop4)
+    func testThereIsExactlyOneWhoopModelAndItIsTheFiveOhMG() {
+        XCTAssertEqual(WhoopModel.allCases, [.whoop5mg])
+        XCTAssertEqual(WhoopModel.whoop5mg.displayName, "WHOOP 5.0 / MG")
+        XCTAssertEqual(WhoopModel.whoop5mg.deviceFamily, .whoop5)
     }
 
-    // Rotating twice returns to the original — the rotation is a clean two-state cycle.
-    func testFallbackIsInvolution() {
-        XCTAssertEqual(WhoopModel.whoop4.fallbackScanModel.fallbackScanModel, .whoop4)
-        XCTAssertEqual(WhoopModel.whoop5mg.fallbackScanModel.fallbackScanModel, .whoop5mg)
+    /// With one family there is nowhere to rotate to. `BLEManager.startScan` relies on the fallback being the
+    /// model itself to skip scheduling a rotation that would only restart the identical scan.
+    func testTheScanFallbackIsTheModelItself() {
+        XCTAssertEqual(WhoopModel.whoop5mg.fallbackScanModel, .whoop5mg)
+    }
+
+    func testASavedFourPointZeroOrAnythingUnknownResolvesToTheSupportedModel() {
+        XCTAssertEqual(WhoopModel.resolve("WHOOP 4.0"), .whoop5mg)
+        XCTAssertEqual(WhoopModel.resolve("something else"), .whoop5mg)
+        XCTAssertEqual(WhoopModel.resolve(nil), .whoop5mg)
+        XCTAssertEqual(WhoopModel.resolve("WHOOP 5.0 / MG"), .whoop5mg)
+    }
+
+    private func isolatedDefaults(_ name: String = #function) throws -> UserDefaults {
+        let suite = "WhoopModelFallbackTests.\(name)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defaults.removePersistentDomain(forName: suite)
+        return defaults
+    }
+
+    func testTheLegacySelectionIsRewrittenOnceAndThenLeftAlone() throws {
+        let defaults = try isolatedDefaults()
+        defaults.set("WHOOP 4.0", forKey: WhoopModel.storageKey)
+        XCTAssertTrue(WhoopModel.migrateLegacySelection(defaults: defaults))
+        XCTAssertEqual(defaults.string(forKey: WhoopModel.storageKey), "WHOOP 5.0 / MG")
+        XCTAssertFalse(WhoopModel.migrateLegacySelection(defaults: defaults), "idempotent")
+    }
+
+    func testMigrationDoesNothingOnAFreshInstallOrACurrentSelection() throws {
+        let fresh = try isolatedDefaults("fresh")
+        XCTAssertFalse(WhoopModel.migrateLegacySelection(defaults: fresh))
+        XCTAssertNil(fresh.string(forKey: WhoopModel.storageKey), "unset stays unset")
+        let current = try isolatedDefaults("current")
+        current.set("WHOOP 5.0 / MG", forKey: WhoopModel.storageKey)
+        XCTAssertFalse(WhoopModel.migrateLegacySelection(defaults: current))
     }
 }

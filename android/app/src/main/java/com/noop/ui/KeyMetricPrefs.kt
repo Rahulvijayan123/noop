@@ -32,10 +32,11 @@ enum class KeyMetric(val raw: String, @StringRes val titleRes: Int) {
     WEIGHT("weight", R.string.today_metric_weight),
     CALORIES("calories", R.string.today_metric_calories),
     // Added 2026-08-24 (queue 11c follow-up): Skin Temp was already a "Your Cards" (DashboardCard)
-    // option, but was never offered as a Key Metrics tile — not a bug, just never added. Reuses
-    // DashboardCard.SKIN_TEMP's own title resource rather than adding a new one. New case, NOT added
-    // to defaultOrder below, so an existing user's saved layout (and a fresh install's default) is
-    // byte-identical to before; only opts in via the layout editor.
+    // option, but was never offered as a Key Metrics tile. Reuses DashboardCard.SKIN_TEMP's own title
+    // resource rather than adding a new one. It began outside defaultOrder, which also kept it out of
+    // the layout editor (the editor's universe IS defaultOrder), so it could never be switched on; it is
+    // now a default tile, like the iOS/macOS `KeyMetric.skinTemp`. A layout saved before this still lacks
+    // it (the iOS side migrates those once; this side does not yet).
     SKIN_TEMP("skinTemp", R.string.today_card_skin_temp);
 
     companion object {
@@ -44,7 +45,7 @@ enum class KeyMetric(val raw: String, @StringRes val titleRes: Int) {
         /** The original, hard-coded grid order — the default when the layout isn't customised. */
         val defaultOrder: List<KeyMetric> = listOf(
             CHARGE, EFFORT, REST, HRV, RESTING_HR,
-            BLOOD_OXYGEN, RESPIRATORY, STEPS, WEIGHT, CALORIES,
+            BLOOD_OXYGEN, SKIN_TEMP, RESPIRATORY, STEPS, WEIGHT, CALORIES,
         )
     }
 }

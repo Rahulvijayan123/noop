@@ -55,6 +55,10 @@ struct StrandiOSApp: App {
         // #1008: pin the pre-change Overnight-only default for existing installs before
         // anything reads it. Idempotent; a no-op on fresh installs and after the first launch.
         PuffinExperiment.migrateContinuousHrvOvernightDefault()
+        // Skin Temp and Blood Oxygen join a saved Key Metrics layout once. Before the first Today render.
+        KeyMetricPrefs.migrateSkinTempAndBloodOxygenShown()
+        // WHOOP 4.0 is retired: a saved "WHOOP 4.0" selection becomes the supported 5.0/MG before anything reads it.
+        WhoopModel.migrateLegacySelection()
         #if DEBUG
         // DEBUG-only promo-screenshot harness: when launched with `--demo-hour <Int>`, pin Today to that
         // hour's day-cycle scene + a per-hour stat frame. No-op (active stays nil) when the arg is absent.
@@ -86,6 +90,10 @@ struct StrandiOSApp: App {
         NotificationPresenter.shared.onCoachBriefTapped = { [weak router] in router?.openCoach() }
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
+        #if DEBUG
+        // `--probe-spo2`: run the read-only SpO2 strap probes and save the report to Documents/spo2-probe.txt.
+        Spo2ProbeHarness.startIfRequested(model: model)
+        #endif
         CoachBriefScheduler.register(generateBrief: { [weak coach = model.coach] in
             await coach?.generateBrief()
         }, log: { [weak model] line in
