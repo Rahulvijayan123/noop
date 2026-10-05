@@ -1006,6 +1006,13 @@ struct MetricDetailView: View {
                         ActivityContextLine(document: context, interval: interval,
                                             dayStart: dayWindow[0], dayEnd: dayWindow[1])
                     }
+                    // Physiology context (HRV / resting HR from the strap, cloud mode only): how the selected
+                    // day's measurement was taken, whether it qualifies for its comparison, and how it differs
+                    // from the reference used. Renders nothing in local-only mode.
+                    if let contextMetric = MeasurementContextPage.metric(forCatalogKey: metric.key, source: metric.source),
+                       let contextDay = latest(in: win)?.day {
+                        MeasurementContextCard(metric: contextMetric, day: contextDay)
+                    }
                     intradaySection
                     if let dual = hrvDualPoints(windowed: win) {
                         hrvDualHeroChart(points: dual, effectiveRange: effRange, windowFellBack: fellBack)
