@@ -599,6 +599,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// comfortably spans the threshold + re-nudge cadence and a separating Active break for bout
     /// continuity). Mirrors the Android WhoopBleClient.INACTIVITY_LOOKBACK_S.
     static let inactivityLookbackSeconds = 4 * 3600
+    /// False once the app's rolling-window stand reminder (`ActivityContextCoordinator`) owns the nudge, so the
+    /// gravity-only path in `maybeBuzzInactivity` does not buzz a second time for the same stretch. A host that
+    /// never attaches the coordinator keeps the original behaviour.
+    var legacyInactivityNudgeEnabled = true
     /// Safety-net detector: strap reports newer data than us AND our frontier frozen 10 min ⇒ flag for
     /// reboot. behindGapSeconds avoids false positives when off-wrist / caught up. Insurance only.
     private var stuckDetector = StuckStrapDetector(stuckAfterSeconds: 600, behindGapSeconds: 300)
@@ -5681,7 +5685,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// owns the concrete store) hops onto a @MainActor Task, then the gated buzz + state save run back on
     /// the main actor. Haptic firing can't be verified in the simulator — test on-device.
     private func maybeBuzzInactivity() {
-        guard InactivityPrefs.isEnabled() else { return }   // cheap pre-check before any DB read
+        guard legacyInactivityNudgeEnabled, InactivityPrefs.isEnabled() else { return }   // cheap pre-check before any DB read
         Task { @MainActor in
             let nowSec = Int(Date().timeIntervalSince1970)
             let from = nowSec - BLEManager.inactivityLookbackSeconds

@@ -268,6 +268,11 @@ final class Repository: ObservableObject {
     struct StrainProfile: Sendable { let hrMax: Double; let sex: String }
     var strainProfile: StrainProfile?
 
+    /// The wearer's maximum heart rate (the profile override, else Tanaka from age; nil without either), set by
+    /// AppModel alongside `strainProfile`. With the typical resting rate it is the reference the activity
+    /// decoder judges effort against (`activityDecoderConfig`). nil keeps the decoder's default.
+    var activityMaxHeartRate: Double?
+
     /// Emit one Workouts & GPS test-mode line iff the mode is on and a sink is wired. The cheap
     /// `TestCentre.active(.workouts)` gate is checked BEFORE `build()` runs, so the string is never
     /// constructed when the mode is off (the @autoclosure defers it).
@@ -308,7 +313,7 @@ final class Repository: ObservableObject {
     /// the final fallback. Archived devices intentionally remain: archive means "stop connecting, keep
     /// data", and historical timelines must not orphan their retained samples. The active id remains first
     /// even for a non-WHOOP provider, preserving the pre-multi-strap cross-provider path.
-    private func rawPhysiologyReadIds(store: WhoopStore) -> [String] {
+    func rawPhysiologyReadIds(store: WhoopStore) -> [String] {
         let paired = (try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []
         let registeredWhoops = paired.filter {
             $0.brand.caseInsensitiveCompare("WHOOP") == .orderedSame

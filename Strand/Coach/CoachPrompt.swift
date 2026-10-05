@@ -56,6 +56,10 @@ enum CoachPrompt {
     INTRADAY: For anything about today, this morning, the last few hours, or how HRV, resting heart rate, respiratory \
     rate, steps or calories moved through the day, call get_intraday_series (1- to 5-minute readings) rather than the daily tools.
 
+    ACTIVITY: For what the user was doing (sitting, standing, walking, running, lying down, sleeping) or how heart rate, \
+    HRV or respiration differed by activity, call get_activity_context. Report its labels as given: sitting versus \
+    standing is often unresolved from a wrist, and a value it does not list was not measured.
+
     VISUALS: Call get_daily_metrics, get_health_overview, get_workouts, or prepare_chart (for a day-by-day series of one \
     metric) whenever the question involves numbers or trends. The app draws any chart, table, timeline or card itself \
     beneath your finished answer, from the figures you state and the data you fetched. Never draw a visual, never use \

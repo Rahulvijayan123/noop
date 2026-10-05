@@ -70,6 +70,16 @@ final class AppModel: ObservableObject {
     let profile = ProfileStore()
     /// Mirrors the Settings profile to the cloud `profiles` row (cloud mode only).
     private(set) lazy var profileSync = ProfileCloudSync(profile: profile)
+    /// What the activity classifier does after each sync: the rolling-window stand reminder and saving the
+    /// day's activity context to the store (see `ActivityContextCoordinator`).
+    private(set) lazy var activityContext = ActivityContextCoordinator(
+        repo: repo,
+        isWorn: { [weak self] in self?.live.worn ?? true },
+        remind: { [weak self] loops, windowMinutes in
+            self?.buzz(loops: loops)
+            AppModel.postInactivity(minutes: windowMinutes)
+        },
+        log: { [weak self] line in self?.live.append(log: line) })
     /// Behaviour settings: double-tap action, wear automation, zone coaching, smart alarm, illness watch.
     let behavior = BehaviorStore()
     /// On-device WHOOP-style recovery/strain/sleep computation from raw strap streams.
@@ -524,11 +534,17 @@ final class AppModel: ObservableObject {
         // @Published setter lands, so read the CURRENT values , they're already committed by the time the
         // next reconcile reads `strainProfile`). Display-only; the score itself is unchanged.
         self.repo.strainProfile = Repository.StrainProfile(hrMax: Double(profile.hrMax), sex: profile.sex)
+        // The activity decoder judges effort against the same maximum (only a real one: nil without an age or
+        // an override), and the rolling-window stand reminder replaces the gravity-only nudge the strap
+        // connection used to fire on its own.
+        self.repo.activityMaxHeartRate = profile.effortHRmax
+        self.ble.legacyInactivityNudgeEnabled = false
         profile.objectWillChange.sink { [weak self] in
             guard let self else { return }
             DispatchQueue.main.async {
                 self.repo.strainProfile = Repository.StrainProfile(
                     hrMax: Double(self.profile.hrMax), sex: self.profile.sex)
+                self.repo.activityMaxHeartRate = self.profile.effortHRmax
             }
         }.store(in: &hrCancellables)
         // Smooth HR centrally so it's solid everywhere it's shown.
@@ -799,6 +815,10 @@ final class AppModel: ObservableObject {
                 // v5: recompute the skin-temp suite snapshots (cycle phase + body clock) from the
                 // freshly-scored history so the Health hub cards read a ready result.
                 await self.refreshV5Signals()
+                // A day's saved activity context also depends on inputs that are not streams (the sleep
+                // session, workouts, wrist-off): the pass re-reads a recent day now and then, and does nothing
+                // for a day that is already current.
+                self.activityContext.requestMaterialization()
                 // #836 battery: 30-min BACKSTOP cadence (twin of Android ANALYZE_INTERVAL_MS). The
                 // `force: false` gate above can't skip while the strap streams live HR — the fingerprint
                 // advances every second — so this re-scored the whole 21-day window every 15 min even though
@@ -1004,6 +1024,7 @@ final class AppModel: ObservableObject {
         if routeAnalysisToCloud() { return }
         await intelligence.analyzeRecent(skipIfUnchanged: fromCompletedPass,
                                          triggerLabel: fromCompletedPass ? "resume-gated" : "resume-forced")
+        activityContext.requestMaterialization()
         #if os(iOS)
         // The deferred pass is the one that finally produces today's score, and it runs with no UI
         // attached — so publish the snapshot here too, for the same reason the post-offload path does.
@@ -1019,6 +1040,10 @@ final class AppModel: ObservableObject {
     private func refreshAfterCompletedBackfill() async {
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
         await repo.refresh(days: 120)
+        // The stand reminder is judged on the data that just landed, before any scoring: it reads the activity
+        // classifier, not the scores, and it is the one thing here that is useful only if it is prompt. It runs
+        // in cloud mode too (a reminder is a local decision).
+        await activityContext.evaluateStandReminder()
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
         // analyzeRecent tick , otherwise a just-synced night's Charge / Effort / Rest can take up to
         // 15 minutes to appear on a strap-only (no-import) dashboard. analyzeRecent no-ops if a tick is
@@ -1035,12 +1060,18 @@ final class AppModel: ObservableObject {
         // the #1538 report while never producing a score. Decide first whether this pass can finish here,
         // and hand it to a background-processing task when it cannot. A no-op on macOS, and on iOS a
         // foreground pass is never deferred.
-        if routeAnalysisToCloud() { return }
+        if routeAnalysisToCloud() {
+            activityContext.requestMaterialization()
+            return
+        }
         await RescoreBackgroundScheduler.run(passInProgress: intelligence.computing,
                                              log: { [live] line in live.append(log: line) }) {
             await intelligence.analyzeRecent(skipIfUnchanged: true)
         }
         await refreshV5Signals()
+        // Save the day's activity context once scoring is out of the way: the sleep session it reads for
+        // "asleep" is detected by that pass. A background task, so it never delays the widget / Health writes.
+        activityContext.requestMaterialization()
         #if os(iOS)
         // #980: a strap backfill routinely completes while the app is BACKGROUNDED (it runs as a
         // bluetooth-central, so it stays alive to receive the offload). The only other widget-publish

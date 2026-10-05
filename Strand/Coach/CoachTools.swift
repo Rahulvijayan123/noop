@@ -1,5 +1,6 @@
 import Foundation
 import WhoopStore
+import StrandAnalytics
 
 /// Display labels for the "Looked at" badge under an answer.
 enum CoachToolDisplayNames {
@@ -11,6 +12,7 @@ enum CoachToolDisplayNames {
         case "get_readiness_analysis": return "Readiness"
         case "prepare_chart": return "Metric series"
         case "get_intraday_series": return "Readings through the day"
+        case "get_activity_context": return "Activity context"
         case "save_memory": return "Saved note"
         case "get_memories": return "Past context"
         default: return tool.replacingOccurrences(of: "_", with: " ").capitalized
@@ -49,6 +51,10 @@ struct CoachToolExecutor {
              ["metric": ("string", CoachIntraday.metricNames),
               "hours": ("integer", "Hours back from now (default: last 24 h, or the local day so far for steps and calories; max 72)")],
              required: ["metric"]),
+        tool("get_activity_context",
+             "What the wearer was doing (sitting at a desk, standing, walking, running, lying down, sleeping, fidgeting, strap off), from the activity classifier's saved output, with the heart rate, HRV, respiratory rate and steps measured during each activity. Use for questions about posture, movement or context: 'was my heart rate high while I was sitting?', 'how much did I walk today?', 'what was I doing when my HRV dropped?'. Sitting and standing cannot be told apart from a wrist, so a still stretch is often reported as 'Still (sitting or standing)'.",
+             ["hours": ("integer", "Hours back from now (default 6, max 168)"),
+              "activity": ("string", "Optional: list only one activity: " + CoachActivityContext.activityNames)]),
         tool("save_memory",
              "Save a durable fact about the user (goal, injury, preference, routine), third person, e.g. 'User is training for a half marathon in March'. Not transient data.",
              ["content": ("string", "The fact, under 400 characters"),
@@ -59,7 +65,8 @@ struct CoachToolExecutor {
     ]
 
     /// Tools every turn keeps: memory and the series fetch the visual pipeline draws from.
-    private static let coreTools: Set<String> = ["get_memories", "save_memory", "prepare_chart", "get_intraday_series"]
+    private static let coreTools: Set<String> = ["get_memories", "save_memory", "prepare_chart", "get_intraday_series",
+                                                  "get_activity_context"]
 
     /// Per-intent bundle: the core plus the data tools the question can plausibly need. Deterministic keyword
     /// routing; an unrecognised question falls back to the full set so a tool is never withheld by a guess.
@@ -104,6 +111,7 @@ struct CoachToolExecutor {
         case "get_readiness_analysis": return await readiness()
         case "prepare_chart": return chart(args)
         case "get_intraday_series": return await intraday(args)
+        case "get_activity_context": return await activityContext(args)
         case "save_memory": return await saveMemory(args)
         case "get_memories": return await memories()
         default: return "Unknown tool: \(name)"
@@ -218,6 +226,22 @@ struct CoachToolExecutor {
             return "Could not load intraday readings right now. Tell the user the live curve is unavailable, "
                 + "and do not say the device records only one value per day."
         }
+    }
+
+    private func activityContext(_ args: [String: Any]) async -> String {
+        var activity: ActivityClass?
+        if let raw = (args["activity"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty {
+            guard let match = CoachActivityContext.activity(named: raw) else {
+                return "Unknown activity. Use one of: " + CoachActivityContext.activityNames
+            }
+            activity = match
+        }
+        let now = Date()
+        let to = Int(now.timeIntervalSince1970)
+        let from = to - Self.int(args["hours"], default: 6, max: 168) * 3_600
+        let stored = await repo.storedActivityContext(from: from, to: to)
+        return CoachActivityContext.describe(intervals: stored.intervals, from: from, to: to, activity: activity,
+                                             storedThrough: stored.through, now: now)
     }
 
     // MARK: Memory

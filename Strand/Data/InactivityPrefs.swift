@@ -9,10 +9,13 @@ import StrandAnalytics
 /// (`notif.masterEnabled` / `notif.onlyWhenWorn` / `notif.quietHours*`) for the global gates rather
 /// than forking them — the same keys `NotificationSettingsStore` writes.
 ///
-/// All gating + de-dup logic lives in the shipped, unit-tested `SedentaryDetector` engine. The UI edits
-/// the knobs here; the BLE offload hook (`BLEManager.maybeBuzzInactivity`) reads the engine seams
-/// (`Config.load` / `State.load` / `State.save`) straight from UserDefaults — exactly as the Android
-/// `WhoopBleClient` reads SharedPreferences — and feeds them to `SedentaryDetector.evaluate`.
+/// All gating + de-dup logic lives in the shipped, unit-tested engines. The UI edits the knobs here.
+/// The decision is `StandReminderEngine` (a rolling window: remind only when the last `thresholdMinutes`
+/// held less than a minute of standing or movement), run by `ActivityContextCoordinator` after each sync
+/// through `loadStandConfig` / `loadStandState` / `saveStandState`. The older gravity-only
+/// `SedentaryDetector` path (`BLEManager.maybeBuzzInactivity`, via `loadConfig` / `loadState` /
+/// `saveState`) reads the same knobs straight from UserDefaults — exactly as the Android `WhoopBleClient`
+/// reads SharedPreferences — and stays as the fallback for hosts that never attach the coordinator.
 ///
 /// The active-hours window is evaluated by the engine against the candidate bout's LOCAL end time, NOT
 /// `now`: gravity only reaches the app on the strap's offload flush, so an overnight bout is processed
@@ -23,7 +26,8 @@ final class InactivityPrefs: ObservableObject {
 
     /// Feature toggle (opt-in, default OFF). Inert until the notification master is also on.
     @Published var enabled: Bool        { didSet { d.set(enabled, forKey: K.enabled) } }
-    /// Minutes seated before the first nudge (UI 15–120, step 15).
+    /// The rolling window, in minutes: a nudge is due only when this much time held less than a minute of
+    /// standing or movement (UI 15–120, step 5; default 50). It was "minutes seated before the first nudge".
     @Published var thresholdMinutes: Int { didSet { d.set(thresholdMinutes, forKey: K.threshold) } }
     /// If still seated, re-buzz this often (UI 15–120, step 15).
     @Published var reNudgeMinutes: Int   { didSet { d.set(reNudgeMinutes, forKey: K.reNudge) } }
@@ -50,12 +54,15 @@ final class InactivityPrefs: ObservableObject {
         static let lastBuzzAt      = "inactivity.lastBuzzAt"
         static let lastBoutStart   = "inactivity.lastBuzzedBoutStart"
         static let lastBoutEnd     = "inactivity.lastBuzzedBoutEnd"
+        // The rolling-window engine's own state (the legacy keys above belong to the gravity detector).
+        static let standEvaluatedThrough = "inactivity.stand.evaluatedThrough"
+        static let standLastRemindAt     = "inactivity.stand.lastRemindAt"
     }
 
     // Defaults match SedentaryDetector / the PR #419 numbers.
     init() {
         enabled            = d.object(forKey: K.enabled) as? Bool ?? false
-        thresholdMinutes   = d.object(forKey: K.threshold) as? Int ?? SedentaryDetector.defaultThresholdMinutes  // 45
+        thresholdMinutes   = d.object(forKey: K.threshold) as? Int ?? StandReminderEngine.defaultWindowMinutes  // 50
         reNudgeMinutes     = d.object(forKey: K.reNudge) as? Int ?? SedentaryDetector.defaultReNudgeMinutes      // 30
         buzzLoops          = d.object(forKey: K.buzzLoops) as? Int ?? SedentaryDetector.defaultBuzzLoops         // 2
         activeHoursEnabled = d.object(forKey: K.activeOn) as? Bool ?? true
@@ -95,6 +102,27 @@ final class InactivityPrefs: ObservableObject {
             quietEndMinutes: d.object(forKey: NotifK.quietEnd) as? Int ?? SedentaryDetector.defaultQuietEndMin,
             onlyWhenWorn: d.object(forKey: NotifK.worn) as? Bool ?? true
         )
+    }
+
+    /// The rolling-window rule's configuration: the same stored knobs and notification gates as above, with
+    /// "Sitting for" as the window length. Guarded against an out-of-range stored value.
+    static func loadStandConfig(_ d: UserDefaults = .standard) -> StandReminderEngine.Config {
+        var config = StandReminderEngine.Config(loadConfig(d))
+        config.windowMinutes = min(max(d.object(forKey: K.threshold) as? Int ?? StandReminderEngine.defaultWindowMinutes, 5), 240)
+        return config
+    }
+
+    /// Rehydrate the rolling-window engine's de-dup state.
+    static func loadStandState(_ d: UserDefaults = .standard) -> StandReminderEngine.State {
+        StandReminderEngine.State(
+            lastEvaluatedThrough: d.object(forKey: K.standEvaluatedThrough) as? Int ?? 0,
+            lastRemindAt: d.object(forKey: K.standLastRemindAt) as? Int ?? 0)
+    }
+
+    /// Persist the rolling-window engine's `nextState`, so a relaunch cannot judge the same window twice.
+    static func saveStandState(_ s: StandReminderEngine.State, to d: UserDefaults = .standard) {
+        d.set(s.lastEvaluatedThrough, forKey: K.standEvaluatedThrough)
+        d.set(s.lastRemindAt, forKey: K.standLastRemindAt)
     }
 
     /// Whether the feature toggle is on (cheap pre-check so the hook can bail before any DB read).

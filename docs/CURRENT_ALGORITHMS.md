@@ -475,6 +475,75 @@ When resting HR is known, VO₂max is estimated with Uth 2004, `15.3 × HRmax / 
 
 ---
 
+## 9. Activity class (what the wearer was doing)
+
+**What it is.** One canonical, machine-readable label per moment (`ActivityClass`, taxonomy `act-class-1`) with a confidence, built on the ActivityContext decoder (`hsmm-1.2`, ontology `v2.0`). It is the label code and downstream systems branch on. The on-screen wording ("Desk sitting", "Brisk walking") stays a view for people. This is a behavioural context, not a medical measurement.
+
+### Input
+
+The decoder reads what the strap actually sends: gravity and dynamic acceleration, the cumulative step counter, heart rate (scaled by the profile's HRmax), logged sleep sessions and workouts, and wrist-on / wrist-off events. When a raw-IMU session covers the time, the HART motion encoder adds gait rhythm and a named activity. Every five seconds it publishes three independent probability heads (posture, locomotion, arm behaviour) and never forces a class.
+
+### Classes
+
+Only classes the sensors can tell apart with reasonable confidence are in the taxonomy. `ActivityClass.capabilities` states the evidence and the limit of every one, and a test fails if a class is added without that statement.
+
+| Code | Established by | What it cannot tell apart |
+|---|---|---|
+| `off_wrist` | wrist-off events, loss of pulse contact (a hard gate, confidence 1) | a quiet strap on a table is never taken as on-wrist evidence |
+| `sleeping` | a logged sleep session and stillness | naps outside a detected session read as `lying_down` |
+| `lying_down` | recumbent posture reached through a lying-down movement signature | no absolute wrist-orientation cue is used, so a quiet daytime lie-down is not seen |
+| `sitting`, `sitting_desk` | stationary wrist whose posture head leans seated; `sitting_desk` adds desk-like hand activity | the wrist cannot see body height: sitting vs standing is a likelihood, never a measurement |
+| `standing` | stationary wrist whose posture head leans upright | needs a committed upright lean, otherwise the state is `stationary` |
+| `stationary` | awake, on the wrist, no movement | deliberately unresolved between sitting and standing |
+| `fidgeting` | bursty low-amplitude movement without gait | tremor, restless legs and gesturing overlap |
+| `light_activity` | whole-body movement without a sustained gait, or a posture-change signature | chores, pacing and rearranging are not told apart |
+| `walking` | step cadence about 70-125/min with steady movement; stairs are reported as walking | confident gait needs the step counter (WHOOP 5/MG) or raw IMU rhythm; WHOOP 4.0 relies on movement shape |
+| `brisk_walking` | cadence about 105-150/min, higher intensity, raised heart rate | overlaps ordinary walking near 105-125/min (the runner-up says so) |
+| `running` | cadence about 135-210/min with high intensity | treadmill vs outdoor and pace |
+| `cycling` | only when the motion encoder or a cycling workout names it | never inferred from heart rate and stillness: pedalling leaves almost no wrist or step signature |
+| `vigorous_activity` | sustained heart rate of about 45% of reserve or more with vigorous arm movement and no gait, or a logged workout | the activity itself (rowing, lifting, HIIT, a ball sport) is not named |
+| `unknown` | conflicting or missing evidence; confidence 0 | carries no claim, the best guess is the runner-up |
+
+### How a class and its confidence come out
+
+The class is the display rules' reading of the three heads at that instant, without the label's 10-30 s hysteresis (a stored class must not lag the evidence it describes). The confidence is the belief mass of the body state the class names: seated for `sitting` and `sitting_desk` alike, the walking family for `walking` and `brisk_walking`, recumbent for `sleeping` and `lying_down`. The runner-up is the best alternative outside that family. `evidenceQuality` is the decoder's own overall confidence (sensor coverage, channel agreement, warm-up), so a confident class over thin evidence is visible as such.
+
+### Persisted intervals (`activityContextInterval`)
+
+Decoded runs become timestamp-aligned intervals: one row says "from `startTs` to `endTs` (half-open) the wearer was `activityClass`, with this confidence". Neighbouring runs of the same class, sleep and wear state (gap of at most 10 s) merge, a non-movement fragment shorter than 10 s between two stretches of one situation is absorbed (a movement fragment is never folded away), and a stretch longer than 15 minutes is cut into near-equal parts so every row's statistics stay local.
+
+Beside the label each interval stores the measurements that have no per-timestamp row to join against: mean, min, max and slope of heart rate (slope needs 30 samples over 90 s), RMSSD with the clean beat count (at least 20 beats and 60 s, never during gait or exercise because motion corrupts beat timing), respiratory rate from RSA with its breath count (still wearer only, at least 6 breaths), step ticks and cadence (at least 20 s of stepping), motion intensity, and the head tops, sleep and wear state. A value that could not be measured is NULL, not zero.
+
+Everything that is recorded per sample (heart rate, R-R, SpO2, skin temperature, respiration, gravity, steps) is **not copied**. It joins to its interval through the `*Ctx` SQL views (`hrSampleCtx`, `rrIntervalCtx`, `spo2SampleCtx`, `skinTempSampleCtx`, `respSampleCtx`, `gravitySampleCtx`, `stepSampleCtx`, `ppgHrSampleCtx`), which add `ctxClass`, `ctxConfidence`, `ctxRunnerUp`, `ctxEvidenceQuality`, `ctxPosture`, `ctxLocomotion`, `ctxArmBehavior`, `ctxSleep`, `ctxWear`, `ctxIntensity`, `ctxStartTs`, `ctxEndTs` by an as-of lookup on the interval table's primary key. A sample in a gap (strap off, stretch not decoded yet) still appears with NULL context. `activityContextDayClass` totals seconds per class per day. A derived time series (the per-minute energy estimate, intraday HRV or respiratory-rate buckets) is not copied or stored per interval either: it joins by its own bucket timestamp, in memory with `ActivityContextLookup` or from the store with `activityContextInterval(deviceId:at:)`.
+
+The tables are derived and regenerable. A day is written once it is closed and is re-checked while it is recent; the ledger row (`activityContextDay`) records the taxonomy, decoder and interval versions so a version bump re-derives stored days.
+
+---
+
+## 10. Stand reminder
+
+**What it is.** A reminder to stand up, decided over a rolling window rather than a single elapsed-time counter (`StandReminderEngine`).
+
+**Rule.** Look at the previous 50 minutes (the existing "minutes before the first nudge" setting, 15-120 in steps of 5) ending at the newest second the strap has reported. Add up every second of meaningful standing or movement inside it. If the total reaches 60 seconds, there is no reminder, however it was spread; otherwise the wearer is eligible.
+
+| Last 50 minutes | Reminder |
+|---|---|
+| 2 minutes of walking | no |
+| 70 s of standing or moving | no |
+| six 12-second walks to the kettle (72 s in total, never in one block) | no |
+| 20 s of movement | still eligible |
+| 50 minutes seated | yes |
+
+**What counts.** The canonical class of each stretch, plus the step counter. Movement: `standing`, `light_activity`, `walking`, `brisk_walking`, `running`, `cycling`, `vigorous_activity`, and any stretch where steps were counted even if the heads read seated (carrying a laptop across the room barely moves the wrist). A bout must last 10 s to count and moving seconds no further than 5 s apart are one bout, so a gesture cannot add up to a minute by itself, and a class needs a belief of at least 0.25. Sedentary: `sitting`, `sitting_desk`, `stationary`, `fidgeting`. Neither: `lying_down` (a couch nap is not buzzed awake), `unknown`, asleep and off-wrist, which are also removed from the window's coverage so "just put it on" is not "sedentary for 50 minutes".
+
+**Other gates.** At least 85% of the window observed awake and on the wrist, at least 80% positively sedentary, a 30 s hold-off after movement ends, the existing re-nudge spacing, active and quiet hours, the notification master switch and "only when worn". Data older than 20 minutes is not acted on.
+
+**When it runs.** History reaches the phone in offloads, so the rule is evaluated after each completed backfill and the window ends at the newest data, not at the clock. A reminder can therefore arrive up to one offload (about 15 minutes) after the window was already sedentary. The decision and the reason ("Stand reminder: remind (50-min window: 12 s standing or moving, 98% observed, 91% seated)") go to the strap log. The legacy gravity-only `SedentaryDetector` is kept and tested, but the app no longer sends reminders through it.
+
+**What it cannot see.** A wrist cannot tell sitting from standing still, so someone who stands motionless is credited only when the posture head leans clearly upright. The engine errs toward staying quiet whenever it is unsure (unknown, lying down, thin coverage), because a reminder that arrives while the wearer has been up and about is the failure people stop trusting.
+
+---
+
 ## Charge (uses several of the above)
 
 **What it is.** The 0–100 recovery score (`RecoveryScorer`). Approximate, HRV-dominant, normalized to your own baseline. Not WHOOP’s recovery model.
@@ -531,3 +600,9 @@ A low-HRV + low-RHR pattern is detected as a possible parasympathetic-saturation
 | Calorie evaluation harness | `Tools/EnergyBench` |
 | Primary-session RHR shadow | `PrimarySessionRestingHR.swift` |
 | Live wiring (which flags are on) | `Strand/Data/IntelligenceEngine.swift`, `Strand/BLE/PuffinExperiment.swift` |
+| Activity class taxonomy + classifier | `ActivityContextClass.swift` |
+| Activity intervals + per-interval physiology | `ActivityContextInterval.swift`, `ActivityContextInterval+Store.swift`, `ActivityContextAggregate.swift` |
+| When a day is written | `ActivityContextMaterialization.swift`, `Strand/Data/ActivityContextCoordinator.swift`, `Strand/Data/Repository+ActivityContextStore.swift` |
+| Stored context (tables, views) | `Packages/WhoopStore/Sources/WhoopStore/ActivityContextStore.swift`, `ActivityContextViews.swift`, migration `v48-activity-context` |
+| Stand reminder | `StandReminderEngine.swift`, `Strand/Data/InactivityPrefs.swift` |
+| Coach access to the context | `Strand/Coach/CoachActivityContext.swift` (`get_activity_context`) |

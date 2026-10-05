@@ -27,8 +27,9 @@ struct AutomationsView: View {
     /// v5 Rhythm experimental gate (the screen still shows its own consent clickwrap when opened).
     @AppStorage(RhythmConsent.enabledKey) private var rhythmEnabled = false
     /// Inactivity reminder (#419) — UI-local store, persisted in UserDefaults. The buzz itself fires
-    /// from the BLE offload path (BLEManager.maybeBuzzInactivity → the shipped SedentaryDetector); this
-    /// screen only edits the prefs the engine reads.
+    /// after each completed history sync (ActivityContextCoordinator.evaluateStandReminder →
+    /// StandReminderEngine, a rolling window over the activity classifier); this screen only edits the
+    /// prefs the engine reads.
     @StateObject private var inactivity = InactivityPrefs()
     #if os(iOS)
     /// Wrist-alerts master gate (PR #572). On iOS the NotificationSettingsView (and its store) are
@@ -264,7 +265,7 @@ struct AutomationsView: View {
                     }
                     rowDivider
                     stepperRow(label: String(localized: "Sitting for"), help: String(localized: "Minutes seated before the first nudge."),
-                               value: $inactivity.thresholdMinutes, suffix: String(localized: "min"), range: 15...120, step: 15)
+                               value: $inactivity.thresholdMinutes, suffix: String(localized: "min"), range: 15...120, step: 5)
                     rowDivider
                     stepperRow(label: String(localized: "Re-nudge every"), help: String(localized: "If you're still seated, buzz again this often."),
                                value: $inactivity.reNudgeMinutes, suffix: String(localized: "min"), range: 15...120, step: 15)
