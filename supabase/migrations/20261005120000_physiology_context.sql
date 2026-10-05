@@ -642,9 +642,9 @@ $$;
 -- ---------------------------------------------------------------------------------------------------------
 
 -- Enqueue from scoring completions (algorithm frwhoop-server-1, the owner's last 120 local days):
---   * a (device, day) with completed scoring and no job for its mode is created (today first, then the
---     newest days), so the live day, a day that just closed (its retrospective job) and the backfill all
---     come from here;
+--   * a (device, day) with its own completed scoring and no job for its mode is created (today first, then
+--     the newest days), so the live day, a day that just closed (its retrospective job) and the backfill all
+--     come from here (a neighbour without scoring of its own gets no job: it has no measurements);
 --   * an existing, completed (or dead-lettered) job whose scoring of D-1..D+1 completed again after it was
 --     last dirtied is bumped when its dependency fingerprint changed and it was last dirtied at least
 --     10 minutes ago (a live day is rebuilt at most every 10 minutes; a pending job is never bumped here);
@@ -678,13 +678,14 @@ begin
          and s.day between o.today - 120 and o.today + 1
     ), cand as (
       select f.user_id, f.device_id, (f.day + k.k) as day,
-             max(coalesce(f.last_completed_at, '-infinity'::timestamptz)) as touched_at, min(f.today) as today
+             max(coalesce(f.last_completed_at, '-infinity'::timestamptz)) as touched_at, min(f.today) as today,
+             bool_or(k.k = 0) as own
         from finished f
         cross join (values (-1), (0), (1)) as k(k)
        where f.day + k.k between f.today - 119 and f.today
        group by f.user_id, f.device_id, f.day + k.k
     ), keyed as (
-      select c.user_id, c.device_id, c.day, c.touched_at,
+      select c.user_id, c.device_id, c.day, c.touched_at, c.own,
              case when c.day >= c.today then 'causal_live' else 'retrospective' end as mode
         from cand c
        where exists (select 1 from public.devices d where d.id = c.device_id and d.user_id = c.user_id)
@@ -693,7 +694,7 @@ begin
       from keyed k
       left join public.physiology_context_jobs j
         on j.user_id = k.user_id and j.device_id = k.device_id and j.day = k.day and j.mode = k.mode
-     where j.user_id is null
+     where (j.user_id is null and k.own)
         or ((j.completed_revision >= j.input_revision or j.dead_letter)
             and k.touched_at > j.dirty_at
             and j.dirty_at <= pg_catalog.clock_timestamp() - interval '10 minutes')

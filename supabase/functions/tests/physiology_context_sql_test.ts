@@ -299,16 +299,14 @@ Deno.test({
         algorithm_version), '')) from public.scoring_jobs_v2 s`);
       const scoringBefore = await scoringState();
       assert.equal(await sql('select public.enqueue_physiology_context_days_v1(2)'), '2', 'the limit holds');
-      assert.equal(Number(await sql('select public.enqueue_physiology_context_days_v1(50)')), 4);
+      assert.equal(Number(await sql('select public.enqueue_physiology_context_days_v1(50)')), 1);
       assert.equal(await scoringState(), scoringBefore, 'the enqueue never writes scoring_jobs_v2');
       const jobs = await sqlJson(`select json_agg(json_build_object('day', to_char(day, 'YYYY-MM-DD'), 'mode', mode,
           'rev', input_revision, 'reasons', reasons, 'fp', fingerprint is not null) order by day)
         from public.physiology_context_jobs where user_id = '${a.user}'`);
+      // Only days with scoring of their own get a job; neighbours are dependencies, not new work.
       assert.deepEqual(jobs.map((row: any) => [row.day, row.mode, row.rev, row.reasons, row.fp]), [
-        [addDays(today, -11), 'retrospective', 1, ['scoring_completed'], true],
         [addDays(today, -10), 'retrospective', 1, ['scoring_completed'], true],
-        [addDays(today, -9), 'retrospective', 1, ['scoring_completed'], true],
-        [addDays(today, -2), 'retrospective', 1, ['scoring_completed'], true],
         [addDays(today, -1), 'retrospective', 1, ['scoring_completed'], true],
         [today, 'causal_live', 1, ['scoring_completed'], true],
       ]);
