@@ -215,6 +215,35 @@ final class ActivityClassifierScenarioTests: XCTestCase {
         XCTAssertEqual(WorkoutKind(sport: nil), .unspecified)
     }
 
+    func testSportNamesAreMatchedByWholeWordNotBySubstring() {
+        XCTAssertEqual(WorkoutKind(sport: "Bikram yoga"), .other)
+        XCTAssertEqual(WorkoutKind(sport: "Ab crunches"), .other)
+        XCTAssertEqual(WorkoutKind(sport: "Spinal mobility"), .other)
+        XCTAssertEqual(WorkoutKind(sport: "Motorcycle"), .other)
+        XCTAssertEqual(WorkoutKind(sport: "Hot Yoga"), .other)
+        XCTAssertEqual(WorkoutKind(sport: "HIIT"), .other)
+
+        XCTAssertEqual(WorkoutKind(sport: "Spin class"), .cycling)
+        XCTAssertEqual(WorkoutKind(sport: "E-Bike commute"), .cycling)
+        XCTAssertEqual(WorkoutKind(sport: "Stationary bike"), .cycling)
+        XCTAssertEqual(WorkoutKind(sport: "Rucking"), .walking)
+        XCTAssertEqual(WorkoutKind(sport: "Run/Walk intervals"), .running)
+    }
+
+    func testCamelCaseIdentifiersAreSplitIntoWords() {
+        XCTAssertEqual(WorkoutKind(sport: "MountainBiking"), .cycling)
+        XCTAssertEqual(WorkoutKind(sport: "HandCycling"), .cycling)
+        XCTAssertEqual(WorkoutKind(sport: "TrailRunning"), .running)
+        XCTAssertEqual(WorkoutKind(sport: "NordicWalking"), .walking)
+        XCTAssertEqual(WorkoutKind(sport: "HighIntensityIntervalTraining"), .other)
+    }
+
+    func testATreadmillWalkIsAWalkNotARun() {
+        XCTAssertEqual(WorkoutKind(sport: "Incline treadmill walk"), .walking)
+        XCTAssertEqual(WorkoutKind(sport: "Treadmill run"), .running)
+        XCTAssertEqual(WorkoutKind(sport: "Treadmill"), .running)
+    }
+
     func testTheTrackBuilderTagsEachSecondWithTheCoveringWorkoutsKind() throws {
         var sim = ActivitySim()
         sim.still(60); sim.desk(60); sim.still(60)

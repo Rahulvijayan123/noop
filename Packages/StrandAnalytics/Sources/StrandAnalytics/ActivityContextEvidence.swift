@@ -117,13 +117,43 @@ public enum WorkoutKind: String, Codable, Equatable, Sendable {
     /// Any other sport (strength, rowing, HIIT, court sports …).
     case other
 
+    /// Sport names are free text (a strap's own labels, the manual picker, Apple Health and activity-file
+    /// imports), so they are matched by whole word: "Ab crunches" is not a run, "Spinal mobility" is not a
+    /// spin class and "Bikram yoga" is not a bike ride. CamelCase identifiers ("MountainBiking") are split
+    /// into their words first.
     public init(sport: String?) {
-        let s = (sport ?? "").lowercased()
-        if s.isEmpty { self = .unspecified }
-        else if ["cycl", "bik", "spin", "peloton"].contains(where: { s.contains($0) }) { self = .cycling }
-        else if ["run", "jog", "treadmill"].contains(where: { s.contains($0) }) { self = .running }
-        else if ["walk", "hik", "ruck"].contains(where: { s.contains($0) }) { self = .walking }
+        let words = WorkoutKind.words(in: sport ?? "")
+        if words.isEmpty { self = .unspecified }
+        else if words.contains(where: { $0.hasPrefix("cycl") || WorkoutKind.cyclingWords.contains($0) }) { self = .cycling }
+        else if words.contains(where: { WorkoutKind.runningWords.contains($0) }) { self = .running }
+        else if words.contains(where: { $0.hasPrefix("walk") || $0.hasPrefix("hik") || WorkoutKind.ruckingWords.contains($0) }) { self = .walking }
+        else if words.contains("treadmill") { self = .running }
         else { self = .other }
+    }
+
+    private static let cyclingWords: Set<String> = ["bike", "bikes", "biking", "biker", "ebike", "spin", "spinning", "peloton"]
+    private static let runningWords: Set<String> = ["run", "runs", "running", "runner", "jog", "jogging", "jogger", "marathon", "parkrun"]
+    private static let ruckingWords: Set<String> = ["ruck", "rucks", "rucking"]
+
+    private static func words(in sport: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var previousWasLowercase = false
+        for character in sport {
+            guard character.isLetter || character.isNumber else {
+                if !current.isEmpty { words.append(current.lowercased()); current = "" }
+                previousWasLowercase = false
+                continue
+            }
+            if character.isUppercase, previousWasLowercase, !current.isEmpty {
+                words.append(current.lowercased())
+                current = ""
+            }
+            current.append(character)
+            previousWasLowercase = character.isLowercase
+        }
+        if !current.isEmpty { words.append(current.lowercased()) }
+        return words
     }
 }
 
