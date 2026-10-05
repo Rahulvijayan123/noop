@@ -31,7 +31,10 @@ final class ActivityContextWordingTests: XCTestCase {
         XCTAssertEqual(ActivityFamily.of("Running"), .running)
         XCTAssertEqual(ActivityFamily.of("Cycling"), .otherMovement)
         XCTAssertEqual(ActivityFamily.of("Asleep"), .asleep)
-        XCTAssertEqual(ActivityFamily.of("Resting in bed"), .asleep)
+        // Lying awake in bed is not drawn as sleep: the lane and the sleep page agree about a night.
+        XCTAssertEqual(ActivityFamily.of("Resting in bed"), .inBed)
+        XCTAssertEqual(ActivityFamily.of("Lying down"), .inBed)
+        XCTAssertNotEqual(ActivityFamily.inBed.color, ActivityFamily.asleep.color)
         XCTAssertEqual(ActivityFamily.of("Changing position"), .changing)
         XCTAssertEqual(ActivityFamily.of(ActivityDisplay.offWrist), .offWrist)
     }

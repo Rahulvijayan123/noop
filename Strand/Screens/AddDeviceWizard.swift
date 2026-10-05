@@ -30,7 +30,6 @@ struct AddDeviceWizard: View {
     /// What the user is adding. Drives the prep copy AND which scan/register path runs.
     enum DeviceType: Identifiable, Hashable {
         case whoop5mg
-        case whoop4
         case hrStrap
         case gymEquipment
         // EXPERIMENTAL tier — best-effort, clean-room, can't be hardware-verified here. Each fails to an
@@ -41,10 +40,9 @@ struct AddDeviceWizard: View {
         case oura          // Oura ring (factory-reset-and-adopt: NOOP installs its own key, becomes owner)
         var id: Self { self }
 
-        var isWhoop: Bool { self == .whoop4 || self == .whoop5mg }
+        var isWhoop: Bool { self == .whoop5mg }
         var whoopModel: WhoopModel? {
             switch self {
-            case .whoop4:   return .whoop4
             case .whoop5mg: return .whoop5mg
             default:        return nil
             }
@@ -328,9 +326,6 @@ struct AddDeviceWizard: View {
             typeRow(.whoop5mg, icon: "applewatch.side.right",
                     title: "WHOOP 5.0 / MG",
                     subtitle: String(localized: "Newer WHOOP band with live data and history sync"))
-            typeRow(.whoop4, icon: "applewatch.side.right",
-                    title: "WHOOP 4.0",
-                    subtitle: String(localized: "NOOP's primary, fully-supported band"))
             typeRow(.hrStrap, icon: "heart.circle",
                     title: String(localized: "Heart-rate strap"),
                     subtitle: String(localized: "Polar, Wahoo, Coospo, Garmin HRM, Amazfit Helio broadcast"))
@@ -469,12 +464,6 @@ struct AddDeviceWizard: View {
     /// Type-specific "get it ready" guidance — the point of the branching wizard.
     private func prepInstructions(_ t: DeviceType) -> [String] {
         switch t {
-        case .whoop4:
-            return [
-                String(localized: "Put your WHOOP 4.0 on your wrist and make sure it's awake."),
-                String(localized: "Make sure it's NOT connected to the official WHOOP app right now."),
-                String(localized: "NOOP will look for it nearby."),
-            ]
         case .whoop5mg:
             return [
                 String(localized: "WHOOP 5.0 / MG bonds to one device at a time. Unpair it from the official WHOOP app first."),
@@ -1032,7 +1021,7 @@ struct AddDeviceWizard: View {
     /// SF Symbol for a device type — used on the prep step header.
     private func typeIcon(_ t: DeviceType) -> String {
         switch t {
-        case .whoop4, .whoop5mg: return "applewatch.side.right"
+        case .whoop5mg: return "applewatch.side.right"
         case .hrStrap:           return "heart.circle"
         case .gymEquipment:      return "figure.run.treadmill"
         case .amazfit:           return "waveform.path.ecg.rectangle"
@@ -1058,7 +1047,7 @@ struct AddDeviceWizard: View {
                     model.stopWhoopScan()
                     step = .confirm
                 } onRescan: {
-                    model.presentWhoopScan(model: type.whoopModel ?? .whoop4)
+                    model.presentWhoopScan(model: type.whoopModel ?? .whoop5mg)
                 }
             } else if type == .gymEquipment {
                 FTMSPickList(scanner: ftmsScanner) { machine in
@@ -1230,7 +1219,7 @@ struct AddDeviceWizard: View {
 
     private func startScan(for type: DeviceType) {
         switch type {
-        case .whoop4, .whoop5mg: model.presentWhoopScan(model: type.whoopModel ?? .whoop4)
+        case .whoop5mg: model.presentWhoopScan(model: type.whoopModel ?? .whoop5mg)
         case .gymEquipment:      ftmsScanner.scan()
         case .amazfit, .miBand:  huamiScanner.scan()
         case .oura:              ouraScanner.scan()
@@ -1254,10 +1243,10 @@ struct AddDeviceWizard: View {
         let name = confirmName
         let device: PairedDevice
 
-        if let pickedWhoop, let type, let wm = type.whoopModel {
+        if let pickedWhoop, let type, type.whoopModel != nil {
             // WHOOP: honest live capability set (no calibrated SpO₂ % — import-only; #548);
-            // id namespaced by uuid; model "4.0" / "5.0 MG". Steps only on 5.0/MG.
-            let modelLabel = (wm == .whoop4) ? "4.0" : "5.0 MG"
+            // id namespaced by uuid; model "5.0 MG" (WHOOP 4.0 is no longer offered).
+            let modelLabel = "5.0 MG"
             device = PairedDevice(
                 id: "whoop-\(pickedWhoop.uuid)",
                 brand: "WHOOP",
@@ -1397,7 +1386,6 @@ struct AddDeviceWizard: View {
     private func typeTitle(_ t: DeviceType) -> String {
         switch t {
         case .whoop5mg:     return "WHOOP 5.0 / MG"
-        case .whoop4:       return "WHOOP 4.0"
         case .hrStrap:      return String(localized: "Heart-rate strap")
         case .gymEquipment: return String(localized: "Gym equipment")
         case .amazfit:      return "Amazfit / Zepp"

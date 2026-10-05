@@ -36,7 +36,8 @@ public enum SleepStagerV2 {
     /// span. DROP-IN: same signature + return type as `SleepStager.stageSession`, so a caller can switch
     /// V1↔V2 on a flag with no other change. `resp` (raw resp ADC) is accepted for signature-parity but not
     /// consumed — respiration regularity is recovered from the R-R stream (RSA), the path available on both
-    /// WHOOP 4 and 5. The recipe stages "wake" naturally (no separate pre-onset / post-wake forcing).
+    /// WHOOP 4 and 5. The recipe stages "wake" from its emissions, plus one pre-onset rule: nothing before
+    /// the wrist first settles is sleep (`settledOnset`). There is no post-wake forcing.
     public static func stageSession(start: Int, end: Int, grav: [GravitySample],
                                     hr: [HRSample], rr: [RRInterval], resp: [RespSample]) -> [StageSegment] {
         // v7.0.2 perf (#707): stage each night AT MOST ONCE per (window, input-fingerprint). The post-sync
@@ -545,6 +546,47 @@ public enum SleepStagerV2 {
         return nil
     }
 
+    /// Settled-onset rule: sleep cannot begin before the wrist SETTLES — the first run of
+    /// `settledOnsetEpochs` epochs (15 minutes) in which at most `settledOnsetTolerance` epoch moved, a moved
+    /// epoch being one that is not `motionQuiescent`. Every epoch before the first sleep label at or after the
+    /// start of that run is wake.
+    ///
+    /// WHY. Lying awake in bed — scrolling, waiting to fall asleep — is still and low-HR, and the per-epoch
+    /// emissions call it light sleep: the motion terms see too little movement and the cardiac terms see a
+    /// relaxed heart. What does separate it from sleep is that the wakeful wrist keeps shifting every few
+    /// minutes, while the first sleep cycle holds still for a quarter of an hour. One recorded night: still
+    /// and 62–68 bpm from 01:52, repositioning every 4–8 min, staged light from 01:52; asleep, by the
+    /// wearer's account and a 40-minute motionless run, at 02:54.
+    ///
+    /// MEASURED against human-scored PSG (PhysioNet sleep-accel, n = 31, `Tools/SleepPSG --section onset`):
+    /// sleep-onset bias −11.1 → +0.4 min, MAE 11.1 → 5.6 min, no subject pushed more than 15 min late;
+    /// pre-onset wake recall 28.8 → 80.0 %, 4-class kappa 0.371 → 0.399, wake precision 67.4 → 70.1 %. The
+    /// two constants were picked from a 48-cell grid on that cohort; the neighbours (20/40 epochs, tolerance
+    /// 2) land within a few minutes of the same bias, and a 10-minute run is too short to clear the
+    /// recorded night above. Only the START of the night moves: wake after onset is untouched.
+    /// Kotlin twin: `SleepStagerV2.settledOnset`.
+    static let settledOnsetEpochs = 30
+    static let settledOnsetTolerance = 1
+
+    /// Index of the first sleep epoch at or after the start of the first settled run, or nil when no run
+    /// settles (the hypnogram is then left as Viterbi staged it). `settled[i]` is `motionQuiescent(feats[i])`.
+    static func settledOnset(_ settled: [Bool], _ labels: [String]) -> Int? {
+        let w = settledOnsetEpochs
+        guard settled.count >= w, labels.count == settled.count else { return nil }
+        var unsettled = 0
+        for i in 0..<w where !settled[i] { unsettled += 1 }
+        var i = 0
+        while true {
+            if unsettled <= settledOnsetTolerance && settled[i] {
+                return labels[i...].firstIndex { $0 != "awake" }
+            }
+            if i + w >= settled.count { return nil }
+            if !settled[i] { unsettled -= 1 }
+            if !settled[i + w] { unsettled += 1 }
+            i += 1
+        }
+    }
+
     /// Viterbi most-likely path over the per-epoch log-emissions with the sticky transition matrix and a
     /// uniform start. Ties resolve to the earlier stage in `stageNames`.
     static func viterbi(_ emSeq: [[String: Double]]) -> [String] {
@@ -641,8 +683,17 @@ public enum SleepStagerV2 {
             seq.append(em)
         }
 
+        // Lying awake before the wrist settles is wake, however still and low-HR it was (`settledOnset`).
+        let settled = feats.map(motionQuiescent)
+        func wakeBeforeSettling(_ labels: inout [String]) {
+            if let onset = settledOnset(settled, labels) {
+                for i in 0..<onset { labels[i] = "awake" }
+            }
+        }
+
         // PASS 1 — stage without the REM-latency guard purely to locate sleep onset.
-        let provisional = viterbi(seq)
+        var provisional = viterbi(seq)
+        wakeBeforeSettling(&provisional)
         // Origin for the guard: the centre of the first sustained-sleep epoch, in the same window-relative
         // minutes `features()` stamped on every epoch. No sustained run → 0.0, i.e. the window start.
         let originMin = sustainedSleepOnset(provisional).map { feats[$0].minutesSinceOnset } ?? 0.0
@@ -651,6 +702,8 @@ public enum SleepStagerV2 {
         for i in feats.indices {
             seq[i]["rem"]! -= remLatencyGuard(feats[i].minutesSinceOnset - originMin)
         }
-        return viterbi(seq)
+        var labels = viterbi(seq)
+        wakeBeforeSettling(&labels)
+        return labels
     }
 }

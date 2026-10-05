@@ -23,12 +23,18 @@ final class TodayStepsPipelineTests: XCTestCase {
         XCTAssertFalse(active(model: .whoop5mg, hasDayData: true, sampleDays: 3))
     }
 
-    func testWhoop4WithDayDataActivatesBeforeCalibrationStarts() {
-        XCTAssertTrue(active(model: .whoop4, hasDayData: true))
-    }
-
-    func testWhoop4WithoutDayDataIsNotActivatedByPartialSampleDays() {
-        XCTAssertFalse(active(model: .whoop4, hasDayData: false, sampleDays: 3))
+    /// WHOOP 4.0 is retired, so no `WhoopModel` is a 4.0 any more and a "WHOOP 4.0" saved before the retirement
+    /// no longer parses as a model (the launch migration rewrites it to the 5.0/MG). It reads as "no strap
+    /// identified": day data alone does not activate the prompt, and only a working coefficient does.
+    func testALegacyFourPointZeroStringIsNoLongerAModel() {
+        func legacy(hasDayData: Bool, calibration: Double = 0, sampleDays: Int = 0) -> Bool {
+            TodayView.stepsPipelineActive(selectedModelRaw: "WHOOP 4.0", hasDayData: hasDayData,
+                                          calibrationCoefficient: calibration, manualCoefficient: 0,
+                                          calibrationSampleDays: sampleDays)
+        }
+        XCTAssertFalse(legacy(hasDayData: true), "no 4.0 family to activate on")
+        XCTAssertFalse(legacy(hasDayData: false, sampleDays: 3))
+        XCTAssertTrue(legacy(hasDayData: true, calibration: 0.42), "an existing coefficient still counts")
     }
 
     /// #1523 follow-up: these two asserted TRUE when the suite landed, on the grounds that a profile

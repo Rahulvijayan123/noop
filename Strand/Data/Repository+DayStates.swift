@@ -20,7 +20,11 @@ struct DayStreams {
     /// One strap's step samples (the first id that has any). Safe to difference: two straps' cumulative
     /// counters are never interleaved.
     let stepCounter: [StepSample]
+    /// The nights' sleep epochs: each session's staged non-wake stretches (`DayStateSpan.asleep`), so lying
+    /// awake in bed is not sleep here either.
     let sleep: [DayStateSpan]
+    /// The nights' in-bed windows (whole sessions).
+    let inBed: [DayStateSpan]
     let workouts: [DayStateWorkout]
     let offWrist: [DayStateSpan]
 }
@@ -71,9 +75,10 @@ extension Repository {
         }
 
         let daysBack = max(0, Int(Date().timeIntervalSince(dayStart) / 86_400)) + 2
-        let sleep: [DayStateSpan] = await allSleepSessions(days: daysBack).compactMap { s in
-            let lo = s.effectiveStartTs, hi = s.endTs
-            return (hi > start && lo < end) ? DayStateSpan(start: lo, end: hi) : nil
+        let nights = await allSleepSessions(days: daysBack).filter { $0.endTs > start && $0.effectiveStartTs < end }
+        let inBed = nights.map { DayStateSpan(start: $0.effectiveStartTs, end: $0.endTs) }
+        let sleep = nights.flatMap {
+            DayStateSpan.asleep(stagesJSON: $0.stagesJSON, start: $0.effectiveStartTs, end: $0.endTs)
         }
         let workouts: [DayStateWorkout] = await workoutRows(days: daysBack).compactMap { w in
             (w.endTs > start && w.startTs < end)
@@ -90,7 +95,7 @@ extension Repository {
         return DayStreams(sourceKey: importedReadIds.joined(separator: "+"), start: start, end: end,
                           isLiveDay: now < start + 86_400, hr: hr, gravity: gravity,
                           stepLabels: Array(stepByTs.values), stepCounter: counter,
-                          sleep: sleep, workouts: workouts, offWrist: offWrist)
+                          sleep: sleep, inBed: inBed, workouts: workouts, offWrist: offWrist)
     }
 
     /// The inferred-state timeline for one day, from the strap's own stored signals.

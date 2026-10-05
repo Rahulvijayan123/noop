@@ -21,8 +21,12 @@ public struct ActivityContextTrackInput {
     public var gravity: [GravitySample]
     /// Cumulative step counter + the strap's per-record still/walk/run label.
     public var steps: [StepSample]
-    /// Logged sleep sessions.
+    /// Sleep: each night's sleep epochs, the staged hypnogram's non-wake stretches (`DayStateSpan.asleep`).
+    /// A caller that only has whole sessions may pass those, at the cost of lying awake in bed reading as
+    /// asleep.
     public var sleep: [DayStateSpan]
+    /// Each night's in-bed window, the whole detected session: lying awake inside it is "in bed".
+    public var inBed: [DayStateSpan]
     /// True when sleep detection has run over this stretch, so time outside a session is "awake". For a
     /// live day the detector has not seen the present yet; pass false and it stays "unknown".
     public var sleepKnownOutsideSessions: Bool
@@ -37,14 +41,14 @@ public struct ActivityContextTrackInput {
 
     public init(dayStart: Int, dayEnd: Int,
                 hr: [HRSample] = [], gravity: [GravitySample] = [], steps: [StepSample] = [],
-                sleep: [DayStateSpan] = [], sleepKnownOutsideSessions: Bool = true,
+                sleep: [DayStateSpan] = [], inBed: [DayStateSpan] = [], sleepKnownOutsideSessions: Bool = true,
                 workouts: [DayStateWorkout] = [], offWrist: [DayStateSpan] = [],
                 encoderWindows: [ActivityWindowPrediction] = [],
                 encoderId: String = "hart", encoderVersion: String = "unknown",
                 imuWindows: [ImuWindowFeatures] = []) {
         self.dayStart = dayStart; self.dayEnd = dayEnd
         self.hr = hr; self.gravity = gravity; self.steps = steps
-        self.sleep = sleep; self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
+        self.sleep = sleep; self.inBed = inBed; self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
         self.workouts = workouts; self.offWrist = offWrist
         self.encoderWindows = encoderWindows; self.encoderId = encoderId; self.encoderVersion = encoderVersion
         self.imuWindows = imuWindows
@@ -165,10 +169,11 @@ public enum ActivityContextTrackBuilder {
         for f in input.imuWindows where f.endTs >= lo && f.endTs < hi { imuAt[f.endTs] = f }
 
         let sleepSpans = input.sleep.sorted { $0.start < $1.start }
+        let bedSpans = input.inBed.sorted { $0.start < $1.start }
         let offSpans = input.offWrist.sorted { $0.start < $1.start }
         let workouts = input.workouts.sorted { $0.start < $1.start }
         let workoutKinds = workouts.map { WorkoutKind(sport: $0.sport) }
-        var sleepCursor = 0, offCursor = 0, workoutCursor = 0
+        var sleepCursor = 0, bedCursor = 0, offCursor = 0, workoutCursor = 0
 
         func inside<S>(_ spans: [S], _ cursor: inout Int, _ ts: Int, start: (S) -> Int, end: (S) -> Int) -> Bool {
             while cursor < spans.count, end(spans[cursor]) <= ts { cursor += 1 }
@@ -199,8 +204,14 @@ public enum ActivityContextTrackBuilder {
             o.strapClass = classAt[ts]
             o.encoder = encoderAt[ts]
             o.imu = imuAt[ts]
+            let inBedSpan = inside(bedSpans, &bedCursor, ts, start: \.start, end: \.end)
             if inside(sleepSpans, &sleepCursor, ts, start: \.start, end: \.end) {
                 o.sleep = .asleep
+                o.inBed = true
+            } else if inBedSpan {
+                // Inside the night but not on a sleep epoch: lying awake, which the stager knows.
+                o.sleep = .awake
+                o.inBed = true
             } else {
                 o.sleep = input.sleepKnownOutsideSessions ? .awake : .unknown
             }
@@ -231,6 +242,8 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     public var overallUncertainty: Double
     public var displayContext: String?
     public var sleep: SleepContextState
+    /// Inside a detected night's in-bed window (`SleepContext.inBed`).
+    public var inBed: Bool
     public var wear: WearContextState
     /// Published states merged into the run.
     public var count: Int
@@ -238,11 +251,13 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     public init(start: Int, end: Int, posture: HeadProbabilities<PostureClass>,
                 locomotion: HeadProbabilities<LocomotionClass>, armBehavior: HeadProbabilities<ArmBehaviorClass>,
                 intensity: Double?, overallConfidence: Double, overallUncertainty: Double,
-                displayContext: String?, sleep: SleepContextState, wear: WearContextState, count: Int) {
+                displayContext: String?, sleep: SleepContextState, inBed: Bool = false,
+                wear: WearContextState, count: Int) {
         self.start = start; self.end = end; self.posture = posture; self.locomotion = locomotion
         self.armBehavior = armBehavior; self.intensity = intensity
         self.overallConfidence = overallConfidence; self.overallUncertainty = overallUncertainty
-        self.displayContext = displayContext; self.sleep = sleep; self.wear = wear; self.count = count
+        self.displayContext = displayContext; self.sleep = sleep; self.inBed = inBed; self.wear = wear
+        self.count = count
     }
 
     enum CodingKeys: String, CodingKey {
@@ -250,7 +265,7 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         case armBehavior = "arm_behavior"
         case intensity
         case overallConfidence = "overall_confidence", overallUncertainty = "overall_uncertainty"
-        case displayContext = "display_context", sleep, wear, count = "n"
+        case displayContext = "display_context", sleep, inBed = "in_bed", wear, count = "n"
         // Derived on write from the fields above (`ActivityClassifier`), never read back: the document
         // carries them so SQL and other readers get the canonical class without re-implementing the mapping.
         case activityClass = "activity_class", classConfidence = "class_confidence"
@@ -268,6 +283,7 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         overallUncertainty = try c.decode(Double.self, forKey: .overallUncertainty)
         displayContext = try c.decodeIfPresent(String.self, forKey: .displayContext)
         sleep = try c.decode(SleepContextState.self, forKey: .sleep)
+        inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed) ?? false
         wear = try c.decode(WearContextState.self, forKey: .wear)
         count = try c.decode(Int.self, forKey: .count)
     }
@@ -289,6 +305,8 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         if let displayContext { try c.encode(displayContext, forKey: .displayContext) }
         else { try c.encodeNil(forKey: .displayContext) }
         try c.encode(sleep, forKey: .sleep)
+        // Written only when set, so a run outside any night encodes as it did before the field existed.
+        if inBed { try c.encode(true, forKey: .inBed) }
         try c.encode(wear, forKey: .wear)
         try c.encode(count, forKey: .count)
         let k = classification
@@ -304,7 +322,8 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         return ActivityContextState(
             ts: ts, posture: posture, locomotion: locomotion, armBehavior: armBehavior,
             intensity: intensity, transition: transition,
-            sleep: SleepContext(state: sleep), wear: WearContext(state: wear, validity: wear == .offWrist ? 0 : 1),
+            sleep: SleepContext(state: sleep, inBed: inBed),
+            wear: WearContext(state: wear, validity: wear == .offWrist ? 0 : 1),
             overallConfidence: overallConfidence, overallUncertainty: overallUncertainty,
             headConfidence: ActivityHeadConfidence(posture: top(posture, .unknown),
                                                    locomotion: top(locomotion, .unknown),
@@ -349,7 +368,8 @@ public enum ActivityContextRuns {
     /// wobble inside that situation (a posture head dipping for one tick), not a separate one: fold it in.
     static func foldFragments(_ runs: [ActivityContextRun], maxFragmentS: Int) -> [ActivityContextRun] {
         func sameSituation(_ a: ActivityContextRun, _ b: ActivityContextRun) -> Bool {
-            a.displayContext == b.displayContext && a.wear == b.wear && a.sleep == b.sleep && b.start - a.end <= 10
+            a.displayContext == b.displayContext && a.wear == b.wear && a.sleep == b.sleep && a.inBed == b.inBed
+                && b.start - a.end <= 10
         }
         var out: [ActivityContextRun] = []
         var i = 0
@@ -453,7 +473,8 @@ public enum ActivityContextRuns {
 
         func accepts(_ s: ActivityContextState, maxGap: Int) -> Bool {
             guard s.ts - lastTs <= maxGap, s.displayContext == first.displayContext,
-                  s.wear.state == first.wear.state, s.sleep.state == first.sleep.state else { return false }
+                  s.wear.state == first.wear.state, s.sleep.state == first.sleep.state,
+                  s.sleep.inBed == first.sleep.inBed else { return false }
             let n = Double(count)
             func far<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ h: HeadProbabilities<C>, _ sums: [C: Double]) -> Bool
                 where C.RawValue == String {
@@ -488,7 +509,8 @@ public enum ActivityContextRuns {
                 armBehavior: head(arm, floor: 0.04),
                 intensity: intensityN > 0 ? intensitySum / Double(intensityN) : nil,
                 overallConfidence: confidenceSum / n, overallUncertainty: uncertaintySum / n,
-                displayContext: first.displayContext, sleep: first.sleep.state, wear: first.wear.state, count: count)
+                displayContext: first.displayContext, sleep: first.sleep.state, inBed: first.sleep.inBed,
+                wear: first.wear.state, count: count)
         }
     }
 }
@@ -551,7 +573,7 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
     public var observedSeconds: Int
     /// Whether time outside logged sleep was treated as awake (a finished day) or unknown (a live one).
     public var sleepKnownOutsideSessions: Bool
-    /// Hash of the sleep, workout and off-wrist spans inside the covered range. Editing a night, adding a
+    /// Hash of the sleep, in-bed, workout and off-wrist spans inside the covered range. Editing a night, adding a
     /// workout or a late wrist-off event changes it, and the day is then decoded again from the start.
     public var contextFingerprint: String?
     public var runs: [ActivityContextRun]
@@ -622,9 +644,13 @@ public enum ActivityContextDayBuilder {
                 return end > lo ? "\(lo)-\(end)" : nil
             }.sorted()
         }
-        let text = "s:" + clipped(input.sleep.map { ($0.start, $0.end) }).joined(separator: ",")
-            + "|w:" + clipped(input.workouts.map { ($0.start, $0.end) }).joined(separator: ",")
-            + "|o:" + clipped(input.offWrist.map { ($0.start, $0.end) }).joined(separator: ",")
+        let parts: [(String, [(Int, Int)])] = [
+            ("s", input.sleep.map { ($0.start, $0.end) }),
+            ("b", input.inBed.map { ($0.start, $0.end) }),
+            ("w", input.workouts.map { ($0.start, $0.end) }),
+            ("o", input.offWrist.map { ($0.start, $0.end) }),
+        ]
+        let text = parts.map { "\($0.0):" + clipped($0.1).joined(separator: ",") }.joined(separator: "|")
         var h: UInt64 = 0xcbf29ce484222325
         for b in text.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
         return String(h, radix: 16)

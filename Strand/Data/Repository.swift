@@ -181,6 +181,9 @@ final class Repository: ObservableObject {
     /// Not a stored value and never crosses `.noopbak`, so no Android twin is required.
     var activeDeviceIsOura: Bool { DeviceBrandCatalog.isOura(deviceId) }
     private var store: WhoopStore?
+    /// Device ids whose stored rows PROVE a 5.0/MG wrote them (they hold v18 history records, which no other
+    /// strap emits), whatever the registry label says. Positive evidence never goes away, so it is kept.
+    private var provenWhoop5Ids: Set<String> = []
 
     /// Daily metrics (recovery/strain/sleep/HRV/RHR…) over the recent window, oldest→newest.
     @Published var days: [DailyMetric] = []
@@ -839,9 +842,37 @@ final class Repository: ObservableObject {
         }
         storeOpenTask = task
         let opened = await task.value
-        if let opened { store = opened }
+        if let opened {
+            store = opened
+            if !didRelabelWhoop5 {
+                didRelabelWhoop5 = true
+                Task { await self.relabelMislabelledWhoop5() }
+            }
+        }
         storeOpenTask = nil
         return opened
+    }
+
+    /// Runs `relabelMislabelledWhoop5` at most once per launch.
+    private var didRelabelWhoop5 = false
+
+    /// Rename registry rows still carrying the retired "WHOOP 4.0" label to the 5.0/MG when their own rows prove
+    /// a 5/MG wrote them (they hold v18 history records, which no other strap emits).
+    ///
+    /// The label came from the model the app defaulted to when the strap was added, and it decides which
+    /// conversions every read applies. A 5.0/MG labelled "WHOOP 4.0" had its skin temperature run through the
+    /// 4.0's experimental map and shown as 321 °F. A row labelled 4.0 with NO v18 records is left exactly as it
+    /// is: that is genuinely a 4.0's history, and relabelling it would misread its temperatures. Idempotent.
+    func relabelMislabelledWhoop5() async {
+        guard let store = await ensureStore() else { return }
+        let registry = DeviceRegistryStore(dbQueue: store.registryWriter)
+        guard let devices = try? registry.all() else { return }
+        for d in devices where d.brand.caseInsensitiveCompare("WHOOP") == .orderedSame
+            && DeviceFamily.forRegistryDevice(model: d.model, brand: d.brand) == .whoop4 {
+            guard await holdsV18Records(store: store, id: d.id) else { continue }
+            try? registry.setModel(d.id, model: WhoopModel.whoop5mg.rawValue)
+            NSLog("Repository: relabelled \(d.id) from \"\(d.model)\" to \"\(WhoopModel.whoop5mg.rawValue)\" (it holds 5.0/MG v18 records)")
+        }
     }
 
     /// Expose the shared store handle (used by the importer to persist mapped rows).
@@ -1370,6 +1401,81 @@ final class Repository: ObservableObject {
             perId.append((try? await store.stepSamples(deviceId: id, from: from, to: to, limit: 200_000)) ?? [])
         }
         return Self.latestActivityClass(perId)
+    }
+
+    /// The strap's current skin temperature for the Skin Temp Key Metrics tile: the newest banked sample across
+    /// the active strap + canonical union, if it is a worn-range reading no older than
+    /// `KeyMetricReadings.currentSkinTempSeconds`. nil when the strap is off the wrist or nothing has
+    /// offloaded, and the tile then shows the nightly value. Each id is converted with ITS family's scale
+    /// (`skinTempFamilies`), and a 4.0 never yields a live absolute (see `KeyMetricReadings.currentSkinTemp`).
+    func currentSkinTemp(now: Int = Int(Date().timeIntervalSince1970)) async -> KeyMetricReadings.SkinTemp? {
+        guard let store = await ensureStore() else { return nil }
+        let ids = importedReadIds
+        let families = await strapFamilies(store: store, ids: ids)
+        let from = now - KeyMetricReadings.currentSkinTempSeconds
+        var newest: KeyMetricReadings.SkinTemp?
+        for id in ids {
+            // A 30-minute window at 1 Hz is at most 1,800 rows; the limit leaves room for duplicate seconds.
+            let samples = (try? await store.skinTempSamples(deviceId: id, from: from, to: now + 300, limit: 4_000)) ?? []
+            if let reading = KeyMetricReadings.currentSkinTemp(samples, family: families[id] ?? .whoop5, now: now),
+               reading.ts > (newest?.ts ?? Int.min) {
+                newest = reading
+            }
+        }
+        return newest
+    }
+
+    /// The strap's SpO₂ readings over `[from, to]` for the Blood Oxygen Key Metrics tile, read from the banked
+    /// `@82` byte across the active strap + canonical union. A row is stored for every strap-second (not only
+    /// those carrying a reading), so a full 24-hour window is up to ~86k rows, the same order as the
+    /// whole-day HR read on this screen; the count runs off the main actor. nil when the window holds no
+    /// in-band reading (a 4.0 banks no `@82`, and a 5/MG fills it only asleep).
+    func spo2Readings(from: Int, to: Int) async -> KeyMetricReadings.Spo2Readings? {
+        guard to > from, let store = await ensureStore() else { return nil }
+        var aux: [V18AuxSample] = []
+        for id in importedReadIds {
+            aux += (try? await store.v18AuxSamples(deviceId: id, from: from, to: to, limit: 200_000)) ?? []
+        }
+        return await Task.detached(priority: .utility) { KeyMetricReadings.spo2Readings(aux) }.value
+    }
+
+    /// Every skin-temperature sample the strap banked over `[from, to]`, in °C by each source's family scale,
+    /// across the whole worn-WHOOP union (the Deep Timeline's scope), as 5-minute means plus the raw count and
+    /// range. This is the "every reading" view of the signal the Skin Temp tile shows one number of.
+    func bankedSkinTemp(from: Int, to: Int) async -> KeyMetricReadings.BankedSeries {
+        guard to > from, let store = await ensureStore() else { return KeyMetricReadings.BankedSeries() }
+        let ids = rawPhysiologyReadIds(store: store)
+        let families = await strapFamilies(store: store, ids: ids)
+        var byTs: [Int: Double] = [:]
+        for id in ids {
+            let family = families[id] ?? .whoop5
+            // A full day at 1 Hz is ~86k rows; 200k matches every other whole-window read.
+            let rows = (try? await store.skinTempSamples(deviceId: id, from: from, to: to, limit: 200_000)) ?? []
+            for row in rows where byTs[row.ts] == nil {
+                let celsius = skinTempCelsius(raw: row.raw, family: family)
+                if KeyMetricReadings.plausibleSkinTempC.contains(celsius) { byTs[row.ts] = celsius }
+            }
+        }
+        let readings = byTs.map { (ts: $0.key, value: $0.value) }
+        return await Task.detached(priority: .utility) {
+            KeyMetricReadings.bankedSeries(readings, bucketSeconds: 300)
+        }.value
+    }
+
+    /// Every SpO₂ reading the strap banked over `[from, to]`: the in-band `@82` percentages (the same ones
+    /// uploaded as `SPO2_STRAP_EST` rows), each as its own point, plus how many other nonzero bytes the strap
+    /// wrote that are not percentages. Empty outside sleep, because the strap writes nothing then.
+    func bankedSpo2(from: Int, to: Int) async -> KeyMetricReadings.BankedSeries {
+        guard to > from, let store = await ensureStore() else { return KeyMetricReadings.BankedSeries() }
+        var aux: [V18AuxSample] = []
+        for id in rawPhysiologyReadIds(store: store) {
+            aux += (try? await store.v18AuxSamples(deviceId: id, from: from, to: to, limit: 200_000)) ?? []
+        }
+        return await Task.detached(priority: .utility) {
+            KeyMetricReadings.bankedSeries(
+                Spo2StrapEstimate.readings(from: aux).map { (ts: $0.ts, value: Double($0.percent)) },
+                bucketSeconds: 1, statusBytes: KeyMetricReadings.spo2StatusByteCount(aux))
+        }.value
     }
 
     /// Raw strap step TICKS over `[from, to]` for a manual-workout summary (#398): the wrap-aware
@@ -2135,7 +2241,7 @@ final class Repository: ObservableObject {
         // #938: resolve each source id's strap family ONCE (skin-temp raw→°C is family-specific: 5/MG
         // centidegrees vs a 4.0 v24 raw ADC). Cheap registry snapshot; a positively-identified 4.0 maps to
         // `.whoop4`, everything else (5/MG, imports, unknown) to `.whoop5` — the prior /100 behaviour.
-        let familyById = Self.skinTempFamilies(store: store, ids: unionIds)
+        let familyById = await strapFamilies(store: store, ids: unionIds)
         var perId: [[TrendPoint]] = []
         for id in unionIds {
             perId.append(await timelineRawMetric(metric: metric, store: store, source: id,
@@ -2174,6 +2280,45 @@ final class Repository: ObservableObject {
             out[id] = DeviceFamily.forRegistryDevice(model: d?.model, brand: d?.brand) ?? .whoop5
         }
         return out
+    }
+
+    /// Does `id` hold a v18 history record? Only a 5.0/MG emits them, so a yes means a 5/MG wrote this id's
+    /// rows whatever its registry label says. Positive answers are remembered: that evidence never goes away.
+    private func holdsV18Records(store: WhoopStore, id: String) async -> Bool {
+        if provenWhoop5Ids.contains(id) { return true }
+        let newest = Int(Date().timeIntervalSince1970) + 86_400
+        let rows = (try? await store.v18AuxSamples(deviceId: id, from: 0, to: newest, limit: 1)) ?? []
+        guard !rows.isEmpty else { return false }
+        provenWhoop5Ids.insert(id)
+        return true
+    }
+
+    /// `skinTempFamilies`, corrected by what each id's rows show.
+    ///
+    /// The registry LABEL is only what the strap was called when it was added, and it can be wrong: a phone
+    /// in the field holds a 5.0/MG registered as "WHOOP 4.0". Trusting the label there applied the 4.0's
+    /// provisional raw-ADC map to the 5/MG's centidegree register (33 + (3375 − 826) × 0.05 = 160.5 °C,
+    /// shown as 321 °F) and sent a 5/MG down every 4.0 branch. Evidence only ever UPGRADES a 4.0 label: an id
+    /// labelled 4.0 that holds v18 records is a 5/MG. The reverse is not needed (a 5/MG label on a 4.0 has no
+    /// v18 rows to contradict it), and a non-WHOOP device keeps the label map's answer untouched.
+    private func strapFamilies(store: WhoopStore, ids: [String]) async -> [String: DeviceFamily] {
+        var families = Self.skinTempFamilies(store: store, ids: ids)
+        for id in ids where families[id] == .whoop4 {
+            if await holdsV18Records(store: store, id: id) { families[id] = .whoop5 }
+        }
+        return families
+    }
+
+    /// `activeStrapIsWhoop5`, except that a WHOOP labelled 4.0 which holds v18 records is a 5/MG (see
+    /// `strapFamilies`). Used where the answer picks user-facing copy, so a mislabelled 5/MG is not told its
+    /// SpO₂ is unsupported or empty for the wrong reason. A non-WHOOP device is never upgraded.
+    func activeStrapIsWhoop5WithEvidence() async -> Bool {
+        if activeStrapIsWhoop5() { return true }
+        guard let store else { return false }
+        let devices = (try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []
+        let d = devices.first(where: { $0.id == deviceId })
+        guard DeviceFamily.forRegistryDevice(model: d?.model, brand: d?.brand) == .whoop4 else { return false }
+        return await holdsV18Records(store: store, id: deviceId)
     }
 
     /// Is the ACTIVE strap a 5.0/MG-family WHOOP (#623)? Gates the deep timeline's family-specific
@@ -2262,11 +2407,18 @@ final class Repository: ObservableObject {
             // Two-channel (WHOOP) → the honest raw red/IR ratio proxy; single-channel (Oura) → the reading
             // itself. See `spo2TimelineValue(red:ir:)` for why, and for the range gate.
             let s = (try? await store.spo2Samples(deviceId: source, from: from, to: to, limit: 200_000)) ?? []
-            // The up-to-200k-row conversion runs OFF the main actor; only the Sendable `s` rows cross in.
+            // A 5.0/MG banks no raw red/IR channel. It writes its OWN SpO₂ estimate into a history byte while
+            // its wearer sleeps (`Spo2StrapEstimate`), already a percentage, so those readings ARE this
+            // track for that family. Without this the pill was permanently empty on a 5/MG, and said the
+            // strap "doesn't send SpO₂" while the phone held hundreds of readings a night.
+            let aux = family == .whoop5
+                ? ((try? await store.v18AuxSamples(deviceId: source, from: from, to: to, limit: 200_000)) ?? [])
+                : []
+            // The up-to-200k-row conversion runs OFF the main actor; only the Sendable rows cross in.
             return await Task.detached(priority: .utility) {
                 s.compactMap { row in
                     Self.spo2TimelineValue(red: row.red, ir: row.ir).map { Self.timelinePoint(row.ts, $0) }
-                }
+                } + Spo2StrapEstimate.readings(from: aux).map { Self.timelinePoint($0.ts, Double($0.percent)) }
             }.value
         case .skinTemp:
             let s = (try? await store.skinTempSamples(deviceId: source, from: from, to: to, limit: 200_000)) ?? []

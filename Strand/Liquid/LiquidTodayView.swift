@@ -44,6 +44,12 @@ struct LiquidTodayView: View {
     // Read unconditionally like the classic TodayView's `spo2CandidateSpark` — always empty when
     // the toggle is off, so no separate gate is needed at fetch time.
     @State private var spo2CandidateByDay: [String: Double] = [:]
+    /// The strap's current skin temperature (today only), straight from the banked samples, for the Skin Temp
+    /// tile. nil when the strap is off the wrist or nothing has offloaded; the tile then shows the nightly
+    /// value. See `KeyMetricReadings`.
+    @State private var currentSkinTemp: KeyMetricReadings.SkinTemp?
+    /// How many SpO₂ readings the strap banked for the selected day's night, for the Blood Oxygen tile's caption.
+    @State private var spo2NightReadings: KeyMetricReadings.Spo2Readings?
     @State private var stepsEst: Double?           // steps_est, day-keyed to the selected day (fallback)
     @State private var importedStepsDay: Int?      // Apple Health steps for the selected day (middle tier)
     @State private var importedActiveKcalDay: Double?  // #616: Apple Health active energy for the day (calorie fallback)
@@ -1044,8 +1050,21 @@ struct LiquidTodayView: View {
                 ? spo2CandidateByDay[cachedDisplayDay?.day ?? selectedDayKey]
                 : nil
             let spo2 = spo2Real ?? spo2CandidateValue
+            // The caption names how many readings the strap banked for the night (every one of them is also
+            // uploaded), keeping the "unverified" label the estimate must always carry. With nothing to show,
+            // it says why: the strap fills its SpO₂ byte only while the wearer sleeps, so a daytime gap is the
+            // strap's schedule and not missing data.
+            let spo2Caption: String? = spo2CandidateValue != nil
+                ? (spo2NightReadings.map { String(localized: "\($0.count) readings · unverified") }
+                    ?? String(localized: "strap estimate (unverified)"))
+                : (spo2 == nil && PuffinExperiment.spo2CandidateDisplayEnabled
+                    ? String(localized: "Measured during sleep") : nil)
+            // `detailMetric` is the catalog's "spo2" entry even while the candidate is showing: there is no
+            // "spo2_candidate" catalog entry, so keying the tap off `key` left the tile inert exactly when it
+            // was showing a number. The detail view merges the candidate series itself.
             ktile(String(localized: "Blood Oxygen"), icon: keyMetricIcon(metric), intText(spo2), "%", StrandPalette.metricCyan, fracOver(spo2, 100), key: spo2CandidateValue != nil ? "spo2_candidate" : "spo2",
-                  caption: spo2CandidateValue != nil ? String(localized: "strap estimate (unverified)") : nil)
+                  detailMetric: MetricCatalog.all.first(where: { $0.key == "spo2" }),
+                  caption: spo2Caption)
         case .respiratory:
             let resp = displayDay?.respRateBpm ?? vitalsDay?.respRateBpm ?? respDay?.respRateBpm
             ktile(String(localized: "Respiratory"), icon: keyMetricIcon(metric), resp.map { String(format: "%.1f", locale: AppLanguage.activeLocale, $0) } ?? "—", "rpm", StrandPalette.accent, fracOver(resp, 24), key: "resp_rate")
@@ -1068,11 +1087,21 @@ struct LiquidTodayView: View {
             // reads "+0.1 Δ°C" here exactly as it does on "Your Cards"/the Deep Timeline, never the plain
             // `%+.1f°` that read a fabricated absolute value for a signed deviation (#622).
             // #1844: same lead-with-the-absolute resolution as "Your Cards" above, so the two agree.
-            let skinText = TodayView.skinTempCardValue(reading: skinTempLeadReading,
+            // The strap takes a skin temperature every second and the phone banks each one, so when the strap is
+            // on the wrist the tile shows the newest, with its age, instead of waiting for last night's score.
+            // Only for the absolute scale: a deviation needs the nightly baseline, so a user who chose
+            // "deviation" in Settings keeps the nightly value. Off the wrist (or nothing offloaded in the last
+            // half hour) `currentSkinTemp` is nil and the tile reads exactly as it did.
+            let preferAbsolute = (SkinTempDisplay.Kind(rawValue: skinTempDisplayRaw) ?? .absolute) == .absolute
+            let live = preferAbsolute ? currentSkinTemp : nil
+            let skinReading = live.map { SkinTempDisplay.Reading(value: $0.celsius, kind: .absolute) }
+                ?? skinTempLeadReading
+            let skinText = TodayView.skinTempCardValue(reading: skinReading,
                                                        fahrenheit: temperatureUnit == .fahrenheit)
             // The card's own unit is deliberately empty — the value carries "°C"/"Δ°F" itself, same as
             // the classic TodayView Skin Temp card.
-            ktile(String(localized: "Skin Temp"), icon: keyMetricIcon(metric), skinText, "", StrandPalette.metricAmber, nil, key: "skin_temp")
+            ktile(String(localized: "Skin Temp"), icon: keyMetricIcon(metric), skinText, "", StrandPalette.metricAmber, nil, key: "skin_temp",
+                  caption: live.map { relativeAgo(TimeInterval($0.ts)) })
         }
     }
 
@@ -1465,6 +1494,19 @@ struct LiquidTodayView: View {
 
         // First load done — bring the hero gauges + sky to life now the launch churn has settled.
         if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
+
+        // The strap's own newest skin temperature (today only: a past day has no "now") and this night's SpO₂
+        // reading count, straight from the banked samples, so the two tiles do not wait for a nightly score.
+        // After the first-paint flip above, and only for a tile that is actually on the grid: the SpO₂ read
+        // scans up to a day of per-second rows.
+        currentSkinTemp = (selectedDayOffset == 0 && enabledKeyMetrics.contains(.skinTemp))
+            ? await repo.currentSkinTemp() : nil
+        if enabledKeyMetrics.contains(.bloodOxygen) {
+            let night = KeyMetricReadings.spo2NightWindow(dayStart: dayStart, now: Date())
+            spo2NightReadings = await repo.spo2Readings(from: night.from, to: night.to)
+        } else {
+            spo2NightReadings = nil
+        }
     }
 
     // MARK: - Derived (sync, off repo.today / repo.days)

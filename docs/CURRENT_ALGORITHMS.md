@@ -108,7 +108,7 @@ Stages are approximations. EEG-free 4-class agreement tops out around 65–73% (
 6. **Daytime guard** (local 11:00–20:00). A still stretch in that band must last ≥ **90 minutes** and its lowest 5-minute HR must be ≤ baseline × **0.95**. A continuation within **90 minutes** of an overnight chain is treated as the night’s tail, not a nap.
 7. **Morning stillness.** A daytime block starting within **180 minutes** of overnight wake must dip to ≤ baseline × **0.90**, unless ≥ **60%** of its epochs are the strap’s own “asleep” band state.
 
-Output of detection: one or more `SleepSession` spans `[start, end]`.
+Output of detection: one or more `SleepSession` spans `[start, end]`. A span is the **in-bed window**: it opens when the wrist goes still, which can be well before sleep. When sleep began is a staging output (below).
 
 The **main night** is the learned-timing best block (habitual midsleep when known). Fragments separated by a short wake are bridged and scored as one night. Naps stay as their own sessions and are not folded into the night totals.
 
@@ -130,6 +130,7 @@ Per-night z-scores of HR, HR variability, and movement, plus:
 - **Motion.** Jerk thresholds are relative to that night’s own median jerk, not a fixed g. A still wrist with a high HR is not called awake (the high-HR half of the awake vote is clamped off).
 - **RSA regularity.** Regular breathing adds to deep and subtracts from REM (weight **0.6**).
 - **Viterbi / HMM.** Sticky transitions. Wake goes to light, not straight into deep or REM. Base rates: light 50%, REM 22%, deep 15%, awake 10%.
+- **Settled onset.** Sleep cannot begin before the wrist settles: the first **15 minutes** (30 epochs) in which at most **one** epoch moved. Everything before the first sleep epoch at or after that point is wake, and the REM guard above is measured from there. Lying awake in bed is still and low-HR, so the per-epoch terms read it as light sleep; what gives it away is a wrist that keeps shifting every few minutes. Against PSG (sleep-accel, n = 31): onset bias −11.1 → +0.4 min, MAE 11.1 → 5.6 min, pre-onset wake recall 28.8 → 80.0 %, kappa 0.371 → 0.399, no subject more than 15 min late. Only the start of the night moves. A night with no settled 15 minutes is left as staged.
 
 Labels: `wake`, `light`, `deep`, `rem`.
 
@@ -150,10 +151,12 @@ From the main-night group only:
 
 | Field | Meaning |
 |---|---|
-| `totalSleepMin` | asleep time (in-bed minus wake) |
+| `totalSleepMin` | asleep time (in-bed minus wake, lying awake before sleep included in wake) |
 | `efficiency` | asleep / in-bed. A bridged gap between fragments is counted as awake. |
 | `deepMin`, `remMin`, `lightMin` | stage minutes |
 | `disturbances` | wake bouts inside the night, plus one if fragments were bridged |
+
+The Sleep page shows **In bed** (the window start), **Asleep** (the first sleep epoch of the staged night) and **Woke**. A night with no staged timeline (an imported total) shows the window start as Asleep, as before.
 
 `hrOnly` is true when the night had heart rate but no usable motion. Those nights can describe duration and stages. Their resting HR and HRV are left nil unless they are the only sessions that day.
 
@@ -477,11 +480,11 @@ When resting HR is known, VO₂max is estimated with Uth 2004, `15.3 × HRmax / 
 
 ## 9. Activity class (what the wearer was doing)
 
-**What it is.** One canonical, machine-readable label per moment (`ActivityClass`, taxonomy `act-class-1`) with a confidence, built on the ActivityContext decoder (`hsmm-1.2`, ontology `v2.0`). It is the label code and downstream systems branch on. The on-screen wording ("Desk sitting", "Brisk walking") stays a view for people. This is a behavioural context, not a medical measurement.
+**What it is.** One canonical, machine-readable label per moment (`ActivityClass`, taxonomy `act-class-2`) with a confidence, built on the ActivityContext decoder (`hsmm-1.3`, ontology `v2.0`). It is the label code and downstream systems branch on. The on-screen wording ("Desk sitting", "Brisk walking") stays a view for people. This is a behavioural context, not a medical measurement.
 
 ### Input
 
-The decoder reads what the strap actually sends: gravity and dynamic acceleration, the cumulative step counter, heart rate (scaled by the profile's HRmax), logged sleep sessions and workouts, and wrist-on / wrist-off events. When a raw-IMU session covers the time, the HART motion encoder adds gait rhythm and a named activity. Every five seconds it publishes three independent probability heads (posture, locomotion, arm behaviour) and never forces a class.
+The decoder reads what the strap actually sends: gravity and dynamic acceleration, the cumulative step counter, heart rate (scaled by the profile's HRmax), the detected nights (each night's in-bed window and its staged sleep epochs, so lying awake in bed is awake and in bed, never asleep), logged workouts, and wrist-on / wrist-off events. When a raw-IMU session covers the time, the HART motion encoder adds gait rhythm and a named activity. Every five seconds it publishes three independent probability heads (posture, locomotion, arm behaviour) and never forces a class.
 
 ### Classes
 
@@ -490,8 +493,8 @@ Only classes the sensors can tell apart with reasonable confidence are in the ta
 | Code | Established by | What it cannot tell apart |
 |---|---|---|
 | `off_wrist` | wrist-off events, loss of pulse contact (a hard gate, confidence 1) | a quiet strap on a table is never taken as on-wrist evidence |
-| `sleeping` | a logged sleep session and stillness | naps outside a detected session read as `lying_down` |
-| `lying_down` | recumbent posture reached through a lying-down movement signature | no absolute wrist-orientation cue is used, so a quiet daytime lie-down is not seen |
+| `sleeping` | a sleep epoch of a detected night (the sleep stager's call) and stillness; the posture head's lean does not override it | naps outside a detected session read as `lying_down`; lying awake in bed is `lying_down`, not `sleeping` |
+| `lying_down` | awake inside a detected night's in-bed window ("Resting in bed"), or recumbent posture reached through a lying-down movement signature | no absolute wrist-orientation cue is used, so a quiet daytime lie-down is not seen |
 | `sitting`, `sitting_desk` | stationary wrist whose posture head leans seated; `sitting_desk` adds desk-like hand activity | the wrist cannot see body height: sitting vs standing is a likelihood, never a measurement |
 | `standing` | stationary wrist whose posture head leans upright | needs a committed upright lean, otherwise the state is `stationary` |
 | `stationary` | awake, on the wrist, no movement | deliberately unresolved between sitting and standing |

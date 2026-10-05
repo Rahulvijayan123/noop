@@ -52,7 +52,7 @@ struct TestCentreView: View {
     @AppStorage(PuffinExperiment.ecgRawDataKey) private var ecgRawDataEnabled = false
 
     /// The strap model the user last picked, the same key SettingsView's showFiveMGControls gate reads.
-    @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop4.rawValue
+    @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop5mg.rawValue
 
     // #polar-debug: the Polar strap-identity diagnostic toggle. Only rendered when a Polar strap is paired.
     @AppStorage(AppModel.polarDebugLoggingKey) private var polarDebugLogging = false
