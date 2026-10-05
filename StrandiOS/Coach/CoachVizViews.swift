@@ -25,6 +25,67 @@ enum CoachVizMetric {
 
 // MARK: - Palette
 
+// MARK: - Build-up
+
+/// How much of a visual has been drawn, 0 to 1. The image-generation reveal raises it while the pixels dissolve,
+/// so the chart is seen being constructed; everywhere else it stays 1 and nothing is held back.
+private struct CoachVizBuildKey: EnvironmentKey { static let defaultValue: Double = 1 }
+
+extension EnvironmentValues {
+    var coachVizBuild: Double {
+        get { self[CoachVizBuildKey.self] }
+        set { self[CoachVizBuildKey.self] = newValue }
+    }
+}
+
+enum CoachVizBuild {
+    /// `progress` remapped so it rises from 0 to 1 over the slice that starts at `delay` and lasts `span`.
+    static func slice(_ progress: Double, delay: Double = 0, span: Double = 1) -> Double {
+        min(1, max(0, (progress - delay) / span))
+    }
+
+    static func easeOut(_ x: Double) -> Double { 1 - pow(1 - min(1, max(0, x)), 3) }
+}
+
+/// Uncovers its content along an axis with a soft leading edge, so lines draw in and cards fill in.
+private struct CoachVizWipe: ViewModifier {
+    @Environment(\.coachVizBuild) private var build
+    let axis: Axis
+    var delay: Double = 0
+    var span: Double = 1
+
+    func body(content: Content) -> some View {
+        let soft = 0.14
+        let front = CoachVizBuild.easeOut(CoachVizBuild.slice(build, delay: delay, span: span)) * (1 + soft)
+        content.mask(
+            LinearGradient(
+                stops: [
+                    .init(color: .black, location: min(1, max(0, front - soft))),
+                    .init(color: .clear, location: min(1, max(0, front)))
+                ],
+                startPoint: axis == .horizontal ? .leading : .top,
+                endPoint: axis == .horizontal ? .trailing : .bottom
+            )
+        )
+    }
+}
+
+/// A clockwise sweep from 12 o'clock, used to draw a pie in.
+private struct CoachVizSweep: Shape {
+    var progress: Double
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let start = Angle.degrees(-90)
+        path.move(to: center)
+        path.addArc(center: center, radius: max(rect.width, rect.height), startAngle: start,
+                    endAngle: start + .degrees(360 * min(1, max(0, progress))), clockwise: false)
+        path.closeSubpath()
+        return path
+    }
+}
+
 enum CoachVizPalette {
     static let series: [Color] = [
         StrandPalette.accent,
@@ -134,6 +195,8 @@ private struct CoachVizCard<Content: View>: View {
     let viz: CoachViz
     let content: Content
 
+    @Environment(\.coachVizBuild) private var build
+
     init(viz: CoachViz, @ViewBuilder content: () -> Content) {
         self.viz = viz
         self.content = content()
@@ -153,6 +216,7 @@ private struct CoachVizCard<Content: View>: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .opacity(CoachVizBuild.slice(build, span: 0.2))
 
             content
 
@@ -161,6 +225,7 @@ private struct CoachVizCard<Content: View>: View {
                     .font(CoachVizFont.micro)
                     .foregroundColor(StrandPalette.textTertiary)
                     .lineLimit(1)
+                    .opacity(CoachVizBuild.slice(build, delay: 0.8, span: 0.2))
             }
         }
         .padding(CoachVizMetric.spaceLG)
@@ -186,13 +251,13 @@ struct CoachVizView: View, Equatable {
         CoachVizCard(viz: viz) {
             switch viz.layout {
             case .chart: CoachVizChartBody(viz: viz)
-            case .progress: CoachVizProgressBody(viz: viz)
-            case .timeline: CoachVizTimelineBody(viz: viz)
-            case .facts: CoachVizFactsBody(facts: viz.facts ?? [])
-            case .table: CoachVizTableBody(columns: viz.columns ?? [], rows: viz.rows ?? [])
-            case .comparison: CoachVizComparisonBody(options: viz.options ?? [])
-            case .list: CoachVizListBody(items: viz.items ?? [])
-            case .alerts: CoachVizAlertsBody(alerts: viz.alerts ?? [])
+            case .progress: CoachVizProgressBody(viz: viz).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .timeline: CoachVizTimelineBody(viz: viz).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .facts: CoachVizFactsBody(facts: viz.facts ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .table: CoachVizTableBody(columns: viz.columns ?? [], rows: viz.rows ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .comparison: CoachVizComparisonBody(options: viz.options ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .list: CoachVizListBody(items: viz.items ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .alerts: CoachVizAlertsBody(alerts: viz.alerts ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
             case .unsupported: EmptyView()
             }
         }
@@ -201,7 +266,8 @@ struct CoachVizView: View, Equatable {
 
 // MARK: - Generating placeholder
 
-/// Placeholder the size of the visual it stands in for: a dot field with a slow accent sweep.
+/// Placeholder the size of the visual it stands in for: the img-fx pixel mosaic (slowed under Reduce Motion).
+/// Falls back to a dot field with a slow accent sweep only when Metal is unavailable.
 struct CoachVizGeneratingView: View {
     var label: String = "Generating"
     var height: CGFloat = 220
@@ -213,7 +279,9 @@ struct CoachVizGeneratingView: View {
 
     var body: some View {
         ZStack(alignment: .bottomLeading) {
-            if reduceMotion {
+            if ImageFXMosaicView.isSupported {
+                ImageFXMosaicView()
+            } else if reduceMotion {
                 dotField(phase: 0.5, animated: false)
             } else {
                 TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
@@ -350,6 +418,7 @@ private struct CoachVizChartBody: View {
     private let yDomain: ClosedRange<Double>?
 
     @State private var selected: String?
+    @Environment(\.coachVizBuild) private var build
 
     struct IndexedPoint: Identifiable {
         let id: Int
@@ -539,13 +608,13 @@ private struct CoachVizChartBody: View {
     private var chart: some View {
         switch viz.type {
         case "bar", "stacked_bar": barChart
-        case "line": lineChart(filled: false)
-        case "area": lineChart(filled: true)
-        case "pie": pieChart
-        case "scatter", "bubble": scatterChart
-        case "heatmap": heatmapChart
-        case "waterfall": waterfallChart
-        case "range": rangeChart
+        case "line": lineChart(filled: false).modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
+        case "area": lineChart(filled: true).modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
+        case "pie": pieChart.mask(CoachVizSweep(progress: CoachVizBuild.easeOut(CoachVizBuild.slice(build, delay: 0.05, span: 0.95))))
+        case "scatter", "bubble": scatterChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
+        case "heatmap": heatmapChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
+        case "waterfall": waterfallChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
+        case "range": rangeChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
         default: EmptyView()
         }
     }
@@ -561,8 +630,21 @@ private struct CoachVizChartBody: View {
     private var barChart: some View {
         let stacked = viz.type == "stacked_bar"
         let horizontal = isHorizontalBars
-        return Chart(indexed) { item in
-            barMark(item.point, horizontal: horizontal, stacked: stacked)
+        let extent = barExtent(stacked: stacked)
+        return Chart {
+            ForEach(indexed) { item in
+                barMark(grown(item.point), horizontal: horizontal, stacked: stacked)
+            }
+            // While the bars grow, invisible marks at the final extremes keep the axis where it will end up.
+            if build < 1 {
+                if horizontal {
+                    RuleMark(x: .value(yTitle, extent.upperBound)).opacity(0)
+                    RuleMark(x: .value(yTitle, extent.lowerBound)).opacity(0)
+                } else {
+                    RuleMark(y: .value(yTitle, extent.upperBound)).opacity(0)
+                    RuleMark(y: .value(yTitle, extent.lowerBound)).opacity(0)
+                }
+            }
         }
         .chartForegroundStyleScale(domain: hasSeries ? seriesNames : [], range: seriesColors)
         .chartLegend(.hidden)
@@ -574,6 +656,34 @@ private struct CoachVizChartBody: View {
             if horizontal { categoryAxisLeading() } else { valueAxis(.leading) }
         }
         .modifier(CoachVizSelection(enabled: isSelectable, selection: $selected))
+    }
+
+    /// The lowest and highest edge any bar reaches, zero included.
+    private func barExtent(stacked: Bool) -> ClosedRange<Double> {
+        var high = 0.0, low = 0.0
+        if stacked {
+            var positive: [String: Double] = [:], negative: [String: Double] = [:]
+            for p in points {
+                let key = p.x ?? ""
+                if p.y >= 0 { positive[key, default: 0] += p.y } else { negative[key, default: 0] += p.y }
+            }
+            high = positive.values.max() ?? 0
+            low = negative.values.min() ?? 0
+        } else {
+            high = max(0, points.map(\.y).max() ?? 0)
+            low = min(0, points.map(\.y).min() ?? 0)
+        }
+        return low...max(high, low)
+    }
+
+    /// A bar part-way through growing: bars rise from the baseline one after another.
+    private func grown(_ p: CoachViz.Point) -> CoachViz.Point {
+        guard build < 1 else { return p }
+        let index = Double(labels.firstIndex(of: p.x ?? "") ?? 0)
+        let delay = 0.5 * index / Double(max(labels.count - 1, 1))
+        var q = p
+        q.y = p.y * CoachVizBuild.easeOut(CoachVizBuild.slice(build, delay: delay, span: 0.5))
+        return q
     }
 
     @ChartContentBuilder

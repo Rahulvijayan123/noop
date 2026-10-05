@@ -85,6 +85,16 @@ struct RecipeConfig: Equatable {
     /// see `Variants.preNine30Guard`. It is a diagnostic, not a candidate.
     var remLatencyMode: RemLatencyMode = .gradedFromOnset
 
+    /// Settled-onset rule: sleep cannot begin before the first run of `settledOnsetEpochs` epochs in which
+    /// at most `settledOnsetTolerance` epochs moved (and, when `settledOnsetHrVarZMax` is finite, whose
+    /// 5-min HR variability sits at or below that night z). Everything before it is wake. 0 disables. The
+    /// defaults are the shipped values (`SleepStagerV2.settledOnsetEpochs` / `settledOnsetTolerance`).
+    /// `settledOnsetMaxMinutes` bounds how far into the window the rule may push onset.
+    var settledOnsetEpochs: Int = 30
+    var settledOnsetTolerance: Int = 1
+    var settledOnsetHrVarZMax: Double = .infinity
+    var settledOnsetMaxMinutes: Double = .infinity
+
     /// The shipped recipe, as of `Packages/StrandAnalytics/Sources/StrandAnalytics/SleepStagerV2.swift`.
     static let shipped = RecipeConfig(
         priorLight: log(0.50), priorDeep: log(0.15), priorRem: log(0.22), priorAwake: log(0.10),
@@ -472,11 +482,45 @@ enum V2Recipe {
 
         if cfg.remLatencyMode == .preNine30FractionStep { return viterbi(seq, cfg) }
 
-        let provisional = viterbi(seq, cfg)
+        let settled = feats.map { f in
+            motionQuiescent(f, cfg) && zhv(f.hrVar) <= cfg.settledOnsetHrVarZMax
+        }
+        func wakeBeforeSettling(_ labels: inout [String]) {
+            guard cfg.settledOnsetEpochs > 0 else { return }
+            if let onset = settledOnset(settled, labels, feats, cfg) {
+                for i in 0..<onset { labels[i] = "awake" }
+            }
+        }
+
+        var provisional = viterbi(seq, cfg)
+        wakeBeforeSettling(&provisional)
         let originMin = sustainedSleepOnset(provisional, cfg).map { feats[$0].minutesSinceOnset } ?? 0.0
         for i in feats.indices {
             seq[i]["rem"]! -= remLatencyGuard(feats[i].minutesSinceOnset - originMin, cfg)
         }
-        return viterbi(seq, cfg)
+        var labels = viterbi(seq, cfg)
+        wakeBeforeSettling(&labels)
+        return labels
+    }
+
+    /// First non-wake epoch at or after the start of the first settled run, or nil when no run qualifies
+    /// within `settledOnsetMaxMinutes` (the hypnogram is then left as it is).
+    static func settledOnset(_ settled: [Bool], _ labels: [String], _ feats: [Epoch],
+                             _ cfg: RecipeConfig) -> Int? {
+        let w = cfg.settledOnsetEpochs
+        guard w > 0, settled.count >= w else { return nil }
+        var unsettled = 0
+        for i in 0..<w where !settled[i] { unsettled += 1 }
+        var i = 0
+        while true {
+            if feats[i].minutesSinceOnset > cfg.settledOnsetMaxMinutes { return nil }
+            if unsettled <= cfg.settledOnsetTolerance && settled[i] {
+                return labels[i...].firstIndex { $0 != "awake" }
+            }
+            if i + w >= settled.count { return nil }
+            if !settled[i] { unsettled -= 1 }
+            if !settled[i + w] { unsettled += 1 }
+            i += 1
+        }
     }
 }

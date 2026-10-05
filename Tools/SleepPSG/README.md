@@ -38,13 +38,25 @@ swift run -c release sleeppsg --dataset ~/datasets/motion-and-heart-rate-*-1.0.0
 | flag | meaning |
 |---|---|
 | `--dataset PATH` | the extracted `sleep-accel` root. Required for every section except `port`. |
-| `--section S` | `all` (default), or one of `port`, `baseline`, `strata`, `rem`, `variants`, `priors`. |
+| `--section S` | `all` (default), or one of `port`, `baseline`, `strata`, `rem`, `variants`, `priors`; and two not in `all`: `onset` and `night` (below). |
+| `--start TS`, `--end TS` | the in-bed window, unix seconds, for `--section night`. |
 | `--subjects N` | score only the first N subject ids — a fast smoke run. |
 | `--csv PATH` | write the per-variant table as CSV. |
 | `--seed N` | the port-validation corpus seed. |
 
 `--section port` needs no dataset at all: it is the equivalence check described below, and it is also what
 `swift test` runs.
+
+`--section onset` scores where each night's sleep begins against PSG (bias, MAE, how many subjects land
+more than 15 minutes early or late, and how much of the wake before PSG onset the stager also calls wake),
+for the shipped recipe, the settled-onset rule switched off, and a 48-cell grid over that rule. It is the
+evidence behind `SleepStagerV2.settledOnsetEpochs` / `settledOnsetTolerance`.
+
+`--section night` replays one recorded night instead of the PhysioNet data: `--dataset` is a directory
+holding `grav.csv` (`ts,x,y,z`), `hr.csv` (`ts,bpm`) and `rr.csv` (`ts,rrMs`), and `--start` / `--end` the
+in-bed window. It prints the shipped hypnogram, the port's, and the port with the settled-onset rule off
+and at its neighbouring settings. There is no truth to score against; it is for looking at a night someone
+reported. Keep the exports out of the repository.
 
 ---
 

@@ -15,6 +15,8 @@ struct Args {
     var csv: String?
     var subjects: Int?
     var seed: UInt64 = PortValidation.defaultSeed
+    var start: Int?
+    var end: Int?
 }
 var a = Args()
 var it = CommandLine.arguments.dropFirst().makeIterator()
@@ -25,6 +27,8 @@ while let k = it.next() {
     case "--csv": a.csv = it.next()
     case "--subjects": a.subjects = Int(it.next() ?? "")
     case "--seed": a.seed = UInt64(it.next() ?? "") ?? a.seed
+    case "--start": a.start = Int(it.next() ?? "")
+    case "--end": a.end = Int(it.next() ?? "")
     case "-h", "--help":
         print("""
         usage: sleeppsg --dataset <sleep-accel root> [--section all|port|baseline|strata|rem|variants|priors]
@@ -75,6 +79,46 @@ if want("port") {
 }
 
 if a.section == "port" { exit(0) }
+
+// One recorded night replayed from CSV exports (`grav.csv` ts,x,y,z; `hr.csv` ts,bpm; `rr.csv` ts,rrMs) in
+// the directory given as --dataset, over the in-bed window given by --start/--end (unix seconds). Prints the
+// shipped hypnogram beside the port's. No PSG truth; this is for looking at one night someone reported.
+if a.section == "night" {
+    guard let dir = a.dataset, let start = a.start, let end = a.end else {
+        FileHandle.standardError.write(Data("night needs --dataset <dir> --start <ts> --end <ts>\n".utf8)); exit(2)
+    }
+    func rows(_ name: String) -> [[Double]] {
+        let text = (try? String(contentsOfFile: (dir as NSString).appendingPathComponent(name), encoding: .utf8)) ?? ""
+        return text.split(whereSeparator: \.isNewline).map { $0.split(separator: ",").compactMap { Double($0) } }
+    }
+    let grav = rows("grav.csv").filter { $0.count >= 4 }
+        .map { GravitySample(ts: Int($0[0]), x: $0[1], y: $0[2], z: $0[3]) }
+    let hr = rows("hr.csv").filter { $0.count >= 2 }.map { HRSample(ts: Int($0[0]), bpm: Int($0[1])) }
+    let rr = rows("rr.csv").filter { $0.count >= 2 }.map { RRInterval(ts: Int($0[0]), rrMs: Int($0[1])) }
+    let tz = TimeZone.current
+    func clock(_ ts: Int) -> String {
+        let d = DateFormatter(); d.timeZone = tz; d.dateFormat = "HH:mm:ss"
+        return d.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+    }
+    func show(_ name: String, _ segs: [StageSegment]) {
+        let asleep = segs.filter { $0.stage != "wake" }.reduce(0) { $0 + $1.end - $1.start }
+        let onset = segs.first { $0.stage != "wake" }.map { clock($0.start) } ?? "none"
+        print("\n\(name): asleep \(asleep / 60) min, first sleep \(onset)")
+        for s in segs.prefix(12) { print("  \(clock(s.start))–\(clock(s.end))  \(s.stage)") }
+    }
+    print("night \(dir): \(grav.count) gravity, \(hr.count) HR, \(rr.count) R-R; window \(clock(start))–\(clock(end))")
+    show("shipped SleepStagerV2", SleepStagerV2.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: []))
+    show("port, shipped config", V2Recipe.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: []))
+    show("port, settled onset off", V2Recipe.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr,
+                                                          resp: [], cfg: Variants.settledOnsetOff.config))
+    for (w, tol) in [(20, 1), (40, 1), (30, 2)] {
+        var c = RecipeConfig.shipped
+        c.settledOnsetEpochs = w; c.settledOnsetTolerance = tol
+        show("port, settled onset W\(w) tol\(tol)",
+             V2Recipe.stageSession(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: [], cfg: c))
+    }
+    exit(0)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 // Dataset
@@ -509,6 +553,56 @@ if want("priors") {
               + "\(f(meanAbs("wake"), 5, 2)) \(f(meanAbs("deep"), 5, 2)) \(f(meanAbs("rem"), 5, 2)) \(f(meanAbs("light"), 5, 2))      "
               + "\(better("wake"))/\(n) \(better("deep"))/\(n) \(better("rem"))/\(n) \(better("light"))/\(n)")
     }
+}
+
+// Sleep onset: does the staged hypnogram start sleep where PSG does? Not part of `all` — a tuning report for
+// the settled-onset rule, run with `--section onset`.
+if a.section == "onset" {
+    print("""
+
+    ================================================================================
+    8. SLEEP ONSET (pre-onset quiet wake)
+    ================================================================================
+    Truth onset is the first PSG epoch scored as any sleep stage. Error is predicted minus truth, in minutes;
+    positive means the stager started sleep too late. `pre-wake rec` is the share of truth wake epochs BEFORE
+    truth onset that the stager also called wake. `late>15` / `early>15` count subjects off by more than 15 min.
+    """)
+    func onsetIdx(_ labels: [String?]) -> Int? { labels.firstIndex { $0 != nil && $0 != "wake" } }
+    func report(_ name: String, _ rows: [Scored]) {
+        var errs: [Double] = []
+        var preHit = 0, preN = 0
+        var tstBias: [Double] = []
+        for r in rows {
+            guard let t = onsetIdx(r.fullTruth), let p = onsetIdx(r.fullPred.map { Optional($0) }) else { continue }
+            errs.append(Double(p - t) * 0.5)
+            for i in 0..<t where r.fullTruth[i] == "wake" {
+                preN += 1
+                if i < r.fullPred.count && r.fullPred[i] == "wake" { preHit += 1 }
+            }
+            let ps = r.pred.filter { $0 != "wake" }.count, ts = r.truth.filter { $0 != "wake" }.count
+            tstBias.append(Double(ps - ts) * 0.5)
+        }
+        let s = summarise(rows)
+        let p = pooledPct(rows) { $0.pred }, t = pooledPct(rows) { $0.truth }
+        let late = errs.filter { $0 > 15 }.count, early = errs.filter { $0 < -15 }.count
+        print("    \(name.padding(toLength: 34, withPad: " ", startingAt: 0))bias\(f(mean(errs), 6, 1))  MAE\(f(mae(errs), 6, 1))  med|e|\(f(median(errs.map { abs($0) }), 5, 1))  late>15 \(late)  early>15 \(early)  pre-wake rec\(f(Double(preHit) / Double(max(1, preN)) * 100, 6, 1))  κ\(f(s.kappa, 6, 3))  wakeSens\(f(s.conf.prf("wake").recall * 100, 6, 1))  wakePrec\(f(s.conf.prf("wake").precision * 100, 6, 1))  wake%bias\(f(p["wake"]! - t["wake"]!, 6, 2))  TSTbias\(f(mean(tstBias), 6, 1))")
+    }
+    report("incumbent", shipped)
+    report(Variants.settledOnsetOff.name, subjects.map { score($0, using: stageVariant(Variants.settledOnsetOff.config)) })
+    var grid: [(String, RecipeConfig)] = []
+    for w in [10, 20, 30, 40] {
+        for tol in [0, 1, 2] {
+            for hz in [Double.infinity, 0.0] {
+                for cap in [Double.infinity, 120.0] {
+                    var c = RecipeConfig.shipped
+                    c.settledOnsetEpochs = w; c.settledOnsetTolerance = tol
+                    c.settledOnsetHrVarZMax = hz; c.settledOnsetMaxMinutes = cap
+                    grid.append(("W\(w) tol\(tol) hrz\(hz.isFinite ? "0" : "-") cap\(cap.isFinite ? "120" : "-")", c))
+                }
+            }
+        }
+    }
+    for (name, c) in grid { report(name, subjects.map { score($0, using: stageVariant(c)) }) }
 }
 
 print("")

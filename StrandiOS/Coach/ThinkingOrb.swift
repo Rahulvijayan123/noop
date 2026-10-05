@@ -31,7 +31,7 @@ enum OrbTheme {
 }
 
 struct ThinkingOrb: View {
-    /// Inline preset from thinking-orbs (`size={20}`), not the 64px avatar graphic.
+    /// Inline preset from thinking-orbs (`size={20}`), not the 32/64 avatar graphics.
     static let indicatorSize: CGFloat = 20
 
     var state: OrbState = .solving
@@ -237,10 +237,11 @@ enum OrbEngine {
     }
 
     static func resolve(state: OrbState, size: CGFloat) -> Resolved {
-        let presetSize: CGFloat = size <= 32 ? 20 : 64
+        // thinking-orbs ships three separately tuned scales: 20 (inline), 32 and 64 (avatar).
+        let presetSize = size <= 24 ? 20 : (size <= 48 ? 32 : 64)
         let mode = mode(for: state)
         var opts = baseProfile(mode)
-        let preset = presets[mode]![presetSize == 20 ? 20 : 64]!
+        let preset = presets[mode]![presetSize]!
         if preset.count != 1 { opts = scaleCounts(opts, preset.count, mode: mode) }
         if preset.size != 1 { opts = scaleRadii(opts, preset.size) }
         if let extra = preset.extra { extra(&opts) }
@@ -296,38 +297,47 @@ enum OrbEngine {
     private static let presets: [Mode: [Int: Preset]] = [
         .orbits: [
             64: Preset(speed: 1.885, count: 1, size: 1),
+            32: Preset(speed: 2.9072, count: 0.4251, size: 1.6849),
             20: Preset(speed: 3.9, count: 0.238, size: 2.4)
         ],
         .globe: [
             64: Preset(speed: 2.015, count: 0.42, size: 1.15, extra: { $0.scanMul = 4.08; $0.dimBase = 0.45 }),
-            20: Preset(speed: 2.665, count: 0.32, size: 1.75, extra: { $0.scanMul = 4.335; $0.dimBase = 0.45 })
+            32: Preset(speed: 2.3803, count: 0.1839, size: 1.4769, extra: { $0.scanMul = 4.2301; $0.dimBase = 0.45 }),
+            20: Preset(speed: 2.665, count: 0.105, size: 1.75, extra: { $0.scanMul = 4.335; $0.dimBase = 0.45 })
         ],
         .rubik: [
             64: Preset(speed: 1.82, count: 0.35, size: 1.05),
-            20: Preset(speed: 1.95, count: 0.22, size: 1.9)
+            32: Preset(speed: 1.8964, count: 0.1537, size: 1.4951),
+            20: Preset(speed: 1.95, count: 0.088, size: 1.9)
         ],
         .wave: [
             64: Preset(speed: 4.388, count: 0.341, size: 1),
+            32: Preset(speed: 4.1512, count: 0.169, size: 1.3232),
             20: Preset(speed: 3.998, count: 0.105, size: 1.6)
         ],
         .web: [
             64: Preset(speed: 3.315, count: 1.35, size: 0.95),
-            20: Preset(speed: 6.63, count: 0.55, size: 1.52)
+            32: Preset(speed: 5.0104, count: 0.4942, size: 1.2571),
+            20: Preset(speed: 6.63, count: 0.25, size: 1.52)
         ],
         .braid: [
             64: Preset(speed: 1.625, count: 0.5, size: 1),
+            32: Preset(speed: 2.2234, count: 0.2056, size: 1.2011),
             20: Preset(speed: 2.75, count: 0.1125, size: 1.36)
         ],
         .ribbon: [
             64: Preset(speed: 2.34, count: 0.25, size: 0.85, extra: { $0.spin = 0; $0.bandMul = 3.9; $0.wobMul = 1 }),
+            32: Preset(speed: 2.7776, count: 0.0969, size: 0.9766, extra: { $0.spin = 0; $0.bandMul = 4.49; $0.wobMul = 1 }),
             20: Preset(speed: 3.12, count: 0.051, size: 1.073, extra: { $0.spin = 0; $0.bandMul = 4.94; $0.wobMul = 1 })
         ],
         .ring: [
             64: Preset(speed: 3.24, count: 0.25, size: 0.956, extra: { $0.spin = 0; $0.bandMul = 3.627; $0.wobMul = 0.368 }),
+            32: Preset(speed: 3.5517, count: 0.0678, size: 1.31, extra: { $0.spin = 0; $0.bandMul = 3.8265; $0.wobMul = 0.4751 }),
             20: Preset(speed: 3.78, count: 0.028, size: 1.622, extra: { $0.spin = 0; $0.bandMul = 3.968; $0.wobMul = 0.565 })
         ],
         .morph: [
             64: Preset(speed: 2.405, count: 0.702, size: 0.395, extra: { $0.spread = 1.45 }),
+            32: Preset(speed: 2.2057, count: 0.5937, size: 0.6916, extra: { $0.spread = 1.45 }),
             20: Preset(speed: 2.08, count: 0.53, size: 1.011, extra: { $0.spread = 1.45 })
         ]
     ]

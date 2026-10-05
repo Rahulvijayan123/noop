@@ -1,8 +1,9 @@
 import StrandDesign
 import SwiftUI
 
-/// A compact, expandable trace of the assistant's work. Rows come from the reasoning the model streamed
-/// and the tools it actually called; nothing is invented to make the animation look busy.
+/// A compact, expandable trace of the assistant's work. The header always reads "Thinking…" and the body is
+/// the same short list of numbered steps every time; the steps tick forward as the answer gets closer, so the
+/// block never rewrites itself while it is open.
 struct CoachThinkingTrace: View {
     private enum RowStatus { case active, complete, neutral }
 
@@ -21,20 +22,28 @@ struct CoachThinkingTrace: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var manualExpanded: Bool?
+    /// The furthest step reached this turn. Steps only ever move forward, even across repeated lookups.
+    @State private var reached = 0
+    @State private var now = Date()
 
-    /// True until the first answer token arrives; the live steps belong to this phase only.
-    private var isThinking: Bool {
-        message.isStreaming && !message.didStall && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    /// True for the whole turn: the orb stays up from the first token to the last, through every tool round.
+    private var isWorking: Bool { message.isStreaming && !message.didStall }
+
+    /// True until answer text arrives. The steps are open for this stretch and fold away as the answer starts
+    /// to stream. Narration before a lookup never reaches the answer text (the view model keeps it in the
+    /// trace), so this does not flip back and forth across tool rounds.
+    private var isAwaitingAnswer: Bool {
+        isWorking && message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private var hasTraceData: Bool {
-        isThinking
+        isWorking
             || !message.thinking.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             || !message.toolNames.isEmpty
             || message.vizPhase != .none
     }
 
-    private var expanded: Bool { manualExpanded ?? isThinking }
+    private var expanded: Bool { manualExpanded ?? isAwaitingAnswer }
 
     var body: some View {
         if hasTraceData {
@@ -55,16 +64,24 @@ struct CoachThinkingTrace: View {
                     .transition(reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top)))
                 }
             }
-            .padding(.horizontal, isThinking ? 12 : 4)
-            .padding(.vertical, isThinking ? 8 : 0)
+            .padding(.horizontal, isWorking ? 12 : 4)
+            .padding(.vertical, isWorking ? 8 : 0)
             .background {
-                if isThinking {
+                if isWorking {
                     RoundedRectangle(cornerRadius: 14, style: .continuous).fill(StrandPalette.surfaceRaised)
                         .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(StrandPalette.hairline.opacity(0.5), lineWidth: 0.5))
                 }
             }
             .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: expanded)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isThinking)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: isWorking)
+            .onChange(of: rawStage) { _, new in reached = max(reached, new) }
+            .task(id: isWorking) {
+                // Re-reads the clock once a second while the turn is running, to pace the steps.
+                while isWorking, !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    now = Date()
+                }
+            }
         }
     }
 
@@ -73,9 +90,11 @@ struct CoachThinkingTrace: View {
             withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.28)) { manualExpanded = !expanded }
         } label: {
             HStack(spacing: 8) {
-                if isThinking {
-                    ThinkingOrb(state: .searching, size: 24)
-                    CoachElapsedLabel(base: phaseLabel.isEmpty ? "Sana is thinking…" : phaseLabel)
+                if isWorking {
+                    ThinkingOrb(state: .solving, size: 20)
+                    Text("Thinking…")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 } else {
                     Text(completedLabel)
                         .font(StrandFont.caption)
@@ -102,42 +121,8 @@ struct CoachThinkingTrace: View {
         return message.toolNames.isEmpty ? "Thought through your request" : "Looked at your data"
     }
 
-    /// One numbered step per finding, lookup and visual, in the order they happened.
-    private var traceRows: [Row] {
-        var rows: [Row] = []
-        func stepIcon() -> String { rows.count < 50 ? "\(rows.count + 1).circle" : "circle" }
-
-        func addSnippets(_ segment: String, complete: Bool, key: String) {
-            for (index, line) in CoachTraceSnippets.extract(from: segment, isComplete: complete).enumerated() {
-                rows.append(Row(id: "\(key)-snippet-\(index)", primary: line, secondary: nil, icon: stepIcon(), status: .neutral, isReasoning: true))
-            }
-        }
-
-        let marks = message.toolMarks
-        let raw = message.thinking
-        var previous = 0
-        for (markIndex, mark) in marks.enumerated() {
-            let segment = String(raw.dropFirst(previous).prefix(max(0, mark.offset - previous)))
-            addSnippets(segment, complete: true, key: "m\(markIndex)")
-            for (labelIndex, label) in mark.labels.enumerated() {
-                let running = isThinking && phase == .lookingUpData && markIndex == marks.count - 1 && labelIndex == mark.labels.count - 1
-                rows.append(Row(id: "m\(markIndex)-tool-\(labelIndex)", primary: label, secondary: "your data",
-                                icon: stepIcon(), status: running ? .active : .complete, isReasoning: false))
-            }
-            previous = max(previous, mark.offset)
-        }
-        addSnippets(String(raw.dropFirst(previous)), complete: !isThinking, key: "tail")
-
-        if marks.isEmpty {
-            for (index, label) in message.toolNames.enumerated() {
-                rows.append(Row(id: "tool-\(index)", primary: label, secondary: "your data", icon: stepIcon(), status: .complete, isReasoning: false))
-            }
-        }
-        for row in visualRows {
-            rows.append(Row(id: row.id, primary: row.primary, secondary: nil, icon: row.icon, status: row.status, isReasoning: false))
-        }
-        return rows.isEmpty ? stepRows : rows
-    }
+    /// The steps, then the visual being drawn (if any).
+    private var traceRows: [Row] { stepRows + visualRows }
 
     private var visualRows: [Row] {
         switch message.vizPhase {
@@ -153,18 +138,40 @@ struct CoachThinkingTrace: View {
         }
     }
 
+    private static let steps = ["Understanding your request", "Checking your data", "Comparing relevant signals", "Writing your answer"]
+
+    /// Where the turn really is: a lookup under way is step 2, results in hand is step 3, answer text is step 4.
+    private var eventStage: Int {
+        if !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return 3 }
+        if !message.toolMarks.isEmpty, phase != .lookingUpData { return 2 }
+        if phase == .lookingUpData || !message.toolMarks.isEmpty { return 1 }
+        return 0
+    }
+
+    /// Keeps a turn with no lookup moving too: it steps forward on a slow clock, but never into the last step,
+    /// which is reserved for the answer actually arriving.
+    private var timeStage: Int {
+        let elapsed = now.timeIntervalSince(message.createdAt)
+        return elapsed < 2.5 ? 0 : (elapsed < 7 ? 1 : 2)
+    }
+
+    private var rawStage: Int { isWorking ? max(eventStage, timeStage) : Self.steps.count }
+
+    /// The step in progress; `steps.count` once the turn is over.
+    private var stage: Int {
+        guard isWorking else { return Self.steps.count }
+        return isAwaitingAnswer ? min(max(reached, rawStage), 2) : 3
+    }
+
     private var stepRows: [Row] {
-        let labels = ["Understanding your request", "Checking your data", "Comparing relevant signals", "Writing your answer"]
-        let current: Int
-        switch phase {
-        case .analyzingImage: current = 1
-        case .lookingUpData: current = 2
-        case .generating: current = 3
-        case .idle: current = isThinking ? 3 : labels.count
-        }
-        return labels.enumerated().map { index, label in
-            let status: RowStatus = (index < current || !isThinking) ? .complete : index == current ? .active : .neutral
-            return Row(id: "step-\(index)", primary: label, secondary: nil, icon: "circle", status: status, isReasoning: false)
+        // A finished answer that never looked anything up did not check or compare anything.
+        let shown = isWorking || !message.toolNames.isEmpty
+            ? Array(Self.steps.enumerated())
+            : [(0, Self.steps[0]), (3, Self.steps[3])]
+        return shown.enumerated().map { position, step in
+            let status: RowStatus = step.0 < stage ? .complete : step.0 == stage ? .active : .neutral
+            return Row(id: "step-\(step.0)", primary: step.1, secondary: nil,
+                       icon: status == .neutral ? "\(position + 1).circle" : "circle", status: status, isReasoning: false)
         }
     }
 
@@ -173,7 +180,8 @@ struct CoachThinkingTrace: View {
             indicator(row)
             Text(row.primary)
                 .font(row.isReasoning ? StrandFont.caption : Font.system(size: 11, design: .rounded))
-                .foregroundStyle(row.isReasoning ? StrandPalette.textSecondary : StrandPalette.textPrimary)
+                .foregroundStyle(row.status == .neutral ? StrandPalette.textTertiary
+                                 : (row.isReasoning ? StrandPalette.textSecondary : StrandPalette.textPrimary))
                 .lineLimit(row.isReasoning ? 3 : 2)
                 .fixedSize(horizontal: false, vertical: row.isReasoning)
             if let secondary = row.secondary {

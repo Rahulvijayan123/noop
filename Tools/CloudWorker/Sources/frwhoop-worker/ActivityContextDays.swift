@@ -88,6 +88,20 @@ enum ActivityContextDays {
             probs: w.probs, baseline: w.baseline)
     }
 
+    /// One published night: its in-bed window and the staged `[{start, end, stage}]` segments.
+    struct Night: Equatable {
+        let start: Int
+        let end: Int
+        let stagesJSON: String?
+    }
+
+    /// The nights' sleep epochs (each night's non-wake segments), the same spans the app derives from its
+    /// stored nights, so lying awake in bed is "in bed" on the server too rather than asleep.
+    static func asleepSpans(_ nights: [Night]) -> [(start: Int, end: Int)] {
+        nights.flatMap { DayStateSpan.asleep(stagesJSON: $0.stagesJSON, start: $0.start, end: $0.end) }
+            .map { (start: $0.start, end: $0.end) }
+    }
+
     /// The decoder input for one job day. Sleep outside logged sessions stays "unknown" on the server
     /// unless the caller says the day has been through sleep detection (`sleepKnownOutsideSessions`):
     /// the detector may not have run over a stretch yet, and stillness alone never means asleep.
@@ -97,7 +111,8 @@ enum ActivityContextDays {
     /// "off wrist" second for every second of an off-wrist span, so an unbounded tail would describe the
     /// rest of today as already over.
     static func trackInput(windows: [ActivityPythonService.WindowPrediction], streams: Streams,
-                           sleep: [(start: Int, end: Int)], exercise: [(start: Int, end: Int)],
+                           sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
+                           exercise: [(start: Int, end: Int)],
                            dayStart: Int, dayEnd: Int, horizon: Int? = nil,
                            encoderVersion: String,
                            sleepKnownOutsideSessions: Bool = false) -> ActivityContextTrackInput {
@@ -113,6 +128,7 @@ enum ActivityContextDays {
             dayStart: dayStart, dayEnd: dayEnd,
             hr: streams.hr, gravity: streams.gravity, steps: streams.steps,
             sleep: sleep.map { DayStateSpan(start: $0.start, end: $0.end) },
+            inBed: inBed.map { DayStateSpan(start: $0.start, end: $0.end) },
             sleepKnownOutsideSessions: sleepKnownOutsideSessions,
             workouts: exercise.map { DayStateWorkout(start: $0.start, end: $0.end, sport: "") },
             offWrist: offWrist,
@@ -187,11 +203,12 @@ enum ActivityContextDays {
     /// The day document for a stream-day job, or nil when the stored streams hold nothing to describe.
     /// `now` bounds an open WRIST_OFF span and decides whether the day has been through sleep detection.
     static func buildStreamDay(day: String, dayBounds: (start: Int, end: Int), streams: Streams,
-                               sleep: [(start: Int, end: Int)], exercise: [(start: Int, end: Int)],
+                               sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
+                               exercise: [(start: Int, end: Int)],
                                now: Int) throws -> Built? {
         guard !streams.isEmpty else { return nil }
         let input = trackInput(
-            windows: [], streams: streams, sleep: sleep, exercise: exercise,
+            windows: [], streams: streams, sleep: sleep, inBed: inBed, exercise: exercise,
             dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
             encoderVersion: streamsPreprocessingVersion,
             sleepKnownOutsideSessions: now >= dayBounds.end + streamsSleepSettleSeconds)

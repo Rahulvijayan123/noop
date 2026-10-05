@@ -16,8 +16,9 @@ public enum ActivityContextVersions {
     public static let schema = 2
     /// Head vocabularies below.
     public static let ontology = "v2.0"
-    /// Temporal decoder structure + parameter tables.
-    public static let decoder = "hsmm-1.2"
+    /// Temporal decoder structure + parameter tables. 1.3: sleep evidence is the staged sleep (wake inside a
+    /// night is awake, not asleep) and the night's in-bed window is carried beside it (`SleepContext.inBed`).
+    public static let decoder = "hsmm-1.3"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     public static let featureSchema = "imu-feat-1"
 }
@@ -204,9 +205,28 @@ public struct SleepContext: Codable, Equatable, Sendable {
     public var state: SleepContextState
     /// Probability asleep when the source supplied one; nil when it only reported a state.
     public var probability: Double?
+    /// Inside a detected night's in-bed window, asleep or not. Lying awake in bed is `state == .awake` with
+    /// this set. Written only when true, so documents from before it existed read back unchanged.
+    public var inBed: Bool
 
-    public init(state: SleepContextState, probability: Double? = nil) {
-        self.state = state; self.probability = probability
+    public init(state: SleepContextState, probability: Double? = nil, inBed: Bool = false) {
+        self.state = state; self.probability = probability; self.inBed = inBed
+    }
+
+    enum CodingKeys: String, CodingKey { case state, probability, inBed = "in_bed" }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        state = try c.decode(SleepContextState.self, forKey: .state)
+        probability = try c.decodeIfPresent(Double.self, forKey: .probability)
+        inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(state, forKey: .state)
+        try c.encodeIfPresent(probability, forKey: .probability)
+        if inBed { try c.encode(true, forKey: .inBed) }
     }
 }
 

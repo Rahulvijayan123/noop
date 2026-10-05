@@ -1601,10 +1601,7 @@ final class AppModel: ObservableObject {
     /// picked (persisted under "selectedWhoopModel"), so every scan entry point ,
     /// Live, onboarding, the menu bar, Settings , honours the same choice.
     func scan(model: WhoopModel? = nil) {
-        let chosen = model
-            ?? UserDefaults.standard.string(forKey: "selectedWhoopModel").flatMap(WhoopModel.init(rawValue:))
-            ?? .whoop4
-        ble.connect(model: chosen)
+        ble.connect(model: model ?? .persisted)
     }
     func disconnect() {
         cancelPendingReconnect()

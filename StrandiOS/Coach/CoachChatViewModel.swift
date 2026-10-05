@@ -36,6 +36,9 @@ struct CoachChatMessage: Identifiable, Equatable {
 struct CoachToolMark: Equatable {
     let offset: Int
     let labels: [String]
+    /// What the model said just before calling the tools ("I'll pull up your sleep data"). Shown as a step in
+    /// the reasoning block, never as answer text.
+    var note: String = ""
 }
 
 enum CoachThinkingPhase {
@@ -77,6 +80,10 @@ final class CoachChatViewModel: ObservableObject {
     private static let historyAssistantChars = 2_500
     private static let toolPayloadCap = 10_000
     private static let flushInterval: TimeInterval = 0.04
+    /// In a round where tools are on offer, the opening of the reply is held this many characters before it
+    /// shows as the answer. A tool call ends a round, and whatever came before it is narration, not answer; the
+    /// stream only says so at the end, so a short preamble is kept out of the bubble instead of flashing in it.
+    private static let preambleHold = 180
     private static let stallGrace: TimeInterval = 45
 
     private let api: CoachAPI
@@ -252,6 +259,18 @@ final class CoachChatViewModel: ObservableObject {
             var buffer = ""
             var lastFlush = Date()
             var failed = false
+            var held = ""
+            var released = !useTools
+
+            func show(_ text: String) {
+                if phase != .idle { phase = .idle }
+                markFirstAnswerToken()
+                buffer += text
+                // Coalesce UI updates: one SwiftUI pass per ~40ms instead of per token.
+                if Date().timeIntervalSince(lastFlush) >= Self.flushInterval {
+                    append(buffer); buffer = ""; lastFlush = Date()
+                }
+            }
 
             do {
                 let events = api.stream(
@@ -263,12 +282,11 @@ final class CoachChatViewModel: ObservableObject {
                     lastActivity = Date()
                     switch event {
                     case .content(let text):
-                        if phase != .idle { phase = .idle }
-                        markFirstAnswerToken()
-                        buffer += text
-                        // Coalesce UI updates: one SwiftUI pass per ~40ms instead of per token.
-                        if Date().timeIntervalSince(lastFlush) >= Self.flushInterval {
-                            append(buffer); buffer = ""; lastFlush = Date()
+                        if released {
+                            show(text)
+                        } else {
+                            held += text
+                            if held.count > Self.preambleHold { released = true; show(held); held = "" }
                         }
                     case .thinking(let text): appendThinking(text)
                     case .toolCalls(let c): calls = c
@@ -279,10 +297,13 @@ final class CoachChatViewModel: ObservableObject {
                 if !Task.isCancelled { errorMessage = Self.userFacing(error) }
                 failed = true
             }
+            // Held text with no tool call behind it was the answer all along.
+            if !held.isEmpty, calls.isEmpty { show(held); held = "" }
             if !buffer.isEmpty { append(buffer) }
             if failed || calls.isEmpty || Task.isCancelled { break }
 
-            // Anything said before a tool call is scratch reasoning; the real answer follows the results.
+            // Anything said before a tool call is narration, not the answer; the real answer follows the results.
+            let narration = Self.narration(from: (messages.last?.content ?? "") + held)
             resetAnswerForToolRound()
             phase = .lookingUpData
             wire.append(CoachWireMessage(role: "assistant", toolCalls: calls))
@@ -292,7 +313,7 @@ final class CoachChatViewModel: ObservableObject {
                 if !labels.contains(label) { labels.append(label) }
                 if !toolNames.contains(label) { toolNames.append(label) }
             }
-            markToolRound(labels)
+            markToolRound(labels, note: narration)
             for call in calls {
                 let result = await executor.execute(name: call.name, arguments: call.arguments)
                 if call.name == "save_memory" { memoriesStale = true }
@@ -391,9 +412,16 @@ final class CoachChatViewModel: ObservableObject {
         messages[idx].thinkingDuration = max(0, Date().timeIntervalSince(messages[idx].createdAt))
     }
 
-    private func markToolRound(_ labels: [String]) {
+    /// The pre-tool narration tidied into one short line for the reasoning block.
+    private static func narration(from raw: String) -> String {
+        let flat = CoachAPI.stripThinking(raw)
+            .components(separatedBy: .whitespacesAndNewlines).filter { !$0.isEmpty }.joined(separator: " ")
+        return flat.count > 220 ? String(flat.prefix(220)).trimmingCharacters(in: .whitespaces) + "…" : flat
+    }
+
+    private func markToolRound(_ labels: [String], note: String) {
         guard let idx = messages.indices.last else { return }
-        messages[idx].toolMarks.append(CoachToolMark(offset: messages[idx].thinking.count, labels: labels))
+        messages[idx].toolMarks.append(CoachToolMark(offset: messages[idx].thinking.count, labels: labels, note: note))
         messages[idx].toolNames = Array(Set(messages[idx].toolNames).union(labels)).sorted()
     }
 

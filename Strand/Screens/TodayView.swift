@@ -563,6 +563,24 @@ struct TodayView: View {
     // shows NO activity icon. A lightweight on-device readout that rides alongside the @57 step counter.
     @State private var stepActivityClassToday: Int?
 
+    /// The strap's current skin temperature (today only) and the SpO₂ readings it banked for the selected
+    /// day's night, read straight from the banked samples for the Skin Temp / Blood Oxygen tiles. See
+    /// `KeyMetricReadings`; the Liquid Today carries the same pair.
+    @State private var currentSkinTemp: KeyMetricReadings.SkinTemp?
+    @State private var spo2NightReadings: KeyMetricReadings.Spo2Readings?
+
+    private func loadKeyMetricReadings() async {
+        currentSkinTemp = (selectedDayOffset == 0 && enabledKeyMetrics.contains(.skinTemp))
+            ? await repo.currentSkinTemp() : nil
+        if enabledKeyMetrics.contains(.bloodOxygen) {
+            let dayStart = Calendar.current.startOfDay(for: selectedLogicalDay)
+            let night = KeyMetricReadings.spo2NightWindow(dayStart: dayStart, now: Date())
+            spo2NightReadings = await repo.spo2Readings(from: night.from, to: night.to)
+        } else {
+            spo2NightReadings = nil
+        }
+    }
+
     // Today's heart rate as 5-minute bucket means (midnight → now), for the 24h trend chart.
     @State private var hrPoints: [TrendPoint] = []
     /// The day's true lowest and highest SAMPLES, not the extremes of the plotted five-minute means.
@@ -1807,6 +1825,11 @@ struct TodayView: View {
         .task(id: TodayLoadKey(seq: repo.refreshSeq, offset: selectedDayOffset,
                               dayCycleMode: dayCycleModeRaw, rolloverSeq: repo.dayRolloverSeq,
                               zoneContextSeq: repo.zoneContextSeq)) { await loadAll() }
+        // The Skin Temp / Blood Oxygen tiles' banked-reading reads. A separate task on the same key, so the
+        // day-scoped cache `loadAll` restores from (which does not hold these) never skips them.
+        .task(id: TodayLoadKey(seq: repo.refreshSeq, offset: selectedDayOffset,
+                              dayCycleMode: dayCycleModeRaw, rolloverSeq: repo.dayRolloverSeq,
+                              zoneContextSeq: repo.zoneContextSeq)) { await loadKeyMetricReadings() }
         // #989: hydration writes don't bump refreshSeq, so the card needs its own triggers, a logged /
         // edited / deleted drink (hydrationSeq) and the Settings feature toggle both re-read just the two
         // hydration fields. Cheap (one metricSeries row), never re-runs the heavy loads.
@@ -4207,10 +4230,14 @@ struct TodayView: View {
             let spo2Value = spo2.value == "—" && candidateTail != nil
                 ? String(format: "%.0f%%", locale: AppLanguage.activeLocale, candidateTail!)
                 : spo2.value
+            // With an estimate showing, the caption counts the readings the strap banked for the night (each
+            // one is also uploaded) and keeps the "unverified" label. With none, it says why: the strap fills
+            // its SpO₂ byte only while the wearer sleeps, so a daytime gap is its schedule, not missing data.
             let spo2Caption: String = spo2.value == "—" && candidateTail != nil
-                ? String(localized: "strap estimate (unverified)")
+                ? (spo2NightReadings.map { String(localized: "\($0.count) readings · unverified") }
+                    ?? String(localized: "strap estimate (unverified)"))
                 : (spo2.value == "—" && spo2CandidateOn
-                   ? String(localized: "toggle ON · no estimate yet")
+                   ? String(localized: "Measured during sleep")
                    : (spo2.caption ?? ""))
             StatTile(
                 label: "Blood Oxygen",
@@ -4313,11 +4340,16 @@ struct TodayView: View {
             // already a "Your Cards" tile (`DashboardCard.skinTemp`), never a Key Metrics one. Reuses the
             // SAME value chain and `skinTempCardValue` formatter the "Your Cards" case above already
             // uses, so the two tiles can never disagree.
-            let skinTempValue = skinTempLeadReading
+            // The strap's newest banked skin temperature (with its age) while it is on the wrist, for the
+            // absolute scale only; the nightly value otherwise. Same rule as the Liquid tile.
+            let liveSkinTemp = skinTempPreferred == .absolute ? currentSkinTemp : nil
+            let skinTempValue = liveSkinTemp.map { SkinTempDisplay.Reading(value: $0.celsius, kind: .absolute) }
+                ?? skinTempLeadReading
             StatTile(
                 label: "Skin Temp",
                 value: Self.skinTempCardValue(reading: skinTempValue, fahrenheit: temperatureUnit == .fahrenheit),
-                caption: skinTempValue == nil ? Self.needsStrapCaption : "",
+                caption: liveSkinTemp.map { relativeAgo(TimeInterval($0.ts)) }
+                    ?? (skinTempValue == nil ? Self.needsStrapCaption : ""),
                 accent: skinTempValue == nil ? StrandPalette.textPrimary : StrandPalette.metricAmber,
                 sparkline: sparks["skin_temp"],
                 sparkColor: StrandPalette.metricAmber

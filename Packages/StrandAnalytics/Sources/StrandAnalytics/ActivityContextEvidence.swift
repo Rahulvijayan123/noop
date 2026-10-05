@@ -175,7 +175,10 @@ public struct ActivityObservation: Equatable, Sendable {
     /// A new encoder window that completed at or before `ts`.
     public var encoder: MotionEncoderOutput?
     public var wear: WearEvidence
+    /// Staged sleep: `.asleep` only on a night's sleep epochs. Lying awake inside the night is `.awake`.
     public var sleep: SleepEvidence
+    /// Inside a detected night's in-bed window, whether or not asleep.
+    public var inBed: Bool
     /// A logged workout covers this second.
     public var loggedWorkout: Bool
     /// What the covering workout is (meaningful only while `loggedWorkout`).
@@ -184,11 +187,11 @@ public struct ActivityObservation: Equatable, Sendable {
     public init(ts: Int, dynAccelG: Double? = nil, gravity: [Double]? = nil, stepTicks: Int? = nil,
                 strapClass: Int? = nil, hrBpm: Int? = nil, imu: ImuWindowFeatures? = nil,
                 encoder: MotionEncoderOutput? = nil, wear: WearEvidence = .unknown,
-                sleep: SleepEvidence = .unknown, loggedWorkout: Bool = false,
+                sleep: SleepEvidence = .unknown, inBed: Bool = false, loggedWorkout: Bool = false,
                 workoutKind: WorkoutKind = .unspecified) {
         self.ts = ts; self.dynAccelG = dynAccelG; self.gravity = gravity; self.stepTicks = stepTicks
         self.strapClass = strapClass; self.hrBpm = hrBpm; self.imu = imu; self.encoder = encoder
-        self.wear = wear; self.sleep = sleep; self.loggedWorkout = loggedWorkout
+        self.wear = wear; self.sleep = sleep; self.inBed = inBed; self.loggedWorkout = loggedWorkout
         self.workoutKind = workoutKind
     }
 }

@@ -569,10 +569,10 @@ phone raw capture (ImuSessionFileStore) -> rawImuSession NPB1 objects (object la
 The same job also stores one decoded document per UTC day in `activity_context_days`. It is the
 document the app builds on the phone for its heart-rate day page: probabilistic posture, locomotion
 and arm-behavior heads coalesced into runs, transition events and a day summary
-(`ActivityContextDayDocument`, schema 2, ontology `v2.0`, decoder `hsmm-1.2`). The server runs the
+(`ActivityContextDayDocument`, schema 2, ontology `v2.0`, decoder `hsmm-1.3`). The server runs the
 SAME decoder (`StrandAnalytics.ActivityContextTrackBuilder`), so a phone-built and a server-built
 document of one day differ only in their inputs. Every run also carries the canonical `activity_class`
-(`sitting_desk`, `walking`, `off_wrist`, `unknown`, ... taxonomy `act-class-1`, see
+(`sitting_desk`, `walking`, `off_wrist`, `unknown`, ... taxonomy `act-class-2`, see
 `CURRENT_ALGORITHMS.md` section 9) and its `class_confidence`, derived by the same classifier the phone
 uses. A document written before decoder `hsmm-1.2` has neither key and reads as NULL.
 
@@ -580,7 +580,7 @@ uses. A document written before decoder `hsmm-1.2` has neither key and reads as 
 activity job (unchanged claim / download / decode / lease renewal)
   -> Python service, per 4-s window: HART (or baseline) probabilities + imu-feat-1 IMU features
   -> Postgres, for the UTC day: HR, gravity, steps, WRIST_OFF/ON events (6 h reach-back),
-     sleep sessions, workouts
+     the published nights (newest scoring_snapshots_v2 of local days d-1..d+1), workouts
   -> ActivityContextTrackBuilder -> ActivityContextDayDocument (no decoder snapshot)
   -> ONE transaction: publish_activity_context_day (fenced, under a savepoint)
                       -> publish_activity_context_v2 (unchanged: epochs, job completion)
@@ -615,6 +615,12 @@ activity job (unchanged claim / download / decode / lease renewal)
   the time the job ran (`data_through`), and a WRIST_OFF that has no WRIST_ON yet is open only up to
   then. Runs are clamped to the day; the neighbouring day's document starts where this one stops.
   Time outside logged sleep sessions stays "unknown" (the server does not infer sleep from stillness).
+- **Where sleep comes from.** The nights the scoring lane published: every `payload.sleep` entry of the
+  newest `scoring_snapshots_v2` row for each local day from d-1 to d+1 that overlaps the UTC day. A
+  night's in-bed window is its `start_at`/`end_at`; it is asleep only on its staged non-wake `stages`,
+  so lying awake in bed is `sleep_state` `awake` with `in_bed: true` on the run, never `asleep`.
+  `public.sessions` was the source until 2026-10; the current scoring lane does not write nights there,
+  and every stream day decoded since then had no sleep at all.
 - **Deploy order.** Apply the migration BEFORE (or together with) the worker upgrade. A worker that
   runs first still publishes v1 as before; its v2 write fails with a missing-function error under the
   savepoint, which is counted on every job and logged once.
@@ -676,7 +682,7 @@ scoring_jobs_v2 completed work (any revision)
        the job for day d depends on the scoring of d-1, d and d+1 (a UTC day's measurements reach the
        scorer's local day boundaries), so any of them completing again marks it for a rebuild
   -> claim_activity_stream_day (lease, fairness across owners)
-  -> worker: HR, gravity, steps, WRIST_OFF/ON (6 h reach-back), sleep and workout sessions of the day
+  -> worker: HR, gravity, steps, WRIST_OFF/ON (6 h reach-back), the published nights and workouts
   -> ActivityContextTrackBuilder (same decoder as the phone) -> ActivityContextDayDocument
   -> complete_activity_stream_day (fenced): publish_activity_context_day + complete the job
 ```

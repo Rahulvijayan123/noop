@@ -531,8 +531,8 @@ private struct ScanStep: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Which strap to look for — shared with the Live screen via the same key.
-    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
-    private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
+    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop5mg.rawValue
+    private var selectedModel: WhoopModel { WhoopModel.resolve(selectedModelRaw) }
 
     private static let bondedSubtitle = String(localized: "Bonded. You're set.")
     private static let scanSubtitle = String(localized: "Pick your strap below, then tap Scan. NOOP will find it.")
