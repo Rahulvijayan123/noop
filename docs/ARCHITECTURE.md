@@ -181,6 +181,16 @@ heads, transitions) for the heart-rate day page. The worker produces the same do
 decoder and stores it per UTC day, but nothing serves it to the phone yet; the app still draws its
 local result.
 
+That decoding also leaves a durable record. Each run carries a canonical activity class (a closed
+vocabulary, with a confidence) beside the display wording. On the phone, each local day's runs are saved
+as timestamp-aligned intervals in the on-device store (`activityContextInterval`), and the per-sample
+tables (heart rate, R-R, SpO₂, skin temperature, respiration, gravity, steps) join to them by time
+through the `*Ctx` views instead of carrying a copied label, so a score, the coach or a query can ask
+what the wearer was doing when any measurement was taken (docs/IOS.md). The worker's per-day documents
+carry the same class as `activity_class` (docs/BACKEND.md). The stand reminder reads the same decoding:
+it stays quiet when the rolling window (50 minutes by default) held a minute of standing or moving
+(docs/CURRENT_ALGORITHMS.md, section 10).
+
 ## What each score needs
 
 - **Strain, sleep, resting heart rate, steps and calories** appear once a day's readings are in.
