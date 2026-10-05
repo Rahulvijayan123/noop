@@ -134,6 +134,12 @@ stops the default privileges re-granting any of it to relations created later.
 of the file), so a later migration cannot widen the surface without that script failing.
 `20261004161000_reconcile_confirm_noop_wearable.sql` records the `confirm_noop_wearable` body production had
 been running after an in-place change.
+`20261004170000_account_deletion_detach_receipts.sql` lets an erase detach an upload receipt from an object or
+token that is being deleted after the installation has already been retired. Without it `account-deletion`
+stalled at `delete_supabase_rows` for any account that had uploaded, because the detach re-ran the
+retired-installation guard and was rejected. A retired installation still cannot write: any other change to a
+receipt, and any new receipt, is still refused. `supabase/tests/account-deletion-retired-installation.sql`
+covers both halves in a rolled-back transaction (the command is at the top of the file).
 
 #### Hosted project checklist
 
@@ -178,7 +184,7 @@ migrations.
 
 > **Do not run `supabase db push` against production.** Production is migrated by hand, as below. Its
 > history table (`supabase_migrations.schema_migrations`) was brought level on 2026-10-04 and now records
-> every file in `supabase/migrations/` through `20261004161000`, plus `20261001065454`, which is the same
+> every file in `supabase/migrations/` through `20261004170000`, plus `20261001065454`, which is the same
 > cron change as `20260930235500` applied from the dashboard under a generated version. Before that it had
 > stopped at `20260921104000` while later migrations were applied directly with SQL.
 
