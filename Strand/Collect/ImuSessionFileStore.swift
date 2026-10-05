@@ -52,6 +52,27 @@ public final class ImuSessionFileStore {
         value.append(Window(id: id, deviceId: deviceId, from: fromMs / 1_000, to: nil)); save(value)
         try? FileManager.default.createDirectory(at: sessionDirectory(id), withIntermediateDirectories: true)
     }
+    /// Keep the open-ended activity-capture window for `deviceId` open (`ActivityImuCapture`): creates it
+    /// when missing or closed, and closes the activity window of any other device id (the strap was swapped
+    /// or re-identified). Idempotent and cheap: an already-open window is left exactly as it is, so the
+    /// keep-alive can call this on every tick.
+    func ensureActivityWindow(deviceId: String, nowMs: Int64) {
+        let id = ActivityImuCapture.windowId(deviceId: deviceId)
+        let all = windows()
+        for other in all where ActivityImuCapture.isActivityWindow(other.id) && other.id != id && other.to == nil {
+            complete(id: other.id, toMs: nowMs)
+        }
+        if all.contains(where: { $0.id == id && $0.deviceId == deviceId && $0.to == nil }) { return }
+        start(id: id, deviceId: deviceId, fromMs: nowMs)
+    }
+
+    /// Close every open activity-capture window (the capture was switched off), so retention can reap them.
+    func closeActivityWindows(nowMs: Int64) {
+        for window in windows() where ActivityImuCapture.isActivityWindow(window.id) && window.to == nil {
+            complete(id: window.id, toMs: nowMs)
+        }
+    }
+
     func complete(id: String, toMs: Int64) {
         flushSession(id); var value = windows()
         if let index = value.firstIndex(where: { $0.id == id }) { value[index].to = toMs / 1_000; save(value) }
@@ -68,6 +89,9 @@ public final class ImuSessionFileStore {
         save(windows().filter { $0.id != id })
     }
     func prepareForRead(_ id: String) { flushSession(id) }
+
+    /// Every device id that has an IMU window (open or closed), sorted: the straps the object lane uploads for.
+    func deviceIds() -> [String] { Array(Set(windows().map(\.deviceId))).sorted() }
 
     /// C8 Fix E: flush EVERY session's RAM-only pending tail to disk now. Idempotent and bounded —
     /// the durable tail never grows past `flushCadenceMs` of live capture, so this is a safe
@@ -218,7 +242,8 @@ public final class ImuSessionFileStore {
         let activeIds = Set(all.filter { $0.to == nil }.map(\.id))
         var evicted: [String] = []
         for window in all where !activeIds.contains(window.id) {
-            if case .evict = policy.decision(active: false, endTs: window.to, now: now) {
+            let rule = ActivityImuCapture.isActivityWindow(window.id) ? policy.activityCapture : policy
+            if case .evict = rule.decision(active: false, endTs: window.to, now: now) {
                 evicted.append(window.id)
                 deleteFiles(window.id)
                 remove(id: window.id)
@@ -229,7 +254,8 @@ public final class ImuSessionFileStore {
         // active window (the bucket currently being written) — never the active window, never
         // seconds newer than the retention floor.
         for id in activeIds {
-            evictActiveSessionSegments(id, now: now, policy: policy)
+            evictActiveSessionSegments(id, now: now,
+                                       policy: ActivityImuCapture.isActivityWindow(id) ? policy.activityCapture : policy)
         }
         let survivors = windows()
         let totalBytes = survivors.reduce(Int64(0)) { $0 + sessionBytes($1.id) }

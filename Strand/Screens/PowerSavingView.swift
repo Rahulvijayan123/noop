@@ -21,6 +21,7 @@ struct PowerSavingView: View {
     @AppStorage(PuffinExperiment.lowRefreshKey) private var lowRefreshEnabled = false
     /// Default ON, matching `PuffinExperiment.freshSyncEnabled` (an absent key reads as on).
     @AppStorage(PuffinExperiment.freshSyncKey) private var freshSyncEnabled = true
+    @AppStorage(ActivityImuCapture.modeKey) private var activityMotionRaw = ActivityImuCapture.defaultMode.rawValue
 
     var body: some View {
         ScreenScaffold(title: "Power saving",
@@ -102,6 +103,8 @@ struct PowerSavingView: View {
                     }
                 }
 
+                activityMotionCard
+
                 NoopCard {
                     VStack(alignment: .leading, spacing: 16) {
                         Text("Fresh data").strandOverline()
@@ -120,6 +123,38 @@ struct PowerSavingView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var activityMotionCard: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Motion for activity").strandOverline()
+                Picker("Raw motion", selection: Binding(
+                    get: { ActivityImuCaptureMode(rawValue: activityMotionRaw) ?? ActivityImuCapture.defaultMode },
+                    set: { mode in
+                        activityMotionRaw = mode.rawValue
+                        model.ble.setActivityImuCaptureMode(mode)
+                    })) {
+                    ForEach(ActivityImuCaptureMode.allCases) { mode in Text(mode.title).tag(mode) }
+                }
+                .pickerStyle(.segmented)
+                Text(activityMotionExplanation)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var activityMotionExplanation: String {
+        switch ActivityImuCaptureMode(rawValue: activityMotionRaw) ?? ActivityImuCapture.defaultMode {
+        case .off:
+            return "Your strap's raw motion is only recorded during a Raw Data session you start yourself. What you were doing is read from heart rate, steps and the strap's once-a-second motion alone."
+        case .partTime:
+            return "Records your strap's raw motion (100 times a second) for one minute in every three and sends it to the server, where the activity model reads it and the Heart rate page uses its verdicts. Pauses while the strap's battery is low."
+        case .continuous:
+            return "Records your strap's raw motion all the time for the most accurate activity labels. This keeps the strap streaming, which uses more of its battery, and uploads tens of megabytes a day. Pauses while the strap's battery is low."
         }
     }
 

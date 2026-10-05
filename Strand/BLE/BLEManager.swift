@@ -962,6 +962,12 @@ public final class BLEManager: NSObject, ObservableObject {
     private var rawCaptureInFlight = false
     private var rawCaptureStoppedAt = Date.distantPast
     private var unexpectedImuStopAt = Date.distantPast
+    /// True while the activity capture (`ActivityImuCapture`) holds the raw IMU stream armed. Separate from
+    /// `rawCaptureInFlight`, which belongs to a Raw Data session someone started by hand: that session owns
+    /// the stream while it runs, and this capture only arms or stops it when no session does.
+    private var activityImuInFlight = false
+    /// The mode last logged, so a part-time cycle does not write two log lines every three minutes.
+    private var activityImuLoggedMode: ActivityImuCaptureMode?
     /// Ordered queue of frames awaiting drain through the serial Backfiller task.
     private var backfillFrameQueue: [[UInt8]] = []
     /// True while the drain task is running (prevents a second drain task from launching).
@@ -2347,13 +2353,68 @@ public final class BLEManager: NSObject, ObservableObject {
     private func stopUnexpectedRealtimeImu(_ frame: [UInt8], isOffload: Bool, now: Date = Date()) {
         guard selectedModel.deviceFamily == .whoop5, !isOffload, frame.count > 8,
               frame[8] == 43 || frame[8] == 51,
-              !rawCaptureInFlight, !UserDefaults.standard.bool(forKey: "enableRawCapture"),
+              !rawCaptureInFlight, !activityImuInFlight, !UserDefaults.standard.bool(forKey: "enableRawCapture"),
               now.timeIntervalSince(rawCaptureStoppedAt) >= 3,
               now.timeIntervalSince(unexpectedImuStopAt) >= 30 else { return }
         unexpectedImuStopAt = now
         send(.stopRawData, payload: [0x01], writeType: .withResponse)
         send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
         log("Raw IMU fail-safe: unexpected realtime packet type \(frame[8]) while capture was off; stop requested")
+    }
+
+    /// Switch the activity capture mode (Settings) and apply it at once.
+    func setActivityImuCaptureMode(_ mode: ActivityImuCaptureMode) {
+        ActivityImuCapture.setMode(mode)
+        reconcileActivityImu()
+    }
+
+    /// Strap charge at or below which the activity capture lets the stream go. Power saving's threshold
+    /// applies while Power saving is on (0 = never); otherwise `ActivityImuCapture.defaultPauseBatteryPct`.
+    private var activityImuPauseBatteryPct: Int {
+        PuffinExperiment.powerSavingEnabled ? PuffinExperiment.powerSavingBatteryPct
+            : ActivityImuCapture.defaultPauseBatteryPct
+    }
+
+    /// Bring the raw IMU stream in line with the activity capture (`ActivityImuCapture`): keep its store
+    /// window open so the frames are kept, and arm or stop the stream on the duty cycle's edges. Runs from
+    /// the post-bond block and every keep-alive tick; a tick without an edge costs a predicate.
+    ///
+    /// Only a bonded, connected WHOOP 5/MG has the 1244-byte IMU path. A Raw Data session in flight owns the
+    /// stream: this never stops it, and the open activity window records it like any other frame.
+    func reconcileActivityImu(now: Date = Date()) {
+        guard selectedModel.deviceFamily == .whoop5, didBond, state.bonded, state.connected else { return }
+        let mode = ActivityImuCapture.mode()
+        let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
+        if mode == .off {
+            ImuSessionFileStore.shared.closeActivityWindows(nowMs: nowMs)
+        } else {
+            ImuSessionFileStore.shared.ensureActivityWindow(deviceId: deviceId, nowMs: nowMs)
+        }
+        if activityImuLoggedMode != mode {
+            activityImuLoggedMode = mode
+            log("Activity motion: \(mode.title.lowercased()) capture for the activity classifier")
+        }
+        guard !rawCaptureInFlight else {
+            activityImuInFlight = false
+            return
+        }
+        let (pct, charging) = batteryPctAndCharging()
+        let want = ActivityImuCapture.wantsStream(mode: mode, now: now, batteryPct: pct, charging: charging,
+                                                  pauseBatteryPct: activityImuPauseBatteryPct)
+        if want && !activityImuInFlight {
+            // Same hardware-verified arm as a Raw Data session: START_RAW_DATA, then the IMU selector.
+            activityImuInFlight = true
+            send(.startRawData, payload: [0x01], writeType: .withResponse)
+            send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+        } else if !want && activityImuInFlight {
+            // Stop while the flag still admits the writes, then release it.
+            if !UserDefaults.standard.bool(forKey: "enableRawCapture") {
+                send(.stopRawData, payload: [0x01], writeType: .withResponse)
+                send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
+            }
+            activityImuInFlight = false
+            rawCaptureStoppedAt = now
+        }
     }
 
     public func groundTruthHistoryCSV(from: Int, to: Int) async -> Data {
@@ -2446,7 +2507,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 || command == .setClock || command == .getClock
                 // Bounded Raw Data Collector only. These writes remain impossible unless the explicit
                 // user-started capture window is in flight; normal sync never enables this gate.
-                || (rawCaptureInFlight && (command == .startRawData
+                || ((rawCaptureInFlight || activityImuInFlight) && (command == .startRawData
                     || command == .stopRawData || command == .toggleIMUMode))
                 // SET_CONFIG / SET_FF_VALUE (120), ENABLE direction — the R22 deep-stream unlock. Allowed
                 // only while the deep-data experiment is opted in, and only for a KEY and a VALUE the gate
@@ -4958,6 +5019,8 @@ public final class BLEManager: NSObject, ObservableObject {
             }
         }
         reconcileRealtime()   // recomputes wantsRealtime from the fresh predicate; toggles only on an edge
+        // The activity capture's duty cycle is time-dependent too; this tick is what moves it.
+        reconcileActivityImu()
         // The command pings below are WHOOP4-framed; a 5/MG link drops them at the send() guard, so
         // skip them for 5/MG (it keeps the experimental strap log clean — re-subscribe + the 120s
         // bounce above are what keep a 5/MG link healthy).
@@ -6397,6 +6460,8 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // A user capture remains represented by RawDataSessionStore, but its transport must be re-armed
         // on the next connection. Keeping this true would make that reconnect attempt a silent no-op.
         rawCaptureInFlight = false
+        // Same for the activity capture: the strap forgets the stream with the link, the next bond re-arms it.
+        activityImuInFlight = false
         // The strap forgets the realtime-HR toggle across a disconnect; the post-bond branch re-arms it
         // from `wantsRealtime`. Clear only the "what we last sent" flag — `screenWantsRealtime` /
         // `keepRealtimeForData` (and thus `wantsRealtime`) are intent and must survive a reconnect so the
@@ -7051,6 +7116,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // of any view. Idempotent: `startGroundTruthRawCapture` no-ops while a capture is in
             // flight, and the marker is cleared when the session is stopped/deleted/unpaired.
             rearmGroundTruthRawCaptureIfWanted()
+            reconcileActivityImu()                              // activity capture: arm now, not 30 s later
             startKeepAlive()                                    // re-subscribe + liveness watchdog
             // Kick the historical offload ONCE per connection — this is the 5/MG edition of the WHOOP4
             // connect-handshake (lines below). didWriteValueFor re-enters this `.whoop5` branch on EVERY
