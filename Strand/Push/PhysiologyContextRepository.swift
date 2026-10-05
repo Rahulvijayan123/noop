@@ -99,18 +99,28 @@ public struct PhysiologyContextDocument: Sendable, Equatable {
     public var timezoneId: String? { header?.identity.timezoneId }
 
     /// Decode a document. Nil only when `data` is not a JSON object.
-    public static func decode(_ data: Data) -> PhysiologyContextDocument? {
+    ///
+    /// The server stores and serves the summary document (envelopes split off) plus interned per-metric envelope
+    /// tables (`PhysiologyContext.StoredDocument`); `envelopeTables` are rebuilt into envelopes here. A table this
+    /// build cannot decode is left out and counted.
+    public static func decode(_ data: Data, envelopeTables: [Data] = []) -> PhysiologyContextDocument? {
         let decoder = PhysiologyContext.decoder()
         guard let lenient = try? decoder.decode(LenientDayDocument.self, from: data) else { return nil }
-        let full = try? decoder.decode(PhysiologyContext.DayDocument.self, from: data)
+        let tables = envelopeTables.compactMap { try? decoder.decode(PhysiologyContext.EnvelopeTable.self, from: $0) }
+        let droppedTables = envelopeTables.count - tables.count
+        let full = (try? decoder.decode(PhysiologyContext.DayDocument.self, from: data))
+            .map { tables.isEmpty ? $0 : PhysiologyContext.StoredDocument.join(summary: $0, tables: tables) }
+        let envelopes = full?.envelopes
+            ?? (lenient.envelopes.elements + PhysiologyContext.StoredDocument.envelopes(tables))
         return PhysiologyContextDocument(
             full: full, header: lenient.header, status: lenient.status,
             statusReasons: lenient.statusReasons.elements, availability: lenient.availability.elements,
-            regimes: lenient.regimes, envelopes: lenient.envelopes.elements, sleep: lenient.sleep,
+            regimes: lenient.regimes, envelopes: envelopes, sleep: lenient.sleep,
             bouts: lenient.bouts.elements, exertion: lenient.exertion.elements, exposures: lenient.exposures,
             dailyValues: lenient.dailyValues.elements, comparisons: lenient.comparisons.elements,
             episodes: lenient.episodes.elements, dependence: lenient.dependence.elements,
-            undecodedElements: lenient.undecodedElements, undecodedMembers: lenient.undecodedMembers)
+            undecodedElements: lenient.undecodedElements + droppedTables,
+            undecodedMembers: lenient.undecodedMembers + (droppedTables > 0 ? ["envelope_tables"] : []))
     }
 }
 
@@ -389,10 +399,14 @@ public actor PhysiologyContextRepository {
             if let v = header[key], !(v is NSNull) { return v }
             return nil
         }
+        let tables: [Data] = ((context["envelope_tables"] as? [Any]) ?? []).compactMap { table in
+            guard let object = table as? [String: Any], JSONSerialization.isValidJSONObject(object) else { return nil }
+            return try? JSONSerialization.data(withJSONObject: object)
+        }
         let document = (context["document"] as? [String: Any]).flatMap { object -> PhysiologyContextDocument? in
             guard JSONSerialization.isValidJSONObject(object),
                   let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
-            return PhysiologyContextDocument.decode(data)
+            return PhysiologyContextDocument.decode(data, envelopeTables: tables)
         }
         let status: PhysiologyContextDay.Status = (member("status") as? String)
             .flatMap(PhysiologyContextDay.Status.init(rawValue:))

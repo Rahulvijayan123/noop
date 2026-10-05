@@ -335,6 +335,31 @@ final class PhysiologyContextAppTests: XCTestCase {
         XCTAssertNil(otherDevice, "entries are per device")
     }
 
+    func testTheStoredFormSummaryPlusEnvelopeTablesRebuildsTheDocument() async throws {
+        let doc = builtDocument()
+        let (summary, tables) = PC.StoredDocument.split(doc)
+        XCTAssertTrue(summary.envelopes.isEmpty)
+        var body = contextBody(document: try jsonObject(summary))
+        var context = try XCTUnwrap(body["context"] as? [String: Any])
+        context["envelope_tables"] = try tables.map { try JSONSerialization.jsonObject(with: PC.encoder().encode($0)) }
+        body["context"] = context
+        ContextStub.body = body
+        let read = try await repository().dayContext(day: day, deviceIds: ["whoop-TEST"], metric: .hrvRmssd)
+        guard case .loaded(let value) = read else { return XCTFail("expected a context, got \(read)") }
+        XCTAssertEqual(value.document?.full, doc, "summary + every table rebuilds the engine's document")
+        XCTAssertEqual(value.document?.envelopes, doc.envelopes)
+        XCTAssertEqual(value.document?.undecodedElements, 0)
+
+        // A summary with only some tables keeps those envelopes and nothing else.
+        context["envelope_tables"] = try tables.filter { $0.metric == .heartRate }
+            .map { try JSONSerialization.jsonObject(with: PC.encoder().encode($0)) }
+        body["context"] = context
+        ContextStub.body = body
+        let partial = try await repository().dayContext(day: day, deviceIds: ["whoop-TEST"], metric: .heartRate)
+        guard case .loaded(let p) = partial else { return XCTFail("expected a context") }
+        XCTAssertEqual(p.document?.envelopes, doc.envelopes.filter { $0.metric == .heartRate })
+    }
+
     func testAnOlderOrNewerShapeKeepsWhatDecodesAndIgnoresUnknownMembers() async throws {
         let doc = builtDocument()
         var object = try XCTUnwrap(try jsonObject(doc) as? [String: Any])
