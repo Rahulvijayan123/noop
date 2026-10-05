@@ -96,6 +96,64 @@ export function parseSeriesQuery(params: URLSearchParams) {
   return { from: new Date(start * 1000).toISOString(), to: new Date(end * 1000).toISOString(), metrics };
 }
 
+/** The raw-IMU lane's lineage: the only one that writes `activity_encoder_windows` today. */
+const ACTIVITY_WINDOWS_ALGORITHM = 'hart-activity-1';
+const ACTIVITY_WINDOWS_MAX_DAYS = 3;
+
+/**
+ * `GET /activity-windows?days=<YYYY-MM-DD>[,…][&known=<YYYY-MM-DD>:<revision>,…]`: HART's per-window output
+ * (`hart-windows-1`) for up to three UTC days. A local day spans two UTC days, so the phone asks for both. A
+ * day listed in `known` at its current result revision comes back without its windows (`unchanged: true`), so
+ * an unchanged day costs a few bytes rather than its whole document.
+ */
+function isCalendarDay(day: string): boolean {
+  const at = new Date(`${day}T00:00:00Z`);
+  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === day;
+}
+
+export function parseActivityWindowsQuery(params: URLSearchParams) {
+  const raw = params.get('days');
+  if (raw == null) throw fail('invalid_days', 400);
+  const days = raw.split(',');
+  if (days.length < 1 || days.length > ACTIVITY_WINDOWS_MAX_DAYS || new Set(days).size !== days.length
+      || days.some((d) => !DAY_RE.test(d) || !isCalendarDay(d))) {
+    throw fail('invalid_days', 400);
+  }
+  const known = new Map<string, string>();
+  const rawKnown = params.get('known');
+  if (rawKnown != null && rawKnown !== '') {
+    for (const entry of rawKnown.split(',')) {
+      const m = /^(\d{4}-\d{2}-\d{2}):(\d{1,18})$/.exec(entry);
+      if (!m || !days.includes(m[1])) throw fail('invalid_known', 400);
+      known.set(m[1], m[2]);
+    }
+  }
+  return { days, known };
+}
+
+export async function readActivityWindows({ rest, userId, deviceId, days, known }: {
+  rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
+}) {
+  const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}&algorithm_version=eq.${ACTIVITY_WINDOWS_ALGORITHM}`;
+  const heads = await rest.select('activity_encoder_windows', `${owner}&day=in.(${days.join(',')})`
+    + '&select=day,encoder_id,model_version,preprocessing_version,feature_schema,window_count,first_ts,last_ts,'
+    + 'result_revision,computed_at') ?? [];
+  const wanted = heads.filter((h: any) => known.get(h.day) !== String(h.result_revision)).map((h: any) => h.day);
+  const bodies = wanted.length
+    ? await rest.select('activity_encoder_windows',
+      `${owner}&day=in.(${wanted.join(',')})&select=day,result_revision,windows`) ?? []
+    : [];
+  const bodyByDay = new Map(bodies.map((b: any) => [b.day, b]));
+  return heads.map((h: any) => {
+    const body: any = bodyByDay.get(h.day);
+    // A republish between the two reads makes the body newer than its head; the body's revision is the one
+    // that describes the windows sent.
+    return body
+      ? { ...h, result_revision: String(body.result_revision), windows: body.windows }
+      : { ...h, result_revision: String(h.result_revision), unchanged: true };
+  });
+}
+
 async function boundedBody(req: Request, maxBytes = 8192): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
   if (bytes.length > maxBytes) throw fail('payload_too_large', 413);
@@ -162,6 +220,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isRead = req.method === 'GET' && route === '/';
   const isDays = req.method === 'GET' && route === '/days';
   const isSeries = req.method === 'GET' && route === '/series';
+  const isActivityWindows = req.method === 'GET' && route === '/activity-windows';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
   const isRegister = req.method === 'POST' && route === '/devices';
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
@@ -170,8 +229,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isPlacementPost = req.method === 'POST' && route === '/placement';
   const isPlacementGet = req.method === 'GET' && route === '/placement';
   const isStretchFeedback = req.method === 'POST' && route === '/stretch-feedback';
-  if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit
-      && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback) {
+  if (!isRead && !isDays && !isSeries && !isActivityWindows && !isDiagnostics && !isRegister && !isOverride
+      && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -206,9 +265,9 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
     }
-    const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead || isPlacementGet
-      ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES : undefined);
-    const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead
+    const requestBody = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
+      || isPlacementGet ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES : undefined);
+    const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
@@ -247,6 +306,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         p_user: user.id, p_from: query.from, p_to: query.to, ...(query.metrics ? { p_metrics: query.metrics } : {}),
       });
       return Response.json({ series, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isActivityWindows) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseActivityWindowsQuery(url.searchParams);
+      const days = await readActivityWindows({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isComputeSubmit || isComputeRead) {
       if (!deviceId) throw fail('device_registration_pending',409);

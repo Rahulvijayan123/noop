@@ -71,6 +71,10 @@ struct ActivityLane {
     var streamDaysEnabled: Bool = true
     /// Stream-day jobs processed per wake.
     var streamDayBudget: Int = 4
+    /// Downloaded objects and serve answers kept on this host (see `ActivityLocalCache`); nil turns it off.
+    var cache: ActivityLocalCache? = nil
+    /// How often the cache is pruned.
+    static let cachePruneIntervalSeconds: TimeInterval = 6 * 3600
     /// Extra seconds before/after a run sent to Python for resample filter
     /// state (C10 serve protocol: up to 3).
     static let boundarySeconds = 3
@@ -106,12 +110,20 @@ struct ActivityLane {
         /// Soft failures while the model was unavailable.
         var modelUnavailable = 0
         var windowsInferred = 0
+        /// Windows taken from the on-host cache instead of the model (a request it had already answered).
+        var windowsReused = 0
+        /// Objects read from the on-host cache instead of storage.
+        var objectsReused = 0
         /// ActivityContext v2 day documents stored.
         var contextDaysPublished = 0
         /// Day documents not stored because building or writing them failed (the v1 publish was
         /// unaffected). A migration that was not applied shows up here.
         var contextDayFailures = 0
         var lastContextDayError: String?
+        /// HART window sets stored for the phone (`activity_encoder_windows`), and the ones that were not.
+        var windowSetsPublished = 0
+        var windowSetFailures = 0
+        var lastWindowSetError: String?
         /// Stream-day jobs created or refreshed by `enqueue_activity_stream_days`.
         var streamDaysEnqueued = 0
         var streamDaysClaimed = 0
@@ -133,6 +145,7 @@ struct ActivityLane {
     /// Throttle for the drain loop's reconcile call (once a minute is plenty:
     /// the RPC is idempotent and the trigger covers the common path).
     var lastReconcileAt: Date?
+    var lastCachePruneAt: Date?
     static let reconcileIntervalSeconds: TimeInterval = 60
     /// The reconcile call and its lookback. The parameter is bound as text and cast by Postgres, so it
     /// must be a bare interval literal: a quoted `'7 days'::interval` is not one and made every call fail.
@@ -209,6 +222,14 @@ struct ActivityLane {
     mutating func drain(budget: Int) {
         if imuJobsEnabled { drainImuJobs(budget: budget) }
         if streamDaysEnabled { drainStreamDays(budget: streamDayBudget) }
+        pruneCacheIfDue()
+    }
+
+    private mutating func pruneCacheIfDue(now: Date = Date()) {
+        guard let cache else { return }
+        if let last = lastCachePruneAt, now.timeIntervalSince(last) < Self.cachePruneIntervalSeconds { return }
+        lastCachePruneAt = now
+        cache.prune(now: now)
     }
 
     private mutating func drainImuJobs(budget: Int) {
@@ -419,10 +440,12 @@ struct ActivityLane {
         let streams = try ActivityContextDays.loadStreams(
             db: db, userId: job.userId, deviceId: job.deviceId,
             dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let encoder = try ActivityEncoderWindowsStore.load(db: db, userId: job.userId, deviceId: job.deviceId,
+                                                           day: job.day)
         let built = try ActivityContextDays.buildStreamDay(
             day: job.day, dayBounds: dayBounds, streams: streams,
             sleep: ActivityContextDays.asleepSpans(nights), inBed: nights.map { (start: $0.start, end: $0.end) },
-            exercise: exercise, now: Int(Date().timeIntervalSince1970))
+            exercise: exercise, now: Int(Date().timeIntervalSince1970), encoder: encoder)
         guard try renewLease(job: job) else {
             throw PostgresClient.Error(message: "activity lease lost before the stream day completion",
                                        sqlstate: "55000", kind: .stale)
@@ -536,10 +559,14 @@ struct ActivityLane {
         // download/decode phase can outlive the 300 s lease, and an expired
         // lease makes the later publish return NULL — a wasted full-day
         // recompute (audit P3-4).
+        var objectsReused = 0
         let records = try Self.loadObjects(
             objects: objects,
             renew: { try self.renewLease(job: job) },
-            download: { key in try storage.download(objectKey: key) })
+            download: { key in try storage.download(objectKey: key) },
+            cache: cache,
+            reused: { objectsReused = $0 })
+        stats.objectsReused += objectsReused
 
         // 3. Timeline + contiguous runs (never fill gaps).
         let timeline = try Self.buildTimeline(records: records)
@@ -573,6 +600,9 @@ struct ActivityLane {
         var versions = Self.resolvedVersions(
             reportedModel: service.reportedModelVersion,
             reportedPreprocessing: service.reportedPreprocessingVersion)
+        // Answers are cached under the versions the running child reported; before it has reported
+        // there is nothing to key them by.
+        let cacheable = !(service.reportedModelVersion ?? "").isEmpty
         // One request per bounded body chunk (audit P1-2): a contiguous run
         // longer than maxRequestBodySeconds is split at second boundaries and
         // each chunk carries its own head/tail filter state. serve.py emits
@@ -581,6 +611,17 @@ struct ActivityLane {
         // protocol's single 4-s straddle per interior boundary.
         for run in runs {
             for request in Self.runRequests(timeline: timeline, run: run) {
+                // A request this host has already answered with the same model is not sent again: only
+                // the run that grew since the last pass (normally the newest) costs model time.
+                let cacheKey = cacheable
+                    ? ActivityLocalCache.inferenceKey(request: request, modelVersion: versions.model,
+                                                      preprocessingVersion: versions.preprocessing)
+                    : nil
+                if let cacheKey, let cached = cache?.inference(key: cacheKey) {
+                    windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(cached))
+                    stats.windowsReused += cached.windows.count
+                    continue
+                }
                 let renewed = isTrue(try db.callFunctionForJSON(
                     "SELECT public.renew_activity_context_v2($1::uuid, $2::integer)::text",
                     [job.leaseToken, String(leaseSeconds)]))
@@ -601,6 +642,9 @@ struct ActivityLane {
                 if let pv = result.preprocessingVersion, !pv.isEmpty { versions.preprocessing = pv }
                 windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
                 stats.windowsInferred += result.windows.count
+                if let cacheKey, result.modelVersion == nil || result.modelVersion == versions.model {
+                    cache?.storeInference(result, key: cacheKey)
+                }
             }
         }
 
@@ -629,11 +673,15 @@ struct ActivityLane {
         let dayDocument = try buildContextDay(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise)
+
+        // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
+        let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
+                                                   versions: versions)
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
         return try publishDay(job: job, payloadText: payloadText, dayDocument: dayDocument,
-                              durationMS: durationMS, dayBounds: dayBounds)
+                              durationMS: durationMS, dayBounds: dayBounds, windowsPayload: windowsPayload)
     }
 
     /// Steps 7–8 as a unit (internal so a scratch database can exercise it without B2 or Python).
@@ -647,9 +695,21 @@ struct ActivityLane {
     /// Returns true when the v1 publish committed.
     mutating func publishDay(job: ActivityJob, payloadText: String,
                              dayDocument: ActivityContextDays.Built?, durationMS: Int,
-                             dayBounds: (start: Int, end: Int)) throws -> Bool {
+                             dayBounds: (start: Int, end: Int), windowsPayload: String? = nil) throws -> Bool {
         try db.beginTransaction(.readCommitted)
         do {
+            var windowsStored = false
+            if let windowsPayload {
+                switch try ActivityEncoderWindowsStore.publish(
+                    db: db, token: job.leaseToken, revision: job.inputRevision, payload: windowsPayload) {
+                case .stored:
+                    windowsStored = true
+                case .fenced:
+                    break
+                case .rejected(let why):
+                    noteWindowSetFailure(why)
+                }
+            }
             var dayStored = false
             if let dayDocument {
                 switch try ActivityContextDays.publish(
@@ -670,6 +730,7 @@ struct ActivityLane {
             if let revision, revision > 0 {
                 try db.commitTransaction()
                 if dayStored { stats.contextDaysPublished += 1 }
+                if windowsStored { stats.windowSetsPublished += 1 }
                 _ = try? db.callFunctionForJSON(
                     "SELECT public.scoring_dirty_span($1::uuid,$2::uuid,$3::bigint,$4::bigint)::text",
                     [job.userId, job.deviceId, String(dayBounds.start), String(dayBounds.end)])
@@ -718,6 +779,33 @@ struct ActivityLane {
             noteContextDayFailure(ActivityContextDays.safeReason(error))
             return nil
         }
+    }
+
+    /// The `publish_activity_encoder_windows` payload for a job's windows, or nil when encoding failed
+    /// (counted; the v1 publish proceeds).
+    private mutating func encoderWindowsPayload(job: ActivityJob, dayBounds: (start: Int, end: Int),
+                                                windows: [ActivityPythonService.WindowPrediction],
+                                                versions: (model: String, preprocessing: String)) -> String? {
+        let set = ActivityEncoderWindowsStore.windowSet(windows: windows, dayStart: dayBounds.start,
+                                                        dayEnd: dayBounds.end, modelVersion: versions.model)
+        do {
+            return try ActivityEncoderWindowsStore.payload(set: set, day: job.day, dayStart: dayBounds.start,
+                                                           preprocessingVersion: versions.preprocessing)
+        } catch {
+            noteWindowSetFailure(ActivityContextDays.safeReason(error))
+            return nil
+        }
+    }
+
+    /// Same once-per-reason reporting as a skipped day document.
+    private mutating func noteWindowSetFailure(_ why: String) {
+        stats.windowSetFailures += 1
+        if stats.lastWindowSetError != why {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: activity windows not stored (v1 publish unaffected): \(why)\n")
+                    .data(using: .utf8)!)
+        }
+        stats.lastWindowSetError = why
     }
 
     /// Count a skipped v2 day and say why on stderr, once per distinct reason: a migration that was not
@@ -809,11 +897,27 @@ struct ActivityLane {
     /// job again; nothing is failed). `renew`/`download` are injected so the
     /// per-object renewal placement is unit-testable without a database or
     /// B2.
+    ///
+    /// `cache` (when set) holds the wire bytes of objects already downloaded. A cached copy is used only
+    /// after it decompresses to the job's digest; anything else is dropped and downloaded again, so the
+    /// cache can never change what a job reads.
     static func loadObjects(objects: [(id: String, digest: String, key: String)],
                             renew: () throws -> Bool,
-                            download: (String) throws -> Data) throws -> [Npb1ImuDecoder.Record] {
+                            download: (String) throws -> Data,
+                            cache: ActivityLocalCache? = nil,
+                            reused: ((Int) -> Void)? = nil) throws -> [Npb1ImuDecoder.Record] {
         var records: [Npb1ImuDecoder.Record] = []
+        var reusedCount = 0
+        defer { reused?(reusedCount) }
         for object in objects {
+            if let wire = cache?.object(digest: object.digest) {
+                if let decoded = try? VerificationLane.zstdDecompress(wire), sha256Hex(decoded) == object.digest {
+                    records.append(contentsOf: try Npb1ImuDecoder.decode(decoded))
+                    reusedCount += 1
+                    continue
+                }
+                cache?.removeObject(digest: object.digest)
+            }
             let renewed = try renew()
             guard renewed else {
                 throw PostgresClient.Error(message: "activity lease lost during download",
@@ -835,6 +939,7 @@ struct ActivityLane {
                     "digest_mismatch: object \(object.id) expected \(object.digest) got \(actual)")
             }
             records.append(contentsOf: try Npb1ImuDecoder.decode(decoded))
+            cache?.storeObject(wire, digest: object.digest)
         }
         return records
     }

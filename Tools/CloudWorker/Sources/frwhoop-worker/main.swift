@@ -101,6 +101,7 @@ struct WorkerConfig {
     let activityImu: Bool
     let activityStreams: Bool
     let activityStreamBudget: Int
+    let activityCacheDir: String
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -154,6 +155,9 @@ struct WorkerConfig {
         self.activityImu = (environment["FRWHOOP_ACTIVITY_IMU"] ?? "1") != "0"
         self.activityStreams = (environment["FRWHOOP_ACTIVITY_STREAMS"] ?? "1") != "0"
         self.activityStreamBudget = max(1, Int(environment["FRWHOOP_ACTIVITY_STREAM_BUDGET"] ?? "4") ?? 4)
+        // On-host cache of downloaded raw-IMU objects and model answers (ActivityLocalCache). Under
+        // /var/lib/frwhoop by default, which the unit already lets the worker write; "" turns it off.
+        self.activityCacheDir = environment["FRWHOOP_ACTIVITY_CACHE_DIR"] ?? "/var/lib/frwhoop/activity-cache"
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -395,7 +399,8 @@ var activity = ActivityLane(
     imuJobsEnabled: config.activityImu,
     contextDaysEnabled: config.activityContextV2,
     streamDaysEnabled: config.activityStreams,
-    streamDayBudget: config.activityStreamBudget)
+    streamDayBudget: config.activityStreamBudget,
+    cache: config.activityEnabled && config.activityImu ? ActivityLocalCache(path: config.activityCacheDir) : nil)
 
 // MARK: - Candidate (shadow/active) inference lane wiring
 //
@@ -563,6 +568,10 @@ if activityState.read().enabled {
                     "failures_unsettled": activity.stats.failuresUnsettled,
                     "model_unavailable": activity.stats.modelUnavailable,
                     "windows_inferred": activity.stats.windowsInferred,
+                    "windows_reused": activity.stats.windowsReused,
+                    "window_sets_published": activity.stats.windowSetsPublished,
+                    "window_set_failures": activity.stats.windowSetFailures,
+                    "objects_reused": activity.stats.objectsReused,
                     "context_days_published": activity.stats.contextDaysPublished,
                     "context_day_failures": activity.stats.contextDayFailures,
                     "stream_days_enqueued": activity.stats.streamDaysEnqueued,
