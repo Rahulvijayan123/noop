@@ -92,7 +92,7 @@ extension PhysiologyContext {
     }
 
     /// A reference from a measurement to an event that overlapped or preceded it.
-    public struct ExposureRef: Codable, Equatable, Sendable {
+    public struct ExposureRef: Codable, Equatable, Sendable, Hashable {
         public var eventId: String
         public var revision: Int
         public var kind: ExposureKind
@@ -112,7 +112,7 @@ extension PhysiologyContext {
     }
 
     /// Whether a category was recorded over a window. `unrecorded` is not evidence of absence.
-    public struct ExposureCategoryStatus: Codable, Equatable, Sendable {
+    public struct ExposureCategoryStatus: Codable, Equatable, Sendable, Hashable {
         public var kind: ExposureKind
         /// `recorded` | `denied` | `candidate_only` | `unrecorded`.
         public var status: String

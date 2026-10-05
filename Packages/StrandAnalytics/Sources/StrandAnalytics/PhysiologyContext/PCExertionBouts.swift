@@ -350,7 +350,7 @@ extension PhysiologyContext {
     }
 
     /// A reference from a measurement to a bout that preceded it.
-    public struct BoutRef: Codable, Equatable, Sendable {
+    public struct BoutRef: Codable, Equatable, Sendable, Hashable {
         public var boutId: String
         public var kind: String
         public var endedAt: Int
@@ -380,7 +380,7 @@ extension PhysiologyContext {
     }
 
     /// Descriptive exertion over a trailing window ending at an instant.
-    public struct ExertionWindowSummary: Codable, Equatable, Sendable {
+    public struct ExertionWindowSummary: Codable, Equatable, Sendable, Hashable {
         public var windowH: Int
         public var interval: Interval
         /// Bouts overlapping the window.

@@ -55,7 +55,7 @@ extension PhysiologyContext {
         case eligible, ineligible, unknown
     }
 
-    public struct EligibilityVerdict: Codable, Equatable, Sendable {
+    public struct EligibilityVerdict: Codable, Equatable, Sendable, Hashable {
         public var comparison: ComparisonKind
         public var state: EligibilityState
         public var reasons: [ReasonCode]

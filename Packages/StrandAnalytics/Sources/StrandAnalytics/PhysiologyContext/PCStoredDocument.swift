@@ -244,16 +244,15 @@ extension PhysiologyContext {
             var w = w; w.interval = Interval(w.interval.start + d, w.interval.end + d); return w
         }
 
-        /// Interning pool keyed by the canonical encoding (deterministic first-occurrence order).
-        struct Pool<T: Codable & Equatable> {
+        /// Interning pool keyed by value equality (deterministic first-occurrence order). Lossless by construction:
+        /// a row's index points at a value equal to its own.
+        struct Pool<T: Codable & Hashable> {
             var values: [T] = []
-            var byKey: [Data: Int] = [:]
-            let encoder = PhysiologyContext.encoder()
+            var byKey: [T: Int] = [:]
             mutating func index(_ v: T) -> Int {
-                let key = (try? encoder.encode(v)) ?? Data("\(values.count)".utf8)
-                if let i = byKey[key] { return i }
+                if let i = byKey[v] { return i }
                 values.append(v)
-                byKey[key] = values.count - 1
+                byKey[v] = values.count - 1
                 return values.count - 1
             }
         }

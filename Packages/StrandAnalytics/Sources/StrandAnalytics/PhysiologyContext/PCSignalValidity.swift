@@ -123,7 +123,7 @@ extension PhysiologyContext {
         case unsupported
     }
 
-    public struct SignalValidity: Codable, Equatable, Sendable {
+    public struct SignalValidity: Codable, Equatable, Sendable, Hashable {
         public var state: ValidityState
         public var reasons: [ReasonCode]
         /// Observed share of the support interval for the metric's input stream, when defined.

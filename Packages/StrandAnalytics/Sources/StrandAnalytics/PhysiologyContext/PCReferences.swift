@@ -171,7 +171,7 @@ extension PhysiologyContext {
     }
 
     /// One observation compared with one reference view.
-    public struct ReferenceComparison: Codable, Equatable, Sendable {
+    public struct ReferenceComparison: Codable, Equatable, Sendable, Hashable {
         public var day: String
         public var seriesKey: String
         public var regimeKey: String

@@ -208,13 +208,17 @@ up() {
   wait_http "http://127.0.0.1:$GATEWAY_PORT/__e2e/health" 40
 
   if [ -x "$WORKER_BIN" ]; then
-    say "starting frwhoop-worker (scoring lane only)"
+    # The physiology context lane runs too (NARA_E2E_CONTEXT=0 turns it off): it reads only published products and
+    # raw streams and writes only its own tables, so the scoring scenarios are unaffected.
+    local context_enabled="${NARA_E2E_CONTEXT:-1}"
+    say "starting frwhoop-worker (scoring lane; context lane enabled=$context_enabled)"
     spawn worker "$RUN/worker.log" env \
       FRWHOOP_DB_URL="$DBURL" FRWHOOP_ALLOW_INSECURE_DB=1 FRWHOOP_DB_SSLMODE=disable \
       FRWHOOP_B2_KEY_ID=e2e FRWHOOP_B2_APPLICATION_KEY=e2e FRWHOOP_B2_BUCKET=e2e-raw \
       FRWHOOP_INGEST_SECRET="$INGEST_SECRET" FRWHOOP_WORKER_NAME=e2e-worker \
       FRWHOOP_DISABLE_LANES=projection,archive,verify FRWHOOP_POLL_INTERVAL_MS=300 \
       FRWHOOP_V2_INPUT_GATE_SECONDS=0 FRWHOOP_SOURCE_REVISION=e2e \
+      FRWHOOP_CONTEXT_ENABLED="$context_enabled" FRWHOOP_CONTEXT_ENQUEUE_INTERVAL_SECONDS=2 \
       "$WORKER_BIN"
   else
     say "worker binary not found at $WORKER_BIN (build Tools/CloudWorker first); scoring will not run"

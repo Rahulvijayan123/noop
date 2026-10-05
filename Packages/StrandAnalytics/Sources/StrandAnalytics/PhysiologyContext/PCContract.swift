@@ -105,7 +105,7 @@ extension PhysiologyContext {
         case notApplicable = "not_applicable"
     }
 
-    public struct Confidence: Codable, Equatable, Sendable {
+    public struct Confidence: Codable, Equatable, Sendable, Hashable {
         public var kind: ConfidenceKind
         /// In [0, 1]; nil when `kind == .notApplicable` or the evidence was unavailable.
         public var value: Double?
@@ -114,7 +114,7 @@ extension PhysiologyContext {
     }
 
     /// A named numeric diagnostic (arrays of these replace dictionaries in the JSON).
-    public struct Diagnostic: Codable, Equatable, Sendable {
+    public struct Diagnostic: Codable, Equatable, Sendable, Hashable {
         public var name: String
         public var value: Double
         public init(_ name: String, _ value: Double) { self.name = name; self.value = value }
@@ -663,7 +663,7 @@ extension PhysiologyContext {
     }
 
     /// Local wall-clock interpretation of an instant, with the zone that produced it.
-    public struct LocalTimeRef: Codable, Equatable, Sendable {
+    public struct LocalTimeRef: Codable, Equatable, Sendable, Hashable {
         public var timezoneId: String
         public var utcOffsetS: Int
         /// `yyyy-MM-dd` local day containing the instant.
@@ -690,7 +690,7 @@ extension PhysiologyContext {
     }
 
     /// Duration of one label inside an interval.
-    public struct LabelShare: Codable, Equatable, Sendable {
+    public struct LabelShare: Codable, Equatable, Sendable, Hashable {
         public var label: String
         public var seconds: Double
         /// `seconds / interval duration` (whole-interval denominator).
@@ -702,7 +702,7 @@ extension PhysiologyContext {
 
     /// Duration-weighted composition over the WHOLE interval (spec §6.2). `labels` + `unknownS` + `uncoveredS`
     /// reconcile to `intervalS` within numeric tolerance; nothing is labelled by its final second.
-    public struct ActivityComposition: Codable, Equatable, Sendable {
+    public struct ActivityComposition: Codable, Equatable, Sendable, Hashable {
         public var interval: Interval
         public var intervalS: Int
         public var source: ActivitySource
@@ -738,7 +738,7 @@ extension PhysiologyContext {
     }
 
     /// The history window before a measurement, separate from the measurement interval (spec §6.2).
-    public struct PrecedingHistory: Codable, Equatable, Sendable {
+    public struct PrecedingHistory: Codable, Equatable, Sendable, Hashable {
         public var lookback: Interval
         public var source: ActivitySource
         /// Continuous supported stationary seconds ending at the measurement start.

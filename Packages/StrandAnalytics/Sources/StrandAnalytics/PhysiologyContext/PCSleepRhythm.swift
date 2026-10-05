@@ -85,7 +85,7 @@ extension PhysiologyContext {
     }
 
     /// Sleep/wake and wear evidence over a support interval, with the sources that produced it.
-    public struct SleepWearContext: Codable, Equatable, Sendable {
+    public struct SleepWearContext: Codable, Equatable, Sendable, Hashable {
         public var sleepState: SleepWakeState
         /// e.g. `detected_sleep_session`, `outside_detected_sleep`, `band_sleep_state`.
         public var sleepEvidence: [String]
@@ -179,7 +179,7 @@ extension PhysiologyContext {
     }
 
     /// Wake-relative timing of an instant. Seconds are real elapsed UTC seconds (DST-safe).
-    public struct WakeReference: Codable, Equatable, Sendable {
+    public struct WakeReference: Codable, Equatable, Sendable, Hashable {
         public var secondsSinceWake: Int?
         public var wakeAt: Int?
         public var referenceEpisodeId: String?
