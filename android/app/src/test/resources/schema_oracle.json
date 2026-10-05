@@ -64,7 +64,7 @@
   "tables": {
     "activityContextDay": {
       "platform": "ios_only",
-      "reason": "Derived behavioural-context ledger (GRDB v48): which local days have been decoded, by which activity-classifier decoder / taxonomy version, and how far the data reached. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams and is not part of a backup round-trip.",
+      "reason": "Derived behavioural-context ledger (GRDB v48): which local days have been decoded, by which activity-classifier decoder / taxonomy version, and how far the data reached. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams, so a database restored from before v48 is simply refilled.",
       "columns": [
         {
           "name": "deviceId",
@@ -156,7 +156,7 @@
     },
     "activityContextInterval": {
       "platform": "ios_only",
-      "reason": "Derived behavioural-context intervals (GRDB v48): the activity class / confidence covering [startTs, endTs) plus the physiology with no per-timestamp row of its own (RMSSD, respiratory rate, cadence, HR trend). Physiological samples join to it by time through the *Ctx views instead of carrying a copied label. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams and is not part of a backup round-trip.",
+      "reason": "Derived behavioural-context intervals (GRDB v48): the activity class / confidence covering [startTs, endTs) plus the physiology with no per-timestamp row of its own (RMSSD, respiratory rate, cadence, HR trend). Physiological samples join to it by time through the *Ctx views instead of carrying a copied label. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams, so a database restored from before v48 is simply refilled.",
       "columns": [
         {
           "name": "deviceId",

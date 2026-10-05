@@ -116,7 +116,8 @@ sqlite3 /tmp/whoop.sqlite "select day, activityClass, seconds from activityConte
   measurements of each for a window, and says plainly when nothing was saved.
 - **Stand reminder.** Turn it on under Automations; the threshold stepper is the length of the rolling
   window (50 minutes by default). It is judged after each completed backfill, so a reminder can arrive up
-  to one offload (about 15 minutes) late. The shareable strap log records why it did or did not fire, for
+  to one offload late: about 15 minutes at the default cadence, about a minute with the 5.0/MG "fresh
+  data" cadence in cloud mode, and 45 to 60 minutes while the strap is low on battery or Low refresh is on. The shareable strap log records why it did or did not fire, for
   example `Stand reminder: movedEnough (50-min window: 72 s standing or moving, 98% observed, 90% seated)`.
   The old gravity-only nudge in `BLEManager` is switched off (`legacyInactivityNudgeEnabled`).
 

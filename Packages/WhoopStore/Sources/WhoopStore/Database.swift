@@ -1115,8 +1115,10 @@ extension WhoopStore {
         // hundred interval rows of context (at least 96: an interval never exceeds 15 minutes).
         //
         // `activityContextDay` is the ledger of which days have been materialized and by which decoder /
-        // taxonomy version, so a newer decoder re-derives old days and a restored backup (these tables
-        // are derived, not backed up) is refilled. A day's intervals are always replaced as a unit.
+        // taxonomy version, so a newer decoder re-derives old days and a database restored from before this
+        // migration (no rows here yet) is refilled. A backup is the whole database file, so both tables
+        // ride along in it, but nothing depends on that: they are regenerable from the sample streams.
+        // A day's intervals are always replaced as a unit.
         //
         // Rules for rows (enforced by `WhoopStore.replaceActivityContext`, relied on by the range reads):
         // intervals within one device never overlap, are at most `ActivityContextStore.maxIntervalSeconds`
