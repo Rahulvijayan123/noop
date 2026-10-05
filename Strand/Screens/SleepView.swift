@@ -1099,28 +1099,61 @@ struct SleepView: View {
         .accessibilityLabel("Raw on-device stages. This split is the ring's raw on-device classification read over Bluetooth, not the adjusted stages the Oura app shows. Expect more awake and less deep or REM here than in the Oura app for the same night.")
     }
 
-    /// The night's clock window — when you fell asleep and when you woke — as its own clearly
-    /// labelled row. These were previously only in the nav-header's trailing caption, which
+    /// The night's clock window — when you got into bed, when you fell asleep and when you woke — as its
+    /// own clearly labelled row. These were previously only in the nav-header's trailing caption, which
     /// truncates between the two chevrons on a phone, so in practice the two times people look for
     /// first were effectively hidden. The header now carries just the date span.
+    ///
+    /// In bed and Asleep are separate because they are different moments: the window opens when the wrist
+    /// first goes still, and lying awake after that is wake on the staged timeline. A night without a real
+    /// timeline (imported, or a stage-less stub) has only the window start, and keeps the two-time row.
     @ViewBuilder
     private func sleepWindowRow(_ night: Night) -> some View {
         // A frosted Rest-tinted card (was a flat surfaceRaised block) so the window row sits in the
         // same colour world as the rest of the screen. Bevel treatment — content unchanged.
         NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.restColor) {
             VStack(alignment: .leading, spacing: NoopMetrics.rowSpacing) {
-                HStack(spacing: 0) {
-                    sleepTime(icon: "moon.zzz.fill", label: "Asleep", value: night.onsetText)
-                    Spacer(minLength: 12)
-                    Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 30)
-                    Spacer(minLength: 12)
-                    sleepTime(icon: "sun.max.fill", label: "Woke", value: night.wakeText)
-                    Spacer(minLength: 8)
-                    wakeEditButton(night)
+                if let asleep = night.asleepText {
+                    // Three times with their icons fit a wide phone; a narrow one drops the icons.
+                    ViewThatFits(in: .horizontal) {
+                        threeTimeRow(night, asleep: asleep, icons: true)
+                        threeTimeRow(night, asleep: asleep, icons: false)
+                    }
+                } else {
+                    HStack(spacing: 0) {
+                        sleepTime(icon: "moon.zzz.fill", label: "Asleep", value: night.onsetText)
+                        Spacer(minLength: 12)
+                        windowDivider
+                        Spacer(minLength: 12)
+                        sleepTime(icon: "sun.max.fill", label: "Woke", value: night.wakeText)
+                        Spacer(minLength: 8)
+                        wakeEditButton(night)
+                    }
+                    .frame(maxWidth: .infinity)
                 }
-                .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    private func threeTimeRow(_ night: Night, asleep: String, icons: Bool) -> some View {
+        HStack(spacing: 0) {
+            sleepTime(icon: icons ? "bed.double.fill" : nil, label: "In bed", value: night.onsetText)
+            Spacer(minLength: 8)
+            windowDivider
+            Spacer(minLength: 8)
+            sleepTime(icon: icons ? "moon.zzz.fill" : nil, label: "Asleep", value: asleep)
+            Spacer(minLength: 8)
+            windowDivider
+            Spacer(minLength: 8)
+            sleepTime(icon: icons ? "sun.max.fill" : nil, label: "Woke", value: night.wakeText)
+            Spacer(minLength: 8)
+            wakeEditButton(night)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var windowDivider: some View {
+        Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 30)
     }
 
     /// A compact explainer popover: the verbatim foundation reason text, with the nap suffix appended for a
@@ -1156,12 +1189,14 @@ struct SleepView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func sleepTime(icon: String, label: LocalizedStringKey, value: String) -> some View {
+    private func sleepTime(icon: String?, label: LocalizedStringKey, value: String) -> some View {
         HStack(spacing: 10) {
-            Image(systemName: icon)
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.restColor)
-                .accessibilityHidden(true)
+            if let icon {
+                Image(systemName: icon)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.restColor)
+                    .accessibilityHidden(true)
+            }
             VStack(alignment: .leading, spacing: 1) {
                 Text(label).strandOverline()
                 Text(value).font(StrandFont.number(22)).foregroundStyle(StrandPalette.textPrimary)
@@ -2723,7 +2758,7 @@ private struct SleepTimeEditor: View {
     init(bedTs: Int, wakeTs: Int,
          title: LocalizedStringKey = "Edit sleep times",
          blurb: LocalizedStringKey = "Correct when you went to bed and woke. Stages are re-derived from your data; the edit is kept through the next strap sync.",
-         bedLabel: LocalizedStringKey = "Asleep",
+         bedLabel: LocalizedStringKey = "In bed",
          wakeLabel: LocalizedStringKey = "Woke",
          deleteLabel: LocalizedStringKey = "Delete this sleep",
          coverage: ClosedRange<Int>? = nil,

@@ -946,6 +946,9 @@ struct MetricDetailView: View {
         let fellBack = effRange != range
         return ScrollView {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                // Skin Temperature and Blood Oxygen lead with the strap's own readings, plotted; the daily
+                // chart below is a per-night summary of them.
+                bankedReadingsSection
                 if loaded && win.isEmpty {
                     // No data in the entire history — keep the range bar for context, then the
                     // honest empty state (no scenic hero floating over nothing). Deliberately
@@ -1079,6 +1082,23 @@ struct MetricDetailView: View {
         if let intraday = intradayMetric {
             IntradaySeriesSection(metric: intraday, accent: metricAccent(metric))
         }
+    }
+
+    /// Skin Temperature and Blood Oxygen (the WHOOP's own) get an "Every reading" card of what the strap
+    /// banked over the last 24 hours. Their daily charts hold one point per night, which hides the tens of
+    /// thousands of skin-temperature samples and hundreds of SpO₂ readings behind each.
+    @ViewBuilder
+    private var bankedReadingsSection: some View {
+        if hasBankedReadings {
+            BankedReadingsSection(signal: metric.key == "skin_temp" ? .skinTemp : .bloodOxygen,
+                                  accent: metricAccent(metric))
+        }
+    }
+
+    /// Whether this page is the WHOOP's own Skin Temperature or Blood Oxygen, the two signals whose daily chart
+    /// is a per-night summary of many banked readings. Their captions count nights, not "readings".
+    private var hasBankedReadings: Bool {
+        metric.source == "my-whoop" && (metric.key == "skin_temp" || metric.key == "spo2")
     }
 
     private var intradayMetric: IntradayMetric? {
@@ -1492,7 +1512,7 @@ struct MetricDetailView: View {
                               windowFellBack: Bool) -> String {
         guard loaded, !windowed.isEmpty else { return "—" }
         let n = windowed.count
-        let dailySummary = intradayMetric != nil
+        let dailySummary = intradayMetric != nil || hasBankedReadings
         if isStepsDetail {
             let name = dailySummary
                 ? DailyHistoryWording.rangeName(effectiveRange.name, widened: windowFellBack)
@@ -1532,7 +1552,7 @@ struct MetricDetailView: View {
         }()
         let heroValue = latestPoint.map { fmt($0.value) } ?? "—"
         let subtitle: String = {
-            let dailySummary = intradayMetric != nil
+            let dailySummary = intradayMetric != nil || hasBankedReadings
             if isStepsDetail {
                 let name = dailySummary
                     ? DailyHistoryWording.rangeName(effectiveRange.name, widened: windowFellBack)
@@ -1797,7 +1817,8 @@ struct MetricDetailView: View {
         if !rows.isEmpty {
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                    Text("Readings").strandOverline()
+                    Text(hasBankedReadings ? LocalizedStringKey("Nightly summaries") : LocalizedStringKey("Readings"))
+                        .strandOverline()
                     // Slim column header naming the three columns — SAME frames as the data rows below so
                     // each label sits over its column. Android twin (VitalReadingsTable) mirrors this.
                     HStack(spacing: 12) {

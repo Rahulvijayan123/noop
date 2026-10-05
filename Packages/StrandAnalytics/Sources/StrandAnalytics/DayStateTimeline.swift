@@ -42,6 +42,44 @@ public struct DayStateSpan: Equatable, Sendable {
     public let start: Int
     public let end: Int
     public init(start: Int, end: Int) { self.start = start; self.end = end }
+
+    /// A night's sleep as spans: the non-wake stretches of its staged `[{start, end, stage}]` segments,
+    /// clipped to the night's `[start, end)` and joined where they touch. Wake inside the night, lying awake
+    /// before sleep came included, is left out. A night with no segment timeline (an imported
+    /// `{stage: minutes}` total, or nothing) is asleep for its whole window, the only claim it carries.
+    public static func asleep(stagesJSON: String?, start: Int, end: Int) -> [DayStateSpan] {
+        guard end > start else { return [] }
+        guard let json = stagesJSON, let data = json.data(using: .utf8),
+              let segs = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]], !segs.isEmpty else {
+            return [DayStateSpan(start: start, end: end)]
+        }
+        let stages = segs.compactMap { seg -> StageSegment? in
+            guard let s = (seg["start"] as? NSNumber)?.intValue, let e = (seg["end"] as? NSNumber)?.intValue,
+                  let stage = seg["stage"] as? String else { return nil }
+            return StageSegment(start: s, end: e, stage: stage)
+        }
+        return asleep(stages: stages, start: start, end: end)
+    }
+
+    /// `asleep(stagesJSON:start:end:)` over decoded segments (a night the caller has just staged).
+    public static func asleep(stages: [StageSegment], start: Int, end: Int) -> [DayStateSpan] {
+        guard end > start else { return [] }
+        var timed: [(Int, Int, Bool)] = []
+        for seg in stages {
+            let lo = max(seg.start, start), hi = min(seg.end, end)
+            if hi > lo { timed.append((lo, hi, seg.stage != "wake" && seg.stage != "awake")) }
+        }
+        guard !timed.isEmpty else { return [DayStateSpan(start: start, end: end)] }
+        var out: [DayStateSpan] = []
+        for (lo, hi, asleep) in timed.sorted(by: { $0.0 < $1.0 }) where asleep {
+            if let last = out.last, lo <= last.end {
+                out[out.count - 1] = DayStateSpan(start: last.start, end: max(last.end, hi))
+            } else {
+                out.append(DayStateSpan(start: lo, end: hi))
+            }
+        }
+        return out
+    }
 }
 
 public struct DayStateSegment: Equatable, Sendable, Identifiable, Codable {

@@ -36,9 +36,13 @@ struct FullDayChartView: View {
     /// False keeps the multi-metric Deep Timeline exactly as it was.
     private let showsActivityTimeline: Bool
 
-    init(dayStart: Date? = nil, showsActivityTimeline: Bool = false) {
+    /// `initialMetric` opens the timeline on a given signal (the Skin Temperature and Blood Oxygen pages link
+    /// here to show every reading); heart rate stays the default.
+    init(dayStart: Date? = nil, showsActivityTimeline: Bool = false,
+         initialMetric: Repository.TimelineMetric = .hr) {
         _dayStart = State(initialValue: dayStart ?? Repository.logicalDayStart(Date()))
         _didLandOnLatest = State(initialValue: dayStart != nil)
+        _metric = State(initialValue: initialMetric)
         self.showsActivityTimeline = showsActivityTimeline
     }
 
@@ -68,9 +72,10 @@ struct FullDayChartView: View {
     /// else "Brand Model"), so an active Oura ring reads "Oura …" over the ring's own series instead of
     /// the strap label this row shipped with. `nil` (no registry row) keeps the legacy "My WHOOP".
     @State private var sourceName: String? = nil
-    /// #623: true when the current SpO2/respiration metric is genuinely unsupported on the active strap —
-    /// a 5.0-family strap that has NEVER produced it (4.0-only wire signals) — vs merely an empty window.
-    @State private var metricUnsupported = false
+    /// True when the active strap is a 5.0/MG. Its SpO₂ track is the strap's own overnight estimate (#623
+    /// used to call that track "unsupported", because it read only the 4.0's raw red/IR table), so an empty
+    /// window there means the strap's sleep-only schedule, not a missing channel.
+    @State private var strapIsWhoop5 = false
 
     @State private var series: Repository.TimelineSeries = .empty
     // #979 spin-off — day annotations, mirroring the classic Today's Overview HR markers: the main
@@ -119,32 +124,19 @@ struct FullDayChartView: View {
             if showsActivityTimeline {
                 #if DEBUG
                 if !DemoLayout.hidesActivity {
-                    ActivityContextSection(
-                        document: timeline.activityContext,
-                        busy: timeline.activityBusy,
-                        partialReach: timeline.activityPartialReach,
-                        window: visibleWindow,
-                        onOpen: open
-                    )
-                    .id(Int(dayStart.timeIntervalSince1970))
+                    DayStretchesSection(timeline: timeline, window: visibleWindow, onOpen: open, onZoom: zoomTo)
+                        .id(Int(dayStart.timeIntervalSince1970))
                 }
                 #else
-                ActivityContextSection(
-                    document: timeline.activityContext,
-                    busy: timeline.activityBusy,
-                    partialReach: timeline.activityPartialReach,
-                    window: visibleWindow,
-                    onOpen: open
-                )
-                .id(Int(dayStart.timeIntervalSince1970))
+                DayStretchesSection(timeline: timeline, window: visibleWindow, onOpen: open, onZoom: zoomTo)
+                    .id(Int(dayStart.timeIntervalSince1970))
                 #endif
-                DayStateTimelineSection(
-                    segments: timeline.dayStates,
-                    busy: timeline.statesBusy,
-                    reach: timeline.statesReach,
-                    window: visibleWindow,
-                    onOpen: open
-                )
+                NavigationLink {
+                    StretchFeedbackHistoryView()
+                } label: {
+                    StretchFeedbackLinkRow()
+                }
+                .buttonStyle(.plain)
                 NavigationLink(value: TabRoute.fullDayChart) {
                     HStack {
                         Text("Other metrics in the Deep Timeline")
@@ -171,10 +163,8 @@ struct FullDayChartView: View {
         }
         #endif
         .sheet(item: $openStretch) { input in
-            StretchDetailSheet(input: input, deviceId: repo.deviceId) { range in
-                withAnimation(StrandMotion.interactive) { zoomDomain = range }
-            }
-            .environmentObject(repo)
+            StretchDetailSheet(input: input, deviceId: repo.deviceId, onZoom: zoomTo)
+                .environmentObject(repo)
         }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
@@ -188,6 +178,10 @@ struct FullDayChartView: View {
     private func open(_ target: StretchTarget) {
         openStretch = StretchSheetInput(target: target, document: timeline.activityContext,
                                         segments: timeline.dayStates)
+    }
+
+    private func zoomTo(_ range: ClosedRange<Date>) {
+        withAnimation(StrandMotion.interactive) { zoomDomain = range }
     }
 
     #if DEBUG
@@ -227,19 +221,12 @@ struct FullDayChartView: View {
     }
     #endif
 
-    /// #623: a SpO2 track is "unsupported on this strap" only when it's a 5.0-family strap that has never
-    /// produced the metric — not merely an empty window (a 4.0-v24 banks SpO2, and the legacy bare-"WHOOP"
-    /// model resolves to the 5.0 family). Re-resolves when the metric changes.
-    ///
-    /// Respiration is deliberately not asked: a strap with no raw breathing channel now gets a rate estimated
-    /// from the heartbeat rhythm, so an empty respiration window means "no steady beats here", not "this strap
-    /// cannot do it".
+    /// Which strap family is active, so an empty SpO₂ window can be explained truthfully (#623). A 5.0/MG
+    /// does send SpO₂, as its own estimate while the wearer sleeps, and the SpO₂ track plots it; it is never
+    /// "unsupported". Respiration is likewise never called unsupported: a strap with no raw breathing
+    /// channel gets a rate estimated from the heartbeat rhythm. Re-resolves when the metric changes.
     private func resolveMetricUnsupported() async {
-        guard repo.activeStrapIsWhoop5(), metric == .spo2 else {
-            metricUnsupported = false
-            return
-        }
-        metricUnsupported = !(await repo.strapHasEverProduced(metric))
+        strapIsWhoop5 = await repo.activeStrapIsWhoop5WithEvidence()
     }
 
     /// Annotations re-read only when the shown day changes or fresh strap data lands — deliberately NOT
@@ -440,15 +427,16 @@ struct FullDayChartView: View {
         .padding(.horizontal, NoopMetrics.space6)
     }
 
-    /// #623: on a 5.0/MG the SpO2 track is PERMANENTLY empty (a 4.0-only wire signal), so say that instead of
-    /// a generic "nothing offloaded" that reads as broken. Strap view only (ownedOnly). Twin of Android
-    /// FullDayChartScreen.EmptyTimelineState.
+    /// On a 5.0/MG the strap writes its SpO₂ estimate only while the wearer sleeps and lies still, in short
+    /// windows, so a daytime (or any awake) window is legitimately empty. Say that instead of a generic
+    /// "nothing offloaded" that reads as broken. Strap view only (ownedOnly). (#623 used to say the strap
+    /// "doesn't send SpO₂ over Bluetooth", which stopped being true once the estimate was plotted.)
     ///
     /// Respiration and SDNN are read from the heartbeat rhythm, so an empty window there means the beats were
     /// not steady enough to read (movement, loose fit, a sync gap), not that the strap lacks the channel.
     private var emptyReason: String {
-        if ownedOnly, metricUnsupported, metric == .spo2 {
-            return String(localized: "This strap doesn’t send SpO₂ over Bluetooth. Import a WHOOP export or Health Connect to see it.")
+        if ownedOnly, strapIsWhoop5, metric == .spo2 {
+            return String(localized: "Your strap measures SpO₂ only while you sleep, so there are no readings for this part of the day. Check the night around it.")
         }
         if ownedOnly, metric == .respiration {
             return String(localized: "Breathing is estimated from your heartbeat rhythm, and nothing steady enough was recorded in this window. It reads best while you are still, such as asleep.")
@@ -590,9 +578,16 @@ struct FullDayChartView: View {
         case .motion: return " g"
         // Seconds of movement per ~30 s window (the ring's OWN 0x47 activity), so tag it "s".
         case .ouraMovement: return " s"
-        case .spo2, .bandSleepState: return ""
+        // A percentage (the 5/MG's own estimate, or an Oura ring's reading) reads "97%"; the 4.0's red/IR
+        // ratio proxy stays unitless. The two never share a chart: a ratio is well under 10 and a percentage
+        // is 50 or more (`spo2TimelineValue` gates a single-channel reading to 50...110).
+        case .spo2: return Self.spo2IsPercent(displayPoints.last?.value) ? "%" : ""
+        case .bandSleepState: return ""
         }
     }
+
+    /// Whether an SpO₂ timeline value is a percentage rather than the 4.0's red/IR ratio proxy.
+    static func spo2IsPercent(_ value: Double?) -> Bool { (value ?? 0) >= 50 }
 
     private func format(_ v: Double) -> String {
         switch metric {
@@ -601,7 +596,7 @@ struct FullDayChartView: View {
         // `v` already arrives in the displayed unit — callers read from `displayPoints`, which converts
         // skin temp to °F upfront so the chart's own axis (plotted from the same points) agrees. (#101)
         case .skinTemp: return String(format: "%.1f", v)
-        case .spo2: return String(format: "%.2f", v)
+        case .spo2: return Self.spo2IsPercent(v) ? String(Int(v.rounded())) : String(format: "%.2f", v)
         // Resting wrist motion is a few thousandths of a g; two decimals would read as a flat 0.00.
         case .motion: return String(format: "%.3f", v)
         // #175: name the band's own state at the nearest code so the readout reads "asleep", not "2.0".

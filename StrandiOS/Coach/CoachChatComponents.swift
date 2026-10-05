@@ -86,6 +86,9 @@ struct CoachBubble: View {
     var followUps: [String] = []
     var onFollowUp: (String) -> Void = { _ in }
     @State private var containerWidth: CGFloat = 560
+    /// Set once this bubble has shown the loading mosaic, so the visual that follows dissolves out of it.
+    /// Visuals restored from history never saw it and appear plainly.
+    @State private var vizWasGenerating = false
 
     private var maxBubbleWidth: CGFloat { min(containerWidth * 0.82, 560) }
     private var isUser: Bool { message.role == .user }
@@ -114,8 +117,9 @@ struct CoachBubble: View {
                     } else if let viz = message.viz {
                         CoachVizView(viz: viz)
                             .equatable()
+                            .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) { vizWasGenerating = false }
                             .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                            .transition(.opacity.combined(with: .move(edge: .bottom)))
+                            .transition(.opacity)
                     }
                 }
                 if !isUser, message.didStall, let onRetry { retryButton(onRetry) }
@@ -128,6 +132,8 @@ struct CoachBubble: View {
             Color.clear.preference(key: CoachBubbleWidthKey.self, value: geo.size.width)
         })
         .onPreferenceChange(CoachBubbleWidthKey.self) { containerWidth = $0 }
+        .onAppear { if message.vizPhase == .generating { vizWasGenerating = true } }
+        .onChange(of: message.vizPhase) { _, phase in if phase == .generating { vizWasGenerating = true } }
     }
 
     private var avatar: some View {

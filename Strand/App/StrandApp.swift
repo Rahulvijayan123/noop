@@ -8,6 +8,10 @@ struct StrandApp: App {
         // #1008: pin the pre-change Overnight-only default for existing installs before
         // anything reads it. Idempotent; a no-op on fresh installs and after the first launch.
         PuffinExperiment.migrateContinuousHrvOvernightDefault()
+        // Skin Temp and Blood Oxygen join a saved Key Metrics layout once. Before the first Today render.
+        KeyMetricPrefs.migrateSkinTempAndBloodOxygenShown()
+        // WHOOP 4.0 is retired: a saved "WHOOP 4.0" selection becomes the supported 5.0/MG before anything reads it.
+        WhoopModel.migrateLegacySelection()
         #if DEBUG
         // DEBUG-only promo-screenshot harness: when launched with `--demo-hour <Int>`, pin the Today
         // screen to that hour's day-cycle scene + a plausible per-hour stat frame. Runs synchronously

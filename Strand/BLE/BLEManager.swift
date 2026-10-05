@@ -4231,9 +4231,16 @@ public final class BLEManager: NSObject, ObservableObject {
         featureFlagReport = nil
         featureFlagAwaiting = nil
         let text = report.render()
+        enumeratedFlagKeys = report.keys
         log("Feature-flag probe (#761):\n\(text)")
         state.featureFlagProbe = text
     }
+
+    /// The key names the last completed feature-flag enumeration read off the strap, in the strap's order
+    /// (empty until one completes). Lets a value read (`probeDeviceConfigValues(extraFlagKeys:)`) cover every
+    /// flag THIS firmware lists rather than only the names the app already knew. Names only: no value, and
+    /// nothing here can cause a write.
+    public private(set) var enumeratedFlagKeys: [String] = []
 
     /// Clear the #761 probe result (Devices dialog dismissed). Twin of Android clearFeatureFlagProbe().
     public func clearFeatureFlagProbe() { state.featureFlagProbe = nil }
@@ -4269,7 +4276,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// of guessed oxygen key names. Result goes to `LiveState.deviceConfigProbe` (the Devices dialog) and
     /// to the strap log — no new storage. User-initiated only, Test Centre → Connection gated. Twin of
     /// Android `probeDeviceConfigValues()`.
-    public func probeDeviceConfigValues() {
+    public func probeDeviceConfigValues(extraFlagKeys: [String] = []) {
         guard state.connected else {
             log("Device-config read probe (#103) ignored — not connected")
             return
@@ -4291,10 +4298,14 @@ public final class BLEManager: NSObject, ObservableObject {
         #else
         let flagKeys = Whoop5Config.enableR22Sequence.map(\.name)
         #endif
+        // Names the strap itself enumerated that the plan does not already read. Reading a value is the same
+        // read-only GET_FF_VALUE(128) the known names use; the plan is capped well under the probe's hard
+        // step ceiling (`DeviceConfigReadProbe.maxSteps`).
+        let extras = extraFlagKeys.filter { !flagKeys.contains($0) }.prefix(30)
         deviceConfigReport = DeviceConfigReadProbeReport(
             family: selectedModel.deviceFamily,
             // Include names observed on the strap without changing the R22 write sequence.
-            knownFlagKeys: flagKeys,
+            knownFlagKeys: flagKeys + extras,
             candidateKeys: DeviceConfigReadProbe.oxygenCandidateKeys)
         state.deviceConfigProbe = BLEManager.deviceConfigProbeWaiting
         log("Device-config read probe (#103): asking for config VALUES via GET_DEVICE_CONFIG_VALUE(121) + GET_FF_VALUE(128) on family=\(selectedModel.deviceFamily); read-only (SET_FF_VALUE/120 and SET_DEVICE_CONFIG_VALUE/119 are never sent from this path)")
@@ -5177,8 +5188,9 @@ public final class BLEManager: NSObject, ObservableObject {
             withServices: diagnosticServices,
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         )
-        guard allowFallback else { return }
         let fallback = model.fallbackScanModel
+        // One supported WHOOP family: a rotation would restart the identical scan every few seconds.
+        guard allowFallback, fallback != model else { return }
         let work = DispatchWorkItem { [weak self] in
             guard let self, self.central.isScanning, !self.state.connected else { return }
             self.log("No \(model.displayName) found yet — trying \(fallback.displayName)")
@@ -5980,7 +5992,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // forRegistryModel returns the right DeviceFamily (fixes skin-temp ADC scale + display).
         if !modelStamped, let rs = registryStore,
            let stale = try? rs.all().first(where: { $0.status == .active && $0.model == "WHOOP" }) {
-            let correct = selectedModel == .whoop4 ? "WHOOP 4.0" : "WHOOP 5.0 / MG"
+            let correct = selectedModel.displayName
             try? rs.setModel(stale.id, model: correct)
             log("Updated device model from \"WHOOP\" to \"\(correct)\" (#716)")
             modelStamped = true
@@ -6699,7 +6711,12 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         if services.contains(where: { $0.uuid == BLEManager.whoop5Service }) {
             persistSelectedModel(.whoop5mg)
         } else if services.contains(where: { $0.uuid == BLEManager.customService }) {
-            persistSelectedModel(.whoop4)
+            // The WHOOP 4.0 service. WHOOP 4.0 is retired from this app, so a 4.0 that reached here through a
+            // restored or remembered link (a scan never selects it) is refused rather than adopted and
+            // labelled as some other model.
+            log("This is a WHOOP 4.0, which this app no longer supports — disconnecting.")
+            central.cancelPeripheralConnection(peripheral)
+            return
         }
         for s in services {
             switch s.uuid {

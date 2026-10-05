@@ -27,10 +27,10 @@ struct LiveView: View {
     /// the request; LiveView never needs to know which.
     @EnvironmentObject private var router: NavRouter
 
-    /// Which strap the user is pairing — persists across launches. Drives which
-    /// BLE service we scan for so a WHOOP 4.0 scan never hangs on a WHOOP 5 wrist.
-    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
-    private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
+    /// Which strap the user is pairing — persists across launches. Drives which BLE service we scan for.
+    /// WHOOP 5.0/MG is the only WHOOP model (4.0 was retired), so this always resolves to it.
+    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop5mg.rawValue
+    private var selectedModel: WhoopModel { WhoopModel.resolve(selectedModelRaw) }
 
     /// "Card transparency" (0–100, default 100): fades the live console cards in lockstep with the frosted
     /// cards; content stays readable. Mirrors Kotlin `NoopPrefs.cardOpacityPercent`.
@@ -38,14 +38,9 @@ struct LiveView: View {
     private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
 
     /// Maps the picked strap model to the HRV-reading source so the spot caveat is honest (#537): a
-    /// WHOOP 5/MG's R-R is optical PPG (noisier), a WHOOP 4 is electrical R-R. Mirrors the Android
+    /// WHOOP 5/MG's R-R is optical PPG (noisier than a chest strap's electrical R-R). Mirrors the Android
     /// `LiveScreen` mapping.
-    private var hrvSnapshotSource: SpotHrvReading.Source {
-        switch selectedModel {
-        case .whoop5mg: return .opticalPPG
-        case .whoop4:   return .chestStrap
-        }
-    }
+    private var hrvSnapshotSource: SpotHrvReading.Source { .opticalPPG }
 
     /// Effort display scale (#268) — routes the live + saved workout Effort read-outs. Display-only.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
@@ -542,32 +537,13 @@ struct LiveView: View {
 
     // MARK: - Strap picker
 
-    /// Pick the strap family to scan for. Switching the selection drops the current strap's bond so the
-    /// newly-picked one connects fresh — letting a user move between a WHOOP 4 and a 5/MG.
+    /// The strap section. There is one WHOOP model, so there is nothing to pick; what remains is the 5/MG
+    /// pairing guidance: the strap bonds to one host at a time, so if it's still paired in the official WHOOP
+    /// app a scan here finds nothing. Shown up front, not only after a failed scan (#130) or a bond-refusal
+    /// (which is the separate `pairingHint` banner).
     private var modelPicker: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                Text("Strap").font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
-                SegmentedPillControl(
-                    WhoopModel.allCases,
-                    selection: Binding(
-                        get: { selectedModel },
-                        set: { newModel in
-                            guard newModel.rawValue != selectedModelRaw else { return }
-                            selectedModelRaw = newModel.rawValue
-                            // Clear the previous strap's sticky bond/connection so the next scan targets the
-                            // new family's service and bonds it fresh.
-                            model.prepareStrapSwitch()
-                        }
-                    ),
-                    label: { $0.displayName }
-                )
-                Spacer()
-            }
-            // Proactive 5/MG guidance: the strap bonds to one host at a time, so if it's still paired in
-            // the official WHOOP app a scan here finds nothing. Shown the moment 5/MG is picked — not only
-            // after a failed scan (#130) or a bond-refusal (which is the separate `pairingHint` banner).
-            if selectedModel == .whoop5mg { whoop5PairingNote }
+            whoop5PairingNote
         }
     }
 

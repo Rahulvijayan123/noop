@@ -59,7 +59,7 @@ extension Repository {
         let input = ActivityContextTrackInput(
             dayStart: s.start, dayEnd: s.end,
             hr: s.hr, gravity: s.gravity, steps: s.stepCounter,
-            sleep: s.sleep,
+            sleep: s.sleep, inBed: s.inBed,
             // A finished day has been through sleep detection; a live one has not seen the present yet.
             sleepKnownOutsideSessions: !s.isLiveDay,
             workouts: s.workouts, offWrist: s.offWrist)

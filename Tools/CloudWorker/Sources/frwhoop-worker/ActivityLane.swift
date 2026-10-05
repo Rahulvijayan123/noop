@@ -411,8 +411,8 @@ struct ActivityLane {
             throw PostgresClient.Error(message: "activity lease lost before the stream day decode",
                                        sqlstate: "55000", kind: .stale)
         }
-        let asleep = try loadIntervals(kindClause: "kind = 'sleep'", user: job.userId, device: job.deviceId,
-                                       dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let nights = try loadPublishedNights(user: job.userId, device: job.deviceId,
+                                             dayStart: dayBounds.start, dayEnd: dayBounds.end)
         let exercise = try loadIntervals(kindClause: "kind in ('workout','manual_workout')",
                                          user: job.userId, device: job.deviceId,
                                          dayStart: dayBounds.start, dayEnd: dayBounds.end)
@@ -420,8 +420,9 @@ struct ActivityLane {
             db: db, userId: job.userId, deviceId: job.deviceId,
             dayStart: dayBounds.start, dayEnd: dayBounds.end)
         let built = try ActivityContextDays.buildStreamDay(
-            day: job.day, dayBounds: dayBounds, streams: streams, sleep: asleep, exercise: exercise,
-            now: Int(Date().timeIntervalSince1970))
+            day: job.day, dayBounds: dayBounds, streams: streams,
+            sleep: ActivityContextDays.asleepSpans(nights), inBed: nights.map { (start: $0.start, end: $0.end) },
+            exercise: exercise, now: Int(Date().timeIntervalSince1970))
         guard try renewLease(job: job) else {
             throw PostgresClient.Error(message: "activity lease lost before the stream day completion",
                                        sqlstate: "55000", kind: .stale)
@@ -547,10 +548,11 @@ struct ActivityLane {
         }
         let runs = Self.splitRuns(seconds: timeline.seconds)
 
-        // 4. Existing sleep sessions + workout records for the day's epochs.
-        let asleep = try loadIntervals(kindClause: "kind = 'sleep'",
-                                       user: job.userId, device: job.deviceId,
-                                       dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        // 4. The published nights + workout records for the day's epochs.
+        let nights = try loadPublishedNights(user: job.userId, device: job.deviceId,
+                                             dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let asleep = ActivityContextDays.asleepSpans(nights)
+        let inBed = nights.map { (start: $0.start, end: $0.end) }
         let exercise = try loadIntervals(kindClause: "kind in ('workout','manual_workout')",
                                          user: job.userId, device: job.deviceId,
                                          dayStart: dayBounds.start, dayEnd: dayBounds.end)
@@ -626,7 +628,7 @@ struct ActivityLane {
         //     streams through the shared probabilistic decoder. Best effort — see the type comment.
         let dayDocument = try buildContextDay(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
-            asleep: asleep, exercise: exercise)
+            asleep: asleep, inBed: inBed, exercise: exercise)
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
@@ -691,6 +693,7 @@ struct ActivityLane {
         windows: [ActivityPythonService.WindowPrediction],
         versions: (model: String, preprocessing: String),
         asleep: [(start: Int, end: Int)],
+        inBed: [(start: Int, end: Int)] = [],
         exercise: [(start: Int, end: Int)]) throws -> ActivityContextDays.Built? {
         guard contextDaysEnabled else { return nil }
         do {
@@ -703,7 +706,7 @@ struct ActivityLane {
                 dayStart: dayBounds.start, dayEnd: dayBounds.end)
             let now = Int(Date().timeIntervalSince1970)
             let input = ActivityContextDays.trackInput(
-                windows: windows, streams: streams, sleep: asleep, exercise: exercise,
+                windows: windows, streams: streams, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
                 encoderVersion: versions.model)
             return try ActivityContextDays.build(
@@ -834,6 +837,43 @@ struct ActivityLane {
             records.append(contentsOf: try Npb1ImuDecoder.decode(decoded))
         }
         return records
+    }
+
+    /// The nights that can overlap `[dayStart, dayEnd)`, as the scoring lane last published them: every
+    /// sleep session in the newest snapshot of each local day from the day before the UTC day to the day
+    /// after (a night is filed under its local wake day). Naps included, as the app's own lane does. The
+    /// newest revision per day is picked from the read index first, so only those payloads are read: a busy
+    /// day holds hundreds of revisions.
+    ///
+    /// `public.sessions` was the source once; the current scoring lane publishes nights only inside
+    /// `scoring_snapshots_v2`, so that table stopped receiving sleep and every stream day decoded as if
+    /// the wearer never slept. Stream-day jobs are queued off scoring completions for the neighbouring
+    /// days, so a newly published night re-dirties the day that reads it.
+    private func loadPublishedNights(user: String, device: String,
+                                     dayStart: Int, dayEnd: Int) throws -> [ActivityContextDays.Night] {
+        let rows = try db.query("""
+            with newest as (
+              select max(result_revision) as rr
+                from public.scoring_snapshots_v2
+               where user_id=$1::uuid and device_id=$2::uuid
+                 and day between ($3::timestamptz at time zone 'UTC')::date - 1
+                             and ($4::timestamptz at time zone 'UTC')::date + 1
+               group by day)
+            select distinct on (night->>'start_at', night->>'end_at')
+                   extract(epoch from (night->>'start_at')::timestamptz)::bigint as s,
+                   extract(epoch from (night->>'end_at')::timestamptz)::bigint as e,
+                   (night->'stages')::text as stages
+              from newest join public.scoring_snapshots_v2 snap on snap.result_revision = newest.rr
+             cross join lateral jsonb_array_elements(
+                 case when jsonb_typeof(snap.payload->'sleep') = 'array' then snap.payload->'sleep'
+                      else '[]'::jsonb end) as night
+             where (night->>'start_at')::timestamptz < $4::timestamptz
+               and (night->>'end_at')::timestamptz > $3::timestamptz
+            """, [user, device, Self.isoUTC(dayStart), Self.isoUTC(dayEnd)])
+        return rows.compactMap { r in
+            guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? ""), e > s else { return nil }
+            return ActivityContextDays.Night(start: s, end: e, stagesJSON: r["stages"])
+        }
     }
 
     private func loadIntervals(kindClause: String, user: String, device: String,

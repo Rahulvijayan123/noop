@@ -1254,7 +1254,10 @@ struct DayScorer {
                                    day: claim.day,
                                    dayStart: dayStart, dayEnd: dayEnd,
                                    hrvSlotStarts: Self.hrvSlotStarts(fromPoints: slots),
-                                   published: publishedActivity)
+                                   published: publishedActivity,
+                                   sleepIntervals: result.sleepSessions.flatMap {
+                                       DayStateSpan.asleep(stages: $0.stages, start: $0.start, end: $0.end)
+                                   }.map { (start: $0.start, end: $0.end) })
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
@@ -1551,7 +1554,8 @@ struct DayScorer {
                                       day: String,
                                       dayStart: Int, dayEnd: Int,
                                       hrvSlotStarts: Set<Int>? = nil,
-                                      published: PublishedActivityEpochs? = nil) {
+                                      published: PublishedActivityEpochs? = nil,
+                                      sleepIntervals: [(start: Int, end: Int)]? = nil) {
         let published = published ?? readPublishedActivityEpochs(
             db: db, userId: userId, deviceId: deviceId, day: day, dayStart: dayStart, dayEnd: dayEnd)
         let epochs = published.epochs
@@ -1577,23 +1581,9 @@ struct DayScorer {
             inputRevision = 0
         }
 
-        let asleep: [(start: Int, end: Int)]
-        do {
-            let sessionRows = try db.isolatingFailures { try db.query("""
-                select extract(epoch from start_at)::bigint as s,
-                       extract(epoch from end_at)::bigint as e
-                from public.sessions
-                where user_id = $1::uuid and device_id = $2::uuid and kind = 'sleep'
-                  and start_at < $4::timestamptz and end_at > $3::timestamptz
-                """, [userId, deviceId, ActivityLane.isoUTC(dayStart),
-                      ActivityLane.isoUTC(dayEnd)]) }
-            asleep = sessionRows.compactMap { r in
-                guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? "") else { return nil }
-                return (start: s, end: e)
-            }
-        } catch {
-            asleep = []
-        }
+        // The night being scored, staged: its sleep epochs. `public.sessions` was read here once; the
+        // current scoring lane no longer writes nights to it, so a caller without the night gets none.
+        let asleep: [(start: Int, end: Int)] = sleepIntervals ?? []
 
         guard let doc = try? ActivityLane.activityDocument(
             epochs: epochs, sleepIntervals: asleep,

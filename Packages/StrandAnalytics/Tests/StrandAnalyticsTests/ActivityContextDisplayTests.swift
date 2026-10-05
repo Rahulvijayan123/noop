@@ -131,12 +131,33 @@ final class ActivityContextDisplayTests: XCTestCase {
                                                  sleep: .awake, confidence: 0.7), "Asleep")
     }
 
-    func testAClearSeatedReadingOverridesALoggedSleepSession() {
-        let stationary = HeadProbabilities<LocomotionClass>([.stationary: 0.95, .unknown: 0.05])
-        let quiet = HeadProbabilities<ArmBehaviorClass>([.quiet: 0.7, .unknown: 0.3])
-        let upAtDesk = HeadProbabilities<PostureClass>([.seatedLikely: 0.62, .uprightStationary: 0.2, .unknown: 0.18])
-        XCTAssertNotEqual(ActivityDisplay.derive(posture: upAtDesk, locomotion: stationary, arm: quiet,
-                                                 sleep: .asleep, confidence: 0.8), "Asleep")
+    /// A still sleeper's wrist leans seated as often as not: the reported night's 2:23 a.m. stretch read
+    /// seated 0.80 / upright 0.14 while the strap and the session both said asleep, and the old override
+    /// labelled it "Sitting quietly". On a sleep epoch the posture lean no longer overrides the night.
+    func testASeatedLeanDoesNotOverrideASleepEpoch() {
+        let stationary = HeadProbabilities<LocomotionClass>([.stationary: 0.97, .unknown: 0.03])
+        let deskLike = HeadProbabilities<ArmBehaviorClass>([.deskLike: 0.77, .fidgeting: 0.23])
+        let seated = HeadProbabilities<PostureClass>([.seatedLikely: 0.80, .uprightStationary: 0.14, .unknown: 0.06])
+        XCTAssertEqual(ActivityDisplay.derive(posture: seated, locomotion: stationary, arm: deskLike,
+                                              sleep: .asleep, inBed: true, confidence: 0.61), "Asleep")
+        // Movement still breaks it: walking inside the night is walking.
+        let walking = HeadProbabilities<LocomotionClass>([.walking: 0.8, .stationary: 0.2])
+        XCTAssertEqual(ActivityDisplay.derive(posture: seated, locomotion: walking, arm: deskLike,
+                                              sleep: .asleep, inBed: true, confidence: 0.7), "Walking")
+    }
+
+    /// Lying awake in bed (staged wake inside the night) is in bed, however seated the wrist leans: the
+    /// reported night's 2:30–2:50 a.m. stretches read "Desk sitting" at seated 0.75–0.83, and the wearer
+    /// corrected every one of them to lying down.
+    func testAwakeInsideTheNightIsRestingInBed() {
+        let stationary = HeadProbabilities<LocomotionClass>([.stationary: 0.97, .unknown: 0.03])
+        let deskLike = HeadProbabilities<ArmBehaviorClass>([.deskLike: 0.8, .quiet: 0.2])
+        let seated = HeadProbabilities<PostureClass>([.seatedLikely: 0.82, .uprightStationary: 0.11, .unknown: 0.07])
+        XCTAssertEqual(ActivityDisplay.derive(posture: seated, locomotion: stationary, arm: deskLike,
+                                              sleep: .awake, inBed: true, confidence: 0.79), "Resting in bed")
+        // Outside a night the same reading is desk sitting, as before.
+        XCTAssertEqual(ActivityDisplay.derive(posture: seated, locomotion: stationary, arm: deskLike,
+                                              sleep: .awake, confidence: 0.79), "Desk sitting")
     }
 
     // MARK: Vocabulary

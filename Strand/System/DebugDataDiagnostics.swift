@@ -506,8 +506,6 @@ enum DebugDataDiagnostics {
             // reading their own strap log was still sent hunting for the old name.
             lines.append("Model: \(WhoopModel.whoop5mg.displayName) · Protocol probes (Test Centre): "
                          + (PuffinExperiment.isEnabled ? "on" : "off → firmware alarm NOT armed"))
-        case .whoop4:
-            lines.append("Model: \(WhoopModel.whoop4.displayName)")
         case nil:
             lines.append("Model: unknown (family not yet detected)")
         }
