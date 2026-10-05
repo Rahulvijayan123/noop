@@ -3074,7 +3074,8 @@ final class Repository: ObservableObject {
     /// Clear one native answer (never touches imported rows , scoped to the dedicated source id).
     func clearJournalAnswer(day: String, question: String) async {
         guard let store = await ensureStore() else { return }
-        let cleared = (try? await store.deleteJournal(deviceId: Self.journalDeviceId, day: day, question: question)) != nil
+        let cleared = (try? await store.deleteJournal(deviceId: Self.journalDeviceId, day: day,
+                                                      question: question)) != nil
         if cleared {
             ExposureJournalBridge.journalAnswered(day: day, question: question, answer: .cleared,
                                                   writer: store.registryWriter)
