@@ -28,7 +28,7 @@ and checking each part.
 | Function | Called by | Purpose |
 | --- | --- | --- |
 | `push` | the app | Receives upload batches and object-lane uploads, writes rows and receipts. Also provisions installation credentials from a Supabase session (`POST /installations/provision`), confirms and hands off wearables, and retires installations. |
-| `scores` | the app | Returns published score snapshots, the changed-days feed and the intraday metric series (`GET /series`). Also handles device registration and sleep edits. Accepts the installation credential or the signed-in account's JWT. |
+| `scores` | the app | Returns published score snapshots, the changed-days feed and the intraday metric series (`GET /series`). Also handles device registration, sleep edits, manual strap placement and activity stretch feedback (`POST /stretch-feedback`); see Scores routes. Accepts the installation credential or the signed-in account's JWT. |
 | `coach` | the app | Relays Coach questions to the language model and stores the conversation, the coach's memory and the Settings profile (`/profile`). Authenticates like `push` (the installation bearer). |
 | `ingest-verify` | operators | Checks the ingest pipeline end to end. |
 | `reconcile` | scheduled | Reconciles the object manifest against storage. |
@@ -73,6 +73,106 @@ No migration is involved: the table and its deletion handling already existed.
 
 The function tests run with Deno from `supabase/functions/`. Some of them need fixtures that are not
 in this repository, such as `EDGE_TEST_ARTIFACTS` or the old `infra/vps` scripts.
+
+### Scores routes
+
+Every route of the `scores` function authenticates the same way: the installation bearer token, or a
+Supabase session JWT together with the `x-noop-source-id` header of a source registered to that account. The
+owner always comes from the credential, never from the request. Any method and path pair not listed here
+answers 405 `method_not_allowed`; an error body is always `{ "error": "<code>" }`. Request bodies are
+limited to 8 KiB, except `stretch-feedback`.
+
+| Route | Purpose |
+| --- | --- |
+| `GET /` | The day's published score snapshot for `?day=` and `?deviceId=`. |
+| `GET /days` | The changed-days feed (`cursor`, `limit`, `scopeRevision`). |
+| `GET /series` | The intraday metric series (see Intraday metric series). |
+| `GET /diagnostics` | The owner-scoped pipeline diagnostics for one device and day. |
+| `POST /devices` | Registers the device for the caller's source. |
+| `POST /sleep-overrides` | Writes a sleep edit with an optimistic revision. |
+| `GET`, `POST /compute-requests` | Submits and reads a hosted compute request. |
+| `GET`, `POST /placement` | Reads and declares the owner's manual strap placement (`placement_intervals`). |
+| `POST /stretch-feedback` | Stores the person's verdict on a detected activity stretch (below). |
+
+### Activity stretch feedback
+
+On the "Full day and activity timeline" page a person can mark each detected stretch "this is right" or
+"this is wrong, it was actually X". `POST /functions/v1/scores/stretch-feedback` stores that verdict together
+with what the model predicted for the stretch, so the labels can later be used to tune the model. Nothing
+reads the table to score, display or classify anything.
+
+```text
+app -> POST scores/stretch-feedback {feedback: [1..25 items]}
+  -> authenticate (installation bearer, or JWT + x-noop-source-id)
+  -> validate every item (_shared/stretchFeedback.ts), resolve each item's optional device
+  -> rpc upsert_activity_stretch_feedback(owner, validated items)   [service role only]
+  -> public.activity_stretch_feedback, one row per (owner, stretch_key)
+  <- 200 {saved: [{stretch_key, revision}], ignored: [{stretch_key, reason: "stale"}],
+          rejected: [{stretch_key | null, reason}]}
+```
+
+- **Envelope.** The body is at most 128 KiB (413 `payload_too_large`). Not JSON is 400 `invalid_body`;
+  `feedback` missing, not an array, empty or over 25 items is 400 `invalid_feedback`.
+- **Items are judged one by one.** A malformed item comes back in `rejected` with `stretch_key` (null when
+  that is itself malformed) and one reason code, and does not stop the others: `invalid_item`,
+  `invalid_stretch_key`, `invalid_id`, `invalid_kind`, `invalid_time_range`, `invalid_predicted_label`,
+  `invalid_predicted_class`, `invalid_predicted_confidence`, `invalid_verdict`, `invalid_corrected_label`,
+  `invalid_note`, `invalid_model_context`, `invalid_app_version`, `invalid_app_build`, `invalid_tz_offset`,
+  `invalid_client_created_at`, `invalid_client_updated_at`. The rules are in `validateStretchFeedbackItem`
+  and repeated as CHECK constraints on the table. `corrected_label` is only valid with
+  `verdict = "incorrect"`; a label sent with `"correct"` is rejected rather than dropped.
+  `model_context` is any JSON object of at most 16 KiB (compact JSON), at most 32 levels deep, with no NUL
+  characters or unpaired surrogates, because PostgreSQL cannot store those.
+- **Device.** `device_id` is the app's external device id and is optional. If it resolves (through
+  `findNoopDevice`, like every other route) to a device the caller owns, the internal uuid is stored in
+  `device_id`; otherwise `device_id` is NULL and the item is still saved. The external id as sent is kept in
+  `external_device_id` whenever it is a safe id. A device never fails an item.
+- **Last writer wins.** The key is `(owner, stretch_key)`, and `stretch_key` is stable per `(kind, start)`, so
+  validating the same stretch again overwrites it. An incoming `client_updated_at` OLDER than the stored one
+  changes nothing and is reported in `ignored` with reason `stale` (the app treats `ignored` as done). Equal
+  or newer overwrites every mutable column and bumps `revision`, which starts at 1. A repeated key inside one
+  request is applied in order under the same rule, so `saved` can list a key twice.
+- **Storage and access.** `public.activity_stretch_feedback` (migration
+  `20261004171000_activity_stretch_feedback.sql`) has RLS on. A signed-in client can `SELECT` only its own rows
+  and has no `INSERT`, `UPDATE`, `DELETE` or `EXECUTE` anywhere; `anon` has nothing. The only write path is the
+  `SECURITY DEFINER` function `upsert_activity_stretch_feedback(p_owner, p_items)`, executable by
+  `service_role` alone, which also re-checks that a device belongs to `p_owner`. The table keeps the
+  prediction (`predicted_label`, `predicted_class`, `predicted_confidence`, `model_context`), the verdict and
+  correction, the span (`start_ts`, `end_ts`, epoch seconds), and the app version, build and timezone offset.
+  The database caps `model_context` at 32 KiB of jsonb text, twice the edge function's limit, because jsonb
+  renders with extra spaces; it only stops a runaway row.
+- **Deleting an account** removes its rows through the foreign key to `auth.users`; deleting a device keeps the
+  label and clears `device_id`. The table is not in `DELETION_TABLES` (that list deletes by `user_id`).
+- **Reading it for tuning.** Use the service role or `psql`; the indexes are `(owner, start_ts)` and
+  `(kind, verdict, predicted_class)`:
+
+  ```sql
+  select predicted_class, verdict, corrected_label, count(*)
+  from public.activity_stretch_feedback
+  where kind = 'activity_context'
+  group by 1, 2, 3 order by 1, 2, 4 desc;
+  ```
+
+**Deploying it.** Nothing is applied by merging. Apply the migration by hand first, then redeploy the
+function (the commands are in Migrations and Edge functions above; `db push` is never used):
+
+1. `psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261004171000_activity_stretch_feedback.sql`,
+   then `supabase migration repair --status applied 20261004171000`.
+2. `supabase functions deploy scores`.
+
+If the function is deployed before step 1, the route answers 500 `scores_unavailable` (the RPC does not exist
+yet) and nothing is stored. The migration is additive and safe to re-run. Rollback is to redeploy the previous
+`scores` function; the table and function can stay, or be dropped (`drop function
+public.upsert_activity_stretch_feedback(uuid, jsonb); drop table public.activity_stretch_feedback;`), which
+deletes the labels.
+
+**Tests** (from `supabase/functions/`, same sanitised environment as the intake gate in
+`supabase/functions/tests/README.md`, with `EDGE_TEST_ARTIFACTS` pointing at a short directory outside the
+checkout): `tests/stretch_feedback_test.ts` (validator and the route against in-memory doubles),
+`tests/stretch_feedback_sql_test.ts` (schema, privileges, RLS and the upsert RPC on a throwaway local
+PostgreSQL and PostgREST) and `tests/stretch_feedback_route_integration_test.ts` (the real handler against that
+database). `tests/auth_isolation_sql_test.ts` lists the RPC among the service-only functions, so the
+Docker-gated catalogue check fails if a client role is ever granted `EXECUTE`.
 
 ### Accounts and installation credentials
 

@@ -1,6 +1,7 @@
 import { IdentityError, resolveUploadIdentity, resolveJwtUser, bearerToken, looksLikeJwt } from './tokens.ts';
 import { createNoopDeviceResolver, findNoopDevice } from './devices.ts';
 import { isSafeExternalDeviceId, isUuid } from './keys.ts';
+import { STRETCH_FEEDBACK_MAX_BODY_BYTES, validateStretchFeedback } from './stretchFeedback.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -95,11 +96,40 @@ export function parseSeriesQuery(params: URLSearchParams) {
   return { from: new Date(start * 1000).toISOString(), to: new Date(end * 1000).toISOString(), metrics };
 }
 
-async function boundedBody(req: Request): Promise<any> {
+async function boundedBody(req: Request, maxBytes = 8192): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
-  if (bytes.length > 8192) throw fail('payload_too_large', 413);
+  if (bytes.length > maxBytes) throw fail('payload_too_large', 413);
   try { return JSON.parse(new TextDecoder().decode(bytes)); }
   catch { throw fail('invalid_body', 400); }
+}
+
+/**
+ * `POST /stretch-feedback`: validate every item, resolve each item's optional device to one the caller
+ * owns (an id that does not resolve is stored as no device, never an error), and hand only the valid items
+ * to `upsert_activity_stretch_feedback` with the owner taken from the credential. Rejected items are
+ * reported back individually; the last-writer-wins decision (saved vs ignored/stale) is the RPC's.
+ */
+export async function submitStretchFeedback({ rest, userId, sourceId, body }: {
+  rest: Pick<SupabaseRest, 'select' | 'rpc'>; userId: string; sourceId: string; body: unknown;
+}) {
+  const { valid, rejected } = validateStretchFeedback(body);
+  const resolved = new Map<string, string | null>();
+  const items = [];
+  for (const item of valid) {
+    const external = item.external_device_id;
+    if (external != null && !resolved.has(external)) {
+      resolved.set(external, await findNoopDevice({ rest, userId, sourceId, externalDeviceId: external }));
+    }
+    items.push({ ...item, device_id: external != null ? (resolved.get(external) ?? null) : null });
+  }
+  let saved: unknown[] = [];
+  let ignored: unknown[] = [];
+  if (items.length > 0) {
+    const result = await rest.rpc('upsert_activity_stretch_feedback', { p_owner: userId, p_items: items });
+    saved = Array.isArray(result?.saved) ? result.saved : [];
+    ignored = Array.isArray(result?.ignored) ? result.ignored : [];
+  }
+  return { saved, ignored, rejected };
 }
 
 function sleepArguments(value: any, canonicalDevice: string) {
@@ -139,8 +169,9 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isComputeRead = req.method === 'GET' && route === '/compute-requests';
   const isPlacementPost = req.method === 'POST' && route === '/placement';
   const isPlacementGet = req.method === 'GET' && route === '/placement';
+  const isStretchFeedback = req.method === 'POST' && route === '/stretch-feedback';
   if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit
-      && !isComputeRead && !isPlacementPost && !isPlacementGet) {
+      && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -176,22 +207,23 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       user={id:installation.id,sourceId:installation.sourceId};
     }
     const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead || isPlacementGet
-      ? null : await boundedBody(req);
+      ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead
       ? url.searchParams.get('deviceId')
-      : isPlacementGet ? null
+      : (isPlacementGet || isStretchFeedback) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
-    // user-level declaration (the RPC's NULL device scope).
-    if (!isPlacementGet && !(isPlacementPost && externalDeviceId == null)
+    // user-level declaration (the RPC's NULL device scope). Stretch feedback carries a device per
+    // item, which is resolved leniently inside its handler, so it has no request-level device.
+    if (!isPlacementGet && !isStretchFeedback && !(isPlacementPost && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
     // user-level when absent; GET is owner-scoped and never device-scoped).
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
-      : (isPlacementPost || isPlacementGet) ? null
+      : (isPlacementPost || isPlacementGet || isStretchFeedback) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -264,6 +296,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         p_owner: user.id, p_placement: placement, p_effective_start: effectiveStart, p_device: scopeDevice,
       });
       return Response.json({ interval }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isStretchFeedback) {
+      // Model-tuning labels. The owner comes from the credential, never from the body; same auth as
+      // every other score route, no new auth path.
+      const outcome = await submitStretchFeedback({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
     }
     if (isPlacementGet) {
       // Owner-scoped read for reconciliation. device_id is returned as the EXTERNAL device id

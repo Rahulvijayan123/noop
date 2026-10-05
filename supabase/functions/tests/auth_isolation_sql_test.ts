@@ -171,6 +171,7 @@ const SERVICE_ONLY_FUNCTIONS = [
   "http_post_worker",
   "scoring_claim_one",
   "recover_noop_account_from_enrollment",
+  "upsert_activity_stretch_feedback",
 ];
 
 Deno.test({
