@@ -71,14 +71,10 @@ struct StrapStatusCard: View {
 
     // MARK: Strap
 
-    /// Which strap family to look for. Only offered while nothing is connected or in flight, because
-    /// switching drops the current strap's bond so the new family pairs fresh.
-    static func showsModelPicker(_ phase: StrapConnectionStatus.Phase) -> Bool {
-        switch phase {
-        case .disconnected, .unpaired, .needsRepair: return true
-        default: return false
-        }
-    }
+    /// Whether the row offers a strap-family choice. It never does: WHOOP 5.0/MG is the only WHOOP model (4.0 was
+    /// retired), so there is nothing to choose and the row always names the strap. The picker view stays in the
+    /// row, hidden, so the card keeps the fixed height every pairing state relies on.
+    static func showsModelPicker(_ phase: StrapConnectionStatus.Phase) -> Bool { false }
 
     /// "WHOOP 5.0 / MG · Firmware 50.40.1.0" while a link is up, just the model otherwise.
     var strapSummary: String {

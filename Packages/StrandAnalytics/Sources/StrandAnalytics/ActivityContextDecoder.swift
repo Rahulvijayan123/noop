@@ -89,6 +89,7 @@ struct DecoderTracking: Codable, Equatable {
     var lastWindowFill: Int = 0
     var lastIntensity: Double?
     var lastSleep: SleepEvidence = .unknown
+    var lastInBed = false
     var lastWear: WearEvidence = .unknown
     var lastHasMotion = false
     var encoderId: String?
@@ -238,6 +239,7 @@ public struct ActivityContextDecoder: Sendable {
         }
 
         tracking.lastSleep = obs.sleep
+        tracking.lastInBed = obs.inBed
         tracking.lastWear = obs.wear
 
         if obs.wear == .offWrist {
@@ -500,7 +502,7 @@ public struct ActivityContextDecoder: Sendable {
         case .awake: sleepState = .awake
         case .unknown: sleepState = .unknown
         }
-        let sleep = SleepContext(state: sleepState, probability: nil)
+        let sleep = SleepContext(state: sleepState, probability: nil, inBed: tracking.lastInBed)
         let evidence = tracking.lastEvidence ?? ActivityEvidenceSummary(
             imu: false, encoder: false, dynAccel: false, gravity: false, steps: false,
             heartRate: false, sleep: false, coverage: 0)
@@ -567,7 +569,8 @@ public struct ActivityContextDecoder: Sendable {
         for (i, c) in ArmState.classes.enumerated() { armShown[c] = armSource[i] }
         let raw = ActivityDisplay.derive(posture: postureHead, locomotion: locoHead,
                                          arm: HeadProbabilities(armShown).normalized(),
-                                         sleep: sleepState, confidence: confidence)
+                                         sleep: sleepState, inBed: tracking.lastInBed,
+                                         confidence: confidence)
         let label = applyHysteresis(raw: raw, ts: ts)
 
         // The event field shows only fresh events.

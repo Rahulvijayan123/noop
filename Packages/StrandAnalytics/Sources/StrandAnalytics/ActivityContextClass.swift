@@ -21,8 +21,8 @@ import Foundation
 //     circuits, rowing, HIIT …): sustained high heart rate *with* vigorous arm movement and no stride.
 //   • No absolute wrist-orientation cue is used for lying down: how a strap sits on a wrist differs per
 //     person, per wrist and per day, and there is no labelled data to calibrate it. Lying is therefore
-//     the logged sleep session, or a recumbent reading the decoder reaches through a lying-down
-//     movement signature.
+//     the detected night (asleep on its sleep epochs, in bed on its wake ones), or a recumbent reading the
+//     decoder reaches through a lying-down movement signature.
 //
 // `displayContext` strings ("Desk sitting", "Brisk walking" …) stay a *view* for people; this taxonomy is
 // what code may branch on. It is derived from the heads by the same rules as the display label
@@ -34,7 +34,9 @@ import Foundation
 /// Version of the taxonomy and of the display-label → class mapping. Bump when a class is added, removed
 /// or renamed, when the mapping changes, or when the family-confidence rules change meaning.
 public enum ActivityClassVersions {
-    public static let taxonomy = "act-class-1"
+    /// 2: `sleeping` and an in-bed `lyingDown` take their mass from the staged night and stillness, not
+    /// from the posture head's recumbent lean.
+    public static let taxonomy = "act-class-2"
     /// Version of how runs become persisted intervals (merge / fold / split rules and the per-interval
     /// HR, HRV, respiration and cadence statistics). Bump when any of those rules change so stored days
     /// are derived again.
@@ -45,7 +47,7 @@ public enum ActivityClassVersions {
 public enum ActivityClass: String, Codable, CaseIterable, Hashable, Sendable {
     /// The strap is not on the wrist (a hard gate from wear events / pulse contact, not an estimate).
     case offWrist = "off_wrist"
-    /// Inside a logged sleep session and still.
+    /// On a sleep epoch of a detected night and still.
     case sleeping
     /// Recumbent and awake (resting in bed, a daytime lie-down).
     case lyingDown = "lying_down"
@@ -154,10 +156,10 @@ extension ActivityClass {
             evidence: "wear events (wrist-off), loss of pulse contact",
             limitation: "a quiet strap on a table is never treated as on-wrist evidence"),
         ActivityClassCapability(activityClass: .sleeping, basis: .sessionContext,
-            evidence: "a logged sleep session + stillness (recumbent mode)",
-            limitation: "naps outside a detected session read as lying down"),
+            evidence: "a sleep epoch of a detected night (the sleep stager's call) + stillness",
+            limitation: "naps outside a detected session read as lying down; lying awake in bed is lying down, not sleeping"),
         ActivityClassCapability(activityClass: .lyingDown, basis: .sessionContext,
-            evidence: "recumbent mode reached through a lying-down movement signature or an awake in-bed span",
+            evidence: "awake inside a detected night's in-bed window, or a recumbent mode reached through a lying-down movement signature",
             limitation: "no absolute wrist-orientation cue is used, so a daytime lie-down without a movement signature is not seen"),
         ActivityClassCapability(activityClass: .sitting, basis: .hedged,
             evidence: "stationary wrist whose posture head leans seated (reached after sitting-down movement, long quiet spells)",
@@ -274,6 +276,7 @@ public enum ActivityClassifier {
                                 locomotion: HeadProbabilities<LocomotionClass>,
                                 armBehavior: HeadProbabilities<ArmBehaviorClass>,
                                 sleep: SleepContextState,
+                                inBed: Bool = false,
                                 wear: WearContextState,
                                 evidenceQuality: Double) -> ActivityClassification {
         let quality = min(1, max(0, evidenceQuality))
@@ -282,7 +285,7 @@ public enum ActivityClassifier {
         }
 
         let label = ActivityDisplay.derive(posture: posture, locomotion: locomotion, arm: armBehavior,
-                                           sleep: sleep, confidence: quality)
+                                           sleep: sleep, inBed: inBed, confidence: quality)
         let cls = activityClass(forDisplayLabel: label)
         let stationary = locomotion[.stationary]
         let recumbent = posture[.recumbent], seated = posture[.seatedLikely]
@@ -293,7 +296,9 @@ public enum ActivityClassifier {
         // the non-gait mass into vigorous and light so the runner-up can name the sibling.
         let exerciseShare = min(1, max(0, armBehavior[.exerciseMotion] / 0.4))
         let walkFamily = locomotion[.walking] + locomotion[.briskWalking] + locomotion[.stairs]
-        let restfulWhileAsleep = stationary * max(recumbent, 1 - min(1, seated + upright))
+        // Asleep and in bed are the staged night's claims, so their mass is the stillness that confirms
+        // them, not the posture head's lean (which reads a still sleeper as seated; see `ActivityDisplay`).
+        let lying = (sleep == .asleep || inBed) ? stationary : stationary * recumbent
 
         var candidates: [ActivityClass: Double] = [
             .running: locomotion[.running],
@@ -306,8 +311,8 @@ public enum ActivityClassifier {
             .standing: stationary * upright,
             .stationary: stationary * unresolved,
         ]
-        if sleep == .asleep { candidates[.sleeping] = restfulWhileAsleep }
-        else { candidates[.lyingDown] = stationary * recumbent }
+        if sleep == .asleep { candidates[.sleeping] = lying }
+        else { candidates[.lyingDown] = lying }
 
         let confidence: Double
         var sameFamily: Set<ActivityClass> = [cls]
@@ -319,8 +324,8 @@ public enum ActivityClassifier {
         case .cycling: confidence = locomotion[.cycling]
         case .vigorousActivity: confidence = other
         case .lightActivity: confidence = other + stationary * transition
-        case .sleeping: confidence = restfulWhileAsleep; sameFamily = [.sleeping, .lyingDown]
-        case .lyingDown: confidence = stationary * recumbent; sameFamily = [.sleeping, .lyingDown]
+        case .sleeping: confidence = lying; sameFamily = [.sleeping, .lyingDown]
+        case .lyingDown: confidence = lying; sameFamily = [.sleeping, .lyingDown]
         case .sitting, .sittingDesk:
             confidence = stationary * seated + locomotion[.vehicleMotion]; sameFamily = [.sitting, .sittingDesk]
         case .standing: confidence = stationary * upright
@@ -346,11 +351,12 @@ public enum ActivityClassifier {
 
     public static func classify(run: ActivityContextRun) -> ActivityClassification {
         classify(posture: run.posture, locomotion: run.locomotion, armBehavior: run.armBehavior,
-                 sleep: run.sleep, wear: run.wear, evidenceQuality: run.overallConfidence)
+                 sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence)
     }
 
     public static func classify(state: ActivityContextState) -> ActivityClassification {
         classify(posture: state.posture, locomotion: state.locomotion, armBehavior: state.armBehavior,
-                 sleep: state.sleep.state, wear: state.wear.state, evidenceQuality: state.overallConfidence)
+                 sleep: state.sleep.state, inBed: state.sleep.inBed, wear: state.wear.state,
+                 evidenceQuality: state.overallConfidence)
     }
 }

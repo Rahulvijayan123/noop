@@ -2,7 +2,6 @@ package com.noop.ui
 
 import com.noop.data.DailyMetric
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,9 +11,9 @@ import org.junit.Test
  * option, but was never offered as a Key Metrics tile — not a bug, just never added. Pins the two
  * contract points that matter for a NEW persisted enum case: the raw token round-trips
  * ("skinTemp", byte-identical to the Swift `KeyMetric.skinTemp` rawValue — the token IS the persisted
- * form, and two independent implementations must not drift on how they spell one), and it does NOT
- * join `defaultOrder` — an existing user's saved layout, and a fresh install's default, must stay
- * byte-identical to before this case existed.
+ * form, and two independent implementations must not drift on how they spell one), and that it IS in
+ * `defaultOrder`: the layout editor offers only `defaultOrder`, so a tile outside it could never be
+ * switched on. The iOS/macOS twin makes the same choice.
  *
  * NOT a backup/restore contract, despite how it reads: the layout pref `today.keyMetrics` is not in
  * the `.noopbak` whitelist at all — `today.hostedCards` is the one layout pref carried across — so a
@@ -28,15 +27,18 @@ class KeyMetricSkinTempTest {
         assertEquals("skinTemp", KeyMetric.SKIN_TEMP.raw)
     }
 
-    @Test fun notInDefaultOrder() {
-        assertFalse(KeyMetric.defaultOrder.contains(KeyMetric.SKIN_TEMP))
+    @Test fun isADefaultTileRightAfterBloodOxygen() {
+        val order = KeyMetric.defaultOrder
+        assertTrue(order.contains(KeyMetric.SKIN_TEMP))
+        assertEquals(order.indexOf(KeyMetric.BLOOD_OXYGEN) + 1, order.indexOf(KeyMetric.SKIN_TEMP))
+        // The layout editor offers only defaultOrder, so a case outside it can never be switched on.
+        assertEquals(KeyMetric.entries.toSet(), order.toSet())
+        assertEquals(KeyMetric.entries.size, order.size)
     }
 
-    @Test fun blankLayoutStillExcludesIt() {
-        // A fresh install (blank saved layout) decodes to defaultOrder, which must not have picked up
-        // the new case — the whole point of adding it to `entries`/CaseIterable without touching
-        // defaultOrder.
-        assertTrue(KeyMetricPrefs.decodeEnabled("").none { it == KeyMetric.SKIN_TEMP })
+    @Test fun blankLayoutIncludesIt() {
+        // A fresh install (blank saved layout) decodes to defaultOrder, which now carries Skin Temp.
+        assertTrue(KeyMetricPrefs.decodeEnabled("").any { it == KeyMetric.SKIN_TEMP })
     }
 
     private fun day(skinTempDevC: Double?) =

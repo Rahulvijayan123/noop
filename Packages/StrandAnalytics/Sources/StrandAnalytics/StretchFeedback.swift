@@ -97,6 +97,28 @@ public struct StretchModelContext: Codable, Equatable, Sendable {
     }
 
     public init() {}
+
+    /// This context without any number JSON cannot hold (NaN, ±infinity). Such a value is dropped, and a head left
+    /// with no finite probability is dropped whole. The encoder refuses the entire document when it meets one, so a
+    /// single stray value would keep every verdict saved or sent alongside it from being stored at all.
+    /// Every floating-point field of the context has to be listed here.
+    public func finiteOnly() -> StretchModelContext {
+        func finite(_ value: Double?) -> Double? { value.flatMap { $0.isFinite ? $0 : nil } }
+        func finite(_ head: [String: Double]?) -> [String: Double]? {
+            guard let kept = head?.filter({ $0.value.isFinite }), !kept.isEmpty else { return nil }
+            return kept
+        }
+        var clean = self
+        clean.confidence = finite(confidence)
+        clean.uncertainty = finite(uncertainty)
+        clean.intensity = finite(intensity)
+        clean.motionG = finite(motionG)
+        clean.locomotionShare = finite(locomotionShare)
+        clean.posture = finite(posture)
+        clean.locomotion = finite(locomotion)
+        clean.armBehavior = finite(armBehavior)
+        return clean
+    }
 }
 
 public struct StretchFeedback: Codable, Equatable, Identifiable, Sendable {
@@ -115,11 +137,18 @@ public struct StretchFeedback: Codable, Equatable, Identifiable, Sendable {
     public var predictedLabel: String
     /// The canonical class code behind `predictedLabel` (an `ActivityClass` raw value or a `DayState` raw value).
     public var predictedClass: String?
-    public var predictedConfidence: Double?
+    public var predictedConfidence: Double? {
+        didSet { if let value = predictedConfidence, !value.isFinite { predictedConfidence = nil } }
+    }
     public var verdict: StretchVerdict
     public var correctedLabel: StretchCorrection?
     public var note: String?
-    public var context: StretchModelContext
+    public var context: StretchModelContext {
+        didSet {
+            let clean = context.finiteOnly()
+            if clean != context { context = clean }
+        }
+    }
     public var appVersion: String?
     public var appBuild: String?
     public var tzOffsetS: Int?
@@ -150,12 +179,12 @@ public struct StretchFeedback: Codable, Equatable, Identifiable, Sendable {
         self.startTs = startTs; self.endTs = endTs
         self.predictedLabel = String(predictedLabel.prefix(Self.maxLabelLength))
         self.predictedClass = predictedClass.map { String($0.prefix(Self.maxLabelLength)) }
-        self.predictedConfidence = predictedConfidence.map { min(1, max(0, $0)) }
+        self.predictedConfidence = predictedConfidence.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
         self.verdict = verdict
         // A correction only means something next to a "wrong" verdict.
         self.correctedLabel = verdict == .incorrect ? correctedLabel : nil
         self.note = Self.cleaned(note)
-        self.context = context
+        self.context = context.finiteOnly()
         self.appVersion = appVersion; self.appBuild = appBuild; self.tzOffsetS = tzOffsetS
         self.createdAt = now; self.updatedAt = now
         self.syncedAt = nil
@@ -232,11 +261,11 @@ public struct StretchFeedbackWire: Encodable, Sendable {
         startTs = f.startTs; endTs = f.endTs
         predictedLabel = f.predictedLabel
         predictedClass = f.predictedClass
-        predictedConfidence = f.predictedConfidence
+        predictedConfidence = f.predictedConfidence.flatMap { $0.isFinite ? $0 : nil }
         verdict = f.verdict.rawValue
         correctedLabel = f.correctedLabel?.rawValue
         note = f.note
-        modelContext = f.context
+        modelContext = f.context.finiteOnly()
         appVersion = f.appVersion; appBuild = f.appBuild; tzOffsetS = f.tzOffsetS
         clientCreatedAt = Self.iso(f.createdAt)
         clientUpdatedAt = Self.iso(f.updatedAt)

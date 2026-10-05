@@ -52,6 +52,7 @@ public enum ActivityDisplay {
                               locomotion: HeadProbabilities<LocomotionClass>,
                               arm: HeadProbabilities<ArmBehaviorClass>,
                               sleep: SleepContextState,
+                              inBed: Bool = false,
                               confidence: Double) -> String {
         if confidence < 0.30 { return unclear }
 
@@ -70,9 +71,15 @@ public enum ActivityDisplay {
         }
         guard locomotion[.stationary] >= 0.5 else { return unclear }
 
-        // Inside a logged sleep session, brief restlessness (turning over, a bathroom trip that is not a
-        // walk) is still the night; only a clear seated or upright reading overrides the session.
-        if sleep == .asleep, posture[.seatedLikely] + posture[.uprightStationary] < 0.75 { return "Asleep" }
+        // Asleep is the staged night's call, not the posture head's. `sleep` is `.asleep` only on the
+        // night's sleep epochs (lying awake in bed is staged wake), and a still sleeper's wrist reads as
+        // seated as often as not: no orientation cue tells lying from sitting. Letting a seated lean
+        // override the night is what labelled a sleeper "Sitting quietly". Movement still wins above.
+        if sleep == .asleep { return "Asleep" }
+        // Awake inside the night's in-bed window, for the same reason: in bed, whatever the wrist leans.
+        if inBed {
+            return posture[.posturalTransition] >= 0.45 ? "Changing position" : "Resting in bed"
+        }
 
         // Stationary: posture, then arm behaviour.
         if posture[.posturalTransition] >= 0.45 { return "Changing position" }

@@ -161,8 +161,17 @@ enum Variants {
         Variant(name: "incumbent (shipped)", note: "SleepStagerV2 as it ships today", config: .shipped)
     }
 
+    /// The settled-onset rule undone: Viterbi's own first sleep epoch is onset again, so still, low-HR time
+    /// lying awake before the wrist settles goes back to being staged as light sleep.
+    static var settledOnsetOff: Variant {
+        var c = RecipeConfig.shipped
+        c.settledOnsetEpochs = 0
+        return Variant(name: "settled onset OFF (before)",
+                       note: "no 15-min settled-wrist requirement before sleep onset", config: c)
+    }
+
     static var all: [Variant] {
-        [incumbent, deepPriorBefore, pr987, p348Priors, p348Motion, p348Emissions, p348DeepGate,
+        [incumbent, settledOnsetOff, deepPriorBefore, pr987, p348Priors, p348Motion, p348Emissions, p348DeepGate,
          p348Deadzone, p348OtherRows, p348All, preNine30Guard]
     }
 }

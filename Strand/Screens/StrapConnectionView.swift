@@ -30,7 +30,7 @@ private struct StrapConnectionPage: View, Equatable {
     let live: LiveState
 
     @StateObject private var link: StrapLinkObserver
-    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
+    @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop5mg.rawValue
 
     /// Set when the user asks for a connection, cleared once a link is up or they stop it. The BLE layer scans
     /// until it finds the strap and has no "searching" state to read, so this page tracks it itself.
@@ -71,7 +71,7 @@ private struct StrapConnectionPage: View, Equatable {
         StrapActionNotes(buzzSent: buzzSentAt != nil, restartIgnored: restartIgnored)
     }
 
-    private var strapModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
+    private var strapModel: WhoopModel { WhoopModel.resolve(selectedModelRaw) }
 
     var body: some View {
         let current = status

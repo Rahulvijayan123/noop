@@ -95,6 +95,17 @@ struct Night {
     }
 
     var onsetText: String { Night.timeFmt.string(from: Date(timeIntervalSince1970: TimeInterval(session.effectiveStartTs))) }
+
+    /// When sleep began, as distinct from when the night's window opened. The window opens when the wrist
+    /// first goes still in bed; the staged timeline says when the first sleep epoch came, and lying awake
+    /// before it (scrolling, waiting to drop off) is wake there. nil when the night has no real timeline
+    /// (an imported night is durations only) or no sleep in it, and the row then shows the window start alone.
+    var asleepTs: Int? {
+        guard let real = realSegments, real.count >= 2,
+              let first = real.first(where: { $0.stage != .awake }) else { return nil }
+        return session.effectiveStartTs + Int(first.start)
+    }
+    var asleepText: String? { asleepTs.map(Night.clockString) }
     var wakeText: String { Night.timeFmt.string(from: Date(timeIntervalSince1970: TimeInterval(session.endTs))) }
     var dateLabel: String { Night.dateFmt.string(from: Date(timeIntervalSince1970: TimeInterval(session.effectiveStartTs))) }
 

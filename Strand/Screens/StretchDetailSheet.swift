@@ -5,7 +5,7 @@ import StrandAnalytics
 
 // MARK: - A stretch up close, and the wearer's verdict on it
 //
-// Opened by tapping a stretch on the Heart rate page, from either list. It shows what the strap recorded
+// Opened by tapping a stretch on the Heart rate page. It shows what the strap recorded
 // inside the stretch at a finer grain than the page does (heart rate, wrist motion and steps in short slices),
 // what the model based its label on, and asks whether the label is right. The answer is saved on the phone at
 // once and sent to the server with the model's reading, so labelled stretches can be used to tune the model.
@@ -173,7 +173,7 @@ struct StretchDetailSheet: View {
                 Text(p.title)
                     .font(StrandFont.title2)
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("\(DayStateTimelineSection.clock(from, seconds: seconds)) – \(DayStateTimelineSection.clock(to, seconds: seconds)) · \(DayStateTimelineSection.duration(target.durationSeconds))")
+                Text("\(StretchFormat.clock(from, seconds: seconds)) – \(StretchFormat.clock(to, seconds: seconds)) · \(StretchFormat.duration(target.durationSeconds))")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .monospacedDigit()
@@ -246,7 +246,7 @@ struct StretchDetailSheet: View {
                      caption: String(localized: "of the seconds"))
         }
 
-        let slice = DayStateTimelineSection.duration(d.binSeconds)
+        let slice = StretchFormat.duration(d.binSeconds)
         Text("Each bar or point covers \(slice).")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
@@ -298,9 +298,9 @@ struct StretchDetailSheet: View {
                 .monospacedDigit()
                 .frame(width: 44, alignment: .trailing)
         }
-        HeadBlock(title: String(localized: "Posture"), rows: ActivityContextSection.rows(e.posture, name: \.displayName), tint: tint)
-        HeadBlock(title: String(localized: "Movement"), rows: ActivityContextSection.rows(e.locomotion, name: \.displayName), tint: tint)
-        HeadBlock(title: String(localized: "Arm"), rows: ActivityContextSection.rows(e.armBehavior, name: \.displayName), tint: tint)
+        HeadBlock(title: String(localized: "Posture"), rows: HeadBlock.rows(e.posture, name: \.displayName), tint: tint)
+        HeadBlock(title: String(localized: "Movement"), rows: HeadBlock.rows(e.locomotion, name: \.displayName), tint: tint)
+        HeadBlock(title: String(localized: "Arm"), rows: HeadBlock.rows(e.armBehavior, name: \.displayName), tint: tint)
         if e.confidence < 0.55 {
             Text("Conflicting or thin evidence here, so treat this as a guess.")
                 .font(StrandFont.caption)
@@ -346,7 +346,7 @@ struct StretchDetailSheet: View {
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer(minLength: 8)
-                    Text(DayStateTimelineSection.duration(line.seconds))
+                    Text(StretchFormat.duration(line.seconds))
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .monospacedDigit()
@@ -368,7 +368,7 @@ struct StretchDetailSheet: View {
                 let from = Date(timeIntervalSince1970: TimeInterval(max(run.start, target.start)))
                 let to = Date(timeIntervalSince1970: TimeInterval(min(run.end, target.end)))
                 HStack {
-                    Text("\(DayStateTimelineSection.clock(from, seconds: true)) – \(DayStateTimelineSection.clock(to, seconds: true))")
+                    Text("\(StretchFormat.clock(from, seconds: true)) – \(StretchFormat.clock(to, seconds: true))")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .monospacedDigit()
@@ -501,14 +501,14 @@ struct StretchDetailSheet: View {
     @ViewBuilder
     private var saveStatus: some View {
         if let stored {
+            let line = StretchFeedbackStatusLine(feedback.standing(of: stored))
             HStack(spacing: 6) {
-                Image(systemName: stored.needsSync ? "tray.and.arrow.up" : "checkmark.icloud")
-                Text(stored.needsSync
-                     ? String(localized: "Saved on this phone. It will be sent when you're online.")
-                     : String(localized: "Saved and sent."))
+                Image(systemName: line.symbol)
+                Text(line.text)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
+            .foregroundStyle(line.needsAttention ? StrandPalette.statusWarning : StrandPalette.textTertiary)
         }
     }
 
