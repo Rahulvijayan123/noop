@@ -119,32 +119,19 @@ struct FullDayChartView: View {
             if showsActivityTimeline {
                 #if DEBUG
                 if !DemoLayout.hidesActivity {
-                    ActivityContextSection(
-                        document: timeline.activityContext,
-                        busy: timeline.activityBusy,
-                        partialReach: timeline.activityPartialReach,
-                        window: visibleWindow,
-                        onOpen: open
-                    )
-                    .id(Int(dayStart.timeIntervalSince1970))
+                    DayStretchesSection(timeline: timeline, window: visibleWindow, onOpen: open, onZoom: zoomTo)
+                        .id(Int(dayStart.timeIntervalSince1970))
                 }
                 #else
-                ActivityContextSection(
-                    document: timeline.activityContext,
-                    busy: timeline.activityBusy,
-                    partialReach: timeline.activityPartialReach,
-                    window: visibleWindow,
-                    onOpen: open
-                )
-                .id(Int(dayStart.timeIntervalSince1970))
+                DayStretchesSection(timeline: timeline, window: visibleWindow, onOpen: open, onZoom: zoomTo)
+                    .id(Int(dayStart.timeIntervalSince1970))
                 #endif
-                DayStateTimelineSection(
-                    segments: timeline.dayStates,
-                    busy: timeline.statesBusy,
-                    reach: timeline.statesReach,
-                    window: visibleWindow,
-                    onOpen: open
-                )
+                NavigationLink {
+                    StretchFeedbackHistoryView()
+                } label: {
+                    StretchFeedbackLinkRow()
+                }
+                .buttonStyle(.plain)
                 NavigationLink(value: TabRoute.fullDayChart) {
                     HStack {
                         Text("Other metrics in the Deep Timeline")
@@ -171,10 +158,8 @@ struct FullDayChartView: View {
         }
         #endif
         .sheet(item: $openStretch) { input in
-            StretchDetailSheet(input: input, deviceId: repo.deviceId) { range in
-                withAnimation(StrandMotion.interactive) { zoomDomain = range }
-            }
-            .environmentObject(repo)
+            StretchDetailSheet(input: input, deviceId: repo.deviceId, onZoom: zoomTo)
+                .environmentObject(repo)
         }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
@@ -188,6 +173,10 @@ struct FullDayChartView: View {
     private func open(_ target: StretchTarget) {
         openStretch = StretchSheetInput(target: target, document: timeline.activityContext,
                                         segments: timeline.dayStates)
+    }
+
+    private func zoomTo(_ range: ClosedRange<Date>) {
+        withAnimation(StrandMotion.interactive) { zoomDomain = range }
     }
 
     #if DEBUG

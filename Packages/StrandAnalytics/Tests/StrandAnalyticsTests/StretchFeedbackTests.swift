@@ -117,6 +117,60 @@ final class StretchFeedbackTests: XCTestCase {
         XCTAssertEqual(overlap["seconds"] as? Int, 420)
     }
 
+    // JSON cannot hold NaN or infinity, and the encoder refuses the whole document when it meets one. Left in a
+    // model context, a single stray value would stop every verdict queued behind it from being saved or sent.
+    func testNonFiniteNumbersNeverReachTheEncoder() throws {
+        var context = StretchModelContext()
+        context.confidence = .nan
+        context.uncertainty = 0.25
+        context.intensity = .infinity
+        context.motionG = -.infinity
+        context.locomotionShare = .nan
+        context.posture = ["upright": 0.6, "lying": .nan]
+        context.locomotion = ["still": .infinity]
+        context.armBehavior = ["idle": 0.9]
+
+        let built = StretchFeedback(kind: .activityContext, startTs: t0, endTs: t0 + 600, deviceId: nil,
+                                    predictedLabel: "Sitting", predictedClass: "sitting_desk",
+                                    predictedConfidence: .nan, verdict: .incorrect, correctedLabel: .lyingDown,
+                                    context: context)
+        var assigned = make(.incorrect, corrected: .lyingDown)
+        assigned.context = context
+        assigned.predictedConfidence = .infinity
+
+        for f in [built, assigned] {
+            XCTAssertNoThrow(try JSONEncoder().encode(StretchFeedbackWire(f)))
+            XCTAssertNoThrow(try JSONEncoder().encode([f]), "the local file holds the same record")
+            XCTAssertNil(f.predictedConfidence)
+            XCTAssertNil(f.context.confidence)
+            XCTAssertNil(f.context.intensity)
+            XCTAssertNil(f.context.motionG)
+            XCTAssertNil(f.context.locomotionShare)
+            XCTAssertNil(f.context.locomotion, "a head with nothing finite left is dropped, not kept empty")
+            XCTAssertEqual(f.context.uncertainty, 0.25)
+            XCTAssertEqual(f.context.posture, ["upright": 0.6])
+            XCTAssertEqual(f.context.armBehavior, ["idle": 0.9])
+        }
+
+        var alone = StretchModelContext()
+        alone.uncertainty = .nan
+        XCTAssertNil(alone.finiteOnly().uncertainty)
+    }
+
+    func testAWholeFiniteContextIsLeftAsItWas() {
+        var context = StretchModelContext()
+        context.confidence = 0.8
+        context.uncertainty = 0.1
+        context.intensity = 0
+        context.motionG = 0.02
+        context.locomotionShare = 1
+        context.posture = ["upright": 0.7, "lying": 0.3]
+        context.locomotion = ["still": 0.9]
+        context.armBehavior = ["idle": 1]
+        context.avgHr = 58
+        XCTAssertEqual(context.finiteOnly(), context)
+    }
+
     func testTheCorrectionCodesMatchWhatTheServerAccepts() {
         XCTAssertEqual(Set(StretchCorrection.allCases.map(\.rawValue)),
                        ["sitting", "standing", "lying_down", "asleep", "walking", "running", "cycling",

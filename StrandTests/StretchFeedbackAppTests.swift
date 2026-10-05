@@ -125,6 +125,75 @@ final class StretchFeedbackAppTests: XCTestCase {
         XCTAssertTrue(StretchFeedbackStore(fileURL: url).all().isEmpty)
     }
 
+    private func setAsideFiles() throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(StretchFeedbackStore.unreadablePrefix) }
+    }
+
+    func testAnUnreadableFileIsKeptAsideNotWrittenOver() throws {
+        let url = tempDir.appendingPathComponent("stretch-feedback.json")
+        try Data("not json".utf8).write(to: url)
+        let store = StretchFeedbackStore(fileURL: url)
+
+        store.upsert(verdict(start: 1_000, .incorrect))
+
+        let kept = try setAsideFiles()
+        XCTAssertEqual(kept.count, 1)
+        XCTAssertEqual(try String(contentsOf: kept[0], encoding: .utf8), "not json")
+        XCTAssertEqual(StretchFeedbackStore(fileURL: url).all().count, 1, "the new answer is saved as usual")
+    }
+
+    func testOneUnreadableEntryDoesNotCostTheAnswersAroundIt() throws {
+        let url = tempDir.appendingPathComponent("stretch-feedback.json")
+        let first = makeStore()
+        first.upsert(verdict(start: 1_000, .incorrect))
+        first.upsert(verdict(start: 2_000, .correct))
+        var entries = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [[String: Any]])
+        entries.insert(["id": "not-a-uuid", "verdict": 7], at: 1)
+        try JSONSerialization.data(withJSONObject: entries).write(to: url)
+
+        let reopened = StretchFeedbackStore(fileURL: url)
+
+        XCTAssertEqual(Set(reopened.all().map(\.startTs)), [1_000, 2_000])
+        XCTAssertEqual(try setAsideFiles().count, 1, "the original is copied aside, bad entry included")
+    }
+
+    func testAFileThatCannotBeOpenedRightNowIsNotRememberedAsEmpty() throws {
+        let url = tempDir.appendingPathComponent("stretch-feedback.json")
+        makeStore().upsert(verdict(start: 1_000, .incorrect))
+        let store = StretchFeedbackStore(fileURL: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) }
+        try XCTSkipIf((try? Data(contentsOf: url)) != nil, "this account can read a file with no permissions")
+
+        XCTAssertTrue(store.all().isEmpty)
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        XCTAssertEqual(store.all().map(\.startTs), [1_000], "reads the real file once it can be opened")
+        XCTAssertTrue(try setAsideFiles().isEmpty)
+    }
+
+    func testAReadableFileLeavesNothingSetAside() throws {
+        makeStore().upsert(verdict(start: 1_000))
+        _ = makeStore().all()
+        XCTAssertTrue(try setAsideFiles().isEmpty)
+    }
+
+    func testOnlyTheNewestSetAsideCopiesAreKept() throws {
+        let url = tempDir.appendingPathComponent("stretch-feedback.json")
+        for n in 0..<(StretchFeedbackStore.keepUnreadableCopies + 3) {
+            let stale = tempDir.appendingPathComponent("\(StretchFeedbackStore.unreadablePrefix)\(1_000 + n).json")
+            try Data("old \(n)".utf8).write(to: stale)
+        }
+        try Data("not json".utf8).write(to: url)
+
+        _ = StretchFeedbackStore(fileURL: url).all()
+
+        let names = try setAsideFiles().map(\.lastPathComponent).sorted()
+        XCTAssertEqual(names.count, StretchFeedbackStore.keepUnreadableCopies)
+        XCTAssertFalse(names.contains("\(StretchFeedbackStore.unreadablePrefix)1000.json"), "the oldest copy goes first")
+    }
+
     // MARK: Reading the server's reply
 
     func testSavedAndIgnoredCountAsDeliveredRejectedDoesNot() {
@@ -201,8 +270,82 @@ final class StretchFeedbackAppTests: XCTestCase {
 
         let outcome = try await sync(store).pushPending()
 
-        XCTAssertEqual(outcome, .init(uploaded: 0, rejected: 1))
+        XCTAssertEqual(outcome.uploaded, 0)
+        XCTAssertEqual(outcome.rejected, 1)
+        XCTAssertNil(outcome.blocked)
         XCTAssertEqual(store.pending().map(\.id), [a.id])
+    }
+
+    func testTheServersReasonForARefusalComesBack() async throws {
+        let store = makeStore()
+        let a = verdict(start: 1_000)
+        store.upsert(a)
+        StretchFeedbackStub.reply = .rejectedWithReason
+
+        let outcome = try await sync(store).pushPending()
+
+        XCTAssertEqual(outcome.refusals, [a.stretchKey: "invalid_model_context"])
+        XCTAssertEqual(store.pending().map(\.id), [a.id])
+    }
+
+    func testAVerdictTheReplyNeverMentionsIsReportedAsUnconfirmed() async throws {
+        let store = makeStore()
+        let a = verdict(start: 1_000)
+        store.upsert(a)
+        StretchFeedbackStub.reply = .silent
+
+        let outcome = try await sync(store).pushPending()
+
+        XCTAssertEqual(outcome.uploaded, 0)
+        XCTAssertEqual(outcome.refusals, [a.stretchKey: "not_confirmed"])
+        XCTAssertEqual(store.pending().count, 1)
+    }
+
+    func testACredentialTheServerRefusesIsReportedAsSignedOutNotSwallowed() async throws {
+        let store = makeStore()
+        store.upsert(verdict(start: 1_000))
+        StretchFeedbackStub.status = 401
+
+        let outcome = try await sync(store).pushPending()
+
+        XCTAssertEqual(outcome.blocked, .signedOut)
+        XCTAssertEqual(store.pending().count, 1)
+    }
+
+    func testAReplyThatIsNotTheRoutesJSONIsTriedAgainNotTrusted() async {
+        let store = makeStore()
+        store.upsert(verdict(start: 1_000))
+        StretchFeedbackStub.reply = .garbage
+
+        do {
+            _ = try await sync(store).pushPending()
+            XCTFail("expected a thrown error")
+        } catch {
+            XCTAssertTrue(error is StretchFeedbackSyncError)
+        }
+        XCTAssertEqual(store.pending().count, 1)
+    }
+
+    func testNoCloudAddressIsReportedAsSuch() async throws {
+        let store = makeStore()
+        store.upsert(verdict(start: 1_000))
+        let noAddress = StretchFeedbackCloudSync(
+            store: store, session: StretchFeedbackStub.session(), endpoint: { nil },
+            identity: {
+                CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
+                                  sourceId: "22222222-2222-4222-8222-222222222222",
+                                  tokenId: "t", uploadToken: "noop_x")
+            })
+
+        let outcome = try await noAddress.pushPending()
+
+        XCTAssertEqual(outcome.blocked, .noServer)
+        XCTAssertTrue(StretchFeedbackStub.requests.isEmpty)
+    }
+
+    func testNothingWaitingIsNeverReportedAsBlocked() async throws {
+        let outcome = try await sync(makeStore(), signedIn: false).pushPending()
+        XCTAssertEqual(outcome, .init())
     }
 
     func testServerErrorKeepsEverythingQueued() async {
@@ -225,7 +368,7 @@ final class StretchFeedbackAppTests: XCTestCase {
 
         let outcome = try await sync(store, signedIn: false).pushPending()
 
-        XCTAssertEqual(outcome, .init())
+        XCTAssertEqual(outcome, .init(blocked: .signedOut))
         XCTAssertTrue(StretchFeedbackStub.requests.isEmpty)
         XCTAssertEqual(store.pending().count, 1)
     }
@@ -241,6 +384,90 @@ final class StretchFeedbackAppTests: XCTestCase {
         XCTAssertEqual(center.feedback(kind: .activityContext, start: 1_004, end: 1_610)?.verdict, .incorrect)
         XCTAssertNil(center.feedback(kind: .strapState, start: 1_000, end: 1_600))
         XCTAssertNil(center.feedback(kind: .activityContext, start: 5_000, end: 5_600))
+    }
+
+    @MainActor
+    func testCenterSendsAnAnswerAndSaysSo() async {
+        let store = makeStore()
+        let center = StretchFeedbackCenter(store: store, sync: sync(store))
+        center.save(verdict(start: 1_000, .incorrect))
+
+        await center.flushAndWait()
+
+        XCTAssertEqual(center.waitingToUpload, 0)
+        XCTAssertEqual(center.delivery, .idle)
+        XCTAssertEqual(center.standing(of: center.records[0]), .sent)
+        XCTAssertTrue(store.pending().isEmpty)
+    }
+
+    @MainActor
+    func testCenterSaysSignInWhenNobodyIsSignedIn() async {
+        let store = makeStore()
+        let center = StretchFeedbackCenter(store: store, sync: sync(store, signedIn: false))
+        center.save(verdict(start: 1_000, .incorrect))
+
+        await center.flushAndWait()
+
+        XCTAssertEqual(center.delivery, .needsSignIn)
+        XCTAssertEqual(center.standing(of: center.records[0]), .needsSignIn)
+        XCTAssertEqual(center.waitingToUpload, 1, "the answer is kept, not dropped")
+        XCTAssertTrue(StretchFeedbackStub.requests.isEmpty)
+    }
+
+    @MainActor
+    func testCenterKeepsARefusedAnswerAndSaysWhy() async {
+        let store = makeStore()
+        let center = StretchFeedbackCenter(store: store, sync: sync(store))
+        StretchFeedbackStub.reply = .rejectedWithReason
+        center.save(verdict(start: 1_000, .incorrect))
+
+        await center.flushAndWait()
+
+        XCTAssertEqual(center.delivery, .refused)
+        XCTAssertEqual(center.standing(of: center.records[0]), .refused(reason: "invalid_model_context"))
+        XCTAssertEqual(center.waitingToUpload, 1)
+    }
+
+    @MainActor
+    func testCenterTriesAgainOnItsOwnAfterAServerError() async throws {
+        let store = makeStore()
+        let center = StretchFeedbackCenter(store: store, sync: sync(store), retryDelays: [0.05])
+        StretchFeedbackStub.status = 500
+        center.save(verdict(start: 1_000, .incorrect))
+        await center.flushAndWait()
+        XCTAssertEqual(center.delivery, .willRetry)
+        XCTAssertEqual(center.standing(of: center.records[0]), .willRetry)
+        XCTAssertEqual(center.waitingToUpload, 1)
+
+        StretchFeedbackStub.status = 200
+        let deadline = Date().addingTimeInterval(5)
+        while center.waitingToUpload > 0 && Date() < deadline { try await Task.sleep(nanoseconds: 25_000_000) }
+
+        XCTAssertEqual(center.waitingToUpload, 0, "no app relaunch or new answer was needed")
+        XCTAssertEqual(center.delivery, .idle)
+    }
+
+    @MainActor
+    func testCenterGoesBackToSendingWhenSignInReturns() async {
+        let store = makeStore()
+        let signedIn = SignInSwitch()
+        let identity = CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
+                                         sourceId: "22222222-2222-4222-8222-222222222222",
+                                         tokenId: "t", uploadToken: "noop_x")
+        let toggled = StretchFeedbackCloudSync(
+            store: store, session: StretchFeedbackStub.session(),
+            endpoint: { URL(string: "https://example.invalid/functions/v1/scores")! },
+            identity: { signedIn.isOn ? identity : nil })
+        let center = StretchFeedbackCenter(store: store, sync: toggled)
+        center.save(verdict(start: 1_000, .incorrect))
+        await center.flushAndWait()
+        XCTAssertEqual(center.delivery, .needsSignIn)
+
+        signedIn.isOn = true
+        await center.flushAndWait()
+
+        XCTAssertEqual(center.waitingToUpload, 0)
+        XCTAssertEqual(center.delivery, .idle)
     }
 
     // MARK: Day-state cache
@@ -294,9 +521,14 @@ final class StretchFeedbackAppTests: XCTestCase {
     }
 }
 
+/// Stands in for "is anyone signed in", flipped by a test while a sync object that reads it is already built.
+private final class SignInSwitch: @unchecked Sendable {
+    var isOn = false
+}
+
 /// Answers the stretch-feedback route from memory so the real request path runs with no network.
 private final class StretchFeedbackStub: URLProtocol {
-    enum Reply { case saved, rejected, echo }
+    enum Reply { case saved, rejected, echo, rejectedWithReason, silent, garbage }
 
     static var status = 200
     static var reply = Reply.saved
@@ -329,8 +561,15 @@ private final class StretchFeedbackStub: URLProtocol {
         switch Self.reply {
         case .saved, .echo: payload = ["saved": rows, "ignored": [], "rejected": []]
         case .rejected: payload = ["saved": [], "ignored": [], "rejected": rows]
+        case .rejectedWithReason:
+            payload = ["saved": [], "ignored": [],
+                       "rejected": keys.map { ["stretch_key": $0, "reason": "invalid_model_context"] }]
+        case .silent: payload = ["saved": [], "ignored": [], "rejected": []]
+        case .garbage: payload = [:]
         }
-        let data = (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+        let data = Self.reply == .garbage
+            ? Data("<html>sign in to the wifi</html>".utf8)
+            : (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
         let http = HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: "HTTP/1.1",
                                    headerFields: nil)!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
