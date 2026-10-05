@@ -12,10 +12,12 @@ final class ActivityContextClassTests: XCTestCase {
     private func classify(posture: [PostureClass: Double] = [.unknown: 1],
                           locomotion: [LocomotionClass: Double] = [.stationary: 1],
                           arm: [ArmBehaviorClass: Double] = [.unknown: 1],
-                          sleep: SleepContextState = .awake, wear: WearContextState = .onWrist,
+                          sleep: SleepContextState = .awake, inBed: Bool = false,
+                          wear: WearContextState = .onWrist,
                           quality: Double = 0.8) -> ActivityClassification {
         ActivityClassifier.classify(posture: Posture(posture), locomotion: Locomotion(locomotion),
-                                    armBehavior: Arm(arm), sleep: sleep, wear: wear, evidenceQuality: quality)
+                                    armBehavior: Arm(arm), sleep: sleep, inBed: inBed, wear: wear,
+                                    evidenceQuality: quality)
     }
 
     // MARK: Vocabulary
@@ -27,7 +29,7 @@ final class ActivityContextClassTests: XCTestCase {
             "fidgeting", "light_activity", "walking", "brisk_walking", "running", "cycling",
             "vigorous_activity", "unknown",
         ])
-        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-1")
+        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-2")
     }
 
     func testTheRequestedVocabularyIsAllRepresented() {
@@ -201,7 +203,7 @@ final class ActivityContextClassTests: XCTestCase {
         let night = classify(posture: [.recumbent: 0.9, .unknown: 0.1], locomotion: [.stationary: 0.97, .unknown: 0.03],
                              sleep: .asleep)
         XCTAssertEqual(night.activityClass, .sleeping)
-        // Inside the session anything short of a clear sit/stand lean is the night.
+        // On a sleep epoch the confirming evidence is stillness.
         XCTAssertEqual(night.confidence, 0.97, accuracy: 1e-9)
 
         let nap = classify(posture: [.recumbent: 0.9, .unknown: 0.1], locomotion: [.stationary: 0.97, .unknown: 0.03],
@@ -211,6 +213,25 @@ final class ActivityContextClassTests: XCTestCase {
         let inBed = classify(posture: [.recumbent: 0.9, .unknown: 0.1], locomotion: [.stationary: 0.97, .unknown: 0.03],
                              sleep: .awake)
         XCTAssertEqual(inBed.activityClass, .lyingDown)
+    }
+
+    /// The staged night decides asleep and in bed; a seated lean (how a still wrist often reads at night)
+    /// neither overrides it nor drains its confidence.
+    func testTheNightNotThePostureLeanDecidesSleepingAndInBed() {
+        let seated: [PostureClass: Double] = [.seatedLikely: 0.80, .uprightStationary: 0.14, .unknown: 0.06]
+        let still: [LocomotionClass: Double] = [.stationary: 0.97, .unknown: 0.03]
+        let asleep = classify(posture: seated, locomotion: still, arm: [.deskLike: 0.77, .fidgeting: 0.23],
+                              sleep: .asleep, inBed: true)
+        XCTAssertEqual(asleep.activityClass, .sleeping)
+        XCTAssertEqual(asleep.confidence, 0.97, accuracy: 1e-9)
+
+        let awakeInBed = classify(posture: seated, locomotion: still, arm: [.deskLike: 0.8, .quiet: 0.2],
+                                  sleep: .awake, inBed: true)
+        XCTAssertEqual(awakeInBed.activityClass, .lyingDown)
+        XCTAssertEqual(awakeInBed.confidence, 0.97, accuracy: 1e-9)
+
+        let atDesk = classify(posture: seated, locomotion: still, arm: [.deskLike: 0.8, .quiet: 0.2], sleep: .awake)
+        XCTAssertEqual(atDesk.activityClass, .sittingDesk, "outside a night the lean is read as before")
     }
 
     func testThinEvidenceIsUnknownWithTheBestGuessAsRunnerUp() {

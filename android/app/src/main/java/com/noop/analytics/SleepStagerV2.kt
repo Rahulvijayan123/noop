@@ -51,7 +51,8 @@ object SleepStagerV2 {
      * DROP-IN: same signature + return type as [SleepStager.stageSession], so a caller can switch V1↔V2 on a
      * flag with no other change. [resp] (raw resp ADC) is accepted for signature-parity but not consumed —
      * respiration regularity is recovered from the R-R stream (RSA), the path available on both WHOOP 4 and
-     * 5. The recipe stages "wake" naturally (no separate pre-onset / post-wake forcing).
+     * 5. The recipe stages "wake" from its emissions, plus one pre-onset rule: nothing before the wrist
+     * first settles is sleep ([settledOnset]). There is no post-wake forcing.
      *
      * PERF (v7.0.2 / #707): this is a thin cache veneer over [stageSessionUncached]. The full recipe
      * (per-epoch z-scores + a band-limited DFT per epoch + a 4-state Viterbi over the whole night) is the
@@ -544,6 +545,35 @@ object SleepStagerV2 {
         return null
     }
 
+    /** Settled-onset rule: sleep cannot begin before the wrist SETTLES — the first run of [settledOnsetEpochs]
+     *  epochs (15 minutes) in which at most [settledOnsetTolerance] epoch moved, a moved epoch being one that
+     *  is not [motionQuiescent]. Every epoch before the first sleep label at or after the start of that run is
+     *  wake. Lying awake in bed is still and low-HR, but the wakeful wrist keeps shifting every few minutes.
+     *  PSG (sleep-accel, n = 31): onset bias −11.1 → +0.4 min, MAE 11.1 → 5.6 min, kappa 0.371 → 0.399.
+     *  Mirrors Swift `SleepStagerV2.settledOnset`, where the derivation is written out. */
+    internal const val settledOnsetEpochs = 30
+    internal const val settledOnsetTolerance = 1
+
+    /** Index of the first sleep epoch at or after the start of the first settled run, or null when no run
+     *  settles (the hypnogram is then left as Viterbi staged it). */
+    internal fun settledOnset(settled: List<Boolean>, labels: List<String>): Int? {
+        val w = settledOnsetEpochs
+        if (settled.size < w || labels.size != settled.size) return null
+        var unsettled = 0
+        for (i in 0 until w) if (!settled[i]) unsettled++
+        var i = 0
+        while (true) {
+            if (unsettled <= settledOnsetTolerance && settled[i]) {
+                for (j in i until labels.size) if (labels[j] != "awake") return j
+                return null
+            }
+            if (i + w >= settled.size) return null
+            if (!settled[i]) unsettled--
+            if (!settled[i + w]) unsettled++
+            i++
+        }
+    }
+
     /** Viterbi most-likely path over the per-epoch log-emissions with the sticky transition matrix and a
      *  uniform start. Ties resolve to the earlier stage in [stageNames]. */
     private fun viterbi(emSeq: List<Map<String, Double>>): List<String> {
@@ -641,8 +671,15 @@ object SleepStagerV2 {
             seq.add(em)
         }
 
+        // Lying awake before the wrist settles is wake, however still and low-HR it was ([settledOnset]).
+        val settled = feats.map { motionQuiescent(it) }
+        fun wakeBeforeSettling(labels: List<String>): List<String> {
+            val onset = settledOnset(settled, labels) ?: return labels
+            return labels.mapIndexed { i, l -> if (i < onset) "awake" else l }
+        }
+
         // PASS 1 — stage without the REM-latency guard purely to locate sleep onset.
-        val provisional = viterbi(seq)
+        val provisional = wakeBeforeSettling(viterbi(seq))
         // Origin for the guard: the centre of the first sustained-sleep epoch, in the same window-relative
         // minutes [features] stamped on every epoch. No sustained run → 0.0, i.e. the window start.
         val originMin = sustainedSleepOnset(provisional)?.let { feats[it].minutesSinceOnset } ?: 0.0
@@ -651,6 +688,6 @@ object SleepStagerV2 {
         for (i in feats.indices) {
             seq[i]["rem"] = seq[i]["rem"]!! - remLatencyGuard(feats[i].minutesSinceOnset - originMin)
         }
-        return viterbi(seq)
+        return wakeBeforeSettling(viterbi(seq))
     }
 }

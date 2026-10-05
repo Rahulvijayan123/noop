@@ -93,13 +93,16 @@ extension WearContextState {
 /// The colour family a display label belongs to. Many labels ("Desk sitting", "Sitting quietly") are one
 /// family on the lane; the label itself stays in the list and the detail card.
 enum ActivityFamily: CaseIterable, Hashable {
-    case asleep, sitting, standing, stillUnsure, walking, running, otherMovement, changing, offWrist, unclear
+    case asleep, inBed, sitting, standing, stillUnsure, walking, running, otherMovement, changing, offWrist, unclear
 
     static func of(_ label: String) -> ActivityFamily {
         switch label {
         case ActivityDisplay.offWrist: return .offWrist
         case ActivityDisplay.unclear: return .unclear
-        case "Asleep", "Resting in bed", "Lying down": return .asleep
+        case "Asleep": return .asleep
+        // Lying awake in bed is not sleep, and is drawn in the hypnogram's awake colour so the lane and the
+        // sleep page tell the same story about a night.
+        case "Resting in bed", "Lying down": return .inBed
         case "Running": return .running
         case "Walking", "Brisk walking", "Taking stairs": return .walking
         case "Cycling", "In a vehicle", "Exercising", "Moving": return .otherMovement
@@ -114,7 +117,8 @@ enum ActivityFamily: CaseIterable, Hashable {
 
     var title: String {
         switch self {
-        case .asleep: return String(localized: "Asleep or lying down")
+        case .asleep: return String(localized: "Asleep")
+        case .inBed: return String(localized: "Lying down or in bed")
         case .sitting: return String(localized: "Sitting")
         case .standing: return String(localized: "Standing")
         case .stillUnsure: return String(localized: "Still, sitting or standing")
@@ -130,6 +134,7 @@ enum ActivityFamily: CaseIterable, Hashable {
     var color: Color {
         switch self {
         case .asleep: return StrandPalette.sleepDeep
+        case .inBed: return StrandPalette.sleepAwake
         case .sitting: return StrandPalette.metricCyan
         case .standing: return StrandPalette.metricPurple
         case .stillUnsure: return StrandPalette.metricCyan.opacity(0.5)
@@ -145,6 +150,7 @@ enum ActivityFamily: CaseIterable, Hashable {
     var symbol: String {
         switch self {
         case .asleep: return "bed.double.fill"
+        case .inBed: return "bed.double"
         case .sitting, .stillUnsure: return "chair.lounge.fill"
         case .standing: return "figure.stand"
         case .walking: return "figure.walk"
@@ -157,7 +163,7 @@ enum ActivityFamily: CaseIterable, Hashable {
     }
 
     static let displayOrder: [ActivityFamily] = [
-        .asleep, .sitting, .stillUnsure, .standing, .changing, .walking, .running, .otherMovement, .offWrist, .unclear,
+        .asleep, .inBed, .sitting, .stillUnsure, .standing, .changing, .walking, .running, .otherMovement, .offWrist, .unclear,
     ]
 }
 

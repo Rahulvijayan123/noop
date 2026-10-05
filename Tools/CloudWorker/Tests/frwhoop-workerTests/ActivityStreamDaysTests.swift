@@ -20,9 +20,10 @@ final class ActivityStreamDaysTests: XCTestCase {
     }
 
     private func build(_ streams: ActivityContextDays.Streams,
-                       sleep: [(start: Int, end: Int)] = [], now: Int? = nil) throws -> ActivityContextDays.Built? {
+                       sleep: [(start: Int, end: Int)] = [], inBed: [(start: Int, end: Int)] = [],
+                       now: Int? = nil) throws -> ActivityContextDays.Built? {
         try ActivityContextDays.buildStreamDay(
-            day: day, dayBounds: (dayStart, dayEnd), streams: streams, sleep: sleep, exercise: [],
+            day: day, dayBounds: (dayStart, dayEnd), streams: streams, sleep: sleep, inBed: inBed, exercise: [],
             now: now ?? dayEnd + 3_600)
     }
 
@@ -198,6 +199,40 @@ final class ActivityStreamDaysTests: XCTestCase {
         let built = try XCTUnwrap(try build(sim.streams, sleep: sleep))
         let sleeps = try runs(built).compactMap { $0["sleep"] as? String }
         XCTAssertTrue(sleeps.contains("asleep"), "\(sleeps)")
+    }
+
+    /// A published night: in bed from its start, asleep only on its staged sleep epochs. Lying awake
+    /// before sleep is "in bed" and awake, never asleep (reported night: in bed 01:47, asleep 02:54).
+    func testAPublishedNightIsInBedThenAsleepOnItsSleepEpochs() throws {
+        let bed = dayStart + 3_600, asleepAt = bed + 900, end = bed + 1_800
+        var sim = DaySim(start: bed)
+        sim.still(1_800)
+        let night = ActivityContextDays.Night(start: bed, end: end, stagesJSON: """
+            [{"start":\(bed),"end":\(asleepAt),"stage":"wake"},{"start":\(asleepAt),"end":\(end),"stage":"light"}]
+            """)
+        let asleep = ActivityContextDays.asleepSpans([night])
+        XCTAssertEqual(asleep.map(\.start), [asleepAt])
+        XCTAssertEqual(asleep.map(\.end), [end])
+
+        let built = try XCTUnwrap(try build(sim.streams, sleep: asleep, inBed: [(start: bed, end: end)]))
+        let all = try runs(built)
+        // Runs that lie wholly before (after) sleep onset, past the decoder's first-minute warm-up.
+        let before = all.filter { (($0["e"] as? Int) ?? 0) <= asleepAt && (($0["e"] as? Int) ?? 0) > bed + 60 }
+        XCTAssertFalse(before.isEmpty, "\(all.map { ($0["s"] ?? 0, $0["e"] ?? 0, $0["sleep"] ?? "", $0["display_context"] ?? "") })")
+        XCTAssertTrue(before.allSatisfy { ($0["sleep"] as? String) == "awake" && ($0["in_bed"] as? Bool) == true },
+                      "\(before)")
+        let after = all.filter { (($0["s"] as? Int) ?? 0) >= asleepAt }
+        XCTAssertFalse(after.isEmpty)
+        XCTAssertTrue(after.allSatisfy { ($0["sleep"] as? String) == "asleep" && ($0["in_bed"] as? Bool) == true })
+        XCTAssertTrue(after.contains { ($0["display_context"] as? String) == "Asleep" })
+    }
+
+    func testANightWithoutStagesIsAsleepForItsWholeWindow() {
+        let night = ActivityContextDays.Night(start: dayStart, end: dayStart + 600, stagesJSON: nil)
+        let asleep = ActivityContextDays.asleepSpans([night])
+        XCTAssertEqual(asleep.count, 1)
+        XCTAssertEqual(asleep.first?.start, dayStart)
+        XCTAssertEqual(asleep.first?.end, dayStart + 600)
     }
 
     // MARK: - Claimed rows
