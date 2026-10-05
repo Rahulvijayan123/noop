@@ -186,6 +186,22 @@ final class Backfiller {
     /// an offload — a still-fraction only means something over a whole night's worth of records.
     private(set) var sessionDynAccel = Streams.DynAccelDiag()
 
+    /// What this session does with the records it reads (see `HistoryIntake`). Set by the BLE layer before each
+    /// `begin`; `.hold` never reaches a Backfiller, because a held offload is never started.
+    var intake: HistoryIntake = .keep
+
+    /// Records this session read and acknowledged without keeping, because they predate the pairing.
+    private(set) var sessionDiscarded = HistoryFenceReport()
+
+    /// Reported after each chunk that dropped records.
+    var onHistoryDiscarded: ((HistoryFenceReport) -> Void)?
+
+    /// The cut-off in effect for this session, or nil when everything the strap offers is kept.
+    private var fence: Int? {
+        if case .discard(let before) = intake { return before }
+        return nil
+    }
+
     /// The trim cursor of the LAST chunk this Backfiller acked (durably persisted + confirmed to the
     /// strap). Survives across sessions on the same connection so the auto-continue gate (#364) can ask
     /// "did the offload actually advance the strap's trim this session?" — the spin-detector signal that
@@ -326,6 +342,7 @@ final class Backfiller {
         chunk.removeAll(keepingCapacity: true)
         chunkOpen = true
         sessionRowsPersisted = 0
+        sessionDiscarded = HistoryFenceReport()
         sessionRrOffered = 0
         sessionRrInserted = 0
         sessionRrSumMs = 0
@@ -379,7 +396,9 @@ final class Backfiller {
                 // precedes the ack. The store gates on the exact 1244-byte shape (decode is
                 // authoritative, mirroring Android recordGroundTruthImuFrame); the cheap
                 // rawColumns gate here keeps non-IMU data frames from touching the window store.
-                if Whoop5RawImu.rawColumns(frame) != nil {
+                // Under a fence the IMU frames wait for finishChunk, which appends them only for a chunk that
+                // held nothing from before the pairing (still ahead of the ack).
+                if fence == nil, Whoop5RawImu.rawColumns(frame) != nil {
                     _ = ImuSessionFileStore.shared.append(deviceId: deviceId, frame: frame,
                         receivedAtMs: Int64(Date().timeIntervalSince1970 * 1_000))
                 }
@@ -412,6 +431,18 @@ final class Backfiller {
     ) -> (rows: Int, motion: Int, nights: Set<Int>) {
         let rows = counts.hr + counts.rr + counts.spo2 + counts.skinTemp + counts.resp + counts.gravity
         return (rows, counts.gravity, Set(timestamps.map { $0 / 86400 }))
+    }
+
+    /// The one-line summary of an offload that read records only to acknowledge them (see `HistoryIntake`).
+    nonisolated static func sessionDiscardLine(_ report: HistoryFenceReport) -> String {
+        let span: String
+        if let oldest = report.oldest, let newest = report.newest {
+            let from = BadClockDiagnostics.isoDay(oldest), to = BadClockDiagnostics.isoDay(newest)
+            span = from == to ? " dated \(from)" : " dated \(from) to \(to)"
+        } else {
+            span = ""
+        }
+        return "Backfill: session acknowledged \(report.dropped) record(s)\(span) from before this strap was paired, without keeping them."
     }
 
     /// The one-line session success summary (#150) — the success-side log that never existed. Returns nil
@@ -638,12 +669,34 @@ final class Backfiller {
             let dev = ref.device, wall = ref.wall
             let oldest = sessionOldestUnix, newest = sessionNewestUnix
             let extractFn = extract   // keep the injected Extractor seam (tests override it); prod == extractHistoricalStreams
-            let d = await Task.detached(priority: .utility) { () -> DecodedChunk in
+            var d = await Task.detached(priority: .utility) { () -> DecodedChunk in
                 let parsed = frames.map { parseFrame($0, family: fam) }
                 let decoded = extractFn(parsed, dev, wall, fam, oldest, newest)
                 let rejected = rejectedHistoricalRecords(frames, family: fam)
                 return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected)
             }.value
+            // A new owner's offload: whatever is dated before the pairing is read so the ack can free it, and
+            // goes no further. It is cut here, after decode and before every sink below (the store, the cloud
+            // journal, the reject archive, raw capture, the IMU files), so there is exactly one place where
+            // "not kept" is decided.
+            //
+            // Undecodable records have no date to test, so they are archived only when the chunk shows they
+            // are the new owner's: it kept records and dropped none. A chunk that dropped anything, or kept
+            // nothing, may be holding the previous owner's bytes, and an archive is a copy of those.
+            var fenced = false
+            if let fence {
+                let cut = d.decoded.discardingRecords(before: fence)
+                fenced = cut.report.dropped > 0
+                if fenced {
+                    if sessionDiscarded.dropped == 0 {
+                        log?("Backfill: reading records dated \(BadClockDiagnostics.isoDay(cut.report.oldest ?? fence)) to \(BadClockDiagnostics.isoDay(cut.report.newest ?? fence)), before this strap was paired, only to acknowledge them; they are not kept.")
+                    }
+                    sessionDiscarded.absorb(cut.report)
+                    onHistoryDiscarded?(cut.report)
+                }
+                let undatable = fenced || cut.streams.isEmpty
+                d = DecodedChunk(parsed: d.parsed, decoded: cut.streams, rejected: undatable ? [] : d.rejected)
+            }
             let parsed = d.parsed
             // #1008: per-chunk clock basis + R-R packing. The session summary logs only the FIRST chunk's
             // correlation, which cannot show the offset moving across a long offload nor separate "the same
@@ -819,10 +872,12 @@ final class Backfiller {
             let rejected = d.rejected
             // Tally this chunk's outcome so a completed-but-empty session is distinguishable from a
             // caught-up one (#77 family): did it decode sensor rows, and was it console-only?
-            onChunk?(!decoded.isEmpty, decoded.isEmpty && rejected.isEmpty)
+            // A chunk whose records were all cut by the fence was not console output either: it held sensor
+            // records, they just were not this owner's.
+            onChunk?(!decoded.isEmpty || fenced, decoded.isEmpty && rejected.isEmpty && !fenced)
             // A chunk that produced no rows AND held no genuine rejects was pure console output — say
             // so calmly so it doesn't read as data loss (the "rejected frames" red herring, #77/#120).
-            if decoded.isEmpty && rejected.isEmpty {
+            if decoded.isEmpty && rejected.isEmpty && !fenced {
                 log?("Backfill: \(frames.count) frame(s) this chunk carried no sensor records (strap console/diagnostic output) — normal, nothing to persist (trim=\(trim)).")
             }
             // Log + hex-sample the GENUINE rejects whenever there are any — INCLUDING a partially-decoded
@@ -920,9 +975,19 @@ final class Backfiller {
                 }
             }
 
+            // Under a fence, a chunk that held nothing from before the pairing is the new owner's, so its raw
+            // IMU frames go to the IMU store now, still ahead of the ack that frees the strap's copy. A chunk
+            // that held older records gets neither these nor the raw batch below: its frames mix owners.
+            if fence != nil, !fenced {
+                for frame in frames where Whoop5RawImu.rawColumns(frame) != nil {
+                    _ = ImuSessionFileStore.shared.append(deviceId: deviceId, frame: frame,
+                        receivedAtMs: Int64(Date().timeIntervalSince1970 * 1_000))
+                }
+            }
+
             // RAW: only persisted when the research toggle is ON. Default OFF → decoded-only; the
             // chunk is still durably committed (decoded) so the trim is safe to advance + ack.
-            if enableRawCapture {
+            if enableRawCapture, !fenced {
                 let meta = RawBatchMeta(
                     batchId: "hist-\(deviceId)-\(trim)",
                     deviceId: deviceId,

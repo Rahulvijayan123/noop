@@ -59,6 +59,8 @@ final class AppModel: ObservableObject {
     let live: LiveState
     /// CoreBluetooth engine , scans, connects, bonds, streams.
     let ble: BLEManager
+    /// Decides whether a strap's saved history is this account's to read before the first offload runs.
+    private(set) var historyGate: HistoryIntakeGate?
     /// Read model over the on-device store (dashboard + detail screens).
     let repo: Repository
     /// G1 day-boundary driver (audit 20261003): recomputes the local "Today" key on launch/resume/
@@ -271,9 +273,16 @@ final class AppModel: ObservableObject {
     private var hostedSyncInFlight = false
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
+    /// Days the change feed announced whose read failed for a reason that can clear; asked for again next pass.
+    private var hostedRetry = HostedRetryLedger()
     private var hostedCatchUpDone = false
-    private static let hostedCatchUpSpan = 7
+    /// The last sync summary written to the strap log, so an unchanged state is said once, not every 30 s.
+    private var lastHostedSyncLine: String?
+    private static let hostedCatchUpSpan = 14
     private static let hostedChangedDaysCap = 32
+    /// Pages of the server's change feed read per pass. A fresh install, a new phone or a recovered account
+    /// starts the feed at zero, and one page of 32 days is not the whole history of a long-worn strap.
+    private static let hostedChangedPagesPerSync = 4
     /// The account the revisions above were written for; a different account starts from nothing.
     private var hostedAccountScope: CloudDataScope?
 
@@ -342,9 +351,11 @@ final class AppModel: ObservableObject {
     func cloudAccountReady(_ identity: CloudPushIdentity) async {
         if hostedAccountScope != identity.scope {
             hostedWrittenRevision = [:]
+            hostedRetry = HostedRetryLedger()
             hostedAccountScope = identity.scope
         }
         applyPowerSaving()
+        historyGate?.evaluateSoon()
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         guard cloudScoringIsAuthoritative else { return }
@@ -362,14 +373,85 @@ final class AppModel: ObservableObject {
         historySeedTask?.cancel()
         historySeedTask = nil
         hostedWrittenRevision = [:]
+        hostedRetry = HostedRetryLedger()
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
         applyPowerSaving()
     }
 
-    private var hostedReadDeviceId: String {
+    /// The id this phone knows the active strap by locally (the registry's active device).
+    private var hostedLocalDeviceId: String {
         let active = (deviceRegistry?.activeDeviceId ?? "").trimmingCharacters(in: .whitespaces)
         return active.isEmpty ? deviceId : active
+    }
+
+    /// Device ids to read the server's results from, best first. The strap's own `whoop-<serial>` leads once
+    /// its serial is known; the local id follows so a canonical device that has nothing yet does not blank
+    /// out what this phone was already showing.
+    private var hostedReadCandidates: [String] {
+        CloudStrapSerialStore.shared.readCandidates(forLocalId: hostedLocalDeviceId)
+    }
+
+    private var hostedReadDeviceId: String { hostedReadCandidates[0] }
+
+    /// Install the gate that holds a strap's first offload until its saved history is known to be this
+    /// account's (see `HistoryIntakeGate`). Cloud mode only; everywhere else it answers `.keep`.
+    private func configureHistoryGate() {
+        let gate = HistoryIntakeGate(environment: .init(
+            cloudEnabled: { CloudPushSettings.isEnabled },
+            account: { CloudPushRuntime.shared.runningScope?.ownerId },
+            localOwner: { CloudLocalDataBinding.owner() },
+            localDeviceId: { [weak self] in self?.hostedLocalDeviceId ?? "my-whoop" },
+            serial: { [weak self] in self?.ble.cloudLinkSerial },
+            hasHistory: { [weak self] localId, before in await self?.localHeartRateExists(deviceId: localId, before: before) },
+            holdsDevice: { [weak self] cloudId in await self?.accountHoldsDevice(cloudId) ?? .unreachable },
+            now: { Int(Date().timeIntervalSince1970) }))
+        gate.log = { [weak self] line in self?.live.append(log: line) }
+        gate.onDecided = { [weak self] in self?.ble.requestSync(.connect) }
+        ble.historyIntake = { [weak gate] in gate?.intake() ?? .keep }
+        ble.onHistoryDiscarded = { [weak gate] report in gate?.recordDiscarded(report) }
+        historyGate = gate
+    }
+
+    /// Whether this phone holds heart-rate rows for `deviceId` older than `before`. nil when the store cannot
+    /// be read: an unreadable store is never evidence that there is no history.
+    private func localHeartRateExists(deviceId: String, before: Int) async -> Bool? {
+        if CloudStrapSerialStore.shared.hasReplacedStrap(forLocalId: deviceId) { return false }
+        guard let store = await repo.storeHandle() else { return nil }
+        return try? await store.hasHeartRate(deviceId: deviceId, before: before)
+    }
+
+    private func accountHoldsDevice(_ cloudId: String) async -> HistoryProbe {
+        guard let scores = CloudPushRuntime.shared.scoreRepository() else { return .unreachable }
+        do { return try await scores.holdsDevice(cloudId) ? .holds : .absent }
+        catch { return .unreachable }
+    }
+
+    /// The strap's serial was read. Remember it, and when it changes which device the cloud files this
+    /// strap under, re-run the one-time seed and the server read so the very next sync already uses it.
+    func strapSerialKnown(localDeviceId: String, serial: String) {
+        let change = CloudStrapSerialStore.shared.record(serial: serial, forLocalId: localDeviceId)
+        historyGate?.evaluateSoon()
+        guard change != .unchanged else { return }
+        switch change {
+        case .learned:
+            live.append(log: "Cloud: strap identity known (\(WhoopSerialIdentity.logSafe(serial: serial))) — uploads and server results now use the strap's own device")
+        case .replaced:
+            live.append(log: "Cloud: a different strap now answers to this device slot — the earlier strap's banked history is not replayed under it")
+        case .unchanged:
+            break
+        }
+        lastHostedSyncLine = nil
+        guard cloudScoringIsAuthoritative, CloudPushRuntime.shared.runningScope != nil else { return }
+        historySeedTask?.cancel()
+        historySeedTask = nil
+        hostedCatchUpDone = false
+        hostedWrittenRevision = [:]
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.startHistorySeedIfNeeded()
+            await self.syncHostedResults()
+        }
     }
 
     /// Cloud mode: fetch the hosted worker's results for yesterday, today and any day the server reports
@@ -387,11 +469,11 @@ final class AppModel: ObservableObject {
         // the account that owns this phone's on-device history; another account's results are still read
         // (they feed the account-scoped server cards) but never overwrite someone else's local days.
         let writesLocalStore = CloudLocalDataBinding.isOwner(account.ownerId)
-        // Uploads are stamped with the strap's own id (the stable serial id once adopted), so that is the
+        // Uploads are stamped with the strap's own id (the stable serial id once known), so that is the
         // device the server scores. Reading the fixed "my-whoop" id would return the frozen result of the
         // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
-        let readId = hostedReadDeviceId
-        IntradaySeriesStore.shared.readDeviceId = readId
+        let candidates = hostedReadCandidates
+        IntradaySeriesStore.shared.setReadCandidates(candidates)
         // G1 (findings/g1-day-ui.md Q3/Q5): "yesterday" is the previous LOCAL CALENDAR day, computed with
         // Calendar arithmetic — a fixed 86,400-second shift is the same calendar day on a 25-hour DST day
         // and skips the true previous day. Half-open [dayStart, dayStart+1day) bounds in the phone zone.
@@ -406,15 +488,36 @@ final class AppModel: ObservableObject {
         // and stayed a stale stub, which left the baseline a night short.
         let catchUpDays = hostedCatchUpDone ? [] : (2...Self.hostedCatchUpSpan).map { dayKey(daysBack: $0) }
         for day in catchUpDays where !days.contains(day) { days.append(day) }
-        if let changed = try? await scores.pollChangedDays(deviceId: readId) {
-            for change in changed.prefix(Self.hostedChangedDaysCap) where !days.contains(change.day) {
-                days.append(change.day)
+        for day in hostedRetry.days where !days.contains(day) { days.append(day) }
+        // Every candidate's change feed counts: days the server rescored under the strap's own device and
+        // under the installation id both need re-reading. Each feed is paged until it runs dry (bounded), so a
+        // feed that starts at zero on a fresh install reaches the whole history, not just its first page.
+        var feedFailures: [String] = []
+        for candidate in candidates {
+            for _ in 0..<Self.hostedChangedPagesPerSync {
+                let page: [ServerScoreChange]
+                do {
+                    page = try await scores.pollChangedDays(deviceId: candidate)
+                } catch {
+                    feedFailures.append(HostedDayRead.failureToken(for: error))
+                    break
+                }
+                for change in page.prefix(Self.hostedChangedDaysCap) where !days.contains(change.day) {
+                    days.append(change.day)
+                }
+                if page.count < Self.hostedChangedDaysCap { break }
             }
         }
         let dismissed = repo.dismissedSleepWindows()
         var written = 0
+        var outcomes: [HostedDayRead.Outcome] = []
+        var unstoredDays: [String] = []
         for day in days {
-            guard let result = (try? await scores.refresh(day: day, deviceId: readId))?.hostedResult,
+            let outcome = await HostedDayRead.read(day: day, candidates: candidates) { id in
+                try await scores.refresh(day: day, deviceId: id).hostedResult
+            }
+            outcomes.append(outcome)
+            guard let result = outcome.result,
                   hostedWrittenRevision[day] != result.resultRevision else { continue }
             // The account may have changed while this read was in flight; its result is not the new
             // account's to write.
@@ -426,11 +529,34 @@ final class AppModel: ObservableObject {
                 written += 1
             } catch {
                 live.append(log: "Cloud: could not store the server result for \(day): \(error)")
+                unstoredDays.append(day)
             }
         }
         hostedCatchUpDone = true
+        if CloudPushRuntime.shared.runningScope == account {
+            hostedRetry.record(outcomes)
+            for day in unstoredDays { hostedRetry.recordStoreFailure(day: day) }
+        }
+        reportHostedSync(outcomes: outcomes, written: written, candidateCount: candidates.count,
+                         feedFailures: feedFailures)
         if written > 0 { await repo.refresh() }
         return written
+    }
+
+    /// Say what a sync pass found when it is not simply "everything is current", once per distinct state.
+    /// A failure used to be swallowed (`try?`), which is how a stuck readback looked identical to an empty one.
+    private func reportHostedSync(outcomes: [HostedDayRead.Outcome], written: Int, candidateCount: Int,
+                                  feedFailures: [String]) {
+        var line = HostedDayRead.summaryLine(outcomes: outcomes, written: written,
+                                             candidateCount: candidateCount)
+        if !feedFailures.isEmpty {
+            let detail = Dictionary(grouping: feedFailures, by: { $0 }).map { "\($0.key)×\($0.value.count)" }
+                .sorted().joined(separator: " ")
+            line = (line.map { $0 + " · " } ?? "Cloud: server results") + "change feed unreadable (\(detail))"
+        }
+        guard let line, line != lastHostedSyncLine else { return }
+        lastHostedSyncLine = line
+        live.append(log: line)
     }
 
     /// While the app is in the foreground, re-read the server's results every half minute so the day's
@@ -454,12 +580,20 @@ final class AppModel: ObservableObject {
         guard cloudScoringIsAuthoritative, historySeedTask == nil else { return }
         historySeedTask = Task { [weak self] in
             guard let self, let store = await self.repo.storeHandle() else { return }
-            let committed = await CloudHistorySeeder.runIfNeeded(store: store, deviceId: self.deviceId, family: nil)
-            if committed > 0 {
-                self.live.append(log: "Cloud: queued \(committed) banked history records for upload")
-            }
             let readId = self.hostedReadDeviceId
-            if readId != self.deviceId {
+            // A strap that files under its own device already sends everything it captures there, including
+            // what is replayed here, so the plain pass would only repeat the "moved" pass below. And rows banked
+            // under this local id before a DIFFERENT strap took the slot belong to the earlier strap: they must
+            // not be uploaded as the new one's history.
+            let capturedUnderStrapId = CloudStrapSerialStore.shared.cloudId(forLocalId: self.deviceId) != self.deviceId
+            let strapWasReplaced = CloudStrapSerialStore.shared.hasReplacedStrap(forLocalId: self.deviceId)
+            if !capturedUnderStrapId {
+                let committed = await CloudHistorySeeder.runIfNeeded(store: store, deviceId: self.deviceId, family: nil)
+                if committed > 0 {
+                    self.live.append(log: "Cloud: queued \(committed) banked history records for upload")
+                }
+            }
+            if readId != self.deviceId, !strapWasReplaced {
                 let moved = await CloudHistorySeeder.runIfNeeded(store: store, deviceId: self.deviceId,
                                                                  cloudDeviceId: readId, family: nil)
                 if moved > 0 {
@@ -470,7 +604,7 @@ final class AppModel: ObservableObject {
             // under the strap's own id go up as that device; any the provisional namespace still holds are sent
             // as the strap too, since the server scores and reads only the strap's device.
             var spo2Queued = await CloudSpo2Seeder.runIfNeeded(store: store, deviceId: readId, family: nil)
-            if readId != self.deviceId {
+            if readId != self.deviceId, !strapWasReplaced {
                 spo2Queued += await CloudSpo2Seeder.runIfNeeded(store: store, deviceId: self.deviceId,
                                                                cloudDeviceId: readId, family: nil)
             }
@@ -573,6 +707,12 @@ final class AppModel: ObservableObject {
         // Physical-input + wear hooks (fired live by FrameRouter).
         live.onDoubleTap = { [weak self] in self?.handleDoubleTap() }
         live.onWristChange = { [weak self] worn in self?.handleWristChange(worn) }
+        // The strap's serial decides which cloud device its data is filed under (see CloudDeviceIdentity). Wired
+        // here, not with the registry, because the serial can be read before the registry exists.
+        ble.onStrapSerialKnown = { [weak self] localId, serial in
+            self?.strapSerialKnown(localDeviceId: localId, serial: serial)
+        }
+        configureHistoryGate()
         // Re-arm the next day's firmware alarm the moment the strap reports it fired (if/when the
         // firmware pushes STRAP_DRIVEN_ALARM_EXECUTED). Gated on enabled inside applySmartAlarm.
         live.onSmartAlarmFired = { [weak self] in

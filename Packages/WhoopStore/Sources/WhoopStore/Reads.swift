@@ -873,6 +873,18 @@ extension WhoopStore {
         }
     }
 
+    /// Whether this device has any heart-rate row dated before `ts`: that this store has met the strap before
+    /// `ts`, rather than only since. Two bare `EXISTS` seeks on the `(deviceId, ts)` primary keys, so it costs
+    /// the same on an empty store and a multi-gigabyte one.
+    public func hasHeartRate(deviceId: String, before ts: Int) async throws -> Bool {
+        try syncRead { db in
+            try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM hrSample WHERE deviceId = ? AND ts < ?)
+                    OR EXISTS(SELECT 1 FROM ppgHrSample WHERE deviceId = ? AND ts < ?)
+                """, arguments: [deviceId, ts, deviceId, ts]) ?? false
+        }
+    }
+
     /// Per-table row counts for every accumulating decoded stream, keyed identically to Android's
     /// `WhoopRepository.storageRowCounts` so a maintainer reads the SAME map from either platform.
     ///

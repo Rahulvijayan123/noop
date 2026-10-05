@@ -342,12 +342,11 @@ struct ServerScoreTodaySection: View {
     private func load() async {
         guard let repository = CloudPushRuntime.shared.scoreRepository(),
               CloudPushIdentityStore.current() != nil else { return }
-        // The readback route resolves the owner's active device; the app's own
-        // device id ("my-whoop") matches what ingest registers it as.
-        let deviceId = "my-whoop"
+        // The strap's own device first, then the installation's: the same candidates the app model syncs.
+        let deviceIds = await IntradaySeriesStore.shared.readCandidates
         let day = dayKeyForToday()
         // Cache-first: the cached snapshot renders immediately.
-        snapshot = await repository.cachedDay(day: day, deviceId: deviceId)
+        snapshot = await repository.cachedDay(day: day, deviceIds: deviceIds)
         freshness = await freshnessLabel(snapshot, repository: repository)
         // The app model refreshes this day whenever it writes server results (which bumps
         // `refreshSeq` and re-runs this), so a cache read that recent needs no second request.
@@ -356,7 +355,7 @@ struct ServerScoreTodaySection: View {
             return
         }
         do {
-            let fresh = try await repository.refresh(day: day, deviceId: deviceId)
+            let fresh = try await repository.refresh(day: day, deviceIds: deviceIds)
             snapshot = fresh
             freshness = await freshnessLabel(fresh, repository: repository)
         } catch {
@@ -467,7 +466,6 @@ struct TodayView: View {
     @AppStorage(HostedCardPrefs.selectionKey) private var hostedCardsRaw = ""
     @AppStorage(TodayLayoutPrefs.orderKey) private var sectionOrderRaw = ""
     @AppStorage(TodayLayoutPrefs.hiddenKey) private var hiddenSectionsRaw = ""
-    @AppStorage(LiveSessionPrefs.betaKey) private var liveSessionsBeta = true
     private var sectionOrder: [TodaySection] {
         TodayLayoutPrefs.visibleOrder(orderRaw: sectionOrderRaw, hiddenRaw: hiddenSectionsRaw)
     }
@@ -645,7 +643,6 @@ struct TodayView: View {
     // iOS top-bar state: the date-jump popover and the profile/settings sheet.
     @State private var showDayPicker = false
     @State private var showSettings = false
-    @State private var showLiveSession = false
     /// The Updates inbox sheet (opened by the header bell). Shared across both platforms.
     /// #1862: the optional Coach launcher sheet, opened from the default-OFF Coach dashboard card.
     /// Presentation state only — nothing is requested from a provider by opening it.
@@ -1887,7 +1884,6 @@ struct TodayView: View {
                 keyMetricsRaw: $keyMetricsRaw,
                 keyMetricsDetailed: $keyMetricsDetailed,
                 keyMetricsWindowDays: $keyMetricsWindowDays,
-                dashboardCardsRaw: $dashboardCardsRaw,
                 hostedCardsRaw: $hostedCardsRaw
             )
         }
@@ -1905,15 +1901,6 @@ struct TodayView: View {
             .frame(width: 620, height: 720)
             #endif
         }
-        #if os(iOS)
-        .fullScreenCover(isPresented: $showLiveSession) {
-            LiveSessionView(onClose: { showLiveSession = false })
-        }
-        #else
-        .sheet(isPresented: $showLiveSession) {
-            LiveSessionView(onClose: { showLiveSession = false })
-        }
-        #endif
         // Honour a "Restore to Today" tap from the inbox: flip the matching dismissed flag back so the
         // card reappears (the inbox also clears the @AppStorage key directly, but this covers an
         // already-mounted Today). Cleared once handled.
@@ -2194,8 +2181,6 @@ struct TodayView: View {
         switch section {
         case .hero:
             classicHeroSection
-        case .liveSession:
-            if liveSessionsBeta { liveSessionStartSection }
         case .synthesis:
             synthesisSection
         case .keyMetrics:
@@ -2204,10 +2189,6 @@ struct TodayView: View {
             workoutsSection
         case .heartRate:
             heartRateTrendSection
-        case .recoveryVitals:
-            recoveryVitalsSection
-        case .yourCards:
-            yourCardsSection
         case .menstrualCycle:
             if selectedDayOffset == 0 { MenstrualCycleHomeCard() }
         case .journal:
@@ -2225,40 +2206,6 @@ struct TodayView: View {
                 RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
                     .fill(StrandPalette.surfaceBase.opacity(0.72))
             )
-    }
-
-    private var liveSessionStartSection: some View {
-        Button { showLiveSession = true } label: {
-            NoopCard(tint: StrandPalette.metricCyan) {
-                HStack(spacing: NoopMetrics.space3) {
-                    Image(systemName: "shield.lefthalf.filled")
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.metricCyan)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                        Text("Start session")
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Silent strap coaching against today's Charge.")
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
-                    Spacer(minLength: NoopMetrics.space2)
-                    Text("Beta")
-                        .strandOverline()
-                    Image(systemName: "chevron.right")
-                        .font(StrandFont.caption.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .accessibilityHidden(true)
-                }
-            }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Start a live session. Beta. Silent strap coaching against today's Charge.")
-    }
-
-    private var recoveryVitalsSection: some View {
-        recoveryVitalsCard(displayDay)
     }
 
     @ViewBuilder
@@ -2700,40 +2647,6 @@ struct TodayView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("Readiness: \(word)")
         .accessibilityHint("See your full readiness")
-    }
-
-    // MARK: - Your cards (#582 / Design Reset)
-
-    /// The user-customisable "Your cards" dashboard (WHOOP "My Dashboard"). Surfaces a persisted, reorderable
-    /// selection of metric cards on the home screen as flat WHOOP metric rows, each opens its detail screen,
-    /// the original three (Stress / Fitness age / Vitality) keep their destinations. A blue "CUSTOMISE" link on
-    /// the header opens a local toggle/reorder sheet. TODAY only. A card with no value yet renders ", " rather
-    /// than vanishing, so the section is stable; it's hidden only when the user has no cards selected at all.
-    @ViewBuilder
-    private var yourCardsSection: some View {
-        if selectedDayOffset == 0 && !enabledDashboardCards.isEmpty {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                // Section header: the "Your cards" label + a right-aligned BLUE "CUSTOMISE" action link (the
-                // WHOOP "My Dashboard" ✎ affordance). Opens a local sheet, no new nav destination.
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Your cards").strandOverline()
-                    Spacer(minLength: 8)
-                    Button {
-                        customizationDestination = .yourCards
-                    } label: {
-                        Label(String(localized: "Edit"), systemImage: "slider.horizontal.3")   // #492/#563: unified "EDIT"
-                            .font(StrandFont.overline)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(StrandPalette.accent)
-                    .accessibilityLabel("Customise your cards")
-                    .help("Choose which cards show and reorder them")
-                }
-                ForEach(enabledDashboardCards) { card in
-                    dashboardCardRow(card)
-                }
-            }
-        }
     }
 
     /// #today-hosted-cards: the Trends/Sleep cards the user hosted in Today, in arranged order. Each is the

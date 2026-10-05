@@ -6,7 +6,7 @@ import StrandDesign
 /// here so it can be pinned by unit tests without a Bluetooth stack.
 struct StrapConnectionStatus: Equatable {
 
-    enum Phase: Equatable {
+    enum Phase: Hashable {
         /// A restart was sent and the strap has not come back yet.
         case restarting
         /// The user asked for a connection and nothing has answered yet.
@@ -221,4 +221,104 @@ struct StrapConnectionStatus: Equatable {
     var pairing: Availability {
         restarting ? .unavailable(String(localized: "Wait for the restart to finish.")) : .available
     }
+
+    // MARK: Action rows
+
+    func availability(of action: StrapAction) -> Availability {
+        switch action {
+        case .reconnect: return reconnect
+        case .disconnect: return disconnect
+        case .buzz: return buzz
+        case .restart: return restart
+        case .repair, .pairDifferent: return pairing
+        }
+    }
+
+    func title(of action: StrapAction) -> String {
+        switch action {
+        case .reconnect: return reconnectTitle
+        case .disconnect: return disconnectTitle
+        case .buzz: return String(localized: "Buzz strap")
+        case .restart: return String(localized: "Restart strap")
+        case .repair: return String(localized: "Re-pair strap")
+        case .pairDifferent: return String(localized: "Pair a different strap")
+        }
+    }
+
+    /// The line under an action's title: why it can't be used right now, otherwise what it does.
+    func detail(of action: StrapAction, notes: StrapActionNotes = StrapActionNotes()) -> String {
+        if let reason = availability(of: action).reason { return reason }
+        switch action {
+        case .reconnect:
+            if phase == .searching { return String(localized: "Looking for your strap…") }
+            return connected
+                ? String(localized: "Drops the Bluetooth link and connects again. Try this first when data stops flowing.")
+                : String(localized: "Looks for your strap and connects to it.")
+        case .disconnect:
+            return phase == .searching
+                ? String(localized: "Cancels the search.")
+                : String(localized: "Ends the Bluetooth link. Nara stays quiet until you tap Connect.")
+        case .buzz:
+            return notes.buzzSent
+                ? String(localized: "Buzz sent. You should feel it on your wrist.")
+                : String(localized: "Vibrates the strap once so you know it's the right one.")
+        case .restart:
+            return notes.restartIgnored
+                ? String(localized: "The strap didn't restart. Try again, or use Re-pair strap if it keeps happening.")
+                : String(localized: "Reboots the strap. It reconnects by itself in about 30 seconds and keeps your data.")
+        case .repair:
+            return String(localized: "Guided fix for a strap that won't connect, drops right away or isn't fully paired.")
+        case .pairDifferent:
+            return String(localized: "Add another WHOOP or a heart-rate strap.")
+        }
+    }
+}
+
+/// The six rows under the status card, in the order the page lays them out.
+enum StrapAction: CaseIterable, Hashable {
+    case reconnect, disconnect, buzz, restart, repair, pairDifferent
+
+    /// Every line this row can show, found by walking the states the link can be in. A row sets aside room for
+    /// the longest of them, so it keeps its height when the link changes and its wording follows.
+    ///
+    /// Only the flags that can change a row's wording are walked (the unit tests walk every flag and fail if one
+    /// of them turns out to matter), which keeps this to a couple of thousand cheap lookups, once.
+    var possibleDetails: [String] { Self.catalogue[self] ?? [] }
+
+    private static let catalogue: [StrapAction: [String]] = {
+        var lines: [StrapAction: [String]] = [:]
+        func note(_ action: StrapAction, _ text: String) {
+            if lines[action, default: []].contains(text) == false { lines[action, default: []].append(text) }
+        }
+        for bits in 0..<(1 << 8) {
+            var status = StrapConnectionStatus()
+            status.connected = bits & 1 != 0
+            status.bonded = bits & 2 != 0
+            status.encryptedBond = bits & 4 != 0
+            status.restarting = bits & 8 != 0
+            status.searching = bits & 16 != 0
+            status.isWhoop4 = bits & 32 != 0
+            status.pairingHint = bits & 64 != 0 ? "hint" : nil
+            status.radioProblem = bits & 128 != 0 ? "radio" : nil
+            for action in StrapAction.allCases {
+                switch action {
+                case .buzz:
+                    note(action, status.detail(of: action, notes: StrapActionNotes(buzzSent: false)))
+                    note(action, status.detail(of: action, notes: StrapActionNotes(buzzSent: true)))
+                case .restart:
+                    note(action, status.detail(of: action, notes: StrapActionNotes(restartIgnored: false)))
+                    note(action, status.detail(of: action, notes: StrapActionNotes(restartIgnored: true)))
+                default:
+                    note(action, status.detail(of: action))
+                }
+            }
+        }
+        return lines
+    }()
+}
+
+/// What the person has just done on the page. Each flag swaps one row's line for a few seconds.
+struct StrapActionNotes: Equatable {
+    var buzzSent = false
+    var restartIgnored = false
 }

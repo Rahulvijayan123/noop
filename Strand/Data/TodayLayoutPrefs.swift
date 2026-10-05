@@ -3,11 +3,14 @@ import SwiftUI
 
 // MARK: - Reorderable Today sections (#today-layout)
 //
-// The liquid Today's sections — the Charge/Effort/Rest hero, the Start-session entry, Synthesis, Key
-// Metrics, Workouts, Heart Rate, Recovery Vitals, Your Cards — rendered in one fixed order. This lets the
-// user REORDER or HIDE them, with the default being the original order so nothing changes for anyone who
-// never customizes Today. Display-only — no metric is computed or stored differently; this only decides
-// which already-built sections render and in what sequence.
+// The liquid Today's sections — the Charge/Effort/Rest hero, Synthesis, Key Metrics, Workouts, Heart
+// Rate — rendered in one fixed order. This lets the user REORDER or HIDE them, with the default being the
+// original order so nothing changes for anyone who never customizes Today. Display-only — no metric is
+// computed or stored differently; this only decides which already-built sections render and in what
+// sequence.
+//
+// Start session, Recovery Vitals and Your Cards were retired from Today. Saved orders and hidden sets that
+// still name them decode cleanly because unknown tokens are dropped, so no migration is needed.
 //
 // Stored as a single comma-joined string of section keys in @AppStorage("today.sectionOrder"), the same
 // mechanism KeyMetricPrefs uses. The Android side mirrors this byte-identically in TodayLayoutPrefs.kt
@@ -24,13 +27,10 @@ import SwiftUI
 /// to the Android `TodaySection` enum so a backup/restore reads the same layout on either OS.
 enum TodaySection: String, CaseIterable, Identifiable {
     case hero
-    case liveSession
     case synthesis
     case keyMetrics
     case workouts
     case heartRate
-    case recoveryVitals
-    case yourCards
     case menstrualCycle
     case journal
     /// Cards hosted from the Trends / Sleep tabs (#today-hosted-cards). Renders the `HostedCardPrefs`
@@ -44,13 +44,10 @@ enum TodaySection: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .hero:           return String(localized: "Charge / Effort / Rest")
-        case .liveSession:    return String(localized: "Start session")
         case .synthesis:      return String(localized: "Synthesis")
         case .keyMetrics:     return String(localized: "Key Metrics")
         case .workouts:       return String(localized: "Workouts")
         case .heartRate:      return String(localized: "Heart Rate")
-        case .recoveryVitals: return String(localized: "Recovery Vitals")
-        case .yourCards:      return String(localized: "Your Cards")
         case .menstrualCycle: return String(localized: "Menstrual Cycle")
         case .journal:        return String(localized: "Journal")
         case .addedCards:     return String(localized: "Added Cards")
@@ -60,7 +57,7 @@ enum TodaySection: String, CaseIterable, Identifiable {
     /// The original, hard-coded section order — the default when the layout isn't customised. The journal
     /// widget (#656) is last by default, where it was first added, above the data-sources card.
     static let defaultOrder: [TodaySection] = [
-        .hero, .liveSession, .synthesis, .keyMetrics, .workouts, .heartRate, .recoveryVitals, .yourCards,
+        .hero, .synthesis, .keyMetrics, .workouts, .heartRate,
         .menstrualCycle, .journal, .addedCards,
     ]
 }

@@ -1290,9 +1290,9 @@ struct MetricDetailView: View {
     /// pick the support interval the read-out joins on (see `ActivityContextSelection`).
     ///
     /// Mirrors `TodayView.ServerScoreTodaySection.load` (TodayView.swift:350-367): cache-first read of
-    /// `CloudPushRuntime.shared.scoreRepository()` with the same "my-whoop" device id the ingest lane
-    /// registers. Every failure mode leaves the three @State fields nil and the screen renders exactly
-    /// as a feature-off build.
+    /// `CloudPushRuntime.shared.scoreRepository()` under the same device ids the app model syncs (the strap's
+    /// own first, then the installation's). Every failure mode leaves the three @State fields nil and the
+    /// screen renders exactly as a feature-off build.
     private func loadActivityContext() async {
         guard Self.activityMetrics.contains(metric.key) else { return }
         guard let latestDay = series.last?.day else { return }
@@ -1301,7 +1301,8 @@ struct MetricDetailView: View {
               let dayWindow = ActivityContextSelection.dayWindow(day: latestDay) else { return }
         // Cache-first, exactly like TodayView (TodayView.swift:350): the awaited read is stored to a
         // local before chaining, so the actor isolation boundary is explicit.
-        guard let cached = await repository.cachedDay(day: latestDay, deviceId: "my-whoop") else { return }
+        let deviceIds = await IntradaySeriesStore.shared.readCandidates
+        guard let cached = await repository.cachedDay(day: latestDay, deviceIds: deviceIds) else { return }
         // Reload only when the day or its server result revision changed; the cache is rewritten by
         // `refresh` under the same owner+device+revision keying, so an unchanged revision is the same
         // timeline (spec §11 "Local caching must include owner/device/model/result revision").

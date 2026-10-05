@@ -577,6 +577,17 @@ public final class BLEManager: NSObject, ObservableObject {
     /// (`DeviceRegistry`, and the coordinator that watches it) follows too — the store write above is not
     /// observable, so without this the UI would keep showing the old id until relaunch.
     var onSerialIdentityAdopted: ((String) -> Void)?
+    /// Fired each time the connected strap's serial is read: the id new samples persist under, then the
+    /// serial. Unlike `onSerialIdentityAdopted` it also fires for the legacy `my-whoop` seed, which never
+    /// adopts a serial id locally, so the cloud layer can still file that strap under its own identity.
+    var onStrapSerialKnown: ((_ localDeviceId: String, _ serial: String) -> Void)?
+    /// What this strap's saved history may become on this phone, asked before every offload (see
+    /// `HistoryIntake`). nil means no gate is installed, which is the same as `.keep`.
+    var historyIntake: (() -> HistoryIntake)?
+    /// One chunk's worth of records that were read and acknowledged without being kept.
+    var onHistoryDiscarded: ((HistoryFenceReport) -> Void)?
+    /// An offload held back for the gate is said once, not on every tick that asks again.
+    private var heldHistoryNoted = false
     private var registryStore: DeviceRegistryStore?
     /// #716: true once the seeded "WHOOP" model has been stamped to the correct family.
     private var modelStamped = false
@@ -1547,6 +1558,7 @@ public final class BLEManager: NSObject, ObservableObject {
                                 // UNIVERSAL clock-drift: bank the strap's historical layout so the export's
                                 // universal clock-drift line is firmware-aware on every export. Unconditional.
                                 firmwareLayout: { [weak self] v in self?.state.setStrapFirmwareLayout(v) })
+        backfiller?.onHistoryDiscarded = { [weak self] report in self?.onHistoryDiscarded?(report) }
         // Strand: no server uploader/sync — all data stays on-device.
 
         // Retro-decode: when the decoder gains a historical layout (e.g. WHOOP 4.0 v25), re-run every
@@ -2636,6 +2648,19 @@ public final class BLEManager: NSObject, ObservableObject {
             Task { @MainActor in await self.bootstrapStore() }
             return false
         }
+        // Whose history is this? An offload ends every chunk by acknowledging it, and the strap frees what it
+        // is acknowledged for, so it must not start until we know the strap's saved days are this account's
+        // to read. Held offloads are retried by the gate itself when it has an answer.
+        let intake = historyIntake?() ?? .keep
+        if intake == .hold {
+            if !heldHistoryNoted {
+                heldHistoryNoted = true
+                log("Backfill: held - checking whether this strap's saved history is yours before reading any of it. Nothing is read from the strap and nothing is erased until that is settled; live heart rate is unaffected.")
+            }
+            return false
+        }
+        heldHistoryNoted = false
+        backfiller.intake = intake
         // Capture the family at begin() (not init): selectedModel is reliably set by connect() before any
         // backfill starts, whereas bootstrapStore() can build the Backfiller before the family is known.
         // #42/#364: consecutiveAutoContinues > 0 means this offload is re-kicked after an EARLIER session in
@@ -2794,9 +2819,15 @@ public final class BLEManager: NSObject, ObservableObject {
         backfillTimeout?.cancel()
         backfillTimeout = nil
         backfillFrameQueue.removeAll()
+        // A new owner's offload reads a previous owner's records and keeps none of them: nothing is persisted,
+        // yet the strap's trim moved on. That is progress, and it is judged as progress below.
+        let drainedRecords = backfiller?.sessionDiscarded.dropped ?? 0
         log("Backfill: session ended — reason=\(reason)"
             + BLEManager.sessionEndedOutcome(reason: reason,
-                                             bankedRows: (backfiller?.sessionRowsPersisted ?? 0) > 0))
+                                             bankedRows: (backfiller?.sessionRowsPersisted ?? 0) > 0 || drainedRecords > 0))
+        if let bf = backfiller, drainedRecords > 0 {
+            log(Backfiller.sessionDiscardLine(bf.sessionDiscarded))
+        }
         // Inactivity reminder (#419): read-only hook on the natural offload completion (no cadence
         // change). Only on a true HISTORY_COMPLETE — a timeout/disconnect didn't bring a fresh window.
         if reason == "HISTORY_COMPLETE" { maybeBuzzInactivity() }
@@ -2887,7 +2918,9 @@ public final class BLEManager: NSObject, ObservableObject {
         // sensor row landed) at function scope, so the auto-continue decision below gates on this snapshot —
         // never a fresh `backfiller.sessionRowsPersisted` re-read that a re-kicked session / trailing frames
         // could have mutated across the offload boundary.
-        let persistedSensorRows = (backfiller?.sessionRowsPersisted ?? 0) > 0
+        // A session that only drained a previous owner's records counts too: the strap's trim advanced and more
+        // may remain, and without this the drain would stop after one pass and then back off as if empty.
+        let persistedSensorRows = (backfiller?.sessionRowsPersisted ?? 0) > 0 || drainedRecords > 0
         if persistedSensorRows { consecutiveEmptyOffloads = 0 }
         else if consecutiveAutoContinues == 0 { consecutiveEmptyOffloads += 1 }
         if reason == "HISTORY_COMPLETE" {
@@ -5336,7 +5369,17 @@ public final class BLEManager: NSObject, ObservableObject {
         // existing consumer — nothing about framing or decode reads this.
         state.whoop5Variant = variant.label
         reconcileModelFromAttestation(variant)
+        publishStrapSerialIfKnown()
         adoptWhoopSerialIdentity()
+    }
+
+    /// Tell the app layer which serial the connected strap reported, so cloud capture and readback can use the
+    /// strap's own identity. Repeats on every reconnect by design: the receiver treats an unchanged serial as
+    /// a no-op, and a missed first delivery must not be lost for the life of the process.
+    private func publishStrapSerialIfKnown() {
+        guard let serial = adoptableSerial, WhoopSerialIdentity.adoptedId(serial: serial) != nil else { return }
+        let localId = deviceId
+        Task { @MainActor [weak self] in self?.onStrapSerialKnown?(localId, serial) }
     }
 
     /// The serial this pairing may adopt: the 5/MG's DIS read, or a 4.0's twice-seen hello serial.
@@ -5358,6 +5401,7 @@ public final class BLEManager: NSObject, ObservableObject {
         guard registryStore != nil else { return }
         guard let confirmed = harvardSerialGate.offer(serial) else { return }
         harvardSerialConfirmed = confirmed
+        publishStrapSerialIfKnown()
         adoptWhoopSerialIdentity()
     }
 

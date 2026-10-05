@@ -1499,21 +1499,35 @@ private struct WhoopPickList: View {
     let onSelect: ((uuid: String, name: String, rssi: Int)) -> Void
     let onRescan: () -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+        let found = ble.discoveredWhoops.sorted { $0.rssi > $1.rssi }
+        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             ScanStatusBar(searching: true, onRescan: onRescan)
-            let found = ble.discoveredWhoops.sorted { $0.rssi > $1.rssi }
-            if found.isEmpty {
+            // The list area is never shorter than the "Searching" card it starts as, so the first strap
+            // turning up, or a rescan clearing the list, does not collapse and re-grow the sheet.
+            ZStack(alignment: .top) {
                 SearchingCard(whoopHint: true)
-            } else {
-                ForEach(found, id: \.uuid) { strap in
-                    DiscoveredRow(name: strap.name.isEmpty ? "WHOOP" : strap.name,
-                                  subtitle: "WHOOP",
-                                  rssi: strap.rssi) {
-                        onSelect(strap)
+                    .hidden()
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    if found.isEmpty {
+                        SearchingCard(whoopHint: true)
+                            .transition(.opacity)
+                    } else {
+                        ForEach(found, id: \.uuid) { strap in
+                            DiscoveredRow(name: strap.name.isEmpty ? "WHOOP" : strap.name,
+                                          subtitle: "WHOOP",
+                                          rssi: strap.rssi) {
+                                onSelect(strap)
+                            }
+                            .transition(.opacity)
+                        }
                     }
                 }
             }
+            .animation(reduceMotion ? nil : PairingMotion.settle, value: found.map { $0.uuid })
         }
     }
 }

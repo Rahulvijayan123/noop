@@ -528,14 +528,21 @@ private struct ScanStep: View {
 
     @State private var scanning = false
     @State private var showHelp = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// Which strap to look for — shared with the Live screen via the same key.
     @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
     private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
 
+    private static let bondedSubtitle = String(localized: "Bonded. You're set.")
+    private static let scanSubtitle = String(localized: "Pick your strap below, then tap Scan. NOOP will find it.")
+    private static let whoop4Note = String(localized: "A WHOOP 4.0 only talks to one app at a time. If nothing's found, fully close the official WHOOP app, then Scan.")
+    private static let whoop5Note = String(localized: "WHOOP 5.0/MG pairs with one app at a time. If nothing's found, unpair it in the official WHOOP app and fully close that app, then Scan.")
+
     var body: some View {
         StepShell(title: String(localized: "Find your strap"),
-                  subtitle: live.bonded ? String(localized: "Bonded. You're set.") : String(localized: "Pick your strap below, then tap Scan. NOOP will find it.")) {
+                  subtitle: live.bonded ? Self.bondedSubtitle : Self.scanSubtitle,
+                  subtitleAlternatives: [Self.bondedSubtitle, Self.scanSubtitle]) {
             VStack(spacing: 24) {
                 RadarSweep(active: scanning && !live.bonded, bonded: live.bonded)
                     .frame(width: 220, height: 220)
@@ -556,16 +563,16 @@ private struct ScanStep: View {
                         )
                     }
 
-                    // Proactive 5/MG guidance (#130): the strap bonds to one host at a time, so a scan
-                    // here finds nothing while it's still paired in the official WHOOP app.
-                    if selectedModel == .whoop5mg {
-                        Text("WHOOP 5.0/MG pairs with one app at a time. If nothing's found, unpair it in the official WHOOP app and fully close that app, then Scan.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .multilineTextAlignment(.center)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: 360)
-                    }
+                    // Proactive pairing guidance (#130): the strap bonds to one host at a time, so a scan
+                    // here finds nothing while it's still paired in the official WHOOP app. Both models get
+                    // a note, in one slot sized for the longer, so switching model never moves the Scan
+                    // button underneath.
+                    ReservedText(text: selectedModel == .whoop5mg ? Self.whoop5Note : Self.whoop4Note,
+                                 alternatives: [Self.whoop4Note, Self.whoop5Note],
+                                 font: StrandFont.footnote,
+                                 alignment: .center,
+                                 textAlignment: .center)
+                        .frame(maxWidth: 360)
 
                     Button(action: { startScan() }) {
                         Label(scanning ? "Scanning…" : "Scan", systemImage: "dot.radiowaves.left.and.right")
@@ -593,17 +600,19 @@ private struct ScanStep: View {
     }
 
     private var statusLine: some View {
-        Group {
-            if live.bonded {
-                StatePill("Connected", tone: .positive)
-            } else if live.connected {
-                StatePill("Connecting…", tone: .warning, pulsing: true)
-            } else if scanning {
-                StatePill("Searching", tone: .accent, pulsing: true)
-            } else {
-                StatePill("Ready to scan", tone: .neutral, showsDot: false)
+        // One pill at a time, always the same height, cross-fading as the state moves on.
+        let state = live.bonded ? 0 : live.connected ? 1 : scanning ? 2 : 3
+        return Group {
+            switch state {
+            case 0: StatePill("Connected", tone: .positive)
+            case 1: StatePill("Connecting…", tone: .warning, pulsing: true)
+            case 2: StatePill("Searching", tone: .accent, pulsing: true)
+            default: StatePill("Ready to scan", tone: .neutral, showsDot: false)
             }
         }
+        .id(state)
+        .transition(.opacity)
+        .animation(reduceMotion ? nil : PairingMotion.settle, value: state)
     }
 
     private func startScan(model scanModel: WhoopModel? = nil) {
@@ -1101,6 +1110,9 @@ private struct AppearanceStep: View {
 private struct StepShell<Content: View>: View {
     var title: String? = nil
     var subtitle: String? = nil
+    /// Other lines the subtitle can turn into. When given, the subtitle's slot is as tall as the longest
+    /// of them, so the content below does not move when the wording does.
+    var subtitleAlternatives: [String] = []
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -1115,10 +1127,18 @@ private struct StepShell<Content: View>: View {
                                 .multilineTextAlignment(.center)
                         }
                         if let subtitle {
-                            Text(subtitle)
-                                .font(StrandFont.body)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .multilineTextAlignment(.center)
+                            if subtitleAlternatives.isEmpty {
+                                Text(subtitle)
+                                    .font(StrandFont.body)
+                                    .foregroundStyle(StrandPalette.textSecondary)
+                                    .multilineTextAlignment(.center)
+                            } else {
+                                ReservedText(text: subtitle,
+                                             alternatives: subtitleAlternatives,
+                                             font: StrandFont.body,
+                                             alignment: .center,
+                                             textAlignment: .center)
+                            }
                         }
                     }
                     .padding(.top, 8)
@@ -1420,6 +1440,22 @@ private struct SecondaryButtonStyle: ButtonStyle {
 // MARK: - Preview
 
 #if DEBUG
+/// `--demo-screen onboardingscan`: the "Find your strap" step on its own, so it can be captured in a simulator
+/// that has no strap. `--demo-strap-state` seeds the link the same way as for Pair & connect.
+struct OnboardingScanDemoScreen: View {
+    @EnvironmentObject private var live: LiveState
+
+    var body: some View {
+        ScanStep(advance: { })
+            .task {
+                for _ in 0..<3 {
+                    StrapDemoSeed.apply(StrapDemoSeed.requestedState, to: live)
+                    try? await Task.sleep(nanoseconds: 800_000_000)
+                }
+            }
+    }
+}
+
 private struct OnboardingPreview: View {
     @StateObject private var model = AppModel()
     var body: some View {
