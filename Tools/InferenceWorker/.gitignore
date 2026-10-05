@@ -1,0 +1,9 @@
+# uv / venv
+.venv/
+uv.lock.bak
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# local artifact staging (never committed; real artifacts live in /opt/frwhoop-models)
+models/artifacts/

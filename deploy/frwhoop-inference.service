@@ -1,0 +1,43 @@
+[Unit]
+Description=FRWHOOP physiology inference sidecar (loopback only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frwhoop-inf
+Group=frwhoop-inf
+WorkingDirectory=/opt/frwhoop-inference
+EnvironmentFile=/etc/frwhoop/inference.env
+Environment=HOME=/var/lib/frwhoop-inf
+Environment=PYTHONUNBUFFERED=1
+# Bound math-library thread counts to the measured Droplet capacity (spec section 4).
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
+Environment=NUMEXPR_NUM_THREADS=1
+Environment=UV_PYTHON_DOWNLOADS=never
+ExecStart=/opt/frwhoop-inference/venv/bin/python -m frwhoop_inference.server --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/frwhoop-models
+ReadWritePaths=/var/lib/frwhoop-inf
+# Resource limits: share 4 vCPU / 8 GB with the Swift worker without starving it.
+CPUQuota=150%
+CPUWeight=50
+MemoryHigh=2G
+MemoryMax=3G
+MemorySwapMax=0
+TasksMax=64
+IOWeight=50
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

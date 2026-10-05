@@ -322,18 +322,748 @@ struct DayScorer {
         Set(points.compactMap { $0.first as? Int })
     }
 
+    // MARK: - Candidate (shadow/active) input assembly
+    //
+    // The candidate lane needs the day's inputs, but it must call the sidecar with
+    // NO transaction open (see CandidateStage.swift). So the input snapshot is
+    // assembled here, while the inputs are already in memory, and handed to the
+    // stage after the canonical transaction has committed.
+
+    /// The bucket width of an observation's identity. Store timestamps are whole
+    /// unix seconds (WhoopProtocol/Streams.swift:89), so the bucket IS the second.
+    static let observationBucketSeconds = 1
+
+    /// One heartbeat as a candidate provider receives it.
+    struct CandidateBeat {
+        /// The stored interval timestamp (whole unix seconds).
+        let ts: Int
+        let rrMs: Int
+        /// Packet order within the observation, when the row carries one.
+        let seq: Int
+        let ord: Int?
+        let srcChannel: Int?
+        /// Interval END under the "`ts` is the interval start" convention.
+        let tsEndSeconds: Double
+        /// Best-effort sub-second END, reconstructed by accumulating within one
+        /// same-second observation bucket. INFORMATIONAL: the authoritative
+        /// production path uses run-based adjacency on the whole-second `ts`, so a
+        /// provider must not treat this as the store's truth.
+        let tsEndReconstructedSeconds: Double
+
+        var json: JSONValue {
+            var obj: [String: JSONValue] = [
+                "ts": .int(ts),
+                "rr_ms": .int(rrMs),
+                "seq": .int(seq),
+                "ts_end_seconds": .double(tsEndSeconds),
+                "ts_end_reconstructed_seconds": .double(tsEndReconstructedSeconds),
+            ]
+            if let ord { obj["ord"] = .int(ord) }
+            if let srcChannel { obj["src_channel"] = .int(srcChannel) }
+            return .object(obj)
+        }
+    }
+
+    /// One heart-rate sample as the `sleep_boundary` provider receives it. The
+    /// adapter accepts `[[ts, bpm], ...]` or `[{ts, bpm}, ...]`
+    /// (`sleep_boundary.py:_read_samples`); the compact pair form is used here.
+    struct CandidateHRSample {
+        let ts: Int
+        let bpm: Int
+        var json: JSONValue { .array([.int(ts), .int(bpm)]) }
+    }
+
+    /// One R-R row as the `sleep_stage` provider receives it. The adapter accepts
+    /// `[[ts, rr_ms, seq, ord, ts_suspect], ...]` or dicts
+    /// (`sleep_stage.py:_read_rr`); the compact positional form is used here.
+    struct CandidateRRRow {
+        let ts: Int
+        let rrMs: Int
+        let seq: Int
+        let ord: Int?
+        let tsSuspect: Int
+        var json: JSONValue {
+            .array([.int(ts), .int(rrMs), .int(seq), .int(ord ?? 0), .int(tsSuspect)])
+        }
+    }
+
+    /// A user sleep edit read from `public.scoring_history_inputs_v3`
+    /// (`kind = 'sleep_edit'`), the same rows the phone's manual bounds come from.
+    /// `payload` is the raw jsonb (`originalStart`, `originalEnd`, `start`, `end`,
+    /// `isNap`, `dismissed`, optional `stages`).
+    struct CandidateSleepEdit {
+        let entity: String
+        let revision: Int64
+        let payload: JSONValue
+
+        /// The edit's own accepted bounds, when the payload carries them.
+        var start: Int? { payload.member("start")?.doubleValue.map { Int($0) } }
+        var end: Int? { payload.member("end")?.doubleValue.map { Int($0) } }
+
+        /// The `user_edit` object sent to a provider. `sleep_boundary.py:410-417`
+        /// withholds `blocked_input / user_edit_present` whenever this is present,
+        /// which is the intended behaviour: a user-corrected session outranks any
+        /// candidate.
+        var json: JSONValue {
+            .object(["entity": .string(entity), "revision": .int(Int(revision)),
+                     "payload": payload])
+        }
+    }
+
+    /// Everything the candidate lane needs for one claimed day.
+    ///
+    /// Assembly is MODE-GATED (audit DD-2): the scoring lane resolves the four
+    /// per-metric selections first, and the per-stream arrays below are only built
+    /// for metrics whose mode is not `off`. When nothing is enabled, `assembled`
+    /// is false and every array is empty, so off mode costs the selection reads and
+    /// nothing else.
+    struct CandidateInputs {
+        let userId: String
+        let deviceId: String
+        let day: String
+        let inputRevision: Int64
+        /// The interval the candidate covers (unix seconds): the main sleep
+        /// session when one was detected (that is the span the canonical nightly
+        /// HRV is computed over), otherwise the claimed calendar day.
+        let intervalStart: Int
+        let intervalEnd: Int
+        /// When this claim's snapshot was sealed. Candidate debt newer than this
+        /// means new input arrived while the claim was being scored.
+        let claimSealedAt: Date
+        let status: String
+        let canonicalAvgHrv: Double?
+        let canonicalSdnn: Double?
+        /// Content version of the profile row the day was scored with. Populated
+        /// whenever the candidate lane is on (spec section 4 requires the inputs to
+        /// identify the profile version).
+        let profileVersion: String?
+        /// Content version of the user's sleep edits for this day: `"none"` when
+        /// the day carries no corrections, otherwise a digest of the edit rows.
+        let correctionsVersion: String?
+        /// The metric modes that are NOT `off` for this user (the cheap check).
+        let enabledMetrics: Set<String>
+        /// False when the candidate lane is off or no metric is enabled: nothing
+        /// was assembled and `input(for:)` returns nil for every metric.
+        let assembled: Bool
+        /// Observation-identity-deduped beats, ordered by (ts, seq, ord).
+        let hrvBeats: [CandidateBeat]
+        /// RR rows read before dedup (diagnostics only).
+        let hrvInputRows: Int
+        /// True when the beats' timestamps are whole seconds only.
+        let hrvTimestampResolution: String
+        /// HR samples for `sleep_boundary` (empty unless that metric is enabled).
+        let hrSamples: [CandidateHRSample]
+        /// The same R-R rows for `sleep_stage` (empty unless enabled).
+        let rrRows: [CandidateRRRow]
+        /// The accepted session bounds the sleep metrics are scored over.
+        let sleepWindowStart: Int?
+        let sleepWindowEnd: Int?
+        /// The user's sleep edits for this day, newest first (empty when none).
+        let sleepEdits: [CandidateSleepEdit]
+        /// `age` / `gender` for the `sleep_stage` model card, when known.
+        /// `gender` is ALREADY sleepecg-encoded (see `sleepecgGender`), because the
+        /// adapter's `SubjectData.gender` is `int | None` and a string raises.
+        let age: Int?
+        let gender: Int?
+
+        /// Rows the provider actually receives (diagnostics).
+        var inputRowCount: Int { hrvBeats.count }
+
+        /// The `user_edit` object for a provider, or nil when the day has none.
+        var userEdit: JSONValue? {
+            guard let first = sleepEdits.first else { return nil }
+            return .object(["edits": .array(sleepEdits.map { $0.json }),
+                            "primary": first.json])
+        }
+
+        /// The accepted sleep bounds the sleep metrics are scored over.
+        ///
+        /// A USER-CORRECTED session outranks the detected one, so the highest-
+        /// revision edit's own bounds win when it has usable ones; otherwise the
+        /// detected session (or the day window) is used. Keeping this here — rather
+        /// than at the DB-facing call site — is what makes the rule testable
+        /// without a database.
+        var effectiveSleepWindow: (start: Int, end: Int)? {
+            if let newest = sleepEdits.max(by: { $0.revision < $1.revision }),
+               let start = newest.start, let end = newest.end, end > start {
+                return (start, end)
+            }
+            guard let start = sleepWindowStart, let end = sleepWindowEnd, end > start else {
+                return nil
+            }
+            return (start, end)
+        }
+
+        /// The metrics this day has BOTH a selection and a usable payload for.
+        var metrics: [String] {
+            guard assembled else { return [] }
+            return CandidateStage.metrics.filter { input(for: $0) != nil }
+        }
+
+        /// The metric-specific `input` object for `POST /v1/infer`, or nil when no
+        /// payload can be built (the stage then skips the metric without calling).
+        func input(for metric: String) -> JSONValue? {
+            guard assembled, enabledMetrics.contains(metric) else { return nil }
+            switch metric {
+            case "hrv":
+                guard !hrvBeats.isEmpty else { return nil }
+                return DayScorer.hrvInput(beats: hrvBeats, windowStart: intervalStart,
+                                          windowEnd: intervalEnd, inputRows: hrvInputRows,
+                                          timestampResolution: hrvTimestampResolution)
+            case "sleep_boundary":
+                guard !hrSamples.isEmpty else { return nil }
+                let window = effectiveSleepWindow ?? (intervalStart, intervalEnd)
+                return DayScorer.sleepBoundaryInput(
+                    hr: hrSamples, windowStart: window.start, windowEnd: window.end,
+                    userEdit: userEdit)
+            case "sleep_stage":
+                guard !rrRows.isEmpty else { return nil }
+                let window = effectiveSleepWindow ?? (intervalStart, intervalEnd)
+                return DayScorer.sleepStageInput(
+                    rr: rrRows, windowStart: window.start, windowEnd: window.end,
+                    age: age, gender: gender, userEdit: userEdit)
+            default:
+                return nil
+            }
+        }
+
+        /// The state used when the candidate lane is off: nothing assembled, and no
+        /// metric can produce a payload.
+        static func disabled(userId: String, deviceId: String, day: String,
+                             inputRevision: Int64, intervalStart: Int, intervalEnd: Int,
+                             claimSealedAt: Date, status: String,
+                             canonicalAvgHrv: Double?, canonicalSdnn: Double?) -> CandidateInputs {
+            CandidateInputs(
+                userId: userId, deviceId: deviceId, day: day, inputRevision: inputRevision,
+                intervalStart: intervalStart, intervalEnd: intervalEnd,
+                claimSealedAt: claimSealedAt, status: status,
+                canonicalAvgHrv: canonicalAvgHrv, canonicalSdnn: canonicalSdnn,
+                profileVersion: nil, correctionsVersion: nil,
+                enabledMetrics: [], assembled: false,
+                hrvBeats: [], hrvInputRows: 0, hrvTimestampResolution: "whole_seconds",
+                hrSamples: [], rrRows: [], sleepWindowStart: nil, sleepWindowEnd: nil,
+                sleepEdits: [], age: nil, gender: nil)
+        }
+    }
+
+    /// Deduplicate retransmitted beats by PHYSICAL OBSERVATION IDENTITY, never by
+    /// RR value alone (spec section 5): the key is the 1 s bucket of `ts` plus the
+    /// interval, packet sequence, in-packet order and source channel. Two genuine
+    /// beats in the same second with the same interval therefore survive as two
+    /// rows, while a byte-identical retransmission collapses to one. The first
+    /// occurrence wins, so the order is stable.
+    static func dedupByObservationIdentity(_ beats: [RRInterval]) -> [RRInterval] {
+        var seen = Set<String>()
+        var out: [RRInterval] = []
+        out.reserveCapacity(beats.count)
+        for beat in beats {
+            let bucket = beat.ts / observationBucketSeconds
+            let key = "\(bucket)|\(beat.rrMs)|\(beat.seq)|\(beat.ord.map(String.init) ?? "-")|"
+                + "\(beat.srcChannel.map { String($0.rawValue) } ?? "-")"
+            if seen.insert(key).inserted { out.append(beat) }
+        }
+        return out
+    }
+
+    /// Map RR rows to provider beats, ordered by (ts, seq, ord) — the original
+    /// series order the gap-aware adjacency rule depends on.
+    static func candidateBeats(_ beats: [RRInterval]) -> [CandidateBeat] {
+        let ordered = beats.enumerated().sorted { lhs, rhs in
+            let a = lhs.element, b = rhs.element
+            if a.ts != b.ts { return a.ts < b.ts }
+            if a.seq != b.seq { return a.seq < b.seq }
+            return (a.ord ?? Int.min) < (b.ord ?? Int.min)
+        }.map { $0.element }
+
+        // Sub-second END reconstruction: within one (bucket, channel) group, the
+        // first interval ends at ts + rr, and each next interval ends where the
+        // previous one did plus its own rr. Purely informational (see CandidateBeat).
+        var reconstructed: [Double] = []
+        reconstructed.reserveCapacity(ordered.count)
+        var previousEnd: Double?
+        var previousKey: String?
+        for beat in ordered {
+            let key = "\(beat.ts / observationBucketSeconds)|\(beat.srcChannel?.rawValue ?? -1)"
+            let end: Double
+            if key == previousKey, let prev = previousEnd {
+                end = prev + Double(beat.rrMs) / 1000.0
+            } else {
+                end = Double(beat.ts) + Double(beat.rrMs) / 1000.0
+            }
+            reconstructed.append(end)
+            previousEnd = end
+            previousKey = key
+        }
+
+        return ordered.enumerated().map { index, beat in
+            CandidateBeat(ts: beat.ts, rrMs: beat.rrMs, seq: beat.seq, ord: beat.ord,
+                          srcChannel: beat.srcChannel?.rawValue,
+                          tsEndSeconds: Double(beat.ts) + Double(beat.rrMs) / 1000.0,
+                          tsEndReconstructedSeconds: reconstructed[index])
+        }
+    }
+
+    /// The HRV provider's `config` block. Defaults are the SHIPPED production
+    /// rules (hrv-neurokit findings section 5a/5d), so a shadow comparison is
+    /// apples-to-apples with the canonical nightly value; the spec's alternative
+    /// rule set is selectable by changing these values, not by changing the code.
+    static func hrvConfig() -> [String: JSONValue] {
+        [
+            "window_sec": .int(300),                 // SleepStager.swift:3012 (tumbling)
+            "min_clean_beats": .int(HRVAnalyzer.minBeats),          // 20 (HRVAnalyzer.swift:33)
+            "min_pairs": .int(1),
+            "min_coverage": .double(0.0),
+            "splice_tolerance_s": .double(3.0),      // IntradaySeries.Tuning.spliceToleranceSeconds
+            "rr_min_ms": .double(300),               // HRVAnalyzer.rrMinMs
+            "rr_max_ms": .double(2000),              // HRVAnalyzer.rrMaxMs
+            "malik_threshold": .double(HRVAnalyzer.ectopicThreshold),   // 0.20
+            "malik_radius": .int(HRVAnalyzer.ectopicWindowRadius),      // 2
+            "coverage_floor": .double(HRVAnalyzer.coveragePlausibleFloor),
+            "coverage_ceiling": .double(HRVAnalyzer.coveragePlausibleCeiling),
+            "beat_accuracy_tolerance_s": .double(HRVAnalyzer.beatAccuracyToleranceS),
+            "beat_accuracy_min_fraction": .double(HRVAnalyzer.beatAccuracyMinFraction),
+            "max_rejected_fraction": .null,          // no nightly gate in shipped code
+            "aggregation": .string("mean_over_windows"),   // SleepStager.swift:2972 (not median)
+            "pooling": .string("sum_sq_and_pairs"),        // spec section 5
+        ]
+    }
+
+    /// The aggregation the `hrv` provider must apply. TOP-LEVEL on purpose
+    /// (audit S-1): the provider's parser reads a top-level `aggregation` key, and
+    /// its own default is `"window"`, which would score only the interval's FIRST
+    /// 5-minute window and report that as the nightly value. The same string is
+    /// mirrored into `config` for back-compat with payloads that only read config.
+    static let hrvAggregation = "mean_over_windows"
+
+    /// The exact `input` object the `hrv` provider expects (plan "Sidecar HTTP
+    /// contract" + hrv-neurokit findings section 6b).
+    static func hrvInput(beats: [CandidateBeat], windowStart: Int, windowEnd: Int,
+                         inputRows: Int, timestampResolution: String) -> JSONValue {
+        .object([
+            "beats": .array(beats.map { $0.json }),
+            "window": .object([
+                "start_sec": .int(windowStart),
+                "end_sec": .int(windowEnd),
+                "inclusive": .bool(true),   // matches HRVAnalyzer.analyze(_:windowStart:windowEnd:)
+            ]),
+            // TOP-LEVEL, so the provider cannot fall back to its "window" default.
+            "aggregation": .string(hrvAggregation),
+            "config": .object(hrvConfig()),
+            "timestamp_convention": .string("interval_end_seconds"),
+            "timestamp_resolution": .string(timestampResolution),
+            "observation_identity": .object([
+                "dedup_key": .array([.string("ts_bucket_1s"), .string("rr_ms"), .string("seq"),
+                                     .string("ord"), .string("src_channel")]),
+                "input_rows": .int(inputRows),
+                "deduped_rows": .int(beats.count),
+                "bucket_seconds": .int(observationBucketSeconds),
+            ]),
+        ])
+    }
+
+    // MARK: - Sleep provider payloads (adapter contracts, read from the package)
+
+    /// The `input` object for `sleep_boundary` (`hypnospy.hr-boundary.v1`).
+    ///
+    /// Contract mirrored from
+    /// `Tools/InferenceWorker/src/frwhoop_inference/frwhoop_sleep/providers/sleep_boundary.py`:
+    ///   * `hr` — REQUIRED. `[[ts, bpm], ...]` or `[{ts, bpm}, ...]`
+    ///     (`_read_samples`, lines 130-150). Empty raises `missing_hr`.
+    ///   * `window` — optional `{start_utc, end_utc}`. It OVERRIDES the context
+    ///     interval as the in-bed interval for this call (lines 343-353), which is
+    ///     what the worker wants: the context interval is the coarse day/recompute
+    ///     range, the window is the accepted session.
+    ///   * `wake_ts_utc` — optional; defaults to the interval end (line 357).
+    ///   * `analysis_day` — deliberately NOT sent. The provider derives the
+    ///     analysis day from `wake_ts_utc` in the IANA zone and RAISES
+    ///     `analysis_day_mismatch` when a supplied day disagrees (lines 359-363).
+    ///     Omitting it removes a whole class of avoidable `error` results.
+    ///   * `user_edit` — when present the provider withholds
+    ///     `blocked_input / user_edit_present` (lines 410-417): a user-corrected
+    ///     session outranks any candidate.
+    static func sleepBoundaryInput(hr: [CandidateHRSample], windowStart: Int, windowEnd: Int,
+                                   userEdit: JSONValue?) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "hr": .array(hr.map { $0.json }),
+            "window": .object([
+                "start_utc": .string(isoUTC(windowStart)),
+                "end_utc": .string(isoUTC(windowEnd)),
+            ]),
+            // The wake end of the accepted session; the provider's analysis day
+            // follows from it in the request's IANA timezone.
+            "wake_ts_utc": .string(isoUTC(windowEnd)),
+        ]
+        if let userEdit { obj["user_edit"] = userEdit }
+        return .object(obj)
+    }
+
+    /// The `input` object for `sleep_stage` (`sleepecg.wrn-gru-mesa.v1`).
+    ///
+    /// Contract mirrored from
+    /// `Tools/InferenceWorker/src/frwhoop_inference/frwhoop_sleep/providers/sleep_stage.py`:
+    ///   * `rr` — REQUIRED. `[[ts, rr_ms, seq, ord, ts_suspect], ...]` or dicts
+    ///     (`_read_rr`, lines 95-126). Empty raises `missing_rr`; rows outside the
+    ///     window raise `no_rr_in_window`.
+    ///   * `window` — `{start_utc, end_utc}`; defaults to the context interval
+    ///     (lines 416-426). Sent explicitly so the stage covers the accepted
+    ///     session, not the coarse day range.
+    ///   * `age` / `gender` — optional model-card inputs (lines 451, 509).
+    ///   * `user_edit` — NOT part of this adapter's contract (it reads only
+    ///     `rr`/`window`/`age`/`gender`), so it is echoed for provenance only.
+    ///     The package has no stage-side suppression rule; the boundary provider is
+    ///     the one that refuses to score over a user's edit.
+    static func sleepStageInput(rr: [CandidateRRRow], windowStart: Int, windowEnd: Int,
+                                age: Int?, gender: Int?, userEdit: JSONValue?) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "rr": .array(rr.map { $0.json }),
+            "window": .object([
+                "start_utc": .string(isoUTC(windowStart)),
+                "end_utc": .string(isoUTC(windowEnd)),
+            ]),
+        ]
+        if let age { obj["age"] = .int(age) }
+        // sleepecg's `SubjectData.gender` is `int | None` (`Gender.FEMALE = 0`,
+        // `Gender.MALE = 1`); a STRING here raises inside the adapter and is
+        // swallowed into `withheld / insufficient_coverage`. Absent stays absent so
+        // the adapter masks the column (`test_missing_age_and_gender_...`).
+        if let gender { obj["gender"] = .int(gender) }
+        if let userEdit { obj["user_edit"] = userEdit }
+        return .object(obj)
+    }
+
+    /// The provider-facing UTC timestamp form (`2026-10-01T08:00:00Z`), matching
+    /// the adapters' `parse_ts` expectations.
+    static func isoUTC(_ ts: Int) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+    }
+
+    /// Map `profiles.sex_model` to sleepecg's integer gender.
+    ///
+    /// `profiles.sex_model` is TEXT restricted to `'male' | 'female' | 'nonbinary'`,
+    /// while the `sleep_stage` adapter builds `sleepecg.io.sleep_readers.SubjectData`,
+    /// whose `gender` field is `int | None` ("stored as an integer as defined by
+    /// `Gender`", with `Gender.FEMALE = 0` and `Gender.MALE = 1`). Sending the raw
+    /// string makes every staged run raise, and the adapter's per-run `except`
+    /// swallows it into `skipped="provider_error"` -> the metric reports
+    /// `withheld / insufficient_coverage` for EVERY user with a sex set.
+    ///
+    /// So: `male -> 1`, `female -> 0`, and nil for `nonbinary` / absent / unknown
+    /// (sleepecg treats a missing gender as "mask the column", which is the honest
+    /// answer for a sex model the reference model was not trained on).
+    static func sleepecgGender(sexModel: String?) -> Int? {
+        switch (sexModel ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "male": return 1
+        case "female": return 0
+        default: return nil
+        }
+    }
+
+    /// Map raw HR rows to provider samples (ordered by ts).
+    static func candidateHRSamples(_ hr: [HRSample]) -> [CandidateHRSample] {
+        hr.sorted { $0.ts < $1.ts }.map { CandidateHRSample(ts: $0.ts, bpm: $0.bpm) }
+    }
+
+    /// Map R-R rows to provider rows (ordered by ts, seq, ord — the order the
+    /// stage adapter itself re-sorts to).
+    static func candidateRRRows(_ beats: [RRInterval]) -> [CandidateRRRow] {
+        beats.enumerated().sorted { lhs, rhs in
+            let a = lhs.element, b = rhs.element
+            if a.ts != b.ts { return a.ts < b.ts }
+            if a.seq != b.seq { return a.seq < b.seq }
+            return (a.ord ?? Int.min) < (b.ord ?? Int.min)
+        }.map { _, beat in
+            CandidateRRRow(ts: beat.ts, rrMs: beat.rrMs, seq: beat.seq, ord: beat.ord, tsSuspect: 0)
+        }
+    }
+
+    /// The metrics that are NOT `off` for this user (audit DD-2's cheap check).
+    /// Pure, so the gate is unit-testable without a database.
+    static func enabledMetrics(from selections: [String: SelectedProvider]) -> Set<String> {
+        var out = Set<String>()
+        for metric in CandidateStage.metrics {
+            if let selection = selections[metric], !selection.isOff { out.insert(metric) }
+        }
+        return out
+    }
+
+    // MARK: - ACTIVE PROMOTION PLUMBING (pure; unreachable while defaults are `off`)
+
+    /// Replace the canonical nightly HRV with an `active`-mode provider value and
+    /// record its provenance in the snapshot payload.
+    ///
+    /// `snapshot` is free-form jsonb (`publish_scoring_snapshot_v2` stores it
+    /// verbatim), so the provenance lands there; the legacy daily row keeps its
+    /// column contract and only `hrv_rmssd_ms` changes. A nil substitution returns
+    /// both payloads UNCHANGED — which is what every shipped configuration does,
+    /// because `physiology_provider_defaults` seeds all four metrics `off`.
+    static func applyActiveHrvSubstitution(
+        snapshot: [String: Any], legacy: [String: Any],
+        substitution: CandidateStage.ActiveHrvSubstitution?
+    ) -> (snapshot: [String: Any], legacy: [String: Any]) {
+        guard let substitution else { return (snapshot, legacy) }
+        var snapshot = snapshot
+        var legacy = legacy
+        var snapshotDaily = (snapshot["daily"] as? [String: Any]) ?? [:]
+        var legacyDaily = (legacy["daily_metrics"] as? [[String: Any]])?.first ?? [:]
+        snapshotDaily["hrv_rmssd_ms"] = substitution.value
+        legacyDaily["hrv_rmssd_ms"] = substitution.value
+        snapshotDaily["hrv_provenance"] = [
+            "mode": substitution.mode,
+            "provider_id": substitution.providerId,
+            "provider_version": substitution.providerVersion,
+            "adapter_version": substitution.adapterVersion,
+            "config_version": substitution.configVersion,
+            "input_sha256": substitution.inputSHA256,
+            "canonical_source": "provider",
+            "fallback": "legacy_hrv_analyzer",
+        ] as [String: Any]
+        snapshot["daily"] = snapshotDaily
+        if var metrics = legacy["daily_metrics"] as? [[String: Any]], !metrics.isEmpty {
+            metrics[0] = legacyDaily
+            legacy["daily_metrics"] = metrics
+        }
+        return (snapshot, legacy)
+    }
+
     // MARK: - Score one claimed day
+
+    /// One scored day: both canonical payloads, the dense intraday series, and the candidate-lane inputs.
+    /// `candidates` is always present; the candidate stage decides whether to use
+    /// it (it is unused whenever FRWHOOP_INFERENCE_URL is unset).
+    struct ScoredDay {
+        let legacy: [String: Any]
+        let snapshot: [String: Any]
+        let series: [String: Any]?
+        let candidates: CandidateInputs
+    }
+
+    // MARK: - Candidate input assembly (mode-gated)
+
+    /// Build the candidate inputs for one scored day, assembling ONLY the streams
+    /// whose metric mode is not `off` (audit DD-2).
+    ///
+    /// `enabled` empty means every metric is `off` (or the lane is off): the
+    /// function returns `.disabled` and touches no stream, so the off path costs
+    /// exactly the selection reads the caller already made.
+    private func buildCandidateInputs(claim: Claim, status: String,
+                                      canonicalAvgHrv: Double?, canonicalSdnn: Double?,
+                                      intervalStart: Int, intervalEnd: Int,
+                                      hr: [HRSample], rr: [RRInterval],
+                                      sleepWindow: (start: Int, end: Int)?,
+                                      claimSealedAt: Date,
+                                      enabled: Set<String>) throws -> CandidateInputs {
+        guard !enabled.isEmpty else {
+            return .disabled(userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+                             inputRevision: claim.inputRevision,
+                             intervalStart: intervalStart, intervalEnd: intervalEnd,
+                             claimSealedAt: claimSealedAt, status: status,
+                             canonicalAvgHrv: canonicalAvgHrv, canonicalSdnn: canonicalSdnn)
+        }
+
+        // HRV needs the observation-identity dedup + ordering.
+        var hrvBeats: [CandidateBeat] = []
+        if enabled.contains("hrv") {
+            hrvBeats = Self.candidateBeats(Self.dedupByObservationIdentity(rr))
+        }
+        // sleep_stage consumes the SAME R-R rows (no dedup: the adapter does its
+        // own run splitting and reports ts_suspect itself).
+        var rrRows: [CandidateRRRow] = []
+        if enabled.contains("sleep_stage") {
+            rrRows = Self.candidateRRRows(rr)
+        }
+        // sleep_boundary consumes HR.
+        var hrSamples: [CandidateHRSample] = []
+        if enabled.contains("sleep_boundary") {
+            hrSamples = Self.candidateHRSamples(hr)
+        }
+        // Corrections are only meaningful to the sleep metrics.
+        let sleepEnabled = enabled.contains("sleep_boundary") || enabled.contains("sleep_stage")
+        var edits: [CandidateSleepEdit] = []
+        var correctionsVersion: String? = nil
+        var profileVersion: String? = nil
+        var age: Int? = nil
+        var gender: Int? = nil
+        if sleepEnabled {
+            edits = try loadSleepEdits(userId: claim.userId, deviceId: claim.deviceId,
+                                       day: claim.day)
+            correctionsVersion = Self.correctionsVersion(edits)
+            let profile = try loadProfileMeta(userId: claim.userId)
+            profileVersion = profile.version
+            age = profile.age
+            gender = profile.gender
+        } else {
+            // HRV does not consume the profile or the corrections, but the request
+            // context still has to identify them (spec section 4), so record the
+            // version strings without paying for the edit rows.
+            //
+            // `corrections_version` is DELIBERATELY the literal "none" here, even
+            // when the day HAS sleep edits: corrections do not enter the HRV
+            // computation at all (they only re-bound sleep sessions), so claiming a
+            // digest of them would imply the HRV candidate depended on input it
+            // never read. A metric that starts consuming corrections must stop
+            // reporting "none" on this branch.
+            profileVersion = try loadProfileMeta(userId: claim.userId).version
+            correctionsVersion = "none"
+        }
+
+        // The window stored is the DETECTED one; a user edit overrides it inside
+        // `CandidateInputs.effectiveSleepWindow` (one source of truth).
+        return CandidateInputs(
+            userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+            inputRevision: claim.inputRevision,
+            intervalStart: intervalStart, intervalEnd: intervalEnd,
+            claimSealedAt: claimSealedAt, status: status,
+            canonicalAvgHrv: canonicalAvgHrv, canonicalSdnn: canonicalSdnn,
+            profileVersion: profileVersion, correctionsVersion: correctionsVersion,
+            enabledMetrics: enabled, assembled: true,
+            hrvBeats: hrvBeats, hrvInputRows: rr.count,
+            hrvTimestampResolution: "whole_seconds",
+            hrSamples: hrSamples, rrRows: rrRows,
+            sleepWindowStart: sleepWindow?.start, sleepWindowEnd: sleepWindow?.end,
+            sleepEdits: edits, age: age, gender: gender)
+    }
+
+    /// Content version of the day's sleep edits: `"none"` when the user has not
+    /// corrected this day, otherwise a digest over the rows' identity, revision and
+    /// payload. Deliberately content-derived (there is no version column on
+    /// `scoring_history_inputs_v3`), so a changed edit always changes the string.
+    static func correctionsVersion(_ edits: [CandidateSleepEdit]) -> String {
+        guard !edits.isEmpty else { return "none" }
+        var canonical: [String] = []
+        for edit in edits {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let payload = (try? encoder.encode(edit.payload)).flatMap { String(data: $0, encoding: .utf8) } ?? "?"
+            canonical.append("\(edit.entity)|\(edit.revision)|\(payload)")
+        }
+        return "sleep_edit1:\(sha256Hex(Data(canonical.joined(separator: "\n").utf8)).prefix(16))"
+    }
+
+    // MARK: - Candidate plan + corrections loaders
+
+    /// The four per-metric selections for a user.
+    ///
+    /// Uses `db.query` (a bare statement) rather than the store's
+    /// `callFunctionForJSON`, because on the v2 path this runs INSIDE the
+    /// claim/publish snapshot transaction and a nested BEGIN/COMMIT would end that
+    /// transaction early.
+    func loadCandidateSelections(userId: String) throws -> [String: SelectedProvider] {
+        var out: [String: SelectedProvider] = [:]
+        for metric in CandidateStage.metrics {
+            let rows = try db.query(PhysiologyCandidateSQL.selectedProvider, [userId, metric])
+            guard let text = rows.first?.values.first, !text.isEmpty,
+                  let data = text.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+            let mode = (obj["mode"] as? String) ?? "off"
+            let providerId = (obj["provider_id"] as? String) ?? ""
+            if mode == "off" || providerId.isEmpty { continue }
+            out[metric] = SelectedProvider(
+                providerId: providerId,
+                providerVersion: (obj["provider_version"] as? String) ?? "unknown",
+                configVersion: (obj["config_version"] as? String) ?? "unknown",
+                mode: mode)
+        }
+        return out
+    }
+
+    /// The user's sleep edits for one day, newest revision first.
+    ///
+    /// Source: `public.scoring_history_inputs_v3` with `kind='sleep_edit'` — the
+    /// same table the phone's manual bounds are written to. The latest row per
+    /// `entity` wins, and a `deleted` row removes that entity's edit.
+    func loadSleepEdits(userId: String, deviceId: String, day: String) throws -> [CandidateSleepEdit] {
+        let rows = try db.query("""
+            select distinct on (entity)
+                   entity,
+                   revision::text as revision,
+                   deleted::text as deleted,
+                   payload::text as payload
+              from public.scoring_history_inputs_v3
+             where user_id = $1::uuid and device_id = $2::uuid and kind = 'sleep_edit'
+               and effective_day = $3::date
+             order by entity, revision desc
+            """, [userId, deviceId, day])
+        var out: [CandidateSleepEdit] = []
+        for row in rows {
+            if isTrue(row["deleted"]) { continue }
+            let text = row["payload"] ?? ""
+            guard !text.isEmpty, let data = text.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                continue
+            }
+            out.append(CandidateSleepEdit(entity: row["entity"] ?? "",
+                                          revision: Int64(row["revision"] ?? "") ?? 0,
+                                          payload: JSONValue(any: obj)))
+        }
+        // Newest revision first, so `sleepEdits.first` is the authoritative edit.
+        return out.sorted { $0.revision > $1.revision }
+    }
+
+    /// The profile row's content version plus the model-card fields the
+    /// `sleep_stage` adapter accepts (`age`, `gender`).
+    ///
+    /// There is no profile version column, so the version is derived from the
+    /// fields the scorer actually uses (plus `updated_at`), which changes whenever
+    /// any of them changes. `"none"` when the user has no profile row.
+    func loadProfileMeta(userId: String) throws -> (version: String, age: Int?, gender: Int?) {
+        let rows = try db.query("""
+            select coalesce(date_of_birth::text,'') dob,
+                   coalesce(sex_model,'') sex,
+                   coalesce(height_cm::text,'') h,
+                   coalesce(weight_kg::text,'') w,
+                   coalesce(timezone,'') tz,
+                   coalesce(updated_at::text,'') updated
+              from public.profiles where id = $1::uuid
+            """, [userId])
+        guard let r = rows.first else { return ("none", nil, nil) }
+        var age: Int? = nil
+        let dob = r["dob"] ?? ""
+        if !dob.isEmpty {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX")
+            f.timeZone = TimeZone(identifier: "UTC")
+            f.dateFormat = "yyyy-MM-dd"
+            if let d = f.date(from: String(dob.prefix(10))) {
+                age = max(1, Int(Date().timeIntervalSince(d) / 86400.0 / 365.25))
+            }
+        }
+        let sex = r["sex"] ?? ""
+        // sleepecg-encoded (0/1/null); the raw `sex_model` string is NOT a valid
+        // SubjectData.gender. The VERSION digest still uses the raw string, so a
+        // change of sex_model always changes the version even when the encoded
+        // value stays nil (e.g. nonbinary -> unknown).
+        let gender = Self.sleepecgGender(sexModel: sex)
+        let canonical = [dob, sex, r["h"] ?? "", r["w"] ?? "", r["tz"] ?? "", r["updated"] ?? ""]
+            .joined(separator: "|")
+        let version = "profile1:\(sha256Hex(Data(canonical.utf8)).prefix(16))"
+        return (version, age, gender)
+    }
 
     /// Score one claimed day: load inputs, compute, and return both the
     /// legacy payload (engine_publish_legacy_fenced) and the v2 snapshot
-    /// payload (publish_scoring_snapshot_v2) built from the same DayResult.
+    /// payload (publish_scoring_snapshot_v2) built from the same DayResult, the
+    /// candidate-lane input snapshot, and the dense intraday series.
     ///
     /// `series` is the day's dense intraday series (`IntradaySeries`) in the shape
     /// `publish_metric_series_v1` takes, computed from the streams already loaded for the snapshot. It is
     /// nil when the day has too little heart rate to score or `buildSeries` is false. It is derived data
     /// for a separate table and never part of the snapshot.
-    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true)
-        throws -> (legacy: [String: Any], snapshot: [String: Any], series: [String: Any]?) {
+    ///
+    /// `candidateLane` is false when the worker has no inference client at all
+    /// (FRWHOOP_INFERENCE_URL unset). In that case NOTHING candidate-related runs:
+    /// no selection read, no per-stream assembly, no digest — the canonical path is
+    /// byte-identical to the pre-migration worker.
+    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true, candidateLane: Bool = false)
+        throws -> ScoredDay {
+        // The claim's snapshot was sealed just before this call, so "now" is the
+        // claim's input revision time for the candidate-debt freshness check.
+        let claimSealedAt = Date()
         let tz = TimeZone(identifier: claim.timezoneId) ?? TimeZone(identifier: "UTC")!
 
         // Calendar-correct day bounds (DST-safe). dayStart/dayEnd are local
@@ -354,6 +1084,21 @@ struct DayScorer {
         //     superset bound so a late wake the next morning is never truncated.
         let nightStart = dayStart - 30 * 3_600
         let nightEnd = dayStart + 54 * 3_600
+
+        // Candidate plan (audit DD-2): resolve the four per-metric modes FIRST, with
+        // plain reads on the connection the caller already owns, so nothing but the
+        // selection query runs when the lane is off or every metric is `off`. This
+        // must NOT open its own transaction: on the v2 path this code runs inside
+        // the claim/publish snapshot transaction.
+        let candidateSelections: [String: SelectedProvider]
+        let candidateEnabled: Set<String>
+        if candidateLane {
+            candidateSelections = try loadCandidateSelections(userId: claim.userId)
+            candidateEnabled = Self.enabledMetrics(from: candidateSelections)
+        } else {
+            candidateSelections = [:]
+            candidateEnabled = []
+        }
 
         let hr = try loadHR(userId: claim.userId, deviceId: claim.deviceId, from: nightStart, to: nightEnd)
         let rr = try loadRR(userId: claim.userId, deviceId: claim.deviceId, from: nightStart, to: nightEnd)
@@ -448,7 +1193,13 @@ struct DayScorer {
             if status != "available" {
                 snapshot["statusReasons"] = ["hr_too_sparse"]
             }
-            return (legacy, snapshot, nil)
+            let sparseCandidates = try buildCandidateInputs(
+                claim: claim, status: status, canonicalAvgHrv: nil, canonicalSdnn: nil,
+                intervalStart: dayStart, intervalEnd: dayEnd,
+                hr: hr, rr: rr, sleepWindow: nil, claimSealedAt: claimSealedAt,
+                enabled: candidateEnabled)
+            return ScoredDay(legacy: legacy, snapshot: snapshot, series: nil,
+                             candidates: sparseCandidates)
         }
 
         // The activity lane's epochs for this day, read once: the energy model takes them as context (it never
@@ -561,7 +1312,26 @@ struct DayScorer {
                 profile: profile, restingHR: result.daily.restingHr, energy: result.energy))
             series = IntradaySeries.payload(dayStart: dayStart, dayEnd: dayEnd, series: built)
         }
-        return (legacy, snapshot, series)
+
+        // Candidate-lane inputs. The interval is the MAIN sleep session when one
+        // was detected — that is the span the canonical nightly HRV aggregates
+        // over — and the claimed calendar day otherwise. The beats are the same
+        // transport-filtered rows the canonical path scored, deduplicated by
+        // observation identity (spec section 5).
+        let candidateInterval: (start: Int, end: Int)
+        if let main = Self.mainSleepSession(result.sleepSessions), main.end > main.start {
+            candidateInterval = (main.start, main.end)
+        } else {
+            candidateInterval = (dayStart, dayEnd)
+        }
+        let candidates = try buildCandidateInputs(
+            claim: claim, status: status,
+            canonicalAvgHrv: result.daily.avgHrv, canonicalSdnn: result.daily.avgSdnn,
+            intervalStart: candidateInterval.start, intervalEnd: candidateInterval.end,
+            hr: hr, rr: rr,
+            sleepWindow: (candidateInterval.start, candidateInterval.end),
+            claimSealedAt: claimSealedAt, enabled: candidateEnabled)
+        return ScoredDay(legacy: legacy, snapshot: snapshot, series: series, candidates: candidates)
     }
 
     // MARK: - Payload shaping

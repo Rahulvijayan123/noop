@@ -52,6 +52,22 @@ import FoundationNetworking
 //   FRWHOOP_HEARTBEAT_INTERVAL_MS heartbeat interval (default 15000)
 //   FRWHOOP_MAX_RUNTIME_SECONDS  exit after N seconds (0 = run forever; for scripted tests)
 //
+// Candidate (shadow/active) inference sidecar — OPTIONAL, and OFF by default:
+//   FRWHOOP_INFERENCE_URL        loopback base URL of the inference sidecar
+//                                (e.g. http://127.0.0.1:8787). UNSET OR EMPTY =
+//                                the candidate lane is fully off: no client is
+//                                built, no HTTP call is made, no extra SQL runs,
+//                                and the canonical scoring path is unchanged.
+//                                A non-loopback host is REFUSED at startup.
+//   FRWHOOP_INFERENCE_TIMEOUT_MS sidecar request deadline (default 25000; keep it
+//                                STRICTLY ABOVE the sidecar's own budget, which
+//                                deploy/inference.env.example sets to 20000, so the
+//                                sidecar's withheld/timeout verdict is the one that
+//                                arrives instead of a client-side timeout)
+//   FRWHOOP_INFERENCE_BUDGET     candidate runs per drain (default 2)
+//   FRWHOOP_INFERENCE_ALLOW_NON_LOOPBACK  "1" allows a non-loopback host
+//                                (tests / an explicitly approved private network)
+//
 // F7: every lane owns its own Postgres connection and runs on its own thread, so a
 // slow object-storage wait in the archive lane cannot delay fresh scoring, and the
 // heartbeat runs on the main thread independently of any lane's I/O. Each lane
@@ -92,6 +108,13 @@ struct WorkerConfig {
     let pollIntervalMS: Int
     let heartbeatIntervalMS: Int
     let maxRuntimeSeconds: Double
+    /// Loopback sidecar base URL. nil (or empty) means the candidate lane is OFF.
+    let inferenceURL: String?
+    let inferenceTimeoutMS: Int
+    let inferenceBudget: Int
+
+    /// True only when a sidecar URL is configured.
+    var inferenceEnabled: Bool { inferenceURL != nil }
 
     init(environment: [String: String]) throws {
         guard let dbURL = environment["FRWHOOP_DB_URL"], !dbURL.isEmpty else {
@@ -144,6 +167,14 @@ struct WorkerConfig {
         self.pollIntervalMS = Int(environment["FRWHOOP_POLL_INTERVAL_MS"] ?? "1000") ?? 1000
         self.heartbeatIntervalMS = Int(environment["FRWHOOP_HEARTBEAT_INTERVAL_MS"] ?? "15000") ?? 15000
         self.maxRuntimeSeconds = Double(environment["FRWHOOP_MAX_RUNTIME_SECONDS"] ?? "0") ?? 0
+        // An empty or absent URL is the OFF switch for the whole candidate lane:
+        // nothing is constructed and nothing is called.
+        let inferenceRaw = (environment["FRWHOOP_INFERENCE_URL"] ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.inferenceURL = inferenceRaw.isEmpty ? nil : inferenceRaw
+        self.inferenceTimeoutMS = Int(environment["FRWHOOP_INFERENCE_TIMEOUT_MS"] ?? "")
+            ?? InferenceClient.defaultTimeoutMS
+        self.inferenceBudget = Int(environment["FRWHOOP_INFERENCE_BUDGET"] ?? "") ?? 2
     }
 }
 
@@ -366,6 +397,44 @@ var activity = ActivityLane(
     streamDaysEnabled: config.activityStreams,
     streamDayBudget: config.activityStreamBudget)
 
+// MARK: - Candidate (shadow/active) inference lane wiring
+//
+// The candidate lane is OPTIONAL and OFF unless FRWHOOP_INFERENCE_URL is set.
+// When it is set, the URL is validated as loopback here: a non-loopback host is
+// refused (the sidecar must never be reachable off-host), and the refusal is
+// reported through the heartbeat rather than crashing the worker — scoring,
+// archiving and the heartbeat must keep running with candidates unavailable.
+let inferenceClient: InferenceClient?
+var inferenceConfigError: String?
+if let rawURL = config.inferenceURL {
+    do {
+        let allowNonLoopback = (env[InferenceEndpoint.allowNonLoopbackEnvKey] ?? "") == "1"
+        let url = try InferenceEndpoint.parse(rawURL, allowNonLoopback: allowNonLoopback)
+        inferenceClient = InferenceClient(baseURL: url, timeoutMS: config.inferenceTimeoutMS)
+    } catch {
+        inferenceClient = nil
+        inferenceConfigError = String(describing: error)
+        FileHandle.standardError.write(
+            "frwhoop-worker: candidate inference lane disabled: \(error)\n".data(using: .utf8)!)
+    }
+} else {
+    inferenceClient = nil
+}
+
+if let inferenceClient {
+    scoring.candidate = CandidateStage(client: inferenceClient,
+                                       store: PostgresCandidateStore(db: dbScoring))
+    scoring.candidateBudget = config.inferenceBudget
+    FileHandle.standardOutput.write(
+        ("frwhoop-worker: candidate inference lane enabled url=\(inferenceClient.baseURL.absoluteString) "
+         + "timeout_ms=\(inferenceClient.timeoutMS) budget=\(config.inferenceBudget)\n")
+            .data(using: .utf8)!)
+} else if inferenceConfigError == nil {
+    FileHandle.standardOutput.write(
+        "frwhoop-worker: candidate inference lane off (FRWHOOP_INFERENCE_URL unset)\n"
+            .data(using: .utf8)!)
+}
+
 let laneQueue = DispatchQueue(label: "frwhoop.lanes", attributes: .concurrent)
 
 if laneEnabled("projection") {
@@ -393,7 +462,7 @@ if laneEnabled("scoring") {
             let before = scoring.stats.completed + scoring.stats.superseded
             scoring.drain(budget: config.scoringBudget)
             scoringState.update {
-                $0.counters = [
+                var counters: [String: Int] = [
                     "claimed": scoring.stats.claimed,
                     "completed": scoring.stats.completed,
                     "failed": scoring.stats.failed,
@@ -410,6 +479,24 @@ if laneEnabled("scoring") {
                     "series_skipped": scoring.stats.seriesSkipped,
                     "series_failed": scoring.stats.seriesFailed,
                 ]
+                // Candidate counters appear ONLY when the lane is on, so an
+                // off-mode heartbeat payload is unchanged.
+                if let candidate = scoring.candidate?.stats {
+                    counters["candidate_runs"] = candidate.runs
+                    counters["candidate_calls"] = candidate.calls
+                    counters["candidate_ok"] = candidate.ok
+                    counters["candidate_withheld"] = candidate.withheld
+                    counters["candidate_recorded"] = candidate.recorded
+                    counters["candidate_duplicates"] = candidate.duplicates
+                    counters["candidate_write_failures"] = candidate.writeFailures
+                    counters["candidate_skipped_stale_debt"] = candidate.skippedStaleDebt
+                    counters["candidate_skipped_deleted_user"] = candidate.skippedDeletedUser
+                    counters["candidate_skipped_no_input"] = candidate.skippedNoInput
+                    counters["candidate_skipped_budget"] = candidate.skippedBudget
+                    counters["candidate_skipped_deadline"] = candidate.skippedDeadline
+                    counters["active_promotions_deferred"] = scoring.stats.activePromotionsDeferred
+                }
+                $0.counters = counters
                 $0.lastError = scoring.stats.lastError
                 $0.lastErrorKind = scoring.stats.lastErrorKind?.rawValue
                 $0.lastActivityAt = scoring.stats.lastScoreAt
@@ -497,6 +584,101 @@ if activityState.read().enabled {
 }
 
 // MARK: - Heartbeat
+
+/// Cached sidecar readiness for the heartbeat payload.
+///
+/// Readiness polling is BOUNDED and CACHED: the probe uses a short deadline
+/// (<= 2.5 s by default) and at most one probe per `ttl` (30 s), so a stalled
+/// sidecar can never delay the worker's own liveness proof. Only the main thread
+/// touches this object (the heartbeat runs there), so no lock is needed.
+final class InferenceReadiness {
+    private var checkedAt: Date?
+    private var ready = false
+    private var providers: [String: Any] = [:]
+    private var lastError: String?
+    private var lastCheckMS = 0
+
+    func refresh(client: InferenceClient, ttl: TimeInterval) {
+        if let checkedAt, Date().timeIntervalSince(checkedAt) < ttl { return }
+        let started = Date()
+        do {
+            let health = try client.healthz()
+            ready = health.ready
+            var map: [String: Any] = [:]
+            for (name, provider) in health.providers ?? [:] {
+                var entry: [String: Any] = ["ready": provider.ready]
+                if let version = provider.version { entry["version"] = version }
+                if let reason = provider.reason { entry["reason"] = reason }
+                map[name] = entry
+            }
+            providers = map
+            lastError = nil
+        } catch {
+            // A readiness probe failure is not a worker failure: it only means the
+            // candidate lane cannot compute right now.
+            ready = false
+            providers = [:]
+            lastError = String(describing: error).prefix(300).description
+        }
+        lastCheckMS = Int(Date().timeIntervalSince(started) * 1000)
+        checkedAt = Date()
+    }
+
+    func payload() -> [String: Any] {
+        var out: [String: Any] = ["ready": ready, "providers": providers, "check_ms": lastCheckMS]
+        if let checkedAt { out["checked_at"] = ISO8601DateFormatter().string(from: checkedAt) }
+        if let lastError { out["last_error"] = lastError }
+        return out
+    }
+}
+
+let inferenceReadiness = InferenceReadiness()
+
+/// The `inference` member of the heartbeat meta.
+///
+/// * candidate lane off (URL unset) -> JSON `null`, which is the documented
+///   "off" encoding for this field;
+/// * candidate lane on -> readiness plus per-lane candidate counters;
+/// * a configured-but-refused URL -> `enabled:false` plus `config_error`, so a
+///   misconfiguration is visible in monitoring instead of looking like "off".
+func inferenceHeartbeatMeta() -> Any {
+    guard let inferenceClient else {
+        if let inferenceConfigError {
+            return ["enabled": false, "config_error": inferenceConfigError] as [String: Any]
+        }
+        return NSNull()
+    }
+    inferenceReadiness.refresh(client: inferenceClient, ttl: 30)
+    var entry = inferenceReadiness.payload()
+    entry["enabled"] = true
+    entry["url"] = inferenceClient.baseURL.absoluteString
+    entry["timeout_ms"] = inferenceClient.timeoutMS
+    entry["budget"] = config.inferenceBudget
+    if let stats = scoring.candidate?.stats {
+        entry["candidate"] = [
+            "runs": stats.runs,
+            "calls": stats.calls,
+            "ok": stats.ok,
+            "withheld": stats.withheld,
+            "errors": stats.errors,
+            "recorded": stats.recorded,
+            "duplicates": stats.duplicates,
+            "write_failures": stats.writeFailures,
+            "skipped_off": stats.skippedOff,
+            "skipped_stale_debt": stats.skippedStaleDebt,
+            "skipped_deleted_user": stats.skippedDeletedUser,
+            "skipped_no_input": stats.skippedNoInput,
+            "skipped_budget": stats.skippedBudget,
+            "skipped_deadline": stats.skippedDeadline,
+            "active_substitutions": stats.activeSubstitutions,
+            "active_promotions_deferred": scoring.stats.activePromotionsDeferred,
+        ] as [String: Any]
+        if let lastError = stats.lastError { entry["candidate_last_error"] = String(lastError.prefix(300)) }
+        if let provider = stats.lastProviderId { entry["candidate_last_provider"] = provider }
+        if let reason = stats.lastWithheldReason { entry["candidate_last_withheld_reason"] = reason }
+    }
+    return entry
+}
 
 /// Compose the heartbeat queue-age query. Aggregate only: no user data.
 ///
@@ -670,6 +852,8 @@ func heartbeat(final: Bool = false) {
             "activity": config.activityBudget,
         ],
         "db": dbHeartbeat.connectionFacts(),
+        // Inference readiness: JSON null when the candidate lane is off.
+        "inference": inferenceHeartbeatMeta(),
         "shutdown_requested": shutdown.isSet,
         "final": final,
     ]

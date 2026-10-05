@@ -48,3 +48,58 @@ psql "$FRWHOOP_DB_URL" -c "select status,count(*) from physiology_archive_outbox
   (2-10 min) and redeliver. SIGTERM finishes the current claim then exits.
 - Worker state is disposable: inputs live in verified B2 objects + Postgres.
 - Rollback: `git checkout <sha> && swift build -c release ... && systemctl restart frwhoop-worker`.
+
+## Physiology inference sidecar (loopback only)
+
+Second service on the same Droplet: `frwhoop-inference.service`, user
+`frwhoop-inf`, config `/etc/frwhoop/inference.env`, code `/opt/frwhoop-inference`
+(pinned venv), model cache `/opt/frwhoop-models/current` (read-only to the service
+user). It binds `127.0.0.1` only and opens no public port, so no Cloud Firewall or
+ufw rule is required. The worker keeps scoring when the sidecar is down.
+
+```bash
+systemctl status frwhoop-inference
+journalctl -u frwhoop-inference -f
+curl -s http://127.0.0.1:8787/healthz | head      # readiness + per-provider status
+curl -s http://127.0.0.1:8787/v1/providers | head # capability manifest
+ss -ltnp | grep 8787                              # must show 127.0.0.1, never 0.0.0.0
+systemctl show frwhoop-inference -p MemoryCurrent -p MemoryPeak
+```
+
+The worker reports sidecar readiness and candidate counters in the EXISTING
+heartbeat payload (`scoring_service_heartbeats.meta -> inference`), so no new
+monitoring surface is needed:
+
+```bash
+psql "$FRWHOOP_DB_URL" -c "select meta->'inference' from scoring_service_heartbeats where id = 1;"
+psql "$FRWHOOP_DB_URL" -c "select meta->'lanes' from scoring_service_heartbeats where id = 1;"
+```
+
+### Failure mapping (candidate lane)
+
+Every sidecar failure settles as a WITHHELD candidate with a machine-readable
+reason and never blocks the canonical publish:
+
+| Condition | Withheld reason | Retried in the same drain |
+| --- | --- | --- |
+| connection refused / unreachable | `provider_error` | once (max 2 attempts) |
+| deadline elapsed (`FRWHOOP_INFERENCE_TIMEOUT_MS`) | `timeout` | once (max 2 attempts) |
+| HTTP 503 (provider not ready) | `not_ready` | once (max 2 attempts) |
+| any other non-200 | `provider_error` | no |
+| undecodable / invalid body | `provider_error` | no |
+
+Candidate skips are counted in the heartbeat: `skipped_stale_debt` (new input
+arrived after the claim was sealed), `skipped_deleted_user`, `skipped_no_input`,
+`skipped_budget`, and `skipped_off` (metric mode is `off`).
+
+### Rollback
+
+1. Disable the candidate lane without touching the sidecar: comment out
+   `FRWHOOP_INFERENCE_URL` in `/etc/frwhoop/worker.env`, then
+   `systemctl restart frwhoop-worker`. Scoring returns to the legacy path exactly.
+2. Set the affected metric back to `off` in `physiology_provider_defaults` — the
+   worker stops computing candidates for it on the next drain.
+3. Stop the sidecar: `systemctl disable --now frwhoop-inference`. The worker keeps
+   running; candidates settle as withheld `provider_error`.
+4. Roll the model cache back by repointing `current`:
+   `ln -sfn /opt/frwhoop-models/revisions/<previous> /opt/frwhoop-models/current`.
