@@ -3032,9 +3032,14 @@ final class Repository: ObservableObject {
     /// Write one native answer (day per the importer's wake-day convention).
     func saveJournalAnswer(day: String, question: String, answeredYes: Bool, notes: String? = nil) async {
         guard let store = await ensureStore() else { return }
-        _ = try? await store.upsertJournal(
+        let written = (try? await store.upsertJournal(
             [JournalEntry(day: day, question: question, answeredYes: answeredYes, notes: notes)],
-            deviceId: Self.journalDeviceId)
+            deviceId: Self.journalDeviceId)) != nil
+        // Exposure history (fire-and-forget; never blocks or fails the journal write).
+        if written {
+            ExposureJournalBridge.journalAnswered(day: day, question: question, answer: answeredYes ? .yes : .no,
+                                                  writer: store.registryWriter)
+        }
     }
 
     /// Write one native NUMERIC answer (#322): stores the value AND answeredYes=true, so the existing
@@ -3042,10 +3047,14 @@ final class Repository: ObservableObject {
     /// while the value is carried for dose-response. Day per the importer's wake-day convention.
     func saveJournalNumeric(day: String, question: String, value: Double, notes: String? = nil) async {
         guard let store = await ensureStore() else { return }
-        _ = try? await store.upsertJournal(
+        let written = (try? await store.upsertJournal(
             [JournalEntry(day: day, question: question, answeredYes: true, notes: notes,
                           numericValue: value)],
-            deviceId: Self.journalDeviceId)
+            deviceId: Self.journalDeviceId)) != nil
+        if written {
+            ExposureJournalBridge.journalAnswered(day: day, question: question, answer: .numeric(value),
+                                                  writer: store.registryWriter)
+        }
     }
 
     /// Per-question numeric series (question → [day: value]) over the imported ∪ native union, native
@@ -3065,7 +3074,12 @@ final class Repository: ObservableObject {
     /// Clear one native answer (never touches imported rows , scoped to the dedicated source id).
     func clearJournalAnswer(day: String, question: String) async {
         guard let store = await ensureStore() else { return }
-        _ = try? await store.deleteJournal(deviceId: Self.journalDeviceId, day: day, question: question)
+        let cleared = (try? await store.deleteJournal(deviceId: Self.journalDeviceId, day: day,
+                                                      question: question)) != nil
+        if cleared {
+            ExposureJournalBridge.journalAnswered(day: day, question: question, answer: .cleared,
+                                                  writer: store.registryWriter)
+        }
     }
 
     /// All workouts (WHOOP + Apple Health + manual + grandfathered detected bouts), newest first.

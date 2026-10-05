@@ -79,7 +79,8 @@ extension PhysiologyContext {
             if hart.spans.isEmpty && strap.spans.isEmpty { statusReasons.append(activityUnavailable) }
 
             let timeline = SignalValidityEngine.regimeTimeline(input, config: policy.validity)
-            let episodes = SleepRhythm.episodes(sessions: input.sleepSessions, identity: identity, mode: mode,
+            let episodes = SleepRhythm.episodes(sessions: input.sleepSessions, priorSleep: history.value.priorSleep,
+                                                identity: identity, mode: mode,
                                                 cutoff: input.availabilityCutoff, config: policy.sleep)
             if episodes.isEmpty { statusReasons.append(sleepUnavailable) }
             let events = Exposures.current(input.exposures, mode: mode, cutoff: input.availabilityCutoff)
@@ -149,7 +150,7 @@ extension PhysiologyContext {
             let finality = documentFinality(input, policy: policy)
             for i in envelopes.indices { envelopes[i].finality = finality }
 
-            let sleep = SleepRhythm.summary(episodes: episodes, priorSleep: rawHistory.priorSleep, identity: identity,
+            let sleep = SleepRhythm.summary(episodes: episodes, priorSleep: history.value.priorSleep, identity: identity,
                                             observations: observations, mode: mode,
                                             cutoff: input.availabilityCutoff, config: policy.sleep)
             let functional = Functional.daySummary(identity: identity, bouts: bouts, hart: hart, strap: strap,
@@ -255,7 +256,10 @@ extension PhysiologyContext {
             out.skinTemperature = input.skinTemperature.filter { ok($0.ts, $0.availableAt) }
             out.wearEvents = input.wearEvents.filter { ok($0.ts, $0.availableAt) }
             out.bandSleepStates = input.bandSleepStates.filter { ok($0.ts, $0.availableAt) }
-            out.sleepSessions = input.sleepSessions.filter { ok($0.interval.start, $0.availableAt) }
+            // A published session is known only once it was published; unknown publication means "at its end".
+            out.sleepSessions = input.sleepSessions.filter {
+                $0.interval.start < c && ($0.availableAt ?? $0.interval.end) <= c
+            }
             out.workouts = input.workouts.filter { ok($0.interval.start, $0.availableAt) }
             out.activityEpochs = input.activityEpochs.filter { ok($0.epoch.startTs, $0.availableAt) }
             out.activityIntervals = input.activityIntervals.filter { ok($0.interval.start, $0.availableAt) }
@@ -329,8 +333,21 @@ extension PhysiologyContext {
                 .sorted { $0.day < $1.day }
                 .map { DayCoverage(day: $0.day, interval: dayInterval($0.day, timezoneId: identity.timezoneId),
                                    observedS: Int($0.value)) }
-            let observed = max(covered(strap, identity.dayWindow), covered(hart, identity.dayWindow))
-            out.append(DayCoverage(day: identity.day, interval: identity.dayWindow, observedS: observed))
+            // Today's observed seconds are the union of both heart-rate independent tracks' covered spans, kept as
+            // intervals so a trailing window can clip the day exactly instead of prorating it.
+            let spans = (strap.spans + hart.spans).compactMap { $0.interval.intersection(identity.dayWindow) }.sorted()
+            var union: [Interval] = []
+            for s in spans {
+                if var last = union.last, s.start <= last.end {
+                    last.end = max(last.end, s.end)
+                    union[union.count - 1] = last
+                } else {
+                    union.append(s)
+                }
+            }
+            let observed = union.reduce(0) { $0 + $1.duration }
+            out.append(DayCoverage(day: identity.day, interval: identity.dayWindow, observedS: observed,
+                                   observedIntervals: union))
             return out
         }
 

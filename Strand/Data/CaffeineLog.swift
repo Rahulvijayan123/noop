@@ -194,7 +194,17 @@ public final class CaffeineLogStore: ObservableObject {
     /// itself. The Apple Health import writes from outside it, and two instances over one UserDefaults
     /// key would mean the card kept publishing its stale in-memory array until it was rebuilt — the
     /// imported intakes would be on disk and invisible. One instance, one source of truth.
-    public static let shared = CaffeineLogStore()
+    public static let shared: CaffeineLogStore = {
+        let store = CaffeineLogStore()
+        // Only the process-wide store feeds the exposure history; instances built by tests or previews do not.
+        store.exposureSink = { ExposureJournalBridge.caffeineChanged($0) }
+        return store
+    }()
+
+    /// Receives every intake change made here (log, remove, clear, Apple Health replace) for the exposure event
+    /// history (`ExposureJournalBridge`). Load-time pruning is NOT reported: the exposure store is the durable
+    /// record, and an intake aging out of this 48 h cache did not stop having happened.
+    var exposureSink: (([ExposureJournalBridge.CaffeineChange]) -> Void)?
 
     /// Logged intakes, newest first. Persisted as JSON under one UserDefaults key.
     @Published public private(set) var intakes: [CaffeineIntake] { didSet { save() } }
@@ -225,7 +235,9 @@ public final class CaffeineLogStore: ObservableObject {
             guard let mg, mg.isFinite, mg > 0 else { return nil }
             return min(mg, 2000)   // a sane upper clamp (no single drink is ~2000 mg)
         }()
-        intakes = ([CaffeineIntake(at: date, mg: cleanMg)] + intakes).sorted { $0.at > $1.at }
+        let intake = CaffeineIntake(at: date, mg: cleanMg)
+        intakes = ([intake] + intakes).sorted { $0.at > $1.at }
+        exposureSink?([.logged(intake)])
     }
 
     /// Replace every IMPORTED intake with `imported`, leaving hand-logged ones untouched (#949).
@@ -240,7 +252,30 @@ public final class CaffeineLogStore: ObservableObject {
         // Skip the write when nothing actually changed — `intakes` has a didSet that persists, and this
         // runs on every sync, so an unconditional assignment would rewrite the JSON (and republish to
         // every observing view) even on the overwhelmingly common no-op sync.
-        if next != intakes { intakes = next }
+        if next != intakes {
+            let changes = Self.importChanges(old: intakes.filter(\.isImported), new: imported, now: now())
+            intakes = next
+            exposureSink?(changes)
+        }
+    }
+
+    /// What an Apple Health replace changed, for the exposure history: new or edited samples are logged; a sample
+    /// that is gone from the source app is removed — but only when it is still well inside the window the import
+    /// reads (`retentionHours`, less an hour of margin), so a drink that merely aged out of the window is not
+    /// mistaken for a deletion.
+    static func importChanges(old: [CaffeineIntake], new: [CaffeineIntake],
+                              now: Date) -> [ExposureJournalBridge.CaffeineChange] {
+        let oldById = Dictionary(old.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let newIds = Set(new.map(\.id))
+        let readFrom = now.addingTimeInterval(-(retentionHours - 1) * 3600)
+        var changes: [ExposureJournalBridge.CaffeineChange] = new
+            .filter { oldById[$0.id] != $0 }
+            .sorted { $0.at < $1.at }
+            .map { .logged($0) }
+        changes += old.filter { !newIds.contains($0.id) && $0.at >= readFrom }
+            .sorted { $0.at < $1.at }
+            .map { .removed($0) }
+        return changes
     }
 
     /// Remove a logged intake (the user mis-logged / wants to clear it).
@@ -252,6 +287,7 @@ public final class CaffeineLogStore: ObservableObject {
     public func remove(_ id: UUID) {
         guard let hit = intakes.first(where: { $0.id == id }), !hit.isImported else { return }
         intakes = intakes.filter { $0.id != id }
+        exposureSink?([.removed(hit)])
     }
 
     /// Clear every HAND-LOGGED intake.
@@ -260,7 +296,9 @@ public final class CaffeineLogStore: ObservableObject {
     /// only last until the next sync re-read the window, so the list would silently repopulate and the
     /// button would look broken.
     public func clearAll() {
+        let removed = intakes.filter { !$0.isImported }
         intakes = intakes.filter { $0.isImported }
+        exposureSink?(removed.map { .removed($0) })
     }
 
     /// The current "still active" estimate, computed from the logged intakes at `now()`.

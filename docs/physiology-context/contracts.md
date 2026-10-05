@@ -47,6 +47,7 @@ signature wins and this file is corrected.
 | History | `HistoryInput` items from the document's day or later are dropped (`history_from_future_dropped`). References are built from strictly earlier days, so an observation is always scored before it can enter an adaptive reference. |
 | Revisions | Overlapping/revised activity records resolve per second by `revision`, then `availableAt`, then a stable id; each second counts once (`IntervalAlgebra.resolve`). |
 | RR identity | `(ts, rrMs, seq)`. Equal RR values are distinct beats; de-duplication is by observation identity only. Storage is whole-second; no sub-second beat time is reconstructed. |
+| Ordering | `SanitizedObservations` streams are sorted by `ts` (then identity); every system may rely on it. |
 | No bridging | Nothing interpolates across a disconnection, source change, clock reset or unsupported transition (`SanitizedObservations.breaks`). |
 
 ## 3. Core Swift contract

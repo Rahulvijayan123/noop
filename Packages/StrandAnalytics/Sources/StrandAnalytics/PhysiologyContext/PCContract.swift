@@ -341,13 +341,18 @@ extension PhysiologyContext {
         public var sourceDay: String?
         /// Producing detector version.
         public var detector: String
+        /// The publishing snapshot's `dataThrough` (Unix seconds): how far the detector had data when it ran.
+        public var dataThrough: Int?
+        /// The zone the publishing snapshot interpreted its day in.
+        public var timezoneId: String?
 
         public init(id: String, interval: Interval, isNap: Bool? = nil, efficiency: Double? = nil,
                     hrOnly: Bool? = nil, stages: [StageSpan] = [], availableAt: Int? = nil,
-                    sourceDay: String? = nil, detector: String) {
+                    sourceDay: String? = nil, detector: String, dataThrough: Int? = nil, timezoneId: String? = nil) {
             self.id = id; self.interval = interval; self.isNap = isNap; self.efficiency = efficiency
             self.hrOnly = hrOnly; self.stages = stages; self.availableAt = availableAt
             self.sourceDay = sourceDay; self.detector = detector
+            self.dataThrough = dataThrough; self.timezoneId = timezoneId
         }
     }
 
