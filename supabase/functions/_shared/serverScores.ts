@@ -2,6 +2,13 @@ import { IdentityError, resolveUploadIdentity, resolveJwtUser, bearerToken, look
 import { createNoopDeviceResolver, findNoopDevice } from './devices.ts';
 import { isSafeExternalDeviceId, isUuid } from './keys.ts';
 import { STRETCH_FEEDBACK_MAX_BODY_BYTES, validateStretchFeedback } from './stretchFeedback.ts';
+import {
+  EXPOSURE_MAX_BODY_BYTES,
+  parseContextHistoryQuery,
+  parseContextQuery,
+  parseExposureReadQuery,
+  submitExposureEvents,
+} from './physiologyContext.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -170,8 +177,15 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isPlacementPost = req.method === 'POST' && route === '/placement';
   const isPlacementGet = req.method === 'GET' && route === '/placement';
   const isStretchFeedback = req.method === 'POST' && route === '/stretch-feedback';
+  // Physiology context (contracts.md §8). Device-scoped reads take deviceId from the query like /series;
+  // exposure events are account-level and take no device.
+  const isContext = req.method === 'GET' && route === '/context';
+  const isContextHistory = req.method === 'GET' && route === '/context/history';
+  const isExposurePost = req.method === 'POST' && route === '/exposures';
+  const isExposureGet = req.method === 'GET' && route === '/exposures';
   if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit
-      && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback) {
+      && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
+      && !isContext && !isContextHistory && !isExposurePost && !isExposureGet) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -207,23 +221,27 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       user={id:installation.id,sourceId:installation.sourceId};
     }
     const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead || isPlacementGet
-      ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES : undefined);
-    const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead
+        || isContext || isContextHistory || isExposureGet
+      ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
+        : isExposurePost ? EXPOSURE_MAX_BODY_BYTES : undefined);
+    const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead || isContext
+        || isContextHistory
       ? url.searchParams.get('deviceId')
-      : (isPlacementGet || isStretchFeedback) ? null
+      : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
     // user-level declaration (the RPC's NULL device scope). Stretch feedback carries a device per
     // item, which is resolved leniently inside its handler, so it has no request-level device.
-    if (!isPlacementGet && !isStretchFeedback && !(isPlacementPost && externalDeviceId == null)
+    if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet
+        && !(isPlacementPost && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
     // user-level when absent; GET is owner-scoped and never device-scoped).
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
-      : (isPlacementPost || isPlacementGet || isStretchFeedback) ? null
+      : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -302,6 +320,40 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       // every other score route, no new auth path.
       const outcome = await submitStretchFeedback({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
       return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isContext || isContextHistory) {
+      // One device-day's context document, or the device's episodes/bouts/daily values over a range. The
+      // owner is the credential's and the device the caller's own (findNoopDevice); the RPCs check both again.
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      if (isContext) {
+        const query = parseContextQuery(url.searchParams);
+        const context = await rest.rpc('physiology_context_read_v1', {
+          p_user: user.id, p_device: deviceId, p_day: query.day, p_mode: query.mode, p_metric: query.metric,
+        });
+        return Response.json({ context, identity }, { headers: { 'cache-control': 'no-store' } });
+      }
+      const query = parseContextHistoryQuery(url.searchParams);
+      const history = await rest.rpc('physiology_context_history_read_v1', {
+        p_user: user.id, p_device: deviceId, p_from: query.from, p_to: query.to, p_mode: query.mode,
+      });
+      return Response.json({ history, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isExposurePost) {
+      // Account-level exposure revisions; owner and uploading source from the credential, never the body.
+      const outcome = await submitExposureEvents({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
+      return Response.json({ ...outcome, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isExposureGet) {
+      const query = parseExposureReadQuery(url.searchParams);
+      const read = await rest.rpc('exposure_events_read_v1', {
+        p_owner: user.id, p_from: query.from, p_to: query.to, p_include_history: query.history,
+      });
+      return Response.json({
+        events: Array.isArray(read?.events) ? read.events : [],
+        ...(query.history ? { revisions: Array.isArray(read?.revisions) ? read.revisions : [] } : {}),
+        truncated: read?.truncated === true,
+        identity,
+      }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isPlacementGet) {
       // Owner-scoped read for reconciliation. device_id is returned as the EXTERNAL device id
