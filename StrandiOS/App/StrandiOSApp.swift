@@ -539,7 +539,7 @@ private struct iOSRootView: View {
                     .navigationTitle("Nara account")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
-                        if !accountSetupInProgress {
+                        if !accountPromptIsMandatory {
                             ToolbarItem(placement: .cancellationAction) {
                                 Button("Not now") { accountPromptDismissed = true }
                                     .accessibilityIdentifier("nara.prompt.notNow")
@@ -547,7 +547,7 @@ private struct iOSRootView: View {
                         }
                     }
             }
-            .interactiveDismissDisabled(accountSetupInProgress)
+            .interactiveDismissDisabled(accountPromptIsMandatory)
         }
         // The Terms gate must stay "over everything" — don't pop What's New on top of it after a
         // combined terms+version update. Gate on terms being current, and re-check when they're
@@ -586,7 +586,8 @@ private struct iOSRootView: View {
     private var accountPromptDue: Bool {
         guard !demoBypass, onboarded, acceptedTerms == Terms.currentVersion, automaticLaunchSheetResolved,
               !showWhatsNew, naraAuth.isAvailable, CloudPushSettings.isConfigured else { return false }
-        return accountSetupInProgress || (!accountPromptDismissed && naraAuth.phase.needsAccountSetup)
+        return accountSetupInProgress || ((CloudPushSettings.isHostedComputeBuild || !accountPromptDismissed)
+            && naraAuth.phase.needsAccountSetup)
     }
 
     /// A new account that has not yet chosen between starting fresh and recovering: nothing is linked until it
@@ -594,6 +595,12 @@ private struct iOSRootView: View {
     private var accountSetupInProgress: Bool {
         if case .choosingSetup = naraAuth.phase { return true }
         return false
+    }
+
+    /// The prompt cannot be dismissed while setup is half done, nor in a hosted-compute build, where an
+    /// account is the only way in: there is no offline mode to fall back to.
+    private var accountPromptIsMandatory: Bool {
+        accountSetupInProgress || CloudPushSettings.isHostedComputeBuild
     }
 
     private func showWhatsNewIfDue() {

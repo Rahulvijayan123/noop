@@ -10,7 +10,9 @@
 //   NOOP_SUPABASE_ANON_KEY         — DEPRECATED legacy anon JWT; read only as a fallback for the
 //                                    publishable key while a project still issues one.
 //   NOOP_SOURCE_REVISION           — the deployed worker/source revision, for diagnostics
-//   NOOP_FINAL_HOSTED_COMPUTE      — YES only for a build that must run cloud-only (no local scoring)
+//   NOOP_FINAL_HOSTED_COMPUTE      — YES for a build that must run cloud-only: sync is on whenever the build is
+//                                    configured, with no toggle, no opt-out, no endpoint override and a
+//                                    sign-in that cannot be skipped. NO leaves cloud as an opt-in.
 //   NOOP_ALLOW_LEGACY_ENROLLMENT   — YES only for a migration build whose phones still hold a NARA
 //                                    enrollment-code credential and must keep using it until sign-in.
 //                                    NO (the default) ignores any such credential.

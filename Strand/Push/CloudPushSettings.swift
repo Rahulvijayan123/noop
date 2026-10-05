@@ -41,9 +41,14 @@ public enum CloudPushSettings {
     ///
     /// xcconfig cannot contain a bare `//`, so secrets files write the scheme as `https:/$()/`.
     /// Normalise that back to `https://` here rather than asking ops to hand-edit the plist.
+    ///
+    /// A hosted-compute build always talks to the endpoint it was cut with: the developer override is
+    /// ignored there, so no stale preference can point a customer's data at another server.
     public static var receiverURL: URL? {
-        let override = UserDefaults.standard.string(forKey: endpointOverrideKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let override = isHostedComputeBuild
+            ? ""
+            : (UserDefaults.standard.string(forKey: endpointOverrideKey)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
         let raw = override.isEmpty ? bundleString(endpointInfoKey) : override
         guard !raw.isEmpty else { return nil }
         let repaired = raw.replacingOccurrences(of: "https:/$()/", with: "https://")
@@ -102,22 +107,29 @@ public enum CloudPushSettings {
 
     /// Master switch.
     ///
-    /// Cloud mode is OPT-IN: a build that merely carries a receiver still uploads nothing until the
-    /// user turns it on, so the existing offline behaviour is what a fresh install does. A build cut
-    /// with `NOOPFinalHostedCompute = YES` is the exception — that build is hosted-compute-only and
-    /// starts enabled. Either way, an unconfigured build can never be enabled: there is no receiver
-    /// to point at, and the toggle is refused rather than silently accepted.
+    /// A build cut with `NOOPFinalHostedCompute = YES` is hosted-compute-only: it has no local scoring and
+    /// no offline mode, so cloud is not a preference there. It is on whenever the build is configured, and
+    /// neither a stored override nor `setEnabled(_:)` can turn it off.
+    ///
+    /// Any other build keeps cloud OPT-IN: carrying a receiver is not consent to upload, so nothing leaves
+    /// the phone until the user turns it on. An unconfigured build can never be enabled: there is no
+    /// receiver to point at, and the toggle is refused rather than silently accepted.
     ///
     /// Enabled does not mean uploading: nothing leaves the phone until an account is signed in and has an
     /// installation credential (see `CloudPushIdentityStore.current()`).
     public static var isEnabled: Bool {
         guard isConfigured else { return false }
+        if isHostedComputeBuild { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: enabledOverrideKey) != nil {
             return defaults.bool(forKey: enabledOverrideKey)
         }
-        return isHostedComputeBuild
+        return false
     }
+
+    /// Whether the person can choose to switch cloud sync on or off. False in a hosted-compute build,
+    /// where there is nothing to switch to, so screens show the state instead of offering a control.
+    public static var isUserSwitchable: Bool { isConfigured && !isHostedComputeBuild }
 
     /// The receiver's project origin (`https://<project>.supabase.co`), derived from the configured
     /// receiver URL by dropping the function path.
@@ -143,6 +155,11 @@ public enum CloudPushSettings {
     }
 
     public static func setEnabled(_ enabled: Bool) {
+        guard !isHostedComputeBuild else {
+            // Cloud cannot be turned off here; a request to do so only makes sure it is running.
+            Task { CloudPushRuntime.shared.startIfEnabled() }
+            return
+        }
         UserDefaults.standard.set(enabled, forKey: enabledOverrideKey)
         // The master switch is a lifecycle control, not just a flag. Flipping it off must stop the
         // runtime's capture staging AND its upload cycle the moment the user asks (D1): the durable

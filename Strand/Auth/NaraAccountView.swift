@@ -437,18 +437,31 @@ public struct NaraAccountView: View {
         if CloudPushSettings.isConfigured {
             StrandCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    Toggle(isOn: Binding(get: { CloudPushSettings.isEnabled },
-                                         set: { account.setUploadsEnabled($0) })) {
+                    if CloudPushSettings.isUserSwitchable {
+                        Toggle(isOn: Binding(get: { CloudPushSettings.isEnabled },
+                                             set: { account.setUploadsEnabled($0) })) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("Sync with your account").font(StrandFont.headline)
+                                    .foregroundStyle(StrandPalette.textPrimary)
+                                Text("Measured strap data is uploaded to your account, where it is scored on the server.")
+                                    .font(StrandFont.subhead)
+                                    .foregroundStyle(StrandPalette.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .accessibilityIdentifier("nara.account.sync")
+                    } else {
                         VStack(alignment: .leading, spacing: 3) {
-                            Text("Sync with your account").font(StrandFont.headline)
+                            Text("Synced with your account").font(StrandFont.headline)
                                 .foregroundStyle(StrandPalette.textPrimary)
-                            Text("Measured strap data is uploaded to your account, where it is scored on the server.")
+                            Text("Measured strap data is saved to your own private space and scored on the server. Only this account can see it.")
                                 .font(StrandFont.subhead)
                                 .foregroundStyle(StrandPalette.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("nara.account.syncAutomatic")
                     }
-                    .accessibilityIdentifier("nara.account.sync")
 
                     if !account.ownsLocalHistory {
                         Text("This phone's saved history belongs to another Nara account. It is not uploaded and is never mixed into your data.")
