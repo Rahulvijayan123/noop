@@ -172,6 +172,17 @@ const SERVICE_ONLY_FUNCTIONS = [
   "scoring_claim_one",
   "recover_noop_account_from_enrollment",
   "upsert_activity_stretch_feedback",
+  // Physiology context (20261005120000_physiology_context.sql): the worker's queue and the scores route's reads.
+  "enqueue_physiology_context_days_v1",
+  "invalidate_physiology_context_span_v1",
+  "claim_physiology_context_v1",
+  "renew_physiology_context_v1",
+  "fail_physiology_context_v1",
+  "publish_physiology_context_v1",
+  "physiology_context_read_v1",
+  "physiology_context_history_read_v1",
+  "record_exposure_event_v1",
+  "exposure_events_read_v1",
 ];
 
 Deno.test({

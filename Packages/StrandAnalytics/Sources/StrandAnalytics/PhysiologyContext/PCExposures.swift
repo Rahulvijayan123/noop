@@ -473,6 +473,9 @@ extension PhysiologyContext {
                 Interval(r.occurred.start, max(r.occurred.end, r.occurred.start + 1))
             }
             guard let minStart = ranges.map(\.start).min(), let maxEnd = ranges.map(\.end).max() else { return [] }
+            // Closed reach [minStart - aligned window, maxEnd + lookback]: `refs` includes an event whose end is
+            // exactly `lookback` before a measurement, so the instant maxEnd + lookback is itself affected
+            // (mirrored by record_exposure_event_v1).
             return dayKeys(from: minStart - config.maxAlignedWindowS, through: maxEnd + config.lookbackS,
                            timezoneId: timezoneId, limit: max(0, config.maxAffectedDays))
         }

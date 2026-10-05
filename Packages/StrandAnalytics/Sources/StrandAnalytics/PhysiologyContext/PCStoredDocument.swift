@@ -109,6 +109,11 @@ extension PhysiologyContext {
             return doc
         }
 
+        /// The envelopes held by `tables`, in document order (for readers that decode the summary leniently).
+        public static func envelopes(_ tables: [EnvelopeTable]) -> [MeasurementEnvelope] {
+            tables.flatMap(decode).sorted { ($0.support, $0.method.id) < ($1.support, $1.method.id) }
+        }
+
         // MARK: Encode
 
         static func table(metric: MetricKind, _ envelopes: [MeasurementEnvelope]) -> EnvelopeTable {
