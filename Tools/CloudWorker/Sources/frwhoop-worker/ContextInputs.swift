@@ -174,6 +174,9 @@ enum ContextInputs {
         /// `ceil(computed_at)`: when this snapshot (and the sessions/values in it) became available.
         var availableAt: Int
         var status: String?
+        /// The snapshot's `dataThrough` (unix seconds) and `timezone`.
+        var dataThrough: Int? = nil
+        var timezone: String? = nil
         var sessions: [Session]
         /// Nightly `daily.<field>` values (only numeric, finite ones).
         var values: [String: Double]
@@ -308,10 +311,12 @@ enum ContextInputs {
                                            String(job.cutoff), job.day])
         for r in others {
             let day = r["day"] ?? ""
-            guard let s = parseSnapshot(day: day, payloadText: "{\"sleep\":\(r["sleep"] ?? "[]")}",
+            guard var s = parseSnapshot(day: day, payloadText: "{\"sleep\":\(r["sleep"] ?? "[]")}",
                                         resultRevision: Int64(r["result_revision"] ?? "") ?? 0,
                                         inputRevision: 0, availableAt: Int(r["at"] ?? "") ?? job.cutoff)
             else { out.skippedRows += 1; continue }
+            s.dataThrough = nonEmpty(r["data_through"]).flatMap(parseInstant)
+            s.timezone = nonEmpty(r["timezone"])
             out.otherSnapshots.append(s)
         }
 
@@ -468,7 +473,9 @@ enum ContextInputs {
                 stages.append(StageSegment(start: a, end: b, stage: stage))
             }
             stages.sort { ($0.start, $0.end, $0.stage) < ($1.start, $1.end, $1.stage) }
-            sessions.append(Snapshot.Session(id: id, start: start, end: end, isNap: s["is_nap"] as? Bool,
+            // The scorer writes `is_nap: false` for every night (`legacyNights`), so only `true` is information.
+            sessions.append(Snapshot.Session(id: id, start: start, end: end,
+                                             isNap: (s["is_nap"] as? Bool) == true ? true : nil,
                                              efficiency: number(s["efficiency"]).flatMap(finite),
                                              stages: stages))
         }
@@ -482,8 +489,11 @@ enum ContextInputs {
             restingInt = values["resting_hr_bpm"].map { Int($0.rounded()) }
         }
         return Snapshot(day: day, resultRevision: resultRevision, inputRevision: inputRevision,
-                        availableAt: availableAt, status: obj["status"] as? String, sessions: sessions,
-                        values: values, restingHRInt: restingInt)
+                        availableAt: availableAt, status: obj["status"] as? String,
+                        dataThrough: (obj["dataThrough"] as? String).flatMap(parseInstant)
+                            ?? number(obj["dataThrough"]).map { Int($0) },
+                        timezone: (obj["timezone"] as? String).flatMap(nonEmpty),
+                        sessions: sessions, values: values, restingHRInt: restingInt)
     }
 
     static func number(_ any: Any?) -> Double? {
@@ -605,7 +615,8 @@ enum ContextInputs {
                                  efficiency: x.efficiency,
                                  stages: x.stages.map { PC.StageSpan(interval: PC.Interval($0.start, $0.end),
                                                                      stage: $0.stage) },
-                                 availableAt: s.availableAt, sourceDay: s.day, detector: sleepDetector)
+                                 availableAt: s.availableAt, sourceDay: s.day, detector: sleepDetector,
+                                 dataThrough: s.dataThrough, timezoneId: s.timezone)
         }
     }
 
@@ -697,7 +708,7 @@ enum ContextInputs {
         input.measurements = measurements
         input.inputRevisions = inputRevisions(loaded)
 
-        var priorSleep = dedupedSessions(loaded.otherSnapshots.filter { $0.day < w.day }.flatMap(sleepInputs))
+        var priorSleep = dedupedSessions(loaded.otherSnapshots.filter { $0.day < w.previousDay }.flatMap(sleepInputs))
         if causal { priorSleep = priorSleep.filter { ($0.availableAt ?? Int.min) <= cutoff } }
         priorSleep.sort { ($0.interval, $0.id) < ($1.interval, $1.id) }
         let history = PC.HistoryInput(
@@ -709,14 +720,14 @@ enum ContextInputs {
                          measurementCount: measurements.count)
     }
 
-    /// The sessions the day's input carries: the day's own snapshot plus the neighbouring days' (D−1, D+1) that
-    /// reach into the read window, so the previous night and the next night are visible where the read window
-    /// covers them. Ownership by end is the sleep system's rule; nothing is re-assigned here.
+    /// The sessions the day's input carries: every session of the newest D−1, D and D+1 snapshots, each with the
+    /// day that published it (`sourceDay`), its publication time and the snapshot's `dataThrough` / zone. The
+    /// sleep system needs D+1's sessions to judge late-day awake evidence retrospectively; a causal view drops
+    /// whatever was published after the cutoff. Ownership by end is the sleep system's rule; nothing is
+    /// re-assigned here. `HistoryInput.priorSleep` takes D−14 … D−2.
     static func daySleep(snapshot: Snapshot?, others: [Snapshot], windows w: Windows) -> [PC.SleepSessionInput] {
         var sessions = snapshot.map(sleepInputs) ?? []
-        for s in others where s.day == w.previousDay || s.day == w.nextDay {
-            sessions += sleepInputs(s).filter { $0.interval.overlapSeconds(with: w.read) > 0 }
-        }
+        for s in others where s.day == w.previousDay || s.day == w.nextDay { sessions += sleepInputs(s) }
         return dedupedSessions(sessions)
     }
 

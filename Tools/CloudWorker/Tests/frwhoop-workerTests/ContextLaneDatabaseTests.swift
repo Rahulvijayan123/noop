@@ -166,6 +166,8 @@ final class ContextLaneDatabaseTests: XCTestCase {
               set input_revision = public.scoring_jobs_v2.input_revision + 1, dirty_at = clock_timestamp(),
                   not_before = clock_timestamp()
             """, [o.user, o.device, day])
+        // Test-only: lift the queue's 45 s per-day re-claim cooldown so a re-score runs now.
+        _ = try db.query("update public.scoring_jobs_v2 set last_claimed_at = null where user_id = $1::uuid", [o.user])
         var lane = scoringLane()
         for _ in 0..<maxPasses {
             lane.drain(budget: 8)
@@ -196,14 +198,15 @@ final class ContextLaneDatabaseTests: XCTestCase {
             """, [o.user, o.device, day, mode])
     }
 
-    func job(_ o: Owner, mode: String = "retrospective") throws -> [String: String] {
+    func job(_ o: Owner, mode: String = "retrospective", day: String? = nil) throws -> [String: String] {
         try db.query("""
             select input_revision::text as rev, completed_revision::text as done,
                    (lease_token is null)::text as free, consecutive_failures::text as failures,
-                   dead_letter::text as dead, coalesce(last_error, '') as error
+                   dead_letter::text as dead, coalesce(last_error, '') as error,
+                   coalesce(last_outcome, '') as outcome, coalesce(cutoff_override::text, '') as cutoff_override
             from public.physiology_context_jobs
             where user_id = $1::uuid and device_id = $2::uuid and day = $3::date and mode = $4
-            """, [o.user, o.device, day, mode]).first ?? [:]
+            """, [o.user, o.device, day ?? self.day, mode]).first ?? [:]
     }
 
     /// Make the day due for the context lane without waiting for the queue's settle time.
@@ -215,13 +218,34 @@ final class ContextLaneDatabaseTests: XCTestCase {
 
     // MARK: - V17: stored streams → scoring → context → storage → read
 
+    /// HART epochs (v1, published by the activity lane) and a logged workout over the 08:00 walk: the heart-rate
+    /// independent evidence an exertion bout is built from.
+    func seedWalkEvidence(_ o: Owner) throws {
+        let walk = (dayStart + 8 * 3_600, dayStart + 8 * 3_600 + 1_200)
+        _ = try db.query("""
+            insert into public.activity_context_epochs(user_id, device_id, day, start_ts, end_ts, motion_label,
+              confidence, observed_s, valid_s, model_version, preprocessing_version, ontology_version, fingerprint,
+              result_revision, computed_at)
+            select $1::uuid, $2::uuid, (to_timestamp(t) at time zone 'UTC')::date, t, t + 30,
+                   case when t >= $3::bigint and t < $4::bigint then 'walking' else 'stationary' end,
+                   0.9, 30, 30, 'hart-test', '1.0.0', 'v1', repeat('a', 64), 1, clock_timestamp()
+              from generate_series($3::bigint - 3600, $4::bigint + 3570, 30) t
+            """, [o.user, o.device, String(walk.0), String(walk.1)])
+        _ = try db.query("""
+            insert into public.sessions(user_id, device_id, kind, source, start_at, end_at, summary)
+            values ($1::uuid, $2::uuid, 'manual_workout', 'manual', to_timestamp($3::bigint), to_timestamp($4::bigint),
+                    '{"type":"walking"}'::jsonb)
+            """, [o.user, o.device, String(walk.0), String(walk.1)])
+    }
+
     func testScoredDayBecomesAStoredContextDocumentWithItsProducts() throws {
         let o = try makeOwner()
         try seed(o, morningSim(dayStart))
+        try seedWalkEvidence(o)
         let snap = try score(o)
         try invalidate(o)
         var lane = contextLane()
-        lane.drain(budget: 4)
+        lane.drain(budget: 8)
         XCTAssertEqual(lane.stats.failed, 0, lane.stats.lastError ?? "")
         XCTAssertGreaterThanOrEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
 
@@ -262,7 +286,23 @@ final class ContextLaneDatabaseTests: XCTestCase {
             select count(*)::text as n from public.physiology_context_bouts
             where user_id = $1::uuid and device_id = $2::uuid and mode = 'retrospective'
             """, [o.user, o.device]).first?["n"]
-        XCTAssertEqual(Int(bouts ?? ""), doc.bouts.count)
+        XCTAssertEqual(Int(bouts ?? ""), doc.bouts.filter { $0.day == day }.count)
+        XCTAssertFalse(doc.bouts.isEmpty, "the logged walk with HART epochs is a bout")
+        XCTAssertGreaterThan(Int(values ?? "") ?? 0, 0)
+        // A stored bout decodes back into the shared type.
+        if let boutText = try db.query("""
+            select payload::text as p from public.physiology_context_bouts
+            where user_id = $1::uuid and device_id = $2::uuid and mode = 'retrospective' limit 1
+            """, [o.user, o.device]).first?["p"] {
+            let bout = try PC.decoder().decode(PC.ExertionBout.self, from: Data(boutText.utf8))
+            XCTAssertEqual(bout.day, day)
+        }
+
+        let eligible = doc.envelopes.filter { $0.eligibility.contains { $0.state == .eligible } }.count
+        print("context-v17: envelopes=\(doc.envelopes.count) eligible_envelopes=\(eligible) "
+              + "daily_values=\(doc.dailyValues.count) bouts=\(doc.bouts.count) episodes=\(doc.episodes.count) "
+              + "sleep_episodes=\(doc.sleep.episodes.count) status=\(doc.status.rawValue) "
+              + "methods=\(methods.sorted().joined(separator: ","))")
 
         // The read surface returns the document, paired with the current snapshot.
         let readText = try XCTUnwrap(try db.callFunctionForJSON(
@@ -281,16 +321,21 @@ final class ContextLaneDatabaseTests: XCTestCase {
         try score(o)
         try invalidate(o)
         var lane = contextLane()
-        lane.drain(budget: 4)
-        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        // The queue also creates the neighbouring days' jobs (D-1 … today); drain them all.
+        lane.drain(budget: 8)
+        XCTAssertGreaterThanOrEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
         let first = try contextDays(o)
+        XCTAssertEqual(first.count, 1, "\(first)")
+        let publishedBefore = lane.stats.published
 
         try invalidate(o, reason: "retry")
-        lane.drain(budget: 4)
+        lane.drain(budget: 8)
         XCTAssertEqual(lane.stats.unchanged, 1, "same fingerprints → unchanged; \(lane.stats.lastError ?? "")")
+        XCTAssertEqual(lane.stats.published, publishedBefore)
         XCTAssertEqual(try contextDays(o), first, "no duplicate revision")
         let j = try job(o)
         XCTAssertEqual(j["done"], j["rev"])
+        XCTAssertEqual(j["outcome"], "unchanged")
     }
 
     func testAWorkerThatDiesMidJobIsReplacedByOneThatPublishesOnce() throws {
@@ -309,12 +354,23 @@ final class ContextLaneDatabaseTests: XCTestCase {
         // The lease runs out.
         _ = try db.query("update public.physiology_context_jobs set lease_until = clock_timestamp() - interval '1 second' where lease_token = $1::uuid",
                          [deadJob.leaseToken])
-        other.drain(budget: 4)
-        XCTAssertEqual(other.stats.published, 1, other.stats.lastError ?? "")
-        // Worker A comes back and tries to publish with its stale lease: fenced, nothing stored.
+        other.drain(budget: 8)
+        XCTAssertGreaterThanOrEqual(other.stats.published, 1, other.stats.lastError ?? "")
+        let reclaimed = try job(o)
+        XCTAssertEqual(reclaimed["done"], reclaimed["rev"], "\(reclaimed)")
+        // Worker A comes back. Its lease is gone: the first renew says so and nothing is read or written…
         var zombie = contextLane()
-        let outcome = try zombie.process(deadJob)
-        if case .fenced = outcome {} else { XCTFail("a stale lease must not publish: \(outcome)") }
+        XCTAssertThrowsError(try zombie.process(deadJob)) { error in
+            XCTAssertEqual((error as? PostgresClient.Error)?.kind, .stale)
+        }
+        // …and a publish it had already built is fenced by the RPC.
+        let w = try XCTUnwrap(ContextInputs.windows(day: deadJob.day, timezoneId: deadJob.timezoneId))
+        let loaded = try ContextInputs.load(db: db, job: deadJob, windows: w)
+        let a = ContextInputs.assemble(loaded, job: deadJob, windows: w)
+        let built = try ContextLane.publishPayload(document: PC.Engine.buildDay(a.input, history: a.history),
+                                                   snapshot: loaded.snapshot)
+        let outcome = try zombie.publish(deadJob, payload: built.payloadText)
+        XCTAssertEqual(outcome, .fenced(reason: "lease_lost"))
         let days = try contextDays(o)
         XCTAssertEqual(days.count, 1, "\(days)")
         XCTAssertEqual(days.first?["current"], "true")
@@ -326,7 +382,7 @@ final class ContextLaneDatabaseTests: XCTestCase {
         try score(o)
         try invalidate(o)
         var lane = contextLane()
-        lane.drain(budget: 4)
+        lane.drain(budget: 8)
         let before = try XCTUnwrap(try contextDays(o).last)
 
         // A caffeine intake at 08:30 entered late, then corrected.
@@ -341,7 +397,7 @@ final class ContextLaneDatabaseTests: XCTestCase {
         XCTAssertEqual(saved["status"] as? String, "saved", "\(saved)")
         let dirty = try job(o)
         XCTAssertNotEqual(dirty["done"], dirty["rev"], "the correction dirtied the day: \(dirty)")
-        lane.drain(budget: 4)
+        lane.drain(budget: 8)
         let after = try contextDays(o)
         XCTAssertEqual(after.filter { $0["current"] == "true" }.count, 1)
         let current = try XCTUnwrap(after.last)
@@ -352,7 +408,7 @@ final class ContextLaneDatabaseTests: XCTestCase {
         corrected["revision"] = 2
         corrected["dose_amount"] = 190
         XCTAssertEqual(try recordExposure(o, source: source, event: corrected)["status"] as? String, "saved")
-        lane.drain(budget: 4)
+        lane.drain(budget: 8)
         let third = try XCTUnwrap(try contextDays(o).last)
         XCTAssertGreaterThan(Int(third["rev"] ?? "") ?? 0, Int(current["rev"] ?? "") ?? 0)
     }
@@ -362,6 +418,64 @@ final class ContextLaneDatabaseTests: XCTestCase {
             "select public.record_exposure_event_v1($1::uuid,$2::uuid,$3::jsonb)::text",
             [o.user, source, String(decoding: try JSONSerialization.data(withJSONObject: event), as: UTF8.self)]))
         return (try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]) ?? [:]
+    }
+
+    // MARK: - V10: a causal replay at a fixed cutoff ignores what arrived later
+
+    func testACausalReplayIsUnchangedByDataThatArrivedAfterItsCutoff() throws {
+        let o = try makeOwner()
+        try seed(o, morningSim(dayStart))
+        try score(o)
+        let cutoff = dayStart + 9 * 3_600
+        // An operator replay: the day decided live as of 09:00 (cutoff_override), not as of the claim.
+        func replay() throws {
+            _ = try db.query("""
+                insert into public.physiology_context_jobs (user_id, device_id, day, mode, cutoff_override, reasons)
+                values ($1::uuid, $2::uuid, $3::date, 'causal_live', $4::bigint, array['replay'])
+                on conflict (user_id, device_id, day, mode) do update set
+                  input_revision = public.physiology_context_jobs.input_revision + 1, cutoff_override = excluded.cutoff_override,
+                  dirty_at = clock_timestamp(), not_before = clock_timestamp(), reasons = array['replay']
+                """, [o.user, o.device, day, String(cutoff)])
+        }
+        try replay()
+        var lane = contextLane()
+        lane.enqueueIntervalSeconds = 3_600
+        lane.lastEnqueueAt = Date()  // only the replay job is due
+        lane.drain(budget: 2)
+        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        let first = try XCTUnwrap(try contextDays(o, mode: "causal_live").last)
+        let stored = try XCTUnwrap(try db.query("""
+            select availability_cutoff::text as cutoff, generated_at::text as generated,
+                   coalesce(scoring_result_revision::text, '') as srev
+            from public.physiology_context_days where context_revision = $1::bigint
+            """, [first["rev"] ?? "0"]).first)
+        XCTAssertEqual(stored["cutoff"], String(cutoff))
+        XCTAssertGreaterThan(Int(stored["generated"] ?? "") ?? 0, cutoff, "generatedAt is the claim time")
+        XCTAssertEqual(stored["srev"], "", "the snapshot was published after the cutoff and is not read")
+        XCTAssertEqual(try job(o, mode: "causal_live")["cutoff_override"], "", "cleared by the publish")
+
+        // Late arrivals with earlier sensor times: extra beats, a wear event, an exposure entered now.
+        let source = UUID().uuidString.lowercased()
+        _ = try db.query("""
+            insert into public.noop_rr_intervals(user_id,device_id,source_id,ts,"rrMs",seq,"srcChannel",batch_id)
+            select $1::uuid,$2::uuid,$3::uuid,t,700,9,5,$3::uuid from generate_series($4::bigint,$4::bigint+300) t
+            """, [o.user, o.device, source, String(dayStart + 8 * 3_600)])
+        _ = try db.query("""
+            insert into public.noop_events(user_id,device_id,source_id,ts,kind,"payloadJSON",batch_id)
+            values ($1::uuid,$2::uuid,$3::uuid,$4::bigint,'WRIST_OFF','{}',$3::uuid)
+            """, [o.user, o.device, source, String(dayStart + 8 * 3_600 + 60)])
+        let event: [String: Any] = [
+            "event_id": "late-\(o.user.prefix(8))", "revision": 1, "kind": "caffeine", "label": "coffee",
+            "occurred": ["start": dayStart + 7 * 3_600, "end": dayStart + 7 * 3_600 + 1], "time_precision": "exact",
+            "recorded_at": dayStart + 7 * 3_600 + 10, "source": "user_entered", "confirmation": "confirmed"]
+        _ = try recordExposure(o, source: source, event: event)
+
+        try replay()
+        lane.drain(budget: 4)
+        XCTAssertEqual(lane.stats.unchanged, 1, "same cutoff, same visible inputs: \(lane.stats.lastError ?? "")")
+        let after = try contextDays(o, mode: "causal_live")
+        XCTAssertEqual(after.count, 1)
+        XCTAssertEqual(after.last?["input_fingerprint"], first["input_fingerprint"])
     }
 
     // MARK: - V16: owners, devices, failure isolation
@@ -420,7 +534,7 @@ final class ContextLaneDatabaseTests: XCTestCase {
         }
         try invalidate(o)
         var lane = contextLane()
-        lane.drain(budget: 2)
+        lane.drain(budget: 8)
         XCTAssertGreaterThanOrEqual(lane.stats.failed, 1)
         XCTAssertGreaterThanOrEqual(lane.stats.failuresPersisted, 1)
         let failedJob = try job(o)
@@ -437,6 +551,47 @@ final class ContextLaneDatabaseTests: XCTestCase {
         let after = try db.query("select count(*)::text as n from public.scoring_snapshots_v2 where user_id = $1::uuid",
                                  [o.user]).first?["n"]
         XCTAssertGreaterThan(Int(after ?? "") ?? 0, Int(before ?? "") ?? 0)
+    }
+
+    // MARK: - Profile against the scoring lane (opt-in: FRWHOOP_CONTEXT_PROFILE=1)
+
+    func testProfileAFullDayAgainstTheScoringLane() throws {
+        guard ProcessInfo.processInfo.environment["FRWHOOP_CONTEXT_PROFILE"] == "1" else {
+            throw XCTSkip("set FRWHOOP_CONTEXT_PROFILE=1 to profile the lanes on a full stored day")
+        }
+        let o = try makeOwner()
+        // The evening before, then a whole day: 86,400 s of heart rate and gravity on the day itself.
+        var sim = ContextDaySim(seed: 21)
+        sim.run(.sit, from: dayStart - 6 * 3_600, to: dayStart - 3_600)
+        sim.run(.sleep, from: dayStart - 3_600, to: dayStart)
+        let day = ContextDaySim.representativeDay(dayStart: dayStart, seed: 21)
+        var merged = sim
+        merged.append(day)
+        let seedStarted = Date()
+        try seed(o, merged)
+        let seedS = Date().timeIntervalSince(seedStarted)
+        let scoringStarted = Date()
+        try score(o)
+        let scoringWallMS = Int(Date().timeIntervalSince(scoringStarted) * 1000)
+        let scoringJob = try db.query("""
+            select coalesce(last_duration_ms::text, '') as ms from public.scoring_jobs_v2
+            where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
+            """, [o.user, o.device, self.day]).first?["ms"] ?? ""
+        try invalidate(o)
+        var lane = contextLane()
+        lane.enqueueIntervalSeconds = 3_600
+        lane.lastEnqueueAt = Date()
+        let contextStarted = Date()
+        lane.drain(budget: 1)
+        let contextWallMS = Int(Date().timeIntervalSince(contextStarted) * 1000)
+        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        let stored = try XCTUnwrap(try contextDays(o).last)
+        print("context-profile-db: rows_hr=\(merged.hr.count) rows_rr=\(merged.rr.count) rows_gravity=\(merged.gravity.count) "
+              + "seed_s=\(Int(seedS)) scoring_wall_ms_all_dirty_days=\(scoringWallMS) scoring_day_compute_ms=\(scoringJob) "
+              + "context_wall_ms=\(contextWallMS) context_load_ms=\(lane.stats.loadMsMax) "
+              + "context_build_ms=\(lane.stats.buildMsMax) context_rows=\(lane.stats.inputsRowsMax) "
+              + "context_measurements=\(lane.stats.measurementsMax) doc_bytes_encoded=\(lane.stats.docBytesMax) "
+              + "doc_bytes_stored=\(stored["bytes"] ?? "")")
     }
 
     func testTheLaneIdlesWhenTheTablesAreMissing() throws {

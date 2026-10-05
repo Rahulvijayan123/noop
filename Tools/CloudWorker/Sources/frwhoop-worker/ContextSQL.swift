@@ -142,7 +142,8 @@ enum ContextSQL {
          limit 1
         """
 
-    /// The sleep sessions of the newest snapshot of each OTHER day in `[$3, $4]` published by `$6`, `$7` excluded
+    /// The sleep sessions (with `dataThrough` and `timezone`) of the newest snapshot of each OTHER day in `[$3, $4]`
+    /// published by `$6`, `$7` excluded
     /// (it is read in full above). The newest revision per day is picked from the read index first, so only those
     /// payloads are read (a busy day holds hundreds of revisions; the pattern of `ActivityLane.loadPublishedNights`).
     static let snapshotSleepRange = """
@@ -156,7 +157,9 @@ enum ContextSQL {
         select snap.day::text as day, snap.result_revision::text as result_revision,
                ceil(extract(epoch from snap.computed_at))::bigint::text as at,
                case when jsonb_typeof(snap.payload -> 'sleep') = 'array' then (snap.payload -> 'sleep')::text
-                    else '[]' end as sleep
+                    else '[]' end as sleep,
+               coalesce(snap.payload ->> 'dataThrough', '') as data_through,
+               coalesce(snap.payload ->> 'timezone', '') as timezone
           from newest join public.scoring_snapshots_v2 snap on snap.result_revision = newest.rr
          order by snap.day
         """

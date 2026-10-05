@@ -311,9 +311,9 @@ let activityState = LaneState(LaneSnapshot(
 let contextState = LaneState(LaneSnapshot(
     name: "context",
     enabled: config.contextLaneRuns,
+    // A context-only startup failure is reported on the lane, never as a blocked database for the worker.
     lastError: contextStartupError,
-    lastErrorKind: contextStartupError == nil ? nil : PGErrorKind.connectionLost.rawValue,
-    dbBlocked: contextStartupError != nil))
+    lastErrorKind: contextStartupError == nil ? nil : "context_connection"))
 
 let startedAt = Date()
 let processInstanceID = UUID().uuidString.lowercased()

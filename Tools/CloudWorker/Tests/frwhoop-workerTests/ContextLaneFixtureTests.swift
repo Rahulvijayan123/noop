@@ -72,6 +72,11 @@ struct ContextDaySim {
         }
     }
 
+    /// Append another simulation's rows (a later span).
+    mutating func append(_ other: ContextDaySim) {
+        hr += other.hr; rr += other.rr; gravity += other.gravity; steps += other.steps
+    }
+
     /// A day in the life: asleep until 07:00, sitting with walks through the day, a gap off-wrist, asleep from
     /// 23:00. `dayStart` is local midnight.
     static func representativeDay(dayStart: Int, seed: UInt64 = 11, duplicateTransport: Bool = false)

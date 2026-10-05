@@ -380,9 +380,9 @@ final class ContextLaneTests: XCTestCase {
 
     func testPriorSleepPublishedAfterACausalCutoffIsNotRead() throws {
         var l = fullDayLoaded()
-        let payload = ContextDaySim.snapshotPayload(sessions: [(dayStart - 30 * 3_600, dayStart - 22 * 3_600)])
+        let payload = ContextDaySim.snapshotPayload(sessions: [(dayStart - 54 * 3_600, dayStart - 46 * 3_600)])
         l.otherSnapshots = [
-            try XCTUnwrap(ContextInputs.parseSnapshot(day: "2026-10-02", payloadText: payload, resultRevision: 5,
+            try XCTUnwrap(ContextInputs.parseSnapshot(day: "2026-10-01", payloadText: payload, resultRevision: 5,
                                                       inputRevision: 0, availableAt: dayStart + 20 * 3_600)),
         ]
         let w = try windows()
@@ -391,6 +391,34 @@ final class ContextLaneTests: XCTestCase {
         let retro = ContextInputs.assemble(l, job: job(mode: .retrospective, claimedAt: dayStart + 12 * 3_600),
                                            windows: w)
         XCTAssertEqual(retro.history.priorSleep.count, 1)
+    }
+
+    func testTheDayCarriesTheNeighbouringNightsAndHistoryTheEarlierOnes() throws {
+        var l = fullDayLoaded()
+        func snap(_ day: String, _ sessions: [(Int, Int)], at: Int, nap: Bool = false) throws -> ContextInputs.Snapshot {
+            var payload = ContextDaySim.snapshotPayload(sessions: sessions)
+            if nap { payload = payload.replacingOccurrences(of: "\"is_nap\":false", with: "\"is_nap\":true") }
+            return try XCTUnwrap(ContextInputs.parseSnapshot(day: day, payloadText: payload, resultRevision: 5,
+                                                             inputRevision: 0, availableAt: at))
+        }
+        let h = 3_600
+        l.otherSnapshots = [
+            try snap("2026-10-01", [(dayStart - 49 * h, dayStart - 41 * h)], at: dayStart - 40 * h),
+            try snap("2026-10-02", [(dayStart - 25 * h, dayStart - 17 * h)], at: dayStart - 16 * h, nap: true),
+            try snap("2026-10-04", [(dayStart + 23 * h, dayStart + 31 * h)], at: dayStart + 32 * h),
+        ]
+        let w = try windows()
+        let retro = ContextInputs.assemble(l, job: job(mode: .retrospective, claimedAt: dayStart + 40 * h), windows: w)
+        XCTAssertEqual(retro.input.sleepSessions.map(\.sourceDay), ["2026-10-02", "2026-10-03", "2026-10-04"])
+        XCTAssertEqual(retro.input.sleepSessions.first?.isNap, true, "an explicit nap flag is kept")
+        XCTAssertNil(retro.input.sleepSessions[1].isNap, "the scorer's constant false is not information")
+        XCTAssertEqual(retro.input.sleepSessions.last?.availableAt, dayStart + 32 * h)
+        XCTAssertEqual(retro.input.sleepSessions.last?.timezoneId, "UTC")
+        XCTAssertEqual(retro.input.sleepSessions.last?.dataThrough, dayStart + 31 * h, "the snapshot's dataThrough")
+        XCTAssertEqual(retro.history.priorSleep.map(\.sourceDay), ["2026-10-01"], "history is D-14 … D-2")
+        // A live decision at noon cannot see the D+1 night (published later).
+        let live = ContextInputs.assemble(l, job: job(mode: .causalLive, claimedAt: dayStart + 12 * h), windows: w)
+        XCTAssertEqual(live.input.sleepSessions.map(\.sourceDay), ["2026-10-02", "2026-10-03"])
     }
 
     func testAssemblyIsIndependentOfRowArrivalOrder() throws {
@@ -546,6 +574,14 @@ final class ContextLaneTests: XCTestCase {
                        "context_publish_not_applied:claimed_revision=4:stale")
         XCTAssertTrue(ContextLane.isMissingObject(PostgresClient.Error(message: "x", sqlstate: "42883", kind: .other)))
         XCTAssertFalse(ContextLane.isMissingObject(PostgresClient.Error(message: "x", sqlstate: "23505", kind: .other)))
+    }
+
+    func testADocumentOverThePublishCapIsRefusedBeforeItIsSent() {
+        XCTAssertNoThrow(try ContextLane.checkDocumentSize(bytes: 16_777_216, envelopes: 10))
+        XCTAssertThrowsError(try ContextLane.checkDocumentSize(bytes: 16_777_217, envelopes: 10)) { error in
+            XCTAssertTrue(ContextLane.sanitize(error).hasPrefix("context_deterministic: "), "\(error)")
+            XCTAssertTrue(ContextLane.sanitize(error).contains("document_too_large"))
+        }
     }
 
     // MARK: - Isolation: the lane's SQL never writes anything scoring or ingest owns

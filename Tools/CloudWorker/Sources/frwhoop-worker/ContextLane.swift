@@ -38,6 +38,9 @@ struct ContextLane {
     static let tablesProbeIntervalSeconds: TimeInterval = 60
     static let claimBackoffSeconds: TimeInterval = 60
     static let maxErrorLength = 300
+    /// The publish RPC's document cap (`document_bytes between 2 and 16777216`, measured on the stored jsonb text,
+    /// which is never shorter than the compact encoding). A larger document is refused here, before it is sent.
+    static let maxDocumentBytes = 16_777_216
 
     struct Stats {
         var claimed = 0
@@ -82,6 +85,8 @@ struct ContextLane {
         var productsOutOfDay = 0
         /// Claims whose queue day bounds differed from the worker's (the worker's, i.e. scoring's, are used).
         var dayWindowMismatch = 0
+        /// Documents over the publish cap (settled as a deterministic failure, never sent).
+        var documentsTooLarge = 0
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -105,6 +110,7 @@ struct ContextLane {
                 "causal_excluded_exposure_revisions": causalExcludedExposures,
                 "inputs_unavailable": inputsUnavailable, "rows_skipped": rowsSkipped,
                 "products_out_of_day": productsOutOfDay, "day_window_mismatch": dayWindowMismatch,
+                "documents_too_large": documentsTooLarge,
             ]
         }
     }
@@ -283,6 +289,12 @@ struct ContextLane {
         let built = try Self.publishPayload(document: document, snapshot: loaded.snapshot,
                                             durationMS: loadMS + buildMS, documentText: documentText)
         noteTelemetry(loadMS: loadMS, buildMS: buildMS, built: built, assembled: assembled, loaded: loaded)
+        do {
+            try Self.checkDocumentSize(bytes: built.documentBytes, envelopes: document.envelopes.count)
+        } catch {
+            stats.documentsTooLarge += 1
+            throw error
+        }
 
         return try publish(job, payload: built.payloadText)
     }
@@ -480,6 +492,14 @@ struct ContextLane {
         guard reason != lastLoggedReason else { return }
         lastLoggedReason = reason
         FileHandle.standardError.write("frwhoop-worker: context lane: \(reason)\n".data(using: .utf8)!)
+    }
+
+    /// A document over the publish cap is a deterministic failure of this input (bounded retry, dead letter), not
+    /// something to send: the RPC would refuse it after the transfer.
+    static func checkDocumentSize(bytes: Int, envelopes: Int) throws {
+        guard bytes <= maxDocumentBytes else {
+            throw ContextError.deterministic("document_too_large bytes=\(bytes) envelopes=\(envelopes)")
+        }
     }
 
     static func leaseLost(_ when: String) -> PostgresClient.Error {
