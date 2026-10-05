@@ -864,6 +864,10 @@ extension PhysiologyContext {
         public var features: [FeatureEvaluation]
         public var dependence: [DependenceNote]
         public var selection: [SelectionSummary]
+        /// Set only on a stored SUMMARY document (`StoredDocument.split`): the envelope tables split off from it.
+        /// nil on a complete document. An empty `envelopes` with a non-nil index means "stored separately", not
+        /// "no measurements".
+        public var envelopeIndex: [EnvelopeTableIndex]? = nil
 
         public init(header: DocumentHeader, status: ProductStatus, statusReasons: [ReasonCode],
                     inputReport: InputContractReport, availability: [AvailabilityEntry], regimes: RegimeTimeline,

@@ -88,6 +88,16 @@ final class PCEngineTests: XCTestCase {
         XCTAssertTrue(doc.statusReasons.contains(PC.Engine.historyFromFutureDropped))
     }
 
+    func testStoredFormIsLosslessAndRoundTripsThroughJSON() throws {
+        let doc = PC.Engine.buildDay(Self.input(), history: .empty)
+        let (summary, tables) = PC.StoredDocument.split(doc)
+        XCTAssertTrue(summary.envelopes.isEmpty)
+        XCTAssertEqual(summary.envelopeIndex?.map(\.envelopeCount).reduce(0, +), doc.envelopes.count)
+        let s2 = try PC.decoder().decode(PC.DayDocument.self, from: PC.encoder().encode(summary))
+        let t2 = try tables.map { try PC.decoder().decode(PC.EnvelopeTable.self, from: PC.encoder().encode($0)) }
+        XCTAssertEqual(PC.StoredDocument.join(summary: s2, tables: t2), doc)
+    }
+
     func testPolicyChangeChangesTheFingerprint() {
         var p = PC.Policy()
         let a = p.fingerprint

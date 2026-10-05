@@ -329,6 +329,7 @@ final class AppModel: ObservableObject {
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
+        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
@@ -360,6 +361,7 @@ final class AppModel: ObservableObject {
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
+        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
         guard cloudScoringIsAuthoritative else { return }
         await confirmWearableLinkIfNeeded()
         startHistorySeedIfNeeded()
@@ -378,6 +380,7 @@ final class AppModel: ObservableObject {
         hostedRetry = HostedRetryLedger()
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
+        PhysiologyContextStore.shared.reset()
         applyPowerSaving()
     }
 
@@ -476,6 +479,7 @@ final class AppModel: ObservableObject {
         // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
         let candidates = hostedReadCandidates
         IntradaySeriesStore.shared.setReadCandidates(candidates)
+        PhysiologyContextStore.shared.setReadCandidates(candidates)
         // G1 (findings/g1-day-ui.md Q3/Q5): "yesterday" is the previous LOCAL CALENDAR day, computed with
         // Calendar arithmetic — a fixed 86,400-second shift is the same calendar day on a 25-hour DST day
         // and skips the true previous day. Half-open [dayStart, dayStart+1day) bounds in the phone zone.
