@@ -12,6 +12,8 @@
 // affected local days (owner zone, earliest start through latest end + 72 h, every device of the owner,
 // clamped to today); exposure_events_read_v1 returns overlapping current events with optional history and
 // never another owner's; the database accepts exactly what the edge validator accepts, with the same reason.
+// The affected-day rule mirrors Swift Exposures.affectedDays: the local days covering the closed instant range
+// [min start - 24 h, max end + 72 h] of the old and new revision (end = max(end, start + 1)).
 import assert from 'node:assert/strict';
 import { validateExposureEvent } from '../_shared/physiologyContext.ts';
 
@@ -168,44 +170,65 @@ Deno.test({
       assert.equal(await sql(`select count(*) from public.exposure_events where owner = '${a.user}'`), '8');
     });
 
-    await t.step('invalidation: earliest start through latest end + 72 h, in the owner zone, every device, clamped to today', async () => {
+    await t.step('invalidation: closed [min start - 24 h, max end + 72 h] in the owner zone, every device, clamped to today', async () => {
       const zone = 'America/New_York';
       const a = await owner(zone, 2);
       const today = await todayIn(zone);
       await sql(`insert into public.scoring_jobs_v2(user_id, device_id, day, algorithm_version, input_revision,
           completed_revision, last_completed_at)
         select '${a.user}', d.id, g::date, 'frwhoop-server-1', 1, 1, clock_timestamp()
-          from public.devices d, generate_series('${addDays(today, -30)}'::date, '${today}'::date, interval '1 day') g
+          from public.devices d, generate_series('${addDays(today, -40)}'::date, '${today}'::date, interval '1 day') g
          where d.user_id = '${a.user}'`);
-      const x = addDays(today, -20);
-      // A one-second event at 22:00 local: affected days x .. x+3 (end + 72 h - 1 s falls on x+3).
+      const reset = () => sql(`update public.physiology_context_jobs set reasons = '{}' where user_id = '${a.user}'`);
+      const days = async (device = a.device) =>
+        (await exposureJobs(a.user)).filter((row: any) => row.device === device).map((row: any) => row.day);
+      const range = (from: string, n: number) => Array.from({ length: n }, (_, k) => addDays(from, k));
+
+      // A one-second event at 22:00 local on x: x-1 (start - 24 h) through x+3 (end + 72 h), on every device.
+      const x = addDays(today, -30);
       const start = await localTs(zone, x, '22:00:00');
       const saved = await record(a.user, event({ event_id: 'late-night', occurred: { start, end: start + 1 } }));
-      assert.equal(saved.invalidated_days, 8);
-      const expected = (days: string[]) => a.devices.flatMap((device) => days.map((day) => ({ device, day, mode: 'retrospective' })))
+      assert.equal(saved.invalidated_days, 10);
+      const expected = (list: string[]) => a.devices.flatMap((device) => list.map((day) => ({ device, day, mode: 'retrospective' })))
         .sort((p, q) => `${p.device}${p.day}`.localeCompare(`${q.device}${q.day}`));
-      assert.deepEqual(await exposureJobs(a.user), expected([x, addDays(x, 1), addDays(x, 2), addDays(x, 3)]));
-      // An occurrence ending exactly at local midnight reaches three more days, not four.
-      await sql(`update public.physiology_context_jobs set reasons = '{}' where user_id = '${a.user}'`);
-      const y = addDays(today, -15);
+      assert.deepEqual(await exposureJobs(a.user), expected(range(addDays(x, -1), 5)));
+
+      // An event ending exactly at local midnight: the day that starts at end + 72 h is included (the end instant is
+      // part of the closed range, as Exposures.refs keeps an event whose end is exactly 72 h before a measurement).
+      await reset();
+      const y = addDays(today, -22);
       const midnight = await localTs(zone, addDays(y, 1), '00:00:00');
       await record(a.user, event({ event_id: 'evening', occurred: { start: midnight - 3600, end: midnight } }));
-      assert.deepEqual((await exposureJobs(a.user)).filter((row: any) => row.device === a.device).map((row: any) => row.day),
-        [y, addDays(y, 1), addDays(y, 2), addDays(y, 3)]);
-      // A correction invalidates from the earliest start (old or new) through the latest end + 72 h.
-      await sql(`update public.physiology_context_jobs set reasons = '{}' where user_id = '${a.user}'`);
+      assert.deepEqual(await days(), range(addDays(y, -1), 6), 'y-1 .. y+4, where y+4 starts at end + 72 h');
+
+      // The -24 h start: an event at 00:30 reaches back to the previous day, and no further.
+      await reset();
+      const z = addDays(today, -15);
+      const early = await localTs(zone, z, '00:30:00');
+      await record(a.user, event({ event_id: 'early', occurred: { start: early, end: early + 1 } }));
+      assert.deepEqual(await days(), range(addDays(z, -1), 5), 'z-1 .. z+3');
+
+      // A correction covers the hull of the old and new revision.
+      await reset();
       const moved = await localTs(zone, addDays(today, -12), '09:00:00');
       await record(a.user, event({ event_id: 'late-night', revision: 2, occurred: { start: moved, end: moved + 1800 } }));
-      const span = (await exposureJobs(a.user)).filter((row: any) => row.device === a.devices[1]).map((row: any) => row.day);
-      assert.deepEqual(span, Array.from({ length: 12 }, (_, k) => addDays(x, k)), 'x .. (today - 12) + 3');
-      // Today maps to the live job; future days are not invalidated.
-      await sql(`update public.physiology_context_jobs set reasons = '{}' where user_id = '${a.user}'`);
+      assert.deepEqual(await days(a.devices[1]), range(addDays(x, -1), 23), 'x-1 .. (today - 12) + 3');
+
+      // Today maps to the live job; days after today are never invalidated.
+      await reset();
       const recent = await localTs(zone, addDays(today, -1), '12:00:00');
       await record(a.user, event({ event_id: 'recent', occurred: { start: recent, end: recent + 60 } }));
       const near = (await exposureJobs(a.user)).filter((row: any) => row.device === a.device);
-      assert.deepEqual(near.map((row: any) => [row.day, row.mode]), [[addDays(today, -1), 'retrospective'], [today, 'causal_live']]);
-      const tomorrow = await localTs(zone, addDays(today, 2), '08:00:00');
-      assert.equal((await record(a.user, event({ event_id: 'future', occurred: { start: tomorrow, end: tomorrow + 1 } }))).invalidated_days, 0);
+      assert.deepEqual(near.map((row: any) => [row.day, row.mode]),
+        [[addDays(today, -2), 'retrospective'], [addDays(today, -1), 'retrospective'], [today, 'causal_live']]);
+      await reset();
+      const later = await localTs(zone, addDays(today, 2), '08:00:00');
+      assert.equal((await record(a.user, event({ event_id: 'future', occurred: { start: later, end: later + 1 } }))).invalidated_days, 0);
+      // Tomorrow morning is within 24 h of today: today's live job is invalidated.
+      const tomorrow = await localTs(zone, addDays(today, 1), '08:00:00');
+      await record(a.user, event({ event_id: 'tomorrow', occurred: { start: tomorrow, end: tomorrow + 1 } }));
+      assert.deepEqual(await days(), [today]);
+
       // Another owner's days are never touched.
       const b = await owner(zone);
       await scored(b.user, b.device, x);

@@ -29,7 +29,8 @@ const JWT_SECRET = 'isolated-pipeline-jwt-secret-never-used-outside-tests';
 const EMAIL_PREFIX = 'pcsql-';
 const decoder = new TextDecoder();
 
-const TABLES = ['physiology_context_jobs', 'physiology_context_days', 'physiology_context_daily_values',
+const TABLES = ['physiology_context_jobs', 'physiology_context_days', 'physiology_context_envelope_tables',
+  'physiology_context_daily_values',
   'physiology_context_bouts', 'physiology_context_episodes', 'physiology_context_frozen_references',
   'exposure_event_revisions', 'exposure_events'];
 const OWNER_READABLE = TABLES.filter((table) => table !== 'physiology_context_jobs');
@@ -168,17 +169,24 @@ function frozen(id: string, day: string, over: Record<string, unknown> = {}) {
 function bout(id: string, day: string, start: number) {
   return { id, interval: { start, end: start + 900 }, day, kind: 'walking', status: 'complete', duration_s: 900, reasons: [] };
 }
+/** An EnvelopeTable (PCStoredDocument.swift, pc-wire-1) with `count` rows; pools are kept trivial. */
+function envelopeTable(metric: string, count: number) {
+  return { wire_version: 'pc-wire-1', metric, methods: [{ id: `${metric}.method` }], validity: [], activity: [],
+    preceding: [], sleep_wear: [], wake: [], recent_bouts: [], exertion: [], exposures: [], exposure_coverage: [],
+    eligibility: [], comparisons: [],
+    rows: Array.from({ length: count }, (_, index) => ({ id: `${metric}@${index}`, method: 0, value: 40 + index,
+      support: { start: 1_791_000_000 + 300 * index, end: 1_791_000_300 + 300 * index } })) };
+}
 function payload(day: string, mode: string, over: {
   input?: string; policy?: string; values?: unknown[]; bouts?: unknown[]; episodes?: unknown[]; frozen?: unknown[];
-  scoringResult?: number | null; finality?: string; cutoff?: number; envelopes?: unknown[]; header?: Record<string, unknown>;
+  scoringResult?: number | null; finality?: string; cutoff?: number; tables?: Record<string, number>;
+  header?: Record<string, unknown>;
 } = {}) {
   const policy = over.policy ?? 'pol-1';
   const input = over.input ?? 'in-1';
   const cutoff = over.cutoff ?? 1_791_000_000;
-  const envelopes = over.envelopes ?? [
-    { id: 'hrv@1-2', metric: 'hrv_rmssd', value: 41 }, { id: 'hr@1-2', metric: 'heart_rate', value: 60 },
-    { id: 'hrv@3-4', metric: 'hrv_rmssd', value: 44 },
-  ];
+  // The stored form: a summary document (no envelopes, an envelope_index) plus one table per metric.
+  const tables = Object.entries(over.tables ?? { heart_rate: 1, hrv_rmssd: 2 });
   return {
     header: { mode, day, finality: over.finality ?? 'provisional', status: 'available', availability_cutoff: cutoff,
       generated_at: cutoff, contract_version: 'pc-contract-1', schema_version: 1, policy_fingerprint: policy,
@@ -187,8 +195,10 @@ function payload(day: string, mode: string, over: {
       header: { schema_version: 1, contract_version: 'pc-contract-1', policy_fingerprint: policy, input_fingerprint: input,
         identity: { device_scope: 'scope', day, timezone_id: 'UTC', day_window: { start: 0, end: 86400 } },
         interpretation: { mode, finality: over.finality ?? 'provisional', availability_cutoff: cutoff, generated_at: cutoff } },
-      status: 'available', envelopes,
+      status: 'available', envelopes: [],
+      envelope_index: tables.map(([metric, count]) => ({ metric, envelope_count: count })),
     },
+    envelope_tables: tables.map(([metric, count]) => ({ metric, envelope_count: count, table: envelopeTable(metric, count) })),
     scoring_result_revision: over.scoringResult ?? null,
     scoring_input_revision: over.scoringResult ? 1 : null,
     duration_ms: 12,
@@ -283,6 +293,12 @@ Deno.test({
       assert.equal(triggers, ['exposure_event_revisions:exposure_event_revision_immutable',
         'physiology_context_frozen_references:physiology_context_frozen_reference_immutable',
         'placement_intervals:physiology_context_placement_changed'].join('\n'));
+      // Large JSON columns use lz4 when the server supports it (the production image does).
+      const lz4 = (await sql(`select 'lz4' = any (enumvals) from pg_settings where name = 'default_toast_compression'`)) === 't';
+      for (const [table, column] of [['physiology_context_days', 'document'], ['physiology_context_envelope_tables', 'envelope_table']]) {
+        assert.equal(await sql(`select coalesce(nullif(attcompression, ''), '-') from pg_attribute
+          where attrelid = 'public.${table}'::regclass and attname = '${column}'`), lz4 ? 'l' : '-', `${table}.${column}`);
+      }
       // Nothing was attached to scoring or noop_* tables.
       assert.equal(await sql(`select count(*) from pg_trigger t join pg_proc p on p.oid = t.tgfoid
         where not t.tgisinternal and p.proname like 'physiology_context%' and t.tgrelid::regclass::text <> 'placement_intervals'
@@ -454,6 +470,12 @@ Deno.test({
         [payload(day, 'retrospective', { episodes: [episode('e1', day, { last_day: '2026-02-30' })] }), /invalid_physiology_context_episode/],
         [payload(day, 'retrospective', { frozen: [frozen('f1', day, { version: 0 })] }), /invalid_physiology_context_frozen_reference/],
         [{ ...payload(day, 'retrospective'), scoring_result_revision: 'five' }, /invalid_physiology_context_scoring_revision/],
+        [{ ...payload(day, 'retrospective'), envelope_tables: [{ metric: 'hrv_rmssd', envelope_count: 2, table: envelopeTable('heart_rate', 2) }, { metric: 'heart_rate', envelope_count: 1, table: envelopeTable('heart_rate', 1) }] }, /invalid_physiology_context_envelope_table/],
+        [{ ...payload(day, 'retrospective'), envelope_tables: [{ metric: 'hrv_rmssd', envelope_count: 3, table: envelopeTable('hrv_rmssd', 2) }, { metric: 'heart_rate', envelope_count: 1, table: envelopeTable('heart_rate', 1) }] }, /invalid_physiology_context_envelope_table/],
+        [{ ...payload(day, 'retrospective'), envelope_tables: [...payload(day, 'retrospective').envelope_tables, payload(day, 'retrospective').envelope_tables[0]] }, /invalid_physiology_context_envelope_table_duplicate/],
+        [{ ...payload(day, 'retrospective'), envelope_tables: [payload(day, 'retrospective').envelope_tables[0]] }, /invalid_physiology_context_envelope_index/],
+        [{ ...payload(day, 'retrospective'), document: { ...payload(day, 'retrospective').document, envelope_index: undefined } }, /invalid_physiology_context_envelope_index/],
+        [{ ...payload(day, 'retrospective'), envelope_tables: [{ metric: 'hrv_rmssd', envelope_count: 2, table: { ...envelopeTable('hrv_rmssd', 2), wire_version: undefined } }, payload(day, 'retrospective').envelope_tables[0]] }, /invalid_physiology_context_envelope_table/],
         ['[]', /invalid_physiology_context_payload/],
       ];
       for (const [body, pattern] of bad) {
@@ -492,17 +514,18 @@ Deno.test({
       assert.equal((await publish(first.lease_token, first.input_revision, body)).reason, 'lease_lost');
       const snapshot = async () => ({
         days: await count('physiology_context_days', `user_id = '${a.user}'`),
+        tables: await count('physiology_context_envelope_tables', `user_id = '${a.user}'`),
         values: await count('physiology_context_daily_values', `user_id = '${a.user}'`),
         bouts: await count('physiology_context_bouts', `user_id = '${a.user}'`),
         episodes: await count('physiology_context_episodes', `user_id = '${a.user}'`),
         frozen: await count('physiology_context_frozen_references', `user_id = '${a.user}'`),
       });
-      assert.deepEqual(await snapshot(), { days: 1, values: 2, bouts: 2, episodes: 1, frozen: 1 });
+      assert.deepEqual(await snapshot(), { days: 1, tables: 2, values: 2, bouts: 2, episodes: 1, frozen: 1 });
       // A retry with identical fingerprints (a re-run after a new, identical snapshot) adds nothing.
       const retry = await publishDay(a.user, a.device, day, 'retrospective', { ...body, scoring_result_revision: 11 });
       assert.deepEqual([retry.applied, retry.reason, retry.context_revision, retry.cascaded_days],
         [false, 'unchanged', published.context_revision, 0]);
-      assert.deepEqual(await snapshot(), { days: 1, values: 2, bouts: 2, episodes: 1, frozen: 1 });
+      assert.deepEqual(await snapshot(), { days: 1, tables: 2, values: 2, bouts: 2, episodes: 1, frozen: 1 });
       const after = await job(a.user, a.device, day, 'retrospective');
       assert.deepEqual([after.completed_revision === after.input_revision, after.lease_token, after.unchanged_count,
         after.last_outcome, after.reasons], [true, null, 1, 'unchanged', []]);
@@ -510,7 +533,7 @@ Deno.test({
         'the identical document is paired with the newer snapshot');
     });
 
-    await t.step('retention keeps the current and previous rows; revisions only increase; A -> B -> A gets a new revision', async () => {
+    await t.step('retention keeps the current row and superseded rows for 24 h (tables with them); revisions only increase; A -> B -> A gets a new revision', async () => {
       const a = await owner('UTC');
       const back = addDays(await todayIn('UTC'), -10);
       const abaRevisions: number[] = [];
@@ -536,9 +559,21 @@ Deno.test({
           'superseded_by', superseded_by) order by context_revision) from public.physiology_context_days
           where user_id = '${a.user}' and day = '${day}'`);
       assert.deepEqual(rows, [
+        { rev: revisions[1], input: 'in-b', superseded_by: revisions[2] },
         { rev: revisions[2], input: 'in-c', superseded_by: revisions[3] },
         { rev: revisions[3], input: 'in-a', superseded_by: null },
-      ]);
+      ], 'superseded rows stay for 24 h; the old in-a copy was replaced by a new revision');
+      // A day later the next publish of the key removes the old superseded rows, and their tables with them.
+      await sql(`update public.physiology_context_days set superseded_at = now() - interval '25 hours'
+        where user_id = '${a.user}' and day = '${day}' and superseded_by is not null`);
+      const next = await publishDay(a.user, a.device, day, 'retrospective', payload(day, 'retrospective', { input: 'in-d' }));
+      assert.deepEqual(await sqlJson(`select json_agg(context_revision order by context_revision) from public.physiology_context_days
+        where user_id = '${a.user}' and day = '${day}'`), [revisions[3], next.context_revision]);
+      assert.deepEqual(await sqlJson(`select json_agg(distinct context_revision order by context_revision)
+        from public.physiology_context_envelope_tables where user_id = '${a.user}' and context_revision in (
+          select context_revision from public.physiology_context_days where user_id = '${a.user}' and day = '${day}')`),
+        [revisions[3], next.context_revision]);
+      assert.equal(await count('physiology_context_envelope_tables', `context_revision in (${revisions[1]}, ${revisions[2]})`), 0);
     });
 
     await t.step('episodes: only the latest published day (or a newer one) replaces the set; frozen references are insert-only', async () => {
@@ -602,8 +637,8 @@ Deno.test({
       const b = await owner('UTC');
       const day = addDays(await todayIn('UTC'), -2);
       let context = await read(a.user, a.device, day);
-      assert.deepEqual([context.status, context.mode, context.document, context.job, context.pairing.consistent],
-        ['none', 'causal_live', null, null, false]);
+      assert.deepEqual([context.status, context.mode, context.document, context.envelope_tables, context.job, context.pairing.consistent],
+        ['none', 'causal_live', null, null, null, false]);
       await sql(`select internal.physiology_context_touch('${a.user}', '${a.device}', '${day}', 'retrospective', 'test', null)`);
       context = await read(a.user, a.device, day);
       assert.deepEqual([context.status, context.mode, context.job.pending], ['pending', 'retrospective', true]);
@@ -625,11 +660,22 @@ Deno.test({
       assert.equal(paired.reason, 'unchanged');
       context = await read(a.user, a.device, day, null, 'hrv_rmssd');
       assert.equal(context.pairing.consistent, true);
-      assert.deepEqual(context.document.envelopes.map((row: any) => row.id), ['hrv@1-2', 'hrv@3-4']);
+      // The summary plus only the requested metric's table.
+      assert.deepEqual(context.document.envelopes, []);
+      assert.deepEqual(context.document.envelope_index, [{ metric: 'heart_rate', envelope_count: 1 }, { metric: 'hrv_rmssd', envelope_count: 2 }]);
+      assert.deepEqual(context.envelope_tables, [envelopeTable('hrv_rmssd', 2)]);
       assert.deepEqual([context.envelope_count, context.returned_envelope_count], [3, 2]);
-      assert.ok(context.returned_document_bytes < context.document_bytes && context.document_bytes > 0);
+      assert.ok(context.returned_table_bytes > 0 && context.returned_table_bytes < context.stored_table_bytes && context.document_bytes > 0);
       assert.equal(context.header.input_fingerprint, 'in-1');
-      assert.equal((await read(a.user, a.device, day, null, 'spo2_candidate')).document.envelopes.length, 0);
+      const all = await read(a.user, a.device, day);
+      assert.deepEqual(all.envelope_tables, [envelopeTable('heart_rate', 1), envelopeTable('hrv_rmssd', 2)]);
+      assert.equal(all.returned_table_bytes, all.stored_table_bytes);
+      const none = await read(a.user, a.device, day, null, 'spo2_candidate');
+      assert.deepEqual([none.envelope_tables, none.returned_envelope_count], [[], 0]);
+      const resting = await publishDay(a.user, a.device, day, 'retrospective', payload(day, 'retrospective', {
+        input: 'in-rhr', scoringResult: snapshot, tables: { heart_rate: 1, resting_heart_rate: 3 } }));
+      assert.deepEqual(resting.envelope_tables, ['heart_rate', 'resting_heart_rate']);
+      assert.deepEqual((await read(a.user, a.device, day, null, 'resting_heart_rate')).envelope_tables, [envelopeTable('resting_heart_rate', 3)]);
       // A causal document of the same day is a separate row, never presented as the retrospective one.
       await publishDay(a.user, a.device, day, 'causal_live', payload(day, 'causal_live', { input: 'live-1' }));
       assert.deepEqual((await read(a.user, a.device, day)).available_modes, ['causal_live', 'retrospective']);
@@ -789,7 +835,8 @@ Deno.test({
       await publishDay(a.user, a.device, day, 'retrospective', payload(day, 'retrospective', { bouts: [bout('bout-r', day, 1_791_000_000)] }));
       response = await send(`/context?deviceId=${external}&day=${day}&metric=hrv_rmssd`);
       body = await response.json();
-      assert.deepEqual([body.context.status, body.context.mode, body.context.returned_envelope_count], ['available', 'retrospective', 2]);
+      assert.deepEqual([body.context.status, body.context.mode, body.context.returned_envelope_count,
+        body.context.envelope_tables.map((row: any) => row.metric)], ['available', 'retrospective', 2, ['hrv_rmssd']]);
       response = await send(`/context/history?deviceId=${external}&from=${addDays(today, -30)}&to=${today}`);
       body = await response.json();
       assert.deepEqual([response.status, body.history.bouts.map((row: any) => row.id)], [200, ['bout-r']]);

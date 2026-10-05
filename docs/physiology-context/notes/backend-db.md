@@ -20,7 +20,7 @@ UTC. Mode `causal_live` is the owner's local today, `retrospective` every earlie
 
 ## 1. Tables
 
-Every table has RLS. `authenticated` may only `SELECT` its own rows of the seven product/exposure tables
+Every table has RLS. `authenticated` may only `SELECT` its own rows of the eight product/exposure tables
 (`(select auth.uid()) = user_id` or `= owner`); the queue has no client grant at all; `anon` has nothing. All writes go
 through the service-role RPCs. Every foreign key cascades on delete; device-scoped tables carry
 `foreign key (user_id, device_id) references devices(user_id, id) on delete cascade`.
@@ -28,7 +28,8 @@ through the service-role RPCs. Every foreign key cascades on delete; device-scop
 | Table | Key | Lifecycle |
 | --- | --- | --- |
 | `physiology_context_jobs` | PK `(user_id, device_id, day, mode)` | Queue. `input_revision`/`completed_revision`, `lease_token`/`lease_until`, `consecutive_failures`, `dead_letter`, `not_before`, `dirty_at`, `fingerprint` (sha256 hex of the dependency set, stamped at enqueue and at every claim), `reasons text[]` (distinct, sorted, ≤ 16, cleared on completion), `cutoff_override bigint` (cleared on a successful publish), counters (`claim_count`, `success_count`, `unchanged_count`, `renewal_count`, `lease_expiry_count`), `last_worker`, `last_outcome`, `last_context_revision`, `last_error`, `last_duration_ms`. Rows are never deleted except by cascade. |
-| `physiology_context_days` | PK `context_revision` (identity, sequence `physiology_context_revision_seq`); unique current `(user_id, device_id, day, mode) where superseded_by is null`; unique `(user_id, device_id, day, mode, policy_fingerprint, input_fingerprint)` | One row per published revision: header columns, `versions jsonb`, `scoring_result_revision`/`scoring_input_revision`, `document jsonb` (≤ 16 MiB), `document_bytes`, `envelope_count`, `published_at`, `superseded_by`/`superseded_at`. Retention: the current row and the one it superseded. |
+| `physiology_context_days` | PK `context_revision` (identity, sequence `physiology_context_revision_seq`); unique current `(user_id, device_id, day, mode) where superseded_by is null`; unique `(user_id, device_id, day, mode, policy_fingerprint, input_fingerprint)` | One row per published revision: header columns, `versions jsonb`, `scoring_result_revision`/`scoring_input_revision`, `document jsonb` = the **summary** of `StoredDocument.split` (envelopes empty, `envelope_index` set; ≤ 16 MiB, lz4), `document_bytes`, `envelope_count` (total over its tables), `published_at`, `superseded_by`/`superseded_at`. Retention: the current row; a superseded row is deleted (tables cascade) once it has been superseded for 24 h, opportunistically by the next publish of the same key. |
+| `physiology_context_envelope_tables` | PK `(context_revision, metric)`; FK `context_revision → physiology_context_days on delete cascade`; index `(user_id, device_id)` | One interned `EnvelopeTable` (`pc-wire-1`) per metric of a revision: `envelope_table jsonb` (lz4), `envelope_count`, `table_bytes`, `user_id`/`device_id` (RLS, composite device FK). Inserted in the publish transaction with its day row; never updated. |
 | `physiology_context_daily_values` | PK `(user_id, device_id, mode, day, series_key, regime_key)` | Replaced for `(user, device, mode, day)` on each publish. Scalar columns (`metric`, `value`, `units`, `support_count`, `support_unit`, `support_s`, `finality`, `context_revision`) + `payload` = the DailyValue JSON exactly as published. |
 | `physiology_context_bouts` | PK `(user_id, device_id, mode, bout_id)` | Replaced for `(user, device, mode, day)` on publish; a bout id stored under another day moves to the publishing day. `day`, `start_ts`, `end_ts`, `kind`, `status`, `duration_s`, `payload` = ExertionBout JSON. |
 | `physiology_context_episodes` | PK `(user_id, device_id, mode, episode_id)` | The `(user, device, mode)` set is replaced only by a publish whose day ≥ the latest day with a current document for that key; `as_of_day` = the publishing day. `payload` = ChangeEpisode JSON. |
@@ -105,7 +106,8 @@ dead letter at the 8th, `last_error = left(p_error, 2000)`, lease cleared. Diffe
 
 ### `publish_physiology_context_v1(p_token uuid, p_revision bigint, p_payload jsonb) → jsonb`
 
-Payload (snake_case, items exactly as `PhysiologyContext.encoder()` writes them):
+Payload (snake_case, items exactly as `PhysiologyContext.encoder()` writes them; `document` and `envelope_tables` are
+the two halves of `StoredDocument.split(doc)`):
 
 ```json
 {
@@ -113,7 +115,8 @@ Payload (snake_case, items exactly as `PhysiologyContext.encoder()` writes them)
              "status": "available|partial|no_data|unavailable", "availability_cutoff": 1791230000,
              "generated_at": 1791230000, "contract_version": "pc-contract-1", "schema_version": 1,
              "policy_fingerprint": "…", "input_fingerprint": "…", "versions": {"…": "…"}},
-  "document": { /* DayDocument */ },
+  "document": { /* summary DayDocument: "envelopes": [], "envelope_index": [{"metric", "envelope_count"}] */ },
+  "envelope_tables": [{"metric": "hrv_rmssd", "envelope_count": 288, "table": { /* EnvelopeTable */ }}],
   "scoring_result_revision": 123, "scoring_input_revision": 4,   // or null
   "duration_ms": 850,                                            // optional
   "daily_values": [ /* DailyValue, day = header.day, mode = header.mode */ ],
@@ -129,27 +132,31 @@ then calls `fail_…`): `header.mode/day` = the job's (`…_identity`); `documen
 enums; cutoff/generated integral; contract `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`; schema 1..1000; fingerprints
 `^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$`; document an object ≤ 16 MiB; ≤ 4000 daily values (unique series+regime), ≤ 1000
 bouts (unique id, `interval.end > start`), ≤ 4000 episodes (state enum, direction −1/0/1, valid days, unique id), ≤ 1000
-frozen references (version ≥ 1, valid days, numeric center/scale, unique id and series+regime+version). Keys
-(series, regime, ids) are 1–160 characters without whitespace or control characters.
+frozen references (version ≥ 1, valid days, numeric center/scale, unique id and series+regime+version); ≤ 16 envelope
+tables, one per metric (`^[a-z][a-z0-9_]{0,47}$`), each with `table.metric` = `metric`, a `table.wire_version`
+string, `table.rows` of exactly `envelope_count` rows, ≤ 16 MiB (`…_envelope_table`, `…_envelope_table_duplicate`);
+when the summary has an `envelope_index` it must list exactly the tables' `(metric, envelope_count)` pairs, and
+tables without an index are refused (`…_envelope_index`). A plain document with no index and no tables is accepted.
+Keys (series, regime, ids) are 1–160 characters without whitespace or control characters.
 
 Response:
 
 ```json
 {"applied": true, "context_revision": 812, "reason": "published", "cascaded_days": 3,
- "superseded_revision": 790, "document_bytes": 48211, "daily_values_changed": true,
- "episodes_replaced": true, "frozen_references_inserted": 1}
+ "superseded_revision": 790, "document_bytes": 54211, "envelope_tables": ["heart_rate", "hrv_rmssd"],
+ "table_bytes": 731000, "daily_values_changed": true, "episodes_replaced": true, "frozen_references_inserted": 1}
 ```
 
 | `reason` | `applied` | Effect |
 | --- | --- | --- |
-| `published` | true | New row; previous current row superseded and kept, older ones deleted; values/bouts of the day replaced; episode rule; frozen references inserted; job completed; cascade (below). |
-| `unchanged` | false | The current row already has these `(policy_fingerprint, input_fingerprint)`: no new row, nothing replaced, job completed (`unchanged_count + 1`); `context_revision` = the existing one. If `scoring_result_revision` is newer than the stored one, the pairing columns are raised to it (the only update a document row ever receives besides `superseded_by`). |
+| `published` | true | New row and its envelope tables (same transaction); previous current row marked superseded; superseded rows of the key older than 24 h deleted with their tables; values/bouts of the day replaced; episode rule; frozen references inserted; job completed; cascade (below). |
+| `unchanged` | false | The current row already has these `(policy_fingerprint, input_fingerprint)`: no new row, no envelope table, nothing replaced, job completed (`unchanged_count + 1`); `context_revision` = the existing one. If `scoring_result_revision` is newer than the stored one, the pairing columns are raised to it (the only update a document row ever receives besides `superseded_by`). |
 | `stale_revision` | false | Lease live but `input_revision ≠ p_revision`: nothing written, lease released (job due at once). |
 | `lease_expired` / `lease_lost` | false | Nothing written. |
 | `owner_retired` | false | Account deletion under way: nothing written, lease released. |
 
-If an identical-fingerprint row exists but is the retained *previous* row (A → B → A), it is deleted and a new row with a
-higher revision is inserted, so `context_revision` only ever increases. Publications are serialized per `(user, device,
+If an identical-fingerprint row exists but is a retained *superseded* row (A → B → A), it is deleted (tables cascade) and a
+new row with a higher revision is inserted, so `context_revision` only ever increases. Publications are serialized per `(user, device,
 mode)` with an advisory lock taken before any row lock (episode rule under concurrency, no deadlock).
 
 **Cascade (cross-day horizon):** only for `retrospective`, and only when the day's daily values changed (old set vs new
@@ -166,22 +173,27 @@ set, full JSON equality, ordered by series/regime): every **existing** retrospec
   "header": {"mode": "…", "day": "…", "finality": "…", "status": "…", "availability_cutoff": 0, "generated_at": 0,
              "contract_version": "…", "schema_version": 1, "policy_fingerprint": "…", "input_fingerprint": "…",
              "versions": {}, "published_at": "…"},
-  "document": { /* DayDocument; envelopes filtered to metric when given */ },
+  "document": { /* the stored summary DayDocument */ },
+  "envelope_tables": [ /* EnvelopeTable JSON: only p_metric's when given, every table otherwise (by metric) */ ],
   "metric": "hrv_rmssd",
-  "document_bytes": 48211, "returned_document_bytes": 9120, "envelope_count": 700, "returned_envelope_count": 140,
+  "document_bytes": 54211, "stored_table_bytes": 2600000, "returned_table_bytes": 430000,
+  "envelope_count": 2300, "returned_envelope_count": 288,
   "pairing": {"snapshot_result_revision": 123, "context_scoring_result_revision": 123, "consistent": true},
   "job": {"pending": false, "dirty_at": "…", "input_revision": 4, "completed_revision": 4, "dead_letter": false,
           "leased": false, "reasons": []}
 }
 ```
 
-`header`, `document`, sizes and `context_revision` are null without a document; `job` is null without a job. Mode NULL →
+Rebuild with `StoredDocument.join(summary: document, tables: envelope_tables)`. `header`, `document`,
+`envelope_tables`, sizes and `context_revision` are null without a document (`envelope_tables` is `[]` when the
+document has no table for the metric); `job` is null without a job. Mode NULL →
 `retrospective` if a retrospective document exists, else `causal_live` if one exists, else `retrospective` if a
 retrospective job exists, else `causal_live`. `status`: `pending` when that mode's job is queued (`completed <
 input`, not dead-lettered) — the current (older) document is still returned; else `available` when a document exists;
 else `none`. `pairing.snapshot_result_revision` = newest `scoring_snapshots_v2.result_revision` for (user, device, day,
 `frwhoop-server-1`); `consistent` = a document exists and the two are equal (both NULL counts as equal). `p_metric`
-matches `^[a-z][a-z0-9_]{0,47}$` and filters `document.envelopes` by `metric`. Raises `device_owner_mismatch`,
+(MetricKind raw value, e.g. `hrv_rmssd`, `resting_heart_rate`; `^[a-z][a-z0-9_]{0,47}$`) selects the table (and, for a
+plain document with inline envelopes, filters those). Raises `device_owner_mismatch`,
 `account_retired`, `invalid_mode`, `invalid_metric`.
 
 ### `physiology_context_history_read_v1(p_user uuid, p_device uuid, p_from date, p_to date, p_mode text default null) → jsonb`
@@ -226,10 +238,12 @@ Concurrent writers of one event are serialized (advisory lock per owner + event)
 `account_retired`, `source_owner_mismatch` (a `p_source` that belongs to another owner's installation or account
 source).
 
-**Affected days** (mirror in `Exposures.affectedDays`): in the owner's zone, from the local day of `min(start)` over
-the old and new revision through the local day of `max(end) + 72 h − 1 s`, i.e. the half-open span `[min start, max end
-+ 72 h)`; a correction invalidates the whole hull. Then the invalidation rules above (every device of the owner, clamp
-to today and the most recent 120 days, only `(device, day)` with scoring or a job). Reason `exposure_changed`.
+**Affected days** (mirrors Swift `Exposures.affectedDays`): the local days (owner zone) covering the **closed** instant
+range `[min(start) − 24 h, max(end) + 72 h]` over the old and new revision, with `end = max(end, start + 1)` for a point
+event. The end instant is included because `Exposures.refs` keeps an event whose end is exactly 72 h before a
+measurement (`support.start − occurred.end <= lookback`), so an event ending at local midnight reaches the day that
+starts at `end + 72 h`. A correction invalidates the whole hull. Then the invalidation rules above (every device of the
+owner, days ≤ today, the most recent 120 days, only `(device, day)` with scoring or a job). Reason `exposure_changed`.
 
 ### `exposure_events_read_v1(p_owner uuid, p_from bigint, p_to bigint, p_include_history boolean default false) → jsonb`
 
@@ -254,7 +268,7 @@ Retracted events are included (their `confirmation` is `retracted`); the consume
 | --- | --- | --- | --- |
 | Scoring completion (enqueue) | the day itself (create) / D-1..D+1 via fingerprint (bump) | that device | `scoring_completed`, `inputs_changed` |
 | Finality | retrospective provisional docs once day end + 30 h | that device | `finality_due` |
-| Exposure record | `[min start, max end + 72 h)` in local days | every device | `exposure_changed` |
+| Exposure record | local days of the closed range `[min start − 24 h, max end + 72 h]` | every device | `exposure_changed` |
 | Placement trigger (`after insert or update of placement, source, effective_start, effective_end`) | local day of the earliest changed instant (insert: start; placement/source change: earlier start; end/start change: earlier changed bound) through today | the declared device, or every device for a user-level row | `placement_changed` |
 | Publish cascade | D+1 .. min(today − 1, D + 28), existing retrospective jobs | same device | `history_changed` |
 
@@ -274,7 +288,7 @@ Same auth as `/series`: installation bearer, or Supabase JWT + `x-noop-source-id
 | `GET /scores/context` | `deviceId` (required), `day=yyyy-MM-dd` (required, real date), `mode` (`causal_live`/`retrospective`, optional), `metric` (`^[a-z][a-z0-9_]{0,47}$`, optional) | `{context: <physiology_context_read_v1>, identity}` | 400 `invalid_device_id`, `invalid_day`, `invalid_mode`, `invalid_metric`; 409 `device_registration_pending` (unknown or another owner's device) |
 | `GET /scores/context/history` | `deviceId`, `from`, `to` (`yyyy-MM-dd`, inclusive, ≤ 120 days), `mode` | `{history: <physiology_context_history_read_v1>, identity}` | 400 `invalid_range`, `invalid_mode`, `invalid_device_id`; 409 |
 | `POST /scores/exposures` | body `{events: [1..25 ExposureEventRevision]}`, ≤ 64 KiB (this route only) | `{results: [{event_id, revision, status, reason, received_at?}], identity}` in request order; invalid events are `rejected` without a database call | 400 `invalid_body`, `invalid_events`; 413 `payload_too_large` |
-| `GET /scores/exposures` | `from`, `to` (unix s, half-open, ≤ 366 days), `history` (`1`/`true`/`0`/`false`) | `{events, revisions (only with history), truncated, identity}` | 400 `invalid_range`, `invalid_history` |
+| `GET /scores/exposures` | `from`, `to` (unix s, half-open, ≤ 366 days), `history` (`1`/`true`/`0`/`false`) | `{events: [...], identity, truncated}`; with `history=1` also `revisions: [...]` (always an array) | 400 `invalid_range`, `invalid_history` |
 
 `identity` = `{userId, sourceId, deviceId, externalDeviceId, project}` (device null for exposures). A database 403
 keeps its code (e.g. `device_owner_mismatch`, `account_retired`); anything unexpected is 500 `scores_unavailable`.
@@ -301,12 +315,11 @@ Each exposure is its own transaction: a retried batch gets `ignored`/`duplicate`
    specify a return.
 8. **Exposures**: a lower revision is `ignored` when identical to the stored one, else `rejected/stale_revision`;
    `inferred_candidate` cannot be `confirmed`; `received_at` is server-assigned and returned per result (the phone can
-   store it as the revision's availability time). The affected-day span is the half-open hull `[min start, max end +
-   72 h)` — the Swift `affectedDays` should use the same `− 1 s` end so a midnight-ending event does not reach a
-   fourth day.
+   store it as the revision's availability time).
 9. **Read**: `pending` still returns the current document; `consistent` is a boolean (false without a document);
-   extra keys `day`, `available_modes`, `metric`, `returned_document_bytes`, `envelope_count`,
-   `returned_envelope_count`, `job.leased`, `job.reasons`. History adds `days`, `episodes_as_of`, `pending_days`.
+   extra keys `day`, `available_modes`, `metric`, `document_bytes`, `stored_table_bytes`, `returned_table_bytes`,
+   `envelope_count`, `returned_envelope_count`, `job.leased`, `job.reasons`. History adds `days`, `episodes_as_of`,
+   `pending_days`. Publish also returns `envelope_tables` (metrics stored) and `table_bytes`.
 10. `context_revision` is an identity column with a fixed sequence name (`physiology_context_revision_seq`) so the
     publish can allocate the next revision before superseding the old row.
 11. Route validation lives in a new `_shared/physiologyContext.ts`; `serverScores.ts` only gains the route predicates
@@ -335,8 +348,8 @@ deno test --allow-env --allow-read --no-lock tests/physiology_context_routes_tes
 | Check | Baseline (chain without the new migration) | After |
 | --- | --- | --- |
 | Full ordered chain applies on an empty production-image DB | ok | ok (also re-applied twice on top: idempotent) |
-| `physiology_context_sql_test.ts` | n/a | **1 passed (15 steps)**, DST window asserted (Australia/Sydney 2026-10-04 = 23 h) |
-| `exposure_events_sql_test.ts` | n/a | **1 passed (6 steps)** |
+| `physiology_context_sql_test.ts` | n/a | **1 passed (15 steps)**, DST window asserted (Australia/Sydney 2026-10-04 = 23 h); lz4 asserted on `document` and `envelope_table` (the image supports it) |
+| `exposure_events_sql_test.ts` | n/a | **1 passed (6 steps)**, including an event ending exactly at local midnight (the day starting at end + 72 h is invalidated) and the −24 h start (00:30 reaches the previous day, no further) |
 | `physiology_context_routes_test.ts` | n/a | **18 passed** |
 | `auth_isolation_sql_test.ts` | 1 passed (11 steps), **1 failed step**: `activity_context_at` is client-executable but missing from `CLIENT_CALLABLE_FUNCTIONS` (pre-existing, discovery §5 item 8) | identical: same single failure, no new name in the diff |
 | same, temp copy with `activity_context_at` listed (not committed) | — | **2 passed (12 steps)**: all ten new RPCs pass the service-only privilege loop |
@@ -344,9 +357,11 @@ deno test --allow-env --allow-read --no-lock tests/physiology_context_routes_tes
 | `stretch_feedback_test`, `scores_auth_test`, `server_scores_auth_test`, `enrolled_scores_test`, `result_days_test`, `auth_credentials_test`, `stretch_feedback_route_integration_test` | pass | pass (20, 5, 4, 17, 4, 7, 1) |
 | `placement_route_test.ts` (local_postgres subset) | **fails**: first POST answers 400 `request_rejected` | identical (pre-existing; unrelated, does not apply this migration) |
 
-Mutation check (temporary broken copies of the migration applied to my container, then the real one restored): the
-exposure `+72 h − 1 s` horizon, the `D + 28` cascade bound, the episode rule, an EXECUTE grant to `authenticated`, and
-the stale-revision fence were each caught by the intended step.
+Mutation check (temporary broken copies of the migration applied to my container, then the real one restored), each
+caught by the intended step: the `D + 28` cascade bound, the episode rule, an EXECUTE grant to `authenticated`, the
+stale-revision fence, the exposure range without the −24 h start, the exposure range with an open end (`+ 72 h − 1 s`),
+immediate retention instead of 24 h, the read without the table metric filter, and a publish without the
+envelope-index check.
 
 Not run, and why:
 
@@ -372,4 +387,5 @@ exposure history).
 Operational notes: the enqueue scans `scoring_jobs_v2` for the last ~122 days each call (fine at the current fleet
 size; an index on `(algorithm_version, day)` would be the first step if it grows). The full-payload comparison for the
 cascade means a provisional → final flip of a day's values re-runs up to 28 later days once (their own values usually
-do not change, so it does not chain).
+do not change, so it does not chain). Superseded documents of a key that is never republished stay until the next
+publish of that key (retention is opportunistic); each is at most one row plus its tables.

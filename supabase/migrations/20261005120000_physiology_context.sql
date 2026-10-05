@@ -6,7 +6,8 @@
 --
 -- Tables (all owner-cascading; device-scoped ones carry the composite FK to devices(user_id, id)):
 --   physiology_context_jobs               queue, one row per (user, device, local day, mode)
---   physiology_context_days               one immutable row per published revision (header + document)
+--   physiology_context_days               one immutable row per published revision (header + summary document)
+--   physiology_context_envelope_tables    the revision's interned envelopes, one EnvelopeTable per metric
 --   physiology_context_daily_values       current daily values per (user, device, mode, day, series, regime)
 --   physiology_context_bouts              current exertion bouts per (user, device, mode, bout)
 --   physiology_context_episodes           current change episodes per (user, device, mode, episode)
@@ -112,6 +113,8 @@ create table if not exists public.physiology_context_days (
   -- input_revision). The only columns a later identical publish may raise (see publish).
   scoring_result_revision bigint,
   scoring_input_revision bigint,
+  -- The SUMMARY document of StoredDocument.split (contracts.md §6.1): envelopes empty, envelope_index listing the
+  -- tables in physiology_context_envelope_tables. A plain document (no index) is accepted too.
   document jsonb not null check (jsonb_typeof(document) = 'object'),
   document_bytes integer not null check (document_bytes between 2 and 16777216),
   envelope_count integer not null default 0 check (envelope_count >= 0),
@@ -127,6 +130,33 @@ create unique index if not exists physiology_context_days_fingerprints
   on public.physiology_context_days (user_id, device_id, day, mode, policy_fingerprint, input_fingerprint);
 create index if not exists physiology_context_days_device_mode_day
   on public.physiology_context_days (user_id, device_id, mode, day);
+
+-- One interned EnvelopeTable (PCStoredDocument.swift, wire pc-wire-1) per metric of a published revision. Written in
+-- the same transaction as its day row and removed with it (cascade), so a document and its tables always match.
+-- A metric page reads the summary plus one row.
+create table if not exists public.physiology_context_envelope_tables (
+  context_revision bigint not null references public.physiology_context_days(context_revision) on delete cascade,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  device_id uuid not null,
+  metric text not null check (metric ~ '^[a-z][a-z0-9_]{0,47}$'),
+  envelope_count integer not null check (envelope_count >= 0),
+  table_bytes integer not null check (table_bytes between 2 and 16777216),
+  envelope_table jsonb not null check (jsonb_typeof(envelope_table) = 'object'),
+  primary key (context_revision, metric),
+  foreign key (user_id, device_id) references public.devices(user_id, id) on delete cascade
+);
+create index if not exists physiology_context_envelope_tables_owner
+  on public.physiology_context_envelope_tables (user_id, device_id);
+
+-- The documents and tables are large, repetitive JSON: compress them with lz4 where the server supports it
+-- (PostgreSQL 14+ built with lz4, as Supabase's image is); pglz otherwise.
+do $$
+begin
+  if exists (select 1 from pg_settings where name = 'default_toast_compression' and 'lz4' = any (enumvals)) then
+    alter table public.physiology_context_days alter column document set compression lz4;
+    alter table public.physiology_context_envelope_tables alter column envelope_table set compression lz4;
+  end if;
+end $$;
 
 -- The history source for references: one value per (day, series, regime, mode), replaced for
 -- (user, device, mode, day) on every publish. payload is the DailyValue exactly as the worker encoded it.
@@ -300,8 +330,9 @@ create policy physiology_context_jobs_service on public.physiology_context_jobs
 do $$
 declare t text;
 begin
-  foreach t in array array['physiology_context_days', 'physiology_context_daily_values',
-    'physiology_context_bouts', 'physiology_context_episodes', 'physiology_context_frozen_references'] loop
+  foreach t in array array['physiology_context_days', 'physiology_context_envelope_tables',
+    'physiology_context_daily_values', 'physiology_context_bouts', 'physiology_context_episodes',
+    'physiology_context_frozen_references'] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('revoke all on public.%I from public, anon, authenticated', t);
     execute format('grant all on public.%I to service_role', t);
@@ -860,17 +891,20 @@ end $$;
 -- Fenced publication (contracts.md §6). Payload:
 --   {header: {mode, day, finality, status, availability_cutoff, generated_at, contract_version,
 --             schema_version, policy_fingerprint, input_fingerprint, versions},
---    document, scoring_result_revision, scoring_input_revision, duration_ms,
+--    document (the summary: envelopes empty, envelope_index set), envelope_tables[] ({metric, envelope_count,
+--    table}), scoring_result_revision, scoring_input_revision, duration_ms,
 --    daily_values[], bouts[], episodes[], new_frozen_references[]}
 -- Outcomes ({applied, context_revision, reason, cascaded_days, ...}):
 --   lease_lost / lease_expired     nothing written
 --   stale_revision                 the lease is released (the inputs changed meanwhile); nothing written
 --   owner_retired                  the lease is released; nothing written
 --   unchanged                      the current document already has these (policy, input) fingerprints: no new
---                                  row, values/bouts/episodes untouched, job completed (the pairing columns may
---                                  be raised to the newer scoring snapshot the identical document was built for)
---   published                      new immutable row; the previous current row is kept as superseded and any
---                                  older one is deleted (retention: current + previous); values and bouts of the
+--                                  row or envelope table, values/bouts/episodes untouched, job completed (the
+--                                  pairing columns may be raised to the newer scoring snapshot the identical
+--                                  document was built for)
+--   published                      new immutable row plus its envelope tables; the previous current row is marked
+--                                  superseded, and superseded rows of this key older than 24 h are deleted with
+--                                  their tables (retention: the current row, plus superseded rows for 24 h); values and bouts of the
 --                                  day replaced; episodes replaced only when this day >= the latest day already
 --                                  published for (user, device, mode); frozen references inserted (existing
 --                                  ones untouched); job completed; and when the retrospective daily values of
@@ -889,6 +923,11 @@ declare
   bt jsonb;
   ep jsonb;
   fr jsonb;
+  et jsonb;
+  v_index jsonb;
+  v_table_metrics text[] := '{}'::text[];
+  v_table_envelopes integer := 0;
+  v_table_bytes bigint := 0;
   e jsonb;
   v_now timestamptz := pg_catalog.clock_timestamp();
   v_finality text;
@@ -1124,6 +1163,49 @@ begin
     raise exception 'invalid_physiology_context_frozen_reference_duplicate' using errcode = '22023';
   end if;
 
+  -- Envelope tables: each {metric, envelope_count, table} with table.metric = metric and table.rows of exactly
+  -- envelope_count rows, one per metric; when the summary carries an envelope_index it must list exactly these
+  -- (metric, envelope_count) pairs, and tables without an index are refused.
+  et := coalesce(nullif(p_payload -> 'envelope_tables', 'null'::jsonb), '[]'::jsonb);
+  if jsonb_typeof(et) <> 'array' or jsonb_array_length(et) > 16 then
+    raise exception 'invalid_physiology_context_envelope_table' using errcode = '22023';
+  end if;
+  for e in select x.value from jsonb_array_elements(et) as x(value) loop
+    if jsonb_typeof(e) <> 'object'
+       or jsonb_typeof(e -> 'metric') is distinct from 'string' or (e ->> 'metric') !~ '^[a-z][a-z0-9_]{0,47}$'
+       or coalesce(internal.physiology_context_json_int(e -> 'envelope_count'), -1) not between 0 and 1000000
+       or jsonb_typeof(e -> 'table') is distinct from 'object'
+       or (e #>> '{table,metric}') is distinct from (e ->> 'metric')
+       or jsonb_typeof(e #> '{table,wire_version}') is distinct from 'string'
+       or (e #>> '{table,wire_version}') !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$'
+       or jsonb_typeof(e #> '{table,rows}') is distinct from 'array'
+       or jsonb_array_length(e #> '{table,rows}') <> internal.physiology_context_json_int(e -> 'envelope_count')
+       or octet_length((e -> 'table')::text) > 16777216 then
+      raise exception 'invalid_physiology_context_envelope_table' using errcode = '22023';
+    end if;
+    if (e ->> 'metric') = any (v_table_metrics) then
+      raise exception 'invalid_physiology_context_envelope_table_duplicate' using errcode = '22023';
+    end if;
+    v_table_metrics := v_table_metrics || (e ->> 'metric');
+    v_table_envelopes := v_table_envelopes + internal.physiology_context_json_int(e -> 'envelope_count')::integer;
+    v_table_bytes := v_table_bytes + octet_length((e -> 'table')::text);
+  end loop;
+  v_index := doc -> 'envelope_index';
+  if coalesce(jsonb_typeof(v_index), 'null') = 'null' then
+    if jsonb_array_length(et) > 0 then
+      raise exception 'invalid_physiology_context_envelope_index' using errcode = '22023';
+    end if;
+  elsif jsonb_typeof(v_index) <> 'array'
+     or (select coalesce(jsonb_agg(jsonb_build_object('metric', x.value -> 'metric',
+                  'envelope_count', x.value -> 'envelope_count') order by x.value ->> 'metric' collate "C"), '[]'::jsonb)
+           from jsonb_array_elements(v_index) as x(value))
+        is distinct from
+        (select coalesce(jsonb_agg(jsonb_build_object('metric', x.value -> 'metric',
+                  'envelope_count', x.value -> 'envelope_count') order by x.value ->> 'metric' collate "C"), '[]'::jsonb)
+           from jsonb_array_elements(et) as x(value)) then
+    raise exception 'invalid_physiology_context_envelope_index' using errcode = '22023';
+  end if;
+
   -- Idempotency ------------------------------------------------------------------------------------------
   select d.context_revision, (d.superseded_by is null) into v_existing_rev, v_existing_current
     from public.physiology_context_days d
@@ -1146,8 +1228,8 @@ begin
       'cascaded_days', 0, 'document_bytes', v_bytes);
   end if;
   if v_existing_rev is not null then
-    -- The same fingerprints as the retained previous row (A -> B -> A): drop the old copy so the revision
-    -- keeps increasing and the unique fingerprint key holds.
+    -- The same fingerprints as a retained superseded row (A -> B -> A): drop the old copy (its tables cascade) so
+    -- the revision keeps increasing and the unique fingerprint key holds.
     delete from public.physiology_context_days d where d.context_revision = v_existing_rev;
   end if;
 
@@ -1169,11 +1251,17 @@ begin
     envelope_count, published_at)
   values (v_rev, j.user_id, j.device_id, j.day, j.mode, p_revision, v_finality, v_status, v_cutoff, v_generated,
     v_contract, v_schema, v_policy, v_input, v_versions, v_scoring_result, v_scoring_input, doc, v_bytes,
-    v_envelopes, v_now);
-  -- Retention: the current row and the one it superseded.
+    v_envelopes + v_table_envelopes, v_now);
+  insert into public.physiology_context_envelope_tables (context_revision, user_id, device_id, metric,
+    envelope_count, table_bytes, envelope_table)
+  select v_rev, j.user_id, j.device_id, x.value ->> 'metric',
+         internal.physiology_context_json_int(x.value -> 'envelope_count')::integer,
+         octet_length((x.value -> 'table')::text), x.value -> 'table'
+    from jsonb_array_elements(et) as x(value);
+  -- Retention: the current row; a superseded row (and its tables, by cascade) once superseded for 24 h.
   delete from public.physiology_context_days d
    where d.user_id = j.user_id and d.device_id = j.device_id and d.day = j.day and d.mode = j.mode
-     and d.superseded_by is not null and d.context_revision is distinct from v_prev;
+     and d.superseded_by is not null and d.superseded_at < v_now - interval '24 hours';
 
   -- Daily values: replaced for the day; compared first for the cross-day cascade.
   select coalesce(jsonb_agg(v.payload order by v.series_key collate "C", v.regime_key collate "C"), '[]'::jsonb)
@@ -1263,6 +1351,7 @@ begin
 
   return jsonb_build_object('applied', true, 'context_revision', v_rev, 'reason', 'published',
     'cascaded_days', v_cascaded, 'superseded_revision', v_prev, 'document_bytes', v_bytes,
+    'envelope_tables', to_jsonb(v_table_metrics), 'table_bytes', v_table_bytes,
     'daily_values_changed', v_changed, 'episodes_replaced', v_episodes, 'frozen_references_inserted', v_frozen);
 end $$;
 
@@ -1274,7 +1363,10 @@ end $$;
 -- document exists, else causal_live when one exists, else whichever mode has a job (retrospective first).
 -- status: pending when that mode's job is queued (completed_revision < input_revision, not dead-lettered),
 -- else available when a document exists, else none. A pending status still returns the current (older)
--- document so the caller can show it as updating. p_metric keeps only the envelopes of that metric.
+-- document so the caller can show it as updating. document is the stored summary; envelope_tables holds the
+-- revision's EnvelopeTable JSON, only p_metric's table when given (MetricKind raw value), every table otherwise;
+-- the client rebuilds with StoredDocument.join(summary:tables:). (A plain document's own envelopes, if any, are
+-- filtered by p_metric too.)
 -- pairing compares the newest frwhoop-server-1 snapshot of the day with the snapshot the document was built
 -- against; consistent is true only when a document exists and the two are equal (both NULL counts as equal).
 create or replace function public.physiology_context_read_v1(p_user uuid, p_device uuid, p_day date,
@@ -1291,6 +1383,10 @@ declare
   v_snapshot bigint;
   v_doc jsonb;
   v_returned integer;
+  v_tables jsonb;
+  v_table_bytes bigint;
+  v_table_envelopes bigint;
+  v_stored_table_bytes bigint;
 begin
   if auth.uid() is not null and auth.uid() is distinct from p_user then
     raise exception 'cross_user_caller' using errcode = '42501';
@@ -1345,7 +1441,14 @@ begin
           from jsonb_array_elements(v_doc -> 'envelopes') with ordinality as x(value, ord)
          where x.value ->> 'metric' = p_metric), '[]'::jsonb));
     end if;
-    v_returned := case when jsonb_typeof(v_doc -> 'envelopes') = 'array'
+    select coalesce(jsonb_agg(t.envelope_table order by t.metric collate "C"), '[]'::jsonb),
+           coalesce(sum(t.table_bytes), 0), coalesce(sum(t.envelope_count), 0)
+      into v_tables, v_table_bytes, v_table_envelopes
+      from public.physiology_context_envelope_tables t
+     where t.context_revision = r.context_revision and (p_metric is null or t.metric = p_metric);
+    select coalesce(sum(t.table_bytes), 0) into v_stored_table_bytes
+      from public.physiology_context_envelope_tables t where t.context_revision = r.context_revision;
+    v_returned := v_table_envelopes::integer + case when jsonb_typeof(v_doc -> 'envelopes') = 'array'
                        then jsonb_array_length(v_doc -> 'envelopes') else 0 end;
   end if;
 
@@ -1362,9 +1465,11 @@ begin
         'policy_fingerprint', r.policy_fingerprint, 'input_fingerprint', r.input_fingerprint,
         'versions', r.versions, 'published_at', r.published_at) end,
     'document', v_doc,
+    'envelope_tables', v_tables,
     'metric', p_metric,
     'document_bytes', case when v_found then r.document_bytes end,
-    'returned_document_bytes', case when v_found then octet_length(v_doc::text) end,
+    'stored_table_bytes', v_stored_table_bytes,
+    'returned_table_bytes', v_table_bytes,
     'envelope_count', case when v_found then r.envelope_count end,
     'returned_envelope_count', v_returned,
     'pairing', jsonb_build_object(
@@ -1453,9 +1558,11 @@ end $$;
 --   revision <  current          ignored (duplicate) when that exact revision is stored, else rejected
 --                                (stale_revision)
 --   invalid                      rejected (invalid_<field>), nothing stored
--- Affected days, in the owner's zone, for every device of the owner: from the local day of the earliest
--- occurrence start (old and new revision) through the local day of (the latest occurrence end + 72 h - 1 s),
--- i.e. the half-open span [min start, max end + 72 h); clamped to today and the most recent 120 days.
+-- Affected days (mirrors Swift Exposures.affectedDays), in the owner's zone, for every device of the owner: the
+-- local days covering the CLOSED instant range [min(start) - 24 h, max(end) + 72 h] over the old and new revision,
+-- with end = max(end, start + 1) for a point event. The end instant is included because Exposures.refs keeps an
+-- event whose end is exactly 72 h before a measurement (support.start - occurred.end <= lookback). Clamped to
+-- days <= the owner's today and the most recent 120 days.
 -- Returns {status, event_id, revision, reason, received_at, invalidated_days}.
 create or replace function public.record_exposure_event_v1(p_owner uuid, p_source uuid, p_event jsonb)
 returns jsonb language plpgsql security definer set search_path = '' as $$
@@ -1548,11 +1655,13 @@ begin
     updated_at = excluded.updated_at;
 
   v_lo := case when v_has_current then least(v_start, cur.occurred_start) else v_start end;
-  v_hi := case when v_has_current then greatest(v_end, cur.occurred_end) else v_end end;
+  v_hi := case when v_has_current
+               then greatest(greatest(v_end, v_start + 1), greatest(cur.occurred_end, cur.occurred_start + 1))
+               else greatest(v_end, v_start + 1) end;
   v_zone := internal.physiology_context_zone(p_owner);
   v_count := internal.physiology_context_invalidate(p_owner, null,
-    (to_timestamp(v_lo) at time zone v_zone)::date,
-    (to_timestamp(v_hi + 259200 - 1) at time zone v_zone)::date,
+    (to_timestamp(v_lo - 86400) at time zone v_zone)::date,
+    (to_timestamp(v_hi + 259200) at time zone v_zone)::date,
     'exposure_changed');
   return jsonb_build_object('status', 'saved', 'event_id', v_id, 'revision', v_rev, 'reason', null,
     'received_at', v_received, 'invalidated_days', v_count);
@@ -1680,7 +1789,9 @@ grant execute on function public.exposure_events_read_v1(uuid, bigint, bigint, b
 comment on table public.physiology_context_jobs is
   'Physiology context queue: one job per (user, device, local day, mode). Fenced like scoring_jobs_v2 (input_revision/completed_revision, lease token, backoff, dead letter at 8). Service role only.';
 comment on table public.physiology_context_days is
-  'One immutable physiology context document per published revision of (user, device, local day, mode). superseded_by IS NULL marks the current row; retention keeps the current row and the previous one. Written only by publish_physiology_context_v1.';
+  'One immutable physiology context summary document per published revision of (user, device, local day, mode); its envelopes are in physiology_context_envelope_tables. superseded_by IS NULL marks the current row; a superseded row is deleted (with its tables) once superseded for 24 h. Written only by publish_physiology_context_v1.';
+comment on table public.physiology_context_envelope_tables is
+  'One interned EnvelopeTable (PCStoredDocument.swift, pc-wire-1) per metric of a published physiology context revision; deleted with its day row. Rebuild a document with StoredDocument.join(summary:tables:).';
 comment on table public.physiology_context_daily_values is
   'Current context-conditioned daily values (DailyValue JSON in payload) per (user, device, mode, day, series, regime); replaced on each publish of the day. History source for references.';
 comment on table public.physiology_context_bouts is
