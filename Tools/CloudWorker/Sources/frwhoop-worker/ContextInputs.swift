@@ -37,6 +37,8 @@ enum ContextInputs {
         var cutoffOverride: Int?
         /// Database clock at the claim (unix seconds).
         var claimedAt: Int
+        /// The queue's own `[local midnight, next local midnight)` for the day, when the claim returned it.
+        var queueDayWindow: PC.Interval? = nil
 
         /// contracts §7.3: `causal_live` decides at the claim time, or at `cutoff_override` for a replay;
         /// `retrospective` uses the claim time (and every input stored by then).
@@ -58,8 +60,11 @@ enum ContextInputs {
         let tzRaw = (r["timezone_id"] ?? "").trimmingCharacters(in: .whitespaces)
         let tz = (!tzRaw.isEmpty && TimeZone(identifier: tzRaw) != nil) ? tzRaw : "UTC"
         let override = Int(r["cutoff_override"] ?? "")
+        var queueWindow: PC.Interval?
+        if let s = Int(r["day_start"] ?? ""), let e = Int(r["day_end"] ?? ""), e > s { queueWindow = PC.Interval(s, e) }
         return Job(userId: uid, deviceId: dev, day: day, mode: mode, inputRevision: revision,
-                   leaseToken: token, timezoneId: tz, cutoffOverride: override, claimedAt: claimedAt)
+                   leaseToken: token, timezoneId: tz, cutoffOverride: override, claimedAt: claimedAt,
+                   queueDayWindow: queueWindow)
     }
 
     static func isDayKey(_ s: String) -> Bool {
@@ -83,6 +88,7 @@ enum ContextInputs {
         var boutsFrom: String     // D−3
         var priorSleepFrom: String // D−14
         var previousDay: String   // D−1
+        var nextDay: String       // D+1
         /// UTC calendar days the read window touches (activity day documents are per UTC day).
         var utcFrom: String
         var utcTo: String
@@ -107,12 +113,12 @@ enum ContextInputs {
               let plus1Start = DayScorer.dayStartUnix(dPlus1, tz: tz),
               let historyFrom = shiftDay(day, by: -historyDays), let boutsFrom = shiftDay(day, by: -boutHistoryDays),
               let priorSleepFrom = shiftDay(day, by: -priorSleepNights),
-              let previous = shiftDay(day, by: -1) else { return nil }
+              let previous = shiftDay(day, by: -1), let next = shiftDay(day, by: 1) else { return nil }
         let exposureEnd = DayScorer.nextDayStartUnix(after: plus1Start, tz: tz)
         let read = PC.Interval(start - lookbackS, end + lookaheadS)
         return Windows(day: day, timezoneId: timezoneId, dayWindow: PC.Interval(start, end), read: read,
                        exposure: PC.Interval(exposureStart, exposureEnd), historyFrom: historyFrom,
-                       boutsFrom: boutsFrom, priorSleepFrom: priorSleepFrom, previousDay: previous,
+                       boutsFrom: boutsFrom, priorSleepFrom: priorSleepFrom, previousDay: previous, nextDay: next,
                        utcFrom: utcDay(read.start), utcTo: utcDay(read.end - 1))
     }
 
@@ -184,7 +190,8 @@ enum ContextInputs {
         var wearEvents: [PC.WearEventObservation] = []
         var bandSleep: [PC.BandSleepStateObservation] = []
         var snapshot: Snapshot?
-        var priorSnapshots: [Snapshot] = []
+        /// The sleep of the newest snapshot of every other day in D−14 … D+1 (sessions only; values unused).
+        var otherSnapshots: [Snapshot] = []
         var workouts: [PC.WorkoutInput] = []
         var epochs: [PC.ActivityEpochInput] = []
         var intervals: [PC.ActivityIntervalInput] = []
@@ -218,7 +225,7 @@ enum ContextInputs {
             l.placements.sort { ($0.start, $0.end ?? Int.max, $0.revision, $0.recordedAt ?? -1, $0.placement, $0.source) <
                                 ($1.start, $1.end ?? Int.max, $1.revision, $1.recordedAt ?? -1, $1.placement, $1.source) }
             l.exposures.sort { ($0.eventId, $0.revision) < ($1.eventId, $1.revision) }
-            l.priorSnapshots.sort { ($0.day, $0.resultRevision) < ($1.day, $1.resultRevision) }
+            l.otherSnapshots.sort { ($0.day, $0.resultRevision) < ($1.day, $1.resultRevision) }
             return l
         }
 
@@ -226,7 +233,7 @@ enum ContextInputs {
             heartRate.count + beatIntervals.count + motion.count + steps.count + skin.count + wearEvents.count
                 + bandSleep.count + workouts.count + epochs.count + intervals.count + placements.count
                 + exposures.count + historyValues.count + historyBouts.count + frozen.count
-                + priorSnapshots.count + (snapshot == nil ? 0 : 1)
+                + otherSnapshots.count + (snapshot == nil ? 0 : 1)
         }
     }
 
@@ -296,16 +303,16 @@ enum ContextInputs {
                                          availableAt: Int(r["at"] ?? "") ?? job.cutoff)
             if out.snapshot == nil { out.skippedRows += 1 }
         }
-        let prior = try db.query(ContextSQL.priorSnapshotSleep,
-                                 scope + [w.priorSleepFrom, w.previousDay, scoringAlgorithmVersion,
-                                          String(job.cutoff)])
-        for r in prior {
+        let others = try db.query(ContextSQL.snapshotSleepRange,
+                                  scope + [w.priorSleepFrom, w.nextDay, scoringAlgorithmVersion,
+                                           String(job.cutoff), job.day])
+        for r in others {
             let day = r["day"] ?? ""
             guard let s = parseSnapshot(day: day, payloadText: "{\"sleep\":\(r["sleep"] ?? "[]")}",
                                         resultRevision: Int64(r["result_revision"] ?? "") ?? 0,
                                         inputRevision: 0, availableAt: Int(r["at"] ?? "") ?? job.cutoff)
             else { out.skippedRows += 1; continue }
-            out.priorSnapshots.append(s)
+            out.otherSnapshots.append(s)
         }
 
         if let r = try db.query(ContextSQL.device, [job.deviceId, job.userId]).first {
@@ -351,22 +358,26 @@ enum ContextInputs {
             }
         } ?? []
         let mode = job.mode.rawValue
+        // A causal decision reads only history published by its cutoff; a retrospective one reads it all.
+        let historyCutoff = job.mode == .causalLive ? String(job.cutoff) : ""
         out.historyValues = optional("history_daily_values_unavailable") {
-            try db.query(ContextSQL.historyDailyValues, scope + [mode, w.historyFrom, w.previousDay]).compactMap {
+            try db.query(ContextSQL.historyDailyValues,
+                         scope + [mode, w.historyFrom, w.previousDay, historyCutoff]).compactMap {
                 let v: PC.DailyValue? = decodeStored($0["value"])
                 if v == nil { skipped += 1 }
                 return v
             }
         } ?? []
         out.historyBouts = optional("history_bouts_unavailable") {
-            try db.query(ContextSQL.historyBouts, scope + [mode, w.boutsFrom, w.previousDay]).compactMap {
+            try db.query(ContextSQL.historyBouts,
+                         scope + [mode, w.boutsFrom, w.previousDay, historyCutoff]).compactMap {
                 let v: PC.ExertionBout? = decodeStored($0["bout"])
                 if v == nil { skipped += 1 }
                 return v
             }
         } ?? []
         out.frozen = optional("frozen_references_unavailable") {
-            try db.query(ContextSQL.frozenReferences, scope).compactMap {
+            try db.query(ContextSQL.frozenReferences, scope + [historyCutoff]).compactMap {
                 let v: PC.FrozenReference? = decodeStored($0["reference"])
                 if v == nil { skipped += 1 }
                 return v
@@ -653,7 +664,7 @@ enum ContextInputs {
                                       dayWindow: w.dayWindow)
 
         let snapshot = loaded.snapshot
-        let sleep = (snapshot.map(sleepInputs) ?? [])
+        let sleep = daySleep(snapshot: snapshot, others: loaded.otherSnapshots, windows: w)
         // Every input as stored, for the telemetry count of what a causal decision could not see.
         let unrestricted = PC.DayInput(
             identity: identity, mode: job.mode, availabilityCutoff: cutoff, generatedAt: job.generatedAt,
@@ -686,7 +697,7 @@ enum ContextInputs {
         input.measurements = measurements
         input.inputRevisions = inputRevisions(loaded)
 
-        var priorSleep = loaded.priorSnapshots.flatMap(sleepInputs)
+        var priorSleep = dedupedSessions(loaded.otherSnapshots.filter { $0.day < w.day }.flatMap(sleepInputs))
         if causal { priorSleep = priorSleep.filter { ($0.availableAt ?? Int.min) <= cutoff } }
         priorSleep.sort { ($0.interval, $0.id) < ($1.interval, $1.id) }
         let history = PC.HistoryInput(
@@ -696,6 +707,29 @@ enum ContextInputs {
             priorSleep: priorSleep)
         return Assembled(input: input, history: history, causalExcluded: excluded, rowCount: loaded.rowCount,
                          measurementCount: measurements.count)
+    }
+
+    /// The sessions the day's input carries: the day's own snapshot plus the neighbouring days' (D−1, D+1) that
+    /// reach into the read window, so the previous night and the next night are visible where the read window
+    /// covers them. Ownership by end is the sleep system's rule; nothing is re-assigned here.
+    static func daySleep(snapshot: Snapshot?, others: [Snapshot], windows w: Windows) -> [PC.SleepSessionInput] {
+        var sessions = snapshot.map(sleepInputs) ?? []
+        for s in others where s.day == w.previousDay || s.day == w.nextDay {
+            sessions += sleepInputs(s).filter { $0.interval.overlapSeconds(with: w.read) > 0 }
+        }
+        return dedupedSessions(sessions)
+    }
+
+    /// One session per id (the newest publication wins), in time order.
+    static func dedupedSessions(_ sessions: [PC.SleepSessionInput]) -> [PC.SleepSessionInput] {
+        var byId: [String: PC.SleepSessionInput] = [:]
+        for s in sessions {
+            if let old = byId[s.id], (old.sourceDay ?? "", old.availableAt ?? 0) >= (s.sourceDay ?? "", s.availableAt ?? 0) {
+                continue
+            }
+            byId[s.id] = s
+        }
+        return byId.values.sorted { ($0.interval, $0.id) < ($1.interval, $1.id) }
     }
 
     /// `DayScorer.oneTransportPerHour` over the contract's beat observations. That function filters and keeps
@@ -797,7 +831,7 @@ enum ContextInputs {
             PC.InputRevision(input: "activity_days", revision: maxOf(l.intervals.map(\.revision))),
             PC.InputRevision(input: "placement", revision: "\(l.placements.count):\(maxOf(l.placements.map(\.revision)))"),
             PC.InputRevision(input: "exposures", revision: "\(l.exposures.count):\(maxOf(l.exposures.map(\.availableAt)))"),
-            PC.InputRevision(input: "prior_sleep", revision: maxOf(l.priorSnapshots.map { Int($0.resultRevision) })),
+            PC.InputRevision(input: "other_day_snapshots", revision: maxOf(l.otherSnapshots.map { Int($0.resultRevision) })),
             PC.InputRevision(input: "history_daily_values", revision: String(l.historyValues.count)),
             PC.InputRevision(input: "history_bouts", revision: String(l.historyBouts.count)),
             PC.InputRevision(input: "frozen_references", revision: String(l.frozen.count)),

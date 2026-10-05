@@ -381,7 +381,7 @@ final class ContextLaneTests: XCTestCase {
     func testPriorSleepPublishedAfterACausalCutoffIsNotRead() throws {
         var l = fullDayLoaded()
         let payload = ContextDaySim.snapshotPayload(sessions: [(dayStart - 30 * 3_600, dayStart - 22 * 3_600)])
-        l.priorSnapshots = [
+        l.otherSnapshots = [
             try XCTUnwrap(ContextInputs.parseSnapshot(day: "2026-10-02", payloadText: payload, resultRevision: 5,
                                                       inputRevision: 0, availableAt: dayStart + 20 * 3_600)),
         ]
@@ -464,6 +464,31 @@ final class ContextLaneTests: XCTestCase {
                                                 from: JSONSerialization.data(withJSONObject: obj["document"]!))
         XCTAssertEqual(roundTrip.header.inputFingerprint, doc.header.inputFingerprint)
         XCTAssertEqual(roundTrip.envelopes.count, doc.envelopes.count)
+        // The job duration is sent when known.
+        let timed = try ContextLane.publishPayload(document: doc, snapshot: l.snapshot, durationMS: 1_234)
+        let timedObj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(timed.payloadText.utf8)) as? [String: Any])
+        XCTAssertEqual(timedObj["duration_ms"] as? Int, 1_234)
+    }
+
+    func testOnlyTheJobDaysProductsBecomeNormalizedRows() throws {
+        let l = fullDayLoaded()
+        let a = ContextInputs.assemble(l, job: job(), windows: try windows())
+        var doc = PC.Engine.buildDay(a.input, history: a.history)
+        doc.bouts = [
+            PC.ExertionBout(id: "today", interval: PC.Interval(dayStart + 30_000, dayStart + 30_900), day: "2026-10-03",
+                            kind: "walking", status: .complete, durationS: 900),
+            PC.ExertionBout(id: "yesterday", interval: PC.Interval(dayStart - 600, dayStart + 300), day: "2026-10-02",
+                            kind: "walking", status: .complete, durationS: 900),
+        ]
+        doc.dailyValues.append(PC.DailyValue(day: "2026-10-03", seriesKey: "x.live", regimeKey: "r", metric: nil,
+                                             value: 1, units: "s", supportCount: 1, supportUnit: "day", supportS: 1,
+                                             mode: .causalLive, finality: .provisional))
+        let built = try ContextLane.publishPayload(document: doc, snapshot: l.snapshot)
+        let obj = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(built.payloadText.utf8)) as? [String: Any])
+        XCTAssertEqual((obj["bouts"] as? [[String: Any]])?.compactMap { $0["id"] as? String }, ["today"])
+        XCTAssertFalse(((obj["daily_values"] as? [[String: Any]]) ?? []).contains { $0["series_key"] as? String == "x.live" })
+        XCTAssertEqual(built.outOfDay, 2)
+        XCTAssertEqual(((obj["document"] as? [String: Any])?["bouts"] as? [Any])?.count, 2, "the document is unchanged")
     }
 
     func testPayloadWithoutASnapshotSendsNullRevisions() throws {
@@ -481,8 +506,21 @@ final class ContextLaneTests: XCTestCase {
             #"{"applied":true,"context_revision":12,"reason":"published","cascaded_days":3}"#)
         XCTAssertEqual(published, .init(applied: true, revision: 12, reason: "published", cascadedDays: 3,
                                         unchanged: false))
-        let same = ContextLane.parsePublishResult(#"{"applied":true,"context_revision":12,"reason":"unchanged"}"#)
+        // The RPC reports identical fingerprints as applied=false + reason=unchanged + the existing revision, and
+        // completes the job: that is success.
+        let same = ContextLane.parsePublishResult(
+            #"{"applied":false,"context_revision":12,"reason":"unchanged","cascaded_days":0}"#)
         XCTAssertTrue(same.unchanged)
+        XCTAssertTrue(same.applied)
+        XCTAssertEqual(same.revision, 12)
+        XCTAssertFalse(ContextLane.parsePublishResult(#"{"applied":false,"context_revision":null,"reason":"unchanged"}"#).applied)
+        for reason in ["lease_lost", "lease_expired", "stale_revision", "owner_retired"] {
+            let r = ContextLane.parsePublishResult(#"{"applied":false,"context_revision":null,"reason":"\#(reason)"}"#)
+            XCTAssertFalse(r.applied, reason)
+            XCTAssertFalse(r.unchanged, reason)
+        }
+        XCTAssertEqual(ContextLane.failStatus(#"{"status":"released","consecutive_failures":0}"#), "released")
+        XCTAssertEqual(ContextLane.failStatus(nil), "unknown")
         XCTAssertEqual(ContextLane.parsePublishResult(#"{"applied":true,"context_revision":"9","cascaded_days":["a","b"]}"#).cascadedDays, 2)
         let fenced = ContextLane.parsePublishResult(#"{"applied":false,"reason":"stale_lease"}"#)
         XCTAssertFalse(fenced.applied)
@@ -516,7 +554,7 @@ final class ContextLaneTests: XCTestCase {
         let statements = [ContextSQL.tablesPresent, ContextSQL.enqueue, ContextSQL.claim, ContextSQL.renew,
                           ContextSQL.fail, ContextSQL.publish, ContextSQL.heartRate, ContextSQL.beatIntervals,
                           ContextSQL.gravity, ContextSQL.steps, ContextSQL.skinTemperature, ContextSQL.wearEvents,
-                          ContextSQL.bandSleepState, ContextSQL.latestSnapshot, ContextSQL.priorSnapshotSleep,
+                          ContextSQL.bandSleepState, ContextSQL.latestSnapshot, ContextSQL.snapshotSleepRange,
                           ContextSQL.workouts, ContextSQL.activityEpochs, ContextSQL.activityRuns,
                           ContextSQL.placements, ContextSQL.device, ContextSQL.profile, ContextSQL.exposureRevisions,
                           ContextSQL.historyDailyValues, ContextSQL.historyBouts, ContextSQL.frozenReferences]

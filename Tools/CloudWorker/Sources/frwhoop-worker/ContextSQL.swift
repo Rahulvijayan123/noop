@@ -31,19 +31,26 @@ enum ContextSQL {
 
     static let enqueue = "select public.enqueue_physiology_context_days_v1($1::integer)::text"
 
-    /// The claim, plus the database clock at the claim (the job's causal cutoff and `generatedAt`). The clock is
-    /// the database's so it is on the same timeline as `ingested_at`.
+    /// The claim (`claim_physiology_context_v1(p_worker, p_lease_seconds)`), plus the database clock at the
+    /// claim (the job's causal cutoff and `generatedAt`). The clock is the database's so it is on the same
+    /// timeline as `ingested_at`. `day_start`/`day_end` are the queue's own local-day bounds (checked against the
+    /// worker's).
     static let claim = """
         select c.user_id::text as user_id, c.device_id::text as device_id, c.day::text as day,
                c.mode::text as mode, c.input_revision::text as input_revision,
                c.lease_token::text as lease_token, coalesce(c.timezone_id::text, '') as timezone_id,
+               coalesce(c.day_start::text, '') as day_start, coalesce(c.day_end::text, '') as day_end,
                coalesce(c.cutoff_override::text, '') as cutoff_override,
+               coalesce(array_to_string(c.reasons, ','), '') as reasons,
                floor(extract(epoch from clock_timestamp()))::bigint::text as claimed_at
           from public.claim_physiology_context_v1($1::text, $2::integer) c
         """
 
     static let renew = "select public.renew_physiology_context_v1($1::uuid, $2::integer)::text"
+    /// Returns `{status: failed|released|lease_lost|lease_expired, ...}`.
     static let fail = "select public.fail_physiology_context_v1($1::uuid, $2::bigint, $3::text)::text"
+    /// Returns `{applied, context_revision, reason: published|unchanged|lease_lost|lease_expired|stale_revision|
+    /// owner_retired, cascaded_days, ...}`; a malformed payload raises 22023 `invalid_physiology_context_*`.
     static let publish = "select public.publish_physiology_context_v1($1::uuid, $2::bigint, $3::jsonb)::text"
 
     /// Heartbeat queue-age entry (appended only when `tablesPresent`; a static reference to a missing table fails
@@ -135,15 +142,23 @@ enum ContextSQL {
          limit 1
         """
 
-    /// The latest snapshot's sleep sessions for each earlier day in `[$3, $4]` published by `$6`.
-    static let priorSnapshotSleep = """
-        select distinct on (s.day) s.day::text as day, s.result_revision::text as result_revision,
-               ceil(extract(epoch from s.computed_at))::bigint::text as at,
-               coalesce((s.payload -> 'sleep')::text, '[]') as sleep
-          from public.scoring_snapshots_v2 s
-         where s.user_id = $1::uuid and s.device_id = $2::uuid and s.day >= $3::date and s.day <= $4::date
-           and s.algorithm_version = $5::text and s.computed_at <= to_timestamp($6::bigint)
-         order by s.day, s.result_revision desc
+    /// The sleep sessions of the newest snapshot of each OTHER day in `[$3, $4]` published by `$6`, `$7` excluded
+    /// (it is read in full above). The newest revision per day is picked from the read index first, so only those
+    /// payloads are read (a busy day holds hundreds of revisions; the pattern of `ActivityLane.loadPublishedNights`).
+    static let snapshotSleepRange = """
+        with newest as (
+          select s.day, max(s.result_revision) as rr
+            from public.scoring_snapshots_v2 s
+           where s.user_id = $1::uuid and s.device_id = $2::uuid and s.day >= $3::date and s.day <= $4::date
+             and s.day <> $7::date and s.algorithm_version = $5::text and s.computed_at <= to_timestamp($6::bigint)
+           group by s.day
+        )
+        select snap.day::text as day, snap.result_revision::text as result_revision,
+               ceil(extract(epoch from snap.computed_at))::bigint::text as at,
+               case when jsonb_typeof(snap.payload -> 'sleep') = 'array' then (snap.payload -> 'sleep')::text
+                    else '[]' end as sleep
+          from newest join public.scoring_snapshots_v2 snap on snap.result_revision = newest.rr
+         order by snap.day
         """
 
     /// Logged and detected workouts of this device overlapping the read window. Availability is the last write.
@@ -227,8 +242,7 @@ enum ContextSQL {
     static let exposureRevisions = """
         select r.event_id::text as event_id, r.revision::text as revision, r.kind, r.label,
                r.occurred_start::text as s, r.occurred_end::text as e, r.time_precision,
-               r.recorded_at::text as recorded_at,
-               coalesce(ceil(extract(epoch from r.received_at))::bigint::text, '') as received_at,
+               r.recorded_at::text as recorded_at, r.received_at::text as received_at,
                r.source, r.confirmation,
                coalesce(r.dose_amount::text, '') as dose_amount, coalesce(r.dose_unit, '') as dose_unit,
                coalesce(r.dose_provenance, '') as dose_provenance
@@ -237,29 +251,41 @@ enum ContextSQL {
          order by r.event_id, r.revision
         """
 
-    /// Earlier days' daily values of the same device and mode, `[$4, $5]`.
+    /// Earlier days' daily values of the same device and mode, `[$4, $5]`, as the `DailyValue` JSON the worker
+    /// published (`payload`). `$6` (unix seconds, or "" for none) is a causal cutoff: only values whose
+    /// publication is at or before it are read (a replay never sees history published after its decision).
     static let historyDailyValues = """
-        select v.value::text as value
+        select v.payload::text as value
           from public.physiology_context_daily_values v
          where v.user_id = $1::uuid and v.device_id = $2::uuid and v.mode = $3::text
            and v.day >= $4::date and v.day <= $5::date
-         order by v.day, v.series_key, v.regime_key
+           and (nullif($6, '') is null or exists (
+                 select 1 from public.physiology_context_days d
+                  where d.context_revision = v.context_revision
+                    and d.published_at <= to_timestamp(nullif($6, '')::bigint)))
+         order by v.day, v.series_key collate "C", v.regime_key collate "C"
         """
 
-    /// Earlier days' bouts of the same device and mode, `[$4, $5]`.
+    /// Earlier days' bouts of the same device and mode, `[$4, $5]` (`ExertionBout` JSON); `$6` as above.
     static let historyBouts = """
-        select b.bout::text as bout
+        select b.payload::text as bout
           from public.physiology_context_bouts b
          where b.user_id = $1::uuid and b.device_id = $2::uuid and b.mode = $3::text
            and b.day >= $4::date and b.day <= $5::date
-         order by b.day, b.bout_id
+           and (nullif($6, '') is null or exists (
+                 select 1 from public.physiology_context_days d
+                  where d.context_revision = b.context_revision
+                    and d.published_at <= to_timestamp(nullif($6, '')::bigint)))
+         order by b.day, b.start_ts, b.bout_id collate "C"
         """
 
-    /// Every frozen reference registered for the device.
+    /// Every frozen reference registered for the device (`FrozenReference` JSON); `$3` as `$6` above, against
+    /// the registration time.
     static let frozenReferences = """
-        select f.reference::text as reference
+        select f.payload::text as reference
           from public.physiology_context_frozen_references f
          where f.user_id = $1::uuid and f.device_id = $2::uuid
-         order by f.series_key, f.regime_key, f.version, f.reference_id
+           and (nullif($3, '') is null or f.registered_at <= to_timestamp(nullif($3, '')::bigint))
+         order by f.series_key collate "C", f.regime_key collate "C", f.version, f.reference_id collate "C"
         """
 }

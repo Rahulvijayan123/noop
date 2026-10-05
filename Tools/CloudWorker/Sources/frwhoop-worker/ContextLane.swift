@@ -77,6 +77,11 @@ struct ContextLane {
         /// Optional inputs that could not be read, summed over jobs.
         var inputsUnavailable = 0
         var rowsSkipped = 0
+        /// Daily values / bouts of the document not owned by the job's day (or mode), left out of the normalized
+        /// rows the publish replaces (they stay in the document).
+        var productsOutOfDay = 0
+        /// Claims whose queue day bounds differed from the worker's (the worker's, i.e. scoring's, are used).
+        var dayWindowMismatch = 0
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -99,6 +104,7 @@ struct ContextLane {
                 "causal_excluded_records": causalExcludedRecords,
                 "causal_excluded_exposure_revisions": causalExcludedExposures,
                 "inputs_unavailable": inputsUnavailable, "rows_skipped": rowsSkipped,
+                "products_out_of_day": productsOutOfDay, "day_window_mismatch": dayWindowMismatch,
             ]
         }
     }
@@ -261,6 +267,7 @@ struct ContextLane {
         guard let windows = ContextInputs.windows(day: job.day, timezoneId: job.timezoneId) else {
             throw ContextError.deterministic("invalid_job_day")
         }
+        if let queue = job.queueDayWindow, queue != windows.dayWindow { stats.dayWindowMismatch += 1 }
         guard try renew(job) else { throw Self.leaseLost("before the input reads") }
         let loadStarted = Date()
         let loaded = try ContextInputs.load(db: db, job: job, windows: windows)
@@ -270,8 +277,11 @@ struct ContextLane {
         let buildStarted = Date()
         let assembled = ContextInputs.assemble(loaded, job: job, windows: windows)
         let document = PC.Engine.buildDay(assembled.input, history: assembled.history, policy: policy)
-        let built = try Self.publishPayload(document: document, snapshot: loaded.snapshot)
+        let documentText = String(decoding: try PC.encoder().encode(document), as: UTF8.self)
         let buildMS = Self.millis(since: buildStarted)
+        // The job's duration (reads + build) rides along for the queue's `last_duration_ms`.
+        let built = try Self.publishPayload(document: document, snapshot: loaded.snapshot,
+                                            durationMS: loadMS + buildMS, documentText: documentText)
         noteTelemetry(loadMS: loadMS, buildMS: buildMS, built: built, assembled: assembled, loaded: loaded)
 
         return try publish(job, payload: built.payloadText)
@@ -308,14 +318,22 @@ struct ContextLane {
         "context_publish_not_applied:claimed_revision=\(claimedRevision):\(sanitize(reason: reason))"
     }
 
-    /// Persist a failure (bounded backoff / dead letter) in its own transaction; never throws.
+    /// Persist a failure (bounded backoff / dead letter) in its own transaction; never throws. `failed` and
+    /// `released` are settled; `lease_lost` / `lease_expired` leave the queue's expiry to recover the job.
     private mutating func settle(token: String, revision: Int64, reason: String) {
         do {
-            _ = try db.callFunctionForJSON(ContextSQL.fail, [token, String(revision), reason])
-            stats.failuresPersisted += 1
+            let status = Self.failStatus(try db.callFunctionForJSON(ContextSQL.fail, [token, String(revision), reason]))
+            if status == "failed" || status == "released" { stats.failuresPersisted += 1 }
+            else { stats.failuresUnsettled += 1 }
         } catch {
             stats.failuresUnsettled += 1
         }
+    }
+
+    static func failStatus(_ text: String?) -> String {
+        guard let text, let data = text.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return "unknown" }
+        return (obj["status"] as? String) ?? "unknown"
     }
 
     // MARK: - Payload (contracts §6 publish_physiology_context_v1)
@@ -339,6 +357,10 @@ struct ContextLane {
         var payloadText: String
         var documentBytes: Int
         var header: PublishHeader
+        /// The encoded document (reused when the payload is rebuilt with the job duration).
+        var documentText: String
+        /// Daily values / bouts left out of the normalized rows because another day (or mode) owns them.
+        var outOfDay: Int
     }
 
     static func header(of d: PC.DayDocument) -> PublishHeader {
@@ -351,28 +373,39 @@ struct ContextLane {
                       versions: d.header.versions)
     }
 
-    /// `{header, document, scoring_result_revision, scoring_input_revision, daily_values[], bouts[], episodes[],
-    /// new_frozen_references[]}`. Every part is encoded with `PhysiologyContext.encoder()` (snake_case, sorted
-    /// keys); the document is embedded byte for byte, so `document_bytes` is the encoded document's length.
-    static func publishPayload(document d: PC.DayDocument, snapshot: ContextInputs.Snapshot?) throws -> Built {
+    /// `{header, document, scoring_result_revision, scoring_input_revision, duration_ms, daily_values[], bouts[],
+    /// episodes[], new_frozen_references[]}` (`publish_physiology_context_v1`). Every part is encoded with
+    /// `PhysiologyContext.encoder()` (snake_case, sorted keys) and the document is embedded byte for byte.
+    ///
+    /// The normalized rows the publish REPLACES for the day are the document's daily values and bouts owned by the
+    /// job's day and mode (the RPC rejects any other): a bout another day owns stays in this document but is
+    /// that day's row to write.
+    static func publishPayload(document d: PC.DayDocument, snapshot: ContextInputs.Snapshot?,
+                               durationMS: Int? = nil, documentText: String? = nil) throws -> Built {
         let encoder = PC.encoder()
         func text<T: Encodable>(_ value: T) throws -> String { String(decoding: try encoder.encode(value), as: UTF8.self) }
-        let documentData = try encoder.encode(d)
+        let documentText = try documentText ?? text(d)
         let header = Self.header(of: d)
+        let day = d.header.identity.day, mode = d.header.interpretation.mode
+        let values = d.dailyValues.filter { $0.day == day && $0.mode == mode }
+        let bouts = d.bouts.filter { $0.day == day }
         let revision = snapshot.map { String($0.resultRevision) } ?? "null"
         let input = snapshot.map { String($0.inputRevision) } ?? "null"
-        let parts: [(String, String)] = [
-            ("bouts", try text(d.bouts)),
-            ("daily_values", try text(d.dailyValues)),
-            ("document", String(decoding: documentData, as: UTF8.self)),
+        var parts: [(String, String)] = [
+            ("bouts", try text(bouts)),
+            ("daily_values", try text(values)),
+            ("document", documentText),
             ("episodes", try text(d.episodes)),
             ("header", try text(header)),
             ("new_frozen_references", try text(d.newFrozenReferences)),
             ("scoring_input_revision", input),
             ("scoring_result_revision", revision),
         ]
+        if let durationMS { parts.insert(("duration_ms", String(max(0, durationMS))), at: 3) }
         let body = parts.map { "\"\($0.0)\":\($0.1)" }.joined(separator: ",")
-        return Built(payloadText: "{" + body + "}", documentBytes: documentData.count, header: header)
+        return Built(payloadText: "{" + body + "}", documentBytes: documentText.utf8.count, header: header,
+                     documentText: documentText,
+                     outOfDay: (d.dailyValues.count - values.count) + (d.bouts.count - bouts.count))
     }
 
     struct PublishResult: Equatable {
@@ -383,7 +416,9 @@ struct ContextLane {
         var unchanged: Bool
     }
 
-    /// `{applied, context_revision, reason, cascaded_days}`; NULL / unparsable → not applied.
+    /// `{applied, context_revision, reason, cascaded_days}`; NULL / unparsable → not applied. The RPC reports an
+    /// identical (policy, input) fingerprint pair as `applied: false, reason: unchanged` WITH the existing
+    /// revision and completes the job; that is success, not a fence.
     static func parsePublishResult(_ text: String?) -> PublishResult {
         guard let text, let data = text.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
@@ -398,13 +433,10 @@ struct ContextLane {
         if let n = obj["cascaded_days"] as? NSNumber { cascaded = n.intValue }
         else if let a = obj["cascaded_days"] as? [Any] { cascaded = a.count }
         else { cascaded = 0 }
-        return PublishResult(applied: applied, revision: revision, reason: reason, cascadedDays: cascaded,
-                             unchanged: applied && unchangedReasons.contains(reason))
+        let unchanged = reason == "unchanged" && revision != nil
+        return PublishResult(applied: applied || unchanged, revision: revision, reason: reason,
+                             cascadedDays: cascaded, unchanged: unchanged)
     }
-
-    /// Reasons with which an applied publish reports "identical fingerprints, nothing new stored".
-    static let unchangedReasons: Set<String> = ["unchanged", "identical", "duplicate", "idempotent", "noop",
-                                                "no_op", "same_fingerprint"]
 
     // MARK: - Telemetry and errors
 
@@ -429,6 +461,7 @@ struct ContextLane {
         }
         stats.inputsUnavailable += loaded.unavailable.count
         stats.rowsSkipped += loaded.skippedRows
+        stats.productsOutOfDay += built.outOfDay
     }
 
     private mutating func clearError() {

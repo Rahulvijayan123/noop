@@ -55,7 +55,7 @@ final class ContextLaneProfileTests: XCTestCase {
             if d <= 14 {
                 let payload = ContextDaySim.snapshotPayload(sessions: [(dayStart - d * 86_400 - 3_600,
                                                                         dayStart - d * 86_400 + 7 * 3_600)])
-                l.priorSnapshots.append(ContextInputs.parseSnapshot(day: key, payloadText: payload,
+                l.otherSnapshots.append(ContextInputs.parseSnapshot(day: key, payloadText: payload,
                                                                     resultRevision: Int64(100 - d), inputRevision: 0,
                                                                     availableAt: dayStart - d * 86_400 + 8 * 3_600)!)
             }
