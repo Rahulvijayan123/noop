@@ -1,14 +1,16 @@
 -- Activity-context DB contract (contracts C5 + C10). Runs inside the isolated, fully migrated
 -- test database with 20261003120000_activity_context.sql (sections 1-11),
--- 20261003130000_activity_context_days.sql (section 12, the ActivityContext v2 day documents) and
--- 20261003140000_activity_context_stream_days.sql (section 13, stream days and the read surface)
+-- 20261003130000_activity_context_days.sql (section 12, the ActivityContext v2 day documents),
+-- 20261003140000_activity_context_stream_days.sql (section 13, stream days and the read surface) and
+-- 20261004150000_activity_context_canonical_class.sql (section 14, the canonical class columns)
 -- applied. Every fixture change rolls back; no deployed credentials or data are touched.
 -- Statement timeout keeps a misbehaving assertion from hanging a disposable cluster.
 --
 -- Run against a disposable cluster the way the other *.sql tests run:
 --   psql -X -qAt -v ON_ERROR_STOP=1 -f ../../migrations/20261003120000_activity_context.sql \
 --        -f ../../migrations/20261003130000_activity_context_days.sql \
---        -f ../../migrations/20261003140000_activity_context_stream_days.sql -f activity_context_contract.sql
+--        -f ../../migrations/20261003140000_activity_context_stream_days.sql \
+--        -f ../../migrations/20261004150000_activity_context_canonical_class.sql -f activity_context_contract.sql
 -- (the migrations must apply to a fully migrated Supabase-style schema first; the fixtures here
 -- only need base_schema, production_persistence, scoring_service_state, physiology_revisions,
 -- the devices_owner_identity unique constraint and these migrations).
@@ -1676,5 +1678,261 @@ begin
   raise notice 'PASS 13.6 deletion cascade';
 end;
 $$;
+
+rollback;
+
+-- 14. The canonical class on the read surface (20261004150000_activity_context_canonical_class.sql):
+-- a run may carry the app's activity class and its confidence; a document without them stays valid and
+-- reads as NULL; a malformed value is rejected when the document is published instead of failing every
+-- read of the views; the lookup and the measurement join return the class.
+begin;
+set local statement_timeout = '120s';
+insert into auth.users(id) values
+ ('a0000000-0000-4000-8000-000000000001'),
+ ('a0000000-0000-4000-8000-000000000002');
+insert into public.devices(id,user_id,source_kind) values
+ ('a0000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','noop_push'),
+ ('a0000000-0000-4000-8000-000000000012','a0000000-0000-4000-8000-000000000002','noop_push');
+
+create function pg_temp.c_lo(p_day date) returns bigint language sql as $$
+  select extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint
+$$;
+-- A run with the head probabilities the decoder writes, plus the canonical class keys when given.
+create function pg_temp.c_run(p_s bigint, p_e bigint, p_label text, p_class jsonb default null,
+                              p_class_conf jsonb default null) returns jsonb
+language sql as $$
+  select jsonb_build_object('s',p_s,'e',p_e,
+    'posture',jsonb_build_object('seated_likely',0.8,'unknown',0.2),
+    'locomotion',jsonb_build_object('stationary',0.9,'walking',0.1),
+    'arm_behavior',jsonb_build_object('desk_like',0.7),
+    'intensity',0.02,'overall_confidence',0.8,'overall_uncertainty',0.3,
+    'display_context',p_label,'sleep','awake','wear','on_wrist','n',((p_e-p_s)/5)::integer)
+    || case when p_class is null then '{}'::jsonb else jsonb_build_object('activity_class',p_class) end
+    || case when p_class_conf is null then '{}'::jsonb else jsonb_build_object('class_confidence',p_class_conf) end
+$$;
+create function pg_temp.c_doc(p_day date, p_runs jsonb) returns jsonb language sql as $$
+  select jsonb_build_object(
+    'schema_version',2,
+    'versions',jsonb_build_object('schema',2,'ontology','v2.0','decoder','hsmm-1.2',
+      'feature_schema','imu-feat-1','encoder',null,'encoder_version',null),
+    'day_start',pg_temp.c_lo(p_day),'day_end',pg_temp.c_lo(p_day) + 86400,
+    'publish_interval_s',5,'generated_at',1790000000,'data_through',pg_temp.c_lo(p_day) + 3600,
+    'observed_s',3600,'sleep_known_outside',false,'context_fp','abc123',
+    'runs',p_runs,'events','[]'::jsonb,'latest',null,
+    'summary',jsonb_build_object('label_s',jsonb_build_object('sitting',100),'unclear_s',40,'mean_confidence',0.7))
+$$;
+create function pg_temp.c_payload(p_day date, p_doc jsonb) returns jsonb language sql as $$
+  select jsonb_build_object('day',p_day::text,'model_version','streams-activity-1',
+    'preprocessing_version','streams-v1','document',p_doc)
+$$;
+create function pg_temp.c_raises(p_sql text, p_msg text) returns boolean language plpgsql as $$
+begin
+  begin
+    execute p_sql;
+  exception when others then
+    return sqlerrm = p_msg;
+  end;
+  return false;
+end $$;
+
+-- 14.1 Validation: optional, strict when present.
+do $$
+declare
+  lo bigint := pg_temp.c_lo('2026-10-20');
+  base jsonb := pg_temp.c_run(pg_temp.c_lo('2026-10-20') + 100, pg_temp.c_lo('2026-10-20') + 200, 'sitting');
+  hi bigint := pg_temp.c_lo('2026-10-20') + 86400;
+begin
+  assert internal.activity_day_run_valid(base, lo, hi), 'a run from before the class existed stays valid';
+  assert internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"sitting_desk"', '0.74'), lo, hi),
+    'a run with a class and its confidence is valid';
+  assert internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"unknown"', '0'), lo, hi),
+    'confidence 0 is valid';
+  assert internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"off_wrist"', '1'), lo, hi),
+    'confidence 1 is valid';
+  assert internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', 'null', 'null'), lo, hi),
+    'JSON nulls read as absent';
+  assert internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', to_jsonb('a' || repeat('b', 31)), '0.5'), lo, hi),
+    'a class code of 32 characters is the longest accepted';
+  assert internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"a_future_class_2"', '0.5'), lo, hi),
+    'a class a later taxonomy adds needs no migration';
+
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '5', '0.5'), lo, hi), 'the class must be a string';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '["walking"]', '0.5'), lo, hi), 'not an array';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '""', '0.5'), lo, hi), 'not empty';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"Walking"', '0.5'), lo, hi), 'lower case only';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"sitting desk"', '0.5'), lo, hi), 'no spaces';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"sitting-desk"', '0.5'), lo, hi), 'no hyphens';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"2fast"', '0.5'), lo, hi), 'starts with a letter';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', to_jsonb('a' || repeat('b', 32)), '0.5'), lo, hi),
+    'a class code of 33 characters is too long';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"walking"', '"0.5"'), lo, hi), 'confidence must be a number';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"walking"', '1.01'), lo, hi), 'confidence above 1';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"walking"', '-0.01'), lo, hi), 'confidence below 0';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"walking"', 'true'), lo, hi), 'confidence is not a boolean';
+  -- Every earlier rule still holds.
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, lo + 100, 'sitting', '"walking"', '0.5'), lo, hi), 'an empty run';
+  assert not internal.activity_day_run_valid(pg_temp.c_run(lo + 100, hi + 5, 'sitting', '"walking"', '0.5'), lo, hi), 'a run past the day';
+  assert not internal.activity_day_run_valid(base - 'wear', lo, hi), 'wear is still required';
+  assert not internal.activity_day_run_valid(jsonb_set(base, '{overall_confidence}', '1.2'), lo, hi), 'run confidence is still bounded';
+  -- The helper stays out of reach of client roles, as before.
+  assert not has_function_privilege('anon', 'internal.activity_day_run_valid(jsonb,bigint,bigint)', 'execute'), 'anon cannot call the validator';
+  assert not has_function_privilege('authenticated', 'internal.activity_day_run_valid(jsonb,bigint,bigint)', 'execute'), 'authenticated cannot call it';
+  assert not has_function_privilege('service_role', 'internal.activity_day_run_valid(jsonb,bigint,bigint)', 'execute'), 'nor the service role';
+  raise notice 'PASS 14.1 class validation';
+end;
+$$;
+
+-- 14.2 A malformed class is rejected when the document is published, and the stable message is the
+--      one every other malformed run produces; a good one is stored verbatim.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := (clock_timestamp() at time zone 'UTC')::date - 2;
+  lo bigint := pg_temp.c_lo((clock_timestamp() at time zone 'UTC')::date - 2);
+  j record; rev bigint;
+begin
+  delete from public.activity_context_jobs;
+  delete from public.activity_context_days;
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u1,d1,v_day,'frwhoop-server-1',1,1,clock_timestamp()) on conflict do nothing;
+  perform public.enqueue_activity_stream_days();
+  delete from public.activity_context_jobs where day <> v_day;
+  select * into j from public.claim_activity_stream_day(300);
+  assert j.day = v_day, 'the test claimed its own job';
+
+  assert pg_temp.c_raises(format('select public.complete_activity_stream_day(%L, %s, %L::jsonb, 1)', j.lease_token, j.input_revision,
+      pg_temp.c_payload(v_day, pg_temp.c_doc(v_day, jsonb_build_array(
+        pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"Sitting At Desk"', '0.5'))))::text),
+    'invalid_activity_day_run'), 'a class that is not a snake_case code rejects the document';
+  assert pg_temp.c_raises(format('select public.complete_activity_stream_day(%L, %s, %L::jsonb, 1)', j.lease_token, j.input_revision,
+      pg_temp.c_payload(v_day, pg_temp.c_doc(v_day, jsonb_build_array(
+        pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"sitting_desk"', '"high"'))))::text),
+    'invalid_activity_day_run'), 'a class confidence that is not a number rejects the document';
+  assert not exists(select 1 from public.activity_context_days where user_id = u1 and device_id = d1 and day = v_day),
+    'a rejected document leaves no row';
+  assert (select completed_revision < input_revision and lease_token = j.lease_token from public.activity_context_jobs
+          where user_id = u1 and device_id = d1 and day = v_day), 'a rejected document completes nothing';
+
+  rev := public.complete_activity_stream_day(j.lease_token, j.input_revision,
+    pg_temp.c_payload(v_day, pg_temp.c_doc(v_day, jsonb_build_array(
+      pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"sitting_desk"', '0.74')))), 5);
+  assert rev is not null and rev >= 1, 'a valid classified document is stored';
+  assert (select document -> 'runs' -> 0 ->> 'activity_class' = 'sitting_desk'
+            and (document -> 'runs' -> 0 ->> 'class_confidence')::numeric = 0.74
+          from public.activity_context_days where user_id = u1 and device_id = d1 and day = v_day),
+    'the class travels inside the stored document untouched';
+  raise notice 'PASS 14.2 publish-time validation';
+end;
+$$;
+
+-- 14.3 The read surface: new columns come last, old documents read NULL, the lookup and the measurement
+--      join return the class.
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := (clock_timestamp() at time zone 'UTC')::date - 3;
+  lo bigint := pg_temp.c_lo((clock_timestamp() at time zone 'UTC')::date - 3);
+  src uuid := gen_random_uuid(); got text[]; r record; cols text[];
+begin
+  delete from public.activity_context_jobs;
+  delete from public.activity_context_days;
+  -- A document from before the class existed (no keys) next to a classified one on another day.
+  insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+    decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+    publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+  values (u1,d1,v_day,'streams-activity-1',2,'v2.0','hsmm-1.2','imu-feat-1','streams-activity-1','streams-v1',repeat('a',64),1,
+          5,3600,3,0,0,0.8,
+          pg_temp.c_doc(v_day, jsonb_build_array(
+            pg_temp.c_run(lo + 100, lo + 200, 'sitting', '"sitting_desk"', '0.74'),
+            pg_temp.c_run(lo + 200, lo + 260, 'walking', '"walking"', '0.61'),
+            pg_temp.c_run(lo + 260, lo + 300, 'x'))),
+          1,clock_timestamp()),
+         (u1,d1,v_day - 1,'streams-activity-1',2,'v2.0','hsmm-1.1','imu-feat-1','streams-activity-1','streams-v1',repeat('b',64),1,
+          5,3600,1,0,0,0.8,
+          pg_temp.c_doc(v_day - 1, jsonb_build_array(pg_temp.c_run(pg_temp.c_lo(v_day - 1) + 100, pg_temp.c_lo(v_day - 1) + 200, 'sitting'))),
+          2,clock_timestamp()),
+         ('a0000000-0000-4000-8000-000000000002','a0000000-0000-4000-8000-000000000012',v_day,'streams-activity-1',2,'v2.0','hsmm-1.2',
+          'imu-feat-1','streams-activity-1','streams-v1',repeat('c',64),1,5,3600,1,0,0,0.8,
+          pg_temp.c_doc(v_day, jsonb_build_array(pg_temp.c_run(lo + 100, lo + 200, 'running', '"running"', '0.9'))),
+          3,clock_timestamp());
+
+  -- Append-only: the columns that existed before keep their names and positions.
+  select array_agg(column_name::text order by ordinal_position) into cols
+    from information_schema.columns where table_schema = 'public' and table_name = 'activity_context_runs';
+  assert cols[1:25] = array['user_id','device_id','day','algorithm_version','start_ts','end_ts','start_at','end_at',
+    'duration_s','display_context','confidence','uncertainty','intensity','sleep_state','wear_state','states','posture',
+    'locomotion','arm_behavior','model_version','decoder_version','ontology_version','feature_schema','encoder_id',
+    'encoder_version'], 'the original columns keep their positions: ' || cols[1:25]::text;
+  assert cols[26:] = array['result_revision','computed_at','source_rank','activity_class','class_confidence'],
+    'the class columns come last: ' || cols[26:]::text;
+  assert (select reloptions @> array['security_invoker=true'] from pg_class where oid = 'public.activity_context_runs'::regclass),
+    'the runs view still runs with the caller''s rights';
+
+  select array_agg(coalesce(activity_class, '-') || ':' || coalesce(class_confidence::text, '-') order by start_ts) into got
+    from public.activity_context_runs where user_id = u1 and device_id = d1 and day = v_day;
+  assert got = array['sitting_desk:0.74', 'walking:0.61', '-:-'], 'classified runs return the class, the bare one NULL: ' || got::text;
+  assert (select count(*) = 1 and bool_and(activity_class is null and class_confidence is null)
+            from public.activity_context_runs where user_id = u1 and device_id = d1 and day = v_day - 1),
+    'a document from before the class existed reads NULL, not an error';
+  assert (select array_agg(display_context order by start_ts) = array['sitting', 'walking', 'x']
+            and min(confidence) > 0.79 and max(confidence) < 0.81 and min(duration_s) = 40
+            from public.activity_context_runs where user_id = u1 and device_id = d1 and day = v_day),
+    'the earlier columns are unaffected';
+
+  -- The lookup returns the class next to everything it returned before.
+  select * into r from public.activity_context_at(u1, d1, lo + 150);
+  assert r.display_context = 'sitting' and r.activity_class = 'sitting_desk' and abs(r.class_confidence - 0.74) < 0.001
+     and r.algorithm_version = 'streams-activity-1' and r.start_ts = lo + 100 and r.end_ts = lo + 200
+     and abs(r.confidence - 0.8) < 0.001, 'the lookup carries the class and its confidence';
+  assert (select activity_class from public.activity_context_at(u1, d1, lo + 200)) = 'walking', 'half-open: the next run starts at its first second';
+  assert (select activity_class is null from public.activity_context_at(u1, d1, lo + 280)), 'an unclassified run answers NULL';
+  assert (select count(*) = 0 from public.activity_context_at(u1, d1, lo + 300)), 'after the last run there is no answer';
+  assert has_function_privilege('authenticated', 'public.activity_context_at(uuid,uuid,bigint)', 'execute'), 'signed-in users can ask';
+  assert has_function_privilege('service_role', 'public.activity_context_at(uuid,uuid,bigint)', 'execute'), 'the service role can ask';
+  assert not has_function_privilege('anon', 'public.activity_context_at(uuid,uuid,bigint)', 'execute'), 'anonymous callers cannot';
+  assert has_table_privilege('authenticated', 'public.activity_context_runs', 'select')
+     and not has_table_privilege('anon', 'public.activity_context_runs', 'select'), 'the view keeps its grants';
+
+  -- Labelling stored measurements with the class, by exact second.
+  insert into public.noop_hr_samples(user_id,device_id,source_id,ts,bpm,batch_id)
+  values (u1,d1,src,lo + 120,62,src), (u1,d1,src,lo + 210,95,src), (u1,d1,src,lo + 280,70,src), (u1,d1,src,lo + 500,66,src);
+  select array_agg(x.label order by x.ts) into got from (
+    select h.ts, coalesce(ctx.activity_class, '-') || '@' || coalesce(ctx.class_confidence::text, '-') as label
+      from public.noop_hr_samples h
+      left join public.activity_context_runs ctx
+        on ctx.user_id = h.user_id and ctx.device_id = h.device_id
+       and ctx.day = (to_timestamp(h.ts) at time zone 'UTC')::date
+       and ctx.algorithm_version = 'streams-activity-1' and h.ts >= ctx.start_ts and h.ts < ctx.end_ts
+     where h.user_id = u1 and h.device_id = d1) x;
+  assert got = array['sitting_desk@0.74', 'walking@0.61', '-@-', '-@-'],
+    'each measurement is labelled with the class of the run covering its second: ' || got::text;
+  -- Time per class for the day: what a scoring model or the chatbot asks.
+  select array_agg(x.c || '=' || x.s order by x.c) into got from (
+    select coalesce(activity_class, 'none') as c, sum(duration_s) as s
+      from public.activity_context_runs where user_id = u1 and device_id = d1 and day = v_day group by 1) x;
+  assert got = array['none=40', 'sitting_desk=100', 'walking=60'], 'seconds per class: ' || got::text;
+  raise notice 'PASS 14.3 read surface carries the class';
+end;
+$$;
+
+-- 14.4 Owner isolation of the new columns.
+set local role authenticated;
+select set_config('request.jwt.claim.sub','a0000000-0000-4000-8000-000000000001',true);
+select set_config('request.jwt.claim.role','authenticated',true);
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  u2 uuid := 'a0000000-0000-4000-8000-000000000002'; d2 uuid := 'a0000000-0000-4000-8000-000000000012';
+  lo bigint := pg_temp.c_lo((clock_timestamp() at time zone 'UTC')::date - 3);
+begin
+  assert (select count(*) > 0 from public.activity_context_runs where activity_class is not null), 'an owner reads their own classes';
+  assert (select count(*) = 0 from public.activity_context_runs where user_id = u2 or activity_class = 'running'),
+    'never another owner''s, although one exists';
+  assert (select activity_class from public.activity_context_at(u1, d1, lo + 150)) = 'sitting_desk', 'an owner can ask what they were doing';
+  assert (select count(*) = 0 from public.activity_context_at(u2, d2, lo + 150)), 'the lookup must not leak another owner''s class';
+end;
+$$;
+reset role;
+do $$ begin raise notice 'PASS 14.4 owner isolation of the class columns'; end $$;
 
 rollback;

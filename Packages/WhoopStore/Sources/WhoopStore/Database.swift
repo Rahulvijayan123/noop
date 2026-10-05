@@ -1103,6 +1103,85 @@ extension WhoopStore {
         migrator.registerMigration("v47-rr-whoop5-fill") { db in
             try db.execute(sql: WhoopStore.whoop5RrFillMigrationSQL)
         }
+        // v48-activity-context: what the wearer was DOING, as a timestamp-aligned table that physiology
+        // joins to, rather than a label copied onto every sample.
+        //
+        // `activityContextInterval` holds one row per stretch of constant behavioural context ("sitting at a
+        // desk, 0.74 confident, from 14:02:10 to 14:17:10") together with the physiology that has no
+        // per-timestamp row of its own on the phone (RMSSD, respiratory rate, step cadence, HR trend). The
+        // streams themselves (hrSample, rrInterval, spo2Sample, ...) are NOT touched or duplicated: the
+        // `*Ctx` views below attach the covering interval to each sample at read time (an as-of join on
+        // the primary key), so a day of 86,000 heart-rate seconds stays 86,000 narrow rows and costs a few
+        // hundred interval rows of context (at least 96: an interval never exceeds 15 minutes).
+        //
+        // `activityContextDay` is the ledger of which days have been materialized and by which decoder /
+        // taxonomy version, so a newer decoder re-derives old days and a restored backup (these tables
+        // are derived, not backed up) is refilled. A day's intervals are always replaced as a unit.
+        //
+        // Rules for rows (enforced by `WhoopStore.replaceActivityContext`, relied on by the range reads):
+        // intervals within one device never overlap, are at most `ActivityContextStore.maxIntervalSeconds`
+        // long, and `[startTs, endTs)` is half-open.
+        //
+        // The views name the stream tables they read. A future migration that REBUILDS one of those tables
+        // (drop + rename, as v24-rr-seq did for rrInterval) must `DROP VIEW` the `*Ctx` views first and
+        // recreate them with `ActivityContextViews.createStatements`; `ActivityContextStoreTests` queries
+        // every view so a forgotten one fails loudly.
+        //
+        // iOS-only in schema_oracle.json (the Android decoder is not ported). Every create is
+        // `ifNotExists`, the v38/v46 idiom, so the migration is a no-op on a database that already has it.
+        migrator.registerMigration("v48-activity-context") { db in
+            try db.create(table: "activityContextInterval", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()
+                t.column("startTs", .integer).notNull()          // unix seconds, inclusive
+                t.column("endTs", .integer).notNull()            // unix seconds, exclusive
+                t.column("activityClass", .text).notNull()       // canonical ActivityClass code, e.g. sitting_desk
+                t.column("confidence", .double).notNull()        // belief in the class's family, 0...1
+                t.column("runnerUp", .text)                      // best alternative class, if any
+                t.column("runnerUpConfidence", .double).notNull().defaults(to: 0)
+                t.column("evidenceQuality", .double).notNull().defaults(to: 0)
+                t.column("posture", .text)                       // most common top reading of each head
+                t.column("locomotion", .text)
+                t.column("armBehavior", .text)
+                t.column("sleepState", .text).notNull()          // asleep | awake | unknown
+                t.column("wearState", .text).notNull()           // on_wrist | off_wrist | unknown
+                t.column("intensity", .double)                   // mean motion intensity, 0...1
+                t.column("stepTicks", .integer).notNull().defaults(to: 0)
+                t.column("cadenceSpm", .double)
+                t.column("hrSamples", .integer).notNull().defaults(to: 0)
+                t.column("hrMean", .double)
+                t.column("hrMin", .integer)
+                t.column("hrMax", .integer)
+                t.column("hrSlope", .double)                     // bpm per minute over the interval
+                t.column("rmssd", .double)                       // ms; NULL unless trustworthy and still
+                t.column("rrBeats", .integer).notNull().defaults(to: 0)
+                t.column("respRateBpm", .double)                 // breaths/min from RSA; NULL unless still
+                t.column("respBreaths", .integer).notNull().defaults(to: 0)
+                t.primaryKey(["deviceId", "startTs"])
+            }
+            // "When did I sit at a desk" / "every walking interval this month" without a table scan.
+            try db.create(index: "idx_activityContextInterval_class", on: "activityContextInterval",
+                          columns: ["deviceId", "activityClass", "startTs"], options: [.ifNotExists])
+
+            try db.create(table: "activityContextDay", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()
+                t.column("dayStart", .integer).notNull()         // unix seconds of the local day's start
+                t.column("day", .text).notNull()                 // local yyyy-MM-dd: joins dailyMetric.day
+                t.column("dayEnd", .integer).notNull()           // exclusive; the data horizon of a live day
+                t.column("taxonomyVersion", .text).notNull()     // activity class taxonomy, e.g. act-class-1
+                t.column("decoderVersion", .text).notNull()      // the state decoder that produced the runs
+                t.column("ontologyVersion", .text).notNull()
+                t.column("intervalVersion", .text).notNull()     // how runs became intervals + statistics
+                t.column("dataThrough", .integer)                // one past the last decoded second
+                t.column("observedSeconds", .integer).notNull().defaults(to: 0)
+                t.column("intervalCount", .integer).notNull().defaults(to: 0)
+                t.column("computedAt", .integer).notNull()
+                t.primaryKey(["deviceId", "dayStart"])
+            }
+            try db.create(index: "idx_activityContextDay_day", on: "activityContextDay",
+                          columns: ["deviceId", "day"], options: [.ifNotExists])
+
+            for sql in ActivityContextViews.createStatements { try db.execute(sql: sql) }
+        }
         return migrator
     }
 }

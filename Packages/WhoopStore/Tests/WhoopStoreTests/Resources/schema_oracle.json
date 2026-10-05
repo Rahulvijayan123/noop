@@ -48,7 +48,8 @@
     "v44-ppg-waveform-base-code",
     "v45-rr-source-index",
     "v46-lift-log",
-    "v47-rr-whoop5-fill"
+    "v47-rr-whoop5-fill",
+    "v48-activity-context"
   ],
   "divergenceReasons": {
     "android-orphan-synced-column": "REAL COLUMN DRIFT: `synced` exists on Android only. GRDB's v10 note is explicit that stepSample gets no `synced` column ('unused; see StreamStore'), and v12's ppgHrSample never had one either; the Room entities copied the flag from the older per-second entities. Nothing reads it on Android \u2014 the per-row upload flag belongs to an upload path that does not exist there \u2014 so it is dead width, not divergent data. Removing it needs a Room table rebuild.",
@@ -61,6 +62,269 @@
     "workout-route-polyline-android-only": "REAL COLUMN DRIFT \u2014 literally the case #775 was filed about: `workout.routePolyline` (encoded GPS route) was added by Room MIGRATION_3_4 and has no GRDB twin. A .noopbak exported from Android carries a column iOS's `workout` table cannot receive."
   },
   "tables": {
+    "activityContextDay": {
+      "platform": "ios_only",
+      "reason": "Derived behavioural-context ledger (GRDB v48): which local days have been decoded, by which activity-classifier decoder / taxonomy version, and how far the data reached. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams and is not part of a backup round-trip.",
+      "columns": [
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "dayStart",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "day",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "dayEnd",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "taxonomyVersion",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "decoderVersion",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "ontologyVersion",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "intervalVersion",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "dataThrough",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "observedSeconds",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "intervalCount",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "computedAt",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "deviceId",
+        "dayStart"
+      ],
+      "indices": [
+        {
+          "name": "idx_activityContextDay_day",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "day"
+          ]
+        }
+      ]
+    },
+    "activityContextInterval": {
+      "platform": "ios_only",
+      "reason": "Derived behavioural-context intervals (GRDB v48): the activity class / confidence covering [startTs, endTs) plus the physiology with no per-timestamp row of its own (RMSSD, respiratory rate, cadence, HR trend). Physiological samples join to it by time through the *Ctx views instead of carrying a copied label. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams and is not part of a backup round-trip.",
+      "columns": [
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "startTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "endTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "activityClass",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "confidence",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "runnerUp",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "runnerUpConfidence",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "evidenceQuality",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "posture",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "locomotion",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "armBehavior",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "sleepState",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "wearState",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "intensity",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "stepTicks",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "cadenceSpm",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrSamples",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "hrMean",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrMin",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrMax",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrSlope",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rmssd",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rrBeats",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "respRateBpm",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "respBreaths",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        }
+      ],
+      "primaryKey": [
+        "deviceId",
+        "startTs"
+      ],
+      "indices": [
+        {
+          "name": "idx_activityContextInterval_class",
+          "unique": false,
+          "columns": [
+            "deviceId",
+            "activityClass",
+            "startTs"
+          ]
+        }
+      ]
+    },
     "appleDaily": {
       "platform": "both",
       "columns": [

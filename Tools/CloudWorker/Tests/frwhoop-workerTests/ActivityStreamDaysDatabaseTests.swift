@@ -265,6 +265,50 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         }
     }
 
+    /// The canonical class (the closed `ActivityClass` vocabulary downstream code branches on) travels with
+    /// every stored run, and the as-of lookup returns it for the exact second of a measurement.
+    func testTheStoredRunsCarryTheCanonicalClassAndItsConfidence() throws {
+        let f = try makeFixture()
+        let columns = try f.db.query("""
+            select column_name from information_schema.columns
+            where table_schema = 'public' and table_name = 'activity_context_runs'
+              and column_name in ('activity_class', 'class_confidence')
+            """, [])
+        guard columns.count == 2 else {
+            throw XCTSkip("apply 20261004150000_activity_context_canonical_class.sql to the scratch database")
+        }
+        let (sim, events, walkStart) = middayStreams(f)
+        try seed(f, sim: sim, events: events)
+        try completeScoring(f)
+        var lane = makeLane(f.db)
+        lane.drainStreamDays(budget: 20)
+        XCTAssertEqual(lane.stats.streamDayFailures, 0, lane.stats.lastStreamDayError ?? "")
+
+        let rows = try f.db.query("""
+            select activity_class, class_confidence::text as class_confidence, display_context
+            from public.activity_context_runs where user_id=$1::uuid and device_id=$2::uuid order by start_ts
+            """, [f.user, f.device])
+        XCTAssertFalse(rows.isEmpty)
+        let vocabulary = Set(ActivityClass.allCases.map(\.rawValue))
+        for row in rows {
+            let cls = try XCTUnwrap(row["activity_class"], "\(row)")
+            XCTAssertTrue(vocabulary.contains(cls), "'\(cls)' is not in the taxonomy")
+            let confidence = try XCTUnwrap(Double(row["class_confidence"] ?? ""), "\(row)")
+            XCTAssertTrue((0...1).contains(confidence))
+        }
+        let classes = Set(rows.compactMap { $0["activity_class"] })
+        XCTAssertTrue(classes.contains("walking") || classes.contains("brisk_walking"), "\(classes)")
+        XCTAssertTrue(classes.contains("off_wrist"), "the strap came off and went back on: \(classes)")
+
+        let at = try f.db.query("""
+            select activity_class, class_confidence::text as class_confidence
+            from public.activity_context_at($1::uuid,$2::uuid,$3::bigint)
+            """, [f.user, f.device, String(walkStart + 75)])
+        XCTAssertEqual(at.count, 1)
+        XCTAssertTrue(["walking", "brisk_walking"].contains(at.first?["activity_class"] ?? ""), "\(at)")
+        XCTAssertTrue((0...1).contains(try XCTUnwrap(Double(at.first?["class_confidence"] ?? ""))))
+    }
+
     func testAnUnchangedDayIsNotRebuiltAndNewScoringWorkRefreshesIt() throws {
         let f = try makeFixture()
         let (sim, events, _) = middayStreams(f)

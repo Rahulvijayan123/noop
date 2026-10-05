@@ -167,6 +167,10 @@ public struct DeviceRegistryStore: Sendable {
         // privacy defect this list exists to close, and one the deviceId-column guard test could not
         // catch for a child table keyed only by its parent.
         "liftExercise", "liftProgram", "liftProgramItem", "liftSession", "liftSet",
+        // v48-activity-context: the behavioural-context intervals and their per-day ledger are
+        // deviceId-keyed and describe what the wearer was doing minute by minute — as sensitive as the
+        // heart-rate stream they annotate, so "delete this device's data" must clear them too.
+        "activityContextInterval", "activityContextDay",
     ]
 
     /// Permanently delete every recorded sample/derived row belonging to one device, across all

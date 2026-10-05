@@ -409,9 +409,12 @@ phone raw capture (ImuSessionFileStore) -> rawImuSession NPB1 objects (object la
 The same job also stores one decoded document per UTC day in `activity_context_days`. It is the
 document the app builds on the phone for its heart-rate day page: probabilistic posture, locomotion
 and arm-behavior heads coalesced into runs, transition events and a day summary
-(`ActivityContextDayDocument`, schema 2, ontology `v2.0`, decoder `hsmm-1.1`). The server runs the
+(`ActivityContextDayDocument`, schema 2, ontology `v2.0`, decoder `hsmm-1.2`). The server runs the
 SAME decoder (`StrandAnalytics.ActivityContextTrackBuilder`), so a phone-built and a server-built
-document of one day differ only in their inputs.
+document of one day differ only in their inputs. Every run also carries the canonical `activity_class`
+(`sitting_desk`, `walking`, `off_wrist`, `unknown`, ... taxonomy `act-class-1`, see
+`CURRENT_ALGORITHMS.md` section 9) and its `class_confidence`, derived by the same classifier the phone
+uses. A document written before decoder `hsmm-1.2` has neither key and reads as NULL.
 
 ```text
 activity job (unchanged claim / download / decode / lease renewal)
@@ -538,6 +541,18 @@ scoring_jobs_v2 completed work (any revision)
   Rollback: `FRWHOOP_ACTIVITY_STREAMS=0` and a restart; the migration is additive, and
   `delete from public.activity_context_jobs where algorithm_version = 'streams-activity-1'` removes the queue
   rows (the documents stay readable).
+- **Canonical class (additive).** `20261004150000_activity_context_canonical_class.sql` appends
+  `activity_class` and `class_confidence` to `activity_context_runs` and `activity_context_at`, and makes
+  the publish-time run check strict about them WHEN PRESENT (a snake_case code of at most 32 characters, a
+  confidence from 0 to 1; a document without them stays valid). It can be applied before or after the
+  worker upgrade. Documents already stored keep NULL until their day is rebuilt, which the worker does when
+  that day's scoring next changes; to rebuild a range on purpose, bump the job and let the budget spread the
+  work out: `update public.activity_context_jobs set input_revision = input_revision + 1, dirty_at = now(),
+  not_before = now() where algorithm_version = 'streams-activity-1' and day >= :from;`. Rollback: re-create
+  the view and the function from `20261003140000_activity_context_stream_days.sql` (drop them first;
+  columns cannot be removed in place); stored documents are untouched. The worker shares
+  `StrandAnalytics` with the app, so the classes only appear in documents after the worker is rebuilt and
+  redeployed from this tree.
 - **Coverage and honesty.** Time is described in 5-second states, coalesced into runs whenever the state does
   not change; the per-tick probabilities are not kept, the per-run confidence and uncertainty are. A stream
   day has no raw-motion evidence, so posture and arm behavior lean on heart rate, gravity and the step
@@ -552,9 +567,9 @@ Everything below is read-only and security-invoker, so an owner sees only their 
 
 | Object | One row per | Columns of interest |
 | --- | --- | --- |
-| `public.activity_context_runs` | state run | `start_ts`, `end_ts` (exact UTC epoch seconds, half-open), `start_at`, `end_at`, `duration_s`, `display_context`, `confidence`, `uncertainty`, `intensity`, `sleep_state`, `wear_state`, `states`, `posture`, `locomotion`, `arm_behavior` (head probabilities), version columns, `source_rank` (1 = raw-IMU document, 2 = stream document) |
+| `public.activity_context_runs` | state run | `start_ts`, `end_ts` (exact UTC epoch seconds, half-open), `start_at`, `end_at`, `duration_s`, `display_context`, `confidence`, `uncertainty`, `intensity`, `sleep_state`, `wear_state`, `states`, `posture`, `locomotion`, `arm_behavior` (head probabilities), version columns, `source_rank` (1 = raw-IMU document, 2 = stream document), `activity_class`, `class_confidence` (the canonical class and how sure the classifier was; NULL on a document written before decoder `hsmm-1.2`) |
 | `public.activity_context_transitions` | transition event | `ts`, `at`, `kind`, `probability`, version columns, `source_rank` |
-| `public.activity_context_at(user, device, ts)` | the run containing `ts` | the run columns above, best source first |
+| `public.activity_context_at(user, device, ts)` | the run containing `ts` | the run columns above (including `activity_class`, `class_confidence`), best source first |
 
 ```sql
 -- What was the user doing at one exact second?
@@ -570,6 +585,21 @@ join public.activity_context_runs r
  and h.ts >= r.start_ts and h.ts < r.end_ts
 where h.user_id = :user and h.device_id = :device and h.ts between :from and :to
 order by h.ts, r.source_rank;
+
+-- The same, with the canonical class instead of the display wording:
+select h.ts, h.bpm, r.activity_class, r.class_confidence
+from public.noop_hr_samples h
+join public.activity_context_runs r
+  on r.user_id = h.user_id and r.device_id = h.device_id
+ and r.day = (to_timestamp(h.ts) at time zone 'UTC')::date
+ and h.ts >= r.start_ts and h.ts < r.end_ts and r.source_rank = 2
+where h.user_id = :user and h.device_id = :device and h.ts between :from and :to;
+
+-- Seconds per canonical class on one day (NULL = a run from before the class existed):
+select activity_class, sum(duration_s) as seconds
+from public.activity_context_runs
+where user_id = :user and device_id = :device and day = :day and source_rank = 2
+group by activity_class order by seconds desc;
 
 -- Every change of state with its time and confidence, for one day:
 select start_at, display_context, confidence, duration_s
