@@ -9,9 +9,10 @@ import StrandAnalytics
 ///   2. every `enqueueInterval` (default 120 s): `enqueue_physiology_context_days_v1` turns scoring completions,
 ///      placement and exposure revisions into context jobs (idempotent, bounded);
 ///   3. up to `budget` jobs: claim (a lease, committed before any long work) → renew → read every input in one
-///      read-only snapshot (`ContextInputs.load`) → renew → `Engine.buildDay` (pure, no clock) → encode with
-///      `PhysiologyContext.encoder()` → `publish_physiology_context_v1` (fenced on the live lease and the claimed
-///      revision; idempotent on the (policy, input) fingerprint pair).
+///      read-only snapshot (`ContextInputs.load`) → renew → `Engine.buildDay` (pure, no clock) → split into the
+///      stored form (`StoredDocument.split`: summary + one envelope table per metric, contracts §6.1) and encode
+///      with `PhysiologyContext.encoder()` → `publish_physiology_context_v1` (fenced on the live lease and the
+///      claimed revision; idempotent on the (policy, input) fingerprint pair).
 ///
 /// Settlement mirrors `ActivityLane`: a publish that did not apply (NULL, `applied=false`: lease lost or revision
 /// moved) releases the lease through renew + fail with the CLAIMED revision, which the queue treats as a clean

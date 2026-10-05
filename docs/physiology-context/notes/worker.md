@@ -1,9 +1,9 @@
 # Physiology context — worker lane
 
 Owner: worker. Branch `pc/worker`. Contract: [contracts.md](../contracts.md) §2, §3, §6, §6.1, §7. Migration read:
-`supabase/migrations/20261005120000_physiology_context.sql` (backend-db). Lead branch merged through 272d8c06
-(stored form; systems A, B, C, D, E, G real; F — references and change detection — still a skeleton when these
-numbers were taken).
+`supabase/migrations/20261005120000_physiology_context.sql` (backend-db, final at e5aca26a: envelope tables). Lead
+branch merged through 2cfdaf4a (stored form; systems A, B, C, D, E, G real; F — references and change detection —
+still a skeleton when these numbers were taken).
 
 ## 1. Files
 
@@ -207,16 +207,16 @@ FRWHOOP_CONTEXT_PROFILE=1 FRWHOOP_TEST_DB_URL=... swift test -c release -Xswiftc
 | --- | --- | --- |
 | `ContextLaneTests` (config default-off / exact `1` / `DISABLE_LANES`, queue-age composition, claim parsing and cutoff per mode, windows incl. DST, series supports and clipping, method ids, series → measurement source/availability, snapshot parsing and nightly supports, neighbouring/prior sleep stamps, row parsers, transport selection, causal assembly, V10 replay byte identity, prior sleep cutoff, shuffle determinism, payload shape and verbatim document, null revisions, day-owned rows, publish/fail result parsing, error sanitizing, size cap, SQL write audit) | 30 | pass |
 | `ContextLaneFixtureTests` | 1 | pass |
-| `ContextLaneDatabaseTests` (scratch DB, migrations incl. 20261005120000) | 8 + 1 opt-in | pass |
+| `ContextLaneDatabaseTests` (scratch DB, final migration e5aca26a) | 8 + 1 opt-in | pass |
 | `ContextLaneProfileTests` | 2 opt-in | pass (numbers below) |
-| Whole worker suite, no DB URL (before the backend merge) | 446, 31 skipped | 0 failures |
-| Whole worker suite with the scratch DB (after all merges) | see §11 | see §11 |
+| Whole worker suite, no DB URL (early, before the backend merge) | 446, 31 skipped | 0 failures |
+| Whole worker suite with the scratch DB (after every merge) | 455, 4 skipped (the 3 opt-in profiles and the pre-existing `PushBatchTests.testEmbeddedFixturesMatchOnDiskCorpus`) | 0 failures |
 
 DB tests (each creates its own owners/devices and deletes them):
 
 | Test | V-case | What it shows |
 | --- | --- | --- |
-| `testScoredDayBecomesAStoredContextDocumentWithItsProducts` | V17 | Stored streams → REAL `ScoringLane` snapshot → enqueue/claim/publish → one current `physiology_context_days` row (policy fingerprint matches), job completed, document decodes, series + nightly + derived HR envelopes with the contracted supports, daily values and bouts rows equal to the document's, a stored bout decodes, `physiology_context_read_v1` returns `available` and `pairing.consistent = true`. Evidence run: 962 envelopes, 3 daily values, 1 bout (HART epochs + logged walk), 2 sleep episodes, status `available`. |
+| `testScoredDayBecomesAStoredContextDocumentWithItsProducts` | V17 | Stored streams → REAL `ScoringLane` snapshot → enqueue/claim/publish → one current `physiology_context_days` row (policy fingerprint matches) holding the summary, its `physiology_context_envelope_tables` joined back (`StoredDocument.join`), job completed, series + nightly + derived HR envelopes with the contracted supports, daily values and bouts rows equal to the document's, a stored bout decodes, `physiology_context_read_v1` returns `available` and `pairing.consistent = true`. Evidence run: 962 envelopes (918 with an eligible verdict), 3 daily values, 1 bout (HART epochs + logged walk), 2 sleep episodes, status `available`. |
 | `testRetryingTheSameInputsStoresNoNewRevision` | V15 retry | Re-dirtied day → `unchanged`, no new revision, job completed with `last_outcome = unchanged` |
 | `testAWorkerThatDiesMidJobIsReplacedByOneThatPublishesOnce` | V15 restart | Claimed lease blocks others; expired → reclaimed → one current revision; the dead worker's renew fails (`.stale`) and its prebuilt publish is fenced (`lease_lost`) |
 | `testAnExposureCorrectionRevisesTheDay` | V15 correction | `record_exposure_event_v1` dirties the day → new revision with a new input fingerprint; a corrected revision → another new revision |
@@ -232,11 +232,11 @@ assemble + `Engine.buildDay` + split/encode; "plain" is the unsplit document.
 
 | Case | Rows read | Measurements / envelopes | Context time | Stored form | Scoring on the same streams |
 | --- | --- | --- | --- | --- | --- |
-| Representative day, in memory (86,400 HR, 92,775 beats, 86,400 gravity and steps; 90 days of history), retrospective | 353,095 | 2,020 / 2,308 | 73 + 432 + 559 = **1,065 ms** | summary **42 KB** + tables **3.9 MB** (largest 2.3 MB, respiratory); plain 13.7 MB | analyzeDay + series 108 ms (in memory) |
-| same, causal_live at 20:00 | 353,095 | 1,682 / 1,917 | **781 ms** | 38 KB + 3.2 MB (plain 11.4 MB) | — |
-| Largest read window, in memory (all streams 1 Hz over 60 h, two R-R transports, 7,200 HART epochs, 2,000 decoder runs, 200 exposure revisions), retrospective | 1,426,902 | 2,016 / 2,304 | 67 + 691 + 2,335 = **3,094 ms** | 314 KB + **32.5 MB** (respiratory table **20.2 MB > 16 MiB**: refused); plain 46.5 MB | 59 ms |
-| same, causal_live | 1,426,902 | 1,678 / 1,912 | 2,426 ms | 252 KB + 27.0 MB (largest 16.8 MB: refused) | — |
-| Stored full day through both lanes (scratch Postgres; 108,000 HR, 115,839 beats, 108,000 gravity) | 439,841 | 2,018 | load **776 ms** + build **990 ms**, wall 1.83 s (claim → publish) | summary 40 KB + tables 3.35 MB | scoring day `last_duration_ms` **1,121 ms**; scoring wall for the 4 dirty days 5.9 s |
+| Representative day, in memory (86,400 HR, 92,775 beats, 86,400 gravity and steps; 90 days of history), retrospective | 353,095 | 2,020 / 2,308 | 47 + 432 + 553 = **1,034 ms** | summary **42 KB** + tables **3.9 MB** (largest 2.3 MB, respiratory); plain 13.7 MB | analyzeDay + series 107 ms (in memory) |
+| same, causal_live at 20:00 | 353,095 | 1,682 / 1,917 | **805 ms** | 38 KB + 3.2 MB (plain 11.4 MB) | — |
+| Largest read window, in memory (all streams 1 Hz over 60 h, two R-R transports, 7,200 HART epochs, 2,000 decoder runs, 200 exposure revisions), retrospective | 1,426,902 | 2,016 / 2,304 | 67 + 688 + 2,305 = **3,061 ms** | 314 KB + **32.5 MB** (respiratory table **20.2 MB > 16 MiB**: refused); plain 46.5 MB | 63 ms |
+| same, causal_live | 1,426,902 | 1,678 / 1,912 | 2,391 ms | 252 KB + 27.0 MB (largest 16.8 MB: refused) | — |
+| Stored full day through both lanes (scratch Postgres, final migration; 108,000 HR, 115,839 beats, 108,000 gravity) | 439,840 | 2,014 | load **677 ms** + build **948 ms**, wall 1.73 s (claim → publish) | summary 34 KB + tables 3.17 MB | scoring day `last_duration_ms` **1,043 ms**; scoring wall for the 4 dirty days 5.0 s |
 
 Earlier points: with every system a skeleton the representative day built in 201 ms (3.4 MB plain); with C, D, E, G
 real and before the stored form, 465 ms and 9.5 MB plain. The plain size is per-envelope context (≈ 2.7–6 KB per
@@ -246,7 +246,12 @@ time the release binary.
 
 ## 11. Whole-suite run after all merges
 
-Recorded at the end of the session: see the final report (`swift test` with `FRWHOOP_TEST_DB_URL` set).
+`swift test` with `FRWHOOP_TEST_DB_URL` set (scratch DB, final migration): 455 tests, 4 skipped, 0 failures. One
+earlier run failed `ActivityStreamDaysDatabaseTests.testADayWithScoringButNoMeasurementsCompletesWithoutADocumentAndStaysDone`
+because two owners from an earlier V17 run had leaked: deleting an owner who has a `sessions` row trips the existing
+`bump_user_revision` trigger (it upserts `user_sync_state` for the user being deleted, FK violation), so the account
+cascade failed and their queued stream days were claimed by the activity test. The context tests now delete
+`sessions` rows first and fail loudly if an owner cannot be removed. The trigger behaviour itself is pre-existing.
 
 ## 12. Deviations and open issues (for the lead)
 
@@ -255,13 +260,16 @@ Recorded at the end of the session: see the final report (`swift test` with `FRW
    per-row `exposures` / `exposureCoverage` pools do not intern well when every minute sees a different set. The
    lane refuses a table over 16 MiB as a deterministic failure (dead letter after 8). Engine/System E decision:
    intern exposure refs per event, or cap respiratory envelopes.
-2. **Retrospective finality loop.** `Engine.inputFingerprint` ignores the cutoff in retrospective mode, so the
-   provisional → final rebuild that `enqueue_physiology_context_days_v1` triggers (`finality_due`) publishes
-   `unchanged`; the stored row stays `provisional` with its old cutoff, and the next enqueue bumps it again — an
-   endless rebuild of every such day every enqueue interval (bounded by `p_limit`). Fix in the engine (put finality
-   or `cutoff ≥ dayEnd + 30 h` into the fingerprint) or in the RPC (update finality/cutoff on `unchanged`, or do
-   not re-bump a job whose last outcome was `unchanged` for the same fingerprints). Not reproducible today against
-   live data within one session (needs a day crossing D + 30 h after its first publish).
+2. **Retrospective finality loop (reproduced).** `Engine.inputFingerprint` ignores the cutoff in retrospective
+   mode, so the provisional → final rebuild that `enqueue_physiology_context_days_v1` triggers (`finality_due`)
+   publishes `unchanged`; the stored row stays `provisional` with its old cutoff, and every later enqueue bumps it
+   again — a rebuild of every such day every enqueue interval (bounded by `p_limit`). Reproduced on the scratch DB
+   with a throwaway probe (a settled day whose current row was set back to provisional with a pre-D+30 h cutoff):
+   three enqueue rounds each returned 1 bump with `reasons = {finality_due}`, each publish was `unchanged`, the row
+   stayed provisional. (When the day's history changed meanwhile the rebuild publishes a new, final revision and the
+   loop ends, which is why it is easy to miss.) Fix in the engine (put finality, or `cutoff ≥ dayEnd + 30 h`, into
+   the retrospective fingerprint) or in the RPC (raise finality/cutoff on `unchanged`, or skip `finality_due` when
+   the last outcome for the same fingerprints was `unchanged`).
 3. **Session aggregate windowS.** Following the contract text, nightly methods carry `windowS` = session length.
    If System A keys regimes on `windowS`, every night is its own regime and nightly references never pool; System
    A/F should ignore `windowS` for `aggregation = session`, or the contract should say `windowS = 0` for sessions.
