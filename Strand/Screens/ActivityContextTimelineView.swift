@@ -165,14 +165,16 @@ enum ActivityFamily: CaseIterable, Hashable {
 
 struct ActivityContextSection: View {
     let document: ActivityContextDayDocument?
-    let loading: Bool
+    /// True while the day is still being read: the stored result is shown meanwhile, if there is one.
+    let busy: Bool
+    /// While the shown document is only the first part of a day being read from scratch, how far it reaches.
+    let partialReach: Date?
     /// Visible x window, shared with the heart-rate graph above so the two stay lined up while zooming.
     let window: ClosedRange<Date>
-    /// Widest y-axis label of the graph above, drawn invisibly so this lane's plot area starts at the same x.
-    let axisLabelPlaceholder: String
-    let onSelect: (ClosedRange<Date>) -> Void
+    /// Open a stretch up close, where the wearer can say whether it is right.
+    let onOpen: (StretchTarget) -> Void
 
-    @State private var selectedStart: Int? = nil
+    @ObservedObject private var feedback = StretchFeedbackCenter.shared
     @State private var showAllEpisodes = false
     @State private var showAllEvents = false
 
@@ -187,12 +189,20 @@ struct ActivityContextSection: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space4) {
             header
             if let document, !episodes.isEmpty {
+                #if DEBUG
+                if !DemoLayout.listsOnly {
+                    laneCard(document, episodes)
+                    detailCard(document)
+                    summaryGrid(document)
+                }
+                #else
                 laneCard(document, episodes)
-                detailCard(document, episodes)
+                detailCard(document)
                 summaryGrid(document)
+                #endif
                 episodeList(episodes)
                 eventList(document)
-            } else if loading {
+            } else if busy {
                 HStack(spacing: 10) {
                     ProgressView()
                     Text("Working out your day…")
@@ -217,11 +227,17 @@ struct ActivityContextSection: View {
                 Text("Activity context")
                     .font(StrandFont.title2)
                     .foregroundStyle(StrandPalette.textPrimary)
-                if loading && document != nil { ProgressView().controlSize(.small) }
+                if busy && document != nil { ProgressView().controlSize(.small) }
             }
-            Text("Posture, movement and arm behaviour, each as a probability and read over the last several minutes. Tap the bar or a stretch to see why.")
+            Text("Posture, movement and arm behaviour, each as a probability and read over the last several minutes. Tap the bar or a stretch to see it up close and tell us whether it is right.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
+            if let partialReach {
+                Text("Reading your day, up to \(Self.clock(partialReach)) so far…")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .monospacedDigit()
+            }
         }
         .padding(.horizontal, NoopMetrics.space1)
     }
@@ -251,16 +267,15 @@ struct ActivityContextSection: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
             }
+            // The lane runs the full width of its card. It used to start where the heart-rate graph's
+            // plot area does, which left an empty gutter down the left and a narrower bar than the card.
             .chartXScale(domain: window)
             .chartYScale(domain: 0.0...1.0)
-            .chartXAxis(.hidden)
-            .chartYAxis {
-                AxisMarks(position: .leading, values: [0.5]) { _ in
-                    AxisValueLabel {
-                        Text(axisLabelPlaceholder)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(Color.clear)
-                    }
+            .chartYAxis(.hidden)
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                    AxisTick()
+                    AxisValueLabel(format: axisFormat)
                 }
             }
             .chartPlotStyle { $0.clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)) }
@@ -274,18 +289,27 @@ struct ActivityContextSection: View {
                             guard let date: Date = proxy.value(atX: location.x - plot.minX) else { return }
                             let ts = Int(date.timeIntervalSince1970)
                             if let hit = episodes.first(where: { $0.start <= ts && ts < $0.end }) {
-                                withAnimation(StrandMotion.interactive) { selectedStart = hit.start }
+                                onOpen(.activity(hit))
                             }
                         }
                 }
             }
-            .frame(height: 44)
+            .frame(height: 68)
             .accessibilityLabel(Text("Activity context timeline. The list of stretches below has the same information."))
 
             legend(doc)
+                .padding(.horizontal, NoopMetrics.space2)
         }
-        .padding(NoopMetrics.space3)
+        .padding(.horizontal, NoopMetrics.space2)
+        .padding(.vertical, NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(NoopPanelSurface(cornerRadius: 20))
+    }
+
+    private var axisFormat: Date.FormatStyle {
+        window.upperBound.timeIntervalSince(window.lowerBound) <= 6 * 3_600
+            ? Date.FormatStyle().hour().minute()
+            : Date.FormatStyle().hour()
     }
 
     /// A 15 second change of posture is a fraction of a point wide on a whole-day lane. Widen anything
@@ -347,23 +371,10 @@ struct ActivityContextSection: View {
         var confidence: Double
         var sleep: SleepContextState
         var wear: WearContextState
-        var zoom: ClosedRange<Date>?
-        var isLatest: Bool
     }
 
-    private func detail(_ doc: ActivityContextDayDocument, _ episodes: [ActivityEpisode]) -> Detail? {
-        if let start = selectedStart, let ep = episodes.first(where: { $0.start == start }) {
-            let from = Date(timeIntervalSince1970: TimeInterval(ep.start))
-            let to = Date(timeIntervalSince1970: TimeInterval(ep.end))
-            let dur = Double(ep.durationSeconds)
-            let pad: TimeInterval = dur < 600 ? max(90, dur * 2) : dur * 0.15
-            return Detail(title: ep.label,
-                          caption: "\(Self.clock(from, seconds: ep.durationSeconds < 300)) – \(Self.clock(to, seconds: ep.durationSeconds < 300)) · \(DayStateTimelineSection.duration(ep.durationSeconds))",
-                          family: ActivityFamily.of(ep.label), posture: ep.posture, locomotion: ep.locomotion,
-                          arm: ep.armBehavior, intensity: ep.intensity, confidence: ep.confidence,
-                          sleep: ep.sleep, wear: ep.wear,
-                          zoom: from.addingTimeInterval(-pad)...to.addingTimeInterval(pad), isLatest: false)
-        }
+    /// The decoder's reading right now. Any other stretch opens in its own sheet.
+    private func detail(_ doc: ActivityContextDayDocument) -> Detail? {
         guard let s = doc.latest else { return nil }
         let at = Date(timeIntervalSince1970: TimeInterval(s.ts))
         var caption = String(localized: "As of \(Self.clock(at, seconds: true))")
@@ -373,13 +384,12 @@ struct ActivityContextSection: View {
         let label = s.displayContext ?? ActivityDisplay.unclear
         return Detail(title: label, caption: caption, family: ActivityFamily.of(label), posture: s.posture,
                       locomotion: s.locomotion, arm: s.armBehavior, intensity: s.intensity,
-                      confidence: s.overallConfidence, sleep: s.sleep.state, wear: s.wear.state,
-                      zoom: nil, isLatest: true)
+                      confidence: s.overallConfidence, sleep: s.sleep.state, wear: s.wear.state)
     }
 
     @ViewBuilder
-    private func detailCard(_ doc: ActivityContextDayDocument, _ episodes: [ActivityEpisode]) -> some View {
-        if let d = detail(doc, episodes) {
+    private func detailCard(_ doc: ActivityContextDayDocument) -> some View {
+        if let d = detail(doc) {
             let color = d.family.color
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
@@ -388,7 +398,7 @@ struct ActivityContextSection: View {
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer(minLength: 8)
-                    Text(d.isLatest ? String(localized: "Latest") : String(localized: "Selected"))
+                    Text("Latest")
                         .font(StrandFont.caption.weight(.semibold))
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
@@ -417,23 +427,6 @@ struct ActivityContextSection: View {
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
 
-                HStack(spacing: 12) {
-                    if let zoom = d.zoom {
-                        Button {
-                            onSelect(zoom)
-                        } label: {
-                            Label("Zoom the graph here", systemImage: "magnifyingglass")
-                        }
-                        Button {
-                            withAnimation(StrandMotion.interactive) { selectedStart = nil }
-                        } label: {
-                            Label("Back to latest", systemImage: "arrow.uturn.backward")
-                        }
-                    }
-                }
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.accent)
-                .buttonStyle(.plain)
             }
             .padding(NoopMetrics.space3)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -467,7 +460,7 @@ struct ActivityContextSection: View {
     }
 
     /// The strongest answers of a head, most likely first. Anything under 5% is noise at this resolution.
-    private static func rows<C: RawRepresentable & Hashable & CaseIterable & Sendable>(
+    static func rows<C: RawRepresentable & Hashable & CaseIterable & Sendable>(
         _ head: HeadProbabilities<C>, name: KeyPath<C, String>, limit: Int = 3
     ) -> [(name: String, p: Double)] where C.RawValue == String {
         head.values
@@ -520,7 +513,7 @@ struct ActivityContextSection: View {
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .padding(.horizontal, NoopMetrics.space1)
-            ForEach(visible) { ep in episodeBox(ep) }
+            ForEach(visible) { ep in episodeBox(ep, isLatest: ep.id == shown.first?.id) }
             if shown.count > Self.collapsedEpisodes {
                 Button {
                     withAnimation(StrandMotion.interactive) { showAllEpisodes.toggle() }
@@ -535,7 +528,7 @@ struct ActivityContextSection: View {
         }
     }
 
-    private func episodeBox(_ ep: ActivityEpisode) -> some View {
+    private func episodeBox(_ ep: ActivityEpisode, isLatest: Bool) -> some View {
         let family = ActivityFamily.of(ep.label)
         let color = family.color
         let from = Date(timeIntervalSince1970: TimeInterval(ep.start))
@@ -547,11 +540,9 @@ struct ActivityContextSection: View {
             .prefix(2)
             .map { "\($0.key.displayName) \(Int(($0.value * 100).rounded()))%" }
             .joined(separator: " · ")
+        let verdict = feedback.feedback(kind: .activityContext, start: ep.start, end: ep.end)
         return Button {
-            withAnimation(StrandMotion.interactive) { selectedStart = ep.start }
-            let dur = Double(ep.durationSeconds)
-            let pad: TimeInterval = dur < 600 ? max(90, dur * 2) : dur * 0.15
-            onSelect(from.addingTimeInterval(-pad)...to.addingTimeInterval(pad))
+            onOpen(.activity(ep))
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 RoundedRectangle(cornerRadius: 3).fill(color).frame(width: 6)
@@ -562,11 +553,15 @@ struct ActivityContextSection: View {
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
                             .lineLimit(2)
+                        if isLatest { LatestTag() }
                         Spacer(minLength: 8)
                         Text(DayStateTimelineSection.duration(ep.durationSeconds))
                             .font(StrandFont.subhead.weight(.semibold))
                             .foregroundStyle(StrandPalette.textPrimary)
                             .monospacedDigit()
+                        Image(systemName: "chevron.right")
+                            .font(StrandFont.caption.weight(.semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
                     }
                     Text("\(Self.clock(from, seconds: short)) – \(Self.clock(to, seconds: short)) · \(Int((ep.confidence * 100).rounded()))% sure")
                         .font(StrandFont.footnote)
@@ -577,6 +572,7 @@ struct ActivityContextSection: View {
                             .font(StrandFont.caption)
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
+                    StretchVerdictBadge(feedback: verdict)
                 }
             }
             .padding(12)
@@ -586,7 +582,7 @@ struct ActivityContextSection: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Shows the probabilities for this stretch and zooms the heart rate graph to it")
+        .accessibilityHint("Shows this stretch up close, with the probabilities, and lets you say whether it is right")
     }
 
     @ViewBuilder
@@ -695,7 +691,19 @@ private struct SummaryTile: View {
     }
 }
 
-private struct ProbabilityBar: View {
+/// Marks the newest stretch in a list.
+struct LatestTag: View {
+    var body: some View {
+        Text("Latest")
+            .font(StrandFont.caption.weight(.semibold))
+            .foregroundStyle(StrandPalette.accent)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(StrandPalette.accent.opacity(0.14)))
+    }
+}
+
+struct ProbabilityBar: View {
     let value: Double
     let tint: Color
     var width: CGFloat = 96
@@ -710,7 +718,7 @@ private struct ProbabilityBar: View {
     }
 }
 
-private struct HeadBlock: View {
+struct HeadBlock: View {
     let title: String
     let rows: [(name: String, p: Double)]
     let tint: Color

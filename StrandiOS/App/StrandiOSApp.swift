@@ -653,6 +653,9 @@ enum DemoScreens {
         case "health":   return AnyView(HealthView())
         case "insights": return AnyView(InsightsView())
         case "explore":  return AnyView(MetricExplorerView())
+        // The Heart rate day page (HR graph, Activity context, Through the day). Pair with `--demo-seed
+        // --demo-intraday` so there is a day of per-second streams to decode.
+        case "heartrateday": return AnyView(FullDayChartView(showsActivityTimeline: true))
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
         case "coach":    return AnyView(CoachDemoHost())

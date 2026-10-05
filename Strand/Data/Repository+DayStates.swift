@@ -25,7 +25,29 @@ struct DayStreams {
     let offWrist: [DayStateSpan]
 }
 
+/// The raw per-second signals over one stretch, for the stretch detail sheet.
+struct StretchSignals {
+    let hr: [HRSample]
+    let gravity: [GravitySample]
+    let steps: [StepSample]
+}
+
 extension Repository {
+    /// The strap's signals over `[start, end)`, starting a few seconds early so the first second has a
+    /// previous sample to difference against. A stretch is minutes to hours, so this is a small read.
+    func stretchSignals(from start: Int, to end: Int) async -> StretchSignals? {
+        guard let store = await storeHandle(), end > start else { return nil }
+        let from = start - 5
+        let hr = await hrSamples(from: from, to: end, limit: 200_000)
+        let gravity = await gravitySamplesUnion(from: from, to: end)
+        var steps: [StepSample] = []
+        for id in importedReadIds {
+            steps = (try? await store.stepSamples(deviceId: id, from: from, to: end, limit: 200_000)) ?? []
+            if !steps.isEmpty { break }
+        }
+        return StretchSignals(hr: hr, gravity: gravity, steps: steps)
+    }
+
     /// The streams for `[dayStart, min(dayStart + 24h, now))`; nothing is read for the future.
     func dayStreams(dayStart: Date) async -> DayStreams? {
         guard let store = await storeHandle() else { return nil }
@@ -57,10 +79,13 @@ extension Repository {
             (w.endTs > start && w.startTs < end)
                 ? DayStateWorkout(start: w.startTs, end: w.endTs, sport: w.sport) : nil
         }
-        let offWrist: [DayStateSpan] = AnalyticsEngine
-            .offWristIntervals(events: events, windowEnd: end, hr: hr)
-            .filter { $0.end > start && $0.start < end }
-            .map { DayStateSpan(start: $0.start, end: $0.end) }
+        // Walks every heart-rate sample of the day, so it runs off the main actor.
+        let offWrist: [DayStateSpan] = await Task.detached(priority: .userInitiated) { [events, hr] in
+            AnalyticsEngine
+                .offWristIntervals(events: events, windowEnd: end, hr: hr)
+                .filter { $0.end > start && $0.start < end }
+                .map { DayStateSpan(start: $0.start, end: $0.end) }
+        }.value
 
         return DayStreams(sourceKey: importedReadIds.joined(separator: "+"), start: start, end: end,
                           isLiveDay: now < start + 86_400, hr: hr, gravity: gravity,
@@ -75,7 +100,7 @@ extension Repository {
     }
 
     func dayStateTimeline(from s: DayStreams) async -> [DayStateSegment] {
-        await Task.detached(priority: .utility) {
+        await Task.detached(priority: .userInitiated) {
             DayStateTimeline.build(dayStart: s.start, dayEnd: s.end, hr: s.hr, gravity: s.gravity,
                                    steps: s.stepLabels, sleep: s.sleep, workouts: s.workouts, offWrist: s.offWrist)
         }.value

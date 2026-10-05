@@ -328,6 +328,7 @@ final class AppModel: ObservableObject {
         applyPowerSaving()   // cloud mode may have been enabled since launch; the minute cadence follows it
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
+        StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
@@ -358,6 +359,7 @@ final class AppModel: ObservableObject {
         historyGate?.evaluateSoon()
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
+        StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
         guard cloudScoringIsAuthoritative else { return }
         await confirmWearableLinkIfNeeded()
         startHistorySeedIfNeeded()
@@ -871,6 +873,7 @@ final class AppModel: ObservableObject {
             // screenshots). No-op in Release (whole seeder is #if DEBUG) and once data already exists.
             if AppleDemoSeeder.requested, let store = await self.repo.storeHandle() {
                 await AppleDemoSeeder.seedIfRequested(into: store)
+                await DemoIntradaySeeder.seedIfRequested(into: store)
                 // Give the demo a plausible strap battery so the Today header badge renders (the live
                 // battery is runtime-only and nil without a connected strap).
                 self.live.batteryPct = 68

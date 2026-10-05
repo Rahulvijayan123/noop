@@ -634,15 +634,22 @@ public enum ActivityContextDayBuilder {
     /// stored span is unchanged (same ontology / decoder, same number of observed seconds before the cut),
     /// and decodes the whole day otherwise: a newer ontology or decoder, a different day, or data that
     /// arrived late inside the already-covered span (a backfill) would otherwise be silently missed.
+    ///
+    /// `progress` is for the one case that takes noticeable time, decoding a whole day from scratch. When it
+    /// is given, the day is decoded in pieces of `chunkObservations` seconds and every finished piece before
+    /// the last reports the day so far (without a decoder snapshot, so it can be shown but never stored). The
+    /// returned document is the same as the one an uninterrupted decode produces.
     public static func update(cached: ActivityContextDayDocument?, input: ActivityContextTrackInput, now: Int,
-                              config: ActivityDecoderConfig = ActivityDecoderConfig())
+                              config: ActivityDecoderConfig = ActivityDecoderConfig(),
+                              chunkObservations: Int = 3_600,
+                              progress: ((ActivityContextDayDocument) -> Void)? = nil)
         -> (document: ActivityContextDayDocument, how: ActivityContextDayUpdate) {
         let all = ActivityContextTrackBuilder.observations(for: input)
 
         func fresh(_ reason: String) -> (ActivityContextDayDocument, ActivityContextDayUpdate) {
-            let track = ActivityContextTrackBuilder.decode(all, config: config)
-            return (ActivityContextDayDocument(track: track, input: input, generatedAt: now, config: config),
-                    .recomputed(reason: reason))
+            let document = decodeFromStart(all, input: input, now: now, config: config,
+                                           chunkObservations: chunkObservations, progress: progress)
+            return (document, .recomputed(reason: reason))
         }
 
         guard let cached else { return fresh("no_cache") }
@@ -685,6 +692,37 @@ public enum ActivityContextDayBuilder {
         doc.versions = track.snapshot.versions
         doc.summary = ActivityContextDaySummary(runs: doc.runs)
         return (doc, .resumed(fromTs: through))
+    }
+
+    /// Decode a day from its first second. Without `progress` this is one pass. With it, the observations
+    /// go through the decoder in pieces, each continuing from the snapshot the one before left, and the
+    /// pieces are joined as tracks so the final document is built exactly as an uninterrupted decode builds it.
+    static func decodeFromStart(_ all: [ActivityObservation], input: ActivityContextTrackInput, now: Int,
+                                config: ActivityDecoderConfig, chunkObservations: Int,
+                                progress: ((ActivityContextDayDocument) -> Void)?) -> ActivityContextDayDocument {
+        let size = max(60, chunkObservations)
+        guard let progress, all.count > size else {
+            let track = ActivityContextTrackBuilder.decode(all, config: config)
+            return ActivityContextDayDocument(track: track, input: input, generatedAt: now, config: config)
+        }
+        var track: ActivityContextTrack?
+        var offset = 0
+        while offset < all.count {
+            let end = min(all.count, offset + size)
+            let piece = ActivityContextTrackBuilder.decode(Array(all[offset..<end]), config: config,
+                                                           resuming: track?.snapshot)
+            let joined = track?.appending(piece) ?? piece
+            track = joined
+            offset = end
+            if offset < all.count {
+                var sofar = input
+                sofar.dayEnd = (joined.lastTs ?? input.dayStart) + 1
+                progress(ActivityContextDayDocument(track: joined, input: sofar, generatedAt: now,
+                                                    config: config, includeSnapshot: false))
+            }
+        }
+        return ActivityContextDayDocument(track: track ?? ActivityContextTrackBuilder.decode([], config: config),
+                                          input: input, generatedAt: now, config: config)
     }
 }
 

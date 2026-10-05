@@ -101,19 +101,23 @@ extension DayStateSegment {
 
 struct DayStateTimelineSection: View {
     let segments: [DayStateSegment]
-    let loading: Bool
+    /// True while the timeline is being brought up to date: what is on screen may be a stored copy.
+    let busy: Bool
+    /// The end of the data the shown stretches were built from.
+    let reach: Date?
     /// Visible x window, shared with the heart-rate graph above so the two stay lined up while zooming.
     let window: ClosedRange<Date>
-    /// Widest y-axis label of the graph above, drawn invisibly so this lane's plot area starts at the same x.
-    let axisLabelPlaceholder: String
-    let onSelect: (ClosedRange<Date>) -> Void
+    /// Open a stretch up close, where the wearer can say whether it is right.
+    let onOpen: (StretchTarget) -> Void
+
+    @ObservedObject private var feedback = StretchFeedbackCenter.shared
 
     private var totals: [DayState: Int] { DayStateTimeline.totals(segments) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space4) {
             header
-            if loading && segments.isEmpty {
+            if busy && segments.isEmpty {
                 ProgressView().frame(maxWidth: .infinity).padding(.vertical, NoopMetrics.space6)
             } else if segments.isEmpty {
                 Text("Nothing recorded for this day yet.")
@@ -121,8 +125,15 @@ struct DayStateTimelineSection: View {
                     .foregroundStyle(StrandPalette.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
+                #if DEBUG
+                if !DemoLayout.listsOnly {
+                    laneCard
+                    summaryGrid
+                }
+                #else
                 laneCard
                 summaryGrid
+                #endif
                 episodes
             }
             limitations
@@ -131,10 +142,13 @@ struct DayStateTimelineSection: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("What the strap reported")
-                .font(StrandFont.title2)
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text("Only the strap's own labels, your logged sleep and workouts, and wrist on and off. A cross-check on the activity context above. Tap a box to zoom the graph.")
+            HStack(spacing: 8) {
+                Text("What the strap reported")
+                    .font(StrandFont.title2)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                if busy && !segments.isEmpty { ProgressView().controlSize(.small) }
+            }
+            Text("Only the strap's own labels, your logged sleep and workouts, and wrist on and off. A cross-check on the activity context above. Tap a stretch to see it up close and tell us whether it is right.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
@@ -153,25 +167,32 @@ struct DayStateTimelineSection: View {
                 .cornerRadius(2)
                 .foregroundStyle(seg.state.color)
             }
+            // Full width of the card, like the activity lane above it.
             .chartXScale(domain: window)
             .chartYScale(domain: 0.0...1.0)
-            .chartXAxis(.hidden)
-            .chartYAxis {
-                AxisMarks(position: .leading, values: [0.5]) { _ in
-                    AxisValueLabel {
-                        Text(axisLabelPlaceholder)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(Color.clear)
-                    }
+            .chartYAxis(.hidden)
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                    AxisTick()
+                    AxisValueLabel(format: axisFormat)
                 }
             }
             .chartPlotStyle { $0.clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous)) }
-            .frame(height: 44)
+            .frame(height: 68)
 
             legend
+                .padding(.horizontal, NoopMetrics.space2)
         }
-        .padding(NoopMetrics.space3)
+        .padding(.horizontal, NoopMetrics.space2)
+        .padding(.vertical, NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(NoopPanelSurface(cornerRadius: 20))
+    }
+
+    private var axisFormat: Date.FormatStyle {
+        window.upperBound.timeIntervalSince(window.lowerBound) <= 6 * 3_600
+            ? Date.FormatStyle().hour().minute()
+            : Date.FormatStyle().hour()
     }
 
     /// Longest first, so a short burst is drawn last and stays visible on top of the stretch around it.
@@ -234,23 +255,40 @@ struct DayStateTimelineSection: View {
     /// Lazy: a busy day has a couple of hundred stretches, which built eagerly made this page about 20,000
     /// points tall and laid every card out up front.
     private var episodes: some View {
-        LazyVStack(alignment: .leading, spacing: 10) {
-            Text("Through the day")
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textPrimary)
+        let ordered = newestFirst
+        return LazyVStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Through the day")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Spacer(minLength: 8)
+                if let reach {
+                    Text("Up to \(Self.clock(reach))")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .monospacedDigit()
+                }
+            }
+            .padding(.horizontal, NoopMetrics.space1)
+            Text("Newest first. Tap one to see it up close.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
                 .padding(.horizontal, NoopMetrics.space1)
-            ForEach(segments) { seg in
-                episodeBox(seg)
+            ForEach(ordered) { seg in
+                episodeBox(seg, isLatest: seg.id == ordered.first?.id)
             }
         }
     }
 
-    private func episodeBox(_ seg: DayStateSegment) -> some View {
+    /// The stretch the wearer is in (or just left) comes first, so the freshest information is on screen
+    /// without scrolling through the whole day.
+    private var newestFirst: [DayStateSegment] { segments.sorted { $0.start > $1.start } }
+
+    private func episodeBox(_ seg: DayStateSegment, isLatest: Bool) -> some View {
         let color = seg.state.color
+        let verdict = feedback.feedback(kind: .strapState, start: seg.start, end: seg.end)
         return Button {
-            let dur = Double(seg.durationSeconds)
-            let pad: TimeInterval = dur < 600 ? max(90, dur * 2) : dur * 0.15
-            onSelect(seg.startDate.addingTimeInterval(-pad)...seg.endDate.addingTimeInterval(pad))
+            onOpen(.strap(seg))
         } label: {
             HStack(alignment: .top, spacing: 12) {
                 RoundedRectangle(cornerRadius: 3).fill(color).frame(width: 6)
@@ -265,11 +303,15 @@ struct DayStateTimelineSection: View {
                                 .font(StrandFont.subhead)
                                 .foregroundStyle(StrandPalette.textSecondary)
                         }
+                        if isLatest { LatestTag() }
                         Spacer(minLength: 8)
                         Text(Self.duration(seg.durationSeconds))
                             .font(StrandFont.subhead.weight(.semibold))
                             .foregroundStyle(StrandPalette.textPrimary)
                             .monospacedDigit()
+                        Image(systemName: "chevron.right")
+                            .font(StrandFont.caption.weight(.semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
                     }
                     Text("\(Self.clock(seg.startDate, seconds: seg.durationSeconds < 300)) – \(Self.clock(seg.endDate, seconds: seg.durationSeconds < 300))")
                         .font(StrandFont.footnote)
@@ -286,6 +328,7 @@ struct DayStateTimelineSection: View {
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
+                    StretchVerdictBadge(feedback: verdict)
                 }
             }
             .padding(12)
@@ -295,7 +338,7 @@ struct DayStateTimelineSection: View {
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
-        .accessibilityHint("Zooms the heart rate graph to this stretch")
+        .accessibilityHint("Shows this stretch up close and lets you say whether it is right")
     }
 
     private var limitations: some View {

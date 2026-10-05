@@ -42,10 +42,11 @@ struct FullDayChartView: View {
         self.showsActivityTimeline = showsActivityTimeline
     }
 
-    @State private var dayStates: [DayStateSegment] = []
-    @State private var dayStatesLoading = false
-    @State private var activityContext: ActivityContextDayDocument? = nil
-    @State private var activityContextLoading = false
+    /// What the Heart rate day page shows under the graph. Owns loading: stored results first, then the live
+    /// read, coalescing refreshes (see `DayTimelineModel`).
+    @StateObject private var timeline = DayTimelineModel()
+    /// The stretch opened for a closer look and a verdict.
+    @State private var openStretch: StretchSheetInput? = nil
 
     @State private var metric: Repository.TimelineMetric = .hr
     /// The pills offered for the active device. A WHOOP strap never fills the Oura ring's movement track, so
@@ -106,23 +107,43 @@ struct FullDayChartView: View {
             if !showsActivityTimeline { metricPills }
             dayNav
             if !showsActivityTimeline { sourcePill }
+            #if DEBUG
+            if !demoHidesGraph {
+                chartCard
+                zoomHint
+            }
+            #else
             chartCard
             zoomHint
+            #endif
             if showsActivityTimeline {
+                #if DEBUG
+                if !DemoLayout.hidesActivity {
+                    ActivityContextSection(
+                        document: timeline.activityContext,
+                        busy: timeline.activityBusy,
+                        partialReach: timeline.activityPartialReach,
+                        window: visibleWindow,
+                        onOpen: open
+                    )
+                    .id(Int(dayStart.timeIntervalSince1970))
+                }
+                #else
                 ActivityContextSection(
-                    document: activityContext,
-                    loading: activityContextLoading,
+                    document: timeline.activityContext,
+                    busy: timeline.activityBusy,
+                    partialReach: timeline.activityPartialReach,
                     window: visibleWindow,
-                    axisLabelPlaceholder: valueRange(displayPoints).upperBound >= 99.5 ? "000" : "00",
-                    onSelect: { range in withAnimation(StrandMotion.interactive) { zoomDomain = range } }
+                    onOpen: open
                 )
                 .id(Int(dayStart.timeIntervalSince1970))
+                #endif
                 DayStateTimelineSection(
-                    segments: dayStates,
-                    loading: dayStatesLoading,
+                    segments: timeline.dayStates,
+                    busy: timeline.statesBusy,
+                    reach: timeline.statesReach,
                     window: visibleWindow,
-                    axisLabelPlaceholder: valueRange(displayPoints).upperBound >= 99.5 ? "000" : "00",
-                    onSelect: { range in withAnimation(StrandMotion.interactive) { zoomDomain = range } }
+                    onOpen: open
                 )
                 NavigationLink(value: TabRoute.fullDayChart) {
                     HStack {
@@ -141,26 +162,19 @@ struct FullDayChartView: View {
         .task(id: annotationKey) { await reloadAnnotations() }
         .task(id: annotationKey) {
             guard showsActivityTimeline else { return }
-            dayStatesLoading = true
-            activityContextLoading = true
-            let streams = await repo.dayStreams(dayStart: dayStart)
-            guard !Task.isCancelled else { return }
-            guard let streams else {
-                dayStates = []
-                activityContext = nil
-                dayStatesLoading = false
-                activityContextLoading = false
-                return
+            timeline.request(dayStart: dayStart, repo: repo)
+        }
+        #if DEBUG
+        .task(id: "\(timeline.statesBusy)|\(timeline.activityBusy)") {
+            guard (try? await Task.sleep(nanoseconds: 5_000_000_000)) != nil else { return }
+            demoAutoOpen()
+        }
+        #endif
+        .sheet(item: $openStretch) { input in
+            StretchDetailSheet(input: input, deviceId: repo.deviceId) { range in
+                withAnimation(StrandMotion.interactive) { zoomDomain = range }
             }
-            // The strap-label timeline is quick, so it lands first; the richer decode follows.
-            let timeline = await repo.dayStateTimeline(from: streams)
-            guard !Task.isCancelled else { return }
-            dayStates = timeline
-            dayStatesLoading = false
-            let context = await repo.activityContext(from: streams)
-            guard !Task.isCancelled else { return }
-            activityContext = context
-            activityContextLoading = false
+            .environmentObject(repo)
         }
         .task { await landOnLatestDayIfNeeded() }
         .task(id: metric) { await resolveMetricUnsupported() }   // #623
@@ -170,6 +184,48 @@ struct FullDayChartView: View {
             if !availableMetrics.contains(metric) { metric = .hr }
         }
     }
+
+    private func open(_ target: StretchTarget) {
+        openStretch = StretchSheetInput(target: target, document: timeline.activityContext,
+                                        segments: timeline.dayStates)
+    }
+
+    #if DEBUG
+    // Render hooks for simulator screenshots, where a page cannot be scrolled or tapped from outside the app.
+    // `--demo-hr-sections` leaves the graph off, `--demo-lists-only` also drops the cards above each list,
+    // `--demo-skip-activity` leaves out the whole activity section, and
+    // `--demo-open-stretch=activity:2` (or `strap:0`) opens the nth newest stretch once the page has loaded.
+    @State private var demoOpened = false
+
+    private var demoHidesGraph: Bool {
+        showsActivityTimeline && (CommandLine.arguments.contains("--demo-hr-sections") || DemoLayout.listsOnly)
+    }
+
+    private func demoAutoOpen() {
+        let prefix = "--demo-open-stretch="
+        guard showsActivityTimeline, !demoOpened,
+              let arg = CommandLine.arguments.first(where: { $0.hasPrefix(prefix) }),
+              !timeline.statesBusy, !timeline.activityBusy else { return }
+        let parts = arg.dropFirst(prefix.count).split(separator: ":")
+        let index = parts.count > 1 ? Int(parts[1]) ?? 0 : 0
+        switch parts.first {
+        case "activity":
+            guard let doc = timeline.activityContext else { return }
+            let stretches = ActivityContextEpisodes.build(doc.runs)
+                .filter { $0.durationSeconds >= 60 }.reversed() as [ActivityEpisode]
+            guard stretches.indices.contains(index) else { return }
+            demoOpened = true
+            open(.activity(stretches[index]))
+        case "strap":
+            let stretches = timeline.dayStates.sorted { $0.start > $1.start }
+            guard stretches.indices.contains(index) else { return }
+            demoOpened = true
+            open(.strap(stretches[index]))
+        default:
+            return
+        }
+    }
+    #endif
 
     /// #623: a SpO2 track is "unsupported on this strap" only when it's a 5.0-family strap that has never
     /// produced the metric — not merely an empty window (a 4.0-v24 banks SpO2, and the legacy bare-"WHOOP"
@@ -415,7 +471,7 @@ struct FullDayChartView: View {
             // #979 spin-off: name the hold-to-scrub affordance — a hidden gesture nobody tries is a
             // feature that doesn't exist. (On the Mac the pointer hover is self-discovering.)
             if showsActivityTimeline {
-                Text(zoomDomain == nil ? "Tap an activity to zoom" : "Zoomed in")
+                Text(zoomDomain == nil ? "Tap an activity below to see it up close" : "Zoomed in")
             } else {
                 Text(zoomDomain == nil ? "Pinch to zoom · drag to pan · hold to read" : "Zoomed in. Drag to pan · hold to read")
             }

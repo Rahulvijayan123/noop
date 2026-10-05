@@ -5,7 +5,7 @@ import WhoopProtocol
 ///
 /// There is deliberately no "sitting" or "standing": a wrist accelerometer sees the arm, not the torso, so
 /// the two are indistinguishable. Both land in `.still`, and the UI says so.
-public enum DayState: String, Sendable, CaseIterable, Equatable {
+public enum DayState: String, Sendable, CaseIterable, Equatable, Codable {
     case sleeping
     case offWrist
     case running
@@ -18,7 +18,7 @@ public enum DayState: String, Sendable, CaseIterable, Equatable {
 }
 
 /// Where a segment's label came from. Shown next to each box so the wearer can judge how much to trust it.
-public enum DayStateBasis: String, Sendable, Equatable {
+public enum DayStateBasis: String, Sendable, Equatable, Codable {
     case sleepSession
     case wristEvent
     case noPulseSignal
@@ -44,7 +44,7 @@ public struct DayStateSpan: Equatable, Sendable {
     public init(start: Int, end: Int) { self.start = start; self.end = end }
 }
 
-public struct DayStateSegment: Equatable, Sendable, Identifiable {
+public struct DayStateSegment: Equatable, Sendable, Identifiable, Codable {
     public let state: DayState
     public let basis: DayStateBasis
     public let start: Int

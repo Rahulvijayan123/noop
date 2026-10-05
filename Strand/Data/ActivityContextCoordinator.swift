@@ -210,7 +210,7 @@ final class ActivityContextCoordinator {
 
     private func loadDay(_ day: Day) async -> LoadedDay? {
         guard let streams = await repo.dayStreams(dayStart: Date(timeIntervalSince1970: TimeInterval(day.start))),
-              let document = await repo.activityContext(from: streams) else { return nil }
+              let document = await repo.activityContext(from: streams, lane: .background) else { return nil }
         return LoadedDay(streams: streams, document: document)
     }
 }
