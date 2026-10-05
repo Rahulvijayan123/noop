@@ -541,7 +541,34 @@ phone raw capture (ImuSessionFileStore) -> rawImuSession NPB1 objects (object la
   -> shared ActivityContextPolicy (same code as the app) -> 30-s epochs
   -> publish_activity_context_v2 (fenced) -> activity_context_epochs
   -> scoring_dirty_span -> next scoring pass attaches daily.activity_context -> snapshot -> app
+  -> publish_activity_encoder_windows (fenced, same transaction) -> activity_encoder_windows
+  -> GET scores/activity-windows -> the phone's own activity decoder (HART evidence per 4-s window)
 ```
+
+### Where the raw motion comes from, and where HART's windows go
+
+- **Capture.** On a WHOOP 5/MG the phone records the raw motion stream on its own (`ActivityImuCapture`:
+  part-time by default, one minute in every three; Off and Continuous in Power saving). It keeps one
+  open-ended IMU store window per strap (`activity-<device>`) and arms or stops the stream on the
+  keep-alive tick; a Raw Data session someone starts by hand still owns the stream while it runs. The
+  strap's battery cost of streaming raw motion has not been measured, which is why the default is
+  part-time. Recordings are kept a week on the phone (`ImuRetentionPolicy.activityCapture`).
+- **Upload.** The object lane reads the IMU store under the BLE layer's local id and uploads under the
+  strap's cloud id (`CloudStrapSerialStore`), the device its heart rate and gravity already go to. Before
+  this the lane read under the account's fallback id, found nothing, and no `rawImuSession` object ever
+  reached the server. An object goes out once its 300 s window has closed, so a live capture costs one
+  object per five minutes instead of one per lane pass.
+- **Cost on the worker.** A day's job re-runs whenever another object of the day turns ready. The lane
+  keeps downloaded objects and the model's answer for every serve request on the host
+  (`ActivityLocalCache`, `FRWHOOP_ACTIVITY_CACHE_DIR`), and request chunks are aligned to the start of
+  their run, so a re-run only infers the run that grew.
+- **Back to the phone.** The windows (labels, probabilities, the `imu-feat-1` features) are stored per
+  UTC day in `activity_encoder_windows` as one compact `hart-windows-1` document
+  (`ActivityEncoderWindowSet`, shared by the worker and the app). The phone asks for yesterday and today
+  every five minutes, sending the revisions it holds so an unchanged day costs a few bytes. Its decoder
+  takes them as encoder windows, and a set that arrives for seconds already decoded re-decodes the day
+  (the windows are part of the day's context fingerprint). The stream days below read the same table,
+  so the server's documents use the same evidence.
 
 - The Python child is a persistent `stdin/stdout` JSON process (no per-window launches, no HTTP
   endpoint, no GPU). Model loading and inference happen outside Postgres transactions; the lane
@@ -671,8 +698,8 @@ activity job (unchanged claim / download / decode / lease renewal)
 
 Raw IMU is uploaded for only a handful of sessions, but heart rate, gravity, steps and wear events are
 stored for every day the strap was worn. Stream days give each of those UTC days the same day document,
-decoded from the stored measurements alone (no encoder windows, so `encoder_id` is null and the HART/IMU
-evidence is absent). The lineage is `algorithm_version = 'streams-activity-1'`; a day that also has a raw
+decoded from the stored measurements and, when the raw-IMU lane has stored any for the day, HART's windows
+from `activity_encoder_windows` (otherwise `encoder_id` is null and the HART/IMU evidence is absent). The lineage is `algorithm_version = 'streams-activity-1'`; a day that also has a raw
 IMU document (`hart-activity-1`) keeps both rows and the read surface lists the IMU one first.
 
 ```text
@@ -788,6 +815,7 @@ order by day desc;
 | Raw IMU sessions | Backblaze B2 only | NPB1 objects, verified by digest; only sessions the phone chose to upload |
 | ActivityContext v2 day documents (runs, events, confidence, uncertainty, provenance) | Supabase Postgres only (`activity_context_days`) | There is no B2 copy; the table is the store of record |
 | v1 30-second epochs (raw-IMU days) | Supabase Postgres (`activity_context_epochs`) | |
+| HART per-window output (raw-IMU days) | Supabase Postgres (`activity_encoder_windows`) | One `hart-windows-1` document per UTC day; regenerable from the raw IMU objects |
 | Phone-built documents | The phone only | They are never uploaded; the server rebuilds the same document from the stored streams |
 
 ## Health checks
