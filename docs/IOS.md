@@ -33,6 +33,11 @@ Supabase Auth which project a sign-up belongs to. There is no ingest token to co
 secret key or `service_role` key must never go in this file because it would ship inside the app.
 A build without these values runs fully offline and cannot sign in or turn on cloud sync.
 
+Set `NOOP_FINAL_HOSTED_COMPUTE = YES` in the same file for any build you give to someone else. Cloud sync is
+then the only mode: the account sheet cannot be skipped, there is no sync switch, and neither a stored
+preference nor a developer endpoint override can turn sync off or point it at another server. With the
+default `NO`, cloud stays an opt-in switch, which is what a developer build wants.
+
 `NOOP_ALLOW_LEGACY_ENROLLMENT` and `NOOP_LEGACY_FLEET_TOKEN` exist only for a migration build whose phones
 still hold a credential from the old NARA enrollment-code flow and must keep uploading with it until the
 person signs in. The app can no longer redeem a code. Leave both unset for testers; with them unset a
@@ -64,17 +69,20 @@ xcrun devicectl device process launch --device "$D" --terminate-existing com.rah
 
 Installing over an existing copy keeps its data, strap pairing and signed-in account.
 
-## Create an account and turn on cloud sync
+## Create an account
 
-In the app, open **Settings → Nara account**, choose **Create account**, and enter an email address and a
-password. Nara emails a one-time code; enter it to confirm the address and you are signed in. **Sign in**
-and **Forgot password?** (which also emails a code) are on the same screen, and **Resend code** sends a
-fresh code if the first did not arrive. Nothing is uploaded until a verified session exists.
+In a build with `NOOP_FINAL_HOSTED_COMPUTE = YES` the account sheet opens by itself once onboarding and the
+terms are done, and it cannot be dismissed. In any other build, open **Settings → Nara account**. Choose
+**Create account** and enter an email address and a password. Nara emails an eight-digit one-time code;
+enter it to confirm the address and you are signed in. **Sign in** and **Forgot password?** (which also
+emails a code) are on the same screen, and **Resend code** sends a fresh code if the first did not arrive.
+Nothing is uploaded until a verified session exists.
 
 After that the app links this phone to your account by itself: there is nothing to paste and no code to
 redeem. Pair the strap as usual and the app confirms it against your account as soon as the strap reports
-its serial number. Turn on **Sync with your account** and the app uploads its strap history and shows the
-scores the backend computes. See [ARCHITECTURE.md](ARCHITECTURE.md) for what happens next.
+its serial number. In a hosted-compute build it then uploads the strap history and shows the scores the
+backend computes, with no switch to find. In any other build, turn on **Sync with your account** first.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for what happens next.
 
 Signing out stops uploads and removes this account's credential from the Keychain. Data that was already
 recorded stays on the phone under that account, and keeps syncing to it the next time that account signs in.

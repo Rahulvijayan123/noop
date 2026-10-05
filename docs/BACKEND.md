@@ -124,6 +124,17 @@ reference table aside), that every policy a client can hit is written in terms o
 exactly the reviewed functions are executable by `anon` and `authenticated`, and that no view hands a
 client rows its owner's rights could see.
 
+The client roles are also narrower than Supabase's defaults.
+`20261004160000_client_privilege_hardening.sql` removes every `anon` privilege on `public` relations and
+sequences, removes `TRUNCATE`, `REFERENCES` and `TRIGGER` (which RLS does not govern) from `authenticated`,
+applies the policies whose only job is to admit the service role to `service_role` instead of `PUBLIC`, and
+stops the default privileges re-granting any of it to relations created later.
+`supabase/tests/client-privileges.sql` asserts all of that, and the reviewed list of client-callable
+`SECURITY DEFINER` functions, against a live database in a read-only transaction (the command is at the top
+of the file), so a later migration cannot widen the surface without that script failing.
+`20261004161000_reconcile_confirm_noop_wearable.sql` records the `confirm_noop_wearable` body production had
+been running after an in-place change.
+
 #### Hosted project checklist
 
 Do these once per project, in the dashboard or with `supabase config push`. None of it is applied by
@@ -165,10 +176,11 @@ migrations.
 
 ### Migrations
 
-> **Do not run `supabase db push` against production.** The production migration history
-> (`supabase_migrations.schema_migrations`) only records versions up to `20260921104000`. The 39
-> later migrations in `supabase/migrations/` were applied directly with SQL, so `db push` would try
-> to run them all again.
+> **Do not run `supabase db push` against production.** Production is migrated by hand, as below. Its
+> history table (`supabase_migrations.schema_migrations`) was brought level on 2026-10-04 and now records
+> every file in `supabase/migrations/` through `20261004161000`, plus `20261001065454`, which is the same
+> cron change as `20260930235500` applied from the dashboard under a generated version. Before that it had
+> stopped at `20260921104000` while later migrations were applied directly with SQL.
 
 To apply a new migration to production:
 
