@@ -30,10 +30,12 @@ extension PhysiologyContext {
         public static let sharedBeatIntervals: ReasonCode = "shared_beat_intervals"
         public static let labelsReadHeartRate: ReasonCode = "labels_read_heart_rate"
         public static let motionSharedAcrossSystems: ReasonCode = "motion_shared_across_systems"
+        public static let sharedOpticalSensor: ReasonCode = "shared_optical_sensor"
 
         public static let reasonCodes: [ReasonCode] = [
             historyFromFutureDropped, measurementAfterCutoff, noMeasurements, noObservations, activityUnavailable,
             sleepUnavailable, sharedBeatIntervals, labelsReadHeartRate, motionSharedAcrossSystems,
+            sharedOpticalSensor,
         ]
 
         /// Series key of the engine's own per-day motion-coverage value (feeds trailing exertion windows).
@@ -223,7 +225,7 @@ extension PhysiologyContext {
                                                generatedAt: input.generatedAt),
                 versions: policy.versions, policyFingerprint: fingerprint,
                 inputFingerprint: inputFingerprint(input, observations: observations, measurements: measurements,
-                                                   history: history.value, cutoff: cutoff),
+                                                   history: history.value, cutoff: cutoff, finality: finality),
                 inputRevisions: input.inputRevisions.sorted { ($0.input, $0.revision) < ($1.input, $1.revision) })
 
             return DayDocument(header: header, status: status, statusReasons: statusReasons.sorted(),
@@ -393,6 +395,11 @@ extension PhysiologyContext {
                                members: [MetricKind.heartRate.rawValue, MetricKind.restingHeartRate.rawValue,
                                          "sleep_detector", "decoder_intervals"],
                                note: labelsReadHeartRate),
+                DependenceNote(group: "optical_pulse",
+                               members: [MetricKind.heartRate.rawValue, MetricKind.restingHeartRate.rawValue,
+                                         MetricKind.hrvRmssd.rawValue, MetricKind.hrvSdnn.rawValue,
+                                         MetricKind.respiratoryRate.rawValue],
+                               note: sharedOpticalSensor),
                 DependenceNote(group: "strap_motion",
                                members: ["eligibility_stillness", "exertion_bouts", "functional_features"],
                                note: motionSharedAcrossSystems),
@@ -405,10 +412,13 @@ extension PhysiologyContext {
         /// not available at the cutoff does not change the fingerprint.
         static func inputFingerprint(_ input: DayInput, observations o: SanitizedObservations,
                                      measurements: [MeasurementInput], history: HistoryInput,
-                                     cutoff: Int) -> String {
+                                     cutoff: Int, finality: Finality) -> String {
             var h = FNV()
             h.add(input.identity.deviceScope); h.add(input.identity.day); h.add(input.identity.timezoneId)
             h.add(input.mode.rawValue); h.add(input.mode == .causalLive ? input.availabilityCutoff : 0)
+            // A retrospective document's cutoff matters only through its finality (provisional → final once the
+            // day is 30 h closed); without it the finality rebuild would publish "unchanged" forever.
+            h.add(finality.rawValue)
             for s in o.heartRate { h.add(s.ts); h.add(s.bpm) }
             h.add("|rr")
             for b in o.beatIntervals { h.add(b.ts); h.add(b.rrMs); h.add(b.seq) }

@@ -70,6 +70,30 @@ final class PCDocumentSizeTests: XCTestCase {
                                          seriesAlgorithmVersion: "frwhoop-series-2"))
     }
 
+    /// 200 timed exposure events across the read window (an extreme logging day): the stored form must still intern
+    /// the per-row exposure references and stay within budget.
+    func testExposureHeavyDayStaysWithinTheStoredBudget() throws {
+        var input = Self.fullDay()
+        let start = input.identity.dayWindow.start
+        input.exposures = (0..<200).map { i in
+            let t = start - 2 * 86_400 + i * 1_200
+            return PC.ExposureEventRevision(eventId: "ev-\(i)", revision: 1, kind: i % 2 == 0 ? .caffeine : .meal,
+                                            label: i % 2 == 0 ? "coffee" : "meal", occurred: .init(t, t + 1),
+                                            timePrecision: .exact, recordedAt: t + 60, receivedAt: t + 120,
+                                            source: .userEntered, confirmation: .confirmed,
+                                            doseAmount: i % 2 == 0 ? 80 : nil, doseUnit: i % 2 == 0 ? "mg" : nil)
+        }
+        let doc = PC.Engine.buildDay(input, history: .empty)
+        let (summary, tables) = PC.StoredDocument.split(doc)
+        XCTAssertEqual(PC.StoredDocument.join(summary: summary, tables: tables), doc)
+        let enc = PC.encoder()
+        let sizes = try tables.map { ($0.metric.rawValue, try enc.encode($0).count) }
+        let stored = try enc.encode(summary).count + sizes.reduce(0) { $0 + $1.1 }
+        print("PC_STORED_EXPOSURES summary=\(try enc.encode(summary).count / 1024)KB "
+              + sizes.map { "\($0.0)=\($0.1 / 1024)KB" }.joined(separator: " "))
+        XCTAssertLessThan(stored, 4_000_000, "exposure-heavy stored document over budget: \(stored) bytes")
+    }
+
     func testFullDayDocumentSizeAndBuildTime() throws {
         let input = Self.fullDay()
         let t0 = Date()

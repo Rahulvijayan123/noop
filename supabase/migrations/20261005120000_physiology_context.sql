@@ -954,6 +954,7 @@ declare
   v_changed boolean;
   v_episodes boolean := false;
   v_frozen integer := 0;
+  v_frozen_conflicts integer := 0;
   v_cascaded integer := 0;
   v_today date;
   v_s bigint;
@@ -1327,6 +1328,16 @@ begin
     from jsonb_array_elements(fr) as x(value)
   on conflict do nothing;
   get diagnostics v_frozen = row_count;
+  -- A proposed reference whose (series, regime, version) is already registered under ANOTHER id is not stored: the
+  -- registered one stays the authority (never silently replaced). The day's document still describes the reference
+  -- it computed from its own strictly-earlier history; the count makes that visible instead of silent.
+  select count(*) into v_frozen_conflicts
+    from jsonb_array_elements(fr) as x(value)
+    join public.physiology_context_frozen_references f
+      on f.user_id = j.user_id and f.device_id = j.device_id and f.series_key = x.value ->> 'series_key'
+     and f.regime_key = x.value ->> 'regime_key'
+     and f.version = internal.physiology_context_json_int(x.value -> 'version')::integer
+     and f.reference_id <> x.value ->> 'id';
 
   update public.physiology_context_jobs q set
     completed_revision = p_revision, lease_token = null, lease_until = null, consecutive_failures = 0,
@@ -1352,7 +1363,8 @@ begin
   return jsonb_build_object('applied', true, 'context_revision', v_rev, 'reason', 'published',
     'cascaded_days', v_cascaded, 'superseded_revision', v_prev, 'document_bytes', v_bytes,
     'envelope_tables', to_jsonb(v_table_metrics), 'table_bytes', v_table_bytes,
-    'daily_values_changed', v_changed, 'episodes_replaced', v_episodes, 'frozen_references_inserted', v_frozen);
+    'daily_values_changed', v_changed, 'episodes_replaced', v_episodes, 'frozen_references_inserted', v_frozen,
+    'frozen_references_conflicting', v_frozen_conflicts);
 end $$;
 
 -- ---------------------------------------------------------------------------------------------------------

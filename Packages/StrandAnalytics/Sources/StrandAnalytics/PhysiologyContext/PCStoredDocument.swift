@@ -73,7 +73,12 @@ extension PhysiologyContext {
         public var recentBouts: [[BoutRef]]
         /// Exertion windows with `interval` relative to the row's support start.
         public var exertion: [[ExertionWindowSummary]]
-        public var exposures: [[ExposureRef]]
+        /// Distinct exposure references; a `precedes` reference holds its occurrence's absolute end instant in
+        /// `secondsSinceOccurrence` (derived back on decode).
+        public var exposureRefs: [ExposureRef]
+        /// Each row's exposure list as indices into `exposureRefs` (a sliding 72 h window changes lists often, so
+        /// references are pooled individually).
+        public var exposures: [[Int]]
         public var exposureCoverage: [[ExposureCategoryStatus]]
         public var eligibility: [EligibilityVerdict]
         public var comparisons: [[ReferenceComparison]]
@@ -120,7 +125,8 @@ extension PhysiologyContext {
             var methods = Pool<MethodRef>(), validity = Pool<SignalValidity>(), activity = Pool<ActivityComposition>()
             var preceding = Pool<PrecedingHistory>(), sleepWear = Pool<SleepWearContext>()
             var wake = Pool<WakeReference>(), bouts = Pool<[BoutRef]>(), exertion = Pool<[ExertionWindowSummary]>()
-            var exposures = Pool<[ExposureRef]>(), coverage = Pool<[ExposureCategoryStatus]>()
+            var exposureRefs = Pool<ExposureRef>(), exposures = Pool<[Int]>()
+            var coverage = Pool<[ExposureCategoryStatus]>()
             var verdicts = Pool<EligibilityVerdict>(), comparisons = Pool<[ReferenceComparison]>()
             var rows: [EnvelopeTable.Row] = []
             rows.reserveCapacity(envelopes.count)
@@ -152,7 +158,9 @@ extension PhysiologyContext {
                     sleepWear: sleepWear.index(e.sleepWear), wake: wake.index(w), wakeSecondsOverride: wakeOverride,
                     recentBouts: bouts.index(refs), boutSecondsOverride: boutOverride,
                     exertion: exertion.index(e.history.exertion.map { shifted($0, by: -anchor) }),
-                    exposures: exposures.index(e.history.exposures),
+                    exposures: exposures.index(e.history.exposures.map {
+                        exposureRefs.index(absoluteExposure($0, anchor: anchor))
+                    }),
                     exposureCoverage: coverage.index(e.history.exposureCoverage),
                     eligibility: e.eligibility.map { verdicts.index($0) },
                     comparisons: comparisons.index(e.comparisons), finality: e.finality))
@@ -160,7 +168,8 @@ extension PhysiologyContext {
             return EnvelopeTable(wireVersion: EnvelopeTable.wireVersion, metric: metric, methods: methods.values,
                                  validity: validity.values, activity: activity.values, preceding: preceding.values,
                                  sleepWear: sleepWear.values, wake: wake.values, recentBouts: bouts.values,
-                                 exertion: exertion.values, exposures: exposures.values,
+                                 exertion: exertion.values, exposureRefs: exposureRefs.values,
+                                 exposures: exposures.values,
                                  exposureCoverage: coverage.values, eligibility: verdicts.values,
                                  comparisons: comparisons.values, rows: rows)
         }
@@ -174,6 +183,7 @@ extension PhysiologyContext {
                       t.sleepWear.indices.contains(r.sleepWear), t.wake.indices.contains(r.wake),
                       t.recentBouts.indices.contains(r.recentBouts), t.exertion.indices.contains(r.exertion),
                       t.exposures.indices.contains(r.exposures),
+                      t.exposures[r.exposures].allSatisfy(t.exposureRefs.indices.contains),
                       t.exposureCoverage.indices.contains(r.exposureCoverage),
                       t.comparisons.indices.contains(r.comparisons),
                       r.eligibility.allSatisfy(t.eligibility.indices.contains),
@@ -194,7 +204,8 @@ extension PhysiologyContext {
                 let history = HistoryContext(
                     wake: wake, recentBouts: refs,
                     exertion: t.exertion[r.exertion].map { shifted($0, by: anchor) },
-                    exposures: t.exposures[r.exposures], exposureCoverage: t.exposureCoverage[r.exposureCoverage])
+                    exposures: t.exposures[r.exposures].map { relativeExposure(t.exposureRefs[$0], anchor: anchor) },
+                    exposureCoverage: t.exposureCoverage[r.exposureCoverage])
                 return MeasurementEnvelope(
                     id: r.id ?? MeasurementEnvelope.makeId(method: method, support: r.support), metric: t.metric,
                     method: method, source: r.source, value: r.value, support: r.support,
@@ -208,6 +219,20 @@ extension PhysiologyContext {
         }
 
         // MARK: Helpers
+
+        /// A `precedes` reference stores, in the pool, the absolute instant its occurrence ended
+        /// (`anchor - secondsSinceOccurrence`), so the same event shares one pooled entry across rows. `overlaps`
+        /// references (0 s) are stored as they are.
+        static func absoluteExposure(_ r: ExposureRef, anchor: Int) -> ExposureRef {
+            var r = r
+            if r.relation == Exposures.relationPrecedes { r.secondsSinceOccurrence = anchor - r.secondsSinceOccurrence }
+            return r
+        }
+        static func relativeExposure(_ r: ExposureRef, anchor: Int) -> ExposureRef {
+            var r = r
+            if r.relation == Exposures.relationPrecedes { r.secondsSinceOccurrence = anchor - r.secondsSinceOccurrence }
+            return r
+        }
 
         static func shifted(_ c: ActivityComposition, by d: Int) -> ActivityComposition {
             var c = c; c.interval = Interval(c.interval.start + d, c.interval.end + d); return c

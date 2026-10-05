@@ -98,6 +98,20 @@ final class PCEngineTests: XCTestCase {
         XCTAssertEqual(PC.StoredDocument.join(summary: s2, tables: t2), doc)
     }
 
+    func testRetrospectiveFinalityChangesTheInputFingerprint() {
+        // Same data; one rebuild before the day is 30 h closed (provisional), one after (final). The final rebuild
+        // must not be an "unchanged" publish, or the stored row would stay provisional forever.
+        let id = Self.identity()
+        let early = PC.Engine.buildDay(Self.input(cutoff: id.dayWindow.end + 3600), history: .empty)
+        let late = PC.Engine.buildDay(Self.input(cutoff: id.dayWindow.end + 31 * 3600), history: .empty)
+        XCTAssertEqual(early.header.interpretation.finality, .provisional)
+        XCTAssertEqual(late.header.interpretation.finality, .final)
+        XCTAssertNotEqual(early.header.inputFingerprint, late.header.inputFingerprint)
+        // Two final rebuilds at different cutoffs are still the same input.
+        let later = PC.Engine.buildDay(Self.input(cutoff: id.dayWindow.end + 50 * 3600), history: .empty)
+        XCTAssertEqual(late.header.inputFingerprint, later.header.inputFingerprint)
+    }
+
     func testPolicyChangeChangesTheFingerprint() {
         var p = PC.Policy()
         let a = p.fingerprint

@@ -595,6 +595,9 @@ Deno.test({
       const sameVersion = await publishDay(a.user, a.device, newer, 'retrospective', payload(newer, 'retrospective', {
         input: 'in-2', episodes: [episode('ep-new-3', newer)], frozen: [frozen('fr-3', newer)] }));
       assert.deepEqual([sameVersion.episodes_replaced, sameVersion.frozen_references_inserted], [true, 0]);
+      // ...and the conflict is reported, not silent: fr-3 proposed (series, regime, version) that fr-1 already holds.
+      assert.equal(sameVersion.frozen_references_conflicting, 1);
+      assert.equal(late.frozen_references_conflicting, 0, 'fr-1 resent under its own id is not a conflict');
       assert.deepEqual(await episodes(), [`ep-new-3@${newer}`]);
       await sqlFails(`update public.physiology_context_frozen_references set center = 1 where user_id = '${a.user}'`,
         /physiology_context_frozen_references_immutable/);
