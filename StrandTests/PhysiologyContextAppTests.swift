@@ -545,6 +545,10 @@ final class PhysiologyContextAppTests: XCTestCase {
         ContextStub.body = ["context": ["status": "none"]]
         await s.load(key)
         XCTAssertEqual(s.state(for: key), .unavailable(.noData))
+        ContextStub.status = 502
+        await s.load(key)
+        XCTAssertEqual(s.state(for: key), .unavailable(.noData), "a failed re-read keeps the server's last answer")
+        ContextStub.status = 200
 
         ContextStub.status = 409
         ContextStub.body = ["error": "device_registration_pending"]

@@ -192,6 +192,8 @@ final class PhysiologyContextStore: ObservableObject {
                 if case .loading = states[key] { states[key] = nil }
                 return
             }
+            // A settled server answer without a document (none, pending, old server) stays as it was.
+            if let current = states[key], current.shownDay == nil, Self.isSettledAnswer(current) { return }
             states[key] = .failed(cached: states[key]?.shownDay, message: Self.describe(error))
         }
     }
@@ -232,6 +234,10 @@ final class PhysiologyContextStore: ObservableObject {
                 if case .loading = histories[key] { histories[key] = nil }
                 return
             }
+            switch histories[key] {
+            case .pending?, .unavailable(.unsupportedServer)?: return   // the server's last answer stays
+            default: break
+            }
             histories[key] = .failed(cached: histories[key]?.shown, message: Self.describe(error))
         }
     }
@@ -250,6 +256,15 @@ final class PhysiologyContextStore: ObservableObject {
             // Built from an earlier scoring result: never pair it silently with the value now on screen.
             if day.pairing?.consistent == false { return .stale(day) }
             return .available(day)
+        }
+    }
+
+    /// A state the server itself answered with (as opposed to loading or a failure).
+    nonisolated static func isSettledAnswer(_ state: State) -> Bool {
+        switch state {
+        case .pending: return true
+        case .unavailable(let reason): return reason == .noData || reason == .unsupportedServer
+        default: return false
         }
     }
 
