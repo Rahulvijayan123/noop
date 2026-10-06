@@ -1,101 +1,242 @@
 # Inertia-1 heads — evaluation summary
 
-> **SUPERSEDED — pending re-evaluation.** These numbers were produced before the red-team fixes (subject-clustered strong/weak rule, per-dataset test gate with weak → abstain, sealed gate files, compatible-only merges, union macro-F1, awake-lying and single-label reporting, provenance). Every bundle is being retrained from a clean commit and re-evaluated (`post_audit_rule_change`); `pipeline_cli summary` regenerates this file with the per-dataset tables and the disclosures (WISDM/PAMAP2 test exposure during prototyping; evaluator field change between runs 1 and 2).
-
 > **STAND-IN ENCODERS — NOT INERTIA-1; real Inertia-1 evaluation blocked: no public checkpoint.** Every number below is a *measured* result for a stand-in encoder on public wrist data; nothing here is evidence about Inertia-1 itself.
 
 Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_cli embed --encoder inertia-1/ar_transformer-small/30s@20hz` fails with `model_missing: blocked: no checkpoint`). The bundles below use stand-in encoders (`standin:handcrafted-stats-v1` = engineered baseline, `standin:nara-imu-feat-1-accel` = what the decoder already sees, `standin:inertia-arch-random-init/ar_transformer-small/seed0` = negative control). All are `evidence_tier_max = shadow`.
 
 ## Experiments
 
-| experiment | role | encoder | window | training datasets | bundle | sha256 | evaluated |
-|---|---|---|---|---|---|---|---|
-| ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-hc` | `0ad677d470782c0d` | yes (n=2) |
-| ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-nf` | `c622221dd1c5cae8` | yes (n=2) |
-| ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-art` | `dcfe3f2253ed896c` | yes (n=2) |
-| primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-hc` | `f61007169e3d3ad9` | yes (n=2) |
-| primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-nf` | `573f8b46431726cf` | yes (n=2) |
-| primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-art` | `02759f77b142d3c1` | yes (n=1) |
-| linear-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-hc` | `b68e2cecc6fa6631` | yes (n=2) |
-| mlp-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-mlp-hc` | `f4c14ff205e8863f` | yes (n=2) |
-| linear-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-art` | `afe7aced6ba22245` | yes (n=1) |
-| mlp-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-mlp-art` | `de5c5b711d0bafcc` | yes (n=1) |
-| linear-nf | arch | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-nf` | `52163f0733739e01` | yes (n=2) |
-| w10-hc | window | hc | w10 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-w10-hc` | `e1256ed06c23ed21` | yes (n=2) |
-| lodo-noc24-hc | lodo | hc | w30 | wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-lodo-noc24-hc` | `f5793b3ac33c64da` | yes (n=2) |
-| lodo-c24only-hc | lodo | hc | w30 | capture24 | `shadow-lodo-c24only-hc` | `c0d3529c78c7e979` | yes (n=2) |
-| lodo-nohhar-hc | lodo | hc | w30 | capture24, wisdm2019_watch, pamap2, mhealth, opportunity | `shadow-lodo-nohhar-hc` | `697310ada5cb0bc8` | yes (n=2) |
-| seed1-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-seed1-hc` | `f6630f03aaf96bff` | yes (n=2) |
-| seed2-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-seed2-hc` | `c565508a8c716e2a` | yes (n=2) |
-| primary-inertia1 | primary | inertia1 | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-inertia1` | `` | blocked |
+| experiment | role | encoder | window | training datasets | bundle | evaluated sha256 | sealed sha256 | git commit | evaluated |
+|---|---|---|---|---|---|---|---|---|---|
+| ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-hc` | `811ef6e2a28314d4` | `1a5110336832634b` | `a424d207e1c4` | yes (n=3) |
+| ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-nf` | `bb828ffb3235147e` | `5916b911e7d06282` | `a424d207e1c4` | yes (n=3) |
+| ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-art` | `3784c9c5bdcc7085` | `9ff173b2a3eac8be` | `a424d207e1c4` | yes (n=3) |
+| primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-hc` | `f03f85acf7e06e9b` | `3fb1ae3e75c8b993` | `a424d207e1c4` | yes (n=3) |
+| primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-nf` | `e8a34e919d5d19b5` | `736eb93e440fa5da` | `a424d207e1c4` | yes (n=3) |
+| primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-art` | `c0eb1a045f749df3` | `1b8fadcc1521709a` | `a424d207e1c4` | yes (n=2) |
+| linear-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-hc` | `6dac0eddb1f9875c` | `55ec82170e80c93c` | `a424d207e1c4` | yes (n=3) |
+| mlp-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-mlp-hc` | `97115d4109c57015` | `30e84df65b21ab31` | `a424d207e1c4` | yes (n=3) |
+| linear-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-art` | `f0a839da6c42f169` | `20fe1b0a40e86883` | `a424d207e1c4` | yes (n=2) |
+| mlp-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-mlp-art` | `8df3f9f10866715e` | `813cf70ad14be481` | `a424d207e1c4` | yes (n=2) |
+| linear-nf | arch | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-nf` | `ac609c4fd7435a28` | `1f001e014c71bb3c` | `a424d207e1c4` | yes (n=3) |
+| w10-hc | window | hc | w10 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-w10-hc` | `1cd36c60fda273ab` | `e57e9f8a7c661bf2` | `a424d207e1c4` | yes (n=3) |
+| lodo-noc24-hc | lodo | hc | w30 | wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-lodo-noc24-hc` | `62b9566ced026d1e` | `af46646f8e6721dc` | `a424d207e1c4` | yes (n=3) |
+| lodo-c24only-hc | lodo | hc | w30 | capture24 | `shadow-lodo-c24only-hc` | `0af9f28cbb271e4e` | `59970578b019ff8e` | `a424d207e1c4` | yes (n=3) |
+| lodo-nohhar-hc | lodo | hc | w30 | capture24, wisdm2019_watch, pamap2, mhealth, opportunity | `shadow-lodo-nohhar-hc` | `cb2cd3200eaace91` | `2bfa1d9f339a156a` | `a424d207e1c4` | yes (n=3) |
+| seed1-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-seed1-hc` | `1141f03851e3f4e0` | `f91941703727b82d` | `a424d207e1c4` | yes (n=3) |
+| seed2-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-seed2-hc` | `796029c9cb29261c` | `9128922bb4810dd7` | `a424d207e1c4` | yes (n=3) |
+| primary-inertia1 | primary | inertia1 | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-inertia1` | `` | `–` | `–` | blocked |
+
+Every evaluated bundle is SEALED: `test_gate.json` (per class val status, pooled + per-dataset test gates, final status, recomputed merges) is listed in the bundle's manifest, so the served artifact carries the one-shot gate; `load_bundle` refuses a gate that promotes or was made for another bundle.
 
 ## Headline (pooled test, subject-cluster bootstrap 95% CI)
 
-| experiment | head | n | macro-F1 [95% CI] | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 |
-|---|---|---|---|---|---|---|---|---|
-| primary-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 |
-| primary-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 |
-| primary-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 |
-| primary-nf | posture | 74,475 | 0.598 [0.583, 0.611] | 0.596 [0.582, 0.609] | 0.484 | 0.262 | 0.027 | 0.250 |
-| primary-nf | locomotion | 91,653 | 0.417 [0.380, 0.439] | 0.422 [0.397, 0.447] | 0.475 | 0.229 | 0.015 | 0.127 |
-| primary-nf | arm_behavior | 20,972 | 0.353 [0.307, 0.422] | 0.395 [0.362, 0.493] | 0.738 | 0.478 | 0.068 | 0.262 |
-| primary-art | posture | 74,475 | 0.460 [0.436, 0.488] | 0.473 [0.448, 0.502] | 0.704 | 0.432 | 0.108 | 0.250 |
-| primary-art | locomotion | 91,653 | 0.254 [0.219, 0.277] | 0.253 [0.212, 0.288] | 0.657 | 0.310 | 0.052 | 0.127 |
-| primary-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.740 | 0.470 | 0.056 | 0.262 |
-| linear-hc | posture | 74,475 | 0.618 [0.605, 0.628] | 0.617 [0.605, 0.627] | 0.413 | 0.231 | 0.014 | 0.250 |
-| linear-hc | locomotion | 91,653 | 0.620 [0.572, 0.658] | 0.564 [0.506, 0.616] | 0.424 | 0.198 | 0.037 | 0.127 |
-| linear-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 |
-| mlp-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 |
-| mlp-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 |
-| mlp-hc | arm_behavior | 20,972 | 0.416 [0.372, 0.462] | 0.471 [0.427, 0.566] | 0.665 | 0.441 | 0.066 | 0.262 |
-| linear-art | posture | 74,475 | 0.432 [0.411, 0.455] | 0.445 [0.422, 0.472] | 0.742 | 0.464 | 0.072 | 0.250 |
-| linear-art | locomotion | 91,653 | 0.232 [0.193, 0.258] | 0.235 [0.193, 0.273] | 0.690 | 0.318 | 0.040 | 0.127 |
-| linear-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.727 | 0.462 | 0.085 | 0.262 |
-| mlp-art | posture | 74,475 | 0.460 [0.436, 0.488] | 0.473 [0.448, 0.502] | 0.704 | 0.432 | 0.108 | 0.250 |
-| mlp-art | locomotion | 91,653 | 0.254 [0.219, 0.277] | 0.253 [0.212, 0.288] | 0.657 | 0.310 | 0.052 | 0.127 |
-| mlp-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.740 | 0.470 | 0.056 | 0.262 |
-| linear-nf | posture | 74,475 | 0.567 [0.554, 0.582] | 0.574 [0.562, 0.587] | 0.552 | 0.290 | 0.087 | 0.250 |
-| linear-nf | locomotion | 91,653 | 0.393 [0.366, 0.414] | 0.375 [0.351, 0.394] | 0.507 | 0.234 | 0.044 | 0.127 |
-| linear-nf | arm_behavior | 20,972 | 0.353 [0.307, 0.422] | 0.395 [0.362, 0.493] | 0.738 | 0.478 | 0.068 | 0.262 |
-| w10-hc | posture | 227,293 | 0.618 [0.601, 0.634] | 0.613 [0.600, 0.625] | 0.454 | 0.255 | 0.043 | 0.212 |
-| w10-hc | locomotion | 282,152 | 0.616 [0.583, 0.641] | 0.589 [0.560, 0.619] | 0.434 | 0.205 | 0.021 | 0.127 |
-| w10-hc | arm_behavior | 64,906 | 0.430 [0.379, 0.498] | 0.443 [0.404, 0.552] | 0.708 | 0.466 | 0.069 | 0.260 |
+| experiment | head | n | macro-F1 [95% CI] | macro-F1 present-only (legacy) | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 | predicted while absent |
+|---|---|---|---|---|---|---|---|---|---|---|
+| primary-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 | – |
+| primary-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 | – |
+| primary-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 | – |
+| primary-nf | posture | 74,475 | 0.598 [0.583, 0.611] | 0.598 [0.583, 0.611] | 0.596 [0.582, 0.609] | 0.484 | 0.262 | 0.027 | 0.250 | – |
+| primary-nf | locomotion | 91,653 | 0.417 [0.380, 0.439] | 0.417 [0.380, 0.439] | 0.422 [0.397, 0.447] | 0.475 | 0.229 | 0.015 | 0.127 | – |
+| primary-nf | arm_behavior | 20,972 | 0.353 [0.307, 0.422] | 0.353 [0.307, 0.422] | 0.395 [0.362, 0.493] | 0.738 | 0.478 | 0.068 | 0.262 | – |
+| primary-art | posture | 74,475 | 0.460 [0.436, 0.488] | 0.460 [0.436, 0.488] | 0.473 [0.448, 0.502] | 0.704 | 0.432 | 0.108 | 0.250 | – |
+| primary-art | locomotion | 91,653 | 0.254 [0.219, 0.277] | 0.254 [0.219, 0.277] | 0.253 [0.212, 0.288] | 0.657 | 0.310 | 0.052 | 0.127 | – |
+| primary-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.740 | 0.470 | 0.056 | 0.262 | – |
+| linear-hc | posture | 74,475 | 0.618 [0.605, 0.628] | 0.618 [0.605, 0.628] | 0.617 [0.605, 0.627] | 0.413 | 0.231 | 0.014 | 0.250 | – |
+| linear-hc | locomotion | 91,653 | 0.620 [0.572, 0.658] | 0.620 [0.572, 0.658] | 0.564 [0.506, 0.616] | 0.424 | 0.198 | 0.037 | 0.127 | – |
+| linear-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 | – |
+| mlp-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 | – |
+| mlp-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 | – |
+| mlp-hc | arm_behavior | 20,972 | 0.416 [0.372, 0.462] | 0.416 [0.372, 0.462] | 0.471 [0.427, 0.566] | 0.665 | 0.441 | 0.066 | 0.262 | – |
+| linear-art | posture | 74,475 | 0.432 [0.411, 0.455] | 0.432 [0.411, 0.455] | 0.445 [0.422, 0.472] | 0.742 | 0.464 | 0.072 | 0.250 | – |
+| linear-art | locomotion | 91,653 | 0.232 [0.193, 0.258] | 0.232 [0.193, 0.258] | 0.235 [0.193, 0.273] | 0.690 | 0.318 | 0.040 | 0.127 | – |
+| linear-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.727 | 0.462 | 0.085 | 0.262 | – |
+| mlp-art | posture | 74,475 | 0.460 [0.436, 0.488] | 0.460 [0.436, 0.488] | 0.473 [0.448, 0.502] | 0.704 | 0.432 | 0.108 | 0.250 | – |
+| mlp-art | locomotion | 91,653 | 0.254 [0.219, 0.277] | 0.254 [0.219, 0.277] | 0.253 [0.212, 0.288] | 0.657 | 0.310 | 0.052 | 0.127 | – |
+| mlp-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.740 | 0.470 | 0.056 | 0.262 | – |
+| linear-nf | posture | 74,475 | 0.567 [0.554, 0.582] | 0.567 [0.554, 0.582] | 0.574 [0.562, 0.587] | 0.552 | 0.290 | 0.087 | 0.250 | – |
+| linear-nf | locomotion | 91,653 | 0.393 [0.366, 0.414] | 0.393 [0.366, 0.414] | 0.375 [0.351, 0.394] | 0.507 | 0.234 | 0.044 | 0.127 | – |
+| linear-nf | arm_behavior | 20,972 | 0.353 [0.307, 0.422] | 0.353 [0.307, 0.422] | 0.395 [0.362, 0.493] | 0.738 | 0.478 | 0.068 | 0.262 | – |
+| w10-hc | posture | 227,293 | 0.618 [0.601, 0.634] | 0.618 [0.601, 0.634] | 0.613 [0.600, 0.625] | 0.454 | 0.255 | 0.043 | 0.212 | – |
+| w10-hc | locomotion | 282,152 | 0.616 [0.583, 0.641] | 0.616 [0.583, 0.641] | 0.589 [0.560, 0.619] | 0.434 | 0.205 | 0.021 | 0.127 | – |
+| w10-hc | arm_behavior | 64,906 | 0.430 [0.379, 0.498] | 0.430 [0.379, 0.498] | 0.443 [0.404, 0.552] | 0.708 | 0.466 | 0.069 | 0.260 | – |
+
+macro-F1 = sklearn convention (union of true and predicted classes); 'present-only' = the earlier number over classes with test support only. † = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
 
 ## Per-class test F1 (precision/recall) — primary bundles
 
+Final status = min(VAL status, pooled test gate, every wrist dataset with >= 30 accepted windows): strong needs precision >= .95 (pooled also CP95 >= .90, recall >= .05), weak needs precision >= .80; demotions only. P single-label = precision on windows whose truth is exactly one class.
+
 #### posture
 
-| class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | test support | final status (primary-hc) |
-|---|---|---|---|---|---|---|---|
-| recumbent | 0.91 (0.91/0.92) | 0.89 (0.85/0.94) | 0.75 (0.72/0.77) | 0.91 (0.89/0.93) | 0.91 (0.91/0.92) | 38,480 | strong→strong |
-| seated_likely | 0.84 (0.81/0.87) | 0.80 (0.81/0.79) | 0.63 (0.61/0.65) | 0.83 (0.81/0.85) | 0.84 (0.81/0.87) | 31,775 | weak→weak |
-| upright_stationary | 0.22 (0.47/0.14) | 0.10 (0.33/0.06) | 0.00 (0.00/0.00) | 0.11 (0.29/0.07) | 0.22 (0.47/0.14) | 4,220 | abstain→abstain |
-| postural_transition | unsupported | unsupported | unsupported | unsupported | unsupported | 0 | unsupported→– |
+Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the training data (awake lying is reported separately below); driving/passenger (vehicle) windows carry `seated_likely` because posture is genuinely labelled there; posture is MASKED on gait/cycling/exercise windows.
+
+| class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | primary-hc P single-label (n) | test support | status val→final (primary-hc) | demotion reasons |
+|---|---|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | 0.91 (0.91/0.92) | 0.89 (0.85/0.94) | 0.75 (0.72/0.77) | 0.91 (0.89/0.93) | 0.91 (0.91/0.92) | 0.90 (35,939) | 38,480 | weak→weak | – |
+| seated_likely | 0.84 (0.81/0.87) | 0.80 (0.81/0.79) | 0.63 (0.61/0.65) | 0.83 (0.81/0.85) | 0.84 (0.81/0.87) | 0.77 (25,686) | 31,775 | weak→abstain | pamap2 test: precision 0.629 at n_acc 89 -> abstain |
+| upright_stationary | 0.22 (0.47/0.14) | 0.10 (0.33/0.06) | 0.00 (0.00/0.00) | 0.11 (0.29/0.07) | 0.22 (0.47/0.14) | 0.53 (4,220) | 4,220 | abstain→abstain | – |
+| postural_transition | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
 
 #### locomotion
 
-| class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | test support | final status (primary-hc) |
-|---|---|---|---|---|---|---|---|
-| stationary | 0.94 (0.91/0.97) | 0.92 (0.86/0.98) | 0.89 (0.81/1.00) | 0.93 (0.89/0.98) | 0.94 (0.91/0.97) | 73,196 | strong→strong |
-| walking | 0.66 (0.80/0.56) | 0.57 (0.72/0.48) | 0.15 (0.79/0.08) | 0.63 (0.82/0.51) | 0.66 (0.80/0.56) | 8,527 | strong→strong |
-| brisk_walking | unsupported | unsupported | unsupported | unsupported | unsupported | 0 | unsupported→– |
-| running | 0.88 (0.91/0.85) | 0.80 (0.69/0.95) | 0.72 (0.75/0.68) | 0.78 (0.95/0.67) | 0.88 (0.91/0.85) | 203 | strong→weak |
-| stairs | 0.73 (0.72/0.74) | 0.00 (0.00/0.00) | 0.00 (0.00/0.00) | 0.72 (0.69/0.76) | 0.73 (0.72/0.74) | 152 | weak→weak |
-| cycling | 0.67 (0.72/0.63) | 0.46 (0.49/0.43) | 0.00 (0.00/0.00) | 0.62 (0.71/0.55) | 0.67 (0.72/0.63) | 808 | weak→weak |
-| vehicle_motion | 0.50 (0.71/0.38) | 0.00 (0.31/0.00) | 0.00 (0.00/0.00) | 0.37 (0.76/0.25) | 0.50 (0.71/0.38) | 3,518 | weak→weak |
-| other | 0.37 (0.40/0.35) | 0.17 (0.27/0.12) | 0.02 (0.22/0.01) | 0.28 (0.34/0.24) | 0.37 (0.40/0.35) | 5,249 | abstain→abstain |
+| class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | primary-hc P single-label (n) | test support | status val→final (primary-hc) | demotion reasons |
+|---|---|---|---|---|---|---|---|---|---|
+| stationary | 0.94 (0.91/0.97) | 0.92 (0.86/0.98) | 0.89 (0.81/1.00) | 0.93 (0.89/0.98) | 0.94 (0.91/0.97) | 0.91 (72,964) | 73,196 | strong→strong | – |
+| walking | 0.66 (0.80/0.56) | 0.57 (0.72/0.48) | 0.15 (0.79/0.08) | 0.63 (0.82/0.51) | 0.66 (0.80/0.56) | 0.79 (8,306) | 8,527 | strong→strong | – |
+| brisk_walking | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
+| running | 0.88 (0.91/0.85) | 0.80 (0.69/0.95) | 0.72 (0.75/0.68) | 0.78 (0.95/0.67) | 0.88 (0.91/0.85) | 0.91 (203) | 203 | strong→weak | pooled test: precision 0.941 at n_acc 152 -> weak |
+| stairs | 0.73 (0.72/0.74) | 0.00 (0.00/0.00) | 0.00 (0.00/0.00) | 0.72 (0.69/0.76) | 0.73 (0.72/0.74) | 0.72 (152) | 152 | weak→weak | – |
+| cycling | 0.67 (0.72/0.63) | 0.46 (0.49/0.43) | 0.00 (0.00/0.00) | 0.62 (0.71/0.55) | 0.67 (0.72/0.63) | 0.72 (808) | 808 | weak→abstain | pooled test: precision 0.721 at n_acc 703 -> abstain |
+| vehicle_motion | 0.50 (0.71/0.38) | 0.00 (0.31/0.00) | 0.00 (0.00/0.00) | 0.37 (0.76/0.25) | 0.50 (0.71/0.38) | 0.71 (3,518) | 3,518 | weak→weak | – |
+| other | 0.37 (0.40/0.35) | 0.17 (0.27/0.12) | 0.02 (0.22/0.01) | 0.28 (0.34/0.24) | 0.37 (0.40/0.35) | 0.40 (5,249) | 5,249 | abstain→abstain | – |
 
 #### arm_behavior
 
-| class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | test support | final status (primary-hc) |
+| class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | primary-hc P single-label (n) | test support | status val→final (primary-hc) | demotion reasons |
+|---|---|---|---|---|---|---|---|---|---|
+| quiet | 0.15 (0.41/0.09) | 0.04 (0.49/0.02) | 0.00 (0.00/0.00) | 0.15 (0.41/0.09) | 0.00 (0.08/0.00) | 0.41 (6,845) | 6,845 | abstain→abstain | – |
+| desk_like | 0.78 (0.67/0.94) | 0.78 (0.65/0.98) | 0.78 (0.65/1.00) | 0.78 (0.67/0.94) | 0.79 (0.66/0.99) | 0.67 (13,545) | 13,545 | abstain→abstain | – |
+| fidgeting | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
+| repetitive_hand_motion | 0.34 (0.44/0.27) | 0.23 (0.32/0.18) | 0.00 (0.00/0.00) | 0.34 (0.44/0.27) | 0.46 (0.51/0.42) | 0.44 (582) | 582 | weak→abstain | pooled test: precision 0.635 at n_acc 85 -> abstain |
+| active_gesturing | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
+| exercise_motion | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
+| other | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
+
+## Per-dataset per-class test P/R/F1 — primary bundles
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+† = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+
+#### primary-hc — posture
+
+| class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| quiet | 0.15 (0.41/0.09) | 0.04 (0.49/0.02) | 0.00 (0.00/0.00) | 0.15 (0.41/0.09) | 0.00 (0.08/0.00) | 6,845 | abstain→abstain |
-| desk_like | 0.78 (0.67/0.94) | 0.78 (0.65/0.98) | 0.78 (0.65/1.00) | 0.78 (0.67/0.94) | 0.79 (0.66/0.99) | 13,545 | abstain→abstain |
-| fidgeting | unsupported | unsupported | unsupported | unsupported | unsupported | 0 | unsupported→– |
-| repetitive_hand_motion | 0.34 (0.44/0.27) | 0.23 (0.32/0.18) | 0.00 (0.00/0.00) | 0.34 (0.44/0.27) | 0.46 (0.51/0.42) | 582 | weak→weak |
-| active_gesturing | unsupported | unsupported | unsupported | unsupported | unsupported | 0 | unsupported→– |
-| exercise_motion | unsupported | unsupported | unsupported | unsupported | unsupported | 0 | unsupported→– |
-| other | unsupported | unsupported | unsupported | unsupported | unsupported | 0 | unsupported→– |
+| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38401) · gate 0.91@39065→weak | 0.00/0.00/0.00 (0) · gate 0.00@26→weak | 0.44/1.00/0.62 (4) · gate 0.44@9→weak | 0.00/0.00/0.00 (0) | 0.89/0.84/0.86 (75) · gate 0.89@71→weak | 0.00/0.00/0.00 (0) · gate 0.00@25→weak | weak→weak |
+| seated_likely | 0.81/0.87/0.84 (31548) · gate 0.81@33775→weak | 0.86/0.81/0.83 (37) · gate 0.86@35→weak | 0.14/0.17/0.15 (6) · gate 0.14@7→weak | 0.86/1.00/0.92 (30) · gate 0.86@35→weak | 0.63/0.76/0.69 (74) · gate 0.63@89→abstain | 0.67/0.74/0.70 (80) · gate 0.67@88→abstain | weak→abstain |
+| upright_stationary | 0.43/0.12/0.19 (4036) | 0.92/0.32/0.48 (37) | 0.00/0.00/0.00 (6) | 1.00/0.29/0.44 (7) | 0.77/0.62/0.69 (55) | 1.00/0.58/0.74 (79) | abstain→abstain |
+
+| dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.650 [0.631, 0.669] | 0.438 [0.416, 0.456]† | 0.256 [0.190, 0.317]† | 0.684 [0.684, 0.684]† | 0.746 [0.682, 0.746]† | 0.479 [0.382, 0.562]† |
+
+#### primary-hc — locomotion
+
+| class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|
+| stationary | 0.91/0.97/0.94 (71942) · gate 0.98@63194→strong | 0.97/1.00/0.99 (74) · gate 1.00@70→strong | 1.00/0.84/0.91 (19) · gate 1.00@16→weak | 1.00/0.92/0.96 (37) · gate 1.00@19→weak | 0.85/0.88/0.86 (187) · gate 0.96@136→strong | 1.00/0.98/0.99 (937) · gate 1.00@778→strong | strong→strong |
+| walking | 0.80/0.55/0.65 (8375) · gate 0.99@2499→strong | 0.92/1.00/0.96 (35) · gate 1.00@30→strong | 0.57/1.00/0.73 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.71/0.98/0.82 (43) · gate 1.00@22→weak | 0.79/0.96/0.86 (70) · gate 1.00@57→strong | strong→strong |
+| running | 0.82/0.74/0.78 (103) · gate 0.87@68→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 1.00/0.96/0.98 (80) · gate 1.00@64→strong | strong→weak |
+| stairs | 0.02/0.12/0.04 (8) · gate 0.00@17→weak | 1.00/0.97/0.98 (32) · gate 1.00@27→weak | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.90/0.62/0.73 (29) · gate 1.00@16→weak | 1.00/0.78/0.87 (80) · gate 1.00@52→strong | weak→weak |
+| cycling | 0.69/0.60/0.65 (743) · gate 0.70@645→abstain | 1.00/0.88/0.94 (33) · gate 1.00@29→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 1.00/0.89/0.94 (28) · gate 1.00@25→weak | 0.00/0.00/0.00 (0) | weak→abstain |
+| vehicle_motion | 0.71/0.39/0.50 (3484) · gate 0.90@979→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.60/0.09/0.15 (34) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) | weak→weak |
+| other | 0.39/0.35/0.37 (5174) | 0.00/0.00/0.00 (0) | 0.75/1.00/0.86 (9) | 0.00/0.00/0.00 (0) | 0.70/0.88/0.78 (66) | 0.00/0.00/0.00 (0) | abstain→abstain |
+
+| dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.560 [0.439, 0.589] | 0.966 [0.964, 0.970]† | 0.750 [0.728, 0.949]† | 0.319 [0.319, 0.319]† | 0.757 [0.644, 0.791]† | 0.742 [0.707, 0.773]† |
+
+#### primary-hc — arm_behavior
+
+| class | capture24 (50 subj) | mhealth (2 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|
+| quiet | 0.41/0.09/0.15 (6802) | 0.00/0.00/0.00 (12) | 1.00/0.03/0.06 (31) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| desk_like | 0.67/0.94/0.78 (13385) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.78/1.00/0.88 (160) | abstain→abstain |
+| repetitive_hand_motion | 0.12/0.07/0.09 (393) · gate 0.00@31→abstain | 0.00/0.00/0.00 (0) | 1.00/0.45/0.62 (29) | 1.00/0.72/0.84 (160) · gate 1.00@54→strong | weak→abstain |
+
+| dataset | capture24 | mhealth | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.341 [0.299, 0.384] | 0.000 [0.000, 0.000]† | 0.227 [0.190, 0.259]† | 0.860 [0.709, 0.981]† |
+
+#### primary-nf — posture
+
+| class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | 0.85/0.94/0.89 (39388) · gate 0.97@20520→strong | 0.00/0.00/0.00 (0) · gate 0.00@29→weak | 0.25/1.00/0.40 (4) · gate 0.00@1→weak | 0.00/0.00/0.00 (0) | 0.78/0.80/0.79 (71) · gate 0.96@28→weak | 0.00/0.00/0.00 (0) · gate 0.00@8→weak | strong→strong |
+| seated_likely | 0.81/0.79/0.80 (30561) · gate 0.81@29535→weak | 0.40/0.05/0.10 (37) · gate 0.40@5→weak | 0.00/0.00/0.00 (6) | 0.81/1.00/0.90 (30) · gate 0.81@37→weak | 0.52/0.85/0.64 (78) · gate 0.52@128→abstain | 0.47/0.55/0.51 (80) · gate 0.47@93→abstain | weak→abstain |
+| upright_stationary | 0.33/0.06/0.11 (4036) | 0.00/0.00/0.00 (37) | 0.00/0.00/0.00 (6) | 0.00/0.00/0.00 (7) | 0.33/0.02/0.03 (55) | 0.00/0.00/0.00 (79) | abstain→abstain |
+
+| dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.600 [0.585, 0.611] | 0.032 [0.029, 0.035]† | 0.133 [0.133, 0.133]† | 0.448 [0.448, 0.448]† | 0.489 [0.311, 0.542]† | 0.170 [0.115, 0.201]† |
+
+#### primary-nf — locomotion
+
+| class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|
+| stationary | 0.86/0.98/0.92 (71976) · gate 0.97@55806→strong | 0.84/1.00/0.91 (74) · gate 1.00@73→strong | 0.84/0.84/0.84 (19) · gate 1.00@16→weak | 1.00/0.95/0.97 (37) · gate 1.00@12→weak | 0.79/0.90/0.84 (187) · gate 0.98@116→strong | 1.00/0.89/0.94 (937) · gate 1.00@507→strong | strong→strong |
+| walking | 0.74/0.47/0.57 (8341) · gate 0.91@3173→weak | 0.55/1.00/0.71 (35) · gate 0.58@60→abstain | 0.40/1.00/0.57 (4) · gate 0.57@7→weak | 0.00/0.00/0.00 (0) | 0.38/0.91/0.53 (43) · gate 0.26@31→abstain | 0.40/0.86/0.54 (70) · gate 0.39@64→abstain | weak→abstain |
+| running | 0.53/0.93/0.67 (103) · gate 0.67@132→abstain | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 0.91/1.00/0.95 (10) · gate 1.00@10→weak | 1.00/0.96/0.98 (80) · gate 1.00@68→strong | weak→abstain |
+| stairs | 0.00/0.00/0.00 (8) | 0.00/0.00/0.00 (32) | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 0.00/0.00/0.00 (80) | abstain→abstain |
+| cycling | 0.49/0.41/0.45 (743) · gate 0.58@414→abstain | 1.00/0.58/0.73 (33) · gate 1.00@17→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) · gate 0.00@1→weak | 1.00/0.71/0.83 (28) · gate 1.00@19→weak | 0.00/0.00/0.00 (0) · gate 0.00@28→weak | weak→abstain |
+| vehicle_motion | 0.31/0.00/0.00 (3484) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (34) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| other | 0.27/0.12/0.16 (5174) | 0.00/0.00/0.00 (0) | 0.67/0.44/0.53 (9) | 0.00/0.00/0.00 (0) | 0.65/0.48/0.56 (66) | 0.00/0.00/0.00 (0) | abstain→abstain |
+
+| dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.396 [0.286, 0.436] | 0.470 [0.344, 0.663]† | 0.658 [0.640, 0.861]† | 0.486 [0.486, 0.486]† | 0.531 [0.499, 0.675]† | 0.411 [0.383, 0.433]† |
+
+#### primary-nf — arm_behavior
+
+| class | capture24 (50 subj) | mhealth (2 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|
+| quiet | 0.49/0.02/0.04 (6802) | 0.00/0.00/0.00 (12) | 1.00/0.06/0.12 (31) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| desk_like | 0.66/0.98/0.79 (13385) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.72/1.00/0.84 (160) | abstain→abstain |
+| repetitive_hand_motion | 0.03/0.02/0.03 (393) · gate 0.00@48→abstain | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 1.00/0.61/0.75 (160) · gate 1.00@34→strong | weak→abstain |
+
+| dataset | capture24 | mhealth | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.285 [0.262, 0.304] | 0.000 [0.000, 0.000]† | 0.040 [0.000, 0.070]† | 0.795 [0.609, 0.937]† |
+
+#### primary-art — posture
+
+| class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | 0.73/0.77/0.75 (40277) · gate 0.81@20174→weak | 0.00/0.00/0.00 (0) | 0.40/0.50/0.44 (4) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) · gate 0.00@27→weak | 0.31/0.91/0.46 (44) · gate 0.16@90→abstain | 0.00/0.00/0.00 (0) · gate 0.00@11→weak | weak→abstain |
+| seated_likely | 0.61/0.65/0.63 (29672) | 0.82/0.49/0.61 (37) | 0.27/0.50/0.35 (6) | 0.00/0.00/0.00 (30) | 0.62/0.43/0.51 (105) | 0.72/0.55/0.62 (80) | abstain→abstain |
+| upright_stationary | 0.00/0.00/0.00 (4036) | 0.00/0.00/0.00 (37) | 0.00/0.00/0.00 (6) | 0.00/0.00/0.00 (7) | 0.00/0.00/0.00 (55) | 0.00/0.00/0.00 (79) | abstain→abstain |
+
+| dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.461 [0.434, 0.484] | 0.203 [0.000, 0.333]† | 0.266 [0.000, 0.556]† | 0.000 [0.000, 0.000]† | 0.321 [0.140, 0.365]† | 0.208 [0.121, 0.291]† |
+
+#### primary-art — locomotion
+
+| class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|
+| stationary | 0.81/1.00/0.89 (72149) · gate 0.81@88816→weak | 0.47/1.00/0.64 (74) · gate 0.47@156→abstain | 0.49/1.00/0.66 (19) · gate 0.49@39→abstain | 1.00/1.00/1.00 (37) · gate 1.00@37→strong | 0.58/0.98/0.73 (187) · gate 0.58@316→abstain | 0.89/0.99/0.94 (937) · gate 0.89@1035→weak | weak→abstain |
+| walking | 0.84/0.08/0.14 (8168) | 0.06/0.03/0.04 (35) | 0.00/0.00/0.00 (4) | 0.00/0.00/0.00 (0) | 0.60/0.74/0.67 (43) | 0.49/0.39/0.43 (70) | abstain→abstain |
+| running | 0.64/0.51/0.57 (103) · gate 0.70@76→abstain | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 0.45/1.00/0.62 (10) · gate 0.45@22→weak | 0.96/0.81/0.88 (80) · gate 0.98@64→strong | weak→abstain |
+| stairs | 0.00/0.00/0.00 (8) | 0.00/0.00/0.00 (32) | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 0.00/0.00/0.00 (80) | abstain→abstain |
+| cycling | 0.00/0.00/0.00 (743) | 0.00/0.00/0.00 (33) | 0.00/0.00/0.00 (4) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (28) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| vehicle_motion | 0.00/0.00/0.00 (3484) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (34) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| other | 0.21/0.01/0.01 (5174) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (9) | 0.00/0.00/0.00 (0) | 0.83/0.08/0.14 (66) | 0.00/0.00/0.00 (0) | abstain→abstain |
+
+| dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.231 [0.145, 0.278] | 0.170 [0.149, 0.189]† | 0.276 [0.274, 0.333]† | 1.000 [1.000, 1.000]† | 0.309 [0.275, 0.314]† | 0.450 [0.384, 0.504]† |
+
+#### primary-art — arm_behavior
+
+| class | capture24 (50 subj) | mhealth (2 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|
+| quiet | 0.00/0.00/0.00 (6802) | 0.00/0.00/0.00 (12) | 0.00/0.00/0.00 (31) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| desk_like | 0.65/1.00/0.79 (13385) · gate 0.72@9737→abstain | 0.00/0.00/0.00 (0) · gate 0.00@6→weak | 0.00/0.00/0.00 (0) · gate 0.00@17→weak | 0.50/1.00/0.67 (160) · gate 0.65@246→abstain | weak→abstain |
+| repetitive_hand_motion | 0.00/0.00/0.00 (393) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 0.00/0.00/0.00 (160) | abstain→abstain |
+
+| dataset | capture24 | mhealth | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.263 [0.241, 0.282] | 0.000 [0.000, 0.000]† | 0.000 [0.000, 0.000]† | 0.333 [0.333, 0.333]† |
+
+## Awake lying (recumbent outside sleep periods)
+
+| experiment | recumbent truth | sleep-period share | awake-lying truth (by dataset) | recumbent P/R/F1 on non-sleep windows | awake-lying gate (pooled) | awake-lying status |
+|---|---|---|---|---|---|---|
+| primary-hc | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.41/0.99/0.58 | P=0.411 n=6,237 → abstain | abstain |
+| primary-nf | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.34/1.00/0.51 | P=0.444 n=1,336 → abstain | abstain |
+| primary-art | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.27/1.00/0.43 | P=0.281 n=5,522 → abstain | abstain |
+
+The awake-lying gate is reported only: the served `recumbent` status is the pooled gate's, and the class must be read as 'recumbent (mostly sleep-period lying in training data)'.
 
 ## Calibration (test; fit on val only)
 
@@ -227,54 +368,60 @@ Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_c
 
 ### 10 s vs 30 s windows (stand-in hc, class heads)
 
-| experiment | head | n | macro-F1 [95% CI] | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 |
-|---|---|---|---|---|---|---|---|---|
-| primary-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 |
-| primary-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 |
-| primary-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 |
-| w10-hc | posture | 227,293 | 0.618 [0.601, 0.634] | 0.613 [0.600, 0.625] | 0.454 | 0.255 | 0.043 | 0.212 |
-| w10-hc | locomotion | 282,152 | 0.616 [0.583, 0.641] | 0.589 [0.560, 0.619] | 0.434 | 0.205 | 0.021 | 0.127 |
-| w10-hc | arm_behavior | 64,906 | 0.430 [0.379, 0.498] | 0.443 [0.404, 0.552] | 0.708 | 0.466 | 0.069 | 0.260 |
+| experiment | head | n | macro-F1 [95% CI] | macro-F1 present-only (legacy) | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 | predicted while absent |
+|---|---|---|---|---|---|---|---|---|---|---|
+| primary-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 | – |
+| primary-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 | – |
+| primary-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 | – |
+| w10-hc | posture | 227,293 | 0.618 [0.601, 0.634] | 0.618 [0.601, 0.634] | 0.613 [0.600, 0.625] | 0.454 | 0.255 | 0.043 | 0.212 | – |
+| w10-hc | locomotion | 282,152 | 0.616 [0.583, 0.641] | 0.616 [0.583, 0.641] | 0.589 [0.560, 0.619] | 0.434 | 0.205 | 0.021 | 0.127 | – |
+| w10-hc | arm_behavior | 64,906 | 0.430 [0.379, 0.498] | 0.430 [0.379, 0.498] | 0.443 [0.404, 0.552] | 0.708 | 0.466 | 0.069 | 0.260 | – |
+
+macro-F1 = sklearn convention (union of true and predicted classes); 'present-only' = the earlier number over classes with test support only. † = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
 
 ### Linear vs MLP (forced, test)
 
-| experiment | head | n | macro-F1 [95% CI] | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 |
-|---|---|---|---|---|---|---|---|---|
-| linear-hc | posture | 74,475 | 0.618 [0.605, 0.628] | 0.617 [0.605, 0.627] | 0.413 | 0.231 | 0.014 | 0.250 |
-| linear-hc | locomotion | 91,653 | 0.620 [0.572, 0.658] | 0.564 [0.506, 0.616] | 0.424 | 0.198 | 0.037 | 0.127 |
-| linear-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 |
-| mlp-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 |
-| mlp-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 |
-| mlp-hc | arm_behavior | 20,972 | 0.416 [0.372, 0.462] | 0.471 [0.427, 0.566] | 0.665 | 0.441 | 0.066 | 0.262 |
-| linear-art | posture | 74,475 | 0.432 [0.411, 0.455] | 0.445 [0.422, 0.472] | 0.742 | 0.464 | 0.072 | 0.250 |
-| linear-art | locomotion | 91,653 | 0.232 [0.193, 0.258] | 0.235 [0.193, 0.273] | 0.690 | 0.318 | 0.040 | 0.127 |
-| linear-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.727 | 0.462 | 0.085 | 0.262 |
-| mlp-art | posture | 74,475 | 0.460 [0.436, 0.488] | 0.473 [0.448, 0.502] | 0.704 | 0.432 | 0.108 | 0.250 |
-| mlp-art | locomotion | 91,653 | 0.254 [0.219, 0.277] | 0.253 [0.212, 0.288] | 0.657 | 0.310 | 0.052 | 0.127 |
-| mlp-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.740 | 0.470 | 0.056 | 0.262 |
+| experiment | head | n | macro-F1 [95% CI] | macro-F1 present-only (legacy) | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 | predicted while absent |
+|---|---|---|---|---|---|---|---|---|---|---|
+| linear-hc | posture | 74,475 | 0.618 [0.605, 0.628] | 0.618 [0.605, 0.628] | 0.617 [0.605, 0.627] | 0.413 | 0.231 | 0.014 | 0.250 | – |
+| linear-hc | locomotion | 91,653 | 0.620 [0.572, 0.658] | 0.620 [0.572, 0.658] | 0.564 [0.506, 0.616] | 0.424 | 0.198 | 0.037 | 0.127 | – |
+| linear-hc | arm_behavior | 20,972 | 0.422 [0.375, 0.486] | 0.422 [0.375, 0.486] | 0.434 [0.392, 0.546] | 0.705 | 0.461 | 0.072 | 0.262 | – |
+| mlp-hc | posture | 74,475 | 0.657 [0.638, 0.676] | 0.657 [0.638, 0.676] | 0.645 [0.629, 0.661] | 0.389 | 0.216 | 0.024 | 0.250 | – |
+| mlp-hc | locomotion | 91,653 | 0.678 [0.642, 0.706] | 0.678 [0.642, 0.706] | 0.640 [0.595, 0.685] | 0.375 | 0.180 | 0.022 | 0.127 | – |
+| mlp-hc | arm_behavior | 20,972 | 0.416 [0.372, 0.462] | 0.416 [0.372, 0.462] | 0.471 [0.427, 0.566] | 0.665 | 0.441 | 0.066 | 0.262 | – |
+| linear-art | posture | 74,475 | 0.432 [0.411, 0.455] | 0.432 [0.411, 0.455] | 0.445 [0.422, 0.472] | 0.742 | 0.464 | 0.072 | 0.250 | – |
+| linear-art | locomotion | 91,653 | 0.232 [0.193, 0.258] | 0.232 [0.193, 0.258] | 0.235 [0.193, 0.273] | 0.690 | 0.318 | 0.040 | 0.127 | – |
+| linear-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.727 | 0.462 | 0.085 | 0.262 | – |
+| mlp-art | posture | 74,475 | 0.460 [0.436, 0.488] | 0.460 [0.436, 0.488] | 0.473 [0.448, 0.502] | 0.704 | 0.432 | 0.108 | 0.250 | – |
+| mlp-art | locomotion | 91,653 | 0.254 [0.219, 0.277] | 0.254 [0.219, 0.277] | 0.253 [0.212, 0.288] | 0.657 | 0.310 | 0.052 | 0.127 | – |
+| mlp-art | arm_behavior | 20,972 | 0.262 [0.240, 0.283] | 0.262 [0.240, 0.283] | 0.333 [0.333, 0.333] | 0.740 | 0.470 | 0.056 | 0.262 | – |
+
+macro-F1 = sklearn convention (union of true and predicted classes); 'present-only' = the earlier number over classes with test support only. † = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
 
 ### Leave-one-dataset-out transfer (hc)
 
-| posture macro-F1 by test dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+
+| posture macro-F1 by test dataset | capture24 | hhar_watch (descriptive) | mhealth (descriptive) | opportunity (descriptive) | pamap2 (descriptive) | wisdm2019_watch |
 |---|---|---|---|---|---|---|
-| primary-hc | 0.650 | 0.657 | 0.256 | 0.684 | 0.746 | 0.719 |
+| primary-hc | 0.650 | 0.438 | 0.256 | 0.684 | 0.746 | 0.479 |
 | lodo-noc24-hc | 0.424 | 0.919 | 0.378 | 0.769 | 0.661 | 0.892 |
-| lodo-c24only-hc | 0.704 | 0.287 | 0.383 | 0.626 | 0.502 | 0.354 |
-| lodo-nohhar-hc | 0.646 | 0.487 | 0.286 | 0.684 | 0.736 | 0.728 |
+| lodo-c24only-hc | 0.704 | 0.192 | 0.383 | 0.626 | 0.502 | 0.236 |
+| lodo-nohhar-hc | 0.646 | 0.325 | 0.286 | 0.684 | 0.736 | 0.485 |
 
-| locomotion macro-F1 by test dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+| locomotion macro-F1 by test dataset | capture24 | hhar_watch (descriptive) | mhealth (descriptive) | opportunity (descriptive) | pamap2 (descriptive) | wisdm2019_watch |
 |---|---|---|---|---|---|---|
-| primary-hc | 0.560 | 0.966 | 0.750 | 0.958 | 0.757 | 0.928 |
+| primary-hc | 0.560 | 0.966 | 0.750 | 0.319 | 0.757 | 0.742 |
 | lodo-noc24-hc | 0.528 | 0.990 | 0.825 | 1.000 | 0.975 | 0.957 |
-| lodo-c24only-hc | 0.662 | 0.850 | 0.579 | 0.604 | 0.663 | 0.740 |
-| lodo-nohhar-hc | 0.570 | 0.939 | 0.845 | 0.972 | 0.789 | 0.938 |
+| lodo-c24only-hc | 0.662 | 0.510 | 0.579 | 0.151 | 0.663 | 0.296 |
+| lodo-nohhar-hc | 0.570 | 0.751 | 0.845 | 0.486 | 0.789 | 0.625 |
 
-| arm_behavior macro-F1 by test dataset | capture24 | mhealth | pamap2 | wisdm2019_watch |
+| arm_behavior macro-F1 by test dataset | capture24 | mhealth (descriptive) | pamap2 (descriptive) | wisdm2019_watch |
 |---|---|---|---|---|
-| primary-hc | 0.341 | 0.000 | 0.341 | 0.860 |
+| primary-hc | 0.341 | 0.000 | 0.227 | 0.860 |
 | lodo-noc24-hc | 0.392 | – | 1.000 | 0.896 |
 | lodo-c24only-hc | 0.399 | 0.000 | 0.000 | 1.000 |
-| lodo-nohhar-hc | 0.342 | 0.000 | 0.341 | 0.860 |
+| lodo-nohhar-hc | 0.342 | 0.000 | 0.227 | 0.860 |
 
 ### Seed variation (primary hc procedure, archs fixed from seed 0)
 
@@ -294,6 +441,8 @@ Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_c
 | opportunity | 2 | 1 | 1 | 4 | `2df351a0ba583c232c309e1941e3f00f10c0633c0095bb1c4b88b3b375e019b8` |
 | pamap2 | 6 | 1 | 2 | 9 | `4aeb6af05b41c67b3a82724026ddb7e8b633c5270c4d00fc0f580f4adea53715` |
 | wisdm2019_watch | 35 | 8 | 8 | 0 | `7105df4cac920c71c26957bacdaad065d59d9d0312b2026a4fdf1e0c6415754f` |
+
+Limitation: leave-one-subject-out folds are defined in the split manifests (`loso_folds`) for the small datasets but were NOT evaluated; every number here comes from the single frozen train/val/test split.
 
 ## Windows (cached, outside git)
 
@@ -321,7 +470,7 @@ Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_c
 
 ## Dataset / label-mapping summary
 
-`label_mappings.json` sha256 `a7d142240bf1247845714c2e0157a3deb7f8a7d1e9f4fd23acfb28170c9b7b21`; full table: `eval/inertia/label_mappings.md`.
+`label_mappings.json` sha256 `19ae2db05815639e1573c3d83d968fc0c1a41cdc4693e2c98a36f1475c0b16eb`; full table: `eval/inertia/label_mappings.md`.
 
 | dataset | role | labels | rows | used rows posture/locomotion/arm/transition/intensity |
 |---|---|---|---|---|
@@ -345,43 +494,84 @@ Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_c
 | wear | excluded_licence | 19 | 95 | 0/0/0/0/0 |
 | wisdm2019_watch | train_wrist | 18 | 90 | 2/15/4/14/0 |
 
+## Capture-24 source verification
+
+Training uses the HuggingFace parquet mirror (`hf_mirror_nz00shuuuu`, 151 participants). Every participant downloaded from the Oxford ORA release so far was compared with it: **48 of 48 complete ORA files identical** (449,565,923 rows; 0 failures; rule: row counts equal; ORA time (no zone, read as UTC) == timestamp_ms exactly; x/y/z max |diff| <= 1e-6 (max observed 4.77e-7: HF stores the float32 of the ORA value); annotations exactly equal, missing aligned). Incomplete: P008.csv.gz.tmp (0 bytes; the downloader stopped at 17:04 and is not running). The remaining 103 participants are verified only through the mirror's own SHA256SUMS. Verified: P002 P006 P011 P016 P019 P022 P023 P024 P026 P028 P029 P030 P031 P034 P035 P037 P043 P046 P049 P051 P053 P058 P066 P070 P072 P077 P078 P079 P083 P087 P089 P093 P095 P097 P099 P102 P103 P113 P116 P117 P118 P123 P127 P129 P130 P134 P135 P150.
+
 ## Test-split ledger (evaluate-once integrity)
 
-| # | experiment | bundle sha256 | test split sha256 | n evals of experiment | rerun reason |
-|---|---|---|---|---|---|
-| 1 | ood-hc | `27f77d7fef2922d2` | `6afd705530ea` | 1 |  |
-| 2 | primary-hc | `d485c24b3ae5503f` | `6afd705530ea` | 1 |  |
-| 3 | ood-nf | `91e16681ea3aeb9c` | `6afd705530ea` | 1 |  |
-| 4 | primary-nf | `8a74b3989a8f3b1a` | `6afd705530ea` | 1 |  |
-| 5 | linear-hc | `26222b12b4bb0264` | `6afd705530ea` | 1 |  |
-| 6 | lodo-c24only-hc | `d9a458622f82bbc3` | `6afd705530ea` | 1 |  |
-| 7 | mlp-hc | `93d773947a6f8fc0` | `6afd705530ea` | 1 |  |
-| 8 | linear-nf | `c4a5a16145533ae9` | `6afd705530ea` | 1 |  |
-| 9 | lodo-nohhar-hc | `67a3704c8f5798fa` | `6afd705530ea` | 1 |  |
-| 10 | ood-art | `5b0df3c3536731cc` | `6afd705530ea` | 1 |  |
-| 11 | seed1-hc | `85b64aa131f7b876` | `6afd705530ea` | 1 |  |
-| 12 | w10-hc | `94a865079631df30` | `fe25fb43c8cb` | 1 |  |
-| 13 | seed2-hc | `48b2b61521e79855` | `6afd705530ea` | 1 |  |
-| 14 | lodo-noc24-hc | `b73e7fb72e61cc78` | `6afd705530ea` | 1 |  |
-| 15 | ood-hc | `0ad677d470782c0d` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 16 | ood-nf | `c622221dd1c5cae8` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 17 | lodo-c24only-hc | `c0d3529c78c7e979` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 18 | primary-hc | `f61007169e3d3ad9` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 19 | primary-nf | `573f8b46431726cf` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 20 | lodo-noc24-hc | `f5793b3ac33c64da` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 21 | linear-hc | `b68e2cecc6fa6631` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 22 | linear-nf | `52163f0733739e01` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 23 | w10-hc | `e1256ed06c23ed21` | `fe25fb43c8cb` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 24 | mlp-hc | `f4c14ff205e8863f` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 25 | seed1-hc | `f6630f03aaf96bff` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 26 | linear-art | `afe7aced6ba22245` | `6afd705530ea` | 1 |  |
-| 27 | mlp-art | `de5c5b711d0bafcc` | `6afd705530ea` | 1 |  |
-| 28 | lodo-nohhar-hc | `697310ada5cb0bc8` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 29 | primary-art | `02759f77b142d3c1` | `6afd705530ea` | 1 |  |
-| 30 | seed2-hc | `c565508a8c716e2a` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
-| 31 | ood-art | `dcfe3f2253ed896c` | `6afd705530ea` | 2 | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+The test split is assembled only inside the TestVault; a re-evaluation needs an enumerated reason (`artifact_lost_identical_rebuild`, `evaluator_bug_fix`, `post_audit_rule_change`, `provenance_rebuild`) plus free-text detail.
 
-14 re-evaluations: the run-1 bundle directory was deleted by an external process; the bundles were retrained from identical code/data/splits and re-evaluated. Every metric of all 14 re-evaluated experiments was identical to run 1 (field-by-field comparison of evaluation.json, tolerance 1e-9) — training and evaluation are deterministic on CPU. Only bundle hashes differ (the manifest records creation time).
+| # | experiment | bundle sha256 | test split sha256 | n evals (this split) | rerun reason | detail |
+|---|---|---|---|---|---|---|
+| 1 | ood-hc | `27f77d7fef2922d2` | `6afd705530ea` | 1 |  |  |
+| 2 | primary-hc | `d485c24b3ae5503f` | `6afd705530ea` | 1 |  |  |
+| 3 | ood-nf | `91e16681ea3aeb9c` | `6afd705530ea` | 1 |  |  |
+| 4 | primary-nf | `8a74b3989a8f3b1a` | `6afd705530ea` | 1 |  |  |
+| 5 | linear-hc | `26222b12b4bb0264` | `6afd705530ea` | 1 |  |  |
+| 6 | lodo-c24only-hc | `d9a458622f82bbc3` | `6afd705530ea` | 1 |  |  |
+| 7 | mlp-hc | `93d773947a6f8fc0` | `6afd705530ea` | 1 |  |  |
+| 8 | linear-nf | `c4a5a16145533ae9` | `6afd705530ea` | 1 |  |  |
+| 9 | lodo-nohhar-hc | `67a3704c8f5798fa` | `6afd705530ea` | 1 |  |  |
+| 10 | ood-art | `5b0df3c3536731cc` | `6afd705530ea` | 1 |  |  |
+| 11 | seed1-hc | `85b64aa131f7b876` | `6afd705530ea` | 1 |  |  |
+| 12 | w10-hc | `94a865079631df30` | `fe25fb43c8cb` | 1 |  |  |
+| 13 | seed2-hc | `48b2b61521e79855` | `6afd705530ea` | 1 |  |  |
+| 14 | lodo-noc24-hc | `b73e7fb72e61cc78` | `6afd705530ea` | 1 |  |  |
+| 15 | ood-hc | `0ad677d470782c0d` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 16 | ood-nf | `c622221dd1c5cae8` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 17 | lodo-c24only-hc | `c0d3529c78c7e979` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 18 | primary-hc | `f61007169e3d3ad9` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 19 | primary-nf | `573f8b46431726cf` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 20 | lodo-noc24-hc | `f5793b3ac33c64da` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 21 | linear-hc | `b68e2cecc6fa6631` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 22 | linear-nf | `52163f0733739e01` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 23 | w10-hc | `e1256ed06c23ed21` | `fe25fb43c8cb` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 24 | mlp-hc | `f4c14ff205e8863f` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 25 | seed1-hc | `f6630f03aaf96bff` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 26 | linear-art | `afe7aced6ba22245` | `6afd705530ea` | 1 |  |  |
+| 27 | mlp-art | `de5c5b711d0bafcc` | `6afd705530ea` | 1 |  |  |
+| 28 | lodo-nohhar-hc | `697310ada5cb0bc8` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 29 | primary-art | `02759f77b142d3c1` | `6afd705530ea` | 1 |  |  |
+| 30 | seed2-hc | `c565508a8c716e2a` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 31 | ood-art | `dcfe3f2253ed896c` | `6afd705530ea` | 2 | legacy free text (pre-enumeration) | run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed |
+| 32 | ood-hc | `811ef6e2a28314d4` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 33 | ood-nf | `bb828ffb3235147e` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 34 | ood-art | `3784c9c5bdcc7085` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 35 | primary-hc | `f03f85acf7e06e9b` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 36 | primary-nf | `e8a34e919d5d19b5` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 37 | primary-art | `c0eb1a045f749df3` | `6afd705530ea` | 2 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 38 | linear-hc | `6dac0eddb1f9875c` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 39 | mlp-hc | `97115d4109c57015` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 40 | linear-art | `f0a839da6c42f169` | `6afd705530ea` | 2 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 41 | mlp-art | `8df3f9f10866715e` | `6afd705530ea` | 2 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 42 | linear-nf | `ac609c4fd7435a28` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 43 | w10-hc | `1cd36c60fda273ab` | `fe25fb43c8cb` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 44 | lodo-noc24-hc | `62b9566ced026d1e` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 45 | lodo-c24only-hc | `0af9f28cbb271e4e` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 46 | lodo-nohhar-hc | `cb2cd3200eaace91` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 47 | seed1-hc | `1141f03851e3f4e0` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 48 | seed2-hc | `796029c9cb29261c` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+
+Re-evaluations by reason: legacy free text (pre-enumeration): 14 (the run-1 bundle directory was deleted by an external process; the bundles were retrained deterministically and re-evaluated: every metric identical to run 1 at tolerance 1e-9; only bundle hashes differ (the manifest records creation time)); post_audit_rule_change: 17 (a training/selection/gate/metric rule changed after an audit that had seen test results; the new test numbers are NOT pristine).
+
+## Disclosures (test-set exposure and evaluator changes)
+
+- **WISDM / PAMAP2 test numbers are not fully pristine (G-8).** Prototyping in `research/inertia-work/agentD` loaded WISDM-2019 and PAMAP2 subjects that are in the frozen TEST split and printed test-subject deltas next to the validation numbers while the head grid and the arch-selection rule were being chosen; the final `train_heads` GRID and RULE equal the prototype's. No threshold, calibration or status was fit on test, but the procedure was designed with test feedback visible, so read WISDM and PAMAP2 test results as optimistic. The prototype scripts (`proto_*.py`, `run_proto.py`, `run_lodo.py`, `select_rule.py`) load only WISDM and PAMAP2; they contain no Capture-24, HHAR, MHEALTH or Opportunity code path.
+- **Evaluator diagnostic changed between runs (G-17).** Run 1 recorded `apply_vs_apply_arrays_max_abs` (bundle.apply vs bundle.apply_arrays); run 2 records `apply_vs_training_side_max_abs` (bundle.apply vs the training-side numpy path). Every metric of the 14 re-evaluated experiments was identical between the runs; only that diagnostic field changed.
+- **Rule changes after the audit.** The strong/weak VAL rule (subject-cluster bootstrap, >= 5 subjects), the test gate (weak -> abstain, per-dataset demotion), the merge table and the macro-F1 convention were changed after a red-team audit that had seen these test results; evaluations made with the new rules are recorded as `post_audit_rule_change` re-evaluations and are not pristine either.
+
+## Nara/WHOOP fixture behaviour
+
+There is **no labelled WHOOP data**: nothing above is a WHOOP accuracy result. What the WHOOP path is tested with is a synthetic, deterministic golden fixture (`fixtures/inertia/`, regenerated by `python -m activity_context.inertia.make_golden`, checked by `make_golden --check` and `tests/inertia/test_inertia_golden.py`):
+
+- input: one WHOOP-format infer request — 1 s head + 100 s body + 1 s tail of NPB1 int16 columns at 100 Hz, 4096 LSB/g (still, seated-like tilt with sway, 1.8 Hz gait), hop 5 s;
+- path: `inertia-prep-1` (accel only, g, 10 Hz Butterworth filtfilt, resample_poly 1/5 -> 20 Hz, 30 s windows) -> the stand-in encoder `standin:inertia-arch-random-init/ar_transformer-tiny/seed0` (seeded random init, NOT Inertia-1) -> a fixed-weight shadow bundle (`bundle_tiny`, every calibration method, covers, merge_into, MLP + linear heads, kNN OOD) -> the `motion-heads-1` response: 15 windows, heads arm_behavior, locomotion, posture, transition, tier `shadow`, encoder_kind `standin`;
+- serve: the same response is reproduced in-process and through the `python -m activity_context.inertia.serve --allow-standin-shadow` subprocess (byte-for-byte on every field but duration_ms); without the flag it is refused;
+- Swift: `Packages/StrandAnalytics/Tests/StrandAnalyticsTests/MotionHeadsContractTests.swift` decodes the same golden response (`MotionHeadsResponse.decode`), checks the class orders / wire keys, and pushes it through the track builder (every window attaches to an observed second in [e, e+2]).
+
+What it does NOT exercise: real Inertia-1 weights (none are public), WHOOP-specific signal statistics, any accuracy on WHOOP data, or candidate-mode evidence on a real night (stand-ins are refused as evidence).
+
 
 ## Measured vs inferred vs blocked
 

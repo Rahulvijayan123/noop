@@ -2,36 +2,64 @@
 
 > **STAND-IN ENCODERS — NOT INERTIA-1; real Inertia-1 evaluation blocked: no public checkpoint.** Every number below is a *measured* result for a stand-in encoder on public wrist data; nothing here is evidence about Inertia-1 itself.
 
-- bundle_sha256 `c622221dd1c5cae81c7f7431aa1e7525247b9d1ea7c3c0a8c0de05a1088a1461`; encoder `standin:nara-imu-feat-1-accel` (standin); evidence_tier_max `shadow`
-- evaluated once on the frozen test subjects through `load_bundle(...).apply(...)`; test_sha256 `6afd705530ea8f98e32f7c40997c4db53952ebdcd411fea823493c71a8311898`; evaluations of this experiment: 2 (rerun reason: run-1 bundle directory was deleted by an external process (~19:55, /tmp); bundle retrained deterministically from identical code/data/splits; no model, rule or threshold changed); bundle.apply vs training-side numpy max |Δ| (first 2,000 windows) 0.000000000000
+- evaluated bundle_sha256 `bb828ffb3235147e9a82e6864e03d99ebbe1dae495025f1ba5c8300a503a9bec`; sealed bundle_sha256 `5916b911e7d062820f41ecd47b66da991802ad0da152d8822760b630bd0d7d84` (test_gate.json `4026a02c8f41df74`; the served artifact carries the gate); encoder `standin:nara-imu-feat-1-accel` (standin); evidence_tier_max `shadow`
+- provenance: git_commit `a424d207e1c44f08e267f588b2122c787336055c`, source_tree_sha256 `48a7a17c749ac61c`, source dirty False, allow_dirty False
+- evaluated once on the frozen test subjects (assembled inside the TestVault) through `load_bundle(...).apply(...)`; test_sha256 `6afd705530ea8f98e32f7c40997c4db53952ebdcd411fea823493c71a8311898`; evaluations of this experiment on this test split: 3 (rerun reason: post_audit_rule_change — red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207); bundle.apply vs training-side numpy max |Δ| (first 2,000 windows) 0.000000000000
 - test windows: capture24 96,819 (50 subj), hhar_watch 1,998 (2 subj), mhealth 49 (2 subj), opportunity 2,539 (1 subj), pamap2 5,167 (2 subj), wisdm2019_watch 1,397 (8 subj)
 - nonfinite windows dropped: 0
 
+† = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+Limitation: leave-one-subject-out folds are defined in the split manifests (`loso_folds`) for the small datasets but were NOT evaluated; every number here comes from the single frozen train/val/test split.
+
 ### posture
 
-| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |
-|---|---|---|---|---|---|---|---|---|
-| 74,475 | 0.816 | 0.574 [0.562, 0.587] | 0.567 [0.554, 0.582] | 0.925→0.552 | 0.556→0.290 | 0.293→0.086 (0.005) | 0.288→0.082 | 0.159 |
+Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the training data (awake lying is reported separately below); driving/passenger (vehicle) windows carry `seated_likely` because posture is genuinely labelled there; posture is MASKED on gait/cycling/exercise windows.
+
+| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | macro-F1 present-only (legacy) | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |
+|---|---|---|---|---|---|---|---|---|---|
+| 74,475 | 0.816 | 0.574 [0.562, 0.587] | 0.567 [0.554, 0.582] | 0.567 [0.554, 0.582] | 0.925→0.552 | 0.556→0.290 | 0.293→0.086 (0.005) | 0.288→0.082 | 0.159 |
+
+macro-F1 = sklearn convention (mean F1 over the union of true and predicted classes; a class predicted while absent scores 0). Predicted while absent from this test set: none. 'present-only' = the earlier number over classes with test support only (kept for comparison).
 
 Majority baseline (train-majority `recumbent`): accuracy 0.598, balanced acc 0.333, macro-F1 0.250. Set-truth windows: 8,630; windows whose truth is an unsupported class (not scored): 0.
 
-| class | supported | test support | P | R | F1 | classwise ECE | val status | tau | test gate | final status | unsupported-truth windows |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| recumbent | yes | 39,970 | 0.827 | 0.947 | 0.883 | 0.115 | abstain | 1.000 | – | abstain | 0 |
-| seated_likely | yes | 30,285 | 0.802 | 0.754 | 0.777 | 0.114 | abstain | 1.000 | – | abstain | 0 |
-| upright_stationary | yes | 4,220 | 0.414 | 0.022 | 0.042 | 0.015 | abstain | 1.000 | – | abstain | 0 |
-| postural_transition | no | 0 | – | – | – | – | unsupported | – | – | – | 0 |
+| class | supported | test support | P | R | F1 | P single-label (n) | classwise ECE | val status | tau | pooled gate | dataset demotions | final status | unsupported-truth windows |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | yes | 39,970 | 0.827 | 0.947 | 0.883 | 0.810 (35,939) | 0.115 | abstain | 1.000 | – | – | abstain | 0 |
+| seated_likely | yes | 30,285 | 0.802 | 0.754 | 0.777 | 0.764 (25,686) | 0.114 | abstain | 1.000 | – | – | abstain | 0 |
+| upright_stationary | yes | 4,220 | 0.414 | 0.022 | 0.042 | 0.475 (4,220) | 0.015 | abstain | 1.000 | – | – | abstain | 0 |
+| postural_transition | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
 
-Per dataset:
+P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
 
-| dataset | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | per-class F1 |
+Per dataset (macro-F1 = union convention):
+
+| dataset | test subjects | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | note |
+|---|---|---|---|---|---|---|---|
+| capture24 | 50 | 73,985 | 0.575 | 0.569 [0.556, 0.581] | 0.545 | 0.089 |  |
+| hhar_watch | 2 | 74 | 0.014 | 0.017 [0.000, 0.032]† | 2.634 | 0.733 | descriptive |
+| mhealth | 2 | 16 | 0.333 | 0.133 [0.133, 0.133]† | 2.019 | 0.501 | descriptive |
+| opportunity | 1 | 37 | 0.500 | 0.448 [0.448, 0.448]† | 0.518 | 0.122 | descriptive |
+| pamap2 | 2 | 204 | 0.559 | 0.481 [0.300, 0.543]† | 0.897 | 0.145 | descriptive |
+| wisdm2019_watch | 8 | 159 | 0.225 | 0.153 [0.100, 0.190]† | 1.873 | 0.445 |  |
+
+Per dataset per class P/R/F1 (support) and the dataset gate at the frozen tau (P, n_acc → level; levels with n_acc < 30 do not demote):
+
+| class | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
 |---|---|---|---|---|---|---|
-| capture24 | 73,985 | 0.575 | 0.569 [0.556, 0.581] | 0.545 | 0.089 | recumbent 0.88 (n=39892), seated_likely 0.78 (n=30057), upright_stationary 0.04 (n=4036) |
-| hhar_watch | 74 | 0.014 | 0.026 [0.000, 0.048] | 2.634 | 0.733 | seated_likely 0.05 (n=37), upright_stationary 0.00 (n=37) |
-| mhealth | 16 | 0.333 | 0.133 [0.133, 0.133] | 2.019 | 0.501 | recumbent 0.40 (n=4), seated_likely 0.00 (n=6), upright_stationary 0.00 (n=6) |
-| opportunity | 37 | 0.500 | 0.448 [0.448, 0.448] | 0.518 | 0.122 | seated_likely 0.90 (n=30), upright_stationary 0.00 (n=7) |
-| pamap2 | 204 | 0.559 | 0.481 [0.300, 0.543] | 0.897 | 0.145 | recumbent 0.82 (n=74), seated_likely 0.62 (n=75), upright_stationary 0.00 (n=55) |
-| wisdm2019_watch | 159 | 0.225 | 0.229 [0.150, 0.285] | 1.873 | 0.445 | seated_likely 0.46 (n=80), upright_stationary 0.00 (n=79) |
+| recumbent (mostly sleep-period lying in training data) | 0.83/0.95/0.88 (39892) | 0.00/0.00/0.00 (0) | 0.25/1.00/0.40 (4) | 0.00/0.00/0.00 (0) | 0.78/0.86/0.82 (74) | 0.00/0.00/0.00 (0) |
+| seated_likely | 0.80/0.76/0.78 (30057) | 0.50/0.03/0.05 (37) | 0.00/0.00/0.00 (6) | 0.81/1.00/0.90 (30) | 0.50/0.81/0.62 (75) | 0.47/0.45/0.46 (80) |
+| upright_stationary | 0.42/0.02/0.04 (4036) | 0.00/0.00/0.00 (37) | 0.00/0.00/0.00 (6) | 0.00/0.00/0.00 (7) | 0.00/0.00/0.00 (55) | 0.00/0.00/0.00 (79) |
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+† = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+
+Awake lying (recumbent scored on NON-sleep windows only; G-2):
+
+- recumbent truth windows: 44,569, of which sleep-period 35,904 (0.806) and awake lying 8,665 (by dataset: capture24 8576, hhar_watch 0, mhealth 4, opportunity 0, pamap2 85, wisdm2019_watch 0)
+- recumbent on non-sleep windows: P 0.339, R 0.998, F1 0.506 (support 4,066, predicted 11,970)
+
 
 Wrist-only: n=74,475, macro-F1 0.567 (every training/test placement is wrist or forearm; equals pooled).
 
@@ -48,33 +76,53 @@ Confusion (rows truth, cols pred; recumbent, seated_likely, upright_stationary, 
 
 ### locomotion
 
-| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |
-|---|---|---|---|---|---|---|---|---|
-| 91,653 | 0.838 | 0.376 [0.353, 0.395] | 0.393 [0.363, 0.415] | 1.021→0.507 | 0.506→0.233 | 0.278→0.044 (0.004) | 0.126→0.018 | 0.036 |
+| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | macro-F1 present-only (legacy) | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |
+|---|---|---|---|---|---|---|---|---|---|
+| 91,653 | 0.838 | 0.376 [0.353, 0.395] | 0.393 [0.363, 0.415] | 0.393 [0.363, 0.415] | 1.021→0.507 | 0.506→0.233 | 0.278→0.044 (0.004) | 0.126→0.018 | 0.036 |
+
+macro-F1 = sklearn convention (mean F1 over the union of true and predicted classes; a class predicted while absent scores 0). Predicted while absent from this test set: none. 'present-only' = the earlier number over classes with test support only (kept for comparison).
 
 Majority baseline (train-majority `stationary`): accuracy 0.801, balanced acc 0.143, macro-F1 0.127. Set-truth windows: 453; windows whose truth is an unsupported class (not scored): 0.
 
-| class | supported | test support | P | R | F1 | classwise ECE | val status | tau | test gate | final status | unsupported-truth windows |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| stationary | yes | 73,223 | 0.872 | 0.975 | 0.921 | 0.054 | strong | 0.840 | P=0.957 n=64,591 pass | strong | 0 |
-| walking | yes | 8,500 | 0.707 | 0.470 | 0.564 | 0.020 | weak | 0.690 | P=0.918 n=2,220 fail | weak | 0 |
-| brisk_walking | no | 0 | – | – | – | – | unsupported | – | – | – | 0 |
-| running | yes | 203 | 0.783 | 0.852 | 0.816 | 0.003 | weak | 0.530 | P=0.847 n=196 fail | weak | 0 |
-| stairs | yes | 152 | 0.000 | 0.000 | 0.000 | 0.006 | abstain | 1.000 | – | abstain | 0 |
-| cycling | yes | 808 | 0.638 | 0.118 | 0.199 | 0.010 | abstain | 1.000 | – | abstain | 0 |
-| vehicle_motion | yes | 3,518 | 0.000 | 0.000 | 0.000 | 0.018 | abstain | 1.000 | – | abstain | 0 |
-| other | yes | 5,249 | 0.302 | 0.217 | 0.252 | 0.014 | abstain | 1.000 | – | abstain | 0 |
+| class | supported | test support | P | R | F1 | P single-label (n) | classwise ECE | val status | tau | pooled gate | dataset demotions | final status | unsupported-truth windows |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| stationary | yes | 73,223 | 0.872 | 0.975 | 0.921 | 0.872 (72,964) | 0.054 | strong | 0.885 | P=0.974 n=58,577 → strong | – | strong | 0 |
+| walking | yes | 8,500 | 0.707 | 0.470 | 0.564 | 0.698 (8,306) | 0.020 | abstain | 1.000 | – | – | abstain | 0 |
+| brisk_walking | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
+| running | yes | 203 | 0.783 | 0.852 | 0.816 | 0.790 (203) | 0.003 | weak | 0.835 | P=0.950 n=121 → strong | – | weak | 0 |
+| stairs | yes | 152 | 0.000 | 0.000 | 0.000 | 0.000 (152) | 0.006 | abstain | 1.000 | – | – | abstain | 0 |
+| cycling | yes | 808 | 0.638 | 0.118 | 0.199 | 0.638 (808) | 0.010 | abstain | 1.000 | – | – | abstain | 0 |
+| vehicle_motion | yes | 3,518 | 0.000 | 0.000 | 0.000 | 0.000 (3,518) | 0.018 | abstain | 1.000 | – | – | abstain | 0 |
+| other | yes | 5,249 | 0.302 | 0.217 | 0.252 | 0.305 (5,249) | 0.014 | abstain | 1.000 | – | – | abstain | 0 |
 
-Per dataset:
+P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
 
-| dataset | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | per-class F1 |
+Per dataset (macro-F1 = union convention):
+
+| dataset | test subjects | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | note |
+|---|---|---|---|---|---|---|---|
+| capture24 | 50 | 89,829 | 0.379 | 0.392 [0.276, 0.411] | 0.499 | 0.044 |  |
+| hhar_watch | 2 | 174 | 0.500 | 0.304 [0.304, 0.365]† | 0.959 | 0.210 | descriptive |
+| mhealth | 2 | 49 | 0.510 | 0.427 [0.427, 0.543]† | 0.768 | 0.193 | descriptive |
+| opportunity | 1 | 37 | 1.000 | 1.000 [1.000, 1.000]† | 0.276 | 0.231 | descriptive |
+| pamap2 | 2 | 397 | 0.445 | 0.361 [0.309, 0.501]† | 1.114 | 0.134 | descriptive |
+| wisdm2019_watch | 8 | 1,167 | 0.608 | 0.362 [0.324, 0.403]† | 0.845 | 0.111 |  |
+
+Per dataset per class P/R/F1 (support) and the dataset gate at the frozen tau (P, n_acc → level; levels with n_acc < 30 do not demote):
+
+| class | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
 |---|---|---|---|---|---|---|
-| capture24 | 89,829 | 0.379 | 0.392 [0.279, 0.441] | 0.499 | 0.044 | stationary 0.92 (n=71969), walking 0.57 (n=8348), running 0.79 (n=103), stairs 0.00 (n=8), cycling 0.21 (n=743), vehicle_motion 0.00 (n=3484), other 0.25 (n=5174) |
-| hhar_watch | 174 | 0.500 | 0.379 [0.365, 0.393] | 0.959 | 0.210 | stationary 0.82 (n=74), walking 0.70 (n=35), stairs 0.00 (n=32), cycling 0.00 (n=33) |
-| mhealth | 49 | 0.510 | 0.427 [0.427, 0.543] | 0.768 | 0.193 | stationary 0.77 (n=19), walking 0.62 (n=4), running 1.00 (n=10), stairs 0.00 (n=3), cycling 0.00 (n=4), other 0.18 (n=9) |
-| opportunity | 37 | 1.000 | 1.000 [1.000, 1.000] | 0.276 | 0.231 | stationary 1.00 (n=37) |
-| pamap2 | 397 | 0.445 | 0.361 [0.309, 0.501] | 1.114 | 0.134 | stationary 0.81 (n=187), walking 0.45 (n=43), running 0.61 (n=10), stairs 0.00 (n=29), cycling 0.13 (n=28), vehicle_motion 0.00 (n=34), other 0.53 (n=66) |
-| wisdm2019_watch | 1,167 | 0.608 | 0.543 [0.486, 0.598] | 0.845 | 0.111 | stationary 0.91 (n=937), walking 0.39 (n=70), running 0.87 (n=80), stairs 0.00 (n=80) |
+| stationary | 0.87/0.98/0.92 (71969); gate P 0.97 n 57866 → strong | 0.69/1.00/0.82 (74); gate P 1.00 n 74 → strong | 0.64/0.95/0.77 (19); gate P 1.00 n 16 → weak | 1.00/1.00/1.00 (37); gate P 1.00 n 10 → weak | 0.75/0.89/0.81 (187); gate P 0.99 n 118 → strong | 1.00/0.83/0.91 (937); gate P 1.00 n 493 → strong |
+| walking | 0.73/0.46/0.57 (8348) | 0.54/1.00/0.70 (35) | 0.44/1.00/0.62 (4) | 0.00/0.00/0.00 (0) | 0.33/0.70/0.45 (43) | 0.26/0.81/0.39 (70) |
+| running | 0.73/0.87/0.79 (103); gate P 0.92 n 62 → weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10); gate P 1.00 n 10 → weak | 0.00/0.00/0.00 (0) | 0.43/1.00/0.61 (10); gate P 0.91 n 11 → weak | 0.98/0.79/0.87 (80); gate P 1.00 n 38 → strong |
+| stairs | 0.00/0.00/0.00 (8) | 0.00/0.00/0.00 (32) | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 0.00/0.00/0.00 (80) |
+| cycling | 0.68/0.13/0.21 (743) | 0.00/0.00/0.00 (33) | 0.00/0.00/0.00 (4) | 0.00/0.00/0.00 (0) | 1.00/0.07/0.13 (28) | 0.00/0.00/0.00 (0) |
+| vehicle_motion | 0.00/0.00/0.00 (3484) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (34) | 0.00/0.00/0.00 (0) |
+| other | 0.30/0.21/0.25 (5174) | 0.00/0.00/0.00 (0) | 0.50/0.11/0.18 (9) | 0.00/0.00/0.00 (0) | 0.62/0.45/0.53 (66) | 0.00/0.00/0.00 (0) |
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+† = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+
 
 Wrist-only: n=91,653, macro-F1 0.393 (every training/test placement is wrist or forearm; equals pooled).
 
@@ -95,30 +143,46 @@ Confusion (rows truth, cols pred; stationary, walking, brisk_walking, running, s
 
 ### arm_behavior
 
-| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |
-|---|---|---|---|---|---|---|---|---|
-| 20,972 | 0.646 | 0.395 [0.362, 0.493] | 0.353 [0.307, 0.422] | 1.048→0.738 | 0.632→0.478 | 0.135→0.068 (0.008) | 0.200→0.050 | 0.340 |
+| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | macro-F1 present-only (legacy) | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |
+|---|---|---|---|---|---|---|---|---|---|
+| 20,972 | 0.646 | 0.395 [0.362, 0.493] | 0.353 [0.307, 0.422] | 0.353 [0.307, 0.422] | 1.048→0.738 | 0.632→0.478 | 0.135→0.068 (0.008) | 0.200→0.050 | 0.340 |
+
+macro-F1 = sklearn convention (mean F1 over the union of true and predicted classes; a class predicted while absent scores 0). Predicted while absent from this test set: none. 'present-only' = the earlier number over classes with test support only (kept for comparison).
 
 Majority baseline (train-majority `desk_like`): accuracy 0.646, balanced acc 0.333, macro-F1 0.262. Set-truth windows: 0; windows whose truth is an unsupported class (not scored): 14.
 
-| class | supported | test support | P | R | F1 | classwise ECE | val status | tau | test gate | final status | unsupported-truth windows |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| quiet | yes | 6,845 | 0.487 | 0.022 | 0.043 | 0.071 | abstain | 1.000 | – | abstain | 0 |
-| desk_like | yes | 13,545 | 0.654 | 0.981 | 0.785 | 0.063 | abstain | 1.000 | – | abstain | 0 |
-| fidgeting | no | 0 | – | – | – | – | unsupported | – | – | – | 0 |
-| repetitive_hand_motion | yes | 582 | 0.316 | 0.180 | 0.230 | 0.015 | weak | 0.795 | P=0.403 n=144 fail | weak | 0 |
-| active_gesturing | no | 0 | – | – | – | – | unsupported | – | – | – | 0 |
-| exercise_motion | no | 0 | – | – | – | – | unsupported | – | – | – | 14 |
-| other | no | 0 | – | – | – | – | unsupported | – | – | – | 0 |
+| class | supported | test support | P | R | F1 | P single-label (n) | classwise ECE | val status | tau | pooled gate | dataset demotions | final status | unsupported-truth windows |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| quiet | yes | 6,845 | 0.487 | 0.022 | 0.043 | 0.487 (6,845) | 0.071 | abstain | 1.000 | – | – | abstain | 0 |
+| desk_like | yes | 13,545 | 0.654 | 0.981 | 0.785 | 0.654 (13,545) | 0.063 | abstain | 1.000 | – | – | abstain | 0 |
+| fidgeting | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
+| repetitive_hand_motion | yes | 582 | 0.316 | 0.180 | 0.230 | 0.316 (582) | 0.015 | weak | 0.910 | P=0.422 n=83 → abstain | – | abstain | 0 |
+| active_gesturing | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
+| exercise_motion | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 14 |
+| other | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
 
-Per dataset:
+P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
 
-| dataset | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | per-class F1 |
-|---|---|---|---|---|---|---|
-| capture24 | 20,580 | 0.341 | 0.285 [0.261, 0.304] | 0.735 | 0.068 | quiet 0.04 (n=6802), desk_like 0.79 (n=13385), repetitive_hand_motion 0.03 (n=393) |
-| mhealth | 12 | 0.000 | 0.000 [0.000, 0.000] | 1.540 | 0.779 | quiet 0.00 (n=12) |
-| pamap2 | 60 | 0.032 | 0.061 [0.000, 0.105] | 1.990 | 0.691 | quiet 0.12 (n=31), repetitive_hand_motion 0.00 (n=29) |
-| wisdm2019_watch | 320 | 0.803 | 0.795 [0.609, 0.937] | 0.693 | 0.151 | desk_like 0.84 (n=160), repetitive_hand_motion 0.75 (n=160) |
+Per dataset (macro-F1 = union convention):
+
+| dataset | test subjects | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | note |
+|---|---|---|---|---|---|---|---|
+| capture24 | 50 | 20,580 | 0.341 | 0.285 [0.261, 0.304] | 0.735 | 0.068 |  |
+| mhealth | 2 | 12 | 0.000 | 0.000 [0.000, 0.000]† | 1.540 | 0.779 | descriptive |
+| pamap2 | 2 | 60 | 0.032 | 0.040 [0.000, 0.070]† | 1.990 | 0.691 | descriptive |
+| wisdm2019_watch | 8 | 320 | 0.803 | 0.795 [0.609, 0.937]† | 0.693 | 0.151 |  |
+
+Per dataset per class P/R/F1 (support) and the dataset gate at the frozen tau (P, n_acc → level; levels with n_acc < 30 do not demote):
+
+| class | capture24 | mhealth | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|
+| quiet | 0.48/0.02/0.04 (6802) | 0.00/0.00/0.00 (12) | 1.00/0.06/0.12 (31) | 0.00/0.00/0.00 (0) |
+| desk_like | 0.66/0.98/0.79 (13385) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.72/1.00/0.84 (160) |
+| repetitive_hand_motion | 0.03/0.02/0.03 (393); gate P 0.00 n 48 → abstain | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 1.00/0.61/0.75 (160); gate P 1.00 n 35 → strong |
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+† = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+
 
 Wrist-only: n=20,972, macro-F1 0.353 (every training/test placement is wrist or forearm; equals pooled).
 
