@@ -30,6 +30,40 @@ import StrandAnalytics
 // Collapsed by default: Continuity + Regularity only. The expander reveals the four remaining
 // cards ("fewer numbers initially, full object downstream" — spec 7.5).
 
+/// Loads the hosted `daily.sleep_features` for the night on screen from the server-score cache and
+/// renders `SleepFeatureCards` when a matching night exists; otherwise nothing, so a build or night
+/// without the enrichment renders exactly as before.
+///
+/// Reads under the device ids the app model syncs (`IntradaySeriesStore.readCandidates`, the same
+/// list Today and the metric pages use) and re-reads whenever the repository refreshes, which is
+/// when the app model writes a new server result into the cache.
+struct SleepFeatureSection: View {
+    let startTs: Int
+    let endTs: Int
+
+    @EnvironmentObject private var repo: Repository
+    @State private var loaded: (document: SleepFeatureDocument, night: SleepFeatureNight)?
+
+    var body: some View {
+        Group {
+            if let loaded {
+                SleepFeatureCards(document: loaded.document, night: loaded.night)
+            }
+        }
+        .task(id: "\(startTs)|\(endTs)|\(repo.refreshSeq)") { await load() }
+    }
+
+    private func load() async {
+        guard CloudPushIdentityStore.current() != nil,
+              let repository = CloudPushRuntime.shared.scoreRepository() else { loaded = nil; return }
+        let day = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(endTs)))
+        let deviceIds = await IntradaySeriesStore.shared.readCandidates
+        guard let document = repository.cachedDay(day: day, deviceIds: deviceIds)?.hostedResult?.sleepFeatures,
+              let night = document.night(matchingStart: startTs, end: endTs) else { loaded = nil; return }
+        loaded = (document, night)
+    }
+}
+
 /// The whole "Sleep details" section: two always-visible cards plus an expander that reveals the
 /// rest.
 struct SleepFeatureCards: View {
