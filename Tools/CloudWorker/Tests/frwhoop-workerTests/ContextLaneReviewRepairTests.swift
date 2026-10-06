@@ -5,7 +5,8 @@ import WhoopProtocol
 
 /// Worker repairs for the independent reviews (docs/physiology-context/notes/review-worker-repairs.md): nightly
 /// supports (RC-03), the history length (R-F2), device attributes on rebuilt days (RC-13), placement scope
-/// (RC-17) and the frozen-reference cutoff per mode. Each test names the finding it pins.
+/// (RC-17), the frozen-reference cutoff per mode and optional-read failures (R1, lead addendum). Each test names the
+/// finding it pins.
 final class ContextLaneReviewRepairTests: XCTestCase {
     typealias PC = PhysiologyContext
 
@@ -208,6 +209,48 @@ final class ContextLaneReviewRepairTests: XCTestCase {
         reversed.placements.reverse()
         XCTAssertEqual(ContextInputs.assemble(reversed, job: job(), windows: try windows()).input.placements,
                        a.input.placements)
+    }
+
+    // MARK: - R1 (lead addendum): only a missing schema object makes an optional input "unavailable"
+
+    func testR1_onlyAMissingSchemaObjectMakesAnOptionalInputUnavailable() throws {
+        func pg(_ state: String?, _ kind: PGErrorKind = .other) -> PostgresClient.Error {
+            PostgresClient.Error(message: "x", sqlstate: state, kind: kind)
+        }
+        for state in ["42P01", "42883", "42703"] {
+            XCTAssertTrue(ContextInputs.isMissingSchemaObject(pg(state)), state)
+            var unavailable: [String] = []
+            let out: [Int]? = try ContextInputs.optionalRead("history_daily_values_unavailable",
+                                                             unavailable: &unavailable) { throw pg(state) }
+            XCTAssertNil(out)
+            XCTAssertEqual(unavailable, ["history_daily_values_unavailable"], state)
+        }
+        // Transient or job-level failures are rethrown, so the job fails and the queue retries it.
+        let transient: [(String?, PGErrorKind)] = [
+            ("57014", .other),            // statement timeout (query_canceled)
+            ("55P03", .other),            // lock timeout (lock_not_available)
+            ("40001", .serialization), ("40P01", .serialization),
+            ("08006", .connectionLost), ("57P01", .connectionLost), (nil, .connectionLost),
+            ("25P02", .aborted), ("53200", .other),  // out of memory
+            ("42501", .deterministic),    // a missing grant is a deployment fault, not a missing input
+        ]
+        for (state, kind) in transient {
+            XCTAssertFalse(ContextInputs.isMissingSchemaObject(pg(state, kind)), state ?? "nil")
+            var unavailable: [String] = []
+            XCTAssertThrowsError(try ContextInputs.optionalRead("frozen_references_unavailable",
+                                                                unavailable: &unavailable) { () -> [Int] in
+                throw pg(state, kind)
+            }) { error in
+                XCTAssertEqual((error as? PostgresClient.Error)?.sqlstate, state)
+            }
+            XCTAssertTrue(unavailable.isEmpty, "\(state ?? "nil") must not be reported as a missing input")
+        }
+        struct Other: Error {}
+        XCTAssertFalse(ContextInputs.isMissingSchemaObject(Other()))
+        var unavailable: [String] = []
+        XCTAssertEqual(try ContextInputs.optionalRead("placement_unavailable", unavailable: &unavailable) { [1, 2] },
+                       [1, 2])
+        XCTAssertTrue(unavailable.isEmpty)
     }
 
     // MARK: - Frozen references per mode

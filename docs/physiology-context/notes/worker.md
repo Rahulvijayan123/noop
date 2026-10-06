@@ -94,9 +94,13 @@ so the arrival order of rows can never change a document (tested by shuffling). 
 | History bouts | `physiology_context_bouts.payload`, same device and mode, D−3..D−1 | — | `ExertionBout` |
 | Frozen references | `physiology_context_frozen_references.payload`, the device: retrospective every registered reference; causal those registered by the cutoff | — | `FrozenReference` |
 
-Optional products (epochs, runs, placement, exposures, history) are read under a savepoint: a missing table or a
-failing read empties that input, adds `<input>_unavailable` to `inputRevisions` and counts `inputs_unavailable`.
-Raw streams, snapshots, device, profile and workouts are required (a failure ends the job and is retried).
+Optional products (epochs, runs, placement, exposures, history) are read under a savepoint: a schema object that
+does not exist (SQLSTATE 42P01 / 42883 / 42703 — the worker deployed before the migration) empties that input, adds
+`<input>_unavailable` to `inputRevisions` and counts `inputs_unavailable`. Any other failure of an optional read (lock
+or statement timeout, serialization failure, lost connection) ends the job like a required read, so it is settled
+through `fail_physiology_context_v1` and retried with backoff instead of publishing a degraded document as complete
+(lead review R1). Raw streams, snapshots, device, profile and workouts are required (a failure ends the job and is
+retried).
 
 **Causal mode.** `assemble` builds the full `DayInput`, calls `Engine.causalView` once (its exclusion counts go to
 telemetry only: `causal_excluded_observations|records|exposure_revisions`, never into the document), and then

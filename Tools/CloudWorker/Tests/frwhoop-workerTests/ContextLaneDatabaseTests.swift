@@ -788,6 +788,58 @@ final class ContextLaneDatabaseTests: XCTestCase {
         XCTAssertEqual(loaded.placements.map(\.scope), ["account", "device"])
     }
 
+    /// R1 (lead addendum): a transient failure of an optional read (here a lock timeout on the HART epochs, which
+    /// the publish never writes, so only the read can fail) ends the job instead of publishing a document that says
+    /// the input is "unavailable"; the queue keeps the job, and the retry after the lock is gone publishes it with
+    /// every input.
+    func testR1_aTransientOptionalReadFailureFailsTheJobAndTheRetryPublishes() throws {
+        let o = try makeOwner()
+        _ = try db.query("""
+            insert into public.physiology_context_jobs (user_id, device_id, day, mode, reasons)
+            values ($1::uuid, $2::uuid, $3::date, 'retrospective', array['r1-test'])
+            on conflict (user_id, device_id, day, mode) do update set
+              input_revision = public.physiology_context_jobs.input_revision + 1,
+              dirty_at = clock_timestamp(), not_before = clock_timestamp()
+            """, [o.user, o.device, day])
+        // Another session holds the table; the lane's reads give up after 2 s (55P03 lock_not_available).
+        try scoringDB.beginTransaction()
+        var locked = true
+        defer { if locked { scoringDB.rollbackTransaction() } }
+        try scoringDB.exec("lock table public.activity_context_epochs in access exclusive mode")
+        try db.exec("set lock_timeout = '2s'")
+        defer { try? db.exec("reset lock_timeout") }
+
+        var lane = contextLane()
+        lane.enqueueIntervalSeconds = 3_600
+        lane.lastEnqueueAt = Date()  // only this job is due
+        lane.drain(budget: 1)
+        XCTAssertEqual(lane.stats.published, 0)
+        XCTAssertEqual(lane.stats.failed, 1, lane.stats.lastError ?? "")
+        XCTAssertEqual(lane.stats.inputsUnavailable, 0, "a lock timeout is not a missing input")
+        XCTAssertTrue(try contextDays(o).isEmpty, "no degraded revision was published")
+        let failed = try job(o)
+        XCTAssertEqual(failed["failures"], "1", "\(failed)")
+        XCTAssertNotEqual(failed["done"], failed["rev"], "the job is still owed: \(failed)")
+        XCTAssertFalse(failed["dead"] == "true")
+        XCTAssertTrue((failed["error"] ?? "").contains("55P03") || (failed["error"] ?? "").contains("lock"),
+                      "\(failed)")
+
+        // The lock goes away; the retry (backoff lifted for the test) publishes with every input read.
+        scoringDB.rollbackTransaction()
+        locked = false
+        _ = try db.query("update public.physiology_context_jobs set not_before = clock_timestamp() where user_id = $1::uuid",
+                         [o.user])
+        lane.drain(budget: 1)
+        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        let days = try contextDays(o)
+        XCTAssertEqual(days.count, 1)
+        let (doc, _) = try storedDocument(revision: try XCTUnwrap(days.last?["rev"]))
+        XCTAssertFalse(doc.header.inputRevisions.contains { $0.revision == "unavailable" },
+                       "\(doc.header.inputRevisions)")
+        let done = try job(o)
+        XCTAssertEqual(done["done"], done["rev"], "\(done)")
+    }
+
     // MARK: - Profile against the scoring lane (opt-in: FRWHOOP_CONTEXT_PROFILE=1)
 
     func testProfileAFullDayAgainstTheScoringLane() throws {

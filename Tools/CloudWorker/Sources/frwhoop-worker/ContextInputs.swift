@@ -362,24 +362,22 @@ enum ContextInputs {
                                    availableAt: Int(r["at"] ?? ""))
         }
 
-        // Optional products: each under a savepoint, so a missing table only empties that input.
-        func optional<T>(_ name: String, _ body: () throws -> T) -> T? {
-            do { return try db.isolatingFailures(body) } catch {
-                out.unavailable.append(name)
-                return nil
-            }
+        // Optional products: each under a savepoint, so a missing table only empties that input. Any other failure
+        // (a lock or statement timeout, a lost connection) ends the job, which the queue retries with backoff.
+        func optional<T>(_ name: String, _ body: () throws -> T) throws -> T? {
+            try optionalRead(name, unavailable: &out.unavailable) { try db.isolatingFailures(body) }
         }
-        out.epochs = optional("activity_epochs_unavailable") {
+        out.epochs = try optional("activity_epochs_unavailable") {
             try db.query(ContextSQL.activityEpochs, read).compactMap(parseEpoch)
         } ?? []
-        out.intervals = optional("activity_days_unavailable") {
+        out.intervals = try optional("activity_days_unavailable") {
             try db.query(ContextSQL.activityRuns, read + [w.utcFrom, w.utcTo]).compactMap(parseRun)
         } ?? []
-        out.placements = optional("placement_unavailable") {
+        out.placements = try optional("placement_unavailable") {
             try db.query(ContextSQL.placements, read).compactMap(parsePlacement)
         } ?? []
         var skipped = 0
-        out.exposures = optional("exposures_unavailable") {
+        out.exposures = try optional("exposures_unavailable") {
             try db.query(ContextSQL.exposureRevisions,
                          [job.userId, String(w.exposure.start), String(w.exposure.end)]).compactMap { r in
                 let parsed = parseExposure(r)
@@ -389,7 +387,7 @@ enum ContextInputs {
         } ?? []
         let mode = job.mode.rawValue
         let historyCutoff = historyCutoffParameter(job)
-        out.historyValues = optional("history_daily_values_unavailable") {
+        out.historyValues = try optional("history_daily_values_unavailable") {
             try db.query(ContextSQL.historyDailyValues,
                          scope + [mode, w.historyFrom, w.previousDay, historyCutoff]).compactMap {
                 let v: PC.DailyValue? = decodeStored($0["value"])
@@ -397,7 +395,7 @@ enum ContextInputs {
                 return v
             }
         } ?? []
-        out.historyBouts = optional("history_bouts_unavailable") {
+        out.historyBouts = try optional("history_bouts_unavailable") {
             try db.query(ContextSQL.historyBouts,
                          scope + [mode, w.boutsFrom, w.previousDay, historyCutoff]).compactMap {
                 let v: PC.ExertionBout? = decodeStored($0["bout"])
@@ -405,7 +403,7 @@ enum ContextInputs {
                 return v
             }
         } ?? []
-        out.frozen = optional("frozen_references_unavailable") {
+        out.frozen = try optional("frozen_references_unavailable") {
             try db.query(ContextSQL.frozenReferences, scope + [historyCutoff]).compactMap {
                 let v: PC.FrozenReference? = decodeStored($0["reference"])
                 if v == nil { skipped += 1 }
@@ -423,6 +421,32 @@ enum ContextInputs {
         out.skippedRows += skipped
         out.unavailable.sort()
         return out
+    }
+
+    /// One optional input read (review R1, lead addendum). Only a schema object that does not exist — the worker
+    /// deployed before (part of) the migration — makes the input "unavailable": the read returns nil and `name` is
+    /// recorded (it reaches `inputRevisions`, and the document says the input was missing). Every other error is a
+    /// failure of THIS job and is rethrown: a lock or statement timeout, a serialization failure or a lost
+    /// connection must not publish a degraded document as if it were complete (references `insufficient`, episodes
+    /// replaced by `insufficient_evidence`) and leave the job done. The lane settles it through
+    /// `fail_physiology_context_v1`, which retries with backoff.
+    static func optionalRead<T>(_ name: String, unavailable: inout [String], _ read: () throws -> T) throws -> T? {
+        do {
+            return try read()
+        } catch {
+            guard isMissingSchemaObject(error) else { throw error }
+            unavailable.append(name)
+            return nil
+        }
+    }
+
+    /// SQLSTATE 42P01 undefined_table, 42883 undefined_function, 42703 undefined_column: the object the read names
+    /// is not installed (an older schema). Deterministic for this deployment, so not worth a retry.
+    static let missingSchemaObjectStates: Set<String> = ["42P01", "42883", "42703"]
+
+    static func isMissingSchemaObject(_ error: Error) -> Bool {
+        guard let e = error as? PostgresClient.Error, let state = e.sqlstate else { return false }
+        return missingSchemaObjectStates.contains(state)
     }
 
     /// The publication cutoff of the history reads (`$6` of the daily-value and bout queries, `$3` of the frozen
