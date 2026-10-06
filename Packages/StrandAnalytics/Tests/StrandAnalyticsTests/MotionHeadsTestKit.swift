@@ -127,3 +127,11 @@ enum MotionHeadsKit {
         return try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys])
     }
 }
+
+extension MotionHeadsEvidenceConfig {
+    /// The candidate defaults (INERTIA1.md §7), as the worker builds them. A test-target copy of the worker's
+    /// helper, so the package itself exposes no API that only tests and the worker call.
+    static func candidate(bundle: MotionHeadsBundleInfo, expectedBundleSHA256: String? = nil) -> MotionHeadsEvidenceConfig {
+        MotionHeadsEvidenceConfig(mode: .candidate, bundle: bundle, expectedBundleSHA256: expectedBundleSHA256)
+    }
+}

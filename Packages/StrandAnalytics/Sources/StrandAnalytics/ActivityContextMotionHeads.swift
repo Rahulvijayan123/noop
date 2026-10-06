@@ -906,12 +906,6 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
         self.expectedBundleSHA256 = expectedBundleSHA256
     }
 
-    /// The candidate defaults (INERTIA1.md §7).
-    public static func candidate(bundle: MotionHeadsBundleInfo,
-                                 expectedBundleSHA256: String? = nil) -> MotionHeadsEvidenceConfig {
-        MotionHeadsEvidenceConfig(mode: .candidate, bundle: bundle, expectedBundleSHA256: expectedBundleSHA256)
-    }
-
     /// The HART redundancy discount actually applied: the larger of the config's and the bundle's measured ρ̂.
     public var effectiveHartRedundancy: Double {
         guard let rho = bundle.fusion?.rhoHart, rho.isFinite, (0...1).contains(rho) else { return hartRedundancy }

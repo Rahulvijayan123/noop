@@ -818,7 +818,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         let stamp = try XCTUnwrap(config.motionHeads?.provenanceStamp)
         XCTAssertEqual(on.motionHeads?.stamp, stamp)
         XCTAssertEqual(on.snapshot.versions.motionHeads, stamp)
-        XCTAssertEqual(ActivityContextTrackBuilder.cacheTag(for: accepted, config: config), config.cacheTag)
+        XCTAssertEqual(ActivityContextTrackBuilder.effectiveConfig(for: accepted, config: config).cacheTag, config.cacheTag)
         XCTAssertTrue(config.cacheTag.contains("-ih"))
 
         // Windows from another bundle, or no windows at all: no stamp anywhere, no suffix, Inertia-off output.
@@ -835,7 +835,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
             XCTAssertTrue(t.states.allSatisfy { $0.versions.motionHeads == nil }, label)
             XCTAssertEqual(try e.encode(t.states), try e.encode(off.states), label)
             XCTAssertEqual(try e.encode(t.snapshot), try e.encode(off.snapshot), label)
-            XCTAssertEqual(ActivityContextTrackBuilder.cacheTag(for: variant, config: config), ActivityDecoderConfig().cacheTag,
+            XCTAssertEqual(ActivityContextTrackBuilder.effectiveConfig(for: variant, config: config).cacheTag, ActivityDecoderConfig().cacheTag,
                            label)
             // The persisted day document follows the same rule.
             let doc = ActivityContextDayBuilder.update(cached: nil, input: variant, now: input.dayEnd, config: config).document

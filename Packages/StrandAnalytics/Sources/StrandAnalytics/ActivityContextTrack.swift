@@ -127,12 +127,6 @@ public enum ActivityContextTrackBuilder {
         return plain
     }
 
-    /// The cache key component for a decode of `input` with `config` (`effectiveConfig(for:config:).cacheTag`):
-    /// it carries the Inertia suffix only when Inertia evidence is accepted for this input.
-    public static func cacheTag(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> String {
-        effectiveConfig(for: input, config: config).cacheTag
-    }
-
     /// What attaching `windows` to `input`'s observed seconds would do, whatever any config says (the worker's
     /// shadow rows report it so window/second alignment can be checked before Inertia is ever evidence).
     public static func attachmentReport(for input: ActivityContextTrackInput,

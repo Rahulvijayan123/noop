@@ -470,7 +470,9 @@ enum ActivityMotionHeadsDays {
                           expectedBundleSHA256: String?) -> Candidate {
         guard mode == .candidate else { return .notRequested }
         guard let expectedBundleSHA256 else { return .withheld("bundle_sha256_not_pinned") }
-        let evidence = MotionHeadsEvidenceConfig.candidate(bundle: heads.bundle, expectedBundleSHA256: expectedBundleSHA256)
+        // The candidate defaults (INERTIA1.md §7).
+        let evidence = MotionHeadsEvidenceConfig(mode: .candidate, bundle: heads.bundle,
+                                                 expectedBundleSHA256: expectedBundleSHA256)
         if let why = evidence.evidenceRefusal { return .withheld(why) }
         guard var input else { return .withheld("context_days_disabled") }
         input.motionHeads = heads
