@@ -477,6 +477,7 @@ returns void language sql security definer set search_path = '' as $$
     consecutive_failures = 0,
     dead_letter = false,
     last_error = null,
+    cutoff_override = null,
     fingerprint = coalesce(excluded.fingerprint, j.fingerprint),
     reasons = internal.physiology_context_merge_reasons(j.reasons, p_reason)
 $$;
@@ -574,8 +575,10 @@ begin
     return null;  -- a future-dated declaration has no computed day to invalidate yet
   end if;
   -- A context problem must never fail a placement declaration: the invalidation runs in its own
-  -- subtransaction and a failure is only reported as a warning (the next enqueue still sees the placement
-  -- change through the dependency fingerprint).
+  -- subtransaction and a failure is reported as a warning. The enqueue re-checks the dependency fingerprint
+  -- (which covers placement) only when scoring of D-1..D+1 completes again, so a skipped invalidation waits
+  -- for the next scoring of that day. All job-touching paths lock in (user, device, day, mode) order, so the
+  -- deadlock that could previously skip it no longer arises from this lane.
   begin
     perform internal.physiology_context_invalidate(new.owner, new.device_id, v_day, v_today, 'placement_changed');
   exception when others then
@@ -689,6 +692,12 @@ declare
   n integer := 0;
   r record;
   v_fp text;
+  a_user uuid[] := '{}';
+  a_device uuid[] := '{}';
+  a_day date[] := '{}';
+  a_mode text[] := '{}';
+  a_fp text[] := '{}';
+  a_kind text[] := '{}';
 begin
   if p_limit is null or p_limit < 1 or p_limit > 1000 then
     raise exception 'invalid_limit' using errcode = '22023';
@@ -733,13 +742,10 @@ begin
   loop
     exit when n >= p_limit;
     v_fp := internal.physiology_context_dependency_fingerprint(r.user_id, r.device_id, r.day);
-    if r.absent then
-      insert into public.physiology_context_jobs (user_id, device_id, day, mode, fingerprint, reasons)
-      values (r.user_id, r.device_id, r.day, r.mode, v_fp, array['scoring_completed'])
-      on conflict (user_id, device_id, day, mode) do nothing;
-      if found then n := n + 1; end if;
-    elsif r.job_fingerprint is distinct from v_fp then
-      perform internal.physiology_context_touch(r.user_id, r.device_id, r.day, r.mode, 'inputs_changed', v_fp);
+    if r.absent or r.job_fingerprint is distinct from v_fp then
+      a_user := a_user || r.user_id; a_device := a_device || r.device_id; a_day := a_day || r.day;
+      a_mode := a_mode || r.mode; a_fp := a_fp || v_fp;
+      a_kind := a_kind || (case when r.absent then 'create' else 'bump' end);
       n := n + 1;
     end if;
   end loop;
@@ -761,10 +767,29 @@ begin
        order by d.day desc, d.user_id, d.device_id
        limit p_limit - n
     loop
-      perform internal.physiology_context_touch(r.user_id, r.device_id, r.day, 'retrospective', 'finality_due', null);
+      a_user := a_user || r.user_id; a_device := a_device || r.device_id; a_day := a_day || r.day;
+      a_mode := a_mode || 'retrospective'::text; a_fp := a_fp || null::text; a_kind := a_kind || 'finality'::text;
       n := n + 1;
     end loop;
   end if;
+
+  -- Apply in the canonical lock order (user, device, day, mode).
+  for r in
+    select x.u, x.dv, x.dy, x.m, x.fp, x.k
+      from unnest(a_user, a_device, a_day, a_mode, a_fp, a_kind) as x(u, dv, dy, m, fp, k)
+     order by x.u, x.dv, x.dy, x.m
+  loop
+    if r.k = 'create' then
+      insert into public.physiology_context_jobs (user_id, device_id, day, mode, fingerprint, reasons)
+      values (r.u, r.dv, r.dy, r.m, r.fp, array['scoring_completed'])
+      on conflict (user_id, device_id, day, mode) do nothing;
+      if not found then n := n - 1; end if;
+    elsif r.k = 'bump' then
+      perform internal.physiology_context_touch(r.u, r.dv, r.dy, r.m, 'inputs_changed', r.fp);
+    else
+      perform internal.physiology_context_touch(r.u, r.dv, r.dy, r.m, 'finality_due', null);
+    end if;
+  end loop;
   return n;
 end $$;
 
@@ -952,6 +977,10 @@ declare
   v_old jsonb;
   v_new jsonb;
   v_changed boolean;
+  v_bouts_changed boolean;
+  v_sleep_changed boolean;
+  v_horizon integer := 0;
+  v_newest date;
   v_episodes boolean := false;
   v_frozen integer := 0;
   v_frozen_conflicts integer := 0;
@@ -1284,6 +1313,17 @@ begin
          internal.physiology_context_json_int(x.value -> 'support_s'), x.value ->> 'finality', v_rev, x.value
     from jsonb_array_elements(dv) as x(value);
 
+  -- Bouts and sleep episodes are compared too: later days read the last 72 h of bouts and the last 14 nights of
+  -- sleep as history, so a change to either alone must still reach them.
+  select coalesce(jsonb_agg(b.payload order by b.bout_id collate "C"), '[]'::jsonb) is distinct from
+         coalesce((select jsonb_agg(x.value order by (x.value ->> 'id') collate "C")
+                     from jsonb_array_elements(bt) as x(value)), '[]'::jsonb)
+    into v_bouts_changed
+    from public.physiology_context_bouts b
+   where b.user_id = j.user_id and b.device_id = j.device_id and b.mode = j.mode and b.day = j.day;
+  select (select d.document #> '{sleep,episodes}' from public.physiology_context_days d
+           where d.context_revision = v_prev) is distinct from (p_payload #> '{document,sleep,episodes}')
+    into v_sleep_changed;
   -- Bouts: replaced for the day. A bout id already stored under another day moves to this one.
   delete from public.physiology_context_bouts b
    where b.user_id = j.user_id and b.device_id = j.device_id and b.mode = j.mode and b.day = j.day;
@@ -1346,13 +1386,25 @@ begin
     reasons = '{}'::text[], cutoff_override = null, last_outcome = 'published', last_context_revision = v_rev
    where q.user_id = j.user_id and q.device_id = j.device_id and q.day = j.day and q.mode = j.mode;
 
-  -- Cross-day dependency horizon: later retrospective days read this day's values as history.
-  if j.mode = 'retrospective' and v_changed then
+  -- Cross-day dependency horizon: later retrospective days read this day's products as history. References use
+  -- 28 days of daily values, sleep summaries 14 prior nights, exertion history 72 h of bouts. Episodes look back
+  -- further (90 days); rather than recomputing 90 days, the device's newest retrospective day is also refreshed,
+  -- because the current episode set is replaced only by the newest day.
+  if j.mode = 'retrospective' and v_prev is not null then
+    v_horizon := case when v_changed then 28 when v_sleep_changed then 14 when v_bouts_changed then 3 else 0 end;
+  elsif j.mode = 'retrospective' then
+    v_horizon := case when v_changed then 28 else 0 end;
+  end if;
+  if v_horizon > 0 then
     v_today := internal.physiology_context_today(j.user_id);
+    select max(q.day) into v_newest from public.physiology_context_jobs q
+     where q.user_id = j.user_id and q.device_id = j.device_id and q.mode = 'retrospective'
+       and q.day < v_today;
     for r in
       select q.day from public.physiology_context_jobs q
        where q.user_id = j.user_id and q.device_id = j.device_id and q.mode = 'retrospective'
-         and q.day between j.day + 1 and least(v_today - 1, j.day + 28)
+         and ((q.day between j.day + 1 and least(v_today - 1, j.day + v_horizon))
+              or (v_changed and q.day = v_newest and q.day > j.day + v_horizon))
        order by q.day
     loop
       perform internal.physiology_context_touch(j.user_id, j.device_id, r.day, 'retrospective', 'history_changed', null);
@@ -1748,6 +1800,26 @@ create trigger physiology_context_placement_changed
   after insert or update of placement, source, effective_start, effective_end on public.placement_intervals
   for each row execute function internal.physiology_context_placement_changed();
 
+-- A decoder day document (activity_context_days, a UTC day) changed: the context of the local days it overlaps
+-- reads it, and nothing else re-dirties them (stream days never dirty scoring). Same never-fail-the-writer rule
+-- as the placement trigger.
+create or replace function internal.physiology_context_activity_day_changed() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  begin
+    perform internal.physiology_context_invalidate(new.user_id, new.device_id, new.day - 1, new.day + 1,
+                                                   'activity_day_changed');
+  exception when others then
+    raise warning 'physiology context activity-day invalidation skipped: %', sqlstate;
+  end;
+  return null;
+end $$;
+
+drop trigger if exists physiology_context_activity_day_changed on public.activity_context_days;
+create trigger physiology_context_activity_day_changed
+  after insert or update on public.activity_context_days
+  for each row execute function internal.physiology_context_activity_day_changed();
+
 -- ---------------------------------------------------------------------------------------------------------
 -- 8. Function privileges: service role only; helpers nobody but their owner
 -- ---------------------------------------------------------------------------------------------------------
@@ -1766,6 +1838,7 @@ revoke all on function internal.physiology_context_invalidate(uuid, uuid, date, 
   from public, anon, authenticated, service_role;
 revoke all on function internal.physiology_context_reject_update() from public, anon, authenticated, service_role;
 revoke all on function internal.physiology_context_placement_changed() from public, anon, authenticated, service_role;
+revoke all on function internal.physiology_context_activity_day_changed() from public, anon, authenticated, service_role;
 revoke all on function internal.exposure_event_invalid_reason(jsonb) from public, anon, authenticated, service_role;
 revoke all on function internal.exposure_revision_json(public.exposure_event_revisions)
   from public, anon, authenticated, service_role;

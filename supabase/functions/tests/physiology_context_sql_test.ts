@@ -289,8 +289,10 @@ Deno.test({
       assert.deepEqual(helpers.filter((row: any) => row.reachable), [], 'an internal helper is executable by a role');
       const triggers = await sql(`select tgrelid::regclass || ':' || tgname from pg_trigger
         where not tgisinternal and tgname in ('physiology_context_frozen_reference_immutable',
-          'exposure_event_revision_immutable', 'physiology_context_placement_changed') order by 1`);
-      assert.equal(triggers, ['exposure_event_revisions:exposure_event_revision_immutable',
+          'exposure_event_revision_immutable', 'physiology_context_placement_changed',
+          'physiology_context_activity_day_changed') order by 1`);
+      assert.equal(triggers, ['activity_context_days:physiology_context_activity_day_changed',
+        'exposure_event_revisions:exposure_event_revision_immutable',
         'physiology_context_frozen_references:physiology_context_frozen_reference_immutable',
         'placement_intervals:physiology_context_placement_changed'].join('\n'));
       // Large JSON columns use lz4 when the server supports it (the production image does).
@@ -301,7 +303,8 @@ Deno.test({
       }
       // Nothing was attached to scoring or noop_* tables.
       assert.equal(await sql(`select count(*) from pg_trigger t join pg_proc p on p.oid = t.tgfoid
-        where not t.tgisinternal and p.proname like 'physiology_context%' and t.tgrelid::regclass::text <> 'placement_intervals'
+        where not t.tgisinternal and p.proname like 'physiology_context%'
+          and t.tgrelid::regclass::text not in ('placement_intervals', 'activity_context_days')
           and t.tgrelid::regclass::text not like 'physiology_context%' and t.tgrelid::regclass::text not like 'exposure%'`), '0');
     });
 
@@ -606,17 +609,18 @@ Deno.test({
       assert.deepEqual(await episodes(), [`ep-live@${today}`, `ep-new-3@${newer}`]);
     });
 
-    await t.step('cross-day cascade: changed retrospective values bump D+1 .. min(today - 1, D + 28); unchanged values do not', async () => {
+    await t.step('cross-day cascade: changed retrospective values bump D+1 .. min(today - 1, D + 28) and the newest retrospective day; unchanged values do not', async () => {
       const a = await owner('UTC');
       const today = await todayIn('UTC');
       const d = addDays(today, -40);
       for (let k = 1; k <= 39; k++) await completedJob(a.user, a.device, addDays(d, k), 'retrospective');
       await completedJob(a.user, a.device, today, 'causal_live');
       const first = await publishDay(a.user, a.device, d, 'retrospective', payload(d, 'retrospective'));
-      assert.equal(first.cascaded_days, 28);
+      // D+1..D+28 (references) plus the newest retrospective day D+39, whose run replaces the current episode set.
+      assert.equal(first.cascaded_days, 29);
       const bumped = await sqlJson(`select json_agg(to_char(day, 'YYYY-MM-DD') order by day) from public.physiology_context_jobs
         where user_id = '${a.user}' and mode = 'retrospective' and completed_revision < input_revision`);
-      assert.deepEqual(bumped, Array.from({ length: 28 }, (_, index) => addDays(d, index + 1)));
+      assert.deepEqual(bumped, [...Array.from({ length: 28 }, (_, index) => addDays(d, index + 1)), addDays(d, 39)]);
       assert.deepEqual((await job(a.user, a.device, addDays(d, 1), 'retrospective')).reasons, ['history_changed']);
       // Same values, different document: no cascade.
       await sql(`update public.physiology_context_jobs set completed_revision = input_revision where user_id = '${a.user}'`);
@@ -633,6 +637,53 @@ Deno.test({
       const live = await publishDay(a.user, a.device, today, 'causal_live', payload(today, 'causal_live', {
         values: [dailyValue(today, 'causal_live', 'hrv_rmssd.sleep_night', 99)] }));
       assert.deepEqual([live.daily_values_changed, live.cascaded_days], [true, 0]);
+    });
+
+    await t.step('cascade horizons by what changed: bouts only -> 3 days, sleep episodes only -> 14 days; a touch clears a replay cutoff', async () => {
+      const a = await owner('UTC');
+      const today = await todayIn('UTC');
+      const d = addDays(today, -30);
+      for (let k = 1; k <= 29; k++) await completedJob(a.user, a.device, addDays(d, k), 'retrospective');
+      const base = payload(d, 'retrospective');
+      await publishDay(a.user, a.device, d, 'retrospective', base);
+      await sql(`update public.physiology_context_jobs set completed_revision = input_revision where user_id = '${a.user}'`);
+      const due = async () => await sqlJson(`select coalesce(json_agg(to_char(day, 'YYYY-MM-DD') order by day), '[]') from public.physiology_context_jobs
+        where user_id = '${a.user}' and mode = 'retrospective' and completed_revision < input_revision`);
+      // Same daily values, a bout moved: only the 72 h exertion history horizon.
+      const bouts = await publishDay(a.user, a.device, d, 'retrospective', payload(d, 'retrospective', {
+        input: 'in-bouts', bouts: [bout(`bout-${a.user.slice(0, 6)}`, d, 1_791_000_000)] }));
+      assert.deepEqual([bouts.daily_values_changed, bouts.cascaded_days], [false, 3]);
+      assert.deepEqual(await due(), [addDays(d, 1), addDays(d, 2), addDays(d, 3)]);
+      await sql(`update public.physiology_context_jobs set completed_revision = input_revision where user_id = '${a.user}'`);
+      // Same values and bouts, a sleep episode changed: the 14-night sleep history horizon.
+      const withSleep = payload(d, 'retrospective', { input: 'in-sleep',
+        bouts: [bout(`bout-${a.user.slice(0, 6)}`, d, 1_791_000_000)] });
+      (withSleep.document as Record<string, unknown>).sleep = { episodes: [{ id: 'night', interval: { start: 1, end: 2 } }] };
+      const sleep = await publishDay(a.user, a.device, d, 'retrospective', withSleep);
+      assert.deepEqual([sleep.daily_values_changed, sleep.cascaded_days], [false, 14]);
+      assert.equal((await due()).length, 14);
+      // A replay cutoff belongs to the replay request; new inputs make the next run an ordinary one.
+      await sql(`update public.physiology_context_jobs set cutoff_override = 1791000000
+        where user_id = '${a.user}' and day = '${addDays(d, 20)}'`);
+      await sql(`select internal.physiology_context_touch('${a.user}', '${a.device}', '${addDays(d, 20)}', 'retrospective', 'test', null)`);
+      assert.equal((await job(a.user, a.device, addDays(d, 20), 'retrospective')).cutoff_override, null);
+    });
+
+    await t.step('a decoder day document (activity_context_days, UTC day) invalidates the local days it overlaps', async () => {
+      const a = await owner('UTC');
+      const today = await todayIn('UTC');
+      const d = addDays(today, -5);
+      for (const k of [-1, 0, 1]) await completedJob(a.user, a.device, addDays(d, k), 'retrospective');
+      await sql(`insert into public.activity_context_days (user_id, device_id, day, algorithm_version, schema_version,
+          ontology_version, decoder_version, feature_schema, model_version, preprocessing_version, job_fingerprint,
+          input_revision, publish_interval_s, observed_s, run_count, event_count, unclear_s, mean_confidence, document,
+          result_revision, computed_at)
+        values ('${a.user}', '${a.device}', '${d}', 'streams-activity-1', 2, 'v2.0', 'hsmm-1.3', 'imu-feat-1', 'm', 'p',
+          repeat('a', 64), 1, 5, 3600, 1, 0, 0, 0.5, '{}'::jsonb, 1, now())`);
+      const bumped = await sqlJson(`select coalesce(json_agg(to_char(day, 'YYYY-MM-DD') order by day), '[]') from public.physiology_context_jobs
+        where user_id = '${a.user}' and completed_revision < input_revision`);
+      assert.deepEqual(bumped, [addDays(d, -1), d, addDays(d, 1)]);
+      assert.deepEqual((await job(a.user, a.device, d, 'retrospective')).reasons, ['activity_day_changed']);
     });
 
     await t.step('read: status none / pending / available, mode choice, metric filter, document sizes and snapshot pairing', async () => {
