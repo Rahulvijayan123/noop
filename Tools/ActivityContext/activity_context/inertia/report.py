@@ -105,9 +105,12 @@ def class_head_md(h: str, r: Dict[str, Any]) -> List[str]:
                  f"{f(prf[2])} | {single} | {f(pc.get('classwise_ece'))} | {g.get('val_status', 'unsupported')} | "
                  f"{f(g.get('tau'))} | {gate_cell(g.get('test') or {})} | {dem} | {g.get('final_status', '–')} | "
                  f"{f(pc['unsupported_truth_windows'])} |")
-    L += ["", "P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target "
-          "scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, "
-          "every wrist dataset with n_acc >= 30); the gate only demotes.", ""]
+    L += ["", "P/R/F1 = set-target scoring (a set-target window is correct for any member); P single-label = "
+          "precision (argmax) on windows whose truth is exactly one class. Statuses, tau and every gate use the "
+          f"`{(r.get('status_rule') or {}).get('rule', 'set-target scoring')}` rule: a set member is judged on its "
+          "single-label evidence only (windows whose truth is a set containing it are excluded). Final status = "
+          "min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.", ""]
+    L += set_rule_md(h, r)
     L += per_dataset_md(h, r)
     aw = r.get("awake_lying")
     if aw:
@@ -117,6 +120,43 @@ def class_head_md(h: str, r: Dict[str, Any]) -> List[str]:
           "; ".join(f"≥{t['tau']}: cov {f(t['coverage'])}, P {f(t['precision'])}" for t in r["fixed_thresholds"]), "",
           "Confusion (rows truth, cols pred; " + ", ".join(p["confusion"]["rows_truth_cols_pred"]) + "):", "", "```"]
     L += [" ".join(f"{v:7d}" for v in row) for row in p["confusion"]["matrix"]] + ["```", ""]
+    return L
+
+
+def set_rule_md(h: str, r: Dict[str, Any]) -> List[str]:
+    """Set families scored as one class, and the old set-target scoring next to the new rule (G2 D-1)."""
+    L: List[str] = []
+    fams = r.get("families") or {}
+    if fams:
+        L += ["Set families (each scored as ONE class: merged probability, correct iff the truth lies inside the family; "
+              "reported only — a family status never changes a served per-class status):", "",
+              "| family | test windows with exactly this set | argmax P / R (n_acc) | val status | tau | pooled gate | "
+              "dataset demotions | final family status |", "|---|---|---|---|---|---|---|---|"]
+        for k, v in fams.items():
+            a = v.get("argmax") or {}
+            dem = "; ".join(x for x in v.get("reasons", []) if not x.startswith("pooled")) or "–"
+            L.append(f"| {k} | {f(v.get('n_test_exact_set'))} | {f(a.get('precision'))} / {f(a.get('recall'))} "
+                     f"({f(a.get('n_acc'))}) | {v.get('val_status') or 'not on val'} | {f(v.get('tau'))} | "
+                     f"{gate_cell(v.get('test') or {})} | {dem} | {v.get('final_status', '–')} |")
+        L.append("")
+    rows = [(c, g) for c, g in r.get("gate", {}).items() if g.get("set_target_scoring")
+            and (g["set_target_scoring"]["val_status"] != g.get("val_status")
+                 or g["set_target_scoring"]["final_status"] != g.get("final_status")
+                 or abs(float(g["set_target_scoring"]["tau"]) - float(g.get("tau"))) > 1e-12)]
+    if rows:
+        L += ["Rule change (G2 D-1): the earlier set-target scoring on the same bundle and test windows vs the "
+              "single-label rule:", "", "| class | test set windows excluded | set-target val→final (tau) | "
+              "single-label val→final (tau) |", "|---|---|---|---|"]
+        for c, g in rows:
+            o = g["set_target_scoring"]
+            L.append(f"| {class_label(h, c)} | {f(g.get('n_test_set_windows_excluded'))} | {o['val_status']}→"
+                     f"{o['final_status']} ({f(o['tau'])}) | {g.get('val_status')}→{g.get('final_status')} "
+                     f"({f(g.get('tau'))}) |")
+        old_m = r.get("set_target_scoring_merge_into")
+        if old_m is not None:
+            L.append("")
+            L.append(f"merge_into under the old rule (symmetric table): {old_m or '{}'}")
+        L.append("")
     return L
 
 
@@ -246,7 +286,12 @@ def render(rep: Dict[str, Any]) -> str:
          f"numpy max |Δ| (first 2,000 windows) "
          f"{f(rep.get('apply_vs_training_side_max_abs', rep.get('apply_vs_apply_arrays_max_abs')), 12)}",
          f"- test windows: " + ", ".join(f"{d['dataset']} {d['windows']:,} ({d['subjects']} subj)" for d in rep["test_windows"]),
-         f"- nonfinite windows dropped: {rep['n_nonfinite_dropped']}", "", FEW_SUBJECTS_NOTE, DESCRIPTIVE_NOTE, LOSO_NOTE, ""]
+         f"- nonfinite windows dropped: {rep['n_nonfinite_dropped']}"]
+    reuse = st.get("n_evaluations_per_dataset_split")
+    if reuse:
+        L.append("- evaluations of each dataset's test split (any experiment, this one included; G2 D-2): "
+                 + ", ".join(f"{d} {n}" for d, n in reuse.items()))
+    L += ["", FEW_SUBJECTS_NOTE, DESCRIPTIVE_NOTE, LOSO_NOTE, ""]
     for h in ("posture", "locomotion", "arm_behavior"):
         if h in rep["heads"]:
             L += class_head_md(h, rep["heads"][h])

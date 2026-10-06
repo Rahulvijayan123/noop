@@ -307,3 +307,70 @@ def test_train_main_writes_report_and_enforces_split(three_subjects, tmp_path):
     json.dump(bad, open(bad_path, "w"))
     with pytest.raises(SystemExit, match="split mismatch"):
         T.main(args + ["--out", str(tmp_path / "bad"), "--expect-split", bad_path])
+
+
+# ---------------------------------------------------------------------------
+# Single-dropout repair: a named, versioned option, recorded per window (audit G2 E-1)
+# ---------------------------------------------------------------------------
+
+def test_repair_policy_is_named_and_validated():
+    assert W.DEFAULT_REPAIR == "wisdm-single-dropout-linear-1"
+    assert set(W.REPAIR_POLICIES) == {"wisdm-single-dropout-linear-1", "none"}
+    with pytest.raises(ValueError):
+        W.load_subject("/nonexistent", SUBJECT, repair="linear")
+
+
+def test_repaired_sample_is_tracked_to_the_windows(subject_data, wisdm_dir):
+    """Activity A drops accel/gyro sample 300 (t = 15.0 s): the repaired sample sits at 30 Hz output position
+    ~450 and exactly the windows covering it count it; recording C's 300 ms dropout is a break, not a repair."""
+    (pa,) = [p for p in subject_data.pieces if p.activity == "A"]
+    assert len(pa.repaired_pos) == 2                            # one accel + one gyro repaired sample
+    assert np.allclose(pa.repaired_pos, 450.0, atol=1.0)
+    ks = W.window_starts(pa.n)
+    c = W.window_repair_counts(pa, ks)
+    inside = np.array([(k <= 450 <= k + 119) for k in ks])
+    assert c[inside].tolist() == [2] * int(inside.sum()) and not c[~inside].any()
+    c05 = W.window_repair_counts(pa, ks, margin=15)
+    assert (c05 > 0).sum() >= (c > 0).sum()
+    rep = subject_data.report()
+    assert rep["repair"] == W.DEFAULT_REPAIR and rep["n_windows_with_repaired_samples"] == int(inside.sum())
+    assert subject_data.repaired_ts_ns.size == 2
+    for p in subject_data.pieces:
+        if p.activity != "A":
+            assert not len(p.repaired_pos)
+
+
+def test_repair_none_breaks_the_segment_instead(wisdm_dir):
+    sd = W.load_subject(wisdm_dir, SUBJECT, repair="none")
+    assert sd.acc_stats.n_repaired == 0 and sd.gyr_stats.n_repaired == 0 and sd.repaired_ts_ns.size == 0
+    pa = [p for p in sd.pieces if p.activity == "A"]
+    assert len(pa) == 2                                         # the dropout ends the segment
+    assert all(not len(p.repaired_pos) for p in sd.pieces)
+    ref = W.load_subject(wisdm_dir, SUBJECT)                    # other activities are unaffected
+    for act in ("B", "C", "D", "F"):
+        a = [p.samples for p in ref.pieces if p.activity == act]
+        b = [p.samples for p in sd.pieces if p.activity == act]
+        assert len(a) == len(b) and all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def test_train_main_writes_per_window_repair_counts(three_subjects, tmp_path):
+    out = str(tmp_path / "out_rep")
+    assert T.main(["--wisdm", three_subjects, "--out", out, "--seed", "42", "--test-fraction", "0.34",
+                   "--val-fraction", "0.34"]) == 0
+    man = json.load(open(os.path.join(out, "manifest.json")))
+    rp = man["data"]["preprocessing"]["repair"]
+    assert rp["policy"] == W.DEFAULT_REPAIR and rp["rule"] == W.REPAIR_POLICIES[W.DEFAULT_REPAIR]
+    total = 0
+    for name, split in (("train_data.npz", "train"), ("val_data.npz", "val"), ("eval_data.npz", "test")):
+        z = np.load(os.path.join(out, name), allow_pickle=True)
+        assert z["n_repaired"].shape == (z["X"].shape[0],) and z["n_repaired_pm05s"].shape == z["n_repaired"].shape
+        assert int((z["n_repaired"] > 0).sum()) == rp[split]["windows_with_repaired_samples"]
+        assert (z["n_repaired_pm05s"] >= z["n_repaired"]).all()
+        total += int((z["n_repaired"] > 0).sum())
+    assert total > 0                                            # activity A of every subject has a repair
+    out2 = str(tmp_path / "out_none")
+    assert T.main(["--wisdm", three_subjects, "--out", out2, "--seed", "42", "--test-fraction", "0.34",
+                   "--val-fraction", "0.34", "--repair", "none"]) == 0
+    z = np.load(os.path.join(out2, "eval_data.npz"), allow_pickle=True)
+    assert not z["n_repaired"].any()
+    assert json.load(open(os.path.join(out2, "manifest.json")))["data"]["preprocessing"]["repair"]["policy"] == "none"

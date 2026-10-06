@@ -136,7 +136,14 @@ class TestVault:
 
     def evaluate_once(self, experiment: str, bundle_sha256: str, evaluator: Callable[[Mapping[str, Any]], Dict],
                       declared: Sequence[str], rerun_reason: Optional[str] = None, rerun_detail: Optional[str] = None,
-                      before: Optional[Callable[[str], None]] = None) -> Dict:
+                      before: Optional[Callable[[str], None]] = None,
+                      dataset_splits: Optional[Mapping[str, str]] = None,
+                      history: Optional[Callable[[Mapping[str, Any]], Mapping[str, str]]] = None) -> Dict:
+        """``dataset_splits`` {dataset: frozen test-split identity} (e.g. the split manifest sha256) makes the
+        stamp count test reuse PER DATASET test split as well (audit G2 D-2): a combined test split that adds
+        datasets to an earlier one gets a new ``test_sha256`` although it re-opens the earlier datasets' test
+        subjects. ``history(entry)`` derives the per-dataset identities of ledger entries written before
+        ``per_dataset_split_sha256`` was recorded."""
         check_rerun_reason(rerun_reason, rerun_detail)
         if experiment not in declared:
             raise SplitLeakError(f"{experiment} is not a pre-registered experiment; refusing to open the test split")
@@ -158,6 +165,11 @@ class TestVault:
                  "rerun_reason_text": RERUN_REASONS.get(rerun_reason) if rerun_reason else None,
                  "n_test_evaluations": len(same) + 1, "n_evaluations_of_experiment_any_split": len(same_exp) + 1,
                  "n_evaluations_on_this_test_split": len(prior) + 1}
+        if dataset_splits:
+            counts = per_dataset_reuse(self.entries(), history)
+            stamp["per_dataset_split_sha256"] = dict(sorted(dataset_splits.items()))
+            stamp["n_evaluations_per_dataset_split"] = {
+                d: counts.get((d, sha), 0) + 1 for d, sha in sorted(dataset_splits.items())}
         report = dict(report, integrity=stamp)
         os.makedirs(os.path.dirname(self._ledger) or ".", exist_ok=True)
         with open(self._ledger, "a") as f:
@@ -165,6 +177,30 @@ class TestVault:
         return report
 
 
-__all__ = ["SplitView", "TestVault", "SplitLeakError", "require_split", "assert_disjoint_subjects",
+def entry_dataset_splits(entry: Mapping[str, Any],
+                         history: Optional[Callable[[Mapping[str, Any]], Mapping[str, str]]] = None) -> Dict[str, str]:
+    """{dataset: test-split identity} of one ledger entry: recorded, else derived by ``history`` (else {})."""
+    rec = entry.get("per_dataset_split_sha256")
+    if rec:
+        return dict(rec)
+    if history is not None:
+        try:
+            return dict(history(entry) or {})
+        except Exception:  # noqa: BLE001 - an undeclared historical entry simply has no derivable identity
+            return {}
+    return {}
+
+
+def per_dataset_reuse(entries: Sequence[Mapping[str, Any]],
+                      history: Optional[Callable[[Mapping[str, Any]], Mapping[str, str]]] = None) -> Dict[tuple, int]:
+    """{(dataset, split identity): number of ledger entries that opened that dataset's test split}."""
+    out: Dict[tuple, int] = {}
+    for e in entries:
+        for d, sha in entry_dataset_splits(e, history).items():
+            out[(d, sha)] = out.get((d, sha), 0) + 1
+    return out
+
+
+__all__ = ["SplitView", "TestVault", "entry_dataset_splits", "per_dataset_reuse", "SplitLeakError", "require_split", "assert_disjoint_subjects",
            "assert_calibration_provenance", "assert_head_inputs", "array_sha256", "FORBIDDEN_INPUTS", "RERUN_REASONS",
            "check_rerun_reason"]

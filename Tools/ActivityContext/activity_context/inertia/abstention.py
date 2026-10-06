@@ -27,6 +27,24 @@ returns the highest status the test evidence supports (``level``):
 
 The final status is the minimum of the VAL status, the pooled level and every dataset level that has
 n_acc >= 30 (:func:`final_status`): the gate only ever demotes.
+
+Set targets (rule :data:`SET_RULE`, audit G2 D-1, 2026-10-06)
+--------------------------------------------------------------
+A target may be a SET (the truth is one of several classes, e.g. pace-unknown walking = {walking,
+brisk_walking}; Capture-24 "sitting/lying" = {recumbent, seated_likely}). Such a window can neither confirm
+nor refute one member, so every per-class rule above — the VAL operating point (curve, CP bound, cluster
+q05, recall, subject counts), the status and both test gates (pooled and per dataset) — uses only the windows
+that are **unambiguous for that class** (:func:`unambiguous`: truth exactly {c}, or c not in the truth). For a
+class that never appears in a set target this is every window (no change); for a set member it is its
+single-label evidence. Before this rule a set window counted as correct for whichever member was predicted,
+which made ``brisk_walking`` "strong" on pace-unknown walking alone.
+A set FAMILY (every distinct multi-member truth set, :func:`observed_families`) is scored as ONE class
+(:func:`family_view`: merged probability = sum over the members; correct iff the truth lies inside the family;
+a truth that only partly overlaps it is excluded) and earns its own status with the same rules
+(:func:`family_operating_points`). Family statuses are reported (manifest ``families``, test gate
+``families``); they never change a served per-class status.
+Merges are directed from the more specific class to the more general one (:data:`MERGE_RULES`):
+``brisk_walking -> walking`` and ``stairs -> walking``, never ``walking -> brisk_walking`` / ``walking -> stairs``.
 """
 
 from __future__ import annotations
@@ -53,19 +71,87 @@ GATE_CP_FLOOR = 0.90
 GATE_MIN_RECALL = 0.05
 
 # Static semantic-compatibility table for abstained-class merging (G-19): an abstained class may only be
-# merged into one of these partners (and only if that partner is strong/weak); pairs are symmetric.
+# merged into one of these partners (and only if that partner is strong/weak).
 MERGE_PAIRS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     "posture": (("postural_transition", "upright_stationary"),),
     "locomotion": (("brisk_walking", "walking"), ("stairs", "walking")),
     "arm_behavior": (("quiet", "desk_like"),),
 }
-MERGE_COMPAT: Dict[str, Dict[str, Tuple[str, ...]]] = {}
+# Direction (audit G2 D-1): a pair (specific, general) only merges specific -> general. A walking class that
+# abstains is never read as brisk_walking or stairs evidence (the reverse would turn ordinary walking into a pace
+# or stair claim). Pairs with no specificity order stay symmetric.
+DIRECTED_PAIRS: Dict[str, Tuple[Tuple[str, str], ...]] = {
+    "locomotion": (("brisk_walking", "walking"), ("stairs", "walking")),
+}
+MERGE_RULES: Dict[str, Tuple[Tuple[str, str], ...]] = {}
 for _h, _pairs in MERGE_PAIRS.items():
+    _dir = set(DIRECTED_PAIRS.get(_h, ()))
+    _r: List[Tuple[str, str]] = []
+    for _a, _b in _pairs:
+        _r.append((_a, _b))
+        if (_a, _b) not in _dir:
+            _r.append((_b, _a))
+    MERGE_RULES[_h] = tuple(_r)
+MERGE_COMPAT: Dict[str, Dict[str, Tuple[str, ...]]] = {}     # abstained source -> allowed partners
+for _h, _rules in MERGE_RULES.items():
     _m: Dict[str, List[str]] = {}
+    for _src, _dst in _rules:
+        _m.setdefault(_src, []).append(_dst)
+    MERGE_COMPAT[_h] = {k: tuple(v) for k, v in _m.items()}
+
+_SYMMETRIC_COMPAT: Dict[str, Dict[str, Tuple[str, ...]]] = {}  # the pre-2026-10-06 table (report only)
+for _h, _pairs in MERGE_PAIRS.items():
+    _m = {}
     for _a, _b in _pairs:
         _m.setdefault(_a, []).append(_b)
         _m.setdefault(_b, []).append(_a)
-    MERGE_COMPAT[_h] = {k: tuple(v) for k, v in _m.items()}
+    _SYMMETRIC_COMPAT[_h] = {k: tuple(v) for k, v in _m.items()}
+
+SET_RULE = "set-family-1"
+SET_RULE_TEXT = ("set targets: a window whose truth is a set containing class c and another class neither confirms "
+                 "nor refutes c, so c's VAL operating point, status and test gates (pooled and per dataset) use only "
+                 "windows whose truth is exactly {c} or excludes c (single-label evidence); every multi-member set "
+                 "family is scored as one class (merged probability; correct iff the truth lies inside the family) "
+                 "and earns its own, reported, family status; merges only go specific -> general "
+                 "(brisk_walking -> walking, stairs -> walking)")
+
+
+def unambiguous(truth: np.ndarray, c: int) -> np.ndarray:
+    """Windows that can confirm or refute class ``c``: truth exactly {c}, or c not in the truth set.
+
+    A set window containing c and another class (e.g. {walking, brisk_walking} for brisk_walking) is
+    excluded from every per-class rule of c (:data:`SET_RULE`)."""
+    truth = np.asarray(truth, bool)
+    if not len(truth):
+        return np.zeros(0, bool)
+    return ~(truth[:, c] & (truth.sum(axis=1) > 1))
+
+
+def observed_families(truth: np.ndarray) -> List[Tuple[int, ...]]:
+    """Distinct multi-member truth sets (sorted class-index tuples), in a stable order."""
+    truth = np.asarray(truth, bool)
+    multi = truth[truth.sum(axis=1) > 1] if len(truth) else truth
+    if not len(multi):
+        return []
+    return sorted({tuple(int(k) for k in np.flatnonzero(r)) for r in np.unique(multi, axis=0)})
+
+
+def family_key(members: Sequence[int], class_order: Sequence[str]) -> str:
+    return "+".join(class_order[k] for k in sorted(members))
+
+
+def family_view(probs: np.ndarray, truth: np.ndarray, members: Sequence[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """Collapse a family into ONE class (column 0 of the result; the other classes follow in class order).
+
+    Merged probability = sum over the members. Merged truth column = the truth set meets the family; so a
+    truth inside the family is single-label for it, a truth outside refutes it, and a truth that only partly
+    overlaps it (e.g. {walking, brisk_walking, stationary} vs {walking, brisk_walking}) is a set containing the
+    family and another class — excluded by :func:`unambiguous`."""
+    mem = sorted(int(k) for k in members)
+    rest = [k for k in range(probs.shape[1]) if k not in mem]
+    P = np.column_stack([probs[:, mem].sum(axis=1), probs[:, rest]])
+    T = np.column_stack([np.asarray(truth, bool)[:, mem].any(axis=1), np.asarray(truth, bool)[:, rest]])
+    return P, T
 
 
 def min_status(*statuses: str) -> str:
@@ -150,16 +236,30 @@ def select_operating_point(probs: np.ndarray, truth: np.ndarray, subjects: np.nd
                            target: float = STRONG_PRECISION, weak_precision: float = WEAK_PRECISION,
                            n_min_strong: int = 60, n_min_weak: int = 30, min_recall: float = 0.10,
                            min_subjects: int = MIN_STRONG_SUBJECTS, strong_q05: float = STRONG_CLUSTER_Q05,
-                           weak_q05: float = WEAK_CLUSTER_Q05, grid: Sequence[float] = DEFAULT_GRID) -> Dict:
-    """VAL operating point of class ``c`` (module docstring). ``subjects`` = the val subject of every row."""
+                           weak_q05: float = WEAK_CLUSTER_Q05, grid: Sequence[float] = DEFAULT_GRID,
+                           set_rule: bool = True) -> Dict:
+    """VAL operating point of class ``c`` (module docstring). ``subjects`` = the val subject of every row.
+
+    ``set_rule`` (default, :data:`SET_RULE`): only windows :func:`unambiguous` for ``c`` are scored. ``False``
+    reproduces the earlier set-target scoring (a set window counts as correct for any member; report only)."""
+    truth = np.asarray(truth, bool)
+    subjects = np.asarray(subjects)
+    n_set = 0
+    if set_rule:
+        keep = unambiguous(truth, c)
+        n_set = int((~keep).sum())
+        if n_set:
+            probs, truth, subjects = probs[keep], truth[keep], subjects[keep]
+    scoring = {"rule": SET_RULE if set_rule else "set-target scoring (pre-2026-10-06, report only)",
+               "n_set_windows_excluded": n_set}
     n_val = int(truth[:, c].sum())
     if not supported or n_val < n_min_weak:
-        return {"status": "abstain", "tau": 1.0, "n_val_class": n_val,
+        return {"status": "abstain", "tau": 1.0, "n_val_class": n_val, "scoring": scoring,
                 "reason": "unsupported" if not supported else f"only {n_val} val windows"}
     rows = class_curve(probs, truth, subjects, c, grid, cluster=True)
     n_subj_class = int(len(np.unique(np.asarray(subjects)[truth[:, c]])))
     need = min(min_subjects, max(1, n_subj_class))
-    common = {"n_val_class": n_val, "n_val_subjects_class": n_subj_class,
+    common = {"n_val_class": n_val, "n_val_subjects_class": n_subj_class, "scoring": scoring,
               "cluster_bootstrap": {"n_boot": CLUSTER_BOOT, "seed": CLUSTER_SEED, "quantile": CLUSTER_QUANTILE,
                                     "unit": "val subject (all subjects scored by the head)"}}
     if n_subj_class >= min_subjects:
@@ -191,11 +291,42 @@ def merge_confusion(probs: np.ndarray, truth: np.ndarray, class_order: Sequence[
     return (cm + cm.T).astype(int).tolist()
 
 
+def family_operating_points(probs: np.ndarray, truth: np.ndarray, subjects: np.ndarray,
+                            class_order: Sequence[str], supported: Sequence[bool]) -> Dict[str, Dict]:
+    """VAL status of every observed set family, each scored as ONE class (:func:`family_view`, same rules as
+    :func:`select_operating_point`). Keys: :func:`family_key` (members joined by '+', class order)."""
+    out: Dict[str, Dict] = {}
+    for fam in observed_families(truth):
+        if not all(bool(supported[k]) for k in fam):
+            continue
+        P, T = family_view(probs, truth, fam)
+        op = select_operating_point(P, T, subjects, 0, True)
+        op["members"] = [class_order[k] for k in fam]
+        op["n_windows_with_exactly_this_set"] = int(np.all(truth == np.isin(np.arange(truth.shape[1]), fam), axis=1).sum())
+        out[family_key(fam, class_order)] = op
+    return out
+
+
+def family_gates(probs: np.ndarray, truth: np.ndarray, members: Sequence[int], tau: float, val_status: str,
+                 datasets: np.ndarray) -> Dict:
+    """One-shot test gates of a family at its frozen VAL tau (pooled + per dataset) and its final status."""
+    P, T = family_view(probs, truth, members)
+    if val_status not in ("strong", "weak"):
+        return {"test": None, "per_dataset": {}, "final_status": val_status, "reasons": []}
+    pooled = check_gate(P, T, 0, tau)
+    per = {d: check_gate(P[datasets == d], T[datasets == d], 0, tau, dataset_level=True)
+           for d in sorted(np.unique(datasets))}
+    final, reasons = final_status(val_status, pooled, per)
+    return {"test": pooled, "per_dataset": per, "final_status": final, "reasons": reasons}
+
+
 def merge_partners(status: Mapping[str, str], class_order: Sequence[str], head: str,
-                   sym_confusion: Optional[Sequence[Sequence[int]]] = None) -> Dict[str, str]:
+                   sym_confusion: Optional[Sequence[Sequence[int]]] = None, directed: bool = True) -> Dict[str, str]:
     """Abstained class -> a strong/weak partner from :data:`MERGE_COMPAT` (most confused on val, ties by
-    class order). No compatible live partner -> no entry (the decoder drops the class)."""
-    compat = MERGE_COMPAT.get(head, {})
+    class order). No compatible live partner -> no entry (the decoder drops the class). Locomotion merges are
+    directed specific -> general (:data:`DIRECTED_PAIRS`): an abstained ``walking`` never merges into
+    ``brisk_walking`` or ``stairs``. ``directed=False`` = the earlier symmetric table (report only)."""
+    compat = MERGE_COMPAT.get(head, {}) if directed else _SYMMETRIC_COMPAT.get(head, {})
     out = {}
     for k, c in enumerate(class_order):
         if status.get(c) != "abstain":
@@ -218,9 +349,21 @@ def evidence_groups(status: Mapping[str, str], merge_into: Mapping[str, str]) ->
 
 def check_gate(probs_test: np.ndarray, truth_test: np.ndarray, c: int, tau: float, target: float = STRONG_PRECISION,
                cp_floor: float = GATE_CP_FLOOR, n_min: int = GATE_N_MIN, min_recall: float = GATE_MIN_RECALL,
-               weak_precision: float = WEAK_PRECISION, dataset_level: bool = False) -> Dict:
+               weak_precision: float = WEAK_PRECISION, dataset_level: bool = False, set_rule: bool = True) -> Dict:
     """Test evidence at the frozen tau. ``pass`` = the strong criteria hold; ``level`` = the highest status the
-    evidence supports (module docstring). ``dataset_level`` drops the CP/recall parts of the strong check."""
+    evidence supports (module docstring). ``dataset_level`` drops the CP/recall parts of the strong check.
+    ``set_rule`` (default): only windows :func:`unambiguous` for ``c`` count (single-label evidence for a set
+    member); ``False`` = the earlier set-target scoring (report only)."""
+    truth_test = np.asarray(truth_test, bool)
+    n_set = 0
+    if set_rule and len(truth_test):
+        keep = unambiguous(truth_test, c)
+        n_set = int((~keep).sum())
+        if n_set:
+            probs_test, truth_test = probs_test[keep], truth_test[keep]
+    if not len(probs_test):
+        return {"tau": tau, "n_acc": 0, "tp": 0, "precision": float("nan"), "cp_lower_95": 0.0, "recall": 0.0,
+                "n_true": 0, "pass": False, "level": "weak", "decisive": False, "n_set_windows_excluded": n_set}
     pred = probs_test.argmax(axis=1)
     acc = (pred == c) & (probs_test[:, c] >= tau)
     n, k = int(acc.sum()), int((acc & truth_test[:, c]).sum())
@@ -236,7 +379,7 @@ def check_gate(probs_test: np.ndarray, truth_test: np.ndarray, c: int, tau: floa
     else:
         level = "abstain"
     return {"tau": tau, "n_acc": n, "tp": k, "precision": prec, "cp_lower_95": lb, "recall": rec, "n_true": n_true,
-            "pass": strong, "level": level, "decisive": bool(n >= n_min)}
+            "pass": strong, "level": level, "decisive": bool(n >= n_min), "n_set_windows_excluded": n_set}
 
 
 def _level(gate: Mapping) -> str:
@@ -327,4 +470,5 @@ def combined_risk_coverage(conf: np.ndarray, correct: np.ndarray, ood_score: np.
 __all__ = ["select_operating_point", "check_gate", "apply_gate", "final_status", "merge_partners", "merge_confusion",
            "evidence_groups", "class_curve", "cluster_precision_quantile", "risk_coverage", "aurc",
            "at_fixed_thresholds", "combined_risk_coverage", "clopper_pearson_lower", "min_status", "FIXED_THRESHOLDS",
-           "MERGE_COMPAT", "MERGE_PAIRS", "STATUS_RANK"]
+           "MERGE_COMPAT", "MERGE_PAIRS", "MERGE_RULES", "DIRECTED_PAIRS", "STATUS_RANK", "SET_RULE", "SET_RULE_TEXT",
+           "unambiguous", "observed_families", "family_key", "family_view", "family_operating_points", "family_gates"]

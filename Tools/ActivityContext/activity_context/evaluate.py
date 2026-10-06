@@ -383,22 +383,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--data", required=True, help="eval_data.npz from activity-train")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--out", default=None, help="write JSON report to file")
+    ap.add_argument("--ledger", default=None,
+                    help="test ledger: evaluate through inertia.integrity.TestVault (use eval/hart/test_ledger.jsonl "
+                         "whenever --data holds the HART TEST subjects; audit G2 E-2)")
+    ap.add_argument("--rerun-reason", default=None)
+    ap.add_argument("--rerun-detail", default=None)
     args = ap.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
     if not os.path.isfile(args.data):
         raise SystemExit(f"eval data not found: {args.data}")
-    z = np.load(args.data, allow_pickle=True)
-    x = z["X"]
-    y = z["y_ontology"]
-    letters = z["letters"] if "letters" in z else None
-    subjects = z["subjects"] if "subjects" in z else None
-    sessions = z["sessions"] if "sessions" in z else None
-    predictor = build_predictor(manifest, args.checkpoint)
-    report = evaluate(x, y, predictor, manifest.thresholds,
-                      letters=letters, subjects=subjects, sessions=sessions)
-    report["model_version"] = manifest.model_version
-    report["model_kind"] = manifest.model_kind
+    def run(_payload=None) -> Dict:
+        z = np.load(args.data, allow_pickle=True)
+        x = z["X"]
+        y = z["y_ontology"]
+        letters = z["letters"] if "letters" in z else None
+        subjects = z["subjects"] if "subjects" in z else None
+        sessions = z["sessions"] if "sessions" in z else None
+        predictor = build_predictor(manifest, args.checkpoint)
+        rep = evaluate(x, y, predictor, manifest.thresholds,
+                       letters=letters, subjects=subjects, sessions=sessions)
+        rep["model_version"] = manifest.model_version
+        rep["model_kind"] = manifest.model_kind
+        return rep
+
+    if args.ledger:
+        from .hart_wisdm_eval import (HART_DECLARED, HART_EXPERIMENT, _ledger_history, _vault, dataset_splits)
+        sha = manifest.checkpoint["files"]["model.safetensors"]["sha256"] if manifest.checkpoint else "none"
+        report = _vault(args.data, args.ledger).evaluate_once(
+            HART_EXPERIMENT, f"{manifest.model_version}:{sha}", run, HART_DECLARED, args.rerun_reason,
+            args.rerun_detail, dataset_splits=dataset_splits(), history=_ledger_history)
+    else:
+        report = run()
 
     text = json.dumps(report, indent=2)
     if args.out:

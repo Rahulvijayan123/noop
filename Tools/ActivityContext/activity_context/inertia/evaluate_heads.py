@@ -124,13 +124,48 @@ def sleep_period_mask(meta, cw) -> np.ndarray:
 
 
 def class_gates(P: np.ndarray, truth: np.ndarray, k: int, tau: float, val_status: str, ds: np.ndarray,
-                wrist: np.ndarray) -> Dict[str, Any]:
-    """Pooled + per-wrist-dataset one-shot gates at the frozen tau and the resulting final status."""
-    pooled = A.check_gate(P, truth, k, tau)
-    per = {d: A.check_gate(P[(ds == d) & wrist], truth[(ds == d) & wrist], k, tau, dataset_level=True)
+                wrist: np.ndarray, set_rule: bool = True) -> Dict[str, Any]:
+    """Pooled + per-wrist-dataset one-shot gates at the frozen tau and the resulting final status.
+
+    ``set_rule`` (default): single-label evidence for a set member, pooled AND per dataset (abstention.SET_RULE);
+    ``False`` = the earlier set-target scoring (report only)."""
+    pooled = A.check_gate(P, truth, k, tau, set_rule=set_rule)
+    per = {d: A.check_gate(P[(ds == d) & wrist], truth[(ds == d) & wrist], k, tau, dataset_level=True,
+                           set_rule=set_rule)
            for d in sorted(np.unique(ds[wrist]))}
     final, reasons = A.final_status(val_status, pooled, per)
     return {"test": pooled, "per_dataset": per, "final_status": final, "reasons": reasons}
+
+
+def _training_report(bundle) -> Dict[str, Any]:
+    p = os.path.join(bundle.path, "training_report.json")
+    if "training_report.json" not in bundle.manifest.get("files", {}) or not os.path.isfile(p):
+        return {}
+    with open(p) as fh:
+        return json.load(fh)
+
+
+def family_report(h: str, meta, P: np.ndarray, truth: np.ndarray, ds: np.ndarray, order) -> Dict[str, Any]:
+    """Every set family scored as ONE class (abstention.family_view): the VAL family status from the manifest,
+    the one-shot test gates at its frozen tau, and the argmax precision/recall. Families seen only on test are
+    listed (no VAL status, no gate). Reported only: a family status never changes a served per-class status."""
+    out: Dict[str, Any] = {}
+    fams = dict(meta.get("families") or {})
+    seen = {A.family_key(f, order): f for f in A.observed_families(truth)}
+    for key in sorted(set(fams) | set(seen), key=lambda x: (len(x.split("+")), x)):
+        members = fams[key]["members"] if key in fams else [order[k] for k in seen[key]]
+        idx = [order.index(c) for c in members]
+        Pf, Tf = A.family_view(P, truth, idx)
+        exact = int(np.all(truth == np.isin(np.arange(truth.shape[1]), idx), axis=1).sum())
+        r: Dict[str, Any] = {"members": members, "n_test_exact_set": exact,
+                             "argmax": A.check_gate(Pf, Tf, 0, 0.0)}
+        if key in fams:
+            vs, tau = fams[key]["status"], float(fams[key]["tau"])
+            r.update({"val_status": vs, "tau": tau, **A.family_gates(P, truth, idx, tau, vs, ds)})
+        else:
+            r.update({"val_status": None, "note": "set seen on test only (no VAL family status)"})
+        out[key] = r
+    return out
 
 
 def eval_class_head(h: str, bundle, out: Dict, test, raw_logits, cw=None) -> Dict[str, Any]:
@@ -176,6 +211,7 @@ def eval_class_head(h: str, bundle, out: Dict, test, raw_logits, cw=None) -> Dic
     rep["risk_coverage"] = A.risk_coverage(conf, correct)
     rep["aurc"] = A.aurc(conf, correct)
     single = truth.sum(axis=1) == 1
+    legacy_val = (_training_report(bundle).get(h) or {}).get("set_target_scoring_status") or {}
     gate = {}
     for k, c in enumerate(order):
         if not sup.supported[k]:
@@ -187,8 +223,24 @@ def eval_class_head(h: str, bundle, out: Dict, test, raw_logits, cw=None) -> Dic
             g["test_single_label"] = A.check_gate(P[single], truth[single], k, tau)
         else:
             g = {"test": None, "per_dataset": {}, "final_status": vs, "reasons": []}
+        n_amb = int((~A.unambiguous(truth, k)).sum())
+        g["set_member_on_test"] = n_amb > 0
+        g["n_test_set_windows_excluded"] = n_amb
+        if c in legacy_val:
+            # the pre-2026-10-06 set-target scoring on the same bundle and test windows (report only, G2 D-1)
+            lv, lt = legacy_val[c]["status"], float(legacy_val[c]["tau"])
+            lg = (class_gates(P, truth, k, lt, lv, ds, w, set_rule=False) if lv in ("strong", "weak")
+                  else {"test": None, "per_dataset": {}, "final_status": lv, "reasons": []})
+            g["set_target_scoring"] = {"val_status": lv, "tau": lt, "final_status": lg["final_status"],
+                                       "reasons": lg["reasons"], "test": lg["test"]}
         gate[c] = {"val_status": vs, "tau": meta["tau"][c], **g}
     rep["gate"] = gate
+    rep["status_rule"] = {"rule": A.SET_RULE, "text": A.SET_RULE_TEXT}
+    if legacy_val:
+        legacy_final = {c: e["set_target_scoring"]["final_status"] for c, e in gate.items() if "set_target_scoring" in e}
+        rep["set_target_scoring_merge_into"] = A.merge_partners(
+            legacy_final, order, h, (meta.get("selection") or {}).get("merge_confusion_val_sym"), directed=False)
+    rep["families"] = family_report(h, meta, P, truth, ds, order)
     if h == "posture" and cw is not None and "recumbent" in sup.classes and sup.supported[order.index("recumbent")]:
         rep["awake_lying"] = awake_lying_report(P, truth, order, sup, meta, test.meta[m], cw, ds, w)
     counts = {c: meta["support_counts"][c]["train_windows"] for c in order}
@@ -303,7 +355,8 @@ def evaluate_experiment(exp: Experiment, cache_root: Optional[str] = None, bundl
         return rep
 
     report = vault.evaluate_once(exp.name, bundle.bundle_sha256, evaluator, DECLARED, rerun_reason, rerun_detail,
-                                 before=lambda sha: assert_calibration_provenance(bundle.calibration, sha))
+                                 before=lambda sha: assert_calibration_provenance(bundle.calibration, sha),
+                                 dataset_splits=dataset_test_splits(exp), history=ledger_history)
     from .report import _json_safe, write_evaluation
     out_dir = os.path.join(eval_root, exp.bundle_id)
     write_evaluation(report, out_dir)                    # keep the report even if sealing fails
@@ -320,6 +373,22 @@ def evaluate_experiment(exp: Experiment, cache_root: Optional[str] = None, bundl
         shutil.copy(p, os.path.join(bdir, os.path.basename(p)))
     report["report_path"] = paths[0]
     return report
+
+
+def dataset_test_splits(exp: Experiment) -> Dict[str, str]:
+    """{eval dataset: sha256 of its frozen split manifest} — the per-dataset test-split identity (G2 D-2): two
+    experiments that score the same dataset's test subjects open the same split, whatever else they add."""
+    from .splits import load_splits
+    sp = load_splits(list(exp.eval_datasets))
+    return {d: sp[d]["sha256"] for d in exp.eval_datasets if d in sp}
+
+
+def ledger_history(entry: Dict[str, Any]) -> Dict[str, str]:
+    """Per-dataset split identities of a ledger entry written before they were recorded (derived from the
+    experiment's pre-registered eval datasets and the frozen split manifests)."""
+    from .experiments import EXPERIMENTS
+    exp = EXPERIMENTS.get(entry.get("experiment"))
+    return dataset_test_splits(exp) if exp is not None else {}
 
 
 PROVENANCE_KEYS = ("git_commit", "git_dirty", "source_tree_sha256", "source_dirty", "source_dirty_paths",

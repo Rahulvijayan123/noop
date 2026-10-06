@@ -432,6 +432,12 @@ def gate_document(bundle: HeadBundle, evaluation: Mapping[str, Any]) -> Dict[str
                           "reasons": list(g.get("reasons", []))}
         final = {c: e["final_status"] for c, e in classes.items()}
         entry: Dict[str, Any] = {"classes": classes}
+        fams = {k: {"members": list(v["members"]), "val_status": v["val_status"], "tau": v["tau"],
+                    "pooled": v.get("test"), "per_dataset": v.get("per_dataset", {}),
+                    "final_status": v["final_status"], "reasons": list(v.get("reasons", []))}
+                for k, v in (rep.get("families") or {}).items() if v.get("val_status") is not None}
+        if fams:
+            entry["families"] = fams            # reported only: never changes a served per-class status
         if h in SOFTMAX_HEADS:
             sym = (meta.get("selection") or {}).get("merge_confusion_val_sym")
             entry["merge_into"] = A.merge_partners(final, list(meta["class_order"]), h, sym)
@@ -447,7 +453,10 @@ def gate_document(bundle: HeadBundle, evaluation: Mapping[str, Any]) -> Dict[str
             "rule": "final_status = min(VAL status, pooled test gate level, every wrist-dataset gate level with "
                     "n_acc >= 30); levels: strong (precision >= .95 [+ CP95 >= .90, recall >= .05 pooled]), weak "
                     "(precision >= .80 or n_acc < 30), else abstain. Demotions only; merges recomputed inside "
-                    "abstention.MERGE_COMPAT for the final statuses."}
+                    "abstention.MERGE_COMPAT (locomotion directed specific -> general) for the final statuses. "
+                    f"Set targets ({A.SET_RULE}): every gate of a set member uses its single-label evidence; set "
+                    "families are gated as one class and reported under 'families'.",
+            "status_rule": A.SET_RULE}
 
 
 def seal_bundle(bundle_dir: str, evaluation: Mapping[str, Any]) -> HeadBundle:

@@ -41,6 +41,8 @@ and the final posterior. HART, the engineered features and the 1 Hz strap stream
 | split manifest schema | `nara-split-1` |
 | label mapping schema | `nara.inertia.mappings/1` |
 | test gate schema | `nara.inertia.test_gate/1` (`test_gate.json`, written only by `seal_bundle`) |
+| set-target status rule | `set-family-1` (`abstention.SET_RULE`, 2026-10-06; manifest `heads.<h>.selection.status_rule`, gate `status_rule`) |
+| HART WISDM loader / repair | `wisdm-watch-loader-2` with repair option `wisdm-single-dropout-linear-1` (default) or `none` (`activity_context/wisdm.py`; per-window `n_repaired` recorded) |
 | evidence tiers (wire) | `shadow` < `candidate` < `production`; bundles may also be `offline` (dirty build, never served) |
 | upstream commit | `afcd725314c95f4afefce118821349df7d61e7e8` (MIT, "Copyright (c) 2026 The Inertia-1 Authors") |
 | real encoder ids | `inertia-1/<method>-<preset>/<window>s@20hz`, e.g. `inertia-1/ar_transformer-small/30s@20hz` |
@@ -128,15 +130,35 @@ window counts as precision 0). The point precision must also hold at every τ' �
   ≥ min(5, val subjects with the class) subjects;
 * otherwise `abstain`.
 
+**Set targets** (`set-family-1`, audit G2 D-1, 2026-10-06): a window whose truth is a set containing `c` and another
+class (pace-unknown walking `{walking, brisk_walking}`, Capture-24 "sitting/lying" `{recumbent, seated_likely}`,
+"walking and occasional standing" `{walking, brisk_walking, stationary}`) neither confirms nor refutes `c`. Every rule
+above for `c` — curve, CP bound, cluster q05, recall, subject counts, status — and both test gates (pooled and per
+dataset) use only the windows whose truth is exactly `{c}` or excludes `c` (`abstention.unambiguous`): a set member
+is judged on its single-label evidence; a class that is never in a set is unaffected. (Before, a set window counted
+as correct for whichever member was predicted: `brisk_walking` became strong on pace-unknown walking alone.) Every
+observed multi-member truth set is a **family** scored as ONE class (`abstention.family_view`: merged probability =
+sum over the members, correct iff the truth lies inside the family, a partly overlapping truth excluded) with the
+same rules: `manifest.heads.<h>.families{"walking+brisk_walking": {members, status, tau, ...}}` (VAL) and
+`test_gate.heads.<h>.families` (gated, demotions only). Family statuses are reported; they never change a served
+per-class status. Support (`targets.resolve_support`) still credits exact family sets to the representative so it
+trains on them, and records `single_label_train_windows` / `single_label_val_windows` for family members; when the
+representative `covers` every other member (e.g. `brisk_walking` unsupported) it IS the family and its resolved truth
+has no set left.
+
 **Merging abstained classes** (G-19): only into a strong/weak partner inside the static
 semantic-compatibility table (posture `postural_transition ↔ upright_stationary`; locomotion
-`brisk_walking ↔ walking`, `stairs ↔ walking`; arm `quiet ↔ desk_like`), the most-confused one on val.
+`brisk_walking → walking`, `stairs → walking`; arm `quiet ↔ desk_like`), the most-confused one on val. Locomotion
+merges are directed from the more specific class to the more general one (`abstention.DIRECTED_PAIRS`): an
+abstained `walking` is never merged into `brisk_walking` or `stairs` (`load_bundle` refuses such a merge); the
+posture and arm pairs have no specificity order and stay symmetric.
 Otherwise the abstained class has no `merge_into` and the decoder drops it (renormalises it away; its mass
 lowers `rel`). A head left with ≤ 1 evidence group carries `decoder_evidence: false`: its likelihood ratio is
 identically 1 (inert). `load_bundle` refuses an incompatible or non-live merge.
 
 **One-shot test gate** (`abstention.check_gate` / `final_status`, frozen τ): per class, pooled AND per wrist
-dataset. Level `strong` iff precision ≥ 0.95 at n_acc ≥ 30 (pooled also CP95 ≥ 0.90 and recall ≥ 0.05);
+dataset, on the class's single-label evidence (set-family-1; the earlier set-target gate is reported next to it as
+`set_target_scoring`). Level `strong` iff precision ≥ 0.95 at n_acc ≥ 30 (pooled also CP95 ≥ 0.90 and recall ≥ 0.05);
 `weak` iff precision ≥ 0.80, or n_acc < 30 (too few accepted windows to demote); else `abstain`.
 `final_status = min(VAL status, pooled level, every dataset level with n_acc ≥ 30)` — demotions only (e.g. a
 class that passes pooled but reaches 0.03 precision on Capture-24 is abstained).
@@ -168,7 +190,7 @@ no trained `none` output and the wire dict carries only event keys (values need 
 `walking` trained on pace-unknown walking while `brisk_walking` is unsupported) lists it:
 `covers: {"walking": ["walking", "brisk_walking"]}`. The decoder treats such a class as evidence for
 every covered class (compat = element-wise max over the covered classes' compat rows); evaluation scores
-it as correct for any covered truth.
+it as correct for any covered truth (after resolution a covered set is a single-label window of the cover).
 
 Inference is numpy-only (no torch, sklearn or pandas): `z = (emb − mu)/sigma` → logits →
 unsupported classes −inf → calibration → softmax → probabilities over supported classes only.
@@ -191,7 +213,8 @@ says `vehicle_motion`. `recumbent` is **"recumbent (mostly sleep-period lying in
 recumbent training windows are Capture-24 sleep-diary periods; every evaluation also reports awake lying
 (recumbent truth outside sleep-period labels) with its own gate at the frozen τ (reported only; the served
 status is the pooled one). Evaluation reports every class's precision on single-label windows next to the
-set-target scoring (where a set window counts as correct for any member). A class window gets its target only if
+set-target scoring (where a set window counts as correct for any member) for the P/R/F1 metrics; statuses, τ and gates
+use single-label evidence (set-family-1 above). A class window gets its target only if
 ONE non-null source label covers ≥ 90 % of its samples (the rest may be unlabelled or another label). A class is supported only with ≥ 200 train windows from ≥ 5 train subjects and ≥ 2
 val subjects; unsupported classes are −inf at inference and absent from the wire dict.
 
@@ -423,6 +446,14 @@ HART outputs or engineered features); posture promotion decided on wrist data on
   `post_audit_rule_change`, `evaluator_bug_fix`, `provenance_rebuild`) plus free-text detail; both are in the
   ledger and in every report. The decoder replay's TEST decodes (`replay_eval final` / `baseline`) have their
   own pre-registered keys and ledger (`eval/inertia/replay_test_ledger.jsonl`).
+* Test reuse is counted per DATASET test split too (audit G2 D-2): `test_sha256` identifies one combined split, so
+  the eight-set `ncsa-*` split got a new hash although > 99 % of the earlier CC BY test windows are in it. Every new
+  ledger entry records `per_dataset_split_sha256` (the frozen split manifest's sha256 per eval dataset) and
+  `n_evaluations_per_dataset_split`; older entries are counted from their pre-registered eval datasets
+  (`evaluate_heads.ledger_history`); SUMMARY.md tabulates the reuse per dataset.
+* Rules changed after audits that had seen test results (G-2..G-20; set-family-1, G2 D-1) are re-evaluated with
+  `post_audit_rule_change` and are not pristine. GOTOV's `gotov-guard-10s` and the 60 s MET mask of `gotov-met-1`
+  were chosen from QC over all 35 GOTOV files, test participants included, before any model result (G2 D-4).
 * After the stamp the gate is sealed into the bundle (§5 "Sealing"); the served artifact carries it.
 * Reporting: macro-F1 is the sklearn convention (union of true and predicted classes; classes predicted
   while absent are listed); the earlier present-only number is kept, labelled. Every bootstrap CI over < 10
