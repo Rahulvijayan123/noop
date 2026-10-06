@@ -179,6 +179,22 @@ enum ActivityContextDays {
     static func dayDocumentAndReport(input: ActivityContextTrackInput, generatedAt: Int,
                                      config: ActivityDecoderConfig = ActivityDecoderConfig())
         -> (document: ActivityContextDayDocument, report: MotionHeadsTrackReport?) {
+        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config)
+        return (built.document, built.track.motionHeads)
+    }
+
+    /// `dayDocument` plus the decode's gait-quality report (nil without a gait config): how the ElderNet windows were
+    /// attached, dropped and used (the ElderNet candidate comparison, `ActivityGaitWindowsDays`).
+    static func dayDocumentAndGaitReport(input: ActivityContextTrackInput, generatedAt: Int,
+                                         config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (document: ActivityContextDayDocument, report: GaitQualityTrackReport?) {
+        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config)
+        return (built.document, built.track.gaitQuality)
+    }
+
+    static func dayDocumentAndTrack(input: ActivityContextTrackInput, generatedAt: Int,
+                                    config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (document: ActivityContextDayDocument, track: ActivityContextTrack) {
         let track = ActivityContextTrackBuilder.build(input, config: config)
         var document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
                                                   config: config, includeSnapshot: false)
@@ -191,7 +207,7 @@ enum ActivityContextDays {
             return clipped.end > clipped.start ? clipped : nil
         }
         document.summary = ActivityContextDaySummary(runs: document.runs)
-        return (document, track.motionHeads)
+        return (document, track)
     }
 
     // MARK: - Stream days

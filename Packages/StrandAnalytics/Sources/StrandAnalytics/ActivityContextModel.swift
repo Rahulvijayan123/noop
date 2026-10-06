@@ -415,6 +415,16 @@ enum ActivityContextModel {
         var specialistOpenedByMotionHeads = false
         /// The Inertia posture term was omitted this second (asleep / in bed: the sleep route speaks).
         var motionHeadsPostureOmitted = false
+        /// ElderNet walk-vs-brisk term per body mode (tempered log factor, 0 outside {walk, briskWalk}). The
+        /// decoder renormalises it inside that pair against its current belief, so it never changes P(gait).
+        /// nil unless the split's weight is above 0 and the held window carries its metric.
+        var briskShift: [Double]? = nil
+        /// The ElderNet gait term entered this second's score.
+        var gaitQualityApplied = false
+        /// The shared accelerometer budget cut the gait or brisk term on some mode this second.
+        var gaitBudgetLimited = false
+        /// The brisk rule's verdict on the held window (logged at any weight); nil when it had nothing to say.
+        var gaitFavoursBrisk: Bool? = nil
     }
 
     /// Instantaneous soft arm-behaviour likelihoods (not normalized) from movement-pattern features.
@@ -457,10 +467,11 @@ enum ActivityContextModel {
     }
 
     /// Score every body mode against the features. `motionHeads` adds the Inertia-1 channels (see
-    /// `ActivityContextMotionHeadsFusion.swift`) after the existing ones; nil (the default) scores exactly
-    /// as before.
+    /// `ActivityContextMotionHeadsFusion.swift`) after the existing ones, and `gaitQuality` the ElderNet channel
+    /// after those (`ActivityContextGaitQualityFusion.swift`); nil (the default) scores exactly as before.
     static func score(_ f: ActivityFeatures, temperature: Double,
-                      motionHeads: PreparedMotionHeads? = nil) -> Score {
+                      motionHeads: PreparedMotionHeads? = nil,
+                      gaitQuality: PreparedGaitQuality? = nil) -> Score {
         let n = BodyMode.count
         var logL = [Double](repeating: 0, count: n)
         var dis = [Double](repeating: 0, count: n)
@@ -619,6 +630,9 @@ enum ActivityContextModel {
         // that says "working hard" (see `exertion`). No penalty for the other modes.
         var specialists = false
         var support = [Double](repeating: 1, count: n)
+        // What Inertia's opening of a specialist gate added to each mode's log support (ElderNet's share of the
+        // accelerometer budget is what Inertia left). Only read when the gait channel is active.
+        var inertiaGatePull = [Double](repeating: 0, count: n)
         let effort = exertion(f)
         for m in 0..<n {
             guard let label = profiles[m].requiresLabel else { continue }
@@ -638,6 +652,11 @@ enum ActivityContextModel {
             }
             if mode == .otherExercise { s = max(s, closed + 0.96 * effort) }
             support[m] = s
+            if gaitQuality != nil, specialistOpenedByMotionHeads, inertia?.opens.contains(m) ?? false {
+                var without = named ? 1.0 : closed
+                if mode == .otherExercise { without = max(without, closed + 0.96 * effort) }
+                inertiaGatePull[m] = max(0, log(s) - log(without))
+            }
         }
         if specialists { add(support, unknownValue: 1.0, weight: 1.0, isEvidence: false) }
 
@@ -677,6 +696,53 @@ enum ActivityContextModel {
             armTerm = t.arm
         }
 
+        // 9. ElderNet gait: its own tempered channel (never averaged with the encoder or Inertia), `isEvidence:
+        // false`, unknown 1. Per mode it gets only the room Inertia's whole pull left under the shared
+        // accelerometer budget; the walk-vs-brisk split takes what the gait term left.
+        var briskShift: [Double]? = nil
+        var gaitApplied = false, gaitLimited = false
+        var favoursBrisk: Bool? = nil
+        if let gaitQuality, let window = f.gaitQuality {
+            let inertiaLocomotion = (inertia?.locomotion?.weight ?? 0) > 0
+            let t = gaitQuality.gaitTerms(for: window, hartSpeaks: f.encoder != nil,
+                                      inertiaLocomotionSpeaks: inertiaLocomotion)
+            favoursBrisk = t.favoursBrisk
+            let budgetLog = gaitQuality.budget * log(10)
+            var room = [Double](repeating: budgetLog, count: n)
+            if let it = inertia {
+                for m in 0..<n { room[m] = max(0, budgetLog - it.bodyPull(m) - inertiaGatePull[m]) }
+            }
+            if let g = t.gait, g.weight > 0 {
+                var v = [Double](repeating: 1, count: n)
+                for m in 0..<n where m != unknownIdx {
+                    let raw = g.weight * log(max(g.L[m], 1e-6))
+                    let c = min(room[m], max(-room[m], raw))
+                    if c != raw { gaitLimited = true; v[m] = exp(c / g.weight) } else { v[m] = g.L[m] }
+                    room[m] = max(0, room[m] - abs(c))
+                }
+                add(v, unknownValue: 1.0, weight: g.weight, isEvidence: false)
+                gaitApplied = true
+            }
+            if let b = t.brisk, b.weight > 0 {
+                var shift = [Double](repeating: 0, count: n)
+                var L = [Double](repeating: 1, count: n)
+                for mode in PreparedGaitQuality.briskPair {
+                    let m = mode.rawValue
+                    let raw = b.weight * log(max(b.L[m], 1e-6))
+                    let c = min(room[m], max(-room[m], raw))
+                    if c != raw { gaitLimited = true }
+                    L[m] = exp(c / b.weight)
+                    shift[m] = temperature * c
+                }
+                // Counted in the agreement measure like the Inertia posture term, applied by the decoder.
+                weightSum += b.weight
+                let best = max(L.max() ?? 1, 1e-6)
+                for m in 0..<n where m != unknownIdx { dis[m] += b.weight * log(max(L[m], 1e-6) / best) }
+                dis[unknownIdx] += b.weight * min(0, log(1 / best))
+                briskShift = shift
+            }
+        }
+
         // A missing primary movement channel is itself information: nothing can be claimed about
         // stillness or gait without it, so the unknown mode earns a standing bonus.
         if !hasMotion { logL[unknownIdx] += wMotion * log(1 / uMotion) * 0.8 }
@@ -687,7 +753,8 @@ enum ActivityContextModel {
         return Score(logL: logL, disagreement: dis, hasMotion: hasMotion, channels: channels,
                      postureShift: postureShift, arm: armTerm, motionHeadsApplied: inertia != nil,
                      specialistOpenedByMotionHeads: specialistOpenedByMotionHeads,
-                     motionHeadsPostureOmitted: postureOmitted)
+                     motionHeadsPostureOmitted: postureOmitted, briskShift: briskShift,
+                     gaitQualityApplied: gaitApplied, gaitBudgetLimited: gaitLimited, gaitFavoursBrisk: favoursBrisk)
     }
 
     /// Arm-chain emission context: how plausible each arm class is given the body posterior.

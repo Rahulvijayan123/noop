@@ -44,14 +44,28 @@ final class ActivityReplayTests: XCTestCase {
         return MotionHeadsKit.attach(sim.observations) { ActivityContextGoldenTests.loudWindow($0) }
     }
 
-    private func header(arms: [String]? = nil, standIn: Bool = false) -> ActivityReplayHeader {
+    /// `sampleDay` with ElderNet windows too (gait through the walk, non-gait / pre-filtered elsewhere).
+    private func sampleDayWithGait() -> [ActivityObservation] {
+        let day = sampleDay()
+        let walkFrom = day[0].ts + 400, walkTo = walkFrom + 200
+        return GaitKit.attach(day) { e in
+            if e - 10 >= walkFrom && e <= walkTo { return GaitKit.window(endingAt: e, p: 0.96, cadence: 112) }
+            return e % 10 == 0 ? GaitKit.prefiltered(endingAt: e) : GaitKit.window(endingAt: e, p: 0.1)
+        }
+    }
+
+    private func header(arms: [String]? = nil, standIn: Bool = false, gait: Bool = false) -> ActivityReplayHeader {
         ActivityReplayHeader(
             format: ActivityReplayHeader.formatName, arms: arms,
             decoder: .init(restingHR: 57, maxHR: 187),
             motionHeads: .init(bundle: standIn ? MotionHeadsKit.bundle(kind: .standin, tier: .shadow) : MotionHeadsKit.bundle(),
                                config: .init(locomotion: 0.3, posture: 0.2, arm: 0.25, bodyBudget: nil, armBudget: nil,
                                              hartRedundancy: nil),
-                               allowStandIn: standIn))
+                               allowStandIn: standIn),
+            gaitQuality: gait ? .init(model: GaitKit.model(), gaitPrior: 0.2,
+                                      config: .init(gait: 0.4, brisk: nil, briskRule: nil, briskCadenceSpm: nil,
+                                                    briskSpeedMps: nil, hartRedundancy: nil, inertiaRedundancy: nil,
+                                                    accelerometerBudget: nil)) : nil)
     }
 
     /// An ActivitySim day written as replay records, read back and decoded through the public track builder
@@ -77,7 +91,8 @@ final class ActivityReplayTests: XCTestCase {
     }
 
     func testEveryArmRunsAndTheyDiffer() throws {
-        let input = try ActivityReplay.parse(ActivityReplay.encode(header: header(), sequences: [("d", sampleDay())]))
+        let input = try ActivityReplay.parse(ActivityReplay.encode(header: header(gait: true),
+                                                                   sequences: [("d", sampleDayWithGait())]))
         let out = try ActivityReplay.run(input)
         let arms = try XCTUnwrap(out["arms"] as? [String: [String: [String: Any]]])
         XCTAssertEqual(Set(arms.keys), Set(ActivityReplayHeader.allArms))
@@ -96,7 +111,97 @@ final class ActivityReplayTests: XCTestCase {
                                       as: UTF8.self)
         }
         XCTAssertNotNil((arms["hart+inertia"]?["d"]?["motion_heads"] as? [String: Any])?["stamp"] as? String)
+        for arm in ["eldernet", "hart+eldernet", "hart+eldernet+inertia"] {
+            let stamp = (arms[arm]?["d"]?["gait_quality"] as? [String: Any])?["stamp"] as? String
+            XCTAssertTrue(stamp?.hasPrefix("eldernet:") ?? false, "\(arm): \(stamp ?? "nil")")
+        }
+        XCTAssertNotNil((arms["hart+eldernet+inertia"]?["d"]?["motion_heads"] as? [String: Any])?["stamp"] as? String)
+        XCTAssertNil(arms["hart+eldernet"]?["d"]?["motion_heads"])
         XCTAssertEqual(Set(signatures.values).count, signatures.count, "each arm is a different decode")
+        // Only the ElderNet arms can carry the reported block.
+        for (name, perSeq) in arms {
+            let states = perSeq["d"]?["states"] as? [[String: Any]] ?? []
+            let blocks = states.filter { $0["gait"] != nil }.count
+            if name.contains("eldernet") { XCTAssertGreaterThan(blocks, 0, name) } else { XCTAssertEqual(blocks, 0, name) }
+        }
+    }
+
+    /// The five original arms decode exactly what they decoded before ElderNet existed: a file with ElderNet windows
+    /// and a gait header gives them the same output, bit for bit, as the same file without either.
+    func testTheOriginalArmsAreBitIdenticalWithOrWithoutElderNet() throws {
+        let original = ["streams", "hart", "inertia", "hart+inertia", "naive_average"]
+        let with = try ActivityReplay.run(ActivityReplay.parse(ActivityReplay.encode(
+            header: header(arms: original, gait: true), sequences: [("d", sampleDayWithGait())])))
+        let without = try ActivityReplay.run(ActivityReplay.parse(ActivityReplay.encode(
+            header: header(arms: original), sequences: [("d", sampleDay())])))
+        XCTAssertEqual(try JSONSerialization.data(withJSONObject: with, options: [.sortedKeys]),
+                       try JSONSerialization.data(withJSONObject: without, options: [.sortedKeys]))
+        // And the default arm list still contains them (plus the three ElderNet arms, refused without a model).
+        let all = try ActivityReplay.run(ActivityReplay.parse(ActivityReplay.encode(header: header(),
+                                                                                    sequences: [("d", sampleDay())])))
+        let arms = try XCTUnwrap(all["arms"] as? [String: [String: [String: Any]]])
+        XCTAssertEqual(Set(arms.keys), Set(ActivityReplayHeader.allArms))
+        for arm in ["eldernet", "hart+eldernet", "hart+eldernet+inertia"] {
+            XCTAssertEqual(arms[arm]?["d"]?["refusal"] as? String, "no_gait_model", arm)
+        }
+        for arm in original {
+            XCTAssertEqual(try JSONSerialization.data(withJSONObject: arms[arm]!, options: [.sortedKeys]),
+                           try JSONSerialization.data(withJSONObject: (without["arms"] as! [String: Any])[arm]!,
+                                                      options: [.sortedKeys]), arm)
+        }
+    }
+
+    /// ElderNet records round-trip through the mirror and decode like the same observations decoded directly.
+    func testGaitRecordsRoundTripBitForBit() throws {
+        let day = sampleDayWithGait()
+        let h = header(gait: true)
+        let input = try ActivityReplay.parse(ActivityReplay.encode(header: h, sequences: [("d", day)]))
+        XCTAssertEqual(input.sequences[0].observations, day, "the record mirror is lossless")
+        let e = JSONEncoder()
+        e.outputFormatting = [.sortedKeys]
+        let config = try XCTUnwrap(ActivityReplay.gaitConfig(h, base: ActivityReplay.baseConfig(h)))
+        let direct = ActivityContextTrackBuilder.decode(day, config: config)
+        let replayed = ActivityContextTrackBuilder.decode(input.sequences[0].observations, config: config)
+        XCTAssertEqual(try e.encode(replayed.states), try e.encode(direct.states))
+        XCTAssertEqual(try e.encode(replayed.snapshot), try e.encode(direct.snapshot))
+        XCTAssertEqual(config.gaitQuality?.gaitWeight, 0.4)
+    }
+
+    /// The replay refuses what the wire decoder refuses for ElderNet too.
+    func testGaitRecordsGetTheWireValidation() throws {
+        let h = header(gait: true)
+        let good = try ActivityReplay.encode(header: h, sequences: [("d", Array(sampleDayWithGait().prefix(40)))])
+        XCTAssertNoThrow(try ActivityReplay.parse(good))
+        var lines = String(decoding: good, as: UTF8.self).split(separator: "\n").map(String.init)
+        let withWindow = try XCTUnwrap(lines.indices.dropFirst().first { lines[$0].contains("\"gait_quality\":{") })
+        func refused(_ mutate: (inout [String: Any]) -> Void, file: StaticString = #filePath, line: UInt = #line) throws {
+            var copy = lines
+            var rec = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(copy[withWindow].utf8)) as? [String: Any])
+            var obs = try XCTUnwrap(rec["obs"] as? [String: Any])
+            var w = try XCTUnwrap(obs["gait_quality"] as? [String: Any])
+            mutate(&w)
+            obs["gait_quality"] = w
+            rec["obs"] = obs
+            copy[withWindow] = String(decoding: try JSONSerialization.data(withJSONObject: rec), as: UTF8.self)
+            XCTAssertThrowsError(try ActivityReplay.parse(Data(copy.joined(separator: "\n").utf8)), file: file, line: line)
+        }
+        try refused { w in w["gait_prob"] = 0.9; w["is_gait"] = false }       // disagrees with the threshold
+        try refused { w in w["speed_mps"] = 1.0; w["is_gait"] = false; w["gait_prob"] = 0.1 }  // metrics on non-gait
+        try refused { w in w["e"] = (w["s"] as! Int) + 30 }
+        try refused { w in w["s"] = 1e19 }
+        try refused { w in w["mood"] = 1 }
+        // A window without a gait model in the header is refused, and so is a header model the wire would refuse.
+        var bare = h
+        bare.gaitQuality = nil
+        lines[0] = String(decoding: try JSONEncoder().encode(bare), as: UTF8.self)
+        XCTAssertThrowsError(try ActivityReplay.parse(Data(lines.joined(separator: "\n").utf8)))
+        var header = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(h)) as? [String: Any])
+        var gq = try XCTUnwrap(header["gait_quality"] as? [String: Any])
+        var model = try XCTUnwrap(gq["model"] as? [String: Any])
+        model["hop_s"] = 30
+        gq["model"] = model
+        header["gait_quality"] = gq
+        XCTAssertThrowsError(try ActivityReplay.parse(JSONSerialization.data(withJSONObject: header)))
     }
 
     func testAStandInBundleNeedsTheTestOverride() throws {

@@ -48,6 +48,11 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// mode, a stand-in encoder, a tier below `candidate`, out-of-bounds weights) also leaves the decoder
     /// untouched; `ActivityContextDecoder.motionHeadsRefusal` says why.
     public var motionHeads: MotionHeadsEvidenceConfig? = nil
+    /// ElderNet gait evidence. nil (the default) is OFF: states, snapshots, `cacheTag` and version stamps are
+    /// exactly what they were before ElderNet existed. A config that refuses its model (shadow mode, a pin
+    /// mismatch, out-of-bounds weights) also leaves the decoder untouched; `ActivityContextDecoder.
+    /// gaitQualityRefusal` says why.
+    public var gaitQuality: GaitQualityEvidenceConfig? = nil
 
     public init() {}
 }
@@ -103,6 +108,9 @@ struct DecoderTracking: Codable, Equatable {
     var lastPublishTs: Int?
     /// Slow average of the arm posterior: display wording follows it, the published head does not.
     var armDisplay: [Double]?
+    /// ElderNet's current walking stretch (the reported `gait` block). Only ever set while the gait channel is
+    /// active, so a snapshot without it encodes exactly the keys it always did.
+    var gaitStretch: GaitTotals?
 }
 
 // MARK: - Layout of the Erlang-expanded state space
@@ -182,6 +190,12 @@ public struct ActivityContextDecoder: Sendable {
     /// What Inertia did in this decoder's lifetime (nil without a motion-heads config). Not part of the
     /// snapshot: it describes a decode, not the belief.
     public private(set) var motionHeadsReport: MotionHeadsTrackReport?
+    /// The ElderNet channel when `config.gaitQuality` is accepted; nil keeps every code path as it was.
+    private let gaitQuality: PreparedGaitQuality?
+    /// Why `config.gaitQuality` was not used as evidence (nil when it was, or when there is none).
+    public let gaitQualityRefusal: String?
+    /// What ElderNet did in this decoder's lifetime (nil without a gait config). Not part of the snapshot.
+    public private(set) var gaitQualityReport: GaitQualityTrackReport?
 
     /// A transition mode needs at least this much posterior mass to be flagged as an event.
     private static let posturalEventFloor = 0.20
@@ -200,10 +214,19 @@ public struct ActivityContextDecoder: Sendable {
         if config.motionHeads != nil {
             self.motionHeadsReport = MotionHeadsTrackReport(stamp: prepared.prepared?.stamp, refusal: prepared.refusal)
         }
+        let gait = PreparedGaitQuality.prepare(config.gaitQuality)
+        self.gaitQuality = gait.prepared
+        self.gaitQualityRefusal = gait.refusal
+        if config.gaitQuality != nil {
+            self.gaitQualityReport = GaitQualityTrackReport(stamp: gait.prepared?.stamp, refusal: gait.refusal)
+        }
     }
 
     /// The provenance stamp of the active Inertia evidence (`ActivityStateVersions.motionHeads`), or nil.
     public var motionHeadsStamp: String? { motionHeads?.stamp }
+
+    /// The provenance stamp of the active ElderNet evidence (`ActivityStateVersions.gaitQuality`), or nil.
+    public var gaitQualityStamp: String? { gaitQuality?.stamp }
 
     /// Resume from a snapshot. A snapshot written by a different ontology / decoder / feature schema, or
     /// with a mismatched state layout, is discarded and the decoder starts fresh (never a silent mix).
@@ -222,6 +245,11 @@ public struct ActivityContextDecoder: Sendable {
             restoreOutcome = .discarded("motion_heads_mismatch")
             return
         }
+        // The same for ElderNet: a belief shaped by another model / config (or by none) is never continued.
+        if v.gaitQuality != gaitQuality?.stamp {
+            restoreOutcome = .discarded("gait_quality_mismatch")
+            return
+        }
         guard s.body.count == bodyLayout.total, s.arm.count == ArmState.count,
               s.body.allSatisfy({ $0.isFinite && $0 >= 0 }), s.arm.allSatisfy({ $0.isFinite && $0 >= 0 }),
               s.body.reduce(0, +) > 0, s.arm.reduce(0, +) > 0 else {
@@ -235,7 +263,7 @@ public struct ActivityContextDecoder: Sendable {
     public func snapshot() -> ActivityDecoderSnapshot {
         ActivityDecoderSnapshot(
             versions: ActivityStateVersions(encoderId: tracking.encoderId, encoderVersion: tracking.encoderVersion,
-                                            motionHeads: motionHeads?.stamp),
+                                            motionHeads: motionHeads?.stamp, gaitQuality: gaitQuality?.stamp),
             lastTs: lastTs, body: body, arm: arm, window: window, tracking: tracking)
     }
 
@@ -286,10 +314,11 @@ public struct ActivityContextDecoder: Sendable {
         // Without accepted Inertia evidence the hold is 0: a window on the observation is neither kept in the
         // feature window (so the snapshot is unchanged) nor scored.
         let f = window.push(obs, restingHR: config.restingHeartRate, maxHR: config.maxHeartRate,
-                            motionHeadsHoldS: motionHeads?.holdS ?? 0)
+                            motionHeadsHoldS: motionHeads?.holdS ?? 0, gaitQualityHoldS: gaitQuality?.holdS ?? 0)
 
         if !firstEver { predictBody(shift: ActivityContextModel.shiftStrength(f)); predictArm() }
-        let score = ActivityContextModel.score(f, temperature: config.evidenceTemperature, motionHeads: motionHeads)
+        let score = ActivityContextModel.score(f, temperature: config.evidenceTemperature, motionHeads: motionHeads,
+                                               gaitQuality: gaitQuality)
         applyBody(score)
         applyArm(f, motionHeads: score.arm)
         smoothArmForDisplay()
@@ -302,6 +331,19 @@ public struct ActivityContextDecoder: Sendable {
             if score.specialistOpenedByMotionHeads { motionHeadsReport!.specialistOpenings += 1 }
             if score.motionHeadsPostureOmitted { motionHeadsReport!.postureOmittedSleep += 1 }
         }
+        if gaitQuality != nil, gaitQualityReport != nil {
+            if let w = obs.gaitQuality {
+                gaitQualityReport!.windowsIngested += 1
+                if w.isGait { gaitQualityReport!.gaitWindows += 1 }
+                if w.prefiltered { gaitQualityReport!.prefilteredWindows += 1 }
+            }
+            if score.gaitQualityApplied { gaitQualityReport!.evidenceSeconds += 1 }
+            if score.gaitBudgetLimited { gaitQualityReport!.budgetLimitedSeconds += 1 }
+            if let brisk = score.gaitFavoursBrisk {
+                if brisk { gaitQualityReport!.briskFavouredSeconds += 1 } else { gaitQualityReport!.walkFavouredSeconds += 1 }
+            }
+            if score.briskShift != nil { gaitQualityReport!.briskAppliedSeconds += 1 }
+        }
 
         let post = bodyPosterior()
         var agreement = 0.0
@@ -312,8 +354,25 @@ public struct ActivityContextDecoder: Sendable {
         tracking.lastHasMotion = score.hasMotion
         tracking.lastIntensity = f.m10
         updateTracking(post, ts: obs.ts)
+        if let gaitQuality { updateGaitStretch(post, arrived: obs.gaitQuality, held: f.gaitQuality, gait: gaitQuality) }
         lastTs = obs.ts
         return publishIfDue(obs.ts)
+    }
+
+    /// The reported gait block: the current walking stretch is ElderNet's consecutive gait windows while the
+    /// posterior is on the gait modes. It ends when the posterior leaves them, when ElderNet says non-gait, or
+    /// when no window is held any more. A window is counted once, on the second it arrives.
+    private mutating func updateGaitStretch(_ post: [Double], arrived: GaitQualityWindow?, held: GaitQualityWindow?,
+                                            gait: PreparedGaitQuality) {
+        let pGait = PreparedGaitQuality.gaitModes.reduce(0.0) { $0 + post[$1.rawValue] }
+        guard pGait >= PreparedGaitQuality.posteriorGaitFloor, let held, held.isGait else {
+            tracking.gaitStretch = nil
+            return
+        }
+        guard let w = arrived, w.isGait else { return }
+        var stretch = tracking.gaitStretch ?? GaitTotals(since: nil, provenance: gait.stamp)
+        stretch.add(w, stepShare: gait.stepShare)
+        tracking.gaitStretch = stretch
     }
 
     // MARK: Belief updates
@@ -328,6 +387,7 @@ public struct ActivityContextDecoder: Sendable {
         tracking.activePostural = nil
         tracking.lastWindowFill = 0
         tracking.armDisplay = nil
+        tracking.gaitStretch = nil
     }
 
     private mutating func predictBody(shift: Double) {
@@ -377,8 +437,8 @@ public struct ActivityContextDecoder: Sendable {
     private mutating func applyBody(_ score: ActivityContextModel.Score) {
         let mx = score.logL.max() ?? 0
         var total = 0.0
-        if let shift = score.postureShift {
-            applyBodyWithPosture(score, shift: shift, mx: mx, total: &total)
+        if score.postureShift != nil || score.briskShift != nil {
+            applyBodyWithPosture(score, shift: score.postureShift, brisk: score.briskShift, mx: mx, total: &total)
         } else {
             for m in 0..<BodyMode.count {
                 let l = exp(score.logL[m] - mx)
@@ -403,12 +463,29 @@ public struct ActivityContextDecoder: Sendable {
     /// what it would have been without it: the wrist's posture evidence can say "seated rather than upright",
     /// never "stationary rather than moving". (Renormalising against the static mode prior instead would only
     /// preserve P(S) when the current belief inside S happened to equal that prior.)
-    private mutating func applyBodyWithPosture(_ score: ActivityContextModel.Score, shift: [Double], mx: Double,
-                                               total: inout Double) {
+    ///
+    /// The ElderNet walk-vs-brisk term (`brisk`) is applied the same way inside {walk, briskWalk}: it can say
+    /// "brisk rather than easy walking", never "walking rather than not". The two sets are disjoint.
+    private mutating func applyBodyWithPosture(_ score: ActivityContextModel.Score, shift: [Double]?,
+                                               brisk: [Double]? = nil, mx: Double, total: inout Double) {
         var l = [Double](repeating: 0, count: BodyMode.count)
         for m in 0..<BodyMode.count { l[m] = exp(score.logL[m] - mx) }
+        if let shift { renormalise(&l, inside: PreparedMotionHeads.postureSet, shift: shift) }
+        if let brisk { renormalise(&l, inside: PreparedGaitQuality.briskPair, shift: brisk) }
+        for m in 0..<BodyMode.count {
+            let start = bodyLayout.start[m]
+            for j in 0..<bodyLayout.phases[m] {
+                body[start + j] *= l[m]
+                total += body[start + j]
+            }
+        }
+    }
+
+    /// Multiply `l` by `exp(shift)` inside `set`, rescaled so the set's total mass under the current belief is
+    /// what it would have been without the shift.
+    private func renormalise(_ l: inout [Double], inside set: [BodyMode], shift: [Double]) {
         var before = 0.0, after = 0.0
-        for mode in PreparedMotionHeads.postureSet {
+        for mode in set {
             let m = mode.rawValue
             let start = bodyLayout.start[m]
             var mass = 0.0
@@ -418,14 +495,7 @@ public struct ActivityContextDecoder: Sendable {
         }
         if before > 0, after > 0, before.isFinite, after.isFinite {
             let k = before / after
-            for mode in PreparedMotionHeads.postureSet { l[mode.rawValue] *= exp(shift[mode.rawValue]) * k }
-        }
-        for m in 0..<BodyMode.count {
-            let start = bodyLayout.start[m]
-            for j in 0..<bodyLayout.phases[m] {
-                body[start + j] *= l[m]
-                total += body[start + j]
-            }
+            for mode in set { l[mode.rawValue] *= exp(shift[mode.rawValue]) * k }
         }
     }
 
@@ -557,7 +627,9 @@ public struct ActivityContextDecoder: Sendable {
         }
         guard due else { return nil }
         tracking.lastPublishTs = ts
-        return buildState(ts)
+        let state = buildState(ts)
+        if state.gait != nil, gaitQualityReport != nil { gaitQualityReport!.gaitBlockStates += 1 }
+        return state
     }
 
     /// The state for the most recent observation, computed on demand (does not advance the 5-s grid).
@@ -568,7 +640,7 @@ public struct ActivityContextDecoder: Sendable {
 
     private mutating func buildState(_ ts: Int) -> ActivityContextState {
         let versions = ActivityStateVersions(encoderId: tracking.encoderId, encoderVersion: tracking.encoderVersion,
-                                             motionHeads: motionHeads?.stamp)
+                                             motionHeads: motionHeads?.stamp, gaitQuality: gaitQuality?.stamp)
         let wearState: WearContextState
         switch tracking.lastWear {
         case .onWrist: wearState = .onWrist
@@ -669,7 +741,8 @@ public struct ActivityContextDecoder: Sendable {
             overallConfidence: confidence, overallUncertainty: uncertainty,
             headConfidence: headConf,
             displayContext: label == ActivityDisplay.unclear ? nil : label,
-            history: history, evidence: evidence, versions: versions)
+            history: history, evidence: evidence, versions: versions,
+            gait: gaitQuality == nil ? nil : tracking.gaitStretch.map(\.summary))
     }
 
     /// Display hysteresis. A change of *kind* (moving ↔ stationary ↔ lying …) must hold for the group's

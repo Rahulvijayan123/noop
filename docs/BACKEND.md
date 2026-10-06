@@ -770,6 +770,73 @@ activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (
   from public.activity_motion_heads_days order by computed_at desc limit 10;
   ```
 
+### ElderNet gait quality (shadow / candidate, off by default)
+
+A third, optional expert beside HART and Inertia (contract: `Tools/ActivityContext/ELDERNET.md` §6). With
+`FRWHOOP_ELDERNET_ENABLED` on (`1`/`true`/`yes`/`on`; any other value keeps it off and is logged) and
+`FRWHOOP_ELDERNET_WEIGHTS_DIR` set, the activity lane starts a THIRD Python child (`python -m
+activity_context.eldernet.serve --weights-dir <dir> --timeout <s>`, its own timeout, restart cap and response
+cap) and, after each HART chunk (and after Inertia, when that is on), renews the job lease and asks it for
+`gait-quality-1` windows (10-s windows: gait probability, gait flag, pre-filter flag and, on gait windows,
+speed, cadence, stride length, regularity and steps) for the same chunk.
+
+```text
+activity job: HART chunk infer (unchanged) [-> Inertia (isolated)] -> ElderNet infer for the same chunk (isolated)
+  -> strict Swift validation (GaitQualityResponse: schema, known keys, ranges, metrics only on gait, NaN)
+  -> shadow payload (provenance + compact windows + counts + ElderNet's own gait metrics)
+     [candidate mode: + the day decoded a second time with the gait channel, or why it was withheld]
+  -> ONE transaction: publish_activity_context_day (savepoint)
+                      -> publish_activity_motion_heads_day (savepoint, when Inertia is on)
+                      -> publish_activity_gait_windows_day (savepoint, fenced) -> activity_gait_windows_days
+                      -> publish_activity_context_v2 (unchanged)
+```
+
+- **Never gates, never fails a job.** ElderNet is not part of the readiness gate. A missing model or bad weights
+  (ping `model_available: false`), a pin mismatch, timeout, crash, malformed or invalid output is counted
+  (`eldernet_failures`, `eldernet_unavailable`, `eldernet_pin_refused`), logged once per distinct kind, and the
+  HART path continues. A timeout, crash, `model_missing`, `weights_mismatch` or pin refusal stops ElderNet for
+  the rest of that job. The lease is renewed before every ElderNet call, and a lost lease ends the job exactly as
+  before a HART call. Only HART answers are cached on the host: a chunk whose HART answer comes from the cache is
+  still sent to ElderNet.
+- **Timeouts.** `FRWHOOP_ELDERNET_TIMEOUT_SECONDS` (default 60) is clamped to a third of
+  `FRWHOOP_ACTIVITY_LEASE_SECONDS`; the child's `--timeout` is set strictly below it, as for Inertia.
+- **Pins.** `FRWHOOP_ELDERNET_MODEL_VERSION` (the served `model_version`) and `FRWHOOP_ELDERNET_WEIGHTS_SHA256`
+  (the weights digest: sha256 of `eldernet-weights-1\n` followed by `name=sha256\n` for every served head in name
+  order, the same value the decoder and the table compute) are required in candidate mode and enforced in shadow
+  mode when set: checked against the ping (its `model_version` and `weights`) and every response. A different
+  model turns ElderNet off for that job (`eldernet_pin_refused`); the decoder refuses it too
+  (`model_version_mismatch`, `weights_digest_mismatch`). `FRWHOOP_ELDERNET_GAIT_PRIOR` (π in [0.01, 0.99], the
+  gait prevalence of the set the calibration was fit on) is required in candidate mode.
+- **The published documents are untouched.** v1 epochs and the `activity_context_days` document are byte-identical
+  with ElderNet on or off; the candidate comparison is stored only in `activity_gait_windows_days.candidate_document`.
+  `FRWHOOP_ELDERNET_MODE` accepts only `shadow` (default) and `candidate`; production evidence needs a code and
+  config change.
+- **Storage.** `activity_gait_windows_days`, one row per `(user_id, device_id, day, model_version, mode)`, migration
+  `20261006090000_activity_gait_windows.sql` (its own table: `activity_encoder_windows` is read by the phone and the
+  stream days as HART evidence). Service role writes through the fenced `publish_activity_gait_windows_day(token,
+  revision, payload)` (live lease and current revision, else NULL, counted as `eldernet_shadow_fenced`; stable
+  `invalid_gait_windows_*` errors; 16 MiB payload; the weights digest is recomputed from the stored weights and a
+  mismatch is refused); owners may select their own rows. Per-window outputs are columnar small integers
+  (`gait-windows-1`: gait probability per mille, gait / pre-filter flags, speed cm/s, cadence steps/min, stride cm,
+  regularity %, steps × 10, -1 where absent; about 0.45 MB per full day at a 5-s hop, omitted above 512 KiB,
+  refused above 1 MiB). `summary` carries the counts, ElderNet's own gait metrics over its gait windows and
+  `track_report` (how the windows met the day's observed seconds). A `candidate_document` must carry its
+  `versions.gait_quality` stamp (table CHECK and RPC). Contract:
+  `supabase/functions/tests/activity_gait_windows_contract.sql`.
+- **Retention.** `prune_activity_gait_windows_days(keep_days default 30, max_rows default 10000)` (service role
+  only); the lane calls it every 6 h while ElderNet is on (`eldernet_rows_pruned`, `eldernet_prune_failures`).
+- **Deploy order.** Migration first. A worker with ElderNet on and no migration still publishes v1 and v2; the
+  shadow write fails under its savepoint and is counted (`eldernet_shadow_failures`).
+- **Rollback.** Unset `FRWHOOP_ELDERNET_ENABLED` and restart. Nothing reads the table.
+- **Check.**
+
+  ```sql
+  select day, mode, model_version, left(weights_digest, 12) as weights12, hop_s, n_windows, n_gait, n_prefiltered,
+         withheld_reason, summary->'gait'->>'cadence_spm' as cadence, summary->>'windows_omitted' as windows_omitted,
+         candidate_document is not null as has_candidate, computed_at
+  from public.activity_gait_windows_days order by computed_at desc limit 10;
+  ```
+
 ### Stream days (a document for every day with measurements)
 
 Raw IMU is uploaded for only a handful of sessions, but heart rate, gravity, steps and wear events are

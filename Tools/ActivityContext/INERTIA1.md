@@ -484,6 +484,10 @@ second that has data). `obs` mirrors `ActivityObservation`:
 | `in_bed` | bool | default false |
 | `workout` / `workout_kind` | bool / `"unspecified"`\|`"running"`\|`"walking"`\|`"cycling"`\|`"other"` | defaults false / unspecified |
 
+ElderNet extends this format (a `gait_quality` header block and observation key, and the arms `eldernet`,
+`hart+eldernet`, `hart+eldernet+inertia`; ELDERNET.md "Replay record format"); the five arms below drop the
+ElderNet windows and are unchanged.
+
 Arms: `streams` drops `encoder`, `imu` and `motion_heads`; `hart` drops `motion_heads`; `inertia` drops
 `encoder` and decodes with the motion-heads config; `hart+inertia` keeps everything; `naive_average` (the
 forbidden baseline, ablation only) replaces the encoder probabilities by 0.5·HART + 0.5·Inertia locomotion

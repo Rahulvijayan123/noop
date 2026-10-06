@@ -187,16 +187,21 @@ public struct ActivityObservation: Equatable, Sendable {
     /// the bundle's hop). A separate channel from `encoder`; ignored unless `ActivityDecoderConfig.motionHeads`
     /// accepts its bundle. It never creates an observation second of its own.
     public var motionHeads: MotionHeadsWindow?
+    /// A new ElderNet gait-quality window attached to this second (carried until superseded or older than the
+    /// model's hop). Its own channel, never `encoder` and never `motionHeads`; ignored unless
+    /// `ActivityDecoderConfig.gaitQuality` accepts its model. It never creates an observation second of its own.
+    public var gaitQuality: GaitQualityWindow?
 
     public init(ts: Int, dynAccelG: Double? = nil, gravity: [Double]? = nil, stepTicks: Int? = nil,
                 strapClass: Int? = nil, hrBpm: Int? = nil, imu: ImuWindowFeatures? = nil,
                 encoder: MotionEncoderOutput? = nil, wear: WearEvidence = .unknown,
                 sleep: SleepEvidence = .unknown, inBed: Bool = false, loggedWorkout: Bool = false,
-                workoutKind: WorkoutKind = .unspecified, motionHeads: MotionHeadsWindow? = nil) {
+                workoutKind: WorkoutKind = .unspecified, motionHeads: MotionHeadsWindow? = nil,
+                gaitQuality: GaitQualityWindow? = nil) {
         self.ts = ts; self.dynAccelG = dynAccelG; self.gravity = gravity; self.stepTicks = stepTicks
         self.strapClass = strapClass; self.hrBpm = hrBpm; self.imu = imu; self.encoder = encoder
         self.wear = wear; self.sleep = sleep; self.inBed = inBed; self.loggedWorkout = loggedWorkout
-        self.workoutKind = workoutKind; self.motionHeads = motionHeads
+        self.workoutKind = workoutKind; self.motionHeads = motionHeads; self.gaitQuality = gaitQuality
     }
 }
 
@@ -269,6 +274,9 @@ struct ActivityFeatures: Equatable {
     /// The observation's in-bed flag for this second (read only by the Inertia posture channel, which steps
     /// aside on asleep / in-bed seconds).
     var inBed = false
+    /// The ElderNet window that applies at this second (held for the model's hop), only while the gait channel
+    /// is active.
+    var gaitQuality: GaitQualityWindow?
 }
 
 /// Causal ring of recent seconds. Codable so a decoder restart resumes with its context intact.
@@ -318,6 +326,10 @@ struct ActivityFeatureWindow: Codable, Equatable {
     /// active, so a decoder without it encodes exactly the keys it always did.
     var motionHeads: MotionHeadsWindow?
     var motionHeadsSeenTs: Int?
+    /// The latest ElderNet window and the second it was attached to. Only ever set while the gait channel is
+    /// active, so a decoder without it encodes exactly the keys it always did.
+    var gaitQuality: GaitQualityWindow?
+    var gaitQualitySeenTs: Int?
 
     init() {}
 
@@ -328,6 +340,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
         case samples, hrBuckets, imu, encoder, lastSleep, lastSleepTs, lastWear, lastWorkoutTs, lastWorkoutKind
         case lastHrTs, lastHr, imuSeenTs, encoderSeenTs
         case motionHeads, motionHeadsSeenTs
+        case gaitQuality, gaitQualitySeenTs
     }
 
     init(from decoder: Decoder) throws {
@@ -347,18 +360,21 @@ struct ActivityFeatureWindow: Codable, Equatable {
         encoderSeenTs = try c.decodeIfPresent(Int.self, forKey: .encoderSeenTs)
         motionHeads = try c.decodeIfPresent(MotionHeadsWindow.self, forKey: .motionHeads)
         motionHeadsSeenTs = try c.decodeIfPresent(Int.self, forKey: .motionHeadsSeenTs)
+        gaitQuality = try c.decodeIfPresent(GaitQualityWindow.self, forKey: .gaitQuality)
+        gaitQualitySeenTs = try c.decodeIfPresent(Int.self, forKey: .gaitQualitySeenTs)
     }
 
     mutating func reset() { self = ActivityFeatureWindow() }
 
     /// Ingest one observation and return the features at its timestamp. `motionHeadsHoldS` is the Inertia
     /// hold (the bundle's hop) while Inertia evidence is active, and 0 otherwise: then a window on the
-    /// observation is neither kept nor reported.
+    /// observation is neither kept nor reported. `gaitQualityHoldS` is the same for ElderNet (the model's hop).
     mutating func push(_ obs: ActivityObservation, restingHR: Double, maxHR: Double,
-                       motionHeadsHoldS: Int = 0) -> ActivityFeatures {
+                       motionHeadsHoldS: Int = 0, gaitQualityHoldS: Int = 0) -> ActivityFeatures {
         if let imu = obs.imu { self.imu = imu; imuSeenTs = obs.ts }
         if let enc = obs.encoder { self.encoder = enc; encoderSeenTs = obs.ts }
         if motionHeadsHoldS > 0, let heads = obs.motionHeads { self.motionHeads = heads; motionHeadsSeenTs = obs.ts }
+        if gaitQualityHoldS > 0, let gait = obs.gaitQuality { self.gaitQuality = gait; gaitQualitySeenTs = obs.ts }
         lastSleep = obs.sleep
         if obs.sleep != .unknown { lastSleepTs = obs.ts }
         lastWear = obs.wear
@@ -389,6 +405,11 @@ struct ActivityFeatureWindow: Codable, Equatable {
         if motionHeadsHoldS > 0, let heads = motionHeads, let seen = motionHeadsSeenTs,
            obs.ts >= seen, obs.ts - seen < motionHeadsHoldS {
             f.motionHeads = heads
+        }
+        // So does an ElderNet window.
+        if gaitQualityHoldS > 0, let gait = gaitQuality, let seen = gaitQualitySeenTs,
+           obs.ts >= seen, obs.ts - seen < gaitQualityHoldS {
+            f.gaitQuality = gait
         }
         return f
     }
