@@ -13,10 +13,12 @@ the window-local detector (activity_context.eldernet.gait) and writes, like upst
   <stem>_gait_windows.csv  every window on the ``--hop-s`` grid: s, e, gait_prob, is_gait, prefiltered and the
                        metrics on gait windows (the served per-window view)
 
-Bouts use upstream's rules (centre-second voting at hop 1, 3 s gap bridging, 10 s minimum). Differences from
-upstream by design: no gravity calibration / non-wear / imputation / edge-day trimming; window-local static
-pre-filter; nonfinite samples split the recording. ``--upstream`` instead runs upstream ``pipelines.general``
-literally in its own environment (``--upstream-dir`` / $ELDERNET_UPSTREAM_DIR, ``--upstream-python`` /
+Bouts are upstream's own functions (``gait_quality.detection`` / ``quality``, imported verified from the
+operator's checkout, ``--upstream-dir`` / $ELDERNET_UPSTREAM_DIR; :mod:`.bouts`): centre-second voting at hop 1,
+3 s gap bridging, 10 s minimum. Differences from upstream by design: no gravity calibration / non-wear /
+imputation / edge-day trimming; window-local static pre-filter; nonfinite samples split the recording. Needs
+pandas (upstream ``quality.py``). ``--upstream`` instead runs upstream ``pipelines.general`` literally in its own
+environment (a full clone at ``--upstream-dir`` / $ELDERNET_UPSTREAM_DIR, ``--upstream-python`` /
 $ELDERNET_UPSTREAM_PYTHON) with ``--device cpu`` — the parity reference.
 """
 
@@ -33,8 +35,7 @@ from typing import Dict, List, Optional, Sequence
 import numpy as np
 
 from . import QUALITY_HEADS, RATE_HZ, UPSTREAM_HOP_S, WINDOW_S
-from .bouts import (bout_window_starts, detect_bouts, merge_bouts, summarise_bouts, summarise_recording,
-                    window_predictions_to_seconds)
+from .bouts import bout_window_starts, detect_bouts, second_labels, summarise
 from .gait import GaitCalibration, score_windows
 from .preprocess import stack_windows, windows_from_array
 
@@ -69,21 +70,23 @@ def _write_csv(path: str, rows: List[Dict], columns: Sequence[str]) -> None:
 
 
 def analyse(acc: np.ndarray, fs: float, heads, *, hop_s: int = UPSTREAM_HOP_S, start_time: str = DEFAULT_START_TIME,
-            calibration: Optional[GaitCalibration] = None, min_bout_s: int = 10, merge_gap_s: int = 3) -> Dict:
+            calibration: Optional[GaitCalibration] = None, min_bout_s: int = 10, merge_gap_s: int = 3,
+            upstream_dir: Optional[str] = None) -> Dict:
     """Nara path end to end on one array; returns rows for the four CSVs (no I/O)."""
     start = dt.datetime.fromisoformat(start_time)
     # detection grid: always the upstream 1 s stride (bouts need it); <stem>_gait_windows.csv keeps every hop_s
     windows = windows_from_array(acc, fs, hop_s=UPSTREAM_HOP_S)
     by_start = {int(round(w.s)): i for i, w in enumerate(windows)}
     sc = score_windows(heads, stack_windows(windows), calibration)         # quality on is_gait windows
-    n_sec_total = (int(np.around((len(acc) - 1) / fs * RATE_HZ)) + 1) / RATE_HZ
+    n30 = int(np.around((len(acc) - 1) / fs * RATE_HZ)) + 1                # actipy's 30 Hz tick count
+    n_sec_total = n30 / RATE_HZ
     pred = np.zeros(int(max(0, np.floor(n_sec_total - WINDOW_S + 1e-9) + 1)), dtype=int)
     for i, w in enumerate(windows):
         if 0 <= int(w.s) < len(pred):
             pred[int(w.s)] = int(sc.is_gait[i])
-    labels = merge_bouts(window_predictions_to_seconds(pred), min_bout_s, merge_gap_s) if len(pred) else pred
-    bouts = detect_bouts(labels)
-    cut = [(b, by_start[s]) for b, s in bout_window_starts(bouts, n_sec_total) if s in by_start]
+    labels = second_labels(pred, min_bout_s, merge_gap_s, upstream_dir)
+    bouts = detect_bouts(labels, upstream_dir)
+    cut = [(b, by_start[s]) for b, s in bout_window_starts(bouts, n30, upstream_dir) if s in by_start]
     extra = sorted({i for _, i in cut if not sc.is_gait[i]})      # bridged-gap windows: quality as upstream
     q_extra = heads.quality(stack_windows([windows[i] for i in extra])) if extra else {}
     pos = {i: j for j, i in enumerate(extra)}
@@ -108,8 +111,9 @@ def analyse(acc: np.ndarray, fs: float, heads, *, hop_s: int = UPSTREAM_HOP_S, s
         gait_rows.append(r)
     summary = {"recording": "", "device": "array", "fs_hz": float(fs), "start_time": start_time,
                "duration_hours": round(len(acc) / fs / 3600, 3), "calibration_ok": ""}
-    summary.update(summarise_recording(rows, labels, METRIC_COLUMNS))
-    return {"windows": rows, "bouts": summarise_bouts(rows, METRIC_COLUMNS), "summary": summary,
+    bout_rows, recording = summarise(rows, labels, METRIC_COLUMNS, upstream_dir)
+    summary.update(recording)
+    return {"windows": rows, "bouts": bout_rows, "summary": summary,
             "gait_windows": gait_rows, "second_labels": labels, "n_detection_windows": len(windows)}
 
 
@@ -153,7 +157,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--calibration", default=None, help="VAL-fitted gait calibration JSON (default none)")
     ap.add_argument("--threads", type=int, default=1)
     ap.add_argument("--upstream", action="store_true", help="run upstream pipelines.general instead (parity)")
-    ap.add_argument("--upstream-dir", default=None)
+    ap.add_argument("--upstream-dir", default=None,
+                    help="the pinned upstream source (default $ELDERNET_UPSTREAM_DIR; a full clone for --upstream)")
     ap.add_argument("--upstream-python", default=None)
     ap.add_argument("--nonwear", choices=["auto", "on", "off"], default="auto", help="(--upstream only)")
     args = ap.parse_args(argv)
@@ -163,13 +168,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     from .runtime import load_calibration
     from .weights import WeightsError, resolve
     try:
-        heads = load_heads(resolve(args.weights_dir), threads=args.threads)
+        heads = load_heads(resolve(args.weights_dir), threads=args.threads, upstream_dir=args.upstream_dir)
+        acc = load_array(args.input)
+        result = analyse(acc, args.fs, heads, hop_s=args.hop_s, start_time=args.start_time,
+                         calibration=load_calibration(args.calibration), upstream_dir=args.upstream_dir)
     except WeightsError as exc:
         print(f"[eldernet.run] {exc.kind}: {exc.message}", file=sys.stderr)
         return 2
-    acc = load_array(args.input)
-    result = analyse(acc, args.fs, heads, hop_s=args.hop_s, start_time=args.start_time,
-                     calibration=load_calibration(args.calibration))
     name = os.path.basename(args.input)
     stem = name[:-4] if name.lower().endswith(".npy") else os.path.splitext(name)[0]
     write_outputs(result, args.outdir, stem, name)

@@ -30,9 +30,17 @@ inertia = [
 ]
 # ElderNet gait quality (activity_context.eldernet): six pinned upstream heads, CPU inference. numpy-only
 # preprocessing (nearest-neighbour 30 Hz, upstream-identical), so no scipy/pandas/actipy at serve time.
-# Weights: University of Oxford Academic Use Licence, fetched by sha256, never committed (ELDERNET.md).
+# Weights AND the upstream source (models.py, gait_quality/*) are University of Oxford Academic Use Licence
+# material, fetched by sha256 by the operator (eldernet.weights / eldernet.upstream fetch) and never committed;
+# use is limited to internal academic, non-commercial research (ELDERNET.md "Licence").
 eldernet = [
     "torch==2.8.0",
+]
+# Offline ElderNet run CLI (activity_context.eldernet.run): upstream gait_quality/quality.py needs pandas for the
+# bout summaries. Never imported by the serve process.
+eldernet-offline = [
+    "torch==2.8.0",
+    "pandas==3.0.6",
 ]
 # Offline head training / evaluation (never needed by the serve process).
 inertia-train = [

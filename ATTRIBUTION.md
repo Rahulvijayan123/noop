@@ -77,13 +77,16 @@ NOOP builds on prior community reverse-engineering and interoperability work:
 
 ## Activity context (ElderNet gait quality)
 - **`yonbrand/gait-quality`** (ElderNet) — **Copyright © 2022, University of Oxford**, University of Oxford
-  SSL-wearables **Academic Use Licence** (non-commercial academic research only; accepted by the owner on
-  2026-10-05; full text in `Tools/ActivityContext/NOTICE.md`). Pinned to commit
-  `437a38bcc69f42717fe73c1f7dbea7e1f7a50d23`. The ElderNet model definitions (ResNet-18 from
-  OxWearables/ssl-wearables + FC heads) are narrowly vendored into
-  `Tools/ActivityContext/activity_context/eldernet/vendor/` and the bout rules are re-expressed in
-  `activity_context/eldernet/bouts.py`, each file carrying the licence notice, upstream path and SHA. The six
-  fine-tuned checkpoints are fetched by sha256 from the pinned commit at deploy time and never committed.
+  SSL-wearables **Academic Use Licence** (use limited to the licensee's own internal academic, non-commercial
+  research; no service for third parties; accepted by the owner on 2026-10-05; text in
+  `Tools/ActivityContext/NOTICE.md`). Pinned to commit `437a38bcc69f42717fe73c1f7dbea7e1f7a50d23`. **Not
+  redistributed:** this repository contains no Oxford source code and no ElderNet weights. The operator fetches
+  the six fine-tuned checkpoints and the upstream source files from the pinned commit at install time
+  (`python -m activity_context.eldernet.weights fetch`, `python -m activity_context.eldernet.upstream fetch`,
+  both sha256-pinned), and `Tools/ActivityContext/activity_context/eldernet/upstream.py` imports upstream's own
+  `models.py` (ResNet-18 from OxWearables/ssl-wearables + FC heads) and `gait_quality/detection.py` /
+  `quality.py` from that checkout after verifying every file. Running it as a service on other people's data
+  (the worker lane, off by default) may fall outside the licence — see `Tools/ActivityContext/ELDERNET.md`.
   Please cite: Brand, Y. E., Buchman, A. S., Kluge, F., Palmerini, L., Becker, C., Cereatti, A., Maetzler, W.,
   Vereijken, B., Yarnall, A. J., Rochester, L., Del Din, S., Mueller, A., Hausdorff, J. M. & Perlman, O.
   (2026). Continuous Assessment of Daily-Living Gait Using Self-Supervised Learning of Wrist-Worn Accelerometer

@@ -1,7 +1,10 @@
 """The six ElderNet heads: strict loading and batched CPU inference (ELDERNET.md §1).
 
-Architecture per head is exactly upstream ``gait_quality/weights.py::build_model`` with the
-``pipelines/config.yaml`` blocks (ElderNet, head ``fc``, feature_vector_size 128, ReLU between the FC layers):
+The architecture is upstream's own ``models.py`` (``Resnet`` feature extractor + ``ElderNet``), imported verified
+from the operator's checkout of the pinned commit (:mod:`.upstream`; Nara's repository holds no Oxford code). Each
+head is built as upstream ``gait_quality/weights.py::build_model`` builds it from the ``pipelines/config.yaml``
+blocks (ElderNet, head ``fc``, feature_vector_size 128, ReLU between the FC layers), except that the backbone gets
+a fresh ``nn.Sequential`` (upstream's ``Resnet`` default argument is one shared instance):
 
 ==============  ==============  ======  ======================  ==========
 head            output          max_mu  num_layers_regressor    batch_norm
@@ -31,8 +34,9 @@ from typing import Dict, Mapping, Optional
 import numpy as np
 import torch
 
-from . import DETECTION_HEAD, FEATURE_VECTOR_SIZE, HEAD_NAMES, QUALITY_HEADS, WINDOW_SAMPLES
-from .vendor.models import ElderNet, resnet_feature_extractor
+from . import BACKBONE_OUTPUT_SIZE, DETECTION_HEAD, FEATURE_VECTOR_SIZE, HEAD_NAMES, QUALITY_HEADS, WINDOW_S, \
+    WINDOW_SAMPLES
+from . import upstream
 from .weights import WeightsError
 
 def no_nnpack():
@@ -49,16 +53,19 @@ KNOWN_UNUSED_KEYS = frozenset({"regressor.var.weight", "regressor.var.bias"})
 DEFAULT_MAX_BATCH = 64
 
 
-def build_head(name: str) -> ElderNet:
-    """An un-loaded ElderNet for ``name`` with the upstream architecture settings."""
+def build_head(name: str, upstream_dir: Optional[str] = None) -> torch.nn.Module:
+    """An un-loaded upstream ElderNet for ``name`` with the upstream architecture settings."""
     if name == DETECTION_HEAD:
-        return ElderNet(resnet_feature_extractor(), linear_model_output_size=FEATURE_VECTOR_SIZE, output_size=2,
-                        is_classification=True)
-    if name not in QUALITY_HEADS:
+        kw = dict(output_size=2, is_classification=True)
+    elif name in QUALITY_HEADS:
+        _, max_mu, n_layers, bn = QUALITY_HEADS[name]
+        kw = dict(output_size=1, is_regression=True, max_mu=max_mu, num_layers_regressor=n_layers, batch_norm=bn)
+    else:
         raise KeyError(f"unknown ElderNet head {name!r}")
-    _, max_mu, n_layers, bn = QUALITY_HEADS[name]
-    return ElderNet(resnet_feature_extractor(), linear_model_output_size=FEATURE_VECTOR_SIZE, output_size=1,
-                    is_regression=True, max_mu=max_mu, num_layers_regressor=n_layers, batch_norm=bn)
+    up = upstream.models(upstream_dir)
+    backbone = up.Resnet(output_size=kw["output_size"], epoch_len=WINDOW_S, feature_extractor=torch.nn.Sequential())
+    return up.ElderNet(backbone.feature_extractor, head="fc", non_linearity=True,
+                       linear_model_input_size=BACKBONE_OUTPUT_SIZE, linear_model_output_size=FEATURE_VECTOR_SIZE, **kw)
 
 
 def read_state_dict(path: str, name: str) -> Dict[str, torch.Tensor]:
@@ -72,7 +79,7 @@ def read_state_dict(path: str, name: str) -> Dict[str, torch.Tensor]:
     return dict(sd)
 
 
-def load_strict(model: ElderNet, sd: Mapping[str, torch.Tensor], name: str) -> ElderNet:
+def load_strict(model: torch.nn.Module, sd: Mapping[str, torch.Tensor], name: str) -> torch.nn.Module:
     """Load ``sd`` into ``model`` or raise ``weights_mismatch`` naming what differs."""
     want = model.state_dict()
     missing = sorted(set(want) - set(sd))
@@ -136,14 +143,15 @@ class ElderNetHeads:
         return {name: self._run(name, batch)[:, 0] for name in QUALITY_HEADS}
 
 
-def load_heads(paths: Mapping[str, str], threads: Optional[int] = 1,
-               max_batch: int = DEFAULT_MAX_BATCH) -> ElderNetHeads:
-    """name -> verified checkpoint path (``weights.resolve``) -> loaded :class:`ElderNetHeads`."""
+def load_heads(paths: Mapping[str, str], threads: Optional[int] = 1, max_batch: int = DEFAULT_MAX_BATCH,
+               upstream_dir: Optional[str] = None) -> ElderNetHeads:
+    """name -> verified checkpoint path (``weights.resolve``) -> loaded :class:`ElderNetHeads`, the architecture
+    from the verified upstream source (``upstream_dir`` or ``$ELDERNET_UPSTREAM_DIR``)."""
     models = {}
     for name in HEAD_NAMES:
         if name not in paths:
             raise WeightsError("model_missing", f"no checkpoint for {name}")
-        models[name] = load_strict(build_head(name), read_state_dict(paths[name], name), name)
+        models[name] = load_strict(build_head(name, upstream_dir), read_state_dict(paths[name], name), name)
     return ElderNetHeads(models, threads=threads, max_batch=max_batch)
 
 

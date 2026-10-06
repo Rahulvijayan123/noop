@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("torch")
 
-from ._helpers import FIXTURES, T0, upstream_dir_or_skip, weights_dir_or_skip  # noqa: E402
+from ._helpers import FIXTURES, T0, upstream_dir_or_skip, upstream_source_or_skip, weights_dir_or_skip  # noqa: E402
 
 RTOL = ATOL = 1e-4                       # upstream tests/test_example_reproduction.py
 
@@ -19,7 +19,9 @@ RTOL = ATOL = 1e-4                       # upstream tests/test_example_reproduct
 def heads():
     from activity_context.eldernet.model import load_heads
     from activity_context.eldernet.weights import resolve
-    return load_heads(resolve(weights_dir_or_skip()))
+    wd = weights_dir_or_skip()
+    upstream_source_or_skip()
+    return load_heads(resolve(wd))
 
 
 def _csv(path):

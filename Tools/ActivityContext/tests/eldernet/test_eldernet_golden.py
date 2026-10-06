@@ -14,7 +14,7 @@ from activity_context.eldernet.preprocess import stack_windows, windows_from_sec
 from activity_context.eldernet.runtime import decode_request_seconds, parse_infer_request
 from activity_context.eldernet.weights import wire_hashes
 
-from ._helpers import FIXTURES, upstream_dir_or_skip, weights_dir_or_skip
+from ._helpers import FIXTURES, upstream_dir_or_skip, upstream_source_or_skip, weights_dir_or_skip
 
 METRIC_KEYS = {v[0] for v in QUALITY_HEADS.values()}
 RANGES = {v[0]: v[1] for v in QUALITY_HEADS.values()}
@@ -62,7 +62,9 @@ def test_runtime_reproduces_the_golden_response(golden):
     pytest.importorskip("torch")
     from activity_context.eldernet.runtime import build_runtime, handle_request
     req, resp = golden
-    rt = build_runtime(weights_dir_or_skip())
+    wd = weights_dir_or_skip()
+    upstream_source_or_skip()
+    rt = build_runtime(wd)
     assert rt.available, rt.error
     got = handle_request(rt, req)
     got["duration_ms"] = 0

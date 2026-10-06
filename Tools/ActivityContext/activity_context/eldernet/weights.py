@@ -121,6 +121,22 @@ def wire_hashes(manifest: Mapping[str, WeightFile] = MANIFEST) -> Dict[str, str]
     return {name: wf.sha256 for name, wf in manifest.items()}
 
 
+WEIGHTS_DIGEST_PREFIX = "eldernet-weights-1\n"
+
+
+def weights_digest(weights: Mapping[str, str]) -> str:
+    """The deployment pin over a ``weights`` map (ELDERNET.md §5): sha256 of ``eldernet-weights-1\\n`` followed by
+    ``name=sha256\\n`` per head in name order — the same text Swift ``GaitQualityModelInfo.weightsDigest`` and the
+    SQL ``publish_activity_gait_windows_day`` check hash."""
+    import hashlib
+    text = WEIGHTS_DIGEST_PREFIX + "".join(f"{k}={v}\n" for k, v in sorted(weights.items()))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# The pinned deployment digest of the six heads (= weights_digest(wire_hashes()); asserted by the tests).
+DEPLOYMENT_WEIGHTS_DIGEST = "01b2f982a0a2664f455a529a8c483a10106a7ddcd89c326e3d15e24fa4cf4ca6"
+
+
 def fetch(dest: str, manifest: Mapping[str, WeightFile] = MANIFEST, retries: int = 5) -> Dict[str, str]:
     """Download every pinned file into ``dest`` (skipping ones already verified); never used at serve time."""
     from ..fetch_artifacts import download
@@ -148,9 +164,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub.add_parser("manifest", help="print the pinned manifest as JSON")
     args = ap.parse_args(argv)
     if args.cmd == "manifest":
-        print(json.dumps({"upstream_commit": UPSTREAM_COMMIT, "files": {
-            n: {"upstream_path": w.upstream_path, "sha256": w.sha256, "size": w.size, "url": w.url}
-            for n, w in MANIFEST.items()}}, indent=2))
+        print(json.dumps({"upstream_commit": UPSTREAM_COMMIT, "weights_digest": weights_digest(wire_hashes()),
+                          "files": {n: {"upstream_path": w.upstream_path, "sha256": w.sha256, "size": w.size,
+                                        "url": w.url} for n, w in MANIFEST.items()}}, indent=2))
         return 0
     try:
         if args.cmd == "fetch":
