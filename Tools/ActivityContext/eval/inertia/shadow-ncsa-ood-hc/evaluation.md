@@ -2,11 +2,12 @@
 
 > **STAND-IN ENCODERS — NOT INERTIA-1; real Inertia-1 evaluation blocked: no public checkpoint.** Every number below is a *measured* result for a stand-in encoder on public wrist data; nothing here is evidence about Inertia-1 itself.
 
-- evaluated bundle_sha256 `8f1faee3ae086939783e23c7b0f196aa6af8c6a3f888be3b9c3a5af0f2b125d1`; sealed bundle_sha256 `8fe56b2c8875caad6c206f5573e4fd1d513f8e07a71e6b46244156abf85c1b76` (test_gate.json `e301f84c7e8b45b8`; the served artifact carries the gate); encoder `standin:handcrafted-stats-v1` (standin); evidence_tier_max `shadow`
-- provenance: git_commit `bed5973b5533a11a84226c030f1de28de6a7f5c4`, source_tree_sha256 `64891b62cf8bfd73`, source dirty False, allow_dirty False
-- evaluated once on the frozen test subjects (assembled inside the TestVault) through `load_bundle(...).apply(...)`; test_sha256 `c805f429821bb80c15da4ee6b2066c593321a40b3df8a0d7d26b01a838c5d7b1`; evaluations of this experiment on this test split: 1 (rerun reason: none); bundle.apply vs training-side numpy max |Δ| (first 2,000 windows) 0.000000000000
+- evaluated bundle_sha256 `d1c51571af30e6b775b17b9ffb6b0c30f5715c31068af50385960482974d947f`; sealed bundle_sha256 `a674411c675794ea1de43156af66630a190a405426a07ca6c783e746500f881f` (test_gate.json `f62b7aa18c8af3e4`; the served artifact carries the gate); encoder `standin:handcrafted-stats-v1` (standin); evidence_tier_max `shadow`
+- provenance: git_commit `744e33a76ae52a758d82c6f8dd1440dbf24b913d`, source_tree_sha256 `443e2fe493e33691`, source dirty False, allow_dirty False
+- evaluated once on the frozen test subjects (assembled inside the TestVault) through `load_bundle(...).apply(...)`; test_sha256 `c805f429821bb80c15da4ee6b2066c593321a40b3df8a0d7d26b01a838c5d7b1`; evaluations of this experiment on this test split: 2 (rerun reason: post_audit_rule_change — audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2).); bundle.apply vs training-side numpy max |Δ| (first 2,000 windows) 0.000000000000
 - test windows: capture24 96,819 (50 subj), gotov 587 (7 subj), hhar_watch 1,998 (2 subj), mhealth 49 (2 subj), opportunity 2,539 (1 subj), pamap2 5,167 (2 subj), wear 319 (5 subj), wisdm2019_watch 1,397 (8 subj)
 - nonfinite windows dropped: 0
+- evaluations of each dataset's test split (any experiment, this one included; G2 D-2): capture24 75, gotov 10, hhar_watch 75, mhealth 75, opportunity 75, pamap2 75, wear 10, wisdm2019_watch 75
 
 † = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
 *descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
@@ -26,12 +27,26 @@ Majority baseline (train-majority `recumbent`): accuracy 0.597, balanced acc 0.3
 
 | class | supported | test support | P | R | F1 | P single-label (n) | classwise ECE | val status | tau | pooled gate | dataset demotions | final status | unsupported-truth windows |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | yes | 38,743 | 0.897 | 0.924 | 0.910 | 0.889 (36,065) | 0.035 | strong | 0.950 | P=0.986 n=11,291 → strong | – | strong | 0 |
-| seated_likely | yes | 31,820 | 0.807 | 0.856 | 0.831 | 0.766 (25,868) | 0.039 | weak | 0.300 | P=0.807 n=33,768 → weak | gotov test: precision 0.657 at n_acc 140 -> abstain | abstain | 0 |
+| recumbent (mostly sleep-period lying in training data) | yes | 38,743 | 0.897 | 0.924 | 0.910 | 0.889 (36,065) | 0.035 | strong | 0.950 | P=0.986 n=11,065 → strong | – | strong | 0 |
+| seated_likely | yes | 31,820 | 0.807 | 0.856 | 0.831 | 0.766 (25,868) | 0.039 | weak | 0.520 | P=0.772 n=27,046 → abstain | – | abstain | 0 |
 | upright_stationary | yes | 4,298 | 0.351 | 0.095 | 0.149 | 0.378 (4,298) | 0.014 | abstain | 1.000 | – | – | abstain | 0 |
 | postural_transition | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
 
-P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
+P/R/F1 = set-target scoring (a set-target window is correct for any member); P single-label = precision (argmax) on windows whose truth is exactly one class. Statuses, tau and every gate use the `set-family-1` rule: a set member is judged on its single-label evidence only (windows whose truth is a set containing it are excluded). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
+
+Set families (each scored as ONE class: merged probability, correct iff the truth lies inside the family; reported only — a family status never changes a served per-class status):
+
+| family | test windows with exactly this set | argmax P / R (n_acc) | val status | tau | pooled gate | dataset demotions | final family status |
+|---|---|---|---|---|---|---|---|
+| recumbent+seated_likely | 8,630 | 0.947 / 0.991 (73,872) | strong | 0.765 | P=0.960 n=70,110 → strong | gotov test: precision 0.938 at n_acc 308 -> weak; hhar_watch test: precision 0.507 at n_acc 73 -> abstain | abstain |
+
+Rule change (G2 D-1): the earlier set-target scoring on the same bundle and test windows vs the single-label rule:
+
+| class | test set windows excluded | set-target val→final (tau) | single-label val→final (tau) |
+|---|---|---|---|
+| seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.520) |
+
+merge_into under the old rule (symmetric table): {}
 
 Per dataset (macro-F1 = union convention):
 
@@ -49,8 +64,8 @@ Per dataset per class P/R/F1 (support) and the dataset gate at the frozen tau (P
 
 | class | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
 |---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | 0.90/0.92/0.91 (38536); gate P 0.99 n 11278 → strong | 0.54/0.83/0.65 (126); gate P 0.77 n 13 → weak | 0.00/0.00/0.00 (0) | 0.57/1.00/0.73 (4) | 0.00/0.00/0.00 (0) | 0.91/0.78/0.84 (77) | 0.00/0.00/0.00 (0) |
-| seated_likely | 0.81/0.86/0.83 (31413); gate P 0.81 n 33311 → weak | 0.66/0.51/0.57 (182); gate P 0.66 n 140 → abstain | 0.38/0.24/0.30 (37); gate P 0.38 n 24 → weak | 0.44/0.67/0.53 (6); gate P 0.44 n 9 → weak | 0.81/1.00/0.90 (30); gate P 0.81 n 37 → weak | 0.50/0.89/0.64 (72); gate P 0.50 n 129 → abstain | 0.52/0.76/0.62 (80); gate P 0.52 n 118 → abstain |
+| recumbent (mostly sleep-period lying in training data) | 0.90/0.92/0.91 (38536); gate P 0.99 n 11052 → strong | 0.54/0.83/0.65 (126); gate P 0.77 n 13 → weak | 0.00/0.00/0.00 (0) | 0.57/1.00/0.73 (4) | 0.00/0.00/0.00 (0) | 0.91/0.78/0.84 (77) | 0.00/0.00/0.00 (0) |
+| seated_likely | 0.81/0.86/0.83 (31413); gate P 0.77 n 26638 → abstain | 0.66/0.51/0.57 (182); gate P 0.64 n 121 → abstain | 0.38/0.24/0.30 (37); gate P 0.41 n 22 → weak | 0.44/0.67/0.53 (6); gate P 0.33 n 6 → weak | 0.81/1.00/0.90 (30); gate P 0.81 n 37 → weak | 0.50/0.89/0.64 (72); gate P 0.46 n 118 → abstain | 0.52/0.76/0.62 (80); gate P 0.58 n 104 → abstain |
 | upright_stationary | 0.31/0.08/0.13 (4036) | 0.96/0.65/0.78 (78) | 0.00/0.00/0.00 (37) | 0.00/0.00/0.00 (6) | 0.00/0.00/0.00 (7) | 0.78/0.13/0.22 (55) | 1.00/0.23/0.37 (79) |
 
 *descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
@@ -60,7 +75,7 @@ Awake lying (recumbent scored on NON-sleep windows only; G-2):
 
 - recumbent truth windows: 44,695, of which sleep-period 35,904 (0.803) and awake lying 8,791 (by dataset: capture24 8576, gotov 126, hhar_watch 0, mhealth 4, opportunity 0, pamap2 85, wisdm2019_watch 0)
 - recumbent on non-sleep windows: P 0.403, R 0.983, F1 0.572 (support 2,839, predicted 6,920)
-- awake-lying gate at the frozen tau: pooled P=0.604 n=391 → abstain; per dataset capture24 P=0.598 n=378 → abstain, gotov P=0.769 n=13 → weak; awake-lying status abstain (reported only; the served recumbent status is the pooled one)
+- awake-lying gate at the frozen tau: pooled P=0.061 n=165 → abstain; per dataset capture24 P=0.000 n=152 → abstain, gotov P=0.769 n=13 → weak; awake-lying status abstain (reported only; the served recumbent status is the pooled one)
 
 
 Wrist-only: n=74,861, macro-F1 0.630 (every training/test placement is wrist or forearm; equals pooled).
@@ -88,16 +103,32 @@ Majority baseline (train-majority `stationary`): accuracy 0.799, balanced acc 0.
 
 | class | supported | test support | P | R | F1 | P single-label (n) | classwise ECE | val status | tau | pooled gate | dataset demotions | final status | unsupported-truth windows |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| stationary | yes | 73,707 | 0.897 | 0.975 | 0.934 | 0.925 (73,462) | 0.036 | strong | 0.820 | P=0.976 n=64,717 → strong | wear test: precision 0.792 at n_acc 53 -> abstain | abstain | 0 |
-| walking | yes | 2,817 | 0.844 | 0.484 | 0.615 | 0.116 (33) | 0.007 | abstain | 1.000 | – | – | abstain | 0 |
-| brisk_walking | yes | 5,749 | 0.814 | 0.520 | 0.635 | 0.020 (19) | 0.011 | weak | 0.470 | P=0.881 n=3,009 → weak | – | weak | 0 |
+| stationary | yes | 73,707 | 0.897 | 0.975 | 0.934 | 0.925 (73,462) | 0.036 | strong | 0.820 | P=0.976 n=64,655 → strong | wear test: precision 0.792 at n_acc 53 -> abstain | abstain | 0 |
+| walking | yes | 2,817 | 0.844 | 0.484 | 0.615 | 0.116 (33) | 0.007 | weak | 0.575 | P=0.405 n=79 → abstain | – | abstain | 0 |
+| brisk_walking | yes | 5,749 | 0.814 | 0.520 | 0.635 | 0.020 (19) | 0.011 | abstain | 1.000 | – | – | abstain | 0 |
 | running | yes | 296 | 0.900 | 0.882 | 0.891 | 0.939 (296) | 0.002 | strong | 0.510 | P=0.908 n=284 → weak | – | weak | 0 |
 | stairs | yes | 152 | 0.795 | 0.763 | 0.779 | 0.913 (152) | 0.004 | weak | 0.365 | P=0.831 n=136 → weak | – | weak | 0 |
 | cycling | yes | 855 | 0.711 | 0.650 | 0.679 | 0.808 (855) | 0.004 | weak | 0.300 | P=0.715 n=778 → abstain | – | abstain | 0 |
 | vehicle_motion | yes | 3,518 | 0.687 | 0.314 | 0.431 | 0.758 (3,518) | 0.024 | abstain | 1.000 | – | – | abstain | 0 |
 | other | yes | 5,463 | 0.374 | 0.300 | 0.333 | 0.577 (5,463) | 0.016 | abstain | 1.000 | – | – | abstain | 0 |
 
-P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
+P/R/F1 = set-target scoring (a set-target window is correct for any member); P single-label = precision (argmax) on windows whose truth is exactly one class. Statuses, tau and every gate use the `set-family-1` rule: a set member is judged on its single-label evidence only (windows whose truth is a set containing it are excluded). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
+
+Set families (each scored as ONE class: merged probability, correct iff the truth lies inside the family; reported only — a family status never changes a served per-class status):
+
+| family | test windows with exactly this set | argmax P / R (n_acc) | val status | tau | pooled gate | dataset demotions | final family status |
+|---|---|---|---|---|---|---|---|
+| walking+brisk_walking | 8,306 | 0.788 / 0.528 (5,604) | strong | 0.935 | P=0.983 n=2,069 → strong | – | strong |
+| stationary+walking+brisk_walking | 453 | 0.919 / 0.977 (87,471) | strong | 0.835 | P=0.980 n=69,327 → strong | wear test: precision 0.800 at n_acc 60 -> weak | weak |
+
+Rule change (G2 D-1): the earlier set-target scoring on the same bundle and test windows vs the single-label rule:
+
+| class | test set windows excluded | set-target val→final (tau) | single-label val→final (tau) |
+|---|---|---|---|
+| walking | 8,759 | abstain→abstain (1.000) | weak→abstain (0.575) |
+| brisk_walking | 8,759 | weak→weak (0.470) | abstain→abstain (1.000) |
+
+merge_into under the old rule (symmetric table): {'walking': 'brisk_walking'}
 
 Per dataset (macro-F1 = union convention):
 
@@ -116,9 +147,9 @@ Per dataset per class P/R/F1 (support) and the dataset gate at the frozen tau (P
 
 | class | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wear | wisdm2019_watch |
 |---|---|---|---|---|---|---|---|---|
-| stationary | 0.90/0.98/0.93 (71955); gate P 0.98 n 63492 → strong | 0.95/0.88/0.91 (386); gate P 1.00 n 292 → strong | 0.94/1.00/0.97 (74); gate P 1.00 n 74 → strong | 1.00/0.84/0.91 (19); gate P 1.00 n 16 → weak | 1.00/1.00/1.00 (37); gate P 1.00 n 11 → weak | 0.84/0.90/0.87 (187); gate P 0.98 n 131 → strong | 0.75/0.89/0.82 (112); gate P 0.79 n 53 → abstain | 1.00/0.93/0.97 (937); gate P 1.00 n 648 → strong |
-| walking | 0.84/0.48/0.61 (2778) | 0.87/1.00/0.93 (33) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.50/0.33/0.40 (6) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) |
-| brisk_walking | 0.81/0.51/0.63 (5584); gate P 0.88 n 2849 → weak | 1.00/0.74/0.85 (19); gate P 1.00 n 14 → weak | 0.94/0.97/0.96 (35); gate P 0.97 n 35 → strong | 0.50/1.00/0.67 (4); gate P 0.50 n 8 → weak | 0.00/0.00/0.00 (0) | 0.94/0.78/0.85 (37); gate P 1.00 n 27 → weak | 0.00/0.00/0.00 (0) | 0.80/0.99/0.88 (70); gate P 0.91 n 76 → weak |
+| stationary | 0.90/0.98/0.93 (71955); gate P 0.98 n 63430 → strong | 0.95/0.88/0.91 (386); gate P 1.00 n 292 → strong | 0.94/1.00/0.97 (74); gate P 1.00 n 74 → strong | 1.00/0.84/0.91 (19); gate P 1.00 n 16 → weak | 1.00/1.00/1.00 (37); gate P 1.00 n 11 → weak | 0.84/0.90/0.87 (187); gate P 0.98 n 131 → strong | 0.75/0.89/0.82 (112); gate P 0.79 n 53 → abstain | 1.00/0.93/0.97 (937); gate P 1.00 n 648 → strong |
+| walking | 0.84/0.48/0.61 (2778); gate P 0.00 n 46 → abstain | 0.87/1.00/0.93 (33); gate P 1.00 n 32 → strong | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.50/0.33/0.40 (6); gate P 0.00 n 1 → weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) |
+| brisk_walking | 0.81/0.51/0.63 (5584) | 1.00/0.74/0.85 (19) | 0.94/0.97/0.96 (35) | 0.50/1.00/0.67 (4) | 0.00/0.00/0.00 (0) | 0.94/0.78/0.85 (37) | 0.00/0.00/0.00 (0) | 0.80/0.99/0.88 (70) |
 | running | 0.88/0.75/0.81 (103); gate P 0.90 n 86 → weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10); gate P 1.00 n 10 → weak | 0.00/0.00/0.00 (0) | 0.36/1.00/0.53 (10); gate P 0.37 n 27 → weak | 1.00/0.94/0.97 (93); gate P 1.00 n 85 → strong | 1.00/0.96/0.98 (80); gate P 1.00 n 76 → strong |
 | stairs | 0.03/0.12/0.05 (8); gate P 0.00 n 22 → weak | 0.00/0.00/0.00 (0) | 0.97/0.97/0.97 (32); gate P 0.97 n 32 → strong | 1.00/0.33/0.50 (3); gate P 1.00 n 1 → weak | 0.00/0.00/0.00 (0) | 1.00/0.90/0.95 (29); gate P 1.00 n 25 → weak | 0.00/0.00/0.00 (0) | 1.00/0.71/0.83 (80); gate P 1.00 n 56 → strong |
 | cycling | 0.68/0.61/0.64 (743); gate P 0.69 n 658 → abstain | 0.98/0.98/0.98 (47); gate P 0.98 n 47 → strong | 1.00/0.82/0.90 (33); gate P 1.00 n 27 → weak | 1.00/1.00/1.00 (4); gate P 1.00 n 4 → weak | 0.00/0.00/0.00 (0) | 1.00/0.93/0.96 (28); gate P 1.00 n 26 → weak | 0.00/0.00/0.00 (0); gate P 0.00 n 1 → weak | 0.00/0.00/0.00 (0); gate P 0.00 n 15 → weak |
@@ -166,7 +197,7 @@ Majority baseline (train-majority `desk_like`): accuracy 0.645, balanced acc 0.2
 | exercise_motion | yes | 78 | 0.657 | 0.590 | 0.622 | 0.657 (78) | 0.007 | weak | 0.475 | P=0.730 n=63 → abstain | – | abstain | 0 |
 | other | no | 0 | – | – | – | – | – | unsupported | – | – | – | – | 0 |
 
-P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
+P/R/F1 = set-target scoring (a set-target window is correct for any member); P single-label = precision (argmax) on windows whose truth is exactly one class. Statuses, tau and every gate use the `set-family-1` rule: a set member is judged on its single-label evidence only (windows whose truth is a set containing it are excluded). Final status = min(val status, pooled gate, every wrist dataset with n_acc >= 30); the gate only demotes.
 
 Per dataset (macro-F1 = union convention):
 

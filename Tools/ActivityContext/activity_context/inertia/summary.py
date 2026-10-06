@@ -290,7 +290,7 @@ def _rule_change(R) -> List[str]:
     the same evaluation, on the same bundle and test windows), the merges, and the set-family statuses."""
     L = ["## Set-target status rule (G2 D-1, 2026-10-06)", "",
          f"Rule `{A.SET_RULE}`: {A.SET_RULE_TEXT}. Before it, a set window (pace-unknown walking {{walking, "
-         "brisk_walking}}, Capture-24 'sitting/lying' {recumbent, seated_likely}, Capture-24 'walking and occasional "
+         "brisk_walking}, Capture-24 'sitting/lying' {recumbent, seated_likely}, Capture-24 'walking and occasional "
          "standing' {walking, brisk_walking, stationary}) counted as correct for whichever member was predicted, which "
          "made `brisk_walking` strong in `ncsa-primary-hc` on pace-unknown walking alone (VAL single-label precision "
          "18/27 = 0.67; no correct single-label brisk prediction on TEST) and merged an abstained `walking` INTO it. "
