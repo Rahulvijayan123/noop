@@ -453,6 +453,86 @@ def _intensity_dataset(R, names, ds) -> List[str]:
     return L + [""]
 
 
+def _cm(R, n, h, ds):
+    """(matrix, class order) of a head's per-dataset confusion (rows = attributed truth, cols = argmax)."""
+    c = (((_head(R.get(n), h) or {}).get("per_dataset", {}).get(ds) or {}).get("confusion") or {})
+    return c.get("matrix"), c.get("rows_truth_cols_pred")
+
+
+def _ncsa_findings(R) -> List[str]:
+    """Headline findings computed from the evaluation reports (with = ncsa-primary-hc, without = ncsa-lodo-nonc-hc)."""
+    W, N = R.get("ncsa-primary-hc"), R.get("ncsa-lodo-nonc-hc")
+    if not (W and N):
+        return []
+
+    def mf1(rep, h):
+        return (_head(rep, h) or {}).get("pooled", {}).get("macro_f1")
+
+    def pc(rep, h, c, ds=None):
+        r = _head(rep, h) or {}
+        src = r.get("per_dataset", {}).get(ds, {}) if ds else r.get("pooled", {})
+        return (src.get("per_class") or {}).get(c) or {}
+
+    def gate(rep, h, c):
+        g = (_head(rep, h) or {}).get("gate", {}).get(c) or {}
+        return f"{g.get('val_status', 'unsupported')}→{g.get('final_status', '–')}" if g else "unsupported"
+
+    def prf(v):
+        return f"{f(v.get('precision'), 2)}/{f(v.get('recall'), 2)}/{f(v.get('f1'), 2)}" if v.get("supported_by_head") else "unsupported"
+
+    L = ["### Key findings (computed from the sealed reports)", ""]
+    L.append(f"- Pooled macro-F1 without → with NC-SA data: posture {f(mf1(N, 'posture'))} → {f(mf1(W, 'posture'))}, "
+             f"locomotion {f(mf1(N, 'locomotion'))} → {f(mf1(W, 'locomotion'))}, arm_behavior {f(mf1(N, 'arm_behavior'))} → "
+             f"{f(mf1(W, 'arm_behavior'))} (same eight-set test windows; CIs in the headline table).")
+    bw, sl = pc(W, "locomotion", "brisk_walking"), ((_head(W, "locomotion") or {}).get("single_label") or {}).get("per_class", {})
+    g_m, g_c = _cm(R, "ncsa-primary-hc", "locomotion", "gotov")
+    w_m, w_c = _cm(R, "ncsa-primary-hc", "locomotion", "wisdm2019_watch")
+    c_m, c_c = _cm(R, "ncsa-primary-hc", "locomotion", "capture24")
+    split = ""
+    if g_m and w_m and c_m:
+        i_w, i_b = g_c.index("walking"), g_c.index("brisk_walking")
+        split = (f" On the only pace-labelled test windows (GOTOV07) the fast walk is called `walking` "
+                 f"{g_m[i_b][i_w]}/{sum(g_m[i_b])} times and `brisk_walking` {g_m[i_b][i_b]}/{sum(g_m[i_b])}; slow/medium walking "
+                 f"is `walking` {g_m[i_w][i_w]}/{sum(g_m[i_w])}. Pace-unknown walking goes the other way: WISDM walking "
+                 f"(set target) is argmax `brisk_walking` {w_m[i_b][i_b]}/{sum(w_m[i_b]) + sum(w_m[i_w])} times, Capture-24 "
+                 f"free-living walking `brisk_walking` {c_m[i_b][i_b]} vs `walking` {c_m[i_w][i_w]} windows.")
+    L.append(f"- **brisk_walking becomes supported (GOTOV walkingFast) but does not learn pace.** Pooled set-aware "
+             f"P/R/F1 {prf(bw)}, status {gate(W, 'locomotion', 'brisk_walking')} — earned on pace-unknown walking "
+             f"{{walking, brisk_walking}} windows, which count as correct for either member; single-label precision/recall "
+             f"{f((sl.get('brisk_walking') or {}).get('precision'), 2)}/{f((sl.get('brisk_walking') or {}).get('recall'), 2)} "
+             f"(n = {f((sl.get('brisk_walking') or {}).get('support'))}).{split} `walking` drops to "
+             f"{gate(W, 'locomotion', 'walking')} and is merged into `brisk_walking` "
+             f"(final merge_into {((W.get('seal') or {}).get('merge_into') or {}).get('locomotion', {})}): the decoder would "
+             f"read ordinary walking as brisk. The split the head learned is older-adult/slow vs young/lab walking, not "
+             f"pace — **do not use brisk_walking from these bundles as a pace signal**; without GOTOV it stays unsupported "
+             f"(covered by `walking`, {gate(N, 'locomotion', 'walking')}).")
+    ex = pc(W, "arm_behavior", "exercise_motion")
+    exw = pc(W, "arm_behavior", "exercise_motion", "wear")
+    gt = ((_head(W, "arm_behavior") or {}).get("gate", {}).get("exercise_motion") or {}).get("test") or {}
+    L.append(f"- **exercise_motion becomes a class** (WEAR only): unsupported without WEAR; with it P/R/F1 {prf(ex)}, status "
+             f"{gate(W, 'arm_behavior', 'exercise_motion')} (WEAR test {prf(exw)}, 5 subjects; pooled gate precision "
+             f"{f(gt.get('precision'))} at n_acc {f(gt.get('n_acc'))}, CP95 lower bound {f(gt.get('cp_lower_95'))} < 0.90 -> weak). "
+             f"`ncsa-lodo-nowear-hc` has no exercise_motion class at all.")
+    rn_n, rn_w = pc(N, "locomotion", "running", "wear"), pc(W, "locomotion", "running", "wear")
+    st_n, st_w = pc(N, "locomotion", "stationary", "wear"), pc(W, "locomotion", "stationary", "wear")
+    L.append(f"- WEAR test (5 subjects): running {prf(rn_n)} → {prf(rn_w)}; stationary (stretching) {prf(st_n)} → "
+             f"{prf(st_w)}. Without WEAR, stationary is demoted strong→abstain by the WEAR test gate "
+             f"({gate(N, 'locomotion', 'stationary')}; with WEAR {gate(W, 'locomotion', 'stationary')}).")
+    rec_n, rec_w = pc(N, "posture", "recumbent", "gotov"), pc(W, "posture", "recumbent", "gotov")
+    se_n, se_w = pc(N, "posture", "seated_likely", "gotov"), pc(W, "posture", "seated_likely", "gotov")
+    up_n, up_w = pc(N, "posture", "upright_stationary", "gotov"), pc(W, "posture", "upright_stationary", "gotov")
+    L.append(f"- GOTOV test (7 older adults, awake lying): recumbent {prf(rec_n)} → {prf(rec_w)}, seated_likely {prf(se_n)} → "
+             f"{prf(se_w)}, upright_stationary {prf(up_n)} → {prf(up_w)}. GOTOV's own test gate demotes recumbent and "
+             f"seated_likely to abstain in every ncsa bundle (with: {gate(W, 'posture', 'recumbent')} / "
+             f"{gate(W, 'posture', 'seated_likely')}): awake lying vs reclined sitting of older adults stays below 0.80 precision.")
+    gi_n = (_head(N, "movement_intensity") or {}).get("per_dataset", {}).get("gotov", {})
+    gi_w = (_head(W, "movement_intensity") or {}).get("per_dataset", {}).get("gotov", {})
+    L.append(f"- movement_intensity on GOTOV measured MET (n = {f(gi_w.get('n'))} windows, 7 participants): MAE "
+             f"{f(gi_n.get('mae'))} → {f(gi_w.get('mae'))} (constant = test mean: {f(gi_w.get('mae_constant_test_mean'))}), "
+             f"R² {f(gi_n.get('r2'))} → {f(gi_w.get('r2'))}, Spearman {f(gi_n.get('spearman'))} → {f(gi_w.get('spearman'))}.")
+    return L + [""]
+
+
 def _ncsa_section(R, cw) -> List[str]:
     L = ["## With vs without NC-SA data (GOTOV + WEAR, CC BY-NC-SA 4.0; licence decision 2026-10-06)", "",
          "The owner approved non-commercial use of GOTOV and WEAR on 2026-10-06; sets with no stated licence "
@@ -461,7 +541,8 @@ def _ncsa_section(R, cw) -> List[str]:
          "(sealed) like every other bundle. `ncsa-lodo-nonc-hc` = **without** NC-SA data (six CC BY sets; archs and OOD "
          "method fixed from `ncsa-primary-hc` / `ncsa-ood-hc`); `ncsa-primary-hc` = **with**; `ncsa-lodo-nogotov-hc` / "
          "`ncsa-lodo-nowear-hc` leave one NC-SA set out.", "", "### Caveats", ""]
-    L += [f"- {c}" for c in NCSA_CAVEATS] + ["", "### Crosswalk rows trained since 2026-10-06", ""] + _ncsa_mapping_table(cw)
+    L += [f"- {c}" for c in NCSA_CAVEATS] + [""] + _ncsa_findings(R)
+    L += ["### Crosswalk rows trained since 2026-10-06", ""] + _ncsa_mapping_table(cw)
     L += ["### Headline (pooled ncsa test split)", ""] + _headline(R, NCSA_ALL)
     L += ["### Per-class test P/R/F1 and final status — without vs with", "",
           "Pooled over the eight-set test split. `unsupported` = the class failed the train-support rule in that bundle "

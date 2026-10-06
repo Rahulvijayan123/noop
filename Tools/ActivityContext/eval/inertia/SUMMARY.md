@@ -6,26 +6,35 @@ Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_c
 
 ## Experiments
 
-| experiment | role | encoder | window | training datasets | bundle | evaluated sha256 | sealed sha256 | git commit | evaluated |
-|---|---|---|---|---|---|---|---|---|---|
-| ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-hc` | `811ef6e2a28314d4` | `1a5110336832634b` | `a424d207e1c4` | yes (n=3) |
-| ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-nf` | `bb828ffb3235147e` | `5916b911e7d06282` | `a424d207e1c4` | yes (n=3) |
-| ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-ood-art` | `3784c9c5bdcc7085` | `9ff173b2a3eac8be` | `a424d207e1c4` | yes (n=3) |
-| primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-hc` | `f03f85acf7e06e9b` | `3fb1ae3e75c8b993` | `a424d207e1c4` | yes (n=3) |
-| primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-nf` | `e8a34e919d5d19b5` | `736eb93e440fa5da` | `a424d207e1c4` | yes (n=3) |
-| primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-art` | `c0eb1a045f749df3` | `1b8fadcc1521709a` | `a424d207e1c4` | yes (n=2) |
-| linear-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-hc` | `6dac0eddb1f9875c` | `55ec82170e80c93c` | `a424d207e1c4` | yes (n=3) |
-| mlp-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-mlp-hc` | `97115d4109c57015` | `30e84df65b21ab31` | `a424d207e1c4` | yes (n=3) |
-| linear-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-art` | `f0a839da6c42f169` | `20fe1b0a40e86883` | `a424d207e1c4` | yes (n=2) |
-| mlp-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-mlp-art` | `8df3f9f10866715e` | `813cf70ad14be481` | `a424d207e1c4` | yes (n=2) |
-| linear-nf | arch | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-linear-nf` | `ac609c4fd7435a28` | `1f001e014c71bb3c` | `a424d207e1c4` | yes (n=3) |
-| w10-hc | window | hc | w10 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-w10-hc` | `1cd36c60fda273ab` | `e57e9f8a7c661bf2` | `a424d207e1c4` | yes (n=3) |
-| lodo-noc24-hc | lodo | hc | w30 | wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-lodo-noc24-hc` | `62b9566ced026d1e` | `af46646f8e6721dc` | `a424d207e1c4` | yes (n=3) |
-| lodo-c24only-hc | lodo | hc | w30 | capture24 | `shadow-lodo-c24only-hc` | `0af9f28cbb271e4e` | `59970578b019ff8e` | `a424d207e1c4` | yes (n=3) |
-| lodo-nohhar-hc | lodo | hc | w30 | capture24, wisdm2019_watch, pamap2, mhealth, opportunity | `shadow-lodo-nohhar-hc` | `cb2cd3200eaace91` | `2bfa1d9f339a156a` | `a424d207e1c4` | yes (n=3) |
-| seed1-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-seed1-hc` | `1141f03851e3f4e0` | `f91941703727b82d` | `a424d207e1c4` | yes (n=3) |
-| seed2-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-seed2-hc` | `796029c9cb29261c` | `9128922bb4810dd7` | `a424d207e1c4` | yes (n=3) |
-| primary-inertia1 | primary | inertia1 | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | `shadow-primary-inertia1` | `` | `–` | `–` | blocked |
+| experiment | role | encoder | window | training datasets | training data licences | bundle | evaluated sha256 | sealed sha256 | git commit | evaluated |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-hc` | `811ef6e2a28314d4` | `1a5110336832634b` | `a424d207e1c4` | yes (n=3) |
+| ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-nf` | `bb828ffb3235147e` | `5916b911e7d06282` | `a424d207e1c4` | yes (n=3) |
+| ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-art` | `3784c9c5bdcc7085` | `9ff173b2a3eac8be` | `a424d207e1c4` | yes (n=3) |
+| primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-hc` | `f03f85acf7e06e9b` | `3fb1ae3e75c8b993` | `a424d207e1c4` | yes (n=3) |
+| primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-nf` | `e8a34e919d5d19b5` | `736eb93e440fa5da` | `a424d207e1c4` | yes (n=3) |
+| primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-art` | `c0eb1a045f749df3` | `1b8fadcc1521709a` | `a424d207e1c4` | yes (n=2) |
+| linear-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-hc` | `6dac0eddb1f9875c` | `55ec82170e80c93c` | `a424d207e1c4` | yes (n=3) |
+| mlp-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-mlp-hc` | `97115d4109c57015` | `30e84df65b21ab31` | `a424d207e1c4` | yes (n=3) |
+| linear-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-art` | `f0a839da6c42f169` | `20fe1b0a40e86883` | `a424d207e1c4` | yes (n=2) |
+| mlp-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-mlp-art` | `8df3f9f10866715e` | `813cf70ad14be481` | `a424d207e1c4` | yes (n=2) |
+| linear-nf | arch | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-nf` | `ac609c4fd7435a28` | `1f001e014c71bb3c` | `a424d207e1c4` | yes (n=3) |
+| w10-hc | window | hc | w10 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-w10-hc` | `1cd36c60fda273ab` | `e57e9f8a7c661bf2` | `a424d207e1c4` | yes (n=3) |
+| lodo-noc24-hc | lodo | hc | w30 | wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-lodo-noc24-hc` | `62b9566ced026d1e` | `af46646f8e6721dc` | `a424d207e1c4` | yes (n=3) |
+| lodo-c24only-hc | lodo | hc | w30 | capture24 | CC BY 4.0 | `shadow-lodo-c24only-hc` | `0af9f28cbb271e4e` | `59970578b019ff8e` | `a424d207e1c4` | yes (n=3) |
+| lodo-nohhar-hc | lodo | hc | w30 | capture24, wisdm2019_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-lodo-nohhar-hc` | `cb2cd3200eaace91` | `2bfa1d9f339a156a` | `a424d207e1c4` | yes (n=3) |
+| seed1-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-seed1-hc` | `1141f03851e3f4e0` | `f91941703727b82d` | `a424d207e1c4` | yes (n=3) |
+| seed2-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-seed2-hc` | `796029c9cb29261c` | `9128922bb4810dd7` | `a424d207e1c4` | yes (n=3) |
+| primary-inertia1 | primary | inertia1 | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-inertia1` | `` | `–` | `–` | blocked |
+| ncsa-ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-hc` | `8f1faee3ae086939` | `8fe56b2c8875caad` | `bed5973b5533` | yes (n=1) |
+| ncsa-ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-nf` | `d23ca68b7a8c621f` | `b41cab54d203f51d` | `bed5973b5533` | yes (n=1) |
+| ncsa-ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-art` | `ed3a9c821ded3dbc` | `0c06a002ff50006f` | `bed5973b5533` | yes (n=1) |
+| ncsa-primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-hc` | `ee9681ebd651a82f` | `45f0709c20f6df3c` | `bed5973b5533` | yes (n=1) |
+| ncsa-primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-nf` | `35be0bc2e82a0e88` | `d56a50d98ea3b46c` | `bed5973b5533` | yes (n=1) |
+| ncsa-primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-art` | `5b83956e960d14c6` | `a3f0cb0974d84e4c` | `bed5973b5533` | yes (n=1) |
+| ncsa-lodo-nonc-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ncsa-lodo-nonc-hc` | `f311783e3ad39b79` | `a1ff1b8ff0188040` | `bed5973b5533` | yes (n=1) |
+| ncsa-lodo-nogotov-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-lodo-nogotov-hc` | `761e347000c7ccea` | `09c4fd0c64b2ae5e` | `bed5973b5533` | yes (n=1) |
+| ncsa-lodo-nowear-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-lodo-nowear-hc` | `0ae6762ef47e5e49` | `ae4238c6a36fedd8` | `bed5973b5533` | yes (n=1) |
 
 Every evaluated bundle is SEALED: `test_gate.json` (per class val status, pooled + per-dataset test gates, final status, recomputed merges) is listed in the bundle's manifest, so the served artifact carries the one-shot gate; `load_bundle` refuses a gate that promotes or was made for another bundle.
 
@@ -431,15 +440,435 @@ macro-F1 = sklearn convention (union of true and predicted classes); 'present-on
 | locomotion | 0.678 | 0.666 | 0.687 | 0.677 ± 0.011 |
 | arm_behavior | 0.422 | 0.457 | 0.448 | 0.442 ± 0.018 |
 
+## With vs without NC-SA data (GOTOV + WEAR, CC BY-NC-SA 4.0; licence decision 2026-10-06)
+
+The owner approved non-commercial use of GOTOV and WEAR on 2026-10-06; sets with no stated licence (ExtraSensory, RealWorld 2016, UT complex, UCI HMP) stay excluded. The `ncsa-*` experiments were declared in `experiments.py` before any of their test splits was opened, trained from a clean commit and evaluated once (sealed) like every other bundle. `ncsa-lodo-nonc-hc` = **without** NC-SA data (six CC BY sets; archs and OOD method fixed from `ncsa-primary-hc` / `ncsa-ood-hc`); `ncsa-primary-hc` = **with**; `ncsa-lodo-nogotov-hc` / `ncsa-lodo-nowear-hc` leave one NC-SA set out.
+
+### Caveats
+
+- **GOTOV is older adults** (35 participants, 59.5-81.3 y, BMI 23-35, recruited > 60 y) in a scripted protocol: its walking speeds are **instructed** ('slow / medium / fast pace'), never measured, so `brisk_walking` here means 'an older adult asked to walk fast' — not a cadence or speed threshold, and not validated on younger or free-living walkers. Outdoor walking exists for 22 participants only; the frozen split leaves **one** GOTOV test participant with walking (GOTOV07: 19 `brisk_walking` and 33 `walking` test windows), so every GOTOV walking / brisk_walking / cycling test number is a one-subject, descriptive result and the test gate cannot demote with < 30 accepted windows.
+- GOTOV labels are protocol-imputed (researcher-recorded start/end): the first/last 10 s of every activity are MASK (`gotov-guard-10s`), and transitions give interior negatives only. Its movement_intensity target is the **measured** COSMED K4b2 METS (time-weighted per window; the first 60 s of each activity MASK for VO2 on-kinetics; 4 of 35 participants have no COSMED) — whole-body energy expenditure of older adults, not wrist motion.
+- WEAR is 24 (mostly young) adults doing 18 outdoor workouts on a Bangle.js; **one wrist per subject** (left unless < 95 % finite) so no movement is counted twice. `exercise_motion` is supervised only by WEAR push-ups (+complex), burpees, bench-dips and jogging with arm circles (sit-ups / lunges stay MASK: 'arms may be static').
+- Both sets are **CC BY-NC-SA 4.0**: every `ncsa-*` bundle except `ncsa-lodo-nonc-hc` records `training_data_licences` = [CC BY 4.0, CC BY-NC-SA 4.0] and may only be used non-commercially (Nara is non-commercial; owner decision 2026-10-06). Bundles stay outside git.
+- The `ncsa-*` test split = the six CC BY test splits + the GOTOV (7) and WEAR (5) test subjects, so its pooled numbers are not comparable with the sealed `primary-*` bundles above; compare `ncsa-primary-hc` with `ncsa-lodo-nonc-hc` (same test windows, same archs and OOD method, CC BY data only). WISDM / PAMAP2 test caveats (G-8) apply unchanged.
+
+### Key findings (computed from the sealed reports)
+
+- Pooled macro-F1 without → with NC-SA data: posture 0.656 → 0.658, locomotion 0.664 → 0.693, arm_behavior 0.417 → 0.543 (same eight-set test windows; CIs in the headline table).
+- **brisk_walking becomes supported (GOTOV walkingFast) but does not learn pace.** Pooled set-aware P/R/F1 0.92/0.82/0.87, status strong→strong — earned on pace-unknown walking {walking, brisk_walking} windows, which count as correct for either member; single-label precision/recall 0.00/0.00 (n = 19). On the only pace-labelled test windows (GOTOV07) the fast walk is called `walking` 19/19 times and `brisk_walking` 0/19; slow/medium walking is `walking` 33/33. Pace-unknown walking goes the other way: WISDM walking (set target) is argmax `brisk_walking` 67/70 times, Capture-24 free-living walking `brisk_walking` 2279 vs `walking` 1938 windows. `walking` drops to abstain→abstain and is merged into `brisk_walking` (final merge_into {'walking': 'brisk_walking'}): the decoder would read ordinary walking as brisk. The split the head learned is older-adult/slow vs young/lab walking, not pace — **do not use brisk_walking from these bundles as a pace signal**; without GOTOV it stays unsupported (covered by `walking`, strong→strong).
+- **exercise_motion becomes a class** (WEAR only): unsupported without WEAR; with it P/R/F1 0.69/0.86/0.77, status strong→weak (WEAR test 1.00/0.83/0.91, 5 subjects; pooled gate precision 0.964 at n_acc 56, CP95 lower bound 0.892 < 0.90 -> weak). `ncsa-lodo-nowear-hc` has no exercise_motion class at all.
+- WEAR test (5 subjects): running 1.00/0.39/0.56 → 1.00/0.96/0.98; stationary (stretching) 0.65/0.82/0.73 → 0.81/0.91/0.86. Without WEAR, stationary is demoted strong→abstain by the WEAR test gate (strong→abstain; with WEAR strong→weak).
+- GOTOV test (7 older adults, awake lying): recumbent 0.53/0.72/0.61 → 0.63/0.79/0.70, seated_likely 0.50/0.56/0.53 → 0.67/0.68/0.67, upright_stationary 1.00/0.12/0.21 → 0.98/0.55/0.70. GOTOV's own test gate demotes recumbent and seated_likely to abstain in every ncsa bundle (with: weak→abstain / weak→abstain): awake lying vs reclined sitting of older adults stays below 0.80 precision.
+- movement_intensity on GOTOV measured MET (n = 333 windows, 7 participants): MAE 0.123 → 0.103 (constant = test mean: 0.206), R² 0.587 → 0.691, Spearman 0.752 → 0.802.
+
+### Crosswalk rows trained since 2026-10-06
+
+| dataset | head | trained rows (source label → target, confidence) |
+|---|---|---|
+| gotov | posture | standing → upright_stationary (H); lyingDownLeft → recumbent (H); lyingDownRight → recumbent (H); sittingSofa → seated_likely (H); sittingCouch → seated_likely (M); sittingChair → seated_likely (H); dishwashing → upright_stationary (M) |
+| gotov | locomotion | standing → stationary (H); lyingDownLeft → stationary (H); lyingDownRight → stationary (H); sittingSofa → stationary (H); sittingCouch → stationary (H); sittingChair → stationary (H); walkingStairsUp → stairs (H); dishwashing → stationary (M); stakingShelves → other (M); vacuumCleaning → other (M); walkingSlow → walking (H); walkingNormal → walking (M); walkingFast → brisk_walking (M); cycling → cycling (H) |
+| gotov | arm_behavior | sittingChair → desk_like (M) |
+| gotov | transition | standing → none (M); lyingDownLeft → none (M); lyingDownRight → none (M); sittingSofa → none (M); sittingCouch → none (M); sittingChair → none (M); dishwashing → none (M); walkingSlow → none (M); walkingNormal → none (M); walkingFast → none (M) |
+| gotov | movement_intensity | standing → measured MET (H); lyingDownLeft → measured MET (H); lyingDownRight → measured MET (H); sittingSofa → measured MET (H); sittingCouch → measured MET (H); sittingChair → measured MET (H); walkingStairsUp → measured MET (H); dishwashing → measured MET (H); stakingShelves → measured MET (H); vacuumCleaning → measured MET (H); walkingSlow → measured MET (H); walkingNormal → measured MET (H); walkingFast → measured MET (H); cycling → measured MET (H) |
+| wear | locomotion | jogging → running (H); jogging (rotating arms) → running (M); jogging (skipping) → running (M); jogging (sidesteps) → running (M); jogging (butt-kicks) → running (M); stretching (triceps) → stationary (M); stretching (lunging) → stationary (M); stretching (shoulders) → stationary (M); stretching (hamstrings) → stationary (M); stretching (lumbar rotation) → stationary (M); push-ups → other (M); push-ups (complex) → other (M); sit-ups → other (M); sit-ups (complex) → other (M); burpees → other (M); lunges → other (M); lunges (complex) → other (M); bench-dips → other (M) |
+| wear | arm_behavior | jogging (rotating arms) → exercise_motion (H); push-ups → exercise_motion (H); push-ups (complex) → exercise_motion (H); burpees → exercise_motion (H); bench-dips → exercise_motion (H) |
+
+Not trained (Agent C left them unused: low confidence or candidate): gotov/sittingSofa/arm_behavior (low); gotov/dishwashing/arm_behavior (low); gotov/vacuumCleaning/arm_behavior (low); wear/jogging/transition (low); wear/jogging (rotating arms)/transition (low); wear/jogging (skipping)/transition (low); wear/jogging (sidesteps)/transition (low); wear/jogging (butt-kicks)/transition (low); wear/sit-ups/arm_behavior (medium); wear/sit-ups (complex)/arm_behavior (medium); wear/lunges/arm_behavior (medium); wear/lunges (complex)/arm_behavior (medium).
+
+### Headline (pooled ncsa test split)
+
+| experiment | head | n | macro-F1 [95% CI] | macro-F1 present-only (legacy) | balanced acc [95% CI] | NLL | Brier | ECE-15 | majority macro-F1 | predicted while absent |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | posture | 74,861 | 0.656 [0.639, 0.674] | 0.656 [0.639, 0.674] | 0.644 [0.629, 0.660] | 0.392 | 0.218 | 0.022 | 0.249 | – |
+| ncsa-lodo-nonc-hc | locomotion | 92,557 | 0.664 [0.631, 0.686] | 0.664 [0.631, 0.686] | 0.623 [0.583, 0.656] | 0.380 | 0.182 | 0.022 | 0.127 | – |
+| ncsa-lodo-nonc-hc | arm_behavior | 21,035 | 0.417 [0.363, 0.462] | 0.417 [0.363, 0.462] | 0.471 [0.432, 0.546] | 0.665 | 0.441 | 0.065 | 0.262 | – |
+| ncsa-primary-hc | posture | 74,861 | 0.658 [0.639, 0.676] | 0.658 [0.639, 0.676] | 0.645 [0.631, 0.662] | 0.384 | 0.214 | 0.021 | 0.249 | – |
+| ncsa-primary-hc | locomotion | 92,557 | 0.693 [0.668, 0.721] | 0.693 [0.668, 0.721] | 0.664 [0.631, 0.703] | 0.368 | 0.177 | 0.017 | 0.111 | – |
+| ncsa-primary-hc | arm_behavior | 21,113 | 0.543 [0.504, 0.599] | 0.543 [0.504, 0.599] | 0.592 [0.546, 0.686] | 0.648 | 0.424 | 0.067 | 0.196 | – |
+| ncsa-lodo-nogotov-hc | posture | 74,861 | 0.656 [0.639, 0.674] | 0.656 [0.639, 0.674] | 0.644 [0.629, 0.660] | 0.392 | 0.218 | 0.022 | 0.249 | – |
+| ncsa-lodo-nogotov-hc | locomotion | 92,557 | 0.697 [0.663, 0.724] | 0.697 [0.663, 0.724] | 0.670 [0.635, 0.705] | 0.367 | 0.177 | 0.019 | 0.127 | – |
+| ncsa-lodo-nogotov-hc | arm_behavior | 21,113 | 0.551 [0.514, 0.602] | 0.551 [0.514, 0.602] | 0.590 [0.546, 0.683] | 0.639 | 0.418 | 0.065 | 0.196 | – |
+| ncsa-lodo-nowear-hc | posture | 74,861 | 0.657 [0.639, 0.675] | 0.657 [0.639, 0.675] | 0.645 [0.631, 0.661] | 0.384 | 0.214 | 0.022 | 0.249 | – |
+| ncsa-lodo-nowear-hc | locomotion | 92,557 | 0.680 [0.651, 0.697] | 0.680 [0.651, 0.697] | 0.651 [0.618, 0.682] | 0.377 | 0.180 | 0.016 | 0.111 | – |
+| ncsa-lodo-nowear-hc | arm_behavior | 21,035 | 0.380 [0.326, 0.458] | 0.380 [0.326, 0.458] | 0.403 [0.373, 0.489] | 0.672 | 0.439 | 0.067 | 0.262 | – |
+| ncsa-primary-nf | posture | 74,861 | 0.605 [0.590, 0.617] | 0.605 [0.590, 0.617] | 0.603 [0.589, 0.615] | 0.476 | 0.263 | 0.037 | 0.249 | – |
+| ncsa-primary-nf | locomotion | 92,557 | 0.411 [0.390, 0.427] | 0.411 [0.390, 0.427] | 0.409 [0.396, 0.425] | 0.514 | 0.233 | 0.047 | 0.111 | – |
+| ncsa-primary-nf | arm_behavior | 21,113 | 0.413 [0.378, 0.464] | 0.413 [0.378, 0.464] | 0.452 [0.420, 0.527] | 0.725 | 0.465 | 0.068 | 0.196 | – |
+| ncsa-primary-art | posture | 74,861 | 0.457 [0.436, 0.479] | 0.457 [0.436, 0.479] | 0.470 [0.446, 0.495] | 0.697 | 0.430 | 0.066 | 0.249 | – |
+| ncsa-primary-art | locomotion | 92,557 | 0.284 [0.268, 0.300] | 0.284 [0.268, 0.300] | 0.278 [0.265, 0.293] | 0.643 | 0.300 | 0.021 | 0.111 | – |
+| ncsa-primary-art | arm_behavior | 21,113 | 0.360 [0.320, 0.394] | 0.360 [0.320, 0.394] | 0.357 [0.325, 0.387] | 0.745 | 0.460 | 0.064 | 0.196 | – |
+
+macro-F1 = sklearn convention (union of true and predicted classes); 'present-only' = the earlier number over classes with test support only. † = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+
+### Per-class test P/R/F1 and final status — without vs with
+
+Pooled over the eight-set test split. `unsupported` = the class failed the train-support rule in that bundle (< 200 train windows / 5 train subjects / 2 val subjects); a set target {walking, brisk_walking} counts as correct for either member.
+
+#### posture
+
+| class | test support | ncsa-lodo-nonc-hc F1 (P/R) · val→final | ncsa-primary-hc F1 (P/R) · val→final | ncsa-lodo-nogotov-hc F1 (P/R) · val→final | ncsa-lodo-nowear-hc F1 (P/R) · val→final | ncsa-primary-hc P single-label (n) | ncsa-primary-hc demotion reasons |
+|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | 38,376 | 0.91 (0.90/0.92) · weak→abstain | 0.92 (0.91/0.92) · weak→abstain | 0.91 (0.90/0.92) · weak→abstain | 0.92 (0.91/0.92) · weak→abstain | 0.91 (36,065) | gotov test: precision 0.627 at n_acc 158 -> abstain |
+| seated_likely | 32,187 | 0.84 (0.81/0.87) · weak→abstain | 0.84 (0.81/0.88) · weak→abstain | 0.84 (0.81/0.87) · weak→abstain | 0.84 (0.81/0.88) · weak→abstain | 0.77 (25,868) | gotov test: precision 0.668 at n_acc 184 -> abstain |
+| upright_stationary | 4,298 | 0.22 (0.47/0.14) · abstain→abstain | 0.21 (0.48/0.14) · abstain→abstain | 0.21 (0.47/0.14) · abstain→abstain | 0.21 (0.48/0.14) · abstain→abstain | 0.54 (4,298) | – |
+| postural_transition | 0 | unsupported | unsupported | unsupported | unsupported | – | – |
+
+#### locomotion
+
+| class | test support | ncsa-lodo-nonc-hc F1 (P/R) · val→final | ncsa-primary-hc F1 (P/R) · val→final | ncsa-lodo-nogotov-hc F1 (P/R) · val→final | ncsa-lodo-nowear-hc F1 (P/R) · val→final | ncsa-primary-hc P single-label (n) | ncsa-primary-hc demotion reasons |
+|---|---|---|---|---|---|---|---|
+| stationary | 73,703 | 0.94 (0.91/0.97) · strong→abstain | 0.94 (0.91/0.97) · strong→weak | 0.94 (0.91/0.97) · strong→weak | 0.94 (0.91/0.97) · strong→abstain | 0.93 (73,462) | pamap2 test: precision 0.918 at n_acc 158 -> weak |
+| walking | 6,265 | 0.66 (0.79/0.56) · strong→strong | 0.48 (0.76/0.35) · abstain→abstain | 0.66 (0.80/0.57) · strong→strong | 0.51 (0.76/0.39) · weak→abstain | 0.05 (33) | – |
+| brisk_walking | 2,305 | unsupported | 0.87 (0.92/0.82) · strong→strong | unsupported | 0.89 (0.93/0.85) · strong→strong | 0.00 (19) | – |
+| running | 296 | 0.80 (0.92/0.71) · strong→weak | 0.87 (0.89/0.85) · strong→weak | 0.88 (0.88/0.88) · strong→weak | 0.81 (0.95/0.71) · strong→weak | 0.95 (296) | pooled test: precision 0.930 at n_acc 229 -> weak |
+| stairs | 152 | 0.69 (0.65/0.74) · weak→abstain | 0.76 (0.70/0.84) · strong→weak | 0.76 (0.72/0.82) · weak→abstain | 0.69 (0.59/0.84) · strong→strong | 0.89 (152) | pooled test: precision 0.955 at n_acc 88 -> weak |
+| cycling | 855 | 0.69 (0.73/0.64) · weak→abstain | 0.72 (0.75/0.69) · strong→weak | 0.70 (0.76/0.65) · weak→abstain | 0.71 (0.74/0.69) · strong→weak | 0.86 (855) | pooled test: precision 0.934 at n_acc 361 -> weak |
+| vehicle_motion | 3,518 | 0.50 (0.71/0.38) · weak→weak | 0.54 (0.72/0.43) · weak→weak | 0.55 (0.72/0.45) · weak→weak | 0.52 (0.68/0.42) · weak→weak | 0.76 (3,518) | – |
+| other | 5,463 | 0.38 (0.40/0.36) · abstain→abstain | 0.37 (0.37/0.36) · abstain→abstain | 0.38 (0.41/0.36) · abstain→abstain | 0.37 (0.37/0.36) · abstain→abstain | 0.57 (5,463) | – |
+
+#### arm_behavior
+
+| class | test support | ncsa-lodo-nonc-hc F1 (P/R) · val→final | ncsa-primary-hc F1 (P/R) · val→final | ncsa-lodo-nogotov-hc F1 (P/R) · val→final | ncsa-lodo-nowear-hc F1 (P/R) · val→final | ncsa-primary-hc P single-label (n) | ncsa-primary-hc demotion reasons |
+|---|---|---|---|---|---|---|---|
+| quiet | 6,845 | 0.00 (0.08/0.00) · abstain→abstain | 0.06 (0.63/0.03) · abstain→abstain | 0.07 (0.61/0.04) · abstain→abstain | 0.06 (0.70/0.03) · abstain→abstain | 0.63 (6,845) | – |
+| desk_like | 13,608 | 0.79 (0.66/0.99) · weak→abstain | 0.79 (0.66/0.99) · weak→abstain | 0.79 (0.66/0.98) · weak→abstain | 0.79 (0.66/0.99) · weak→abstain | 0.66 (13,608) | pooled test: precision 0.777 at n_acc 11931 -> abstain |
+| fidgeting | 0 | unsupported | unsupported | unsupported | unsupported | – | – |
+| repetitive_hand_motion | 582 | 0.46 (0.51/0.42) · strong→abstain | 0.56 (0.64/0.49) · strong→abstain | 0.55 (0.62/0.49) · strong→abstain | 0.28 (0.63/0.18) · strong→abstain | 0.64 (582) | pooled test: precision 0.903 at n_acc 185 -> weak; capture24 test: precision 0.500 at n_acc 36 -> abstain |
+| active_gesturing | 0 | unsupported | unsupported | unsupported | unsupported | – | – |
+| exercise_motion | 0 | unsupported | 0.77 (0.69/0.86) · strong→weak | 0.79 (0.74/0.85) · strong→weak | unsupported | 0.69 (78) | pooled test: precision 0.964 at n_acc 56 -> weak |
+| other | 0 | unsupported | unsupported | unsupported | unsupported | – | – |
+
+### GOTOV / WEAR test subjects (key classes)
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population. GOTOV walking / brisk_walking / cycling test windows all come from ONE participant (GOTOV07).
+
+| test dataset | head | class | ncsa-lodo-nonc-hc P/R/F1 (n) | ncsa-primary-hc P/R/F1 (n) | ncsa-lodo-nogotov-hc P/R/F1 (n) | ncsa-lodo-nowear-hc P/R/F1 (n) | ncsa-primary-nf P/R/F1 (n) |
+|---|---|---|---|---|---|---|---|
+| gotov | locomotion | stationary | 0.90/0.87/0.88 (386) | 0.96/0.96/0.96 (386) | 0.93/0.85/0.89 (386) | 0.96/0.93/0.94 (386) | 0.78/0.90/0.84 (386) |
+| gotov | locomotion | walking | 0.84/1.00/0.91 (52) | 0.63/1.00/0.78 (33) | 0.95/1.00/0.97 (52) | 0.63/1.00/0.78 (33) | 0.54/1.00/0.70 (33) |
+| gotov | locomotion | brisk_walking | unsupported (0) | 0.00/0.00/0.00 (19) | unsupported (0) | 0.00/0.00/0.00 (19) | 0.00/0.00/0.00 (19) |
+| gotov | locomotion | cycling | 1.00/0.91/0.96 (47) | 1.00/1.00/1.00 (47) | 1.00/0.94/0.97 (47) | 0.98/1.00/0.99 (47) | 0.60/0.06/0.12 (47) |
+| gotov | locomotion | other | 0.56/0.57/0.57 (100) | 0.84/0.83/0.83 (100) | 0.57/0.74/0.64 (100) | 0.76/0.84/0.80 (100) | 0.67/0.46/0.54 (100) |
+| gotov | posture | recumbent (mostly sleep-period lying in training data) | 0.53/0.72/0.61 (126) | 0.63/0.79/0.70 (126) | 0.54/0.72/0.61 (126) | 0.63/0.79/0.70 (126) | 0.46/0.82/0.59 (126) |
+| gotov | posture | seated_likely | 0.50/0.56/0.53 (182) | 0.67/0.68/0.67 (182) | 0.50/0.57/0.53 (182) | 0.67/0.68/0.67 (182) | 0.44/0.35/0.39 (182) |
+| gotov | posture | upright_stationary | 1.00/0.12/0.21 (78) | 0.98/0.55/0.70 (78) | 1.00/0.12/0.21 (78) | 0.98/0.55/0.70 (78) | 0.95/0.24/0.39 (78) |
+| gotov | arm_behavior | desk_like | 1.00/1.00/1.00 (63) | 1.00/1.00/1.00 (63) | 1.00/1.00/1.00 (63) | 1.00/1.00/1.00 (63) | 1.00/1.00/1.00 (63) |
+| wear | locomotion | stationary | 0.65/0.82/0.73 (112) | 0.81/0.91/0.86 (112) | 0.81/0.89/0.85 (112) | 0.67/0.89/0.77 (112) | 0.64/0.88/0.74 (112) |
+| wear | locomotion | running | 1.00/0.39/0.56 (93) | 1.00/0.96/0.98 (93) | 1.00/0.96/0.98 (93) | 1.00/0.34/0.51 (93) | 0.95/0.89/0.92 (93) |
+| wear | locomotion | other | 0.76/0.45/0.56 (114) | 0.94/0.77/0.85 (114) | 0.94/0.81/0.87 (114) | 0.75/0.52/0.61 (114) | 0.79/0.47/0.59 (114) |
+| wear | arm_behavior | exercise_motion | – | 1.00/0.83/0.91 (64) | 1.00/0.81/0.90 (64) | – | 1.00/0.56/0.72 (64) |
+
+### Per-dataset macro-F1 (ncsa test split)
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+
+| posture macro-F1 by test dataset | capture24 | gotov | hhar_watch (descriptive) | mhealth (descriptive) | opportunity (descriptive) | pamap2 (descriptive) | wisdm2019_watch |
+|---|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | 0.650 | 0.448 | 0.438 | 0.256 | 0.684 | 0.746 | 0.479 |
+| ncsa-primary-hc | 0.647 | 0.691 | 0.273 | 0.262 | 0.580 | 0.742 | 0.487 |
+| ncsa-lodo-nogotov-hc | 0.650 | 0.450 | 0.432 | 0.256 | 0.684 | 0.751 | 0.479 |
+| ncsa-lodo-nowear-hc | 0.646 | 0.691 | 0.293 | 0.262 | 0.580 | 0.748 | 0.487 |
+| ncsa-primary-nf | 0.607 | 0.455 | 0.030 | 0.133 | 0.448 | 0.507 | 0.173 |
+| ncsa-primary-art | 0.459 | 0.373 | 0.065 | 0.111 | 0.000 | 0.327 | 0.112 |
+
+| locomotion macro-F1 by test dataset | capture24 | gotov | hhar_watch (descriptive) | mhealth (descriptive) | opportunity (descriptive) | pamap2 (descriptive) | wear | wisdm2019_watch |
+|---|---|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | 0.560 | 0.664 | 0.966 | 0.750 | 0.319 | 0.757 | 0.308 | 0.742 |
+| ncsa-primary-hc | 0.577 | 0.714 | 0.780 | 0.987 | 1.000 | 0.729 | 0.536 | 0.541 |
+| ncsa-lodo-nogotov-hc | 0.568 | 0.694 | 0.985 | 0.845 | 1.000 | 0.722 | 0.539 | 0.630 |
+| ncsa-lodo-nowear-hc | 0.592 | 0.585 | 0.985 | 0.845 | 0.314 | 0.718 | 0.270 | 0.697 |
+| ncsa-primary-nf | 0.401 | 0.440 | 0.263 | 0.492 | 1.000 | 0.391 | 0.451 | 0.354 |
+| ncsa-primary-art | 0.262 | 0.377 | 0.251 | 0.391 | 1.000 | 0.258 | 0.706 | 0.411 |
+
+| arm_behavior macro-F1 by test dataset | capture24 | gotov | mhealth (descriptive) | pamap2 (descriptive) | wear | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | 0.361 | 1.000 | 0.000 | 0.295 | – | 0.850 |
+| ncsa-primary-hc | 0.304 | 1.000 | 0.333 | 0.500 | 0.453 | 0.915 |
+| ncsa-lodo-nogotov-hc | 0.306 | 1.000 | 0.333 | 0.500 | 0.448 | 0.912 |
+| ncsa-lodo-nowear-hc | 0.299 | 1.000 | 0.000 | 0.081 | – | 0.781 |
+| ncsa-primary-nf | 0.221 | 1.000 | 0.242 | 0.280 | 0.360 | 0.813 |
+| ncsa-primary-art | 0.291 | 1.000 | 0.000 | 0.231 | 0.281 | 0.333 |
+
+### Per-dataset per-class test P/R/F1 — ncsa-primary-hc and ncsa-lodo-nonc-hc
+
+*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe those subjects, not a population.
+† = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.
+
+#### ncsa-primary-hc — posture
+
+| class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38178) · gate 0.91@38454→weak | 0.63/0.79/0.70 (126) · gate 0.63@158→abstain | 0.00/0.00/0.00 (0) · gate 0.00@45→abstain | 0.33/1.00/0.50 (4) · gate 0.33@12→weak | 0.00/0.00/0.00 (0) | 0.90/0.82/0.86 (68) · gate 0.90@62→weak | 0.00/0.00/0.00 (0) · gate 0.00@20→weak | weak→abstain |
+| seated_likely | 0.81/0.88/0.85 (31771) · gate 0.81@34475→weak | 0.67/0.68/0.67 (182) · gate 0.67@184→abstain | 0.59/0.27/0.37 (37) · gate 0.59@17→weak | 0.00/0.00/0.00 (6) · gate 0.00@3→weak | 0.83/1.00/0.91 (30) · gate 0.83@36→weak | 0.66/0.72/0.69 (81) · gate 0.66@88→abstain | 0.68/0.80/0.74 (80) · gate 0.68@94→abstain | weak→abstain |
+| upright_stationary | 0.43/0.11/0.18 (4036) | 0.98/0.55/0.70 (78) | 0.92/0.30/0.45 (37) | 1.00/0.17/0.29 (6) | 1.00/0.14/0.25 (7) | 0.69/0.67/0.68 (55) | 1.00/0.57/0.73 (79) | abstain→abstain |
+
+| dataset | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.647 [0.630, 0.665] | 0.691 [0.577, 0.786]† | 0.273 [0.190, 0.325]† | 0.262 [0.167, 0.333]† | 0.580 [0.580, 0.580]† | 0.742 [0.707, 0.742]† | 0.487 [0.374, 0.565]† |
+
+#### ncsa-primary-hc — locomotion
+
+| class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wear (5 subj) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|---|---|
+| stationary | 0.91/0.97/0.94 (71954) · gate 0.97@64350→strong | 0.96/0.96/0.96 (386) · gate 1.00@327→strong | 0.99/1.00/0.99 (74) · gate 1.00@67→strong | 1.00/0.95/0.97 (19) · gate 1.00@16→weak | 1.00/1.00/1.00 (37) · gate 1.00@23→weak | 0.83/0.90/0.87 (187) · gate 0.92@158→weak | 0.81/0.91/0.86 (112) · gate 0.93@74→weak | 1.00/0.99/0.99 (937) · gate 1.00@797→strong | strong→weak |
+| walking | 0.76/0.35/0.48 (5578) | 0.63/1.00/0.78 (33) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/0.50/0.67 (2) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| brisk_walking | 0.92/0.82/0.87 (2785) · gate 0.97@1266→strong | 0.00/0.00/0.00 (19) | 0.95/1.00/0.97 (35) · gate 1.00@28→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.97/0.73/0.83 (41) · gate 1.00@15→weak | 0.00/0.00/0.00 (0) | 0.88/0.96/0.92 (70) · gate 1.00@57→strong | strong→strong |
+| running | 0.84/0.61/0.71 (103) · gate 0.93@57→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@7→weak | 0.00/0.00/0.00 (0) | 0.36/1.00/0.53 (10) · gate 0.45@22→weak | 1.00/0.96/0.98 (93) · gate 1.00@83→strong | 1.00/1.00/1.00 (80) · gate 1.00@60→strong | strong→weak |
+| stairs | 0.04/0.25/0.06 (8) · gate 0.00@4→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (32) · gate 1.00@22→weak | 1.00/1.00/1.00 (3) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (29) · gate 1.00@17→weak | 0.00/0.00/0.00 (0) | 1.00/0.78/0.87 (80) · gate 1.00@45→strong | strong→weak |
+| cycling | 0.71/0.66/0.68 (743) · gate 0.92@285→weak | 1.00/1.00/1.00 (47) · gate 1.00@46→strong | 1.00/0.88/0.94 (33) · gate 1.00@12→weak | 1.00/1.00/1.00 (4) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) | 1.00/0.96/0.98 (28) · gate 1.00@16→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | strong→weak |
+| vehicle_motion | 0.73/0.43/0.54 (3484) · gate 0.85@1514→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.75/0.09/0.16 (34) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | weak→weak |
+| other | 0.35/0.33/0.34 (5174) | 0.84/0.83/0.83 (100) | 0.00/0.00/0.00 (0) | 0.90/1.00/0.95 (9) | 0.00/0.00/0.00 (0) | 0.76/0.85/0.80 (66) | 0.94/0.77/0.85 (114) | 0.00/0.00/0.00 (0) | abstain→abstain |
+
+| dataset | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wear | wisdm2019_watch |
+|---|---|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.577 [0.480, 0.615] | 0.714 [0.682, 0.968]† | 0.780 [0.756, 1.000]† | 0.987 [0.966, 1.000]† | 1.000 [1.000, 1.000]† | 0.729 [0.700, 0.740]† | 0.536 [0.515, 0.679]† | 0.541 [0.512, 0.792]† |
+
+#### ncsa-primary-hc — arm_behavior
+
+| class | capture24 (50 subj) | gotov (7 subj) | mhealth (2 subj, descriptive) | pamap2 (2 subj, descriptive) | wear (5 subj) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|
+| quiet | 0.63/0.03/0.06 (6802) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (12) | 0.00/0.00/0.00 (31) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| desk_like | 0.66/0.99/0.79 (13385) · gate 0.77@11708→abstain | 1.00/1.00/1.00 (63) · gate 1.00@63→strong | 0.00/0.00/0.00 (0) · gate 0.00@1→weak | 0.00/0.00/0.00 (0) · gate 0.00@18→weak | 0.00/0.00/0.00 (0) | 0.86/1.00/0.92 (160) · gate 0.99@141→strong | weak→abstain |
+| repetitive_hand_motion | 0.43/0.32/0.37 (393) · gate 0.50@36→abstain | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (29) · gate 1.00@29→weak | 0.00/0.00/0.00 (0) | 1.00/0.83/0.91 (160) · gate 1.00@120→strong | strong→abstain |
+| exercise_motion | 0.00/0.00/0.00 (0) · gate 0.00@2→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (7) · gate 1.00@7→weak | 1.00/1.00/1.00 (7) · gate 1.00@3→weak | 1.00/0.83/0.91 (64) · gate 1.00@44→strong | 0.00/0.00/0.00 (0) | strong→weak |
+
+| dataset | capture24 | gotov | mhealth | pamap2 | wear | wisdm2019_watch |
+|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.304 [0.218, 0.354] | 1.000 [1.000, 1.000]† | 0.333 [0.333, 0.333]† | 0.500 [0.333, 0.500]† | 0.453 [0.416, 0.492]† | 0.915 [0.755, 1.000]† |
+
+#### ncsa-lodo-nonc-hc — posture
+
+| class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|---|
+| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38401) · gate 0.91@39065→weak | 0.53/0.72/0.61 (126) · gate 0.53@171→abstain | 0.00/0.00/0.00 (0) · gate 0.00@26→weak | 0.44/1.00/0.62 (4) · gate 0.44@9→weak | 0.00/0.00/0.00 (0) | 0.89/0.84/0.86 (75) · gate 0.89@71→weak | 0.00/0.00/0.00 (0) · gate 0.00@25→weak | weak→abstain |
+| seated_likely | 0.81/0.87/0.84 (31548) · gate 0.81@33775→weak | 0.50/0.56/0.53 (182) · gate 0.50@206→abstain | 0.86/0.81/0.83 (37) · gate 0.86@35→weak | 0.14/0.17/0.15 (6) · gate 0.14@7→weak | 0.86/1.00/0.92 (30) · gate 0.86@35→weak | 0.63/0.76/0.69 (74) · gate 0.63@89→abstain | 0.67/0.74/0.70 (80) · gate 0.67@88→abstain | weak→abstain |
+| upright_stationary | 0.43/0.12/0.19 (4036) | 1.00/0.12/0.21 (78) | 0.92/0.32/0.48 (37) | 0.00/0.00/0.00 (6) | 1.00/0.29/0.44 (7) | 0.77/0.62/0.69 (55) | 1.00/0.58/0.74 (79) | abstain→abstain |
+
+| dataset | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.650 [0.631, 0.669] | 0.448 [0.336, 0.555]† | 0.438 [0.416, 0.456]† | 0.256 [0.190, 0.317]† | 0.684 [0.684, 0.684]† | 0.746 [0.682, 0.746]† | 0.479 [0.382, 0.562]† |
+
+#### ncsa-lodo-nonc-hc — locomotion
+
+| class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wear (5 subj) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|---|---|---|
+| stationary | 0.91/0.97/0.94 (71942) · gate 0.98@63194→strong | 0.90/0.87/0.88 (386) · gate 1.00@296→strong | 0.97/1.00/0.99 (74) · gate 1.00@70→strong | 1.00/0.84/0.91 (19) · gate 1.00@16→weak | 1.00/0.92/0.96 (37) · gate 1.00@19→weak | 0.85/0.88/0.86 (187) · gate 0.96@136→strong | 0.65/0.82/0.73 (112) · gate 0.59@61→abstain | 1.00/0.98/0.99 (937) · gate 1.00@778→strong | strong→abstain |
+| walking | 0.80/0.55/0.65 (8375) · gate 0.99@2499→strong | 0.84/1.00/0.91 (52) · gate 1.00@52→strong | 0.92/1.00/0.96 (35) · gate 1.00@30→strong | 0.57/1.00/0.73 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.71/0.98/0.82 (43) · gate 1.00@22→weak | 0.00/0.00/0.00 (0) · gate 0.00@3→weak | 0.79/0.96/0.86 (70) · gate 1.00@57→strong | strong→strong |
+| running | 0.82/0.74/0.78 (103) · gate 0.87@68→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 1.00/0.39/0.56 (93) · gate 1.00@27→weak | 1.00/0.96/0.98 (80) · gate 1.00@64→strong | strong→weak |
+| stairs | 0.02/0.12/0.04 (8) · gate 0.00@17→weak | 0.00/0.00/0.00 (0) | 1.00/0.97/0.98 (32) · gate 1.00@27→weak | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.90/0.62/0.73 (29) · gate 1.00@16→weak | 0.00/0.00/0.00 (0) · gate 0.00@8→weak | 1.00/0.78/0.87 (80) · gate 1.00@52→strong | weak→abstain |
+| cycling | 0.69/0.60/0.65 (743) · gate 0.70@645→abstain | 1.00/0.91/0.96 (47) · gate 1.00@43→strong | 1.00/0.88/0.94 (33) · gate 1.00@29→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 1.00/0.89/0.94 (28) · gate 1.00@25→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | weak→abstain |
+| vehicle_motion | 0.71/0.39/0.50 (3484) · gate 0.90@979→weak | 0.00/0.00/0.00 (0) · gate 0.00@1→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.60/0.09/0.15 (34) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) · gate 0.00@1→weak | 0.00/0.00/0.00 (0) | weak→weak |
+| other | 0.39/0.35/0.37 (5174) | 0.56/0.57/0.57 (100) | 0.00/0.00/0.00 (0) | 0.75/1.00/0.86 (9) | 0.00/0.00/0.00 (0) | 0.70/0.88/0.78 (66) | 0.76/0.45/0.56 (114) | 0.00/0.00/0.00 (0) | abstain→abstain |
+
+| dataset | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wear | wisdm2019_watch |
+|---|---|---|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.560 [0.439, 0.589] | 0.664 [0.441, 0.691]† | 0.966 [0.964, 0.970]† | 0.750 [0.728, 0.949]† | 0.319 [0.319, 0.319]† | 0.757 [0.644, 0.791]† | 0.308 [0.264, 0.354]† | 0.742 [0.707, 0.773]† |
+
+#### ncsa-lodo-nonc-hc — arm_behavior
+
+| class | capture24 (50 subj) | gotov (7 subj) | mhealth (2 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
+|---|---|---|---|---|---|---|
+| quiet | 0.08/0.00/0.00 (6802) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (12) | 0.00/0.00/0.00 (31) | 0.00/0.00/0.00 (0) | abstain→abstain |
+| desk_like | 0.66/0.99/0.79 (13385) · gate 0.77@10462→abstain | 1.00/1.00/1.00 (63) | 0.00/0.00/0.00 (0) · gate 0.00@12→weak | 0.00/0.00/0.00 (0) · gate 0.00@15→weak | 0.77/1.00/0.87 (160) · gate 0.92@172→weak | weak→abstain |
+| repetitive_hand_motion | 0.31/0.27/0.29 (393) · gate 0.15@34→abstain | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/0.79/0.88 (29) | 1.00/0.71/0.83 (160) · gate 1.00@90→strong | strong→abstain |
+
+| dataset | capture24 | gotov | mhealth | pamap2 | wisdm2019_watch |
+|---|---|---|---|---|---|
+| macro-F1 [95% CI] | 0.361 [0.264, 0.405] | 1.000 [1.000, 1.000]† | 0.000 [0.000, 0.000]† | 0.295 [0.282, 0.308]† | 0.850 [0.678, 0.969]† |
+
+### Movement intensity on GOTOV (measured COSMED MET)
+
+Target `clip(ln MET / ln 12, 0, 1)` of the window's measured METS (7 GOTOV test participants, those with COSMED); `MAE const` = predicting the GOTOV test mean (an oracle constant; R² is relative to it).
+
+| experiment | trained on GOTOV | n | MAE | MAE const (test mean) | R² | Spearman | 80% coverage |
+|---|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | no | 333 | 0.123 | 0.206 | 0.587 | 0.752 | 0.607 |
+| ncsa-primary-hc | yes | 333 | 0.103 | 0.206 | 0.691 | 0.802 | 0.679 |
+| ncsa-lodo-nogotov-hc | no | 333 | 0.122 | 0.206 | 0.588 | 0.753 | 0.610 |
+| ncsa-lodo-nowear-hc | yes | 333 | 0.103 | 0.206 | 0.690 | 0.802 | 0.679 |
+| ncsa-primary-nf | yes | 333 | 0.148 | 0.206 | 0.375 | 0.716 | 0.721 |
+| ncsa-primary-art | yes | 333 | 0.157 | 0.206 | 0.375 | 0.704 | 0.646 |
+
+All movement-intensity sets:
+
+| experiment | set | n | MAE | MAE const | R² | Spearman | 80% coverage |
+|---|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | pooled | 96,146 | 0.103 | 0.137 | 0.497 | 0.780 | 0.764 |
+| ncsa-lodo-nonc-hc | capture24 | 95,579 | 0.103 | 0.136 | 0.492 | 0.779 | 0.765 |
+| ncsa-lodo-nonc-hc | gotov | 333 | 0.123 | 0.206 | 0.587 | 0.752 | 0.607 |
+| ncsa-lodo-nonc-hc | pamap2 | 234 | 0.107 | 0.203 | 0.645 | 0.845 | 0.697 |
+| ncsa-primary-hc | pooled | 96,146 | 0.095 | 0.137 | 0.558 | 0.787 | 0.772 |
+| ncsa-primary-hc | capture24 | 95,579 | 0.095 | 0.136 | 0.553 | 0.786 | 0.773 |
+| ncsa-primary-hc | gotov | 333 | 0.103 | 0.206 | 0.691 | 0.802 | 0.679 |
+| ncsa-primary-hc | pamap2 | 234 | 0.105 | 0.203 | 0.636 | 0.855 | 0.744 |
+| ncsa-lodo-nogotov-hc | pooled | 96,146 | 0.103 | 0.137 | 0.499 | 0.782 | 0.765 |
+| ncsa-lodo-nogotov-hc | capture24 | 95,579 | 0.103 | 0.136 | 0.494 | 0.782 | 0.766 |
+| ncsa-lodo-nogotov-hc | gotov | 333 | 0.122 | 0.206 | 0.588 | 0.753 | 0.610 |
+| ncsa-lodo-nogotov-hc | pamap2 | 234 | 0.107 | 0.203 | 0.647 | 0.844 | 0.697 |
+| ncsa-lodo-nowear-hc | pooled | 96,146 | 0.095 | 0.137 | 0.558 | 0.787 | 0.772 |
+| ncsa-lodo-nowear-hc | capture24 | 95,579 | 0.095 | 0.136 | 0.553 | 0.786 | 0.773 |
+| ncsa-lodo-nowear-hc | gotov | 333 | 0.103 | 0.206 | 0.690 | 0.802 | 0.679 |
+| ncsa-lodo-nowear-hc | pamap2 | 234 | 0.105 | 0.203 | 0.637 | 0.855 | 0.744 |
+| ncsa-primary-nf | pooled | 96,146 | 0.122 | 0.137 | 0.288 | 0.753 | 0.786 |
+| ncsa-primary-nf | capture24 | 95,579 | 0.122 | 0.136 | 0.281 | 0.752 | 0.786 |
+| ncsa-primary-nf | gotov | 333 | 0.148 | 0.206 | 0.375 | 0.716 | 0.721 |
+| ncsa-primary-nf | pamap2 | 234 | 0.129 | 0.203 | 0.573 | 0.814 | 0.654 |
+| ncsa-primary-art | pooled | 96,146 | 0.138 | 0.137 | 0.091 | 0.452 | 0.789 |
+| ncsa-primary-art | capture24 | 95,579 | 0.138 | 0.136 | 0.082 | 0.449 | 0.789 |
+| ncsa-primary-art | gotov | 333 | 0.157 | 0.206 | 0.375 | 0.704 | 0.646 |
+| ncsa-primary-art | pamap2 | 234 | 0.165 | 0.203 | 0.255 | 0.684 | 0.748 |
+
+### Awake lying (GOTOV lying is awake by protocol)
+
+| experiment | recumbent truth | sleep-period share | awake-lying truth (by dataset) | recumbent P/R/F1 on non-sleep windows | awake-lying gate (pooled) | awake-lying status |
+|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.414 n=6,408 → abstain | abstain |
+| ncsa-primary-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.412 n=5,892 → abstain | abstain |
+| ncsa-lodo-nogotov-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.414 n=6,411 → abstain | abstain |
+| ncsa-lodo-nowear-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.413 n=5,888 → abstain | abstain |
+| ncsa-primary-nf | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.36/0.99/0.52 | P=0.461 n=1,337 → abstain | abstain |
+| ncsa-primary-art | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.25/0.99/0.40 | – | – |
+
+The awake-lying gate is reported only: the served `recumbent` status is the pooled gate's, and the class must be read as 'recumbent (mostly sleep-period lying in training data)'.
+
+### Transition events (ncsa)
+
+| experiment | event | supported | AUROC | AP | Brier | ECE | F1 ±5 s | F1 ±10 s | median/p90 abs err (s) | status val→final |
+|---|---|---|---|---|---|---|---|---|---|---|
+| ncsa-lodo-nonc-hc | sit_to_stand_like | yes | 0.926 | 0.063 | 0.099 | 0.213 | 0.19 | 0.22 | 2.9/5.4 | abstain→abstain |
+| ncsa-lodo-nonc-hc | stand_to_sit_like | yes | 0.894 | 0.053 | 0.099 | 0.200 | 0.00 | 0.00 | –/– | abstain→abstain |
+| ncsa-lodo-nonc-hc | walk_start | yes | 0.923 | 0.091 | 0.101 | 0.214 | 0.42 | 0.47 | 2.3/5.9 | abstain→abstain |
+| ncsa-lodo-nonc-hc | walk_stop | yes | 0.900 | 0.075 | 0.104 | 0.211 | 0.39 | 0.48 | 2.5/7.0 | abstain→abstain |
+| ncsa-primary-hc | sit_to_stand_like | yes | 0.928 | 0.062 | 0.090 | 0.191 | 0.27 | 0.30 | 2.7/4.3 | abstain→abstain |
+| ncsa-primary-hc | stand_to_sit_like | yes | 0.898 | 0.053 | 0.095 | 0.190 | 0.00 | 0.00 | –/– | abstain→abstain |
+| ncsa-primary-hc | walk_start | yes | 0.926 | 0.090 | 0.088 | 0.185 | 0.42 | 0.50 | 2.5/6.1 | abstain→abstain |
+| ncsa-primary-hc | walk_stop | yes | 0.906 | 0.077 | 0.100 | 0.202 | 0.41 | 0.51 | 2.5/7.0 | abstain→abstain |
+| ncsa-lodo-nogotov-hc | sit_to_stand_like | yes | 0.926 | 0.063 | 0.099 | 0.212 | 0.19 | 0.22 | 2.9/5.4 | abstain→abstain |
+| ncsa-lodo-nogotov-hc | stand_to_sit_like | yes | 0.894 | 0.053 | 0.099 | 0.199 | 0.00 | 0.00 | –/– | abstain→abstain |
+| ncsa-lodo-nogotov-hc | walk_start | yes | 0.923 | 0.091 | 0.101 | 0.213 | 0.42 | 0.47 | 2.4/5.7 | abstain→abstain |
+| ncsa-lodo-nogotov-hc | walk_stop | yes | 0.900 | 0.075 | 0.104 | 0.211 | 0.39 | 0.48 | 2.5/6.9 | abstain→abstain |
+| ncsa-lodo-nowear-hc | sit_to_stand_like | yes | 0.928 | 0.062 | 0.090 | 0.191 | 0.27 | 0.30 | 2.7/4.3 | abstain→abstain |
+| ncsa-lodo-nowear-hc | stand_to_sit_like | yes | 0.898 | 0.053 | 0.095 | 0.190 | 0.16 | 0.25 | 4.0/7.4 | abstain→abstain |
+| ncsa-lodo-nowear-hc | walk_start | yes | 0.926 | 0.090 | 0.088 | 0.186 | 0.42 | 0.50 | 2.5/6.5 | abstain→abstain |
+| ncsa-lodo-nowear-hc | walk_stop | yes | 0.906 | 0.077 | 0.100 | 0.202 | 0.41 | 0.50 | 2.5/7.0 | abstain→abstain |
+
+### Calibration (ncsa primaries)
+
+| experiment | head | method | NLL raw→cal | Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal |
+|---|---|---|---|---|---|---|
+| ncsa-primary-hc | posture | temp_bias | 0.501→0.384 | 0.288→0.214 | 0.018→0.021 (0.004) | 0.089→0.024 |
+| ncsa-primary-hc | locomotion | vector | 0.500→0.368 | 0.240→0.177 | 0.051→0.017 (0.004) | 0.040→0.009 |
+| ncsa-primary-hc | arm_behavior | vector | 0.776→0.648 | 0.494→0.424 | 0.074→0.067 (0.010) | 0.097→0.041 |
+| ncsa-primary-nf | posture | temp_bias | 0.732→0.476 | 0.420→0.263 | 0.128→0.037 (0.005) | 0.188→0.037 |
+| ncsa-primary-nf | locomotion | vector | 1.014→0.514 | 0.487→0.233 | 0.292→0.047 (0.004) | 0.108→0.018 |
+| ncsa-primary-nf | arm_behavior | temp_bias | 1.152→0.725 | 0.656→0.465 | 0.059→0.068 (0.009) | 0.170→0.041 |
+| ncsa-primary-art | posture | temp_bias | 0.907→0.697 | 0.551→0.430 | 0.056→0.066 (0.005) | 0.143→0.041 |
+| ncsa-primary-art | locomotion | temp_bias | 1.449→0.643 | 0.757→0.300 | 0.130→0.021 (0.004) | 0.132→0.013 |
+| ncsa-primary-art | arm_behavior | temp_bias | 1.213→0.745 | 0.698→0.460 | 0.125→0.064 (0.010) | 0.189→0.045 |
+| ncsa-lodo-nonc-hc | posture | temp_bias | 0.537→0.392 | 0.308→0.218 | 0.050→0.022 (0.004) | 0.101→0.024 |
+| ncsa-lodo-nonc-hc | locomotion | vector | 0.574→0.380 | 0.280→0.182 | 0.073→0.022 (0.003) | 0.059→0.010 |
+| ncsa-lodo-nonc-hc | arm_behavior | vector | 0.910→0.665 | 0.576→0.441 | 0.096→0.065 (0.010) | 0.179→0.052 |
+
+### OOD (ncsa)
+
+`heldout_dataset_<set>_test` = the left-out NC-SA set's test windows scored as out-of-distribution by the LODO bundle that never saw it.
+
+| bundle | OOD set | method | AUROC | AUPRC (prev.) | FPR@95 OOD+ | ID false alarm @op | OOD detect @op |
+|---|---|---|---|---|---|---|---|
+| ncsa-ood-hc | daphnet_fog_nonwrist | energy | 0.322 | 0.006 (0.01) | 0.970 | 0.051 | 0.000 |
+| ncsa-ood-hc | daphnet_fog_nonwrist | knn@10 | 0.686 | 0.017 (0.01) | 0.782 | 0.042 | 0.060 |
+| ncsa-ood-hc | daphnet_fog_nonwrist | knn@20 | 0.700 | 0.019 (0.01) | 0.790 | 0.040 | 0.065 |
+| ncsa-ood-hc | daphnet_fog_nonwrist | knn@5 | 0.672 | 0.017 (0.01) | 0.771 | 0.043 | 0.062 |
+| ncsa-ood-hc | daphnet_fog_nonwrist | maha_global (bundle) | 0.499 | 0.040 (0.01) | 0.893 | 0.044 | 0.033 |
+| ncsa-ood-hc | daphnet_fog_nonwrist | maha_min | 0.502 | 0.040 (0.01) | 0.939 | 0.044 | 0.034 |
+| ncsa-ood-hc | daphnet_fog_nonwrist | maha_rel | 0.572 | 0.058 (0.01) | 0.928 | 0.046 | 0.274 |
+| ncsa-ood-hc | heldout_activities_test | energy | 0.696 | 0.073 (0.02) | 0.971 | 0.051 | 0.263 |
+| ncsa-ood-hc | heldout_activities_test | knn@10 | 0.567 | 0.022 (0.02) | 0.774 | 0.042 | 0.022 |
+| ncsa-ood-hc | heldout_activities_test | knn@20 | 0.560 | 0.022 (0.02) | 0.785 | 0.040 | 0.016 |
+| ncsa-ood-hc | heldout_activities_test | knn@5 | 0.570 | 0.022 (0.02) | 0.763 | 0.043 | 0.024 |
+| ncsa-ood-hc | heldout_activities_test | maha_global (bundle) | 0.796 | 0.141 (0.02) | 0.496 | 0.044 | 0.259 |
+| ncsa-ood-hc | heldout_activities_test | maha_min | 0.799 | 0.152 (0.02) | 0.495 | 0.044 | 0.256 |
+| ncsa-ood-hc | heldout_activities_test | maha_rel | 0.599 | 0.134 (0.02) | 0.951 | 0.046 | 0.302 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | energy | 0.591 | 0.011 (0.01) | 0.867 | 0.050 | 0.006 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | knn@10 | 0.666 | 0.017 (0.01) | 0.744 | 0.045 | 0.066 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | knn@20 (bundle) | 0.661 | 0.016 (0.01) | 0.765 | 0.046 | 0.045 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | knn@5 | 0.671 | 0.017 (0.01) | 0.724 | 0.046 | 0.086 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | maha_global | 0.556 | 0.012 (0.01) | 0.925 | 0.050 | 0.035 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | maha_min | 0.557 | 0.014 (0.01) | 0.957 | 0.046 | 0.034 |
+| ncsa-ood-nf | daphnet_fog_nonwrist | maha_rel | 0.520 | 0.011 (0.01) | 0.953 | 0.050 | 0.120 |
+| ncsa-ood-nf | heldout_activities_test | energy | 0.762 | 0.080 (0.02) | 0.992 | 0.050 | 0.248 |
+| ncsa-ood-nf | heldout_activities_test | knn@10 | 0.805 | 0.083 (0.02) | 0.461 | 0.045 | 0.182 |
+| ncsa-ood-nf | heldout_activities_test | knn@20 (bundle) | 0.805 | 0.076 (0.02) | 0.451 | 0.046 | 0.174 |
+| ncsa-ood-nf | heldout_activities_test | knn@5 | 0.803 | 0.085 (0.02) | 0.460 | 0.046 | 0.188 |
+| ncsa-ood-nf | heldout_activities_test | maha_global | 0.770 | 0.145 (0.02) | 0.584 | 0.050 | 0.288 |
+| ncsa-ood-nf | heldout_activities_test | maha_min | 0.734 | 0.109 (0.02) | 0.661 | 0.046 | 0.226 |
+| ncsa-ood-nf | heldout_activities_test | maha_rel | 0.245 | 0.013 (0.02) | 0.999 | 0.050 | 0.024 |
+| ncsa-ood-art | daphnet_fog_nonwrist | energy | 0.470 | 0.007 (0.01) | 0.688 | 0.040 | 0.000 |
+| ncsa-ood-art | daphnet_fog_nonwrist | knn@10 | 0.740 | 0.034 (0.01) | 0.743 | 0.048 | 0.031 |
+| ncsa-ood-art | daphnet_fog_nonwrist | knn@20 | 0.799 | 0.043 (0.01) | 0.606 | 0.047 | 0.034 |
+| ncsa-ood-art | daphnet_fog_nonwrist | knn@5 | 0.687 | 0.029 (0.01) | 0.843 | 0.046 | 0.031 |
+| ncsa-ood-art | daphnet_fog_nonwrist | maha_global (bundle) | 0.611 | 0.011 (0.01) | 0.580 | 0.059 | 0.039 |
+| ncsa-ood-art | daphnet_fog_nonwrist | maha_min | 0.606 | 0.011 (0.01) | 0.603 | 0.059 | 0.039 |
+| ncsa-ood-art | daphnet_fog_nonwrist | maha_rel | 0.459 | 0.011 (0.01) | 0.957 | 0.055 | 0.101 |
+| ncsa-ood-art | heldout_activities_test | energy | 0.479 | 0.021 (0.02) | 0.992 | 0.040 | 0.049 |
+| ncsa-ood-art | heldout_activities_test | knn@10 | 0.794 | 0.064 (0.02) | 0.579 | 0.048 | 0.218 |
+| ncsa-ood-art | heldout_activities_test | knn@20 | 0.791 | 0.064 (0.02) | 0.566 | 0.047 | 0.213 |
+| ncsa-ood-art | heldout_activities_test | knn@5 | 0.798 | 0.065 (0.02) | 0.540 | 0.046 | 0.216 |
+| ncsa-ood-art | heldout_activities_test | maha_global (bundle) | 0.859 | 0.141 (0.02) | 0.375 | 0.059 | 0.350 |
+| ncsa-ood-art | heldout_activities_test | maha_min | 0.860 | 0.142 (0.02) | 0.376 | 0.059 | 0.351 |
+| ncsa-ood-art | heldout_activities_test | maha_rel | 0.765 | 0.110 (0.02) | 0.686 | 0.055 | 0.330 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | energy | 0.372 | 0.006 (0.01) | 0.957 | 0.051 | 0.001 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | knn@10 | 0.693 | 0.017 (0.01) | 0.789 | 0.041 | 0.055 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | knn@20 | 0.705 | 0.020 (0.01) | 0.799 | 0.039 | 0.062 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | knn@5 | 0.674 | 0.017 (0.01) | 0.781 | 0.041 | 0.060 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | maha_global (bundle) | 0.504 | 0.040 (0.01) | 0.886 | 0.047 | 0.034 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | maha_min | 0.507 | 0.040 (0.01) | 0.926 | 0.047 | 0.034 |
+| ncsa-lodo-nogotov-hc | daphnet_fog_nonwrist | maha_rel | 0.576 | 0.053 (0.01) | 0.931 | 0.047 | 0.232 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | energy | 0.526 | 0.007 (0.01) | 0.989 | 0.051 | 0.066 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | knn@10 | 0.557 | 0.008 (0.01) | 0.840 | 0.041 | 0.090 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | knn@20 | 0.557 | 0.007 (0.01) | 0.867 | 0.039 | 0.085 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | knn@5 | 0.558 | 0.007 (0.01) | 0.847 | 0.041 | 0.078 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | maha_global (bundle) | 0.537 | 0.007 (0.01) | 0.962 | 0.047 | 0.044 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | maha_min | 0.531 | 0.007 (0.01) | 0.963 | 0.047 | 0.041 |
+| ncsa-lodo-nogotov-hc | heldout_dataset_gotov_test | maha_rel | 0.423 | 0.005 (0.01) | 0.983 | 0.047 | 0.031 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | energy | 0.241 | 0.005 (0.01) | 0.985 | 0.050 | 0.002 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | knn@10 | 0.689 | 0.016 (0.01) | 0.782 | 0.041 | 0.058 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | knn@20 | 0.702 | 0.018 (0.01) | 0.789 | 0.040 | 0.064 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | knn@5 | 0.673 | 0.016 (0.01) | 0.769 | 0.042 | 0.061 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | maha_global (bundle) | 0.497 | 0.039 (0.01) | 0.892 | 0.049 | 0.035 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | maha_min | 0.498 | 0.040 (0.01) | 0.939 | 0.049 | 0.035 |
+| ncsa-lodo-nowear-hc | daphnet_fog_nonwrist | maha_rel | 0.569 | 0.064 (0.01) | 0.923 | 0.045 | 0.276 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | energy | 0.618 | 0.006 (0.00) | 0.973 | 0.050 | 0.122 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | knn@10 | 0.733 | 0.006 (0.00) | 0.537 | 0.041 | 0.047 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | knn@20 | 0.740 | 0.006 (0.00) | 0.492 | 0.040 | 0.060 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | knn@5 | 0.728 | 0.006 (0.00) | 0.580 | 0.042 | 0.066 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | maha_global (bundle) | 0.874 | 0.093 (0.00) | 0.526 | 0.049 | 0.583 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | maha_min | 0.872 | 0.104 (0.00) | 0.554 | 0.049 | 0.589 |
+| ncsa-lodo-nowear-hc | heldout_dataset_wear_test | maha_rel | 0.640 | 0.142 (0.00) | 0.970 | 0.045 | 0.408 |
+
+| bundle | method (VAL-selected) | threshold | ID test false-alarm rate |
+|---|---|---|---|
+| ncsa-ood-hc | maha_global | 14.609 | 0.044 |
+| ncsa-ood-nf | knn@20 | 0.324 | 0.046 |
+| ncsa-ood-art | maha_global | 36.675 | 0.059 |
+| ncsa-primary-hc | maha_global | 14.419 | 0.046 |
+| ncsa-primary-nf | knn@20 | 0.323 | 0.048 |
+| ncsa-primary-art | maha_global | 36.207 | 0.063 |
+| ncsa-lodo-nonc-hc | maha_global | 14.286 | 0.052 |
+| ncsa-lodo-nogotov-hc | maha_global | 14.379 | 0.047 |
+| ncsa-lodo-nowear-hc | maha_global | 14.339 | 0.051 |
+
 ## Split manifests (subject-level, frozen before windowing)
 
 | dataset | train | val | test | LOSO folds | sha256 |
 |---|---|---|---|---|---|
 | capture24 | 81 | 20 | 50 | 0 | `b6110fbe0b1ed83d8f7d20d3149c67b41b574aa97b561acc9738b64a06074b67` |
+| gotov | 21 | 7 | 7 | 0 | `0da75c2ff2a3571b6249857579e5796943c67c624d99cb2832e13a28845912d4` |
 | hhar_watch | 6 | 1 | 2 | 9 | `3e4c143046e562eb233e785b7bc3f6d459a455a0e76638269acae9537f3537af` |
 | mhealth | 6 | 2 | 2 | 10 | `cc95780c0706c08f92e61f7267335b366fa761cd29fa35e3dd7d8d36a29f394b` |
 | opportunity | 2 | 1 | 1 | 4 | `2df351a0ba583c232c309e1941e3f00f10c0633c0095bb1c4b88b3b375e019b8` |
 | pamap2 | 6 | 1 | 2 | 9 | `4aeb6af05b41c67b3a82724026ddb7e8b633c5270c4d00fc0f580f4adea53715` |
+| wear | 14 | 5 | 5 | 0 | `efa3bd862c37b045d72c5eed49791a8e9ff484410256a33244ddb9bb5d469f3e` |
 | wisdm2019_watch | 35 | 8 | 8 | 0 | `7105df4cac920c71c26957bacdaad065d59d9d0312b2026a4fdf1e0c6415754f` |
 
 Limitation: leave-one-subject-out folds are defined in the split manifests (`loso_folds`) for the small datasets but were NOT evaluated; every number here comes from the single frozen train/val/test split.
@@ -465,12 +894,14 @@ Limitation: leave-one-subject-out folds are defined in the split manifests (`los
 | opportunity | w30t | 30/2 | 6,188 | 2,922 | 2,502 | – | 4 | opportunity-loader-1 |
 | opportunity | w10 | 10/5 | 875 | 471 | 245 | – | 4 | opportunity-loader-1 |
 | daphnet_fog | w30 | 30/15 | – | – | – | 850 | 10 | daphnet-loader-1 |
+| gotov | w30 | 30/15 | 2,761 | 1,037 | 587 | – | 35 | gotov-loader-1+gotov-guard-10s+gotov-met-1 |
+| wear | w30 | 30/15 | 1,040 | 350 | 319 | – | 24 | wear-loader-1 |
 
 `w30t` = dense 2-s-hop transition windows (Opportunity/PAMAP2/HHAR whole recordings; Capture-24 only windows containing an eligible <= 28-s gap event); class heads never train on them.
 
 ## Dataset / label-mapping summary
 
-`label_mappings.json` sha256 `19ae2db05815639e1573c3d83d968fc0c1a41cdc4693e2c98a36f1475c0b16eb`; full table: `eval/inertia/label_mappings.md`.
+`label_mappings.json` sha256 `a3efb1521bb3d8b44bd43e7db454f80613dc8f5154bdfdbe5eb4e9b085eaca01`; full table: `eval/inertia/label_mappings.md`.
 
 | dataset | role | labels | rows | used rows posture/locomotion/arm/transition/intensity |
 |---|---|---|---|---|
@@ -478,7 +909,7 @@ Limitation: leave-one-subject-out folds are defined in the split manifests (`los
 | daphnet_fog | ood_only | 3 | 15 | 0/0/0/0/0 |
 | dsads | excluded_other | 19 | 95 | 0/0/0/0/0 |
 | extrasensory_watch | excluded_licence | 51 | 255 | 0/0/0/0/0 |
-| gotov | excluded_licence | 17 | 85 | 0/0/0/0/0 |
+| gotov | train_wrist | 17 | 85 | 7/14/1/10/14 |
 | har70plus | pooled_ablation_non_wrist | 7 | 35 | 0/0/0/0/0 |
 | harth | pooled_ablation_non_wrist | 12 | 60 | 0/0/0/0/0 |
 | hhar_watch | train_wrist | 7 | 35 | 2/6/0/2/0 |
@@ -491,7 +922,7 @@ Limitation: leave-one-subject-out folds are defined in the split manifests (`los
 | uci_hapt_waist | pooled_ablation_non_wrist | 12 | 60 | 0/0/0/0/0 |
 | uci_hmp_wrist | excluded_licence | 14 | 70 | 0/0/0/0/0 |
 | ut_complex_shoaib2016 | excluded_licence | 13 | 65 | 0/0/0/0/0 |
-| wear | excluded_licence | 19 | 95 | 0/0/0/0/0 |
+| wear | train_wrist | 19 | 95 | 0/18/5/0/0 |
 | wisdm2019_watch | train_wrist | 18 | 90 | 2/15/4/14/0 |
 
 ## Capture-24 source verification
@@ -552,8 +983,29 @@ The test split is assembled only inside the TestVault; a re-evaluation needs an 
 | 46 | lodo-nohhar-hc | `cb2cd3200eaace91` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
 | 47 | seed1-hc | `1141f03851e3f4e0` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
 | 48 | seed2-hc | `796029c9cb29261c` | `6afd705530ea` | 3 | post_audit_rule_change | red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207 |
+| 49 | ncsa-ood-hc | `8f1faee3ae086939` | `c805f429821b` | 1 |  |  |
+| 50 | ncsa-ood-nf | `d23ca68b7a8c621f` | `c805f429821b` | 1 |  |  |
+| 51 | ncsa-ood-art | `ed3a9c821ded3dbc` | `c805f429821b` | 1 |  |  |
+| 52 | ncsa-primary-hc | `ee9681ebd651a82f` | `c805f429821b` | 1 |  |  |
+| 53 | ncsa-primary-nf | `35be0bc2e82a0e88` | `c805f429821b` | 1 |  |  |
+| 54 | ncsa-primary-art | `5b83956e960d14c6` | `c805f429821b` | 1 |  |  |
+| 55 | ncsa-lodo-nonc-hc | `f311783e3ad39b79` | `c805f429821b` | 1 |  |  |
+| 56 | ncsa-lodo-nogotov-hc | `761e347000c7ccea` | `c805f429821b` | 1 |  |  |
+| 57 | ncsa-lodo-nowear-hc | `0ae6762ef47e5e49` | `c805f429821b` | 1 |  |  |
 
 Re-evaluations by reason: legacy free text (pre-enumeration): 14 (the run-1 bundle directory was deleted by an external process; the bundles were retrained deterministically and re-evaluated: every metric identical to run 1 at tolerance 1e-9; only bundle hashes differ (the manifest records creation time)); post_audit_rule_change: 17 (a training/selection/gate/metric rule changed after an audit that had seen test results; the new test numbers are NOT pristine).
+
+### Decoder-replay TEST ledger (replay_eval final/baseline)
+
+| # | experiment | bundle sha256 | test split sha256 | n evals (this split) | rerun reason | detail |
+|---|---|---|---|---|---|---|
+| 1 | replay-baseline/wisdm | `b7e4cff1cd67d336` | `6daf528d1eed` | 1 | post_audit_rule_change | decoder rebuilt from 227ff05c after the red-team audit fixes (1802a012, a424d207) and the nara/main merge (0176a63e): specialist gate inside the Inertia budget, posture omitted on asleep/in-bed seconds, hartRedundancy default 0.65, strict replay validation; the pre-audit replay (xctest 5b10b94c86d0, not ledgered) had already decoded this test split |
+| 2 | replay-baseline/capture24 | `b7e4cff1cd67d336` | `eb616899278f` | 1 | post_audit_rule_change | decoder rebuilt from 227ff05c after the red-team audit fixes (1802a012, a424d207) and the nara/main merge (0176a63e): specialist gate inside the Inertia budget, posture omitted on asleep/in-bed seconds, hartRedundancy default 0.65, strict replay validation; the pre-audit replay (xctest 5b10b94c86d0, not ledgered) had already decoded this test split |
+| 3 | replay-final/wisdm/shadow-primary-hc | `3fb1ae3e75c8b993` | `6daf528d1eed` | 1 | post_audit_rule_change | sealed post-audit bundle retrained from clean commit a424d207 (seal 227ff05c; one-evidence-group / decoder_evidence:false heads inert) decoded with the 227ff05c decoder; the pre-audit replay (bundle built from 32a2dc52, xctest 5b10b94c86d0, not ledgered) had already decoded this test split |
+| 4 | replay-final/wisdm/shadow-primary-art | `1b8fadcc1521709a` | `6daf528d1eed` | 1 | post_audit_rule_change | sealed post-audit bundle retrained from clean commit a424d207 (seal 227ff05c; one-evidence-group / decoder_evidence:false heads inert) decoded with the 227ff05c decoder; the pre-audit replay (bundle built from 32a2dc52, xctest 5b10b94c86d0, not ledgered) had already decoded this test split |
+| 5 | replay-final/capture24/shadow-primary-hc | `3fb1ae3e75c8b993` | `eb616899278f` | 1 | post_audit_rule_change | sealed post-audit bundle retrained from clean commit a424d207 (seal 227ff05c; one-evidence-group / decoder_evidence:false heads inert) decoded with the 227ff05c decoder; the pre-audit replay (bundle built from 32a2dc52, xctest 5b10b94c86d0, not ledgered) had already decoded this test split |
+
+Re-evaluations by reason: post_audit_rule_change: 5 (a training/selection/gate/metric rule changed after an audit that had seen test results; the new test numbers are NOT pristine).
 
 ## Disclosures (test-set exposure and evaluator changes)
 
