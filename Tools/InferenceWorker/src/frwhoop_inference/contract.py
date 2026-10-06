@@ -44,7 +44,12 @@ SERVER_NAME = "frwhoop-inference"
 #: serialisation behaviour of this package changes.
 ADAPTER_VERSION = "frwhoop-inference.adapter/1.0.0"
 
-METRICS: tuple[str, ...] = ("hrv", "sleep_boundary", "sleep_stage", "respiration")
+#: ``sensor_biomarkers`` (additive sensor-biomarker families; docs/sensor-biomarkers/CONTRACTS.md)
+#: owns its payload validation inside the provider package, exactly like the sleep
+#: candidates: the provider checks shapes, bounds, finiteness and timestamps and
+#: answers with status="error" plus a machine-readable diagnostics.reason_detail.
+METRICS: tuple[str, ...] = ("hrv", "sleep_boundary", "sleep_stage", "respiration",
+                            "sensor_biomarkers")
 
 #: Status values permitted in a response.
 STATUSES: tuple[str, ...] = ("ok", "withheld", "error")
@@ -804,11 +809,12 @@ def parse_request(body: Any) -> InferRequest:
 
     if metric == "hrv":
         validated: Any = parse_hrv_input(raw_input, context)
-    elif metric in ("sleep_boundary", "sleep_stage"):
-        # The sleep candidates own their payload validation: they check shapes, bounds,
-        # finiteness, timestamps and label space inside the provider and answer with
-        # status="error" plus a machine-readable diagnostics.reason_detail instead of
-        # raising here. Passing the raw mapping through keeps that single source of truth.
+    elif metric in ("sleep_boundary", "sleep_stage", "sensor_biomarkers"):
+        # The sleep candidates and the sensor-biomarkers provider own their payload
+        # validation: they check shapes, bounds, finiteness, timestamps and label space
+        # inside the provider and answer with status="error" plus a machine-readable
+        # diagnostics.reason_detail instead of raising here. Passing the raw mapping
+        # through keeps that single source of truth.
         validated = dict(raw_input)
     else:
         raise ContractError("provider_unavailable",
