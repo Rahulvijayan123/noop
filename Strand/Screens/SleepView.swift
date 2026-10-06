@@ -186,6 +186,11 @@ struct SleepView: View {
                         ForEach(Array(sleepVisibleSections.enumerated()), id: \.element) { idx, section in
                             sleepSectionView(section, resolved).staggeredAppear(index: idx + 1)
                         }
+                        // Temporary build marker so the installed build can be told apart on the phone.
+                        Text("Sleep tab build 2026-10-06 noon")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(maxWidth: .infinity)
                     }
                 } else {
                     emptyState
