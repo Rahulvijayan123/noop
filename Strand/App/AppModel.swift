@@ -386,6 +386,7 @@ final class AppModel: ObservableObject {
         IntradaySeriesStore.shared.reset()
         PhysiologyContextStore.shared.reset()
         ActivityEncoderWindowStore.shared.reset()
+        SensorBiomarkerStore.shared.reset()
         activityWindowsSyncedAt = nil
         applyPowerSaving()
     }
@@ -486,6 +487,7 @@ final class AppModel: ObservableObject {
         let candidates = hostedReadCandidates
         IntradaySeriesStore.shared.setReadCandidates(candidates)
         PhysiologyContextStore.shared.setReadCandidates(candidates)
+        SensorBiomarkerStore.shared.setReadCandidates(candidates)
         // G1 (findings/g1-day-ui.md Q3/Q5): "yesterday" is the previous LOCAL CALENDAR day, computed with
         // Calendar arithmetic — a fixed 86,400-second shift is the same calendar day on a 25-hour DST day
         // and skips the true previous day. Half-open [dayStart, dayStart+1day) bounds in the phone zone.
