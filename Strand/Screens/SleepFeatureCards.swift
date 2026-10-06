@@ -58,7 +58,11 @@ struct SleepFeatureSection: View {
               let repository = CloudPushRuntime.shared.scoreRepository() else { loaded = nil; return }
         let day = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(endTs)))
         let deviceIds = await IntradaySeriesStore.shared.readCandidates
-        guard let document = repository.cachedDay(day: day, deviceIds: deviceIds)?.hostedResult?.sleepFeatures,
+        var document = repository.cachedDay(day: day, deviceIds: deviceIds)?.hostedResult?.sleepFeatures
+        if document == nil {
+            document = (try? await repository.refresh(day: day, deviceIds: deviceIds))?.hostedResult?.sleepFeatures
+        }
+        guard !Task.isCancelled, let document,
               let night = document.night(matchingStart: startTs, end: endTs) else { loaded = nil; return }
         loaded = (document, night)
     }
@@ -76,15 +80,19 @@ struct SleepFeatureCards: View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Sleep details", overline: "Server enrichment")
 
-            SleepFeatureContinuityCard(continuity: night.continuity)
-            SleepFeatureRegularityCard(regularity: document.regularity)
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SleepFeatureContinuityCard(continuity: night.continuity)
+                SleepFeatureRegularityCard(regularity: document.regularity)
 
-            if expanded {
-                SleepFeatureArchitectureCard(architecture: night.architecture)
-                SleepFeaturePhysiologyCard(physiology: night.stagePhysiology)
-                SleepFeatureSettlingCard(settling: night.settling)
-                SleepFeatureBreathingCard(breathing: night.respiratoryVariability)
+                if expanded {
+                    SleepFeatureArchitectureCard(architecture: night.architecture)
+                    SleepFeaturePhysiologyCard(physiology: night.stagePhysiology)
+                    SleepFeatureSettlingCard(settling: night.settling)
+                    SleepFeatureBreathingCard(breathing: night.respiratoryVariability)
+                }
             }
+            .contentShape(Rectangle())
+            .onTapGesture { withAnimation(StrandMotion.interactive) { expanded.toggle() } }
 
             Button {
                 withAnimation(StrandMotion.interactive) { expanded.toggle() }
