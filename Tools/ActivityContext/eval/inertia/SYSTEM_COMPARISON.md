@@ -8,6 +8,13 @@ built from HEAD `227ff05c` (after the red-team audit fixes `1802a012` / `a424d20
 channel (WISDM NLL −0.14, Capture-24 −0.04), adds ~1 % of locomotion NLL on top of HART, and the pre-audit
 Capture-24 posture "gain" (sleep-like lying) is gone. ρ̂ = 0.634. What changed vs the pre-audit run: §6.
 
+**Update 2026-10-06 (§12): HART v1 and ElderNet**, decoded with the integration branch at `0b6d34f5`:
+* HART v1 is *not* better than v0 inside the decoder (locomotion NLL +0.076).
+* ElderNet alone improves locomotion calibration a little and cuts display flips, but walking never reaches
+  95 % precision.
+* On top of HART v1, VAL turns ElderNet nearly off (ρ̂ vs HART 0.33).
+* With Inertia on Capture-24 the two are complementary but small (ρ̂ 0.65, discount floor 0.66).
+
 No public Inertia-1 checkpoint exists (INERTIA1.md, header). Every "Inertia" arm below runs a **stand-in**
 encoder bundle produced by agent P2 (`encoder_id` starting `standin:`); it says nothing about Inertia-1
 itself. Arms are compared on public wrist data (WISDM-2019 watch, Capture-24) through **proxies** of the
@@ -449,6 +456,280 @@ python -m activity_context.inertia.replay_eval final --bundle <bundles>/shadow-p
 python -m activity_context.inertia.replay_report --runs <out>/shadow-primary-hc --out <out>/shadow-primary-hc/SYSTEM_COMPARISON \
     --baseline <out>/baseline
 # the full sequence (<= 8 workers): research/inertia-replay/scratch/post_audit.sh
+```
+
+## 12. HART v1 and ElderNet in the decoder replay (2026-10-06; STAND-IN Inertia, NOT INERTIA-1)
+
+### 12.1 What was run
+
+* **Decoder**: release replay test bundle rebuilt from the clean integration branch at **HEAD `0b6d34f5`**
+  (ElderNet gait-quality channel + the three new harness arms): executable sha256
+  `5385b529a4a66b1b5a4c26b4d5efc35c58158357cb3a7e6b6c62ab2ed5671d53`, Swift sources fingerprint
+  `a9e5565f14310d01` (422 files in `Sources/` + `Tests/`; unchanged after the build, tree clean). Harness
+  self-tests: 9 pass, 1 skipped (env-gated), including "the original arms are bit-identical with or without
+  ElderNet". On Capture-24 this build reproduces the post-audit (`227ff05c`) A0 and Inertia arms to every reported digit.
+* **HART v1** (`hart-wisdm-v1`, checkpoint `2414949634e5…`): agent HF's per-window outputs
+  (`hart_v1_wisdm_{val,test}.npz`), produced with R's stream / window code, so the windows are identical to v0
+  (checked window by window); only probabilities and labels differ.
+* **ElderNet** (`eldernet-437a38b`, served defaults: **uncalibrated**, threshold 0.5, hop 5) from
+  `research/eldernet-replay` (MANIFEST.json). Decoder π = **0.065** (Capture-24 VAL gait prevalence, ELDERNET.md
+  §8), used for both datasets. Brisk split weight 0, accelerometer budget 0.5.
+* **Inertia**: sealed `shadow-primary-hc` (`3fb1ae3e75c8…`, locomotion head only) at the INERTIA1 §7 candidate
+  defaults in every arm that has it.
+* **Arms.** These follow ELDERNET.md "Replay record format"; `noenc` = no encoder windows in the file.
+  * WISDM: A0 = noenc/`hart`; **A1(v0)**, **A1(v1)** = `hart` with v0 / v1 encoder windows; A1(v1)+I =
+    `hart+inertia`; **E** = noenc/`eldernet`; **A1(v1)+E** = `hart+eldernet`; **A1(v1)+E+I** =
+    `hart+eldernet+inertia`.
+  * Capture-24: A0, **E**, I = noenc/`hart+inertia`, **E+I** = noenc/`hart+eldernet+inertia`.
+  * A1(v1)+I and I are added as references, so ElderNet's increment can be read with and without Inertia.
+* **Code**: `activity_context/inertia/replay_eldernet.py` (new; unit tests `tests/inertia/test_replay_eldernet.py`,
+  9) and an additive extension of `replay_export.write_harness_file` (the `gait_quality` header / observation key
+  and the three arm names; files without ElderNet are byte-identical to before).
+
+### 12.2 Data alignment, exclusions, re-baseline
+
+* **Mixed-rate WISDM blocks** (agent HF's finding). R's replay uses one nominal rate per block, so blocks that
+  switch between 20 and ~100 Hz are time-scaled. ElderNet's windows are on the true clock and cannot be aligned
+  with them.
+  * They are detected from the raw timestamps (replayed length vs raw span > 3 s) and **excluded from every arm**:
+    * TEST: 1605-08-I, 1607-11-L, 1617-14-P and **1650-00-A** (502 HART windows; 138 of 142 blocks remain,
+      exactly the 138 that have Inertia windows).
+    * VAL: 1620-15-Q, 1624-15-Q and **1624-17-S** (320 windows).
+  * This is one block more per split than HF's list.
+  * **A0 and A1(v0) were re-baselined on the remaining blocks** with the new decoder; their WISDM numbers here
+    therefore differ slightly from §5 (142 blocks).
+  * Fixing the time-scaling properly would need re-running both HART checkpoints, the proxies and the Inertia
+    windows for those blocks. I did not do this.
+* **ElderNet window mapping.**
+  * WISDM: rows map to blocks by session start (each session starts exactly at one block's first sample).
+  * Capture-24: rows are on the participants' epoch clock.
+  * Window starts that are off the integer-second clock are placed on the nearest second (shift ≤ 0.5 s).
+    Affected: Capture-24 P140, whose whole day is at +0.46 s; 46 rows of P142; 17 WISDM TEST rows.
+  * Mapped TEST windows: WISDM 4,711 (14 beyond a block end dropped), Capture-24 914,189 (50 / 50 participants).
+* **Duplicated VAL subject.** WISDM val subject 1629's raw file contains all 18 of its blocks twice, with
+  identical data. Both copies are kept, as in every earlier VAL selection, so 1629 counts double in weight
+  selection.
+* **Ledger** (`eval/inertia/replay_test_ledger.jsonl`). New declared experiments `replay-gait/wisdm` and
+  `replay-gait/capture24` (declared in `replay_eldernet.DECLARED`). Each was opened twice:
+  1. First with `post_audit_rule_change`: the split had already been decoded for A0 / A1(v0) / Inertia, and the
+     HART v1 and ElderNet owners had already reported TEST metrics.
+  2. Then with `evaluator_bug_fix`: the first mapping had *dropped* the off-clock windows, P140 included.
+
+  Only the second opening is reported. The superseded first-round files are in
+  `research/inertia-replay/runs/gait/superseded_round1/`; WISDM is unchanged to 3 decimals. **All these TEST
+  numbers are NOT pristine.**
+
+### 12.3 ρ̂ and the chosen weights (VALIDATION only)
+
+ρ̂ uses the same definition as before: pooled Pearson r of the mode-centred log-LR vectors over the 14
+non-unknown body modes, with the decoder's tables mirrored in Python. The ElderNet term mirrors
+`PreparedGaitQuality.likelihood` (r = q/π on walk / brisk walk / stairs, (1−q)/(1−π) on bed / seated / upright /
+vehicle / cycling, ε = 0.02, clip [0.1, 10]); pairs are formed with the other channel's window still held
+(age < hop).
+
+| pair | data | windows | ρ̂ | per subject |
+|---|---|---|---|---|
+| **ElderNet gait vs HART v1 locomotion** | WISDM VAL | 13,138 | **0.332** | 0.03–0.48 |
+| **ElderNet gait vs Inertia locomotion** | Capture-24 VAL | 357,688 | **0.652** | 0.59–0.74 |
+| ElderNet vs Inertia | WISDM VAL | 3,585 | 0.614 | 0.51–0.69 |
+| Inertia vs HART v1 (side value; Inertia keeps its 0.65 default) | WISDM VAL | 8,824 | 0.611 | 0.40–0.81 |
+
+**Discount floors.** The floor is the default (0.65), raised to ρ̂ where ρ̂ is higher:
+* `hart_redundancy` floor stays **0.65** (ρ̂ 0.33);
+* `inertia_redundancy` floor rises to **0.66** (ρ̂ 0.652).
+
+The candidate defaults used below are therefore gait 0.25 / ρ_H 0.65 / ρ_I 0.66.
+
+**Sweep.** The objective is the pre-registered one: mean descriptive coverage@95 over posture + locomotion
+classes, tie-break NLL. Stage 1 sweeps the gait weight over {0.10, 0.25, 0.40} at the floors. Stage 2 sweeps
+ρ_H ∈ {floor, 0.80, 0.95} for the HART arms. Stage 3 sweeps ρ_I ∈ {floor, 0.80, 0.95} for the Inertia arms.
+
+| dataset | arm | VAL objective at the floors: w .10 / .25 / .40 | reference arm | **chosen (w / ρ_H / ρ_I)** |
+|---|---|---|---|---|
+| WISDM | E | 0.1180 / 0.1197 / **0.1223** | A0 0.1160 | **0.40** / – / – |
+| WISDM | A1(v1)+E | 0.2636 / 0.2623 / 0.2601 (ρ_H .80: 0.2636; **.95: 0.2647**) | A1(v1) 0.2647 | **0.10 / 0.95** / 0.66 |
+| WISDM | A1(v1)+E+I | 0.2637 / 0.2625 / 0.2601 (ρ_H .95: 0.2647; ρ_I .80 / .95: 0.2647) | A1(v1)+I 0.2647 | **0.10 / 0.95 / 0.66** |
+| Capture-24 | E | 0.0851 / 0.0858 / **0.0866** | A0 0.0842 | **0.40** / – / – |
+| Capture-24 | E+I | 0.0860 / 0.0863 / **0.0866** (ρ_I .80: 0.0863, .95: 0.0860) | I 0.0858 | **0.40** / – / **0.66** |
+
+Read: alone, ElderNet wants the largest weight on both datasets. **On top of HART v1, VAL picks the
+strongest discount**: w 0.10 × (1 − 0.95) is 0.005 effective weight while HART speaks, which is almost off,
+because every larger ElderNet weight lowers the coverage objective. Both the defaults and the chosen weights were
+decoded in the single TEST opening.
+
+### 12.4 WISDM TEST (8 subjects, 138 blocks; HART-feasible)
+
+| arm | gait cfg (w/ρ_H/ρ_I) | coarse acc | loco AURC | loco NLL | loco ECE | stationary cov@95 | **walking** VAL→TEST | walking cov@95 | running VAL→TEST | posture acc | flips/h |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A0 | – | 0.635 | 0.130 | 2.014 | 0.300 | 0.679 | abstain | 0 | abstain | 0.406 | 39.3 |
+| A1(v0) | – | **0.703** | **0.094** | 2.171 | 0.320 | 0.648 | weak τ .96 → P .918, R .359 | 0 | strong τ .66 → P .860 (fails) | 0.429 | 36.5 |
+| A1(v1) | – | 0.685 | 0.101 | 2.247 | 0.335 | 0.626 | weak τ .955 → P .883, R .725 | 0 | strong τ .665 → P .800 (fails) | 0.437 | 36.9 |
+| A1(v1)+I | – | 0.685 | 0.100 | 2.244 | 0.334 | 0.626 | weak τ .955 → P .866, R .745 | 0 | strong → P .794 (fails) | 0.437 | 36.8 |
+| E | .25/–/– (defaults) | 0.661 | 0.119 | **1.939** | **0.287** | **0.686** | abstain | 0 | abstain | 0.406 | 38.1 |
+| **E** | **.40 (chosen)** | 0.659 | 0.120 | 1.963 | 0.292 | **0.690** | abstain | 0 | abstain | 0.404 | 38.6 |
+| A1(v1)+E | .25/.65/.66 (defaults) | 0.681 | 0.101 | 2.245 | 0.336 | 0.624 | weak τ .96 → **P .935**, R .514 | 0 | strong τ .885 → P .824 (fails) | 0.437 | 36.6 |
+| **A1(v1)+E** | **.10/.95/.66 (chosen)** | 0.684 | 0.101 | 2.247 | 0.335 | 0.626 | weak τ .955 → P .884, R .729 | 0 | strong → P .805 (fails) | 0.437 | 36.9 |
+| A1(v1)+E+I | defaults | 0.682 | 0.101 | 2.243 | 0.336 | 0.624 | weak τ .96 → P .930, R .530 | 0 | strong → P .824 (fails) | 0.437 | 36.6 |
+| **A1(v1)+E+I** | **.10/.95/.66 (chosen)** | 0.685 | 0.100 | 2.244 | 0.334 | 0.626 | weak τ .955 → P .858, R .745 | 0 | strong → P .794 (fails) | 0.437 | 36.8 |
+
+No arm reaches walking at ≥ 95 % precision: walking coverage@95 is 0 everywhere, and the descriptive
+TEST-curve coverage is 0 too. The best walking precision is A1(v1)+E at the defaults, 0.935 at recall 0.514.
+
+Paired differences, B − A (subject-cluster bootstrap, 1000 resamples; 8 subjects, so the intervals
+under-cover; ** = CI excludes 0):
+
+| comparison | cfg | loco NLL | loco AURC | stationary cov@95 | posture NLL | flips/h |
+|---|---|---|---|---|---|---|
+| **A1(v1) − A1(v0)** | – | **+0.076 [0.015, 0.135]** (worse) | +0.008 [0.000, 0.017] | **−0.022 [−0.040, −0.005]** | +0.001 [−0.002, 0.004] | +0.45 [−1.52, 2.33] |
+| A1(v1) − A0 | – | **+0.233 [0.067, 0.409]** (worse) | −0.025 [−0.056, 0.004] | **−0.053 [−0.107, −0.013]** | **−0.020 [−0.049, −0.000]** | −2.39 [−4.26, 0.00] |
+| **E − A0** | defaults | **−0.075 [−0.141, −0.001]** | −0.009 [−0.021, 0.000] | **+0.007 [0.002, 0.011]** | −0.001 [−0.003, 0.000] | −1.20 [−2.84, 0.31] |
+| E − A0 | chosen | −0.051 [−0.131, 0.036] | −0.008 [−0.020, 0.002] | **+0.010 [0.004, 0.017]** | −0.002 [−0.005, 0.000] | −0.75 [−2.94, 1.21] |
+| **A1(v1)+E − A1(v1)** | defaults | −0.002 [−0.007, 0.002] | +0.000 [−0.001, 0.001] | **−0.002 [−0.006, −0.000]** | −0.000 | −0.30 [−0.74, 0.00] |
+| A1(v1)+E − A1(v1) | chosen | 0.000 | 0.000 | 0 | 0 | 0.00 |
+| A1(v1)+I − A1(v1) | – | **−0.003 [−0.005, −0.002]** | −0.000 | +0.000 | 0.000 | −0.15 [−0.45, 0.00] |
+| **A1(v1)+E+I − A1(v1)+E** | defaults / chosen | **−0.002 [−0.002, −0.001]** / **−0.003 [−0.005, −0.002]** | 0.000 | 0.000 | 0.000 | 0.00 / −0.15 |
+| A1(v1)+E+I − A1(v1)+I | defaults / chosen | −0.001 [−0.004, 0.003] / 0.000 | 0.000 | **−0.002 [−0.006, −0.000]** / 0 | 0.000 | −0.15 / 0.00 |
+
+### 12.5 Capture-24 TEST (50 participants; free-living, no HART)
+
+| arm | gait cfg | coarse acc | loco AURC | loco NLL | loco ECE | stationary VAL→TEST (descriptive cov@95) | walking | posture acc | posture NLL | flips/h |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A0 | – | 0.793 | 0.096 | 1.308 | 0.168 | weak τ .30 → P .927 (0.783) | abstain (descr. 0) | 0.294 | 1.761 | 23.1 |
+| I | – | 0.809 | 0.087 | 1.270 | 0.162 | weak → P .931 (0.815) | abstain (0) | 0.299 | 1.755 | 22.0 |
+| E | .25 (defaults) | 0.810 | 0.095 | 1.276 | 0.161 | weak → P .932 (0.797) | abstain (0) | 0.301 | 1.749 | 22.1 |
+| **E** | **.40 (chosen)** | 0.813 | 0.095 | 1.277 | 0.161 | weak → P .934 (0.804) | abstain (0) | 0.304 | 1.745 | 21.8 |
+| E+I | .25/–/.66 (defaults) | 0.812 | 0.087 | 1.264 | 0.161 | weak → P .932 (0.819) | abstain (0) | 0.301 | 1.749 | 21.7 |
+| **E+I** | **.40/–/.66 (chosen)** | **0.814** | **0.087** | **1.264** | 0.161 | weak → P .933 (**0.822**) | abstain (0) | 0.303 | 1.747 | **21.6** |
+
+Stationary is weak on VAL in every arm (under the clustered rule), so no arm has stationary coverage@95.
+Walking never reaches weak or strong on VAL, and has no descriptive TEST coverage at ≥ 95 %.
+
+| comparison (paired, 50 participants) | cfg | loco NLL | loco AURC | posture NLL | posture AURC | flips/h |
+|---|---|---|---|---|---|---|
+| **E − A0** | defaults | **−0.032 [−0.045, −0.020]** | **−0.005 [−0.007, −0.003]** | **−0.012 [−0.015, −0.010]** | **−0.010 [−0.012, −0.007]** | **−1.02 [−1.23, −0.83]** |
+| E − A0 | chosen | **−0.030 [−0.046, −0.016]** | **−0.005 [−0.008, −0.002]** | **−0.016 [−0.019, −0.013]** | **−0.013 [−0.016, −0.010]** | **−1.35 [−1.55, −1.15]** |
+| I − A0 | – | **−0.038 [−0.047, −0.030]** | **−0.007 [−0.009, −0.006]** | **−0.006 [−0.008, −0.005]** | **−0.007 [−0.009, −0.004]** | **−1.15 [−1.33, −0.97]** |
+| **E+I − I** (ElderNet's increment over Inertia) | defaults / chosen | **−0.006 [−0.010, −0.002]** / **−0.006 [−0.012, −0.001]** | −0.001 [−0.002, 0.000] | **−0.006** / **−0.008 [−0.011, −0.007]** | **−0.003** / **−0.005** | **−0.34** / **−0.38 [−0.51, −0.26]** |
+| E+I − E (Inertia's increment over ElderNet) | defaults / chosen | **−0.011 [−0.016, −0.007]** / **−0.013 [−0.019, −0.008]** | **−0.004** | 0.000 / +0.001 | 0.000 | **−0.47** / **−0.19 [−0.31, −0.06]** |
+
+**Posture by truth group.** This is known-class argmax accuracy at the chosen weights, computed in the same
+ledgered decode. Recumbent stays unreachable (no sleep evidence in any arm).
+
+| group (states) | A0 | E | E+I | E − A0 | E+I − A0 |
+|---|---|---|---|---|---|
+| seated (158,022) | 0.568 | 0.588 | 0.585 | **+0.020 [0.013, 0.026]** | **+0.016 [0.011, 0.022]** |
+| upright (26,284) | 0.693 | 0.734 | 0.729 | **+0.041 [0.029, 0.056]** | **+0.036 [0.026, 0.049]** |
+| awake static (184,306) | 0.586 | 0.609 | 0.605 | **+0.023 [0.017, 0.028]** | **+0.019 [0.014, 0.024]** |
+| recumbent sleeping / awake | 0.003 / 0.007 | 0.004 / 0.009 | 0.003 / 0.008 | +0.001 / +0.002 | 0.000 / +0.001 |
+
+**Event timing.** The truth is Capture-24's ≤ 28-s gap intervals, which are not timing ground truth.
+* Pooled recall at ±5 / ±10 / ±30 s:
+  * A0: 9.5 / 16.5 / 39.3 %
+  * E (chosen): 9.0 / 17.3 / 39.9 %
+  * E+I (chosen): 8.8 / 15.6 / 37.8 %
+  * I: 8.1 / 14.8 / 37.2 %
+* Flagged events: 25,537 → 22,665 (E) → 22,086 (E+I). Precision ≤ 1.3 % everywhere.
+* Matched walk_start / walk_stop at ±10 s (median |error|):
+  * A0: 55 / 48 (4.0 / 5.3 s)
+  * E: 59 / 51 (5.0 / 6.0 s)
+  * E+I: 55 / 43 (5.0 / 4.5 s)
+
+### 12.6 The reported `gait` block (descriptive)
+
+Published states of the ElderNet arms, at the chosen weights. Every state that carries a block has both speed
+and cadence (availability of speed = cadence = block).
+
+| dataset / truth | arm | states | with gait block | median speed (m/s) | median cadence (steps/min) |
+|---|---|---|---|---|---|
+| WISDM walking (A) | E | 251 | **94 %** | **1.31** | **111** |
+| WISDM walking (A) | A1(v1)+E | 251 | 88 % | 1.29 | 111 |
+| WISDM stairs (C) | E / A1(v1)+E | 287 | 87 % / 10 % | 1.17 / 1.33 | 103 / 105 |
+| WISDM jogging (B) | E / A1(v1)+E | 287 | 1.7 % / 0 % | 1.08 / – | 108 / – |
+| WISDM other activities (D–S) | E / A1(v1)+E | 4,127 | 2.3 % / 0.4 % | 0.53 / 0.57 | 78 / 70 |
+| Capture-24 truth walking | E / E+I | 53,813 | **50 %** / 50 % | **1.30** / 1.31 | **112** / 112 |
+| Capture-24 truth stationary | E | 440,342 | 0.6 % | 0.79 | 95 |
+| Capture-24 truth vehicle / cycling / other | E | 21,394 / 4,700 / 33,149 | 1.3 / 2.1 / 4.8 % | 0.79 / 0.87 / 0.68 | 89 / 104 / 91 |
+
+ElderNet's own served windows, independent of the decoder:
+
+| truth | windows | share gait | median speed / cadence on gait windows |
+|---|---|---|---|
+| WISDM walking | 240 | 98.8 % | 1.28 m/s / 111 |
+| WISDM stairs | 274 | 91.6 % | 1.19 / 100 |
+| WISDM jogging | 274 | 7.3 % | 1.05 / 119 |
+| WISDM other activities | 3,923 | 3.0 % | 0.54 / 76 |
+| Capture-24 walking | 53,833 | 51.7 % | 1.33 / 112 |
+| Capture-24 stationary | 440,276 | 0.8 % (57 % pre-filtered) | 0.68 / 89 |
+
+Plausibility:
+* Walking speed of about 1.3 m/s and cadence of about 111 steps/min are in the normal adult range, on both
+  datasets and from both sources (the decoder's block and the raw windows).
+* Stairs read slower (1.17–1.19 m/s).
+* Jogging is mostly *not* gait to ElderNet, as expected: the model is walking-specific and caps cadence at 150.
+* The block is rare but not absent on non-gait truth (0.6 % of stationary, 4.8 % of "other" Capture-24 states)
+  and sits at lower speed / cadence there.
+* With HART (A1(v1)+E) the block mostly disappears on stairs, because the posterior leaves the gait modes.
+
+It is a report, not evidence, so these are descriptive checks only. There is no speed or cadence ground truth
+in either dataset.
+
+### 12.7 What this says (measured unless marked)
+
+1. **HART v1 does not beat v0 inside the decoder.** HF's per-window evaluation is better for v1 (coverage 0.709
+   vs 0.547, macro-F1 0.777 vs 0.701). Inside the decoder v1 is worse calibrated (locomotion NLL +0.076), ranks
+   slightly worse and lowers stationary coverage@95 (−0.022). It doubles walking recall at the weak threshold
+   (0.36 → 0.73) at lower precision (0.92 → 0.88).
+   *Hypothesis*: the encoder channel's compat tables and evidence temperature were set with v0, and v1's
+   sharper outputs are over-trusted.
+2. **ElderNet alone helps a little** on both datasets.
+   * Locomotion NLL −0.075 on WISDM (defaults), −0.03 on Capture-24.
+   * Fewer display flips: −1.0 to −1.4/h on Capture-24.
+   * +0.7–1.0 points of WISDM stationary coverage@95.
+   * +2.3 points of awake-posture accuracy on Capture-24, via the gait / non-gait split of the stationary modes.
+   * It does **not** deliver walking at ≥ 95 % precision on either dataset, which was the channel's main promise
+     here.
+3. **On top of HART v1 it adds nothing**, and VAL turns it nearly off. The measured overlap with HART is
+   low (ρ̂ 0.33), so this is not redundancy. ElderNet moves HART's decisions the wrong way for the coverage
+   objective: walking precision rises from 0.88 to 0.93 while recall falls from 0.73 to 0.51, and stationary
+   coverage@95 drops by 0.002.
+4. **With Inertia on Capture-24 the two are complementary but small.** E+I is the best arm on every
+   Capture-24 metric (NLL 1.264, AURC 0.087, flips 21.6/h). ElderNet's increment over Inertia is NLL −0.006 and
+   −0.38 flips/h. The measured overlap ρ̂ = 0.65 justifies the 0.66 discount floor.
+5. **The gait block is plausible where it matters** (walking ~1.3 m/s, ~111 steps/min), and rarely spurious.
+
+### 12.8 Caveats
+
+1. **Not pristine** (§12.2). Two openings per experiment; HART v1 / ElderNet TEST metrics had been reported by
+   their owners before this decode.
+2. **WISDM exclusions.** Four mixed-rate test blocks and three val blocks are excluded from every arm;
+   A0 / A1(v0) were re-baselined on 138 blocks. 8 test subjects, so the CIs under-cover.
+3. **π = 0.065 comes from Capture-24 free-living** and is used on WISDM's scripted protocol, where gait is far
+   more common (3 of 18 activities). ElderNet is served uncalibrated; the VAL fit (T = 1.047, ELDERNET.md §8) is
+   not used.
+4. The proxies, no-sleep-evidence, dominant-wrist and Capture-24 boundary caveats of §7 all apply.
+5. **Inertia is a stand-in**, NOT INERTIA-1.
+
+## 13. Files and reproduction for §12
+
+* Code: `activity_context/inertia/replay_eldernet.py` (CLI `rho` / `sweep` / `final`) and
+  `replay_export.py` (ElderNet support); tests `tests/inertia/test_replay_eldernet.py`.
+* Outputs, under `research/inertia-replay/`:
+  * `runs/gait/{rho_hat,sweep_wisdm,sweep_capture24,final_wisdm,final_capture24}.json`
+  * `runs/gait/superseded_round1/`
+  * `swift_sources_at_build_0b6d34f5.sha256`
+  * `logs/gait/`
+  * `scratch/gait_run.sh`, `scratch/gait_run2.sh`
+* Reproduce:
+
+```bash
+cd Tools/ActivityContext
+export PYTHONPATH=. INERTIA_DATA_ROOT=<research> WISDM_DIR=<unpacked wisdm-dataset>
+export NARA_REPLAY_XCTEST=<release build of 0b6d34f5>/StrandAnalyticsPackageTests.xctest
+python -m activity_context.inertia.replay_eldernet rho
+python -m activity_context.inertia.replay_eldernet sweep --dataset wisdm --jobs 4
+python -m activity_context.inertia.replay_eldernet sweep --dataset capture24 --jobs 4
+python -m activity_context.inertia.replay_eldernet final --dataset wisdm --jobs 4 --rerun-reason <reason> --rerun-detail "<why>"
+python -m activity_context.inertia.replay_eldernet final --dataset capture24 --jobs 4 --rerun-reason <reason> --rerun-detail "<why>"
 ```
 
 ## Appendix A — post-audit tables for `shadow-primary-hc` incl. the baseline arms (generated by `replay_report`)
@@ -1885,3 +2166,1117 @@ A1 − A0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [
 ## Appendix C — pre-audit run (superseded)
 
 The pre-audit tables (bundle `f61007169e3d`, xctest `5b10b94c86d0`, ρ default 0.5, unledgered) are in this file's version at commit `1802a012` and in `research/inertia-replay/runs/{baseline,shadow-primary-hc,shadow-primary-art}/`; §6 lists every number that changed.
+
+## Appendix D — §12 tables (HART v1 / ElderNet; generated by `replay_report` functions)
+
+Arms marked * carry the stand-in Inertia bundle (STAND-IN, NOT INERTIA-1).
+
+### wisdm TEST — ElderNet config: defaults (E: w 0.25, ρ_H 0.65, ρ_I 0.66; A1v1+E: w 0.25, ρ_H 0.65, ρ_I 0.66; A1v1+E+I: w 0.25, ρ_H 0.65, ρ_I 0.66)
+
+| arm | published states | coarse 4-class acc | display flips/h | hours | refusals | Inertia windows ingested | of which OOD |
+|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 4,952 | 0.635 | 39.3 | 6.7 | — | — | — |
+| A1(v0) +HART v0 | 4,952 | 0.703 | 36.5 | 6.7 | — | — | — |
+| A1(v1) +HART v1 | 4,952 | 0.685 | 36.9 | 6.7 | — | — | — |
+| A1(v1)+Inertia* | 4,952 | 0.685 | 36.8 | 6.7 | — | 4,130 | 930 |
+| E +ElderNet | 4,952 | 0.661 | 38.1 | 6.7 | — | — | — |
+| A1(v1)+ElderNet | 4,952 | 0.681 | 36.6 | 6.7 | — | — | — |
+| A1(v1)+ElderNet+Inertia* | 4,952 | 0.682 | 36.6 | 6.7 | — | 4,130 | 930 |
+
+#### locomotion
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 4,162 | 0.635 | 0.130 | 2.014 | 0.640 | 0.300 | 0.034 | 0.000 |
+| A1(v0) +HART v0 | 4,162 | 0.643 | 0.094 | 2.171 | 0.668 | 0.320 | 0.079 | 0.000 |
+| A1(v1) +HART v1 | 4,162 | 0.625 | 0.101 | 2.247 | 0.697 | 0.335 | 0.081 | 0.000 |
+| A1(v1)+Inertia* | 4,162 | 0.626 | 0.100 | 2.244 | 0.696 | 0.334 | 0.081 | 0.000 |
+| E +ElderNet | 4,162 | 0.661 | 0.119 | 1.939 | 0.609 | 0.287 | 0.033 | 0.000 |
+| A1(v1)+ElderNet | 4,162 | 0.624 | 0.101 | 2.245 | 0.697 | 0.336 | 0.081 | 0.000 |
+| A1(v1)+ElderNet+Inertia* | 4,162 | 0.624 | 0.101 | 2.243 | 0.697 | 0.336 | 0.081 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| stationary | A0 streams+imu-feat-1 | 3,337 | strong | 0.300 | 0.999 | 0.997 | 0.679 | 0.679 | 0.679 | 0.385 |
+| stationary | A1(v0) +HART v0 | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.648 | 0.648 | 0.648 | 0.375 |
+| stationary | A1(v1) +HART v1 | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.626 | 0.626 | 0.626 | 0.375 |
+| stationary | A1(v1)+Inertia* | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.626 | 0.626 | 0.626 | 0.375 |
+| stationary | E +ElderNet | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.686 | 0.686 | 0.686 | 0.385 |
+| stationary | A1(v1)+ElderNet | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.624 | 0.624 | 0.624 | 0.385 |
+| stationary | A1(v1)+ElderNet+Inertia* | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.624 | 0.624 | 0.624 | 0.385 |
+| walking | A0 streams+imu-feat-1 | 251 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | A1(v0) +HART v0 | 251 | weak | 0.960 | 0.918 | 0.858 | 0.359 | 0.000 | 0.000 | — |
+| walking | A1(v1) +HART v1 | 251 | weak | 0.955 | 0.883 | 0.840 | 0.725 | 0.000 | 0.000 | — |
+| walking | A1(v1)+Inertia* | 251 | weak | 0.955 | 0.866 | 0.821 | 0.745 | 0.000 | 0.000 | — |
+| walking | E +ElderNet | 251 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | A1(v1)+ElderNet | 251 | weak | 0.960 | 0.935 | 0.889 | 0.514 | 0.000 | 0.000 | — |
+| walking | A1(v1)+ElderNet+Inertia* | 251 | weak | 0.960 | 0.930 | 0.884 | 0.530 | 0.000 | 0.000 | — |
+| running | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| running | A1(v0) +HART v0 | 287 | strong | 0.660 | 0.860 | 0.824 | 0.962 | 0.000 | 0.000 | — |
+| running | A1(v1) +HART v1 | 287 | strong | 0.665 | 0.800 | 0.761 | 0.962 | 0.000 | 0.000 | — |
+| running | A1(v1)+Inertia* | 287 | strong | 0.630 | 0.794 | 0.755 | 0.965 | 0.000 | 0.000 | — |
+| running | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| running | A1(v1)+ElderNet | 287 | strong | 0.885 | 0.824 | 0.786 | 0.948 | 0.000 | 0.000 | — |
+| running | A1(v1)+ElderNet+Inertia* | 287 | strong | 0.885 | 0.824 | 0.786 | 0.948 | 0.000 | 0.000 | — |
+| stairs | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v0) +HART v0 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1) +HART v1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1)+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1)+ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1)+ElderNet+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### posture
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 574 | 0.406 | 0.679 | 1.005 | 0.722 | 0.288 | 0.135 | 0.070 |
+| A1(v0) +HART v0 | 574 | 0.429 | 0.667 | 0.983 | 0.701 | 0.261 | 0.123 | 0.057 |
+| A1(v1) +HART v1 | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.254 | 0.134 | 0.071 |
+| A1(v1)+Inertia* | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.254 | 0.133 | 0.071 |
+| E +ElderNet | 574 | 0.406 | 0.677 | 1.003 | 0.721 | 0.288 | 0.131 | 0.066 |
+| A1(v1)+ElderNet | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.255 | 0.134 | 0.071 |
+| A1(v1)+ElderNet+Inertia* | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.255 | 0.134 | 0.071 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| seated_likely | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v0) +HART v0 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1) +HART v1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1)+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1)+ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1)+ElderNet+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v0) +HART v0 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1) +HART v1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1)+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1)+ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1)+ElderNet+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### arm_behavior
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 1,148 | 0.413 | 0.496 | 2.797 | 1.016 | 0.472 | 0.008 | 0.000 |
+| A1(v0) +HART v0 | 1,148 | 0.415 | 0.493 | 2.539 | 0.997 | 0.470 | 0.008 | 0.000 |
+| A1(v1) +HART v1 | 1,148 | 0.415 | 0.495 | 2.604 | 0.998 | 0.469 | 0.008 | 0.000 |
+| A1(v1)+Inertia* | 1,148 | 0.415 | 0.495 | 2.603 | 0.998 | 0.469 | 0.008 | 0.000 |
+| E +ElderNet | 1,148 | 0.413 | 0.496 | 2.808 | 1.018 | 0.472 | 0.008 | 0.000 |
+| A1(v1)+ElderNet | 1,148 | 0.415 | 0.495 | 2.605 | 0.998 | 0.469 | 0.008 | 0.000 |
+| A1(v1)+ElderNet+Inertia* | 1,148 | 0.415 | 0.495 | 2.604 | 0.998 | 0.469 | 0.008 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| desk_like | A0 streams+imu-feat-1 | 574 | strong | 0.970 | 0.991 | 0.973 | 0.392 | 0.392 | 0.512 | 0.965 |
+| desk_like | A1(v0) +HART v0 | 574 | strong | 0.975 | 1.000 | 0.969 | 0.164 | 0.164 | 0.601 | 0.960 |
+| desk_like | A1(v1) +HART v1 | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| desk_like | A1(v1)+Inertia* | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| desk_like | E +ElderNet | 574 | strong | 0.970 | 0.991 | 0.973 | 0.392 | 0.392 | 0.516 | 0.965 |
+| desk_like | A1(v1)+ElderNet | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| desk_like | A1(v1)+ElderNet+Inertia* | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| repetitive_hand_motion | A0 streams+imu-feat-1 | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v0) +HART v0 | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1) +HART v1 | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1)+Inertia* | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | E +ElderNet | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1)+ElderNet | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1)+ElderNet+Inertia* | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### paired bootstrap A1v1-A1v0
+
+A1v1 − A1v0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.001 [-0.002, 0.004]† |
+| posture | AURC (binned) Δ | 0.004 [-0.001, 0.012]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [-0.229, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | 0.076 [0.015, 0.135]† ** |
+| locomotion | AURC (binned) Δ | 0.008 [0.000, 0.017]† ** |
+| locomotion | stationary: descriptive coverage@95 Δ | -0.022 [-0.040, -0.005]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | -0.022 [-0.040, -0.005]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.512]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [-0.961, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | 0.45 [-1.52, 2.33]† |
+
+#### paired bootstrap A1v1-A0
+
+A1v1 − A0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.020 [-0.049, -0.000]† ** |
+| posture | AURC (binned) Δ | -0.007 [-0.030, 0.001]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | 0.233 [0.067, 0.409]† ** |
+| locomotion | AURC (binned) Δ | -0.025 [-0.056, 0.004]† |
+| locomotion | stationary: descriptive coverage@95 Δ | -0.053 [-0.107, -0.013]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | -0.053 [-0.107, -0.013]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.532]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.899]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.962 [0.948, 0.972]† ** |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -2.39 [-4.26, 0.00]† |
+
+#### paired bootstrap E-A0
+
+E − A0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.001 [-0.003, 0.000]† |
+| posture | AURC (binned) Δ | -0.002 [-0.005, 0.001]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.075 [-0.141, -0.001]† ** |
+| locomotion | AURC (binned) Δ | -0.009 [-0.021, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.007 [0.002, 0.011]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.007 [0.002, 0.011]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -1.20 [-2.84, 0.31]† |
+
+#### paired bootstrap A1v1+E-A1v1
+
+A1v1+E − A1v1 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.000 [-0.001, 0.001]† |
+| posture | AURC (binned) Δ | -0.000 [-0.001, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.002 [-0.007, 0.002]† |
+| locomotion | AURC (binned) Δ | 0.000 [-0.001, 0.001]† |
+| locomotion | stationary: descriptive coverage@95 Δ | -0.002 [-0.006, -0.000]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | -0.002 [-0.006, -0.000]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [-0.466, 0.076]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | -0.014 [-0.035, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -0.30 [-0.74, 0.00]† |
+
+#### paired bootstrap A1v1+I-A1v1
+
+A1v1+I − A1v1 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.000 [0.000, 0.000]† ** |
+| posture | AURC (binned) Δ | 0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.003 [-0.005, -0.002]† ** |
+| locomotion | AURC (binned) Δ | -0.000 [-0.001, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.001]† |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.001]† |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [-0.405, 0.056]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.003 [0.000, 0.010]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -0.15 [-0.45, 0.00]† |
+
+#### paired bootstrap A1v1+E+I-A1v1+E
+
+A1v1+E+I − A1v1+E (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.000 [-0.000, 0.000]† |
+| posture | AURC (binned) Δ | 0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.002 [-0.002, -0.001]† ** |
+| locomotion | AURC (binned) Δ | -0.000 [-0.000, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.001]† |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.001]† |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.014]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | 0.00 [-0.44, 0.45]† |
+
+#### paired bootstrap A1v1+E+I-A1v1+I
+
+A1v1+E+I − A1v1+I (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.000 [-0.001, 0.001]† |
+| posture | AURC (binned) Δ | -0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.001 [-0.004, 0.003]† |
+| locomotion | AURC (binned) Δ | 0.000 [-0.000, 0.001]† |
+| locomotion | stationary: descriptive coverage@95 Δ | -0.002 [-0.006, -0.000]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | -0.002 [-0.006, -0.000]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [-0.514, 0.038]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | -0.017 [-0.038, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -0.15 [-0.45, 0.00]† |
+
+### wisdm TEST — ElderNet config: selected (E: w 0.4, ρ_H 0.65, ρ_I 0.66; A1v1+E: w 0.1, ρ_H 0.95, ρ_I 0.66; A1v1+E+I: w 0.1, ρ_H 0.95, ρ_I 0.66)
+
+| arm | published states | coarse 4-class acc | display flips/h | hours | refusals | Inertia windows ingested | of which OOD |
+|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 4,952 | 0.635 | 39.3 | 6.7 | — | — | — |
+| A1(v0) +HART v0 | 4,952 | 0.703 | 36.5 | 6.7 | — | — | — |
+| A1(v1) +HART v1 | 4,952 | 0.685 | 36.9 | 6.7 | — | — | — |
+| A1(v1)+Inertia* | 4,952 | 0.685 | 36.8 | 6.7 | — | 4,130 | 930 |
+| E +ElderNet | 4,952 | 0.659 | 38.6 | 6.7 | — | — | — |
+| A1(v1)+ElderNet | 4,952 | 0.684 | 36.9 | 6.7 | — | — | — |
+| A1(v1)+ElderNet+Inertia* | 4,952 | 0.685 | 36.8 | 6.7 | — | 4,130 | 930 |
+
+#### locomotion
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 4,162 | 0.635 | 0.130 | 2.014 | 0.640 | 0.300 | 0.034 | 0.000 |
+| A1(v0) +HART v0 | 4,162 | 0.643 | 0.094 | 2.171 | 0.668 | 0.320 | 0.079 | 0.000 |
+| A1(v1) +HART v1 | 4,162 | 0.625 | 0.101 | 2.247 | 0.697 | 0.335 | 0.081 | 0.000 |
+| A1(v1)+Inertia* | 4,162 | 0.626 | 0.100 | 2.244 | 0.696 | 0.334 | 0.081 | 0.000 |
+| E +ElderNet | 4,162 | 0.659 | 0.120 | 1.963 | 0.620 | 0.292 | 0.033 | 0.000 |
+| A1(v1)+ElderNet | 4,162 | 0.625 | 0.101 | 2.247 | 0.697 | 0.335 | 0.081 | 0.000 |
+| A1(v1)+ElderNet+Inertia* | 4,162 | 0.626 | 0.100 | 2.244 | 0.696 | 0.334 | 0.081 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| stationary | A0 streams+imu-feat-1 | 3,337 | strong | 0.300 | 0.999 | 0.997 | 0.679 | 0.679 | 0.679 | 0.385 |
+| stationary | A1(v0) +HART v0 | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.648 | 0.648 | 0.648 | 0.375 |
+| stationary | A1(v1) +HART v1 | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.626 | 0.626 | 0.626 | 0.375 |
+| stationary | A1(v1)+Inertia* | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.626 | 0.626 | 0.626 | 0.375 |
+| stationary | E +ElderNet | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.690 | 0.690 | 0.690 | 0.365 |
+| stationary | A1(v1)+ElderNet | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.626 | 0.626 | 0.626 | 0.370 |
+| stationary | A1(v1)+ElderNet+Inertia* | 3,337 | strong | 0.300 | 1.000 | 0.998 | 0.626 | 0.626 | 0.626 | 0.370 |
+| walking | A0 streams+imu-feat-1 | 251 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | A1(v0) +HART v0 | 251 | weak | 0.960 | 0.918 | 0.858 | 0.359 | 0.000 | 0.000 | — |
+| walking | A1(v1) +HART v1 | 251 | weak | 0.955 | 0.883 | 0.840 | 0.725 | 0.000 | 0.000 | — |
+| walking | A1(v1)+Inertia* | 251 | weak | 0.955 | 0.866 | 0.821 | 0.745 | 0.000 | 0.000 | — |
+| walking | E +ElderNet | 251 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | A1(v1)+ElderNet | 251 | weak | 0.955 | 0.884 | 0.841 | 0.729 | 0.000 | 0.000 | — |
+| walking | A1(v1)+ElderNet+Inertia* | 251 | weak | 0.955 | 0.858 | 0.813 | 0.745 | 0.000 | 0.000 | — |
+| running | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| running | A1(v0) +HART v0 | 287 | strong | 0.660 | 0.860 | 0.824 | 0.962 | 0.000 | 0.000 | — |
+| running | A1(v1) +HART v1 | 287 | strong | 0.665 | 0.800 | 0.761 | 0.962 | 0.000 | 0.000 | — |
+| running | A1(v1)+Inertia* | 287 | strong | 0.630 | 0.794 | 0.755 | 0.965 | 0.000 | 0.000 | — |
+| running | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| running | A1(v1)+ElderNet | 287 | strong | 0.690 | 0.805 | 0.766 | 0.962 | 0.000 | 0.000 | — |
+| running | A1(v1)+ElderNet+Inertia* | 287 | strong | 0.650 | 0.794 | 0.755 | 0.965 | 0.000 | 0.000 | — |
+| stairs | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v0) +HART v0 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1) +HART v1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1)+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1)+ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | A1(v1)+ElderNet+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### posture
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 574 | 0.406 | 0.679 | 1.005 | 0.722 | 0.288 | 0.135 | 0.070 |
+| A1(v0) +HART v0 | 574 | 0.429 | 0.667 | 0.983 | 0.701 | 0.261 | 0.123 | 0.057 |
+| A1(v1) +HART v1 | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.254 | 0.134 | 0.071 |
+| A1(v1)+Inertia* | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.254 | 0.133 | 0.071 |
+| E +ElderNet | 574 | 0.404 | 0.677 | 1.003 | 0.721 | 0.290 | 0.130 | 0.063 |
+| A1(v1)+ElderNet | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.254 | 0.134 | 0.071 |
+| A1(v1)+ElderNet+Inertia* | 574 | 0.437 | 0.672 | 0.984 | 0.701 | 0.254 | 0.133 | 0.071 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| seated_likely | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v0) +HART v0 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1) +HART v1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1)+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1)+ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A1(v1)+ElderNet+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A0 streams+imu-feat-1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v0) +HART v0 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1) +HART v1 | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1)+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | E +ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1)+ElderNet | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | A1(v1)+ElderNet+Inertia* | 287 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### arm_behavior
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 1,148 | 0.413 | 0.496 | 2.797 | 1.016 | 0.472 | 0.008 | 0.000 |
+| A1(v0) +HART v0 | 1,148 | 0.415 | 0.493 | 2.539 | 0.997 | 0.470 | 0.008 | 0.000 |
+| A1(v1) +HART v1 | 1,148 | 0.415 | 0.495 | 2.604 | 0.998 | 0.469 | 0.008 | 0.000 |
+| A1(v1)+Inertia* | 1,148 | 0.415 | 0.495 | 2.603 | 0.998 | 0.469 | 0.008 | 0.000 |
+| E +ElderNet | 1,148 | 0.413 | 0.495 | 2.810 | 1.018 | 0.472 | 0.008 | 0.000 |
+| A1(v1)+ElderNet | 1,148 | 0.415 | 0.495 | 2.604 | 0.998 | 0.469 | 0.008 | 0.000 |
+| A1(v1)+ElderNet+Inertia* | 1,148 | 0.415 | 0.495 | 2.603 | 0.998 | 0.469 | 0.008 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| desk_like | A0 streams+imu-feat-1 | 574 | strong | 0.970 | 0.991 | 0.973 | 0.392 | 0.392 | 0.512 | 0.965 |
+| desk_like | A1(v0) +HART v0 | 574 | strong | 0.975 | 1.000 | 0.969 | 0.164 | 0.164 | 0.601 | 0.960 |
+| desk_like | A1(v1) +HART v1 | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| desk_like | A1(v1)+Inertia* | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| desk_like | E +ElderNet | 574 | strong | 0.970 | 0.991 | 0.973 | 0.394 | 0.394 | 0.519 | 0.965 |
+| desk_like | A1(v1)+ElderNet | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| desk_like | A1(v1)+ElderNet+Inertia* | 574 | strong | 0.970 | 0.991 | 0.973 | 0.395 | 0.395 | 0.601 | 0.960 |
+| repetitive_hand_motion | A0 streams+imu-feat-1 | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v0) +HART v0 | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1) +HART v1 | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1)+Inertia* | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | E +ElderNet | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1)+ElderNet | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A1(v1)+ElderNet+Inertia* | 574 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### paired bootstrap A1v1-A1v0
+
+A1v1 − A1v0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.001 [-0.002, 0.004]† |
+| posture | AURC (binned) Δ | 0.004 [-0.001, 0.012]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [-0.229, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | 0.076 [0.015, 0.135]† ** |
+| locomotion | AURC (binned) Δ | 0.008 [0.000, 0.017]† ** |
+| locomotion | stationary: descriptive coverage@95 Δ | -0.022 [-0.040, -0.005]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | -0.022 [-0.040, -0.005]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.512]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [-0.961, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | 0.45 [-1.52, 2.33]† |
+
+#### paired bootstrap A1v1-A0
+
+A1v1 − A0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.020 [-0.049, -0.000]† ** |
+| posture | AURC (binned) Δ | -0.007 [-0.030, 0.001]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | 0.233 [0.067, 0.409]† ** |
+| locomotion | AURC (binned) Δ | -0.025 [-0.056, 0.004]† |
+| locomotion | stationary: descriptive coverage@95 Δ | -0.053 [-0.107, -0.013]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | -0.053 [-0.107, -0.013]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.532]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.899]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.962 [0.948, 0.972]† ** |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -2.39 [-4.26, 0.00]† |
+
+#### paired bootstrap E-A0
+
+E − A0 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.002 [-0.005, 0.000]† |
+| posture | AURC (binned) Δ | -0.002 [-0.006, 0.002]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.051 [-0.131, 0.036]† |
+| locomotion | AURC (binned) Δ | -0.008 [-0.020, 0.002]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.010 [0.004, 0.017]† ** |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.010 [0.004, 0.017]† ** |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -0.75 [-2.94, 1.21]† |
+
+#### paired bootstrap A1v1+E-A1v1
+
+A1v1+E − A1v1 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.000 [-0.000, 0.000]† |
+| posture | AURC (binned) Δ | -0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.000 [-0.000, 0.000]† |
+| locomotion | AURC (binned) Δ | 0.000 [-0.000, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.008]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | 0.00 [0.00, 0.00]† |
+
+#### paired bootstrap A1v1+I-A1v1
+
+A1v1+I − A1v1 (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.000 [0.000, 0.000]† ** |
+| posture | AURC (binned) Δ | 0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.003 [-0.005, -0.002]† ** |
+| locomotion | AURC (binned) Δ | -0.000 [-0.001, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.001]† |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.001]† |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [-0.405, 0.056]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.003 [0.000, 0.010]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -0.15 [-0.45, 0.00]† |
+
+#### paired bootstrap A1v1+E+I-A1v1+E
+
+A1v1+E+I − A1v1+E (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.000 [0.000, 0.000]† ** |
+| posture | AURC (binned) Δ | 0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.003 [-0.005, -0.002]† ** |
+| locomotion | AURC (binned) Δ | -0.000 [-0.001, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.001]† |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.001]† |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [-0.410, 0.052]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.003 [0.000, 0.010]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | -0.15 [-0.45, 0.00]† |
+
+#### paired bootstrap A1v1+E+I-A1v1+I
+
+A1v1+E+I − A1v1+I (paired subject-cluster bootstrap, 1000 resamples, 8 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.000 [-0.000, 0.000]† |
+| posture | AURC (binned) Δ | -0.000 [-0.000, 0.000]† |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | NLL (known) Δ | -0.000 [-0.000, 0.000]† |
+| locomotion | AURC (binned) Δ | 0.000 [-0.000, 0.000]† |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000]† |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000]† |
+| display | label flips per hour Δ | 0.00 [0.00, 0.00]† |
+
+### capture24 TEST — ElderNet config: defaults (E: w 0.25, ρ_H 0.65, ρ_I 0.66; E+I: w 0.25, ρ_H 0.65, ρ_I 0.66)
+
+| arm | published states | coarse 4-class acc | display flips/h | hours | refusals | Inertia windows ingested | of which OOD |
+|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 914,242 | 0.793 | 23.1 | 1269.7 | — | — | — |
+| I +Inertia* | 914,242 | 0.809 | 22.0 | 1269.7 | — | 913,891 | 48,669 |
+| E +ElderNet | 914,242 | 0.810 | 22.1 | 1269.7 | — | — | — |
+| E+I ElderNet+Inertia* | 914,242 | 0.812 | 21.7 | 1269.7 | — | 913,891 | 48,669 |
+
+#### locomotion
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 557,066 | 0.793 | 0.096 | 1.308 | 0.368 | 0.168 | 0.031 | 0.000 |
+| I +Inertia* | 557,066 | 0.809 | 0.087 | 1.270 | 0.350 | 0.162 | 0.031 | 0.000 |
+| E +ElderNet | 557,066 | 0.810 | 0.095 | 1.276 | 0.347 | 0.161 | 0.031 | 0.000 |
+| E+I ElderNet+Inertia* | 557,066 | 0.812 | 0.087 | 1.264 | 0.345 | 0.161 | 0.031 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| stationary | A0 streams+imu-feat-1 | 443,302 | weak | 0.300 | 0.927 | 0.926 | 0.899 | 0.000 | 0.783 | 0.960 |
+| stationary | I +Inertia* | 443,302 | weak | 0.300 | 0.931 | 0.930 | 0.906 | 0.000 | 0.815 | 0.955 |
+| stationary | E +ElderNet | 443,302 | weak | 0.300 | 0.932 | 0.931 | 0.904 | 0.000 | 0.797 | 0.960 |
+| stationary | E+I ElderNet+Inertia* | 443,302 | weak | 0.300 | 0.932 | 0.931 | 0.907 | 0.000 | 0.819 | 0.955 |
+| walking | A0 streams+imu-feat-1 | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | I +Inertia* | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | E +ElderNet | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | E+I ElderNet+Inertia* | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| running | A0 streams+imu-feat-1 | 645 | — | — | — | — | — | — | 0.000 | — |
+| running | I +Inertia* | 645 | — | — | — | — | — | — | 0.000 | — |
+| running | E +ElderNet | 645 | — | — | — | — | — | — | 0.000 | — |
+| running | E+I ElderNet+Inertia* | 645 | — | — | — | — | — | — | 0.000 | — |
+| stairs | A0 streams+imu-feat-1 | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | I +Inertia* | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | E +ElderNet | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | E+I ElderNet+Inertia* | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | A0 streams+imu-feat-1 | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | I +Inertia* | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | E +ElderNet | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | E+I ElderNet+Inertia* | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | A0 streams+imu-feat-1 | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | I +Inertia* | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | E +ElderNet | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | E+I ElderNet+Inertia* | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | A0 streams+imu-feat-1 | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | I +Inertia* | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | E +ElderNet | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | E+I ElderNet+Inertia* | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### posture
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 454,297 | 0.294 | 0.528 | 1.761 | 0.891 | 0.323 | 0.172 | 0.104 |
+| I +Inertia* | 454,297 | 0.299 | 0.521 | 1.755 | 0.887 | 0.319 | 0.165 | 0.097 |
+| E +ElderNet | 454,297 | 0.301 | 0.518 | 1.749 | 0.884 | 0.316 | 0.165 | 0.097 |
+| E+I ElderNet+Inertia* | 454,297 | 0.301 | 0.518 | 1.749 | 0.884 | 0.316 | 0.163 | 0.095 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| recumbent | A0 streams+imu-feat-1 | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| recumbent | I +Inertia* | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| recumbent | E +ElderNet | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| recumbent | E+I ElderNet+Inertia* | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A0 streams+imu-feat-1 | 212,329 | weak | 0.580 | 0.854 | 0.852 | 0.298 | 0.000 | 0.248 | 0.640 |
+| seated_likely | I +Inertia* | 212,329 | weak | 0.580 | 0.855 | 0.853 | 0.305 | 0.000 | 0.257 | 0.635 |
+| seated_likely | E +ElderNet | 212,329 | weak | 0.575 | 0.792 | 0.790 | 0.312 | 0.000 | 0.271 | 0.620 |
+| seated_likely | E+I ElderNet+Inertia* | 212,329 | weak | 0.580 | 0.857 | 0.855 | 0.308 | 0.000 | 0.263 | 0.630 |
+| upright_stationary | A0 streams+imu-feat-1 | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | I +Inertia* | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | E +ElderNet | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | E+I ElderNet+Inertia* | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### arm_behavior
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 128,775 | 0.291 | 0.637 | 3.588 | 1.223 | 0.579 | 0.007 | 0.000 |
+| I +Inertia* | 128,775 | 0.292 | 0.637 | 3.574 | 1.223 | 0.579 | 0.007 | 0.000 |
+| E +ElderNet | 128,775 | 0.292 | 0.637 | 3.576 | 1.222 | 0.579 | 0.007 | 0.000 |
+| E+I ElderNet+Inertia* | 128,775 | 0.292 | 0.637 | 3.571 | 1.222 | 0.579 | 0.007 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| quiet | A0 streams+imu-feat-1 | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| quiet | I +Inertia* | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| quiet | E +ElderNet | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| quiet | E+I ElderNet+Inertia* | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | A0 streams+imu-feat-1 | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | I +Inertia* | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | E +ElderNet | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | E+I ElderNet+Inertia* | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A0 streams+imu-feat-1 | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | I +Inertia* | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | E +ElderNet | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | E+I ElderNet+Inertia* | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### transition events (Capture-24 truth = unannotated gaps <= 28 s; NOT timing ground truth)
+
+| arm | tolerance / kind | TP | FP | FN | precision | recall | F1 |
+|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | ±5 s | 74 | 25,463 | 702 | 0.003 | 0.095 | 0.006 |
+| A0 streams+imu-feat-1 | ±10 s | 128 | 25,409 | 648 | 0.005 | 0.165 | 0.010 |
+| A0 streams+imu-feat-1 | ±30 s | 305 | 25,232 | 471 | 0.012 | 0.393 | 0.023 |
+| A0 streams+imu-feat-1 | getting_up_like ±10 s | 0 | 32 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | lying_down_like ±10 s | 0 | 8 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | run_start ±10 s | 0 | 701 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | run_stop ±10 s | 0 | 635 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | sit_to_stand_like ±10 s | 13 | 2,605 | 139 | 0.005 | 0.086 | 0.009 (med 4.5 s, p90 8.3 s) |
+| A0 streams+imu-feat-1 | stand_to_sit_like ±10 s | 12 | 4,402 | 171 | 0.003 | 0.066 | 0.005 (med 6.0 s, p90 9.5 s) |
+| A0 streams+imu-feat-1 | walk_start ±10 s | 55 | 8,414 | 147 | 0.006 | 0.272 | 0.013 (med 4.0 s, p90 9.0 s) |
+| A0 streams+imu-feat-1 | walk_stop ±10 s | 48 | 8,612 | 189 | 0.006 | 0.203 | 0.011 (med 5.2 s, p90 8.5 s) |
+| I +Inertia* | ±5 s | 63 | 22,845 | 713 | 0.003 | 0.081 | 0.005 |
+| I +Inertia* | ±10 s | 115 | 22,793 | 661 | 0.005 | 0.148 | 0.010 |
+| I +Inertia* | ±30 s | 289 | 22,619 | 487 | 0.013 | 0.372 | 0.024 |
+| I +Inertia* | getting_up_like ±10 s | 0 | 35 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| I +Inertia* | lying_down_like ±10 s | 0 | 8 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| I +Inertia* | run_start ±10 s | 0 | 255 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| I +Inertia* | run_stop ±10 s | 0 | 237 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| I +Inertia* | sit_to_stand_like ±10 s | 12 | 2,714 | 140 | 0.004 | 0.079 | 0.008 (med 4.2 s, p90 8.4 s) |
+| I +Inertia* | stand_to_sit_like ±10 s | 11 | 4,614 | 172 | 0.002 | 0.060 | 0.005 (med 7.5 s, p90 9.5 s) |
+| I +Inertia* | walk_start ±10 s | 52 | 7,350 | 150 | 0.007 | 0.257 | 0.014 (med 5.0 s, p90 9.0 s) |
+| I +Inertia* | walk_stop ±10 s | 40 | 7,580 | 197 | 0.005 | 0.169 | 0.010 (med 4.5 s, p90 8.5 s) |
+| E +ElderNet | ±5 s | 75 | 23,118 | 701 | 0.003 | 0.097 | 0.006 |
+| E +ElderNet | ±10 s | 130 | 23,063 | 646 | 0.006 | 0.168 | 0.011 |
+| E +ElderNet | ±30 s | 313 | 22,880 | 463 | 0.013 | 0.403 | 0.026 |
+| E +ElderNet | getting_up_like ±10 s | 0 | 37 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E +ElderNet | lying_down_like ±10 s | 0 | 8 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E +ElderNet | run_start ±10 s | 0 | 404 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| E +ElderNet | run_stop ±10 s | 0 | 365 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E +ElderNet | sit_to_stand_like ±10 s | 14 | 2,614 | 138 | 0.005 | 0.092 | 0.010 (med 5.0 s, p90 8.9 s) |
+| E +ElderNet | stand_to_sit_like ±10 s | 11 | 4,466 | 172 | 0.002 | 0.060 | 0.005 (med 6.0 s, p90 9.5 s) |
+| E +ElderNet | walk_start ±10 s | 57 | 7,504 | 145 | 0.008 | 0.282 | 0.015 (med 5.0 s, p90 8.0 s) |
+| E +ElderNet | walk_stop ±10 s | 48 | 7,665 | 189 | 0.006 | 0.203 | 0.012 (med 4.8 s, p90 9.0 s) |
+| E+I ElderNet+Inertia* | ±5 s | 67 | 22,152 | 709 | 0.003 | 0.086 | 0.006 |
+| E+I ElderNet+Inertia* | ±10 s | 117 | 22,102 | 659 | 0.005 | 0.151 | 0.010 |
+| E+I ElderNet+Inertia* | ±30 s | 290 | 21,929 | 486 | 0.013 | 0.374 | 0.025 |
+| E+I ElderNet+Inertia* | getting_up_like ±10 s | 0 | 39 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | lying_down_like ±10 s | 0 | 7 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | run_start ±10 s | 0 | 252 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | run_stop ±10 s | 0 | 232 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | sit_to_stand_like ±10 s | 12 | 2,711 | 140 | 0.004 | 0.079 | 0.008 (med 4.8 s, p90 8.9 s) |
+| E+I ElderNet+Inertia* | stand_to_sit_like ±10 s | 10 | 4,653 | 173 | 0.002 | 0.055 | 0.004 (med 7.8 s, p90 9.5 s) |
+| E+I ElderNet+Inertia* | walk_start ±10 s | 54 | 6,989 | 148 | 0.008 | 0.267 | 0.015 (med 4.8 s, p90 9.0 s) |
+| E+I ElderNet+Inertia* | walk_stop ±10 s | 41 | 7,219 | 196 | 0.006 | 0.173 | 0.011 (med 4.5 s, p90 8.5 s) |
+
+#### paired bootstrap E-A0
+
+E − A0 (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.012 [-0.015, -0.010] ** |
+| posture | AURC (binned) Δ | -0.010 [-0.012, -0.007] ** |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.023 [0.004, 0.241] ** |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.032 [-0.045, -0.020] ** |
+| locomotion | AURC (binned) Δ | -0.005 [-0.007, -0.003] ** |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.014 [-0.742, 0.039] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -1.02 [-1.23, -0.83] ** |
+
+#### paired bootstrap I-A0
+
+I − A0 (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.006 [-0.008, -0.005] ** |
+| posture | AURC (binned) Δ | -0.007 [-0.009, -0.004] ** |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.009 [0.000, 0.196] ** |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.038 [-0.047, -0.030] ** |
+| locomotion | AURC (binned) Δ | -0.007 [-0.009, -0.006] ** |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.032 [0.000, 0.766] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -1.15 [-1.33, -0.97] ** |
+
+#### paired bootstrap E+I-E
+
+E+I − E (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.000 [-0.002, 0.001] |
+| posture | AURC (binned) Δ | -0.000 [-0.002, 0.002] |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | -0.008 [-0.041, 0.002] |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.011 [-0.016, -0.007] ** |
+| locomotion | AURC (binned) Δ | -0.004 [-0.006, -0.002] ** |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.022 [-0.001, 0.769] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -0.47 [-0.62, -0.34] ** |
+
+#### paired bootstrap E+I-I
+
+E+I − I (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.006 [-0.008, -0.005] ** |
+| posture | AURC (binned) Δ | -0.003 [-0.005, -0.002] ** |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.007 [0.001, 0.145] ** |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.006 [-0.010, -0.002] ** |
+| locomotion | AURC (binned) Δ | -0.001 [-0.002, 0.000] |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.004 [-0.751, 0.010] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -0.34 [-0.45, -0.23] ** |
+
+### capture24 TEST — ElderNet config: selected (E: w 0.4, ρ_H 0.65, ρ_I 0.66; E+I: w 0.4, ρ_H 0.65, ρ_I 0.66)
+
+| arm | published states | coarse 4-class acc | display flips/h | hours | refusals | Inertia windows ingested | of which OOD |
+|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 914,242 | 0.793 | 23.1 | 1269.7 | — | — | — |
+| I +Inertia* | 914,242 | 0.809 | 22.0 | 1269.7 | — | 913,891 | 48,669 |
+| E +ElderNet | 914,242 | 0.813 | 21.8 | 1269.7 | — | — | — |
+| E+I ElderNet+Inertia* | 914,242 | 0.814 | 21.6 | 1269.7 | — | 913,891 | 48,669 |
+
+#### locomotion
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 557,066 | 0.793 | 0.096 | 1.308 | 0.368 | 0.168 | 0.031 | 0.000 |
+| I +Inertia* | 557,066 | 0.809 | 0.087 | 1.270 | 0.350 | 0.162 | 0.031 | 0.000 |
+| E +ElderNet | 557,066 | 0.813 | 0.095 | 1.277 | 0.344 | 0.161 | 0.031 | 0.000 |
+| E+I ElderNet+Inertia* | 557,066 | 0.814 | 0.087 | 1.264 | 0.343 | 0.161 | 0.031 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| stationary | A0 streams+imu-feat-1 | 443,302 | weak | 0.300 | 0.927 | 0.926 | 0.899 | 0.000 | 0.783 | 0.960 |
+| stationary | I +Inertia* | 443,302 | weak | 0.300 | 0.931 | 0.930 | 0.906 | 0.000 | 0.815 | 0.955 |
+| stationary | E +ElderNet | 443,302 | weak | 0.300 | 0.934 | 0.933 | 0.905 | 0.000 | 0.804 | 0.960 |
+| stationary | E+I ElderNet+Inertia* | 443,302 | weak | 0.300 | 0.933 | 0.932 | 0.908 | 0.000 | 0.822 | 0.955 |
+| walking | A0 streams+imu-feat-1 | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | I +Inertia* | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | E +ElderNet | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| walking | E+I ElderNet+Inertia* | 56,773 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| running | A0 streams+imu-feat-1 | 645 | — | — | — | — | — | — | 0.000 | — |
+| running | I +Inertia* | 645 | — | — | — | — | — | — | 0.000 | — |
+| running | E +ElderNet | 645 | — | — | — | — | — | — | 0.000 | — |
+| running | E+I ElderNet+Inertia* | 645 | — | — | — | — | — | — | 0.000 | — |
+| stairs | A0 streams+imu-feat-1 | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | I +Inertia* | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | E +ElderNet | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| stairs | E+I ElderNet+Inertia* | 63 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | A0 streams+imu-feat-1 | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | I +Inertia* | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | E +ElderNet | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| cycling | E+I ElderNet+Inertia* | 4,700 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | A0 streams+imu-feat-1 | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | I +Inertia* | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | E +ElderNet | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| vehicle_motion | E+I ElderNet+Inertia* | 21,394 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | A0 streams+imu-feat-1 | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | I +Inertia* | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | E +ElderNet | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| other | E+I ElderNet+Inertia* | 33,149 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### posture
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 454,297 | 0.294 | 0.528 | 1.761 | 0.891 | 0.323 | 0.172 | 0.104 |
+| I +Inertia* | 454,297 | 0.299 | 0.521 | 1.755 | 0.887 | 0.319 | 0.165 | 0.097 |
+| E +ElderNet | 454,297 | 0.304 | 0.515 | 1.745 | 0.882 | 0.314 | 0.163 | 0.095 |
+| E+I ElderNet+Inertia* | 454,297 | 0.303 | 0.516 | 1.747 | 0.883 | 0.315 | 0.162 | 0.094 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| recumbent | A0 streams+imu-feat-1 | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| recumbent | I +Inertia* | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| recumbent | E +ElderNet | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| recumbent | E+I ElderNet+Inertia* | 269,991 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| seated_likely | A0 streams+imu-feat-1 | 212,329 | weak | 0.580 | 0.854 | 0.852 | 0.298 | 0.000 | 0.248 | 0.640 |
+| seated_likely | I +Inertia* | 212,329 | weak | 0.580 | 0.855 | 0.853 | 0.305 | 0.000 | 0.257 | 0.635 |
+| seated_likely | E +ElderNet | 212,329 | weak | 0.575 | 0.794 | 0.792 | 0.315 | 0.000 | 0.273 | 0.620 |
+| seated_likely | E+I ElderNet+Inertia* | 212,329 | weak | 0.580 | 0.858 | 0.856 | 0.310 | 0.000 | 0.268 | 0.625 |
+| upright_stationary | A0 streams+imu-feat-1 | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | I +Inertia* | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | E +ElderNet | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| upright_stationary | E+I ElderNet+Inertia* | 26,284 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### arm_behavior
+
+| arm | states | top-known acc | AURC | NLL (known) | Brier | ECE-15 | unknown mass | share unknown>=.5 |
+|---|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | 128,775 | 0.291 | 0.637 | 3.588 | 1.223 | 0.579 | 0.007 | 0.000 |
+| I +Inertia* | 128,775 | 0.292 | 0.637 | 3.574 | 1.223 | 0.579 | 0.007 | 0.000 |
+| E +ElderNet | 128,775 | 0.292 | 0.636 | 3.573 | 1.222 | 0.579 | 0.007 | 0.000 |
+| E+I ElderNet+Inertia* | 128,775 | 0.292 | 0.637 | 3.570 | 1.222 | 0.579 | 0.007 | 0.000 |
+
+| class | arm | truth states | VAL status | VAL tau | TEST precision @VAL tau | CP95 lower | TEST recall @VAL tau | coverage@95 (VAL-strong tau, TEST gate passed) | descriptive coverage@95 (TEST curve) | tau |
+|---|---|---|---|---|---|---|---|---|---|---|
+| quiet | A0 streams+imu-feat-1 | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| quiet | I +Inertia* | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| quiet | E +ElderNet | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| quiet | E+I ElderNet+Inertia* | 43,680 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | A0 streams+imu-feat-1 | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | I +Inertia* | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | E +ElderNet | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| desk_like | E+I ElderNet+Inertia* | 82,714 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | A0 streams+imu-feat-1 | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | I +Inertia* | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | E +ElderNet | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+| repetitive_hand_motion | E+I ElderNet+Inertia* | 2,381 | abstain | 1.000 | — | — | — | 0.000 | 0.000 | — |
+
+#### transition events (Capture-24 truth = unannotated gaps <= 28 s; NOT timing ground truth)
+
+| arm | tolerance / kind | TP | FP | FN | precision | recall | F1 |
+|---|---|---|---|---|---|---|---|
+| A0 streams+imu-feat-1 | ±5 s | 74 | 25,463 | 702 | 0.003 | 0.095 | 0.006 |
+| A0 streams+imu-feat-1 | ±10 s | 128 | 25,409 | 648 | 0.005 | 0.165 | 0.010 |
+| A0 streams+imu-feat-1 | ±30 s | 305 | 25,232 | 471 | 0.012 | 0.393 | 0.023 |
+| A0 streams+imu-feat-1 | getting_up_like ±10 s | 0 | 32 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | lying_down_like ±10 s | 0 | 8 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | run_start ±10 s | 0 | 701 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | run_stop ±10 s | 0 | 635 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| A0 streams+imu-feat-1 | sit_to_stand_like ±10 s | 13 | 2,605 | 139 | 0.005 | 0.086 | 0.009 (med 4.5 s, p90 8.3 s) |
+| A0 streams+imu-feat-1 | stand_to_sit_like ±10 s | 12 | 4,402 | 171 | 0.003 | 0.066 | 0.005 (med 6.0 s, p90 9.5 s) |
+| A0 streams+imu-feat-1 | walk_start ±10 s | 55 | 8,414 | 147 | 0.006 | 0.272 | 0.013 (med 4.0 s, p90 9.0 s) |
+| A0 streams+imu-feat-1 | walk_stop ±10 s | 48 | 8,612 | 189 | 0.006 | 0.203 | 0.011 (med 5.2 s, p90 8.5 s) |
+| I +Inertia* | ±5 s | 63 | 22,845 | 713 | 0.003 | 0.081 | 0.005 |
+| I +Inertia* | ±10 s | 115 | 22,793 | 661 | 0.005 | 0.148 | 0.010 |
+| I +Inertia* | ±30 s | 289 | 22,619 | 487 | 0.013 | 0.372 | 0.024 |
+| I +Inertia* | getting_up_like ±10 s | 0 | 35 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| I +Inertia* | lying_down_like ±10 s | 0 | 8 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| I +Inertia* | run_start ±10 s | 0 | 255 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| I +Inertia* | run_stop ±10 s | 0 | 237 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| I +Inertia* | sit_to_stand_like ±10 s | 12 | 2,714 | 140 | 0.004 | 0.079 | 0.008 (med 4.2 s, p90 8.4 s) |
+| I +Inertia* | stand_to_sit_like ±10 s | 11 | 4,614 | 172 | 0.002 | 0.060 | 0.005 (med 7.5 s, p90 9.5 s) |
+| I +Inertia* | walk_start ±10 s | 52 | 7,350 | 150 | 0.007 | 0.257 | 0.014 (med 5.0 s, p90 9.0 s) |
+| I +Inertia* | walk_stop ±10 s | 40 | 7,580 | 197 | 0.005 | 0.169 | 0.010 (med 4.5 s, p90 8.5 s) |
+| E +ElderNet | ±5 s | 70 | 22,595 | 706 | 0.003 | 0.090 | 0.006 |
+| E +ElderNet | ±10 s | 134 | 22,531 | 642 | 0.006 | 0.173 | 0.011 |
+| E +ElderNet | ±30 s | 310 | 22,355 | 466 | 0.014 | 0.399 | 0.026 |
+| E +ElderNet | getting_up_like ±10 s | 0 | 44 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E +ElderNet | lying_down_like ±10 s | 0 | 6 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E +ElderNet | run_start ±10 s | 0 | 511 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| E +ElderNet | run_stop ±10 s | 0 | 462 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E +ElderNet | sit_to_stand_like ±10 s | 13 | 2,620 | 139 | 0.005 | 0.086 | 0.009 (med 5.0 s, p90 8.9 s) |
+| E +ElderNet | stand_to_sit_like ±10 s | 11 | 4,554 | 172 | 0.002 | 0.060 | 0.005 (med 6.0 s, p90 9.5 s) |
+| E +ElderNet | walk_start ±10 s | 59 | 7,079 | 143 | 0.008 | 0.292 | 0.016 (med 5.0 s, p90 9.0 s) |
+| E +ElderNet | walk_stop ±10 s | 51 | 7,255 | 186 | 0.007 | 0.215 | 0.014 (med 6.0 s, p90 9.0 s) |
+| E+I ElderNet+Inertia* | ±5 s | 68 | 22,018 | 708 | 0.003 | 0.088 | 0.006 |
+| E+I ElderNet+Inertia* | ±10 s | 121 | 21,965 | 655 | 0.005 | 0.156 | 0.011 |
+| E+I ElderNet+Inertia* | ±30 s | 293 | 21,793 | 483 | 0.013 | 0.378 | 0.026 |
+| E+I ElderNet+Inertia* | getting_up_like ±10 s | 0 | 43 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | lying_down_like ±10 s | 0 | 5 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | run_start ±10 s | 0 | 280 | 2 | 0.000 | 0.000 | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | run_stop ±10 s | 0 | 259 | 0 | 0.000 | — | 0.000 (med — s, p90 — s) |
+| E+I ElderNet+Inertia* | sit_to_stand_like ±10 s | 12 | 2,704 | 140 | 0.004 | 0.079 | 0.008 (med 4.8 s, p90 8.9 s) |
+| E+I ElderNet+Inertia* | stand_to_sit_like ±10 s | 11 | 4,721 | 172 | 0.002 | 0.060 | 0.004 (med 7.5 s, p90 9.5 s) |
+| E+I ElderNet+Inertia* | walk_start ±10 s | 55 | 6,850 | 147 | 0.008 | 0.272 | 0.015 (med 5.0 s, p90 8.8 s) |
+| E+I ElderNet+Inertia* | walk_stop ±10 s | 43 | 7,103 | 194 | 0.006 | 0.181 | 0.012 (med 4.5 s, p90 8.5 s) |
+
+#### paired bootstrap E-A0
+
+E − A0 (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.016 [-0.019, -0.013] ** |
+| posture | AURC (binned) Δ | -0.013 [-0.016, -0.010] ** |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.026 [0.010, 0.259] ** |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.030 [-0.046, -0.016] ** |
+| locomotion | AURC (binned) Δ | -0.005 [-0.008, -0.002] ** |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.021 [-0.750, 0.051] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -1.35 [-1.55, -1.15] ** |
+
+#### paired bootstrap I-A0
+
+I − A0 (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.006 [-0.008, -0.005] ** |
+| posture | AURC (binned) Δ | -0.007 [-0.009, -0.004] ** |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.009 [0.000, 0.196] ** |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.038 [-0.047, -0.030] ** |
+| locomotion | AURC (binned) Δ | -0.007 [-0.009, -0.006] ** |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.032 [0.000, 0.766] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -1.15 [-1.33, -0.97] ** |
+
+#### paired bootstrap E+I-E
+
+E+I − E (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | 0.001 [-0.000, 0.003] |
+| posture | AURC (binned) Δ | 0.001 [-0.001, 0.003] |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | -0.005 [-0.196, 0.000] |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.013 [-0.019, -0.008] ** |
+| locomotion | AURC (binned) Δ | -0.004 [-0.006, -0.002] ** |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.018 [-0.009, 0.774] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -0.19 [-0.31, -0.06] ** |
+
+#### paired bootstrap E+I-I
+
+E+I − I (paired subject-cluster bootstrap, 1000 resamples, 50 subjects; point [95% CI]; ** = CI excludes 0)
+
+| head | metric | B − A |
+|---|---|---|
+| posture | NLL (known) Δ | -0.008 [-0.011, -0.007] ** |
+| posture | AURC (binned) Δ | -0.005 [-0.007, -0.003] ** |
+| posture | recumbent: descriptive coverage@95 Δ | 0.000 [-0.000, 0.000] |
+| posture | recumbent: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | seated_likely: descriptive coverage@95 Δ | 0.011 [0.002, 0.172] ** |
+| posture | seated_likely: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| posture | upright_stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | NLL (known) Δ | -0.006 [-0.012, -0.001] ** |
+| locomotion | AURC (binned) Δ | -0.001 [-0.002, 0.000] |
+| locomotion | stationary: descriptive coverage@95 Δ | 0.007 [-0.761, 0.014] |
+| locomotion | stationary: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | walking: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | walking: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | running: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | running: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | stairs: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | stairs: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | cycling: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | cycling: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | vehicle_motion: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| locomotion | other: descriptive coverage@95 Δ | 0.000 [0.000, 0.000] |
+| locomotion | other: recall at VAL-strong tau Δ (precision not gated) | 0.000 [0.000, 0.000] |
+| display | label flips per hour Δ | -0.38 [-0.51, -0.26] ** |

@@ -239,7 +239,8 @@ class HeadsWindows:
 
 HARNESS_FORMAT = "nara-activity-replay-1"
 HARNESS_OUT_FORMAT = "nara-activity-replay-out-1"
-HARNESS_ARMS: Tuple[str, ...] = ("streams", "hart", "inertia", "hart+inertia", "naive_average")
+HARNESS_ARMS: Tuple[str, ...] = ("streams", "hart", "inertia", "hart+inertia", "naive_average",
+                                 "eldernet", "hart+eldernet", "hart+eldernet+inertia")
 # Report arm -> (input-file variant, harness arm). The harness's `streams` arm drops the imu-feat-1 windows as
 # well as the encoder, while its `inertia` arm keeps them; so the engineered baseline that A2 must be compared
 # with (same non-encoder inputs) is the harness `hart` arm on a file WITHOUT encoder windows ("noenc").
@@ -317,17 +318,35 @@ def attach_heads(obs_ts: np.ndarray, heads: HeadsWindows, t0: int) -> Tuple[Dict
     return at, rep
 
 
+@dataclass
+class GaitWindows:
+    """ElderNet gait-quality-1 windows for one recording, already on the recording's absolute clock (ELDERNET.md
+    §4 wire objects: s, e, gait_prob, is_gait[, prefiltered][, speed_mps, cadence_spm, stride_m, regularity, steps])."""
+    rows: List[Dict[str, Any]]
+
+    def __post_init__(self) -> None:
+        self.s = np.asarray([int(r["s"]) for r in self.rows], dtype=np.int64)
+        self.e = np.asarray([int(r["e"]) for r in self.rows], dtype=np.int64)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+
 SHARED_OBS_KEYS = ("ts", "dyn", "grav", "wear", "sleep", "imu")
 
 
 def observation_lines(rec: Recording, heads: Optional[HeadsWindows] = None, include_encoder: bool = True,
-                      encoder_id: str = "hart", encoder_version: str = "hart-wisdm-v0"
-                      ) -> Tuple[List[Dict[str, Any]], AttachReport]:
-    """`{"seq", "obs"}` lines of one recording. Non-encoder fields are identical whatever is included."""
+                      encoder_id: str = "hart", encoder_version: str = "hart-wisdm-v0",
+                      gait: Optional[GaitWindows] = None) -> Tuple[List[Dict[str, Any]], AttachReport]:
+    """`{"seq", "obs"}` lines of one recording. Non-encoder fields are identical whatever is included.
+    ``gait`` (ElderNet windows, absolute clock) attaches like the motion heads: first observed second in
+    [e, e + 2], a later window on the same second supersedes (ELDERNET.md §5)."""
     ts = rec.obs_ts()
     imu_at = {int(rec.t0 + rec.imu_e[i]): i for i in range(len(rec.imu_e))}
     enc_at = {int(rec.t0 + rec.hart_e[i]): i for i in range(len(rec.hart_e))} if include_encoder else {}
     head_at, rep = attach_heads(ts, heads, rec.t0) if heads is not None else ({}, AttachReport())
+    gait_at, gait_rep = attach_heads(ts, gait, 0) if gait is not None else ({}, AttachReport())  # type: ignore[arg-type]
+    rep.gait = gait_rep  # type: ignore[attr-defined]
     out: List[Dict[str, Any]] = []
     for j, t in enumerate(ts.tolist()):
         g = rec.gravity[j]
@@ -339,6 +358,8 @@ def observation_lines(rec: Recording, heads: Optional[HeadsWindows] = None, incl
             o["encoder"] = encoder_record(rec, enc_at[t], encoder_id, encoder_version)
         if t in head_at:
             o["motion_heads"] = heads.window_dict(head_at[t], rec.t0)  # type: ignore[union-attr]
+        if t in gait_at:
+            o["gait_quality"] = dict(gait.rows[gait_at[t]])  # type: ignore[union-attr]
         out.append({"seq": rec.recording_id, "obs": o})
     return out, rep
 
@@ -354,7 +375,10 @@ def shared_inputs_digest(lines: Sequence[Mapping[str, Any]]) -> str:
 
 
 def harness_header(arms: Sequence[str], bundle_info: Optional[Mapping[str, Any]] = None,
-                   weights: Optional[Mapping[str, float]] = None, allow_standin: bool = False) -> Dict[str, Any]:
+                   weights: Optional[Mapping[str, float]] = None, allow_standin: bool = False,
+                   gait_quality: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """``gait_quality``: {"model": <gait-quality-1 response without windows>, "gait_prior": π, "config": {...}}
+    (ELDERNET.md "Replay record format")."""
     for a in arms:
         if a not in HARNESS_ARMS:
             raise ValueError(f"unknown harness arm {a!r}")
@@ -362,6 +386,8 @@ def harness_header(arms: Sequence[str], bundle_info: Optional[Mapping[str, Any]]
     if bundle_info is not None:
         h["motion_heads"] = {"bundle": dict(bundle_info), "config": dict(weights or {}),
                              "allow_standin_evidence_for_testing": bool(allow_standin)}
+    if gait_quality is not None:
+        h["gait_quality"] = {k: (dict(v) if isinstance(v, Mapping) else v) for k, v in gait_quality.items()}
     return h
 
 
@@ -369,25 +395,32 @@ def write_harness_file(path: str, recs: Sequence[Recording], arms: Sequence[str]
                        heads: Optional[Mapping[str, HeadsWindows]] = None,
                        bundle_info: Optional[Mapping[str, Any]] = None,
                        weights: Optional[Mapping[str, float]] = None, allow_standin: bool = False,
-                       include_encoder: bool = True) -> Dict[str, Any]:
-    """Write one `nara-activity-replay-1` file (header + per-second lines, atomic rename)."""
-    header = harness_header(arms, bundle_info, weights, allow_standin)
+                       include_encoder: bool = True, encoder_version: str = "hart-wisdm-v0",
+                       gait: Optional[Mapping[str, GaitWindows]] = None,
+                       gait_quality: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    """Write one `nara-activity-replay-1` file (header + per-second lines, atomic rename). ``gait`` /
+    ``gait_quality``: ElderNet windows per recording and the header block (both optional)."""
+    header = harness_header(arms, bundle_info, weights, allow_standin, gait_quality)
     tmp = path + ".tmp"
     total = AttachReport()
+    gait_total = AttachReport()
     n_lines = 0
     digests: Dict[str, str] = {}
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(json.dumps(header, separators=(",", ":"), allow_nan=False) + "\n")
         for r in recs:
-            lines, rep = observation_lines(r, (heads or {}).get(r.recording_id), include_encoder)
+            lines, rep = observation_lines(r, (heads or {}).get(r.recording_id), include_encoder,
+                                           encoder_version=encoder_version, gait=(gait or {}).get(r.recording_id))
             total.add(rep)
+            gait_total.add(rep.gait)  # type: ignore[attr-defined]
             for ln in lines:
                 f.write(json.dumps(ln, separators=(",", ":"), allow_nan=False) + "\n")
             n_lines += len(lines)
             digests[r.recording_id] = shared_inputs_digest(lines)
     os.replace(tmp, path)
     return {"path": path, "lines": n_lines, "sequences": len(recs), "arms": list(arms),
-            "include_encoder": include_encoder, "attach": dict(total.__dict__), "shared_input_sha256": digests}
+            "include_encoder": include_encoder, "attach": dict(total.__dict__), "shared_input_sha256": digests,
+            **({"gait_attach": dict(gait_total.__dict__)} if gait is not None else {})}
 
 
 def run_harness(in_path: str, out_path: str, package_dir: Optional[str] = None,
