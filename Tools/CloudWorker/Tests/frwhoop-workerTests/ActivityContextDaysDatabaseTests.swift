@@ -396,7 +396,7 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
         let db = f.db
 
         func input(_ sim: DaySim, events: [WhoopEvent] = [], sleep: [(start: Int, end: Int)] = [],
-                   exercise: [(start: Int, end: Int)] = []) -> ActivityContextTrackInput {
+                   exercise: [(start: Int, end: Int, sport: String)] = []) -> ActivityContextTrackInput {
             var streams = sim.streams
             streams.events = events
             return ActivityContextDays.trackInput(
@@ -444,7 +444,7 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
             events: [WhoopEvent(ts: dayStart + 43_100, kind: "WRIST_OFF(10)", payload: [:]),
                      WhoopEvent(ts: dayStart + 43_200, kind: "WRIST_ON(11)", payload: [:])],
             sleep: [(start: dayStart + 42_900, end: dayStart + 43_150)],
-            exercise: [(start: dayStart + 43_250, end: dayStart + 43_300)])))
+            exercise: [(start: dayStart + 43_250, end: dayStart + 43_300, sport: "cycling")])))
 
         shapes.append(("a strap off for the whole day", input(
             DaySim(start: dayStart),

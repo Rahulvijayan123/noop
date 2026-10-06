@@ -466,4 +466,54 @@ final class ActivityContextPolicyTests: XCTestCase {
             XCTAssertEqual(e.sleepState, .unknown)
         }
     }
+
+    // MARK: - WS-05-F11 regression: second-accurate active/still accounting
+
+    /// The 4-s / 2-s-hop window grid covers each interior second twice. activeS/stillS must count
+    /// each REAL second once, so minStillnessS / mixed thresholds measure real time, not
+    /// window-covered time (previously ~1.93x, firing minStillnessS=300 at ~150-180 real seconds).
+    func testStillnessThresholdMeasuresRealSecondsNotWindowCovered() {
+        // 210 real seconds of stationary windows: the 7th epoch has 180 prior real still seconds.
+        // Under the old double-count it had ~356 window-covered seconds and wrongly became
+        // resting_candidate; second-accurate accounting must NOT fire before 300 real seconds.
+        let short = self.build(run(.stationary, from: base, to: base + 210), runStart: base, runEnd: base + 210)
+        XCTAssertEqual(short.epochs.count, 7)
+        XCTAssertTrue(short.epochs.allSatisfy { $0.exertion != .restingCandidate },
+                      "180 real still seconds must not satisfy minStillnessS=300")
+
+        // The finding's literal example: 150 real seconds never fires.
+        let at150 = self.build(run(.stationary, from: base, to: base + 150), runStart: base, runEnd: base + 150)
+        XCTAssertTrue(at150.epochs.allSatisfy { $0.exertion != .restingCandidate })
+
+        // 330 real seconds: the epoch after 300 real still seconds becomes resting_candidate.
+        let long = self.build(run(.stationary, from: base, to: base + 330), runStart: base, runEnd: base + 330)
+        XCTAssertEqual(long.epochs.count, 11)
+        XCTAssertTrue(long.epochs[0..<10].allSatisfy { $0.exertion != .restingCandidate },
+                      "no resting_candidate before 300 real still seconds")
+        XCTAssertEqual(long.epochs[10].exertion, .restingCandidate,
+                       "300 real still seconds satisfy minStillnessS=300")
+    }
+
+    /// `mixed` requires minMixedActiveS/minMixedStillS (10) REAL seconds on both sides. Six real
+    /// stationary seconds in the boundary epoch must not fire mixed (the old double-count gave ~11
+    /// window-covered still seconds and fired early); exactly 10 real seconds must.
+    func testMixedThresholdsMeasureRealSeconds() {
+        // Prior 300 s stillness, then 6 real stationary seconds + walking in the boundary epoch.
+        var below = run(.stationary, from: base - 300, to: base + 6)
+        below.append(contentsOf: run(.walking, from: base + 6, to: base + 30))
+        let belowBuild = self.build(below, runStart: base - 300, runEnd: base + 30)
+        let boundaryBelow = belowBuild.epochs.first { $0.startTs == base }!
+        XCTAssertEqual(boundaryBelow.motion, .walking)
+        XCTAssertNotEqual(boundaryBelow.exertion, .mixed,
+                          "6 real still seconds < minMixedStillS=10 must not be mixed")
+
+        // 10 real stationary seconds + walking: exactly the thresholds -> mixed.
+        var at = run(.stationary, from: base - 300, to: base + 10)
+        at.append(contentsOf: run(.walking, from: base + 10, to: base + 30))
+        let atBuild = self.build(at, runStart: base - 300, runEnd: base + 30)
+        let boundaryAt = atBuild.epochs.first { $0.startTs == base }!
+        XCTAssertEqual(boundaryAt.motion, .walking)
+        XCTAssertEqual(boundaryAt.exertion, .mixed,
+                       "10 real still + 20 real active seconds with sustained stillness is mixed")
+    }
 }

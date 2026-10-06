@@ -173,8 +173,9 @@ final class StretchFeedbackTests: XCTestCase {
 
     func testTheCorrectionCodesMatchWhatTheServerAccepts() {
         XCTAssertEqual(Set(StretchCorrection.allCases.map(\.rawValue)),
-                       ["sitting", "standing", "lying_down", "asleep", "walking", "running", "cycling",
-                        "in_vehicle", "exercise", "other_movement", "not_wearing", "other"])
+                       ["sitting", "standing", "lying_down", "asleep", "walking", "brisk_walking", "running",
+                        "stairs", "cycling", "in_vehicle", "exercise", "desk_work", "typing", "fidgeting",
+                        "other_movement", "not_wearing", "other"])
     }
 
     func testStorageRoundTrips() throws {

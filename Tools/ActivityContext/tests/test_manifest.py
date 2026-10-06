@@ -98,6 +98,47 @@ def test_scaler_sha256_deterministic():
     assert a != c
 
 
+def _with_calibration(d, calibration=None):
+    d = copy.deepcopy(d)
+    if calibration is None:
+        d["calibration"] = {"version": "ts-v1", "method": "temperature_scaling",
+                            "fit_subjects": [1, 2, 3], "nll": 0.72, "brier": 0.11,
+                            "reliability": {"ece": 0.012},
+                            "thresholds": {"max_prob": 0.80, "margin": 0.15}}
+    else:
+        d["calibration"] = calibration
+    return d
+
+
+def test_no_calibration_artifact_means_uncalibrated():
+    # A01: calibrated status must come from an explicit versioned artifact; absent -> false.
+    m = validate_manifest(_baseline())
+    assert m.calibration is None
+    assert m.calibrated is False
+    assert m.calibration_version is None
+    assert "calibration" not in m.to_dict()
+    mh = validate_manifest(_hart())
+    assert mh.calibrated is False          # a HART manifest with no artifact is uncalibrated too
+
+
+def test_well_formed_calibration_artifact_reports_calibrated():
+    m = validate_manifest(_with_calibration(_baseline()))
+    assert m.calibrated is True
+    assert m.calibration_version == "ts-v1"
+    assert m.to_dict()["calibration"]["method"] == "temperature_scaling"
+
+
+def test_malformed_calibration_section_is_uncalibrated_not_an_error():
+    # A01: absent or invalid -> calibrated=false. A malformed section never hard-fails.
+    m = validate_manifest(_with_calibration(_baseline(), calibration={"nll": 0.72}))
+    assert m.calibrated is False
+    assert m.calibration_version is None
+    m2 = validate_manifest(_with_calibration(_baseline(), calibration="temperature_scaling"))
+    assert m2.calibrated is False
+    m3 = validate_manifest(_with_calibration(_baseline(), calibration={"version": "", "method": "ts"}))
+    assert m3.calibrated is False
+
+
 def test_load_manifest_file(tmp_path):
     p = tmp_path / "manifest.json"
     p.write_text(json.dumps(_baseline()))

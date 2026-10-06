@@ -137,7 +137,7 @@ struct SleepView: View {
     /// The analytical cards to render, in saved order minus the hidden set.
     private var sleepVisibleSections: [SleepSection] {
         SleepLayoutPrefs.visibleOrder(orderRaw: sleepSectionOrderRaw, hiddenRaw: sleepHiddenSectionsRaw)
-            .filter { $0 != .sleepMarks }
+            .filter { $0 != .sleepMarks && $0 != .bodyClock && $0 != .stagesVsTypical }
     }
 
     var body: some View {
@@ -186,11 +186,6 @@ struct SleepView: View {
                         ForEach(Array(sleepVisibleSections.enumerated()), id: \.element) { idx, section in
                             sleepSectionView(section, resolved).staggeredAppear(index: idx + 1)
                         }
-                        // Temporary build marker so the installed build can be told apart on the phone.
-                        Text("Sleep tab build 2026-10-06 noon")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .frame(maxWidth: .infinity)
                     }
                 } else {
                     emptyState
@@ -479,7 +474,7 @@ struct SleepView: View {
             Button { router.openRhythm() } label: { bodyClockDial(model).contentShape(Rectangle()) }
                 .buttonStyle(LiquidPressStyle())
         case .nightDetail:
-            metricLink("sleep_efficiency") { NightDetailCard(model: model) }
+            metricLink("sleep_efficiency") { NightDetailCard(model: model, omitsRepeatedTiles: true) }
             // Sleep details (spec 7.5): rendered only when a hosted sleep-features document exists
             // for the current night. With no payload this renders nothing, so feature-off builds
             // are byte-identical to before.

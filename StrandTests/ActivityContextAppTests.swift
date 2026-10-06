@@ -349,10 +349,23 @@ final class ActivityContextAppTests: XCTestCase {
         let decision = StandReminderEngine.Decision(shouldRemind: false, reason: .movedEnough, window: window,
                                                     buzzLoops: 2, nextState: .initial)
         XCTAssertEqual(ActivityContextCoordinator.standLogLine(decision, windowMinutes: 50),
-                       "Stand reminder: movedEnough (50-min window: 42 s standing or moving, 98% observed, 90% seated)")
+                       "Stand reminder: movedEnough (50-min window: 42 s standing or moving, 98% observed, 90% sedentary (sitting or standing))")
         let bare = StandReminderEngine.Decision(shouldRemind: false, reason: .staleData, window: nil,
                                                 buzzLoops: 2, nextState: .initial)
         XCTAssertEqual(ActivityContextCoordinator.standLogLine(bare, windowMinutes: 50), "Stand reminder: staleData")
+    }
+
+    @MainActor
+    func testTheStandLogLineNeverClaimsSeatedForPostureUnresolvedStillness() {
+        // WS-12-F01: a window of posture-unresolved stillness is sedentary, never "seated" — the classifier
+        // cannot tell sitting from standing, and fidgeting is counted as sedentary too.
+        let still = StandReminderEngine.Window(start: 0, end: 3_000, movementSeconds: 0, sedentarySeconds: 3_000,
+                                               observedSeconds: 3_000, lastMovementEnd: nil)
+        let decision = StandReminderEngine.Decision(shouldRemind: true, reason: .remind, window: still,
+                                                    buzzLoops: 1, nextState: .initial)
+        let line = ActivityContextCoordinator.standLogLine(decision, windowMinutes: 50)
+        XCTAssertFalse(line.contains("seated"), line)
+        XCTAssertTrue(line.contains("100% sedentary (sitting or standing)"), line)
     }
 
     // MARK: Coach
@@ -381,12 +394,29 @@ final class ActivityContextAppTests: XCTestCase {
         XCTAssertTrue(text.contains("Classified 1 h 30 min of the 2 h window (75%)"), text)
         XCTAssertTrue(text.contains("Saved through 10:30."), text)
         XCTAssertTrue(text.contains("• Sitting at a desk, 1 h 20 min (89%)"), text)
-        XCTAssertTrue(text.contains("HRV (RMSSD) 53 ms"), "beat-weighted across the two desk stretches: \(text)")
+        XCTAssertTrue(text.contains("HRV (RMSSD) 53 ms from 2 windows (dominant 3600 s)"),
+                      "beat-weighted across the two desk stretches, with the window definition: \(text)")
         XCTAssertTrue(text.contains("• Walking, 10 min (11%)"), text)
         XCTAssertTrue(text.contains("1100 steps at about 110 steps/min"), text)
         XCTAssertTrue(text.contains("no HRV or respiratory rate"), "a moving stretch reports none rather than inventing one: \(text)")
-        XCTAssertTrue(text.contains("09:00-10:00 Sitting at a desk, 1 h, heart rate 68 bpm, HRV 54 ms"), text)
+        XCTAssertTrue(text.contains("09:00-10:00 Sitting at a desk, 1 h, heart rate 68 bpm, HRV (RMSSD) 54 ms from 1 window (3600 s)"), text)
         XCTAssertTrue(text.contains("Notes: sitting and standing cannot be told apart from a wrist"), text)
+    }
+
+    func testCoachTextCarriesTheWindowDefinitionOfPerActivityHrv() throws {
+        // WS-12-F04: a 60-s window and a 900-s window must not be presented as one comparable number. The
+        // coach text carries the count and the dominant recording duration instead of a blended value.
+        let zone = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let from = 1_790_870_400
+        let items = [
+            interval(from, from + 60, .sittingDesk, rmssd: 40),
+            interval(from + 60, from + 960, .sittingDesk, rmssd: 60),
+            interval(from + 1_000, from + 1_300, .sitting, rmssd: 45),
+        ]
+        let text = CoachActivityContext.describe(intervals: items, from: from, to: from + 1_300, timeZone: zone)
+        XCTAssertTrue(text.contains("HRV (RMSSD) 59 ms from 2 windows (dominant 900 s)"),
+                      "beat-weighted but honestly defined: \(text)")
+        XCTAssertTrue(text.contains("HRV (RMSSD) 45 ms from 1 window (300 s)"), text)
     }
 
     func testCoachTextCanBeScopedToOneActivityAndSaysSoWhenThereIsNone() throws {

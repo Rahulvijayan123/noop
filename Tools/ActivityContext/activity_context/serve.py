@@ -6,7 +6,9 @@ C10 serve protocol (FINAL):
             {"id":..,"ok":false,"error":"...","kind":"malformed|model_missing|timeout|internal|output_too_large"}
 
 Additive since the ActivityContext decoder (all optional, old callers unaffected):
-  * every window carries ``feat`` (imu-feat-1, see features.py): encoder-independent motion facts;
+  * every window carries ``feat`` (imu-feat-2, see features.py): encoder-independent motion facts;
+  * every window carries ``calibrated`` (A01) and the response carries ``calibrated`` /
+    ``calibration_version`` derived from the manifest's calibration artifact (absent today -> false);
   * ``run.hop_s`` (or request ``hop_s``) may be 1 or 2 (default 2, the training hop). The window length is
     always 4 s, so a 1 s hop only changes how often the encoder is asked, never what it is asked.
 
@@ -28,7 +30,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -38,8 +40,8 @@ from .features import FEATURE_SCHEMA, window_features
 from .manifest import Manifest, load_manifest
 from .preprocess import (COLUMNS_BYTES_PER_SECOND, HOP_SAMPLES, MAX_HEAD_SECONDS,
                          MAX_RUN_SECONDS, MAX_TAIL_SECONDS, TARGET_HZ,
-                         WINDOW_SECONDS, HOP_SECONDS, decode_columns_b64,
-                         validate_request_units)
+                         WINDOW_SECONDS, HOP_SECONDS, WHOOP_SAMPLE_COUNT,
+                         decode_columns_b64, validate_request_units)
 
 # Hard output bound: a single infer response must stay under this many bytes
 # and this many windows (strict bounded payload, C10).
@@ -71,6 +73,15 @@ class ServeContext:
     model: Any = None
     model_status: str = "baseline"
     model_error: Optional[str] = None
+    # Optional learned transition expert (spec: ONE additional evidence channel).
+    # Absent manifest section -> transition_absent (channel simply not emitted).
+    # Present but unloadable -> transition_unavailable: SOFT failure, the general
+    # activity path is untouched, and every window still gets its label/probs/feat
+    # (spec s21: a broken transition artifact must never take the lane down).
+    transition: Any = None
+    transition_status: str = "transition_absent"
+    transition_error: Optional[str] = None
+    transition_version: Optional[str] = None
 
 
 def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
@@ -101,7 +112,33 @@ def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
         except Exception as exc:
             ctx.model_status = "hart_unavailable"
             ctx.model_error = f"{type(exc).__name__}: {exc}"
+    _load_transition(ctx, manifest, checkpoint_dir)
     return ctx
+
+
+def _load_transition(ctx: ServeContext, manifest: Manifest, checkpoint_dir: Optional[str]) -> None:
+    """Load the OPTIONAL transition expert; any failure is a soft status, never fatal.
+
+    The artifact is looked up as ``transition.json.gz`` inside --checkpoint (the
+    model dir), or an explicit ``artifact`` path in the manifest's transition
+    section. A missing/unreadable/mismatched artifact leaves the general model
+    untouched and every window without a ``transition`` field.
+    """
+    section = manifest.transition
+    if not section:
+        return  # absent == not configured == today's behavior
+    try:
+        from .transition_model import TransitionModel, TransitionModelError
+        art = section.get("artifact") or os.path.join(checkpoint_dir or ".", "transition.json.gz")
+        if not os.path.isfile(art):
+            raise FileNotFoundError(art)
+        ctx.transition = TransitionModel.load(art)
+        ctx.transition_version = ctx.transition.model_version
+        ctx.transition_status = "transition_loaded"
+    except Exception as exc:
+        ctx.transition = None
+        ctx.transition_status = "transition_unavailable"
+        ctx.transition_error = f"{type(exc).__name__}: {exc}"
 
 
 def _bounded_b64_list(value: Any, what: str, max_seconds: int) -> List[str]:
@@ -129,7 +166,7 @@ def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
                      body: List[str], head: List[str], tail: List[str],
                      hop_samples: int = HOP_SAMPLES,
                      ) -> List[Dict[str, Any]]:
-    """Decode -> runs -> windows -> per-window labels (baseline or HART) + imu-feat-1 features."""
+    """Decode -> runs -> windows -> per-window labels (baseline or HART) + imu-feat-2 features."""
     from .preprocess import windows_from_run, decode_seconds, PreprocessError, Run
 
     seconds: List[tuple] = []
@@ -141,32 +178,79 @@ def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
     for i, b in enumerate(tail):
         seconds.append((end_ts + i, decode_columns_b64(b)))
 
-    windows: List[Any] = []
+    # (window, native-rate slice) pairs: the transition expert consumes the ORIGINAL
+    # 100 Hz samples the resampler ate, so its features keep the transient peaks the
+    # 4 s / 30 Hz windows smooth away (the expert is trained on native-rate windows).
+    pairs: List[Tuple[Any, Optional[np.ndarray]]] = []
     for run in decode_seconds(seconds):
-        windows.extend(windows_from_run(run, start_ts, end_ts, hop_samples=hop_samples))
-    windows.sort(key=lambda w: w.s)
-    if len(windows) > MAX_WINDOWS_PER_RESPONSE:
+        hz = WHOOP_SAMPLE_COUNT  # 100 Hz runs, one second of samples per run second
+        for w in windows_from_run(run, start_ts, end_ts, hop_samples=hop_samples):
+            i0 = int(round((w.s - run.start_ts) * hz))
+            i1 = int(round((w.e - run.start_ts) * hz))
+            native = run.samples[i0:i1] if 0 <= i0 < i1 <= run.samples.shape[0] else None
+            pairs.append((w, native))
+    pairs.sort(key=lambda p: p[0].s)
+    if len(pairs) > MAX_WINDOWS_PER_RESPONSE:
         raise ValueError("too many windows for one response")
 
     out: List[Dict[str, Any]] = []
-    for w in windows:
+    for w, native in pairs:
         base_features = None
         if ctx.model is not None:
             pred = ctx.model.predict_window(w.data)
             label, probs, baseline = pred.label, pred.probs, pred.baseline
+            calibrated = pred.calibrated          # A01: from the manifest artifact
         else:
             res = classify_window(w)
             label, probs, baseline = res.label, res.probs, True
+            # A01: calibrated comes from the manifest's calibration artifact, never from
+            # model_kind or the baseline flag (absent today -> False everywhere).
+            calibrated = ctx.manifest.calibrated
             base_features = res.features
-        out.append({
+        row = {
             "s": round(w.s, 6),
             "e": round(w.e, 6),
             "label": label,
             "probs": {k: round(float(v), 6) for k, v in probs.items()},
             "baseline": baseline,
+            "calibrated": calibrated,
             "feat": window_features(w, base_features),
-        })
+        }
+        transition_row = _transition_evidence(ctx, w, native)
+        if transition_row is not None:
+            row["transition"] = transition_row
+        out.append(row)
     return out
+
+
+def _transition_evidence(ctx: ServeContext, w: Any, native: Optional[np.ndarray]) -> Optional[Dict[str, Any]]:
+    """Per-window learned transition evidence, or None when the expert is not usable.
+
+    Fail-open by construction: an unavailable expert, a window without a native-rate
+    slice, or ANY exception while computing it returns None and the window keeps its
+    general fields only (spec s21). The 100 Hz timestamp refinement rides along only
+    for non-none, non-abstaining predictions (spec s9).
+    """
+    if ctx.transition is None or native is None or native.shape[0] < 8:
+        return None
+    try:
+        from .transition_features import window_transition_features
+        from .transition_refine import refine_event_ts
+        pred = ctx.transition.predict_window(native, float(WHOOP_SAMPLE_COUNT))
+        row: Dict[str, Any] = {
+            "probs": {k: round(float(v), 6) for k, v in pred.probs.items()},
+            "label": pred.label,
+            "confidence": round(float(pred.confidence), 6),
+            "abstained": bool(pred.abstained),
+        }
+        if pred.label not in ("none", "unknown") and not pred.abstained:
+            refined = refine_event_ts(native, float(WHOOP_SAMPLE_COUNT), float(w.s), pred.label)
+            if refined is not None:
+                row["ts"] = round(float(refined.ts), 3)
+                row["ts_quality"] = round(float(refined.quality), 4)
+        return row
+    except Exception:
+        return None
 
 
 def handle_ping(ctx: ServeContext) -> Dict[str, Any]:
@@ -179,15 +263,22 @@ def handle_ping(ctx: ServeContext) -> Dict[str, Any]:
         versions["torch"] = torch.__version__
     except Exception:
         versions["torch"] = None
-    return {
+    out = {
         "ok": True,
         "model_status": ctx.model_status,
         "model_error": ctx.model_error,
         "model_version": ctx.manifest.model_version,
         "preprocessing_version": ctx.manifest.preprocessing_version,
+        # A01: calibration status comes from the manifest artifact, not model_kind.
+        "calibrated": ctx.manifest.calibrated,
+        "calibration_version": ctx.manifest.calibration_version,
         "package_version": __version__,
         "versions": versions,
+        "transition_status": ctx.transition_status,
+        "transition_error": ctx.transition_error,
+        "transition_version": ctx.transition_version,
     }
+    return out
 
 
 def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
@@ -240,10 +331,19 @@ def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
         "preprocessing_version": ctx.manifest.preprocessing_version,
         "feature_schema": FEATURE_SCHEMA,
         "hop_s": hop_samples / TARGET_HZ,
+        # A01: calibration status is derived from the manifest's calibration
+        # artifact (absent today -> False), never from model_kind.
+        "calibrated": ctx.manifest.calibrated,
+        "calibration_version": ctx.manifest.calibration_version,
         "windows": windows,
         "manifest": ctx.manifest.to_dict(),
         "duration_ms": int((time.monotonic() - t0) * 1000),
     }
+    if ctx.transition is not None:
+        # Versioned stamp for the additive transition field: callers gate on it
+        # (the Swift reader pattern — unknown schema -> drop, never fail).
+        resp["transition_schema"] = "transition-1"
+        resp["transition_version"] = ctx.transition_version
     raw = json.dumps(resp, separators=(",", ":"), default=_json_default)
     if len(raw.encode("utf-8")) > MAX_OUTPUT_BYTES:
         raise ValueError("response exceeds hard output size cap")

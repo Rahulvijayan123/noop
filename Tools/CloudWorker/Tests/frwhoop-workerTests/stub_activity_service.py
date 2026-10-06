@@ -8,10 +8,11 @@ echo, restart/timeout behavior).
 
 Ops:
   ping     -> {"id":..., "ok":true, "model_status":"loaded",
-               "model_version":"stub-model","preprocessing_version":"stub-preprocess"}
+               "model_version":"stub-model","preprocessing_version":"stub-preprocess",
+               "calibrated":false}
   infer    -> {"id":..., "ok":true, "model_version":"stub-model",
                "preprocessing_version":"stub-preprocess",
-               "feature_schema":"imu-feat-1",
+               "feature_schema":"imu-feat-2",
                "windows":[one 4 s stationary window at run.start_ts, with "feat"],
                "echo":{...run fields echoed back...}}
   shutdown -> respond ok then exit(0)
@@ -20,9 +21,14 @@ Test knobs (fields on any request):
   "die": true        -> exit(2) without a response (crash/restart test)
   "sleep_seconds": N -> sleep N before responding (timeout test)
   "respond_ok": false-> {"ok":false,"kind":"model_missing","error":"..."}
+  "win_calibrated": true -> window carries "calibrated":true (default false: the stub
+                            has no model, so its windows are never calibrated)
   "legacy_no_feat": true     -> an older serve.py: no "feat", no "feature_schema"
-  "feature_schema": "x"      -> stamp "x" instead of imu-feat-1 (layout mismatch test)
+  "feature_schema": "x"      -> stamp "x" instead of imu-feat-2 (layout mismatch test)
   "feat_nulls": true         -> cadence_hz and orientation_change_deg are JSON null
+  "transition": "plain"      -> per-window "transition" evidence + transition_schema/version
+  "transition": "null"       -> "transition" key present but JSON null (fail-open nil)
+  "transition": "bad"        -> malformed "transition" object (fail-open nil, window intact)
 """
 import json
 import sys
@@ -57,6 +63,9 @@ def main():
                 "model_status": "loaded",
                 "model_version": "stub-model",
                 "preprocessing_version": "stub-preprocess",
+                # A01: the stub has no model, so it is never calibrated.
+                "calibrated": False,
+                "transition_version": "stub-transition",
             }
         elif op == "infer":
             run = req.get("run") or {}
@@ -66,6 +75,7 @@ def main():
             else:
                 start_ts = run.get("start_ts")
                 legacy = bool(req.get("legacy_no_feat"))
+                knob = req.get("transition")
                 windows = []
                 if start_ts is not None:
                     window = {
@@ -76,17 +86,33 @@ def main():
                                   "running": 0.03, "other_movement": 0.02,
                                   "unknown": 0.0},
                         "baseline": False,
+                        "calibrated": bool(req.get("win_calibrated", False)),
                     }
                     if not legacy:
                         nulls = bool(req.get("feat_nulls"))
                         window["feat"] = {
                             "accel_rms_g": 0.012,
                             "gyro_rms_dps": 3.5,
-                            "jerk_rms": 0.04,
+                            "jerk_rms_gps": 0.04,
                             "cadence_hz": None if nulls else 1.8,
                             "cadence_strength": 0.31,
                             "orientation_change_deg": None if nulls else 2.5,
                         }
+                    # Optional transition-expert evidence (an older serve.py sends none).
+                    if knob == "plain":
+                        window["transition"] = {
+                            "probs": {"none": 0.22, "sit_to_stand": 0.61,
+                                      "stand_to_sit": 0.09, "lie_down": 0.05,
+                                      "get_up": 0.03},
+                            "label": "sit_to_stand",
+                            "confidence": 0.61,
+                            "abstained": False,
+                            "ts": float(start_ts) + 1.77,
+                        }
+                    elif knob == "null":
+                        window["transition"] = None
+                    elif knob == "bad":
+                        window["transition"] = {"probs": "not-an-object"}
                     windows.append(window)
                 resp = {
                     "id": rid,
@@ -94,6 +120,8 @@ def main():
                     "model_version": "stub-model",
                     "preprocessing_version": "stub-preprocess",
                     "windows": windows,
+                    "transition_schema": "transition-1" if knob else None,
+                    "transition_version": "stub-transition" if knob else None,
                     "echo": {
                         "start_ts": start_ts,
                         "end_ts": run.get("end_ts"),
@@ -111,7 +139,7 @@ def main():
                     },
                 }
                 if not legacy:
-                    resp["feature_schema"] = req.get("feature_schema") or "imu-feat-1"
+                    resp["feature_schema"] = req.get("feature_schema") or "imu-feat-2"
         elif op == "shutdown":
             sys.stdout.write(json.dumps({"id": rid, "ok": True}) + "\n")
             sys.stdout.flush()

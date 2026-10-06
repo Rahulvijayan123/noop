@@ -124,11 +124,11 @@ struct FullDayChartView: View {
             if showsActivityTimeline {
                 #if DEBUG
                 if !DemoLayout.hidesActivity {
-                    DayStretchesSection(timeline: timeline, window: visibleWindow, onOpen: open, onZoom: zoomTo)
+                    DayStretchesSection(timeline: timeline, window: visibleWindow, dayStart: dayStart, onOpen: open, onZoom: zoomTo)
                         .id(Int(dayStart.timeIntervalSince1970))
                 }
                 #else
-                DayStretchesSection(timeline: timeline, window: visibleWindow, onOpen: open, onZoom: zoomTo)
+                DayStretchesSection(timeline: timeline, window: visibleWindow, dayStart: dayStart, onOpen: open, onZoom: zoomTo)
                     .id(Int(dayStart.timeIntervalSince1970))
                 #endif
                 NavigationLink {

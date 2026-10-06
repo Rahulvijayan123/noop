@@ -100,6 +100,85 @@ public enum Whoop5RawImu {
         return Int(u32(f, tsOff))
     }
 
+    // MARK: - Durable-store gate (WS-02-F01/F02, spec §6)
+
+    /// Why a shape-valid raw-IMU frame was rejected at the durable-store gate, or `.none` when it
+    /// may be stored. Spec §6: CRC failures, saturation and stuck/implausible payloads cannot
+    /// become valid stationary windows, so rejection is explicit and never silent. Pure — no I/O,
+    /// no strap — so the protocol package can pin it against golden and corrupted fixtures.
+    public enum RawImuRejectReason: String, Codable, Equatable, Sendable, CaseIterable {
+        /// No rejection — the frame passed shape, payload CRC32 and sample plausibility.
+        case none
+        /// Not a 1244-byte / 100-sample IMU frame (the shape gate `decode`/`rawColumns` applies).
+        case malformed
+        /// The payload CRC32 trailer disagreed with the payload bytes (frame[8..<count-4]).
+        case payloadCRCMismatch
+        /// All 600 samples are exactly zero — no gravity shell, no noise: not a working strap.
+        case zeroPayload
+        /// Every one of the six columns is exactly constant across the full second (pinned/stuck
+        /// sensor; a real MEMS part always carries at least LSB noise).
+        case stuckConstantSamples
+        /// A column is pinned at the int16 full-scale rail (±32767) for all 100 samples — sustained
+        /// rail clipping for a whole second is not real raw motion.
+        case saturatedRail
+    }
+
+    /// Payload CRC32 gate (WS-02-F01). The 5/MG wire frame is `[0xAA][fmt][declLen u16][hdr][payload]
+    /// [crc32 u32 LE]`: the payload is frame[8..<count-4] and the LE trailer sits at count-4 — the
+    /// same convention `verifyFrame(_:family:)` uses, and the reassembler checks only the header
+    /// CRC16, so a payload bit-flip with an intact header reaches this check. True only for a full
+    /// 1244-byte frame whose zlib CRC32 matches; false for any other length or a mismatch.
+    public static func payloadCRC32OK(_ f: [UInt8]) -> Bool {
+        guard f.count == bufferLength else { return false }
+        return crc32(f, 8, f.count - 4) == u32(f, f.count - 4)
+    }
+
+    /// Conservative sample-plausibility gate (WS-02-F02). Rejects ONLY physically impossible
+    /// frames: all-zero samples (no gravity), a column pinned at the full-scale rail for the whole
+    /// second, or every column exactly constant (a real 3-axis MEMS strap always reads the ~1 g
+    /// gravity shell with noise, so none of those can be real raw motion). Deliberately NOT a
+    /// movement detector — no energy, cadence or magnitude thresholds — so genuinely stationary
+    /// data is still stored. Assumes the caller has shape-gated first; a non-1244 frame is
+    /// reported `.malformed` rather than accepted.
+    public static func samplePlausibility(of f: [UInt8]) -> RawImuRejectReason {
+        guard f.count == bufferLength,
+              u16(f, countAOff) == sampleCount, u16(f, countBOff) == sampleCount,
+              gzOff + 2 * sampleCount <= f.count else { return .malformed }
+        let axisOffsets = [axOff, ayOff, azOff, gxOff, gyOff, gzOff]
+        var allZero = true
+        var anyPinned = false
+        var allConstant = true
+        for base in axisOffsets {
+            let first = i16(f, base)
+            var constant = true
+            var pinned = true
+            for i in 0..<sampleCount {
+                let v = i16(f, base + 2 * i)
+                if v != 0 { allZero = false }
+                if v != first { constant = false }
+                if v != 32767 && v != -32768 { pinned = false }
+            }
+            if !constant { allConstant = false }
+            if pinned { anyPinned = true }
+        }
+        if allZero { return .zeroPayload }
+        if anyPinned { return .saturatedRail }
+        if allConstant { return .stuckConstantSamples }
+        return .none
+    }
+
+    /// The durable-store acceptance gate (WS-02-F01/F02, spec §6): shape → payload CRC32 → sample
+    /// plausibility, in that order. `.none` means the frame may be durably stored; any other value
+    /// is the explicit reason it was counted-and-dropped instead of becoming IMU data. Pure, so the
+    /// app-side store gate (and its tests) call one function.
+    public static func storeAcceptance(of f: [UInt8]) -> RawImuRejectReason {
+        guard f.count == bufferLength,
+              u16(f, countAOff) == sampleCount, u16(f, countBOff) == sampleCount,
+              gzOff + 2 * sampleCount <= f.count else { return .malformed }
+        guard payloadCRC32OK(f) else { return .payloadCRCMismatch }
+        return samplePlausibility(of: f)
+    }
+
     // MARK: - Little-endian readers (frame-absolute)
     static func u16(_ f: [UInt8], _ o: Int) -> Int { Int(f[o]) | (Int(f[o + 1]) << 8) }
     static func u32(_ f: [UInt8], _ o: Int) -> UInt32 {

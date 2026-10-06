@@ -21,8 +21,9 @@ export const STRETCH_FEEDBACK_MAX_SPAN_SECONDS = 86_400;
 export const STRETCH_KINDS = ['activity_context', 'strap_state'] as const;
 export const STRETCH_VERDICTS = ['correct', 'incorrect'] as const;
 export const STRETCH_CORRECTED_LABELS = [
-  'sitting', 'standing', 'lying_down', 'asleep', 'walking', 'running', 'cycling', 'in_vehicle',
-  'exercise', 'other_movement', 'not_wearing', 'other',
+  'sitting', 'standing', 'lying_down', 'asleep', 'walking', 'brisk_walking', 'running', 'stairs',
+  'cycling', 'in_vehicle', 'desk_work', 'typing', 'fidgeting', 'exercise', 'other_movement',
+  'not_wearing', 'other',
 ] as const;
 
 const STRETCH_KEY_RE = /^[A-Za-z0-9:_.-]+$/;

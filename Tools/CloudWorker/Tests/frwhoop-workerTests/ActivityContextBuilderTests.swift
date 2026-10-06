@@ -103,12 +103,20 @@ final class ActivityLaneDocumentTests: XCTestCase {
 
         let contexts = try XCTUnwrap(doc["contexts"] as? [String: Any])
         XCTAssertEqual(Set(contexts.keys), ["hrv_slots", "sleep_sessions"])
-        // One 15-min slot covers [dayStart, dayStart+60).
+        // One 15-min slot covers [dayStart, dayStart+900) but only 60 s of it
+        // have epochs. The join normalizes over the FULL slot support (A02):
+        // uncovered seconds count unknown, so stationary = 60/900 and
+        // unknown_share = 840/900, with shares + unknownShare == 1 exactly.
         let slots = try XCTUnwrap(contexts["hrv_slots"] as? [[String: Any]])
         XCTAssertEqual(slots.count, 1)
         XCTAssertEqual(slots[0]["slot_s"] as? Int, dayStart)
         XCTAssertEqual((slots[0]["shares"] as? [String: Any])?["stationary"] as? Double ?? 0,
-                       1.0, accuracy: 1e-9)
+                       60.0 / 900.0, accuracy: 1e-9)
+        XCTAssertEqual(slots[0]["unknown_share"] as? Double ?? 0, 840.0 / 900.0, accuracy: 1e-9)
+        let sharesTotal = (slots[0]["shares"] as? [String: Any])?.values
+            .compactMap { $0 as? Double }.reduce(0, +) ?? 0
+        XCTAssertEqual(sharesTotal + (slots[0]["unknown_share"] as? Double ?? 0), 1.0, accuracy: 1e-9,
+                       "shares + unknownShare must conserve the full slot duration")
         XCTAssertEqual(slots[0]["post_activity"] as? Bool, false)
         XCTAssertEqual((contexts["sleep_sessions"] as? [[String: Any]])?.isEmpty, true)
     }

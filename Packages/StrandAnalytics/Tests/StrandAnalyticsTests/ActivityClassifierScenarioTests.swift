@@ -184,8 +184,15 @@ final class ActivityClassifierScenarioTests: XCTestCase {
         XCTAssertEqual(share(ride(kind: .other), of: [.cycling]), 0)
     }
 
-    func testAWorkoutOfUnknownSportKeepsThePermissiveBehaviour() {
-        XCTAssertGreaterThan(share(ride(kind: .unspecified), of: [.cycling]), 0.9)
+    func testAWorkoutOfUnknownSportCoversOnlyGenericExercise() {
+        // WS-06-F03: a logged workout whose sport is not recognised is evidence of generic
+        // exercise only — never of cycling, stairs or a vehicle. (It behaved like the
+        // pre-`hsmm-1.2` boolean and covered every specialist mode.) The body-mode gate
+        // (workoutCovers) maps `.unspecified` to `otherExercise`; that surfaces here as
+        // generic higher-intensity activity, never as cycling.
+        XCTAssertEqual(share(ride(kind: .unspecified), of: [.cycling]), 0, "an unknown sport is no evidence of cycling")
+        XCTAssertGreaterThan(share(ride(kind: .unspecified), of: [.vigorousActivity, .lightActivity]),
+                              0.5, "it still supports generic exercise")
     }
 
     func testCyclingIsNeverInferredFromHeartRateAlone() {

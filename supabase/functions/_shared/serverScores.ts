@@ -9,6 +9,7 @@ import {
   parseExposureReadQuery,
   submitExposureEvents,
 } from './physiologyContext.ts';
+import { GROUND_TRUTH_LABELS_MAX_BODY_BYTES, submitGroundTruthLabels } from './groundTruthLabels.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -242,9 +243,10 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isContextHistory = req.method === 'GET' && route === '/context/history';
   const isExposurePost = req.method === 'POST' && route === '/exposures';
   const isExposureGet = req.method === 'GET' && route === '/exposures';
+  const isGroundTruthLabels = req.method === 'POST' && route === '/ground-truth-labels';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
-      && !isContext && !isContextHistory && !isExposurePost && !isExposureGet) {
+      && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -282,17 +284,19 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
-        : isExposurePost ? EXPOSURE_MAX_BODY_BYTES : undefined);
+        : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
+        : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
         || isContext || isContextHistory
       ? url.searchParams.get('deviceId')
-      : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet) ? null
+      : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
-    // user-level declaration (the RPC's NULL device scope). Stretch feedback carries a device per
-    // item, which is resolved leniently inside its handler, so it has no request-level device.
-    if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet
+    // user-level declaration (the RPC's NULL device scope). Stretch feedback and ground-truth labels
+    // carry a device per item, which is resolved leniently inside their handlers, so they have no
+    // request-level device.
+    if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet && !isGroundTruthLabels
         && !(isPlacementPost && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
@@ -300,7 +304,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     // user-level when absent; GET is owner-scoped and never device-scoped).
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
-      : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet) ? null
+      : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet
+        || isGroundTruthLabels) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -419,6 +424,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         truncated: read?.truncated === true,
         identity,
       }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isGroundTruthLabels) {
+      // Ground-truth activity labels. The owner comes from the credential, never from the body; same
+      // auth as every other score route, no new auth path.
+      const outcome = await submitGroundTruthLabels({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
     }
     if (isPlacementGet) {
       // Owner-scoped read for reconciliation. device_id is returned as the EXTERNAL device id

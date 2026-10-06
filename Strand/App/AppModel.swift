@@ -332,6 +332,7 @@ final class AppModel: ObservableObject {
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
         Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
+        Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved while offline
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
@@ -364,6 +365,7 @@ final class AppModel: ObservableObject {
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
         Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
+        Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved before the account was ready
         guard cloudScoringIsAuthoritative else { return }
         await confirmWearableLinkIfNeeded()
         startHistorySeedIfNeeded()
@@ -1026,6 +1028,14 @@ final class AppModel: ObservableObject {
                 // live Effort/steps; recovery/sleep are night-computed and unaffected.
                 try? await Task.sleep(nanoseconds: 1_800_000_000_000)  // 30 min backstop (#836 battery)
             }
+        }
+        // Activity calibration: a guided session that was killed mid-flight leaves the IMU capture
+        // mode forced to `.continuous`, with the previous mode recorded in the durable restore
+        // marker. Apply the previous mode at launch (one-shot: `restoreIfPending` clears the marker).
+        // No-op when no marker exists; `setActivityImuCaptureMode` only reconciles the stream once a
+        // WHOOP 5/MG is actually bonded and connected, so this is safe before any strap connects.
+        ActivityCalibrationRestoreMarker.restoreIfPending { mode in
+            self.ble.setActivityImuCaptureMode(mode)
         }
     }
 
@@ -2031,13 +2041,14 @@ final class AppModel: ObservableObject {
     static let wristAlertsMasterKey = "notif.masterEnabled"
 
     /// Post the local notification mirroring the inactivity (sedentary) wrist nudge. Called right after
-    /// `BLEManager.maybeBuzzInactivity` fires its buzz (see crossLaneNotes). `minutes` = the seated bout
-    /// length the detector reported. No-op on macOS and when wrist alerts are off.
+    /// `BLEManager.maybeBuzzInactivity` fires its buzz (see crossLaneNotes). `minutes` = the sedentary bout
+    /// length the detector reported (still, sitting or standing — the wrist cannot tell which). No-op on
+    /// macOS and when wrist alerts are off.
     static func postInactivity(minutes: Int) {
         #if os(iOS)
         let body = minutes > 0
-            ? String(localized: "You've been seated for about \(minutes) min. Time to move.")
-            : String(localized: "Time to move. You've been seated a while.")
+            ? String(localized: "You've been sedentary for about \(minutes) min. Time to move.")
+            : String(localized: "Time to move. You've been sedentary a while.")
         postWristAlert(identifier: "inactivity-nudge", title: String(localized: "Move reminder"), body: body)
         #endif
     }

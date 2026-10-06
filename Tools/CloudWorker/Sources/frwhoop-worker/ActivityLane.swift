@@ -1,6 +1,7 @@
 import Foundation
 import CZstd
 import StrandAnalytics
+import WhoopProtocol
 
 /// Lane 6: activity context (C6).
 ///
@@ -434,9 +435,8 @@ struct ActivityLane {
         }
         let nights = try loadPublishedNights(user: job.userId, device: job.deviceId,
                                              dayStart: dayBounds.start, dayEnd: dayBounds.end)
-        let exercise = try loadIntervals(kindClause: "kind in ('workout','manual_workout')",
-                                         user: job.userId, device: job.deviceId,
-                                         dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let exercise = try loadWorkouts(user: job.userId, device: job.deviceId,
+                                        dayStart: dayBounds.start, dayEnd: dayBounds.end)
         let streams = try ActivityContextDays.loadStreams(
             db: db, userId: job.userId, deviceId: job.deviceId,
             dayStart: dayBounds.start, dayEnd: dayBounds.end)
@@ -580,9 +580,8 @@ struct ActivityLane {
                                              dayStart: dayBounds.start, dayEnd: dayBounds.end)
         let asleep = ActivityContextDays.asleepSpans(nights)
         let inBed = nights.map { (start: $0.start, end: $0.end) }
-        let exercise = try loadIntervals(kindClause: "kind in ('workout','manual_workout')",
-                                         user: job.userId, device: job.deviceId,
-                                         dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let exercise = try loadWorkouts(user: job.userId, device: job.deviceId,
+                                        dayStart: dayBounds.start, dayEnd: dayBounds.end)
 
         // 4b. Wear evidence (G3/G7): WRIST_ON/OFF rows from noop_events feed the shared fold so
         // epochs carry an EVIDENCED wear_state (unknown where no event covers) instead of the
@@ -592,6 +591,15 @@ struct ActivityLane {
         let wearIntervals = Self.wearIntervals(fromEvents: wearEvents,
                                                from: dayBounds.start, to: dayBounds.end)
 
+        // 4c. Heart-rate stream for the wear-signal-quality fold (feat/wear-signal-quality V1):
+        //     the same `noop_hr_samples` rows the context-day/stream-day paths load. HR feeds
+        //     `hrPresent` and the `WristWearRecovery` sustained-HR closure of a durable off
+        //     interval. RR, skin temperature, v18Aux optical fields and PPG waveforms are NOT
+        //     loaded by this lane (no `noop_rr_intervals`/skin-temp/optical projection exists in
+        //     the activity day job), so those evidence channels stay nil server-side.
+        let hrSamples = try loadHrSamples(user: job.userId, device: job.deviceId,
+                                          dayStart: dayBounds.start, dayEnd: dayBounds.end)
+
         // 5. Inference per run, outside any transaction, lease renewed around
         //    the long work. Windows are collected per run and folded ONCE
         //    through the shared policy in step 6 (see
@@ -600,6 +608,11 @@ struct ActivityLane {
         var versions = Self.resolvedVersions(
             reportedModel: service.reportedModelVersion,
             reportedPreprocessing: service.reportedPreprocessingVersion)
+        // The transition expert is OPTIONAL: "none" means no expert ran for this
+        // job, and every downstream consumer skips the transition fields (fail-open).
+        // Resolved again from each answer below: the child may report its expert only with the first infer.
+        var transitionVersions = Self.resolvedTransitionVersions(
+            reportedTransitionModel: service.reportedTransitionVersion)
         // Answers are cached under the versions the running child reported; before it has reported
         // there is nothing to key them by.
         let cacheable = !(service.reportedModelVersion ?? "").isEmpty
@@ -615,7 +628,8 @@ struct ActivityLane {
                 // the run that grew since the last pass (normally the newest) costs model time.
                 let cacheKey = cacheable
                     ? ActivityLocalCache.inferenceKey(request: request, modelVersion: versions.model,
-                                                      preprocessingVersion: versions.preprocessing)
+                                                      preprocessingVersion: versions.preprocessing,
+                                                      transitionVersion: transitionVersions)
                     : nil
                 if let cacheKey, let cached = cache?.inference(key: cacheKey) {
                     windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(cached))
@@ -640,6 +654,7 @@ struct ActivityLane {
                 }
                 if let mv = result.modelVersion, !mv.isEmpty { versions.model = mv }
                 if let pv = result.preprocessingVersion, !pv.isEmpty { versions.preprocessing = pv }
+                if let tv = result.transitionVersion, !tv.isEmpty { transitionVersions = tv }
                 windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
                 stats.windowsInferred += result.windows.count
                 if let cacheKey, result.modelVersion == nil || result.modelVersion == versions.model {
@@ -656,13 +671,16 @@ struct ActivityLane {
         var doc = try Self.activityDocument(
             windows: windows,
             sleepIntervals: asleep,
-            exerciseIntervals: exercise,
+            // The v1 epoch fold reads only start/end (ExerciseSession has no sport); the sport
+            // goes to the v2 decoder through `buildContextDay` below. audit WS-11-F08.
+            exerciseIntervals: exercise.map { (start: $0.start, end: $0.end) },
             dayStart: dayBounds.start, dayEnd: dayBounds.end,
             inputRevision: job.inputRevision,
             modelVersion: versions.model,
             preprocessingVersion: versions.preprocessing,
             dataThrough: dataThrough,
-            wearIntervals: wearIntervals)
+            wearIntervals: wearIntervals,
+            hrSamples: hrSamples)
         // The publish RPC validates `p_payload ->> 'day'` against the job's
         // day (20261003120000_activity_context.sql), so the C10 document is
         // stamped with the job day before it is sealed.
@@ -672,11 +690,12 @@ struct ActivityLane {
         //     streams through the shared probabilistic decoder. Best effort — see the type comment.
         let dayDocument = try buildContextDay(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
-            asleep: asleep, inBed: inBed, exercise: exercise)
+            asleep: asleep, inBed: inBed, exercise: exercise,
+            transitionVersion: transitionVersions)
 
         // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
         let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
-                                                   versions: versions)
+                                                   versions: versions, transitionVersion: transitionVersions)
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
@@ -755,7 +774,8 @@ struct ActivityLane {
         versions: (model: String, preprocessing: String),
         asleep: [(start: Int, end: Int)],
         inBed: [(start: Int, end: Int)] = [],
-        exercise: [(start: Int, end: Int)]) throws -> ActivityContextDays.Built? {
+        exercise: [(start: Int, end: Int, sport: String)],
+        transitionVersion: String = "none") throws -> ActivityContextDays.Built? {
         guard contextDaysEnabled else { return nil }
         do {
             guard try renewLease(job: job) else {
@@ -769,7 +789,9 @@ struct ActivityLane {
             let input = ActivityContextDays.trackInput(
                 windows: windows, streams: streams, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
-                encoderVersion: versions.model)
+                encoderVersion: versions.model,
+                transitionVersion: transitionVersion,
+                transitionPreprocessingVersion: versions.preprocessing)
             return try ActivityContextDays.build(
                 input: input, day: job.day, modelVersion: versions.model,
                 preprocessingVersion: versions.preprocessing, generatedAt: now)
@@ -785,9 +807,12 @@ struct ActivityLane {
     /// (counted; the v1 publish proceeds).
     private mutating func encoderWindowsPayload(job: ActivityJob, dayBounds: (start: Int, end: Int),
                                                 windows: [ActivityPythonService.WindowPrediction],
-                                                versions: (model: String, preprocessing: String)) -> String? {
+                                                versions: (model: String, preprocessing: String),
+                                                transitionVersion: String = "none") -> String? {
         let set = ActivityEncoderWindowsStore.windowSet(windows: windows, dayStart: dayBounds.start,
-                                                        dayEnd: dayBounds.end, modelVersion: versions.model)
+                                                        dayEnd: dayBounds.end, modelVersion: versions.model,
+                                                        transitionVersion: transitionVersion,
+                                                        preprocessingVersion: versions.preprocessing)
         do {
             return try ActivityEncoderWindowsStore.payload(set: set, day: job.day, dayStart: dayBounds.start,
                                                            preprocessingVersion: versions.preprocessing)
@@ -995,6 +1020,27 @@ struct ActivityLane {
         }
     }
 
+    /// Workout intervals for a day, with each row's sport name read from
+    /// `sessions.summary ->> 'sport'` — the phone's own name, written verbatim by
+    /// the structured-sync upload. The v2 day document passes it through to the
+    /// shared decoder's `DayStateWorkout` so the server sees the same `WorkoutKind`
+    /// the phone's decoder sees; a row with no sport stays `""`, the same honest
+    /// "unspecified" the phone uses when it has none (audit WS-11-F08).
+    private func loadWorkouts(user: String, device: String,
+                              dayStart: Int, dayEnd: Int) throws -> [(start: Int, end: Int, sport: String)] {
+        let rows = try db.query("""
+            select extract(epoch from start_at)::bigint as s, extract(epoch from end_at)::bigint as e,
+                   coalesce(summary->>'sport', '') as sport
+            from public.sessions
+            where user_id=$1::uuid and device_id=$2::uuid and kind in ('workout','manual_workout')
+              and start_at < $4::timestamptz and end_at > $3::timestamptz
+            """, [user, device, Self.isoUTC(dayStart), Self.isoUTC(dayEnd)])
+        return rows.compactMap { r in
+            guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? "") else { return nil }
+            return (start: s, end: e, sport: r["sport"] ?? "")
+        }
+    }
+
     /// WRIST_ON/WRIST_OFF event rows (`noop_events`) inside `[dayStart, dayEnd)`, for the wear fold.
     /// Only events within the day count: a stale pre-day OFF cannot paint the day start off-body.
     private func loadWearEvents(user: String, device: String,
@@ -1050,7 +1096,205 @@ struct ActivityLane {
         return out
     }
 
+    /// Heart-rate samples for a day job, from the same `noop_hr_samples` rows
+    /// `ActivityContextDays.loadStreams` reads (the context-day and stream-day
+    /// paths). The raw-IMU day job needs them for the wear-signal-quality fold:
+    /// `hrPresent` per epoch and the `WristWearRecovery` sustained-HR closure
+    /// of a durable off interval. Missing rows are an empty stream, never an
+    /// error.
+    private func loadHrSamples(user: String, device: String,
+                               dayStart: Int, dayEnd: Int) throws -> [HRSample] {
+        let rows = try db.query("""
+            select ts::text, bpm::text from public.noop_hr_samples
+            where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint and ts < $4::bigint
+            order by ts
+            """, [user, device, String(dayStart), String(dayEnd)])
+        return rows.compactMap { r in
+            guard let ts = Int(r["ts"] ?? ""), let bpm = Int(r["bpm"] ?? "") else { return nil }
+            return HRSample(ts: ts, bpm: bpm)
+        }
+    }
+
+    // MARK: - Wear-signal-quality classification (feat/wear-signal-quality V1)
+
+    /// IMU window motion bars for the wear-signal-quality fold. Derived from the lane's real
+    /// `imu-feat-1` window facts (`accel_rms_g`, `gyro_rms_dps`) that the Python service returns;
+    /// the numbers are CALIBRATE-style placeholders (no labeled WHOOP captures exist yet), chosen
+    /// conservatively so only genuinely active wrist motion clears `imuHighMotion` and only a
+    /// nearly-still wrist clears `imuQuiet`. An epoch with no overlapping window — or windows
+    /// whose features an older serve.py omitted — gets nil motion flags: absence is never evidence.
+    static let imuHighMotionGyroRmsDps = 25.0
+    static let imuHighMotionAccelRmsG = 2.0
+    static let imuQuietGyroRmsDps = 4.0
+    static let imuQuietAccelRmsG = 0.25
+
+    /// Per-epoch IMU motion flags from the overlapping encoder windows. `high`/`quiet` are nil when
+    /// the epoch has no window or no window carries features; otherwise both are resolved booleans.
+    static func epochImuMotion(epochStart: Int, epochEnd: Int,
+                               windows: [ActivityPythonService.WindowPrediction]) -> (high: Bool?, quiet: Bool?) {
+        let overlapping = windows.filter { $0.start < Double(epochEnd) && $0.end > Double(epochStart) }
+        guard !overlapping.isEmpty else { return (nil, nil) }
+        var sawFeatures = false
+        var high = false
+        var quiet = true
+        for w in overlapping {
+            guard let accel = w.features["accel_rms_g"], let gyro = w.features["gyro_rms_dps"] else { continue }
+            sawFeatures = true
+            if gyro >= imuHighMotionGyroRmsDps || accel >= imuHighMotionAccelRmsG { high = true }
+            if gyro >= imuQuietGyroRmsDps || accel >= imuQuietAccelRmsG { quiet = false }
+        }
+        guard sawFeatures else { return (nil, nil) }
+        return (high, quiet)
+    }
+
+    /// Precompute, per durable OFF interval, the timestamp from which the interval counts as
+    /// closed by sustained HR (feat/wear-signal-quality V1). Reuses `WristWearRecovery` — the
+    /// same sustained-HR reconciliation the phone uses — so the only exit path when a strap
+    /// missed its `WRIST_ON` is identical server-side. Recovery is monotonic: once met for an
+    /// epoch it stays met for every later epoch in the interval, so this is computed ONCE per
+    /// off interval instead of once per epoch (a full-day off interval would otherwise re-scan
+    /// the whole HR stream for every one of its 2880 epochs).
+    ///
+    /// The value is the completion timestamp of the confirming run (first sample at or after
+    /// `start + confirmationSeconds`), stored as `completion = ts + 1` so an epoch is closed iff
+    /// `epochEnd >= completion` — exactly the causal rule `WristWearRecovery.firstSustainedHR`
+    /// applies when it is called with `before: epochEnd`.
+    static func recoveryCompletions(wearIntervals: [WearInterval],
+                                    hrSamples: [HRSample]) -> [Int: Int] {
+        var out: [Int: Int] = [:]
+        for interval in wearIntervals where interval.wear == .offWrist {
+            guard let start = WristWearRecovery.firstSustainedHR(
+                hrSamples, after: interval.start, before: interval.end) else { continue }
+            let target = start + WristWearRecovery.confirmationSeconds
+            // hrSamples is sorted ascending; the confirmed run is contiguous (gaps <= 5 s, valid
+            // bpm), so the first valid sample at ts >= target is the confirming sample itself.
+            let completion = hrSamples.first {
+                $0.ts >= target && $0.ts > interval.start && $0.ts < interval.end
+                    && (30...220).contains($0.bpm)
+            }?.ts
+            if let completion { out[interval.start] = completion + 1 }
+        }
+        return out
+    }
+
+    /// Resolve one epoch's `WearSignalEvidence` from the day job's loaded inputs.
+    ///
+    /// Offline/replay semantics throughout (the job reconstructs the day after the fact): the
+    /// 45-s strap-domain freshness of `liveWrist*Fresh` does not exist server-side, so those stay
+    /// nil; `durableOffActive` comes from the reconstructed `WearInterval`s — an off interval is
+    /// active until a `WRIST_ON` interval or a sustained-HR run closes it (`recoveryCompletion`
+    /// is the precomputed completion for the covering off interval, or nil when it never
+    /// recovered). Channels the lane does not load stay nil: RR, skin temperature, v18Aux optical
+    /// fields (`opticalBaselineZero`, `strapFlags*`, `contactNotDetected`, `pulseDegraded`),
+    /// charging, battery telemetry, RTC-reset and stream-absence evidence. PPG waveform rows are
+    /// not stored or loaded by the activity lane, so `ppgSqi` is always nil here (PpgSqi is
+    /// computed on the phone, where the v26 waveform exists).
+    static func wearSignalEvidence(epochStart: Int, epochEnd: Int,
+                                   wearIntervals: [WearInterval],
+                                   recoveryCompletion: Int?,
+                                   hrSamples: [HRSample],
+                                   imuMotion: (high: Bool?, quiet: Bool?) = (nil, nil)) -> WearSignalEvidence {
+        var durableOffActive: Bool?
+        var sustainedHrRecoveryMet: Bool?
+        if let interval = wearIntervals.last(where: { $0.start <= epochStart && $0.end > epochStart }) {
+            if interval.wear == .offWrist {
+                if let completion = recoveryCompletion, epochEnd >= completion {
+                    durableOffActive = false
+                    sustainedHrRecoveryMet = true
+                } else {
+                    durableOffActive = true
+                }
+            } else {
+                // Explicit WRIST_ON interval: any durable OFF before it was closed.
+                durableOffActive = false
+            }
+        }
+        // No sample with a plausible bpm in the epoch is a real observation only when the day has an
+        // HR stream at all: an empty stream (not uploaded yet) stays unknown, never "HR absent".
+        // hrSamples is sorted ascending, so a binary search finds the epoch's first sample.
+        var hrPresent: Bool?
+        if !hrSamples.isEmpty {
+            var lo = 0, hi = hrSamples.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if hrSamples[mid].ts < epochStart { lo = mid + 1 } else { hi = mid }
+            }
+            var present = false
+            var i = lo
+            while i < hrSamples.count && hrSamples[i].ts < epochEnd {
+                if (30...220).contains(hrSamples[i].bpm) { present = true; break }
+                i += 1
+            }
+            hrPresent = present
+        }
+        return WearSignalEvidence(
+            durableOffActive: durableOffActive,
+            sustainedHrRecoveryMet: sustainedHrRecoveryMet,
+            hrPresent: hrPresent,
+            imuHighMotion: imuMotion.high,
+            imuQuiet: imuMotion.quiet)
+    }
+
+    /// Thread one `WearSignalTemporalState` through a day's epochs in time order and classify each
+    /// with `WearSignalQualityEngine`, returning epochs with `wearSignal` set. Additive: the
+    /// existing three-state `wear` (from the `WearInterval` enrichment) is left UNCHANGED. When no
+    /// evidence resolves a state the engine abstains to `.unknown` — absence is never fabricated.
+    static func applyWearSignal(epochs: [ActivityEpoch],
+                                windows: [ActivityPythonService.WindowPrediction],
+                                wearIntervals: [WearInterval],
+                                hrSamples: [HRSample]) -> [ActivityEpoch] {
+        guard !epochs.isEmpty else { return epochs }
+        let completions = Self.recoveryCompletions(wearIntervals: wearIntervals, hrSamples: hrSamples)
+        let ordered = epochs.sorted { $0.startTs < $1.startTs }
+        // Windows are scanned with a two-pointer walk (epochs and windows are both time-ordered),
+        // so a full-day window set costs one linear pass instead of one scan per epoch.
+        let sortedWindows = windows.sorted { $0.start < $1.start }
+        var state = WearSignalTemporalState()
+        var windowIndex = 0
+        return ordered.map { e in
+            let s = Double(e.startTs), en = Double(e.endTs)
+            while windowIndex < sortedWindows.count
+                && Double(sortedWindows[windowIndex].end) <= s { windowIndex += 1 }
+            var motion: (high: Bool?, quiet: Bool?) = (nil, nil)
+            if windowIndex < sortedWindows.count && sortedWindows[windowIndex].start < en {
+                var sawFeatures = false
+                var high = false
+                var quiet = true
+                var j = windowIndex
+                while j < sortedWindows.count && sortedWindows[j].start < en {
+                    if let accel = sortedWindows[j].features["accel_rms_g"],
+                       let gyro = sortedWindows[j].features["gyro_rms_dps"] {
+                        sawFeatures = true
+                        if gyro >= imuHighMotionGyroRmsDps || accel >= imuHighMotionAccelRmsG { high = true }
+                        if gyro >= imuQuietGyroRmsDps || accel >= imuQuietAccelRmsG { quiet = false }
+                    }
+                    j += 1
+                }
+                if sawFeatures { motion = (high, quiet) }
+            }
+            let covering = wearIntervals.last { $0.start <= e.startTs && $0.end > e.startTs }
+            let evidence = Self.wearSignalEvidence(
+                epochStart: e.startTs, epochEnd: e.endTs,
+                wearIntervals: wearIntervals,
+                recoveryCompletion: covering.map { completions[$0.start] ?? nil } ?? nil,
+                hrSamples: hrSamples, imuMotion: motion)
+            let result = WearSignalQualityEngine.classify(evidence, state: &state, epochStart: e.startTs)
+            // `.unknown` is the engine's abstention (no evidence resolved a state) and is NOT
+            // emitted: an absent `wsq` already means "no wear-signal decision" to every consumer,
+            // so abstaining stays indistinguishable from a pre-V1 epoch (additive, backward
+            // compatible — the C10 key set of an evidence-less day is unchanged).
+            let wearSignal: WearSignalState? = result.state == .unknown ? nil : result.state
+            return ActivityEpoch(startTs: e.startTs, endTs: e.endTs,
+                                 motion: e.motion, posture: e.posture,
+                                 exercise: e.exercise, sleepState: e.sleepState,
+                                 exertion: e.exertion, wear: e.wear,
+                                 wearSignal: wearSignal,
+                                 confidence: e.confidence, observedS: e.observedS, validS: e.validS)
+        }
+    }
+
     // MARK: - Job row parsing
+
 
     static func parseJob(_ r: [String: String]) -> ActivityJob? {
         let uid = r["user_id"] ?? ""
@@ -1292,6 +1536,13 @@ struct ActivityLane {
     /// manifest and no DB fingerprint constant (audit P1-3/P3-6). The HART
     /// path always reports from the loaded manifest, so a healthy HART child
     /// stamps the true manifest versions.
+    /// The optional transition expert's resolved version stamp: an absent report (no
+    /// expert loaded) resolves to the documented "none" marker, which every consumer
+    /// treats as "no transition evidence" rather than an error.
+    static func resolvedTransitionVersions(reportedTransitionModel: String?) -> String {
+        (reportedTransitionModel?.isEmpty == false) ? reportedTransitionModel! : "none"
+    }
+
     static func resolvedVersions(reportedModel: String?,
                                  reportedPreprocessing: String?)
         -> (model: String, preprocessing: String) {
@@ -1310,7 +1561,7 @@ struct ActivityLane {
         ActivityWindowPrediction(
             startTs: Int(w.start), endTs: Int(w.end),
             label: MotionLabel(rawValue: w.label) ?? .unknown,
-            probs: w.probs, baseline: w.baseline)
+            probs: w.probs, baseline: w.baseline, calibrated: w.calibrated)
     }
 
     /// Clip a model window to `[dayStart, dayEnd)`; nil when it no longer
@@ -1327,7 +1578,7 @@ struct ActivityLane {
         return ActivityWindowPrediction(
             startTs: s, endTs: e,
             label: MotionLabel(rawValue: w.label) ?? .unknown,
-            probs: w.probs, baseline: w.baseline)
+            probs: w.probs, baseline: w.baseline, calibrated: w.calibrated)
     }
 
     /// Map a `public.sessions` sleep interval to a minimal shared
@@ -1397,7 +1648,8 @@ struct ActivityLane {
                                  modelVersion: String,
                                  preprocessingVersion: String,
                                  dataThrough: Int,
-                                 wearIntervals: [WearInterval] = []) throws -> [String: Any] {
+                                 wearIntervals: [WearInterval] = [],
+                                 hrSamples: [HRSample] = []) throws -> [String: Any] {
         let sleepSessions = sleepIntervals.map { Self.sleepSession(from: $0) }
         let exerciseSessions = exerciseIntervals.map { Self.exerciseSession(from: $0) }
         let shared = windows.compactMap {
@@ -1409,7 +1661,13 @@ struct ActivityLane {
             exerciseSessions: exerciseSessions,
             sleepSessions: sleepSessions,
             wearIntervals: wearIntervals)
-        return try activityDocument(epochs: build.epochs,
+        // Wear-signal-quality classification (feat/wear-signal-quality V1): one temporal state per
+        // day job, epochs classified in time order, `epoch.wearSignal` threaded additively on top of
+        // the existing three-state `wear` enrichment (which stays untouched).
+        let classified = Self.applyWearSignal(
+            epochs: build.epochs, windows: windows,
+            wearIntervals: wearIntervals, hrSamples: hrSamples)
+        return try activityDocument(epochs: classified,
                                     sleepIntervals: sleepIntervals,
                                     dayStart: dayStart, dayEnd: dayEnd,
                                     inputRevision: inputRevision,

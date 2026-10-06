@@ -3,7 +3,7 @@ import StrandAnalytics
 import WhoopProtocol
 
 /// ActivityContext v2 on the server: the activity lane's HART (or baseline) window probabilities and
-/// the per-window `imu-feat-1` IMU features go through the SAME decoder the app runs
+/// the per-window `imu-feat-2` IMU features go through the SAME decoder the app runs
 /// (`StrandAnalytics.ActivityContextTrackBuilder`), together with the day's stored heart rate, gravity,
 /// step, sleep, workout and wear streams, and the resulting day document is stored in
 /// `public.activity_context_days` through the fenced `publish_activity_context_day` RPC.
@@ -51,16 +51,48 @@ enum ActivityContextDays {
     // MARK: - Pure assembly (unit-tested without a database)
 
     /// The windows of one inference response, with their IMU features dropped unless the service says
-    /// they are laid out the way this build's decoder reads them (`ActivityContextVersions.featureSchema`).
-    /// A service that renames or rescales a feature must not feed shifted numbers into the decoder.
+    /// they are laid out the way this build's decoder reads them (`ActivityContextVersions.featureSchema`),
+    /// and their transition-expert output dropped unless it is stamped with the schema this build reads
+    /// (`ActivityEncoderWindowSet.transitionSchema`). A service that renames or rescales either must not
+    /// feed shifted numbers into the decoder.
     static func windowsWithCompatibleFeatures(
         _ result: ActivityPythonService.InferResult) -> [ActivityPythonService.WindowPrediction] {
-        if result.featureSchema == ActivityContextVersions.featureSchema { return result.windows }
+        let featuresOK = result.featureSchema == ActivityContextVersions.featureSchema
+        let transitionOK = result.transitionSchema == ActivityEncoderWindowSet.transitionSchema
+        if featuresOK && transitionOK { return result.windows }
         return result.windows.map { w in
             var stripped = w
-            stripped.features = [:]
+            if !featuresOK { stripped.features = [:] }
+            if !transitionOK { stripped.transition = nil }
             return stripped
         }
+    }
+
+    /// The service window as the decoder's optional transition-expert window. Nil when the service
+    /// sent no `transition` output (older serve.py or the expert unavailable — the fail-open default:
+    /// the decoder then runs exactly as it did before the expert existed). An abstained window is also
+    /// nil: the phone's stored window set writes no row for one, so both decoders must see the same
+    /// seconds without it (an abstained window would otherwise clear the previous window's held evidence
+    /// on the server only).
+    static func transitionWindow(_ w: ActivityPythonService.WindowPrediction,
+                                 modelVersion: String, preprocessingVersion: String) -> ActivityTransitionWindow? {
+        guard let t = w.transition, !t.abstained else { return nil }
+        guard w.start.isFinite, w.end.isFinite, abs(w.start) < 1e12, abs(w.end) < 1e12 else { return nil }
+        let s = Int(w.start), e = Int(w.end)
+        guard e > s else { return nil }
+        // Canonical order, fixed: probabilities are stored in the persisted class order.
+        let order = ActivityEncoderWindowSet.transitionClassOrder
+        var probs: [Double] = []
+        probs.reserveCapacity(order.count)
+        for key in order {
+            let v = t.probs[key] ?? 0
+            guard v.isFinite else { return nil }
+            probs.append(v)
+        }
+        return ActivityTransitionWindow(startTs: s, endTs: e, probabilities: probs,
+                                        modelVersion: modelVersion,
+                                        preprocessingVersion: preprocessingVersion,
+                                        abstained: t.abstained)
     }
 
     /// One service window's IMU facts, or nil when the service did not send the required ones (an older
@@ -68,7 +100,7 @@ enum ActivityContextDays {
     static func imuFeatures(_ w: ActivityPythonService.WindowPrediction) -> ImuWindowFeatures? {
         guard w.start.isFinite, w.end.isFinite, abs(w.start) < 1e12, abs(w.end) < 1e12 else { return nil }
         let f = w.features
-        guard let accel = f["accel_rms_g"], let gyro = f["gyro_rms_dps"], let jerk = f["jerk_rms"],
+        guard let accel = f["accel_rms_g"], let gyro = f["gyro_rms_dps"], let jerk = f["jerk_rms_gps"],
               let strength = f["cadence_strength"] else { return nil }
         let s = Int(w.start), e = Int(w.end)
         guard e > s else { return nil }
@@ -85,7 +117,7 @@ enum ActivityContextDays {
         guard e > s else { return nil }
         return ActivityWindowPrediction(
             startTs: s, endTs: e, label: MotionLabel(rawValue: w.label) ?? .unknown,
-            probs: w.probs, baseline: w.baseline)
+            probs: w.probs, baseline: w.baseline, calibrated: w.calibrated)
     }
 
     /// One published night: its in-bed window and the staged `[{start, end, stage}]` segments.
@@ -112,9 +144,11 @@ enum ActivityContextDays {
     /// rest of today as already over.
     static func trackInput(windows: [ActivityPythonService.WindowPrediction], streams: Streams,
                            sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
-                           exercise: [(start: Int, end: Int)],
+                           exercise: [(start: Int, end: Int, sport: String)],
                            dayStart: Int, dayEnd: Int, horizon: Int? = nil,
                            encoderVersion: String,
+                           transitionVersion: String = "unknown",
+                           transitionPreprocessingVersion: String = "unknown",
                            sleepKnownOutsideSessions: Bool = false) -> ActivityContextTrackInput {
         let spanEnd = min(horizon ?? dayEnd, dayEnd)
         let offWrist = AnalyticsEngine
@@ -130,11 +164,18 @@ enum ActivityContextDays {
             sleep: sleep.map { DayStateSpan(start: $0.start, end: $0.end) },
             inBed: inBed.map { DayStateSpan(start: $0.start, end: $0.end) },
             sleepKnownOutsideSessions: sleepKnownOutsideSessions,
-            workouts: exercise.map { DayStateWorkout(start: $0.start, end: $0.end, sport: "") },
+            // Sport is the phone's own name from sessions.summary, passed through verbatim so the
+            // shared decoder sees the same WorkoutKind the phone's decoder sees (a row with no sport
+            // stays "" → .unspecified, exactly the phone's honest fallback). audit WS-11-F08.
+            workouts: exercise.map { DayStateWorkout(start: $0.start, end: $0.end, sport: $0.sport) },
             offWrist: offWrist,
             encoderWindows: windows.compactMap(encoderWindow),
             encoderId: encoderId, encoderVersion: encoderVersion,
-            imuWindows: windows.compactMap(imuFeatures))
+            imuWindows: windows.compactMap(imuFeatures),
+            transitionWindows: windows.compactMap {
+                transitionWindow($0, modelVersion: transitionVersion,
+                                 preprocessingVersion: transitionPreprocessingVersion)
+            })
     }
 
     private struct Envelope: Encodable {
@@ -207,7 +248,7 @@ enum ActivityContextDays {
     /// produced any: the stream day then decodes with the same encoder evidence the phone does.
     static func buildStreamDay(day: String, dayBounds: (start: Int, end: Int), streams: Streams,
                                sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
-                               exercise: [(start: Int, end: Int)],
+                               exercise: [(start: Int, end: Int, sport: String)],
                                now: Int, encoder: ActivityEncoderWindowSet? = nil) throws -> Built? {
         guard !streams.isEmpty else { return nil }
         var input = trackInput(
@@ -220,6 +261,10 @@ enum ActivityContextDays {
             input.imuWindows = encoder.features
             input.encoderId = encoder.encoderId
             input.encoderVersion = encoder.encoderVersion
+            // Stored transition-expert output rides the same stored-set path: each window
+            // carries its own version stamps, so a stream day decodes with exactly the
+            // evidence the raw-IMU lane published for it.
+            input.transitionWindows = encoder.transitions
         }
         let built = try build(input: input, day: day, modelVersion: streamsModelVersion,
                               preprocessingVersion: streamsPreprocessingVersion, generatedAt: now)

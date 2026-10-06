@@ -47,7 +47,6 @@ struct SleepDebtLedgerCard: View {
                                 .font(StrandFont.captionNumber)
                                 .foregroundStyle(debtBalanceColor(ledger))
                         }
-                        // Plain-English read.
                         Text(debtRead(ledger))
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
@@ -67,36 +66,62 @@ struct SleepDebtLedgerCard: View {
         }
     }
 
-    /// The diverging per-night delta strip: each night a bar from the centre line — up
-    /// (accent) for a surplus, down (rose) for a deficit — scaled to the largest |delta|.
+    private static let dayParser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+    private static let weekdayFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "EEEEE"
+        return f
+    }()
+    private static let dayNumberFormat: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "d"
+        return f
+    }()
+
+    /// One column per night: its surplus/shortfall in minutes at the end of its bar, and its weekday and
+    /// date underneath. Bars grow up from the centre line for a surplus and down for a shortfall.
     @ViewBuilder
     private func debtDeltaBars(_ ledger: SleepDebtLedger) -> some View {
-        let deltas = ledger.nights.map { $0.deltaMin }
-        let scale = max(deltas.map { abs($0) }.max() ?? 1, 1)
-        GeometryReader { geo in
-            let n = max(deltas.count, 1)
-            let slot = geo.size.width / CGFloat(n)
-            let barW = max(2, slot * 0.6)
-            let midY = geo.size.height / 2
-            ZStack(alignment: .topLeading) {
-                // Centre (zero) line.
-                Rectangle()
-                    .fill(StrandPalette.hairline)
-                    .frame(height: 1)
-                    .position(x: geo.size.width / 2, y: midY)
-                ForEach(Array(deltas.enumerated()), id: \.offset) { i, d in
-                    let frac = CGFloat(abs(d) / scale)
-                    let h = max(2, frac * (midY - 2))
-                    let x = slot * CGFloat(i) + slot / 2
-                    RoundedRectangle(cornerRadius: 2, style: .continuous)
-                        .fill(d >= 0 ? StrandPalette.accent : StrandPalette.metricRose)
-                        .frame(width: barW, height: h)
-                        // Surplus grows upward from the centre, deficit downward.
-                        .position(x: x, y: d >= 0 ? midY - h / 2 : midY + h / 2)
+        let nights = ledger.nights
+        let scale = max(nights.map { abs($0.deltaMin) }.max() ?? 1, 1)
+        let half: CGFloat = 46
+        HStack(alignment: .top, spacing: 4) {
+            ForEach(Array(nights.enumerated()), id: \.offset) { _, n in
+                let surplus = n.deltaMin >= 0
+                let h = max(3, CGFloat(abs(n.deltaMin) / scale) * (half - 14))
+                let date = Self.dayParser.date(from: n.day)
+                VStack(spacing: 6) {
+                    ZStack(alignment: .top) {
+                        Rectangle().fill(StrandPalette.hairline).frame(height: 1).offset(y: half)
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(surplus ? StrandPalette.accent : StrandPalette.metricRose)
+                            .frame(height: h)
+                            .offset(y: surplus ? half - h : half)
+                        Text(debtSigned(n.deltaMin))
+                            .font(StrandFont.captionNumber)
+                            .foregroundStyle(surplus ? StrandPalette.accent : StrandPalette.metricRose)
+                            .lineLimit(1).minimumScaleFactor(0.6)
+                            .offset(y: surplus ? half - h - 15 : half + h + 2)
+                    }
+                    .frame(height: half * 2 + 4, alignment: .top)
+                    VStack(spacing: 0) {
+                        Text(date.map { Self.weekdayFormat.string(from: $0) } ?? "")
+                            .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
+                        Text(date.map { Self.dayNumberFormat.string(from: $0) } ?? "")
+                            .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textTertiary)
+                    }
                 }
+                .frame(maxWidth: .infinity)
             }
         }
-        .frame(height: 56)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Per-night sleep balance: \(ledger.nightCount) nights, net \(debtSigned(ledger.balanceMin))")
     }
@@ -119,20 +144,13 @@ struct SleepDebtLedgerCard: View {
         return ledger.isDebt ? String(localized: "sleep debt") : String(localized: "balanced")
     }
 
-    /// Plain-English read of the current actionable estimate.
+    /// One factual line under the headline.
     private func debtRead(_ ledger: SleepDebtLedger) -> String {
-        let nights = ledger.nightCount
-        let span = nights == 1
-            ? String(localized: "the last night")
-            : String(localized: "the last \(nights) nights")
-        if ledger.magnitudeMin < SleepDebt.onTargetBandMin {
-            return String(localized: "You've effectively met your current sleep need across \(span).")
+        let need = durationText(ledger.needMin)
+        if ledger.magnitudeMin < SleepDebt.onTargetBandMin || !ledger.isDebt {
+            return String(localized: "Meeting your \(need) need.")
         }
-        let mag = durationText(ledger.magnitudeMin)
-        if ledger.isDebt {
-            return String(localized: "Add about \(mag) to your base sleep target tonight. Meeting that complete sleep need clears the displayed debt; recent shortfalls carry forward at a reduced weight.")
-        }
-        return String(localized: "You've effectively met your current sleep need across \(span).")
+        return String(localized: "\(durationText(ledger.magnitudeMin)) behind your \(need) need.")
     }
 
     /// Color the balance by size: balanced → positive green, modest debt → warning,

@@ -181,3 +181,86 @@ single-threaded and deterministic.
   abstain (honest `unknown`).
 - Temporal voting/hysteresis lives on the Swift side (ActivityContextPolicy);
   Python is a pure per-window classifier.
+
+## Ground-truth label evaluation (spec 10/13)
+
+The harness compares the HART / heuristic / ActivityContext heads against
+guided calibration labels on **leakage-free session-held-out splits**.
+
+### Inputs
+
+- **Ground-truth labels** (`--labels`): a `.jsonl` file (one wire
+  `activity_ground_truth_labels` object per line, snake_case fields per
+  spec 8.1) or a `.json` array. Malformed lines and degenerate intervals
+  are skipped and counted in the load report.
+- **Window docs** (`--windows`, repeatable): `hart-windows-1` day documents
+  (`ActivityEncoderWindowStore` / `ActivityEncoderWindows.swift`). Windows
+  flagged `b=1` (heuristic baseline) are evaluated as a separate
+  **baseline** model; the rest as **hart**. Both score the SAME labeled
+  windows.
+- **ActivityContext day docs** (`--context-days`, optional): a JSON array
+  of `activity_context_days` documents (`runs` with per-head probability
+  dicts). Reported as a third **activity_context** model.
+
+### Semantics
+
+- **Strong vs weak never mixed.** Default evaluation uses guided, confident
+  labels only. `--include-weak` adds stretch-feedback / imported / unsure
+  labels to a clearly-labelled combined view, with strong and weak counted
+  separately.
+- **Gaps never make a label valid.** A label whose `sensor_quality` has ANY
+  gap or `covered_seconds < expected_seconds` is `evaluation_ready=False`
+  and excluded by default (`--include-degraded` includes it with a warning
+  count). Missing `sensor_quality` is also not evaluation-ready.
+- **Window/label join**: a 4 s window joins a label when >= 50% of the
+  window lies inside the label interval and the label sets that head; each
+  window is claimed by at most one label (split integrity).
+- **Abstention is a decision, not a class**: `unknown` window labels abstain
+  every head; per-class P/R/F1, Brier and ECE-15 are scored on accepted
+  windows, with abstention rate and accepted coverage reported alongside.
+- **Splits** are by SESSION (guided `session_id`, or label_key prefix for
+  weak), never by window: sessions ordered by earliest label start, with
+  the last `--holdout-sessions` (default 1) held out, `--split alternate`,
+  or `--split chronological --chronological-ts <unix>` (sessions starting at
+  or after the timestamp are test).
+
+### Metrics (spec 10.3)
+
+Per model × head × split: per-class P/R/F1, macro-F1, balanced accuracy,
+confusion matrix, abstention rate, accepted coverage, duration-weighted
+accuracy, segment-F1 (Ward et al. run matching), Brier + ECE-15 (per head,
+accepted windows), per-session macro-F1 with pooled vs session-macro both
+reported, and a transitions block (F1@τ for τ ∈ {2,5,10}, median/p90 timing
+error, signed bias, false events/hour over monitored duration).
+
+### CLI
+
+```bash
+.venv/bin/python -m activity_context.evaluate_labels \
+    --labels labels.jsonl \
+    --windows day1.json --windows day2.json \
+    [--context-days ctx_days.json] \
+    --out-dir out [--report report.md] [--json] \
+    [--holdout-sessions 1] [--split holdout|alternate|chronological] \
+    [--chronological-ts <unix>] [--tau 5] \
+    [--include-weak] [--include-degraded]
+```
+
+Writes `out/report.md` (human) and, with `--json`, `out/report.json`
+(machine).
+
+### Shadow personalization (spec 11, NO production wiring)
+
+```bash
+.venv/bin/python -m activity_context.personalize \
+    --labels labels.jsonl --windows day1.json --out out
+```
+
+Pure numpy, deterministic (seed 42). Per user (grouped by `user_id` when
+present, else one subject): session-held-out split; evidence gates (>= 30
+windows AND >= 3 distinct sessions per class in the fit split, else
+`insufficient_evidence` with the failed classes listed); then a closed-form
+ridge one-vs-rest logistic probe on `imu-feat-1` features + temperature
+calibration + abstention-threshold tuning. Reports generic-vs-personalized
+per-class F1 delta on the held-out sessions. Nothing here touches serve.py
+or the Swift side.

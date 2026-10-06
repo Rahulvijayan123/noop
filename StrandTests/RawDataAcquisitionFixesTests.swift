@@ -55,22 +55,41 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
         return result
     }
 
+    /// WS-02-F01: write the frame's payload CRC32 trailer (last 4 bytes, zlib CRC32 over
+    /// frame[8..<count-4], LE) so the frame is wire-valid. The golden fixture carries a zeroed
+    /// trailer, and both helpers below mutate CRC-covered bytes, so every synthetic frame
+    /// recomputes the trailer before it can be stored.
+    private static func recomputePayloadCRC32(_ bytes: inout [UInt8]) {
+        guard bytes.count == Whoop5RawImu.bufferLength else { return }
+        let crc = crc32(bytes, 8, bytes.count - 4)
+        let n = bytes.count - 4
+        bytes[n] = UInt8(truncatingIfNeeded: crc & 0xFF)
+        bytes[n + 1] = UInt8(truncatingIfNeeded: (crc >> 8) & 0xFF)
+        bytes[n + 2] = UInt8(truncatingIfNeeded: (crc >> 16) & 0xFF)
+        bytes[n + 3] = UInt8(truncatingIfNeeded: (crc >> 24) & 0xFF)
+    }
+
     /// The golden frame with its 1-second baseTs patched (u32 LE at frame offset 15). Columns
-    /// are untouched, so `Whoop5RawImu.rawColumns` still accepts the frame.
+    /// are untouched, so `Whoop5RawImu.rawColumns` still accepts the frame. The baseTs sits inside
+    /// the CRC-covered payload, so the trailer is recomputed after patching.
     private func frame(baseTs: Int) -> [UInt8] {
         var bytes = Self.bytes(fromHex: Self.goldenFrameHex)
         bytes[15] = UInt8(truncatingIfNeeded: baseTs)
         bytes[16] = UInt8(truncatingIfNeeded: baseTs >> 8)
         bytes[17] = UInt8(truncatingIfNeeded: baseTs >> 16)
         bytes[18] = UInt8(truncatingIfNeeded: baseTs >> 24)
+        Self.recomputePayloadCRC32(&bytes)
         return bytes
     }
 
     /// Same baseTs, deliberately different columns (flip ax[0]'s low byte at offset 28) — used
-    /// to create a conflicting-duplicate timestamp.
+    /// to create a conflicting-duplicate timestamp. The flip is CRC-covered, so the trailer is
+    /// recomputed: both records stay wire-valid, and the store sees a genuine conflicting pair
+    /// rather than a corrupt frame.
     private func frameWithDifferentColumns(baseTs: Int) -> [UInt8] {
         var bytes = frame(baseTs: baseTs)
         bytes[28] ^= 0x01
+        Self.recomputePayloadCRC32(&bytes)
         return bytes
     }
 
@@ -481,5 +500,133 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
         XCTAssertNil(RawDataSessionStore.persistedCaptureIntent)
         XCTAssertTrue(ImuSessionFileStore.shared.readRecords(deviceId: "strap", fromTs: 0,
                                                              toTs: 1_000_000).isEmpty)
+    }
+
+    // MARK: - WS-02-F01/F02: payload-CRC + plausibility gate on the durable store
+
+    private func makeRejectStore(suffix: String) -> (ImuSessionFileStore, String, String) {
+        let deviceId = "imu-reject-\(suffix)-\(UUID().uuidString)"
+        let sessionId = "imu-reject-\(suffix)-\(UUID().uuidString)"
+        let store = ImuSessionFileStore.shared
+        store.resetRawImuRejections()
+        store.start(id: sessionId, deviceId: deviceId, fromMs: 1_758_000_000_000)
+        return (store, deviceId, sessionId)
+    }
+
+    func testCorruptCRCFrameNeverStoredAndCounted() throws {
+        // WS-02-F01: a header-valid 1244-byte frame whose payload CRC32 disagrees must be
+        // counted-and-dropped at the store gate, never stored as IMU data.
+        let (store, deviceId, sessionId) = makeRejectStore(suffix: "crc")
+        defer { store.deleteFiles(sessionId); store.remove(id: sessionId) }
+
+        var corrupt = frame(baseTs: 1_758_000_000)   // valid CRC first
+        corrupt[28] ^= 0x40                          // flip a sample byte; trailer now wrong
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: corrupt, receivedAtMs: 1_000), 0,
+                       "a payload-CRC-failed frame must never be stored")
+        XCTAssertEqual(store.rawImuRejections[.payloadCRCMismatch], 1,
+                       "the rejected frame must be counted with an explicit reason")
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000, toTs: 1_758_000_000).isEmpty,
+                      "the corrupt second must not appear in any window")
+    }
+
+    func testGarbagePayloadFrameRejectedAndCounted() throws {
+        // WS-02-F01: random garbage in the six sample columns (counts/ts intact) with a stale
+        // trailer is rejected at the CRC gate — it must never reach a model window.
+        let (store, deviceId, sessionId) = makeRejectStore(suffix: "garbage")
+        defer { store.deleteFiles(sessionId); store.remove(id: sessionId) }
+
+        var garbage = frame(baseTs: 1_758_000_000)
+        let sampleRanges = [28..<228, 228..<428, 428..<630, 640..<840, 840..<1040, 1040..<1240]
+        for range in sampleRanges {
+            for off in range { garbage[off] = UInt8(truncatingIfNeeded: (off * 7 + 3) & 0xFF) }
+        }
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: garbage, receivedAtMs: 1_000), 0,
+                       "garbage payload must be rejected")
+        XCTAssertEqual(store.rawImuRejections[.payloadCRCMismatch], 1)
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000, toTs: 1_758_000_000).isEmpty)
+    }
+
+    func testAllZeroFrameRejectedAsImplausibleNeverStationary() throws {
+        // WS-02-F02: a CRC-valid all-zero frame (stuck/dead strap) must be rejected by the
+        // plausibility gate — no gravity shell, so it can never become a "stationary" window.
+        let (store, deviceId, sessionId) = makeRejectStore(suffix: "zero")
+        defer { store.deleteFiles(sessionId); store.remove(id: sessionId) }
+
+        var zero = [UInt8](repeating: 0, count: Whoop5RawImu.bufferLength)
+        zero[15] = 0x80; zero[16] = 0xF3; zero[17] = 0xC8; zero[18] = 0x68   // ts = 1758000000
+        zero[24] = 100; zero[25] = 0                                          // countA
+        zero[630] = 100; zero[631] = 0                                        // countB
+        Self.recomputePayloadCRC32(&zero)                                     // CRC-valid, samples zero
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: zero, receivedAtMs: 1_000), 0,
+                       "an all-zero frame must be rejected")
+        XCTAssertEqual(store.rawImuRejections[.zeroPayload], 1)
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000, toTs: 1_758_000_000).isEmpty,
+                      "an all-zero frame must never become a stationary window")
+    }
+
+    func testStuckConstantFrameRejectedAsImplausible() throws {
+        // WS-02-F02: a CRC-valid frame whose six columns are each exactly constant (pinned
+        // sensor) is rejected — a real MEMS part always carries noise, so this is not raw motion.
+        let (store, deviceId, sessionId) = makeRejectStore(suffix: "stuck")
+        defer { store.deleteFiles(sessionId); store.remove(id: sessionId) }
+
+        var stuck = [UInt8](repeating: 0, count: Whoop5RawImu.bufferLength)
+        stuck[15] = 0x80; stuck[16] = 0xF3; stuck[17] = 0xC8; stuck[18] = 0x68
+        stuck[24] = 100; stuck[25] = 0
+        stuck[630] = 100; stuck[631] = 0
+        func putU16(_ o: Int, _ v: Int) { stuck[o] = UInt8(v & 0xFF); stuck[o + 1] = UInt8((v >> 8) & 0xFF) }
+        for i in 0..<100 {
+            putU16(28 + 2 * i, 4117)        // ax pinned at 1 g
+            putU16(228 + 2 * i, 0)          // ay pinned
+            putU16(428 + 2 * i, 0)          // az pinned
+            putU16(640 + 2 * i, 0)          // gx pinned
+            putU16(840 + 2 * i, 0)          // gy pinned
+            putU16(1040 + 2 * i, 0)         // gz pinned
+        }
+        Self.recomputePayloadCRC32(&stuck)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: stuck, receivedAtMs: 1_000), 0)
+        XCTAssertEqual(store.rawImuRejections[.stuckConstantSamples], 1)
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000, toTs: 1_758_000_000).isEmpty)
+    }
+
+    func testRailPinnedFrameRejectedAsImplausible() throws {
+        // WS-02-F02: a column pinned at the int16 full-scale rail for all 100 samples (sustained
+        // clipping) is not real raw motion and must be rejected.
+        let (store, deviceId, sessionId) = makeRejectStore(suffix: "rail")
+        defer { store.deleteFiles(sessionId); store.remove(id: sessionId) }
+
+        var rail = [UInt8](repeating: 0, count: Whoop5RawImu.bufferLength)
+        rail[15] = 0x80; rail[16] = 0xF3; rail[17] = 0xC8; rail[18] = 0x68
+        rail[24] = 100; rail[25] = 0
+        rail[630] = 100; rail[631] = 0
+        func putU16(_ o: Int, _ v: Int) { rail[o] = UInt8(v & 0xFF); rail[o + 1] = UInt8((v >> 8) & 0xFF) }
+        for i in 0..<100 {
+            putU16(28 + 2 * i, 32767)       // ax pinned at the rail
+            putU16(228 + 2 * i, 4117 + i)   // other columns vary — not a "constant" frame
+            putU16(428 + 2 * i, 4000 - i)
+            putU16(640 + 2 * i, i)
+            putU16(840 + 2 * i, 10)
+            putU16(1040 + 2 * i, 20)
+        }
+        Self.recomputePayloadCRC32(&rail)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: rail, receivedAtMs: 1_000), 0)
+        XCTAssertEqual(store.rawImuRejections[.saturatedRail], 1)
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000, toTs: 1_758_000_000).isEmpty)
+    }
+
+    func testValidGoldenFrameStillStored() throws {
+        // WS-02-F01/F02 regression: the CRC-valid, plausible golden walking second must still be
+        // accepted and stored — the gates add rejections for bad data, never for good data.
+        let (store, deviceId, sessionId) = makeRejectStore(suffix: "golden")
+        defer { store.deleteFiles(sessionId); store.remove(id: sessionId) }
+
+        let good = frame(baseTs: 1_758_000_000)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: good, receivedAtMs: 1_000), 1,
+                       "a CRC-valid plausible frame must still be stored")
+        XCTAssertTrue(store.rawImuRejections.isEmpty, "no rejections for a valid frame")
+        let records = store.readRecords(deviceId: deviceId, fromTs: 1_758_000_000, toTs: 1_758_000_000)
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(records.first?.columns.count, 600)
+        XCTAssertEqual(records.first?.ts, 1_758_000_000)
     }
 }

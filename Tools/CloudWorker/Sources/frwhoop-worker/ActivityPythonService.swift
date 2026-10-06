@@ -109,6 +109,13 @@ final class ActivityPythonService {
         var modelVersion: String?
         var preprocessingVersion: String?
         var error: String?
+        /// serve.py's calibration claim (`calibrated` from the manifest artifact,
+        /// plus its version). nil from an older serve.py that never sent them
+        /// (A01/WS-01-F03: absence must not read as calibrated).
+        var calibrated: Bool?
+        var calibrationVersion: String?
+        /// The transition expert's model version, when one is loaded (nil = absent).
+        var transitionVersion: String? = nil
     }
 
     struct WindowPrediction {
@@ -117,10 +124,30 @@ final class ActivityPythonService {
         var label: String
         var probs: [String: Double]
         var baseline: Bool
-        /// Encoder-independent IMU facts for the window (`imu-feat-1`: accel_rms_g, gyro_rms_dps,
-        /// jerk_rms, cadence_hz, cadence_strength, orientation_change_deg). A key is absent when the
+        /// Whether the service claims this window's probabilities are calibrated
+        /// (serve.py: only with an explicit manifest calibration artifact). Absent
+        /// from an older serve.py → false, never assumed (A01/WS-01-F03).
+        var calibrated: Bool = false
+        /// Encoder-independent IMU facts for the window (`imu-feat-2`: accel_rms_g, gyro_rms_dps,
+        /// jerk_rms_gps, cadence_hz, cadence_strength, orientation_change_deg). A key is absent when the
         /// service sent null for it or did not send `feat` at all (an older serve.py).
         var features: [String: Double] = [:]
+        /// Optional learned transition-expert output for the window (absent when the service did not
+        /// send `transition`: an older serve.py, or the expert is not loaded — the fail-open default).
+        var transition: TransitionOutput? = nil
+    }
+
+    /// One window's learned transition-expert evidence (the five canonical classes plus the 100 Hz
+    /// refined timestamp when the expert committed to a transition). Fail-open by construction: an
+    /// absent or malformed field simply yields nil, never an error.
+    struct TransitionOutput {
+        var probs: [String: Double]
+        var label: String
+        var confidence: Double
+        var abstained: Bool
+        /// Refined event timestamp (seconds) from the 100 Hz stream; nil when the expert abstained
+        /// or no qualifying peak existed (the window keeps its unrefined span then).
+        var ts: Double?
     }
 
     struct InferResult {
@@ -132,6 +159,11 @@ final class ActivityPythonService {
         var errorKind: String?
         /// `feature_schema` the service stamped on the window features (nil from an older serve.py).
         var featureSchema: String? = nil
+        /// `transition_schema` the service stamped on the per-window transition evidence
+        /// (nil from an older serve.py or when the expert was unavailable; the reader gates on it).
+        var transitionSchema: String? = nil
+        /// The transition expert's model version (provenance for the `t` rows).
+        var transitionVersion: String? = nil
     }
 
     /// One run request per C10 serve protocol. `columnsB64` is one base64
@@ -172,6 +204,14 @@ final class ActivityPythonService {
     /// builds it.
     private(set) var reportedModelVersion: String?
     private(set) var reportedPreprocessingVersion: String?
+    /// The child's calibration claim (serve.py `calibrated` / `calibration_version`,
+    /// from the manifest's calibration artifact). nil means the child never said —
+    /// never read as calibrated (A01/WS-01-F03).
+    private(set) var reportedCalibrated: Bool?
+    private(set) var reportedCalibrationVersion: String?
+    /// The transition expert's model version, when one is loaded (nil otherwise — the
+    /// expert is optional by design, so absence is a normal state, not a failure).
+    private(set) var reportedTransitionVersion: String?
     /// Last `echo` object from an infer response (stub diagnostic mirror of
     /// the request shape), used by tests to pin the wire contract.
     private(set) var lastEcho: [String: Any]?
@@ -364,6 +404,9 @@ final class ActivityPythonService {
         if status.ok { restartCount = 0 }
         if status.modelVersion != nil { reportedModelVersion = status.modelVersion }
         if status.preprocessingVersion != nil { reportedPreprocessingVersion = status.preprocessingVersion }
+        if status.calibrated != nil { reportedCalibrated = status.calibrated }
+        if status.calibrationVersion != nil { reportedCalibrationVersion = status.calibrationVersion }
+        if status.transitionVersion != nil { reportedTransitionVersion = status.transitionVersion }
         lock.unlock()
         return status
     }
@@ -403,6 +446,7 @@ final class ActivityPythonService {
         if result.ok {
             if let mv = result.modelVersion, !mv.isEmpty { reportedModelVersion = mv }
             if let pv = result.preprocessingVersion, !pv.isEmpty { reportedPreprocessingVersion = pv }
+            if let tv = result.transitionVersion, !tv.isEmpty { reportedTransitionVersion = tv }
             if lastPingStatus == nil || !lastPingStatus!.modelAvailable {
                 lastPingStatus = PingStatus(ok: true, modelAvailable: true,
                                             modelStatus: "loaded",
@@ -574,7 +618,10 @@ final class ActivityPythonService {
             modelStatus: modelStatus,
             modelVersion: obj["model_version"] as? String,
             preprocessingVersion: obj["preprocessing_version"] as? String,
-            error: obj["error"] as? String)
+            error: obj["error"] as? String,
+            calibrated: obj["calibrated"] as? Bool,
+            calibrationVersion: obj["calibration_version"] as? String,
+            transitionVersion: obj["transition_version"] as? String)
     }
 
     private static func parseInfer(_ obj: [String: Any]) -> InferResult {
@@ -600,7 +647,9 @@ final class ActivityPythonService {
                 }
                 windows.append(WindowPrediction(start: s, end: e, label: label,
                                                 probs: probs, baseline: (w["baseline"] as? Bool) ?? false,
-                                                features: features))
+                                                calibrated: (w["calibrated"] as? Bool) ?? false,
+                                                features: features,
+                                                transition: Self.parseTransition(w["transition"])))
             }
         }
         return InferResult(
@@ -610,6 +659,26 @@ final class ActivityPythonService {
             windows: windows,
             error: obj["error"] as? String,
             errorKind: obj["kind"] as? String,
-            featureSchema: obj["feature_schema"] as? String)
+            featureSchema: obj["feature_schema"] as? String,
+            transitionSchema: obj["transition_schema"] as? String,
+            transitionVersion: obj["transition_version"] as? String)
+    }
+
+    /// Parse one window's optional `transition` object; nil for absent/malformed input (fail-open).
+    private static func parseTransition(_ raw: Any?) -> TransitionOutput? {
+        guard let obj = raw as? [String: Any] else { return nil }
+        var probs: [String: Double] = [:]
+        if let rawProbs = obj["probs"] as? [String: Any] {
+            for (k, v) in rawProbs {
+                if let d = v as? Double, d.isFinite { probs[k] = d }
+            }
+        }
+        guard !probs.isEmpty,
+              let label = obj["label"] as? String else { return nil }
+        let confidence = (obj["confidence"] as? Double) ?? 0
+        let abstained = (obj["abstained"] as? Bool) ?? true
+        let ts = (obj["ts"] as? Double).flatMap { $0.isFinite ? $0 : nil }
+        return TransitionOutput(probs: probs, label: label, confidence: confidence,
+                                 abstained: abstained, ts: ts)
     }
 }

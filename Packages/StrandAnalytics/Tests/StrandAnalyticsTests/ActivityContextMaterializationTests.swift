@@ -110,6 +110,57 @@ final class ActivityContextMaterializationTests: XCTestCase {
         XCTAssertFalse(M.needsWork(candidate(old, ledger: oldLedger, newest: oldLedger.dataThrough! - 1), now: later + 86_400 * 30, config: config))
     }
 
+    // MARK: Invalidation (spec §13): late backfills to old days' non-HR streams
+
+    func testALateBackfillToAnOldDaysInputOutsideTheRecencyWindowRechecks() {
+        let old = day(2)   // 8 days before now; far outside the 36 h recent window
+        let done = ledger(old)
+        let newest = done.dataThrough! - 1
+        let looked = M.Check(at: now - 60, newestHeartRateTs: newest, inputFingerprint: "v3|g120|z45")
+        // Same HR horizon, but the tracked input fingerprint moved: a late IMU/step/wear backfill landed
+        // inside the covered span without producing a new heart-rate row. The old day must be re-examined
+        // even though it is not recent (WS-10-F03).
+        let c = M.Candidate(day: old, ledger: done, newestHeartRateTs: newest, lastCheck: looked,
+                            inputFingerprint: "v3|g121|z45", storedInputFingerprint: "v3|g120|z45")
+        XCTAssertTrue(M.needsWork(c, now: now))
+    }
+
+    func testAnInputFingerprintThatNoLongerMatchesTheLedgerRecordRechecks() {
+        let old = day(2)
+        let done = ledger(old)
+        let newest = done.dataThrough! - 1
+        // No lastCheck (the process restarted); the ledger recorded an older input fingerprint than the
+        // streams now hold, so the day is flagged even though no heart-rate row moved.
+        let c = M.Candidate(day: old, ledger: done, newestHeartRateTs: newest,
+                            inputFingerprint: "v4|g300", storedInputFingerprint: "v3|g120")
+        XCTAssertTrue(M.needsWork(c, now: now))
+    }
+
+    func testAnUnchangedInputFingerprintLeavesAnOldDayAlone() {
+        let old = day(2)
+        let done = ledger(old)
+        let newest = done.dataThrough! - 1
+        let looked = M.Check(at: now - 60, newestHeartRateTs: newest, inputFingerprint: "v3|g120|z45")
+        let c = M.Candidate(day: old, ledger: done, newestHeartRateTs: newest, lastCheck: looked,
+                            inputFingerprint: "v3|g120|z45", storedInputFingerprint: "v3|g120|z45")
+        XCTAssertFalse(M.needsWork(c, now: now), "unchanged input is not re-derived every pass")
+    }
+
+    func testAFingerprintMismatchConvergesOnceTheDayIsReDerived() {
+        let old = day(2)
+        let done = ledger(old)
+        let newest = done.dataThrough! - 1
+        let c = M.Candidate(day: old, ledger: done, newestHeartRateTs: newest,
+                            inputFingerprint: "v4|g300", storedInputFingerprint: "v3|g120")
+        XCTAssertTrue(M.needsWork(c, now: now))
+        // The pass re-derived the day and wrote back the fingerprint it saw; the same input asks for
+        // nothing further, so the mismatch route can never re-decode the day every pass.
+        let settled = M.Candidate(day: old, ledger: done, newestHeartRateTs: newest,
+                                  lastCheck: M.Check(at: now, newestHeartRateTs: newest, inputFingerprint: "v4|g300"),
+                                  inputFingerprint: "v4|g300", storedInputFingerprint: "v4|g300")
+        XCTAssertFalse(M.needsWork(settled, now: now))
+    }
+
     // MARK: Planning
 
     func testTheNewestDaysComeFirstAndOldWorkIsMetered() {

@@ -116,6 +116,13 @@ public struct HRVWindow: Equatable, Sendable {
     public var activityContext: ActivityClass?
     /// Share of the window's classified time spent in `activityContext`; nil when nothing was classified.
     public var activityConfidence: Double?
+    /// Six-state wear-signal interpretation context (feat/wear-signal-quality V1), optional and additive:
+    /// nil (no wear signal resolved), `.onWristGood` and `.unknown` leave the existing eligibility rules
+    /// exactly unchanged (unknown never upgrades confidence); `.onWristLoose`, `.motionArtifact`,
+    /// `.offWrist` and `.sensorDropout` make the window ineligible for a resting baseline (spec §10 —
+    /// loose/artifact and off-wrist/optical-corrupted stretches feed garbage into HRV/RHR baselines).
+    /// Unlike the SEMANTIC `activityContext` label above, this is signal quality, so it does gate trust.
+    public var wearSignal: WearSignalState?
 
     public var secondsSinceTransition: Int?
     public var secondsSinceLocomotion: Int?
@@ -134,7 +141,8 @@ public struct HRVWindow: Equatable, Sendable {
                artifactFraction: Double?, signalQuality: HRVSignalQuality, motionRmsG: Double?,
                gyroRmsDps: Double?, activityContext: ActivityClass?, activityConfidence: Double?,
                secondsSinceTransition: Int?, secondsSinceLocomotion: Int?, secondsSinceExercise: Int?,
-               phase: ActivityPhysiologyPhase, eligibleForBaseline: Bool) {
+               phase: ActivityPhysiologyPhase, eligibleForBaseline: Bool,
+               wearSignal: WearSignalState? = nil) {
         self.kind = kind; self.start = start; self.end = end
         self.rmssd = rmssd; self.sdnn = sdnn; self.meanNN = meanNN; self.medianNN = medianNN
         self.rrDiffSqSumMs2 = rrDiffSqSumMs2; self.rrDiffCount = rrDiffCount; self.nnM2 = nnM2
@@ -147,6 +155,7 @@ public struct HRVWindow: Equatable, Sendable {
         self.secondsSinceExercise = secondsSinceExercise
         self.phase = phase
         self.eligibleForBaseline = eligibleForBaseline
+        self.wearSignal = wearSignal
     }
 }
 
@@ -177,6 +186,20 @@ public enum HRVWindowBuilder {
         public init() {}
     }
 
+    /// Per-window wear-signal resolution: the worst NON-NIL epoch state covering each window,
+    /// in authority order (off_wrist / sensor_dropout beat artifact beat loose; `nil` epochs
+    /// never fabricate a downgrade — a window whose covering epochs are all nil/unknown-good
+    /// keeps `wearSignal` nil and the pre-existing gates alone). Additive V1: callers that do
+    /// not pass epochs get the unchanged `wearSignal`-parameter behavior.
+    public static func resolveWearSignal(epochs: [ActivityEpoch], windowStart: Int, windowEnd: Int) -> WearSignalState? {
+        let order: [WearSignalState] = [.offWrist, .sensorDropout, .motionArtifact, .onWristLoose]
+        var seen: Set<WearSignalState> = []
+        for e in epochs where e.endTs > windowStart && e.startTs < windowEnd {
+            if let s = e.wearSignal { seen.insert(s) }
+        }
+        return order.first { seen.contains($0) }
+    }
+
     /// Build every full `kind`-duration window inside `[dayStart, dayEnd)`, aligned to `dayStart`. A
     /// trailing stretch shorter than a full window is dropped: a canonical population is only canonical
     /// if every member is actually `kind.durationSeconds` long. A window with no R-R data at all is
@@ -195,10 +218,15 @@ public enum HRVWindowBuilder {
     ///   - transitionEvents: flagged transitions for the span (and some lookback before it — a caller
     ///     should pass at least `recoveryGuardS` seconds of history, or `secondsSinceTransition` reads
     ///     `nil` for a window that is really still inside a transition's wake).
+    ///   - wearSignal: the window's six-state wear-signal interpretation context
+    ///     (feat/wear-signal-quality V1), if a caller has resolved one. nil leaves the eligibility rules
+    ///     untouched; `.onWristLoose`, `.motionArtifact`, `.offWrist` and `.sensorDropout` make the
+    ///     window ineligible for a resting baseline (spec §10).
     public static func build(kind: HRVWindowKind, dayStart: Int, dayEnd: Int, rr: [RRInterval],
                              imuWindows: [ImuWindowFeatures] = [], gravity: [GravitySample] = [],
                              activity: ActivityContextLookup? = nil,
                              transitionEvents: [ActivityTransitionEvent] = [],
+                             wearSignal: WearSignalState? = nil,
                              config: Config = Config()) -> [HRVWindow] {
         guard dayEnd > dayStart else { return [] }
         let duration = kind.durationSeconds
@@ -209,7 +237,33 @@ public enum HRVWindowBuilder {
             let we = t + duration
             if let w = buildOne(kind: kind, start: t, end: we, rr: sortedRR, imuWindows: imuWindows,
                                 gravity: gravity, activity: activity, transitionEvents: transitionEvents,
-                                config: config) {
+                                wearSignal: wearSignal, config: config) {
+                windows.append(w)
+            }
+            t = we
+        }
+        return windows
+    }
+
+    /// Epoch-resolved variant: each 5-min window gets the worst non-nil `ActivityEpoch.wearSignal`
+    /// covering it (see `resolveWearSignal`), instead of one value for the whole day. Additive.
+    public static func build(kind: HRVWindowKind, dayStart: Int, dayEnd: Int, rr: [RRInterval],
+                             imuWindows: [ImuWindowFeatures] = [], gravity: [GravitySample] = [],
+                             activity: ActivityContextLookup? = nil,
+                             transitionEvents: [ActivityTransitionEvent] = [],
+                             epochWearSignal: [ActivityEpoch],
+                             config: Config = Config()) -> [HRVWindow] {
+        guard dayEnd > dayStart else { return [] }
+        let duration = kind.durationSeconds
+        let sortedRR = rr.sortedByTsStable()
+        var windows: [HRVWindow] = []
+        var t = dayStart
+        while t + duration <= dayEnd {
+            let we = t + duration
+            let resolved = resolveWearSignal(epochs: epochWearSignal, windowStart: t, windowEnd: we)
+            if let w = buildOne(kind: kind, start: t, end: we, rr: sortedRR, imuWindows: imuWindows,
+                                gravity: gravity, activity: activity, transitionEvents: transitionEvents,
+                                wearSignal: resolved, config: config) {
                 windows.append(w)
             }
             t = we
@@ -220,7 +274,7 @@ public enum HRVWindowBuilder {
     private static func buildOne(kind: HRVWindowKind, start: Int, end: Int, rr: [RRInterval],
                                  imuWindows: [ImuWindowFeatures], gravity: [GravitySample],
                                  activity: ActivityContextLookup?, transitionEvents: [ActivityTransitionEvent],
-                                 config: Config) -> HRVWindow? {
+                                 wearSignal: WearSignalState?, config: Config) -> HRVWindow? {
         let slice = rr.filter { $0.ts >= start && $0.ts < end }
         guard !slice.isEmpty else { return nil }
 
@@ -277,7 +331,8 @@ public enum HRVWindowBuilder {
             artifactFraction: artifactFraction, signalQuality: quality, motionRmsG: motion, gyroRmsDps: gyro,
             activityContext: activityContext, activityConfidence: activityConfidence,
             secondsSinceTransition: sinceTransition, secondsSinceLocomotion: sinceLocomotion,
-            secondsSinceExercise: sinceExercise, phase: phase, eligibleForBaseline: false)
+            secondsSinceExercise: sinceExercise, phase: phase, eligibleForBaseline: false,
+            wearSignal: wearSignal)
         window.eligibleForBaseline = isEligibleForBaseline(window, config: config)
         return window
     }
@@ -291,6 +346,11 @@ public enum HRVWindowBuilder {
         guard (w.artifactFraction ?? 1) <= config.maxArtifactFraction else { return false }
         guard w.signalQuality.trustworthy else { return false }
         guard w.activityContext != .offWrist else { return false }
+        // Spec §10 minimum V1 physiology gate (additive): a window carrying a wear-signal state whose
+        // `opticalMeasurementQuality` is non-nil — `.onWristLoose` → `.uncertain`, `.motionArtifact` →
+        // `.poor`, `.offWrist`/`.sensorDropout` → `.unavailable` — must never feed a resting baseline.
+        // nil (no wear signal), `.onWristGood` and `.unknown` keep the pre-existing rules exactly.
+        guard w.wearSignal?.opticalMeasurementQuality == nil else { return false }
         if let motion = w.motionRmsG, motion > config.maxMotionRmsG { return false }
         if let gyro = w.gyroRmsDps, gyro > config.maxGyroRmsDps { return false }
         return true

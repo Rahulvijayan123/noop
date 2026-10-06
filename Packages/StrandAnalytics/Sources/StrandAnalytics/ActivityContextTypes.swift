@@ -94,6 +94,11 @@ public struct ActivityEpoch: Codable, Equatable, Sendable {
     public let sleepState: SleepStateLabel
     public let exertion: ExertionContext
     public let wear: WearState
+    /// Wear-signal-quality classification for the epoch (feat/wear-signal-quality V1): the
+    /// six-state interpretation context from `WearSignalQualityEngine`. Optional and additive:
+    /// older documents/rows decode as nil (missing evidence, never fabricated), the existing
+    /// three-state `wear` enrichment stays the authority, and `coarseWear` folds back into it.
+    public let wearSignal: WearSignalState?
     /// Model confidence in the epoch's motion decision, in [0, 1] (0 when the epoch abstained).
     public let confidence: Double
     /// Seconds of the epoch covered by at least one model window (observed, incl. abstaining).
@@ -104,10 +109,12 @@ public struct ActivityEpoch: Codable, Equatable, Sendable {
     public init(startTs: Int, endTs: Int, motion: MotionLabel, posture: PostureLabel,
                 exercise: ExerciseState, sleepState: SleepStateLabel,
                 exertion: ExertionContext, wear: WearState,
+                wearSignal: WearSignalState? = nil,
                 confidence: Double, observedS: Int, validS: Int) {
         self.startTs = startTs; self.endTs = endTs
         self.motion = motion; self.posture = posture; self.exercise = exercise
         self.sleepState = sleepState; self.exertion = exertion; self.wear = wear
+        self.wearSignal = wearSignal
         self.confidence = confidence; self.observedS = observedS; self.validS = validS
     }
 
@@ -130,8 +137,8 @@ public struct ActivityEpoch: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case startTs = "s", endTs = "e", motion = "m", posture = "p", exercise = "ex",
-             sleepState = "sl", exertion = "ec", wear = "w", confidence = "c",
-             observedS = "os", validS = "vs"
+             sleepState = "sl", exertion = "ec", wear = "w", wearSignal = "wsq",
+             confidence = "c", observedS = "os", validS = "vs"
     }
 }
 
@@ -144,11 +151,37 @@ public struct ActivityWindowPrediction: Codable, Equatable, Sendable {
     public let probs: [String: Double]
     /// True when the window came from the conservative heuristic baseline, not HART.
     public let baseline: Bool
+    /// A01: calibrated status carried on the wire from the serve response (which derives it from
+    /// the manifest's calibration artifact). Absent on older payloads -> false (uncalibrated).
+    /// Never derived from `baseline` — model identity is not calibration provenance.
+    public let calibrated: Bool
 
     public init(startTs: Int, endTs: Int, label: MotionLabel,
-                probs: [String: Double], baseline: Bool = false) {
+                probs: [String: Double], baseline: Bool = false, calibrated: Bool = false) {
         self.startTs = startTs; self.endTs = endTs; self.label = label
-        self.probs = probs; self.baseline = baseline
+        self.probs = probs; self.baseline = baseline; self.calibrated = calibrated
+    }
+
+    /// Older payloads predate the `calibrated` wire field (A01) and decode as uncalibrated —
+    /// a missing key must never fail the window, and must never read as calibrated.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        startTs = try c.decode(Int.self, forKey: .startTs)
+        endTs = try c.decode(Int.self, forKey: .endTs)
+        label = try c.decode(MotionLabel.self, forKey: .label)
+        probs = try c.decode([String: Double].self, forKey: .probs)
+        baseline = try c.decodeIfPresent(Bool.self, forKey: .baseline) ?? false
+        calibrated = try c.decodeIfPresent(Bool.self, forKey: .calibrated) ?? false
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(startTs, forKey: .startTs)
+        try c.encode(endTs, forKey: .endTs)
+        try c.encode(label, forKey: .label)
+        try c.encode(probs, forKey: .probs)
+        try c.encode(baseline, forKey: .baseline)
+        try c.encode(calibrated, forKey: .calibrated)
     }
 
     /// Highest class probability across `probs`, or nil when `probs` is empty.
@@ -163,6 +196,7 @@ public struct ActivityWindowPrediction: Codable, Equatable, Sendable {
 
     enum CodingKeys: String, CodingKey {
         case startTs = "s", endTs = "e", label = "label", probs = "probs", baseline = "baseline"
+        case calibrated
     }
 }
 

@@ -59,6 +59,7 @@ class Block:
     activity: str
     samples: np.ndarray            # (T, 6) float64, 20 Hz, canonical units
     duration_s: float
+    start_ts_s: float              # real block start (unix seconds, ts_ns/1e9)
 
 
 def parse_raw_file(path: str) -> np.ndarray:
@@ -125,14 +126,16 @@ def _finish_block(subject: int, activity: str, ts_list: List[int],
     g_aligned[~near] = 0.0  # unmatched gyro -> zero rotation (documented)
     samples = np.concatenate([xyz_arr * M_S2_TO_G, g_aligned * RAD_S_TO_DEG_S], axis=1)
     return Block(subject=subject, activity=activity, samples=samples,
-                 duration_s=len(ts_arr) / WISDM_HZ)
+                 duration_s=len(ts_arr) / WISDM_HZ,
+                 start_ts_s=float(ts_list[0]) / 1e9)
 
 
 def resample_block(block: Block) -> Block:
     """20 -> 30 Hz per block (anti-alias polyphase 3/2), keeping metadata."""
     out = resample_poly_nd(block.samples, 3, 2, axis=0)
     return Block(subject=block.subject, activity=block.activity, samples=out,
-                 duration_s=len(out) / TARGET_HZ)
+                 duration_s=len(out) / TARGET_HZ,
+                 start_ts_s=block.start_ts_s)
 
 
 def window_block(block: Block, window: int = WINDOW_SAMPLES,
@@ -217,23 +220,35 @@ def split_blocks(blocks: List[Block], test_fraction: float, val_fraction: float,
 
 
 def windows_from_blocks(blocks: Sequence[Block], window: int, hop: int,
-                        ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Stack windowed data; label = majority letter per window."""
+                        ) -> Tuple[np.ndarray, np.ndarray, np.ndarray,
+                                   np.ndarray, np.ndarray]:
+    """Stack windowed data; label = majority letter per window.
+
+    Returns (X, letters, subjects, session_ids, starts) where `starts` is the
+    real per-window start time in unix seconds (block.start_ts_s + sample
+    offset / sample rate) — persisted in the npz artifacts so the evaluator's
+    session-aware transition metrics measure real latency, never fabricated
+    i*HOP_SECONDS spacing (audit WS-07-F03)."""
     xs: List[np.ndarray] = []
     ys: List[str] = []
     subs: List[int] = []
     sess: List[int] = []
+    starts: List[float] = []
     for s_idx, b in enumerate(blocks):
-        for data, letter, subj, _ in window_block(b, window, hop):
+        # Sample rate of this block (30 Hz after resample, 20 Hz raw).
+        rate = (len(b.samples) / b.duration_s) if b.duration_s > 0 else TARGET_HZ
+        for data, letter, subj, k in window_block(b, window, hop):
             xs.append(data)
             ys.append(letter)
             subs.append(subj)
             sess.append(s_idx)
+            starts.append(b.start_ts_s + k / rate)
     if not xs:
         raise ValueError("no windows produced (check input data)")
     return (np.stack(xs).astype(np.float32),
             np.asarray(ys), np.asarray(subs, dtype=np.int64),
-            np.asarray(sess, dtype=np.int64))
+            np.asarray(sess, dtype=np.int64),
+            np.asarray(starts, dtype=np.float64))
 
 
 def fit_scaler(x_train: np.ndarray) -> Tuple[List[float], List[float]]:
@@ -305,7 +320,13 @@ def write_synthetic_wisdm(out_dir: str, seed: int = 0) -> str:
                 g = s[i, 3:6] * RAD_S_TO_DEG_S     # rad/s
                 acc_lines.append(f"{subj},{act},{t},{a[0]:.6f},{a[1]:.6f},{a[2]:.6f};")
                 gyr_lines.append(f"{subj},{act},{t},{g[0]:.6f},{g[1]:.6f},{g[2]:.6f};")
-            ts += int(dur * step_ns) + 2_000_000_000   # >1 s gap between blocks
+            # Advance the clock by the FULL block duration (n samples * 50 ms)
+            # plus a >1 s pause, so successive blocks never overlap in real
+            # time (the previous code advanced by only 5% of the duration,
+            # making later blocks' first windows start BEFORE the earlier
+            # block's last window — impossible timestamps that broke the
+            # real-timestamps contract this pipeline now persists).
+            ts += int(s.shape[0] * step_ns) + 2_000_000_000
         with open(os.path.join(acc_dir, f"data_{subj}_accel_watch.txt"), "w") as f:
             f.write("\n".join(acc_lines) + "\n")
         with open(os.path.join(gyr_dir, f"data_{subj}_gyro_watch.txt"), "w") as f:
@@ -493,8 +514,12 @@ def build_manifest(model_version: str, class_map: List[str], mean: List[float],
     m.units = {"input_accel": "g", "input_gyro": "deg/s",
                "train_accel": "g", "train_gyro": "deg/s"}
     m.seed = seed
-    m.deps = {"numpy": "2.2.6", "torch": "2.8.0", "transformers": "4.56.0",
-              "granite-tsfm": "0.3.3"}
+    # Pinned resolved environment of the [model] extra (pyproject.toml): the
+    # datasets 2.14.x / pyarrow 14 combo requires numpy<2 (audit WS-07-F09 /
+    # WS-03-F02); granite-tsfm 0.3.3 ships the tsfm_public import path.
+    m.deps = {"numpy": "1.26.4", "torch": "2.8.0", "transformers": "4.56.0",
+              "granite-tsfm": "0.3.3", "datasets": "2.14.4",
+              "pyarrow": "14.0.1"}
     if checkpoint_info:
         m.checkpoint = checkpoint_info
     if split is not None:
@@ -534,9 +559,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     blocks = [resample_block(b) for b in blocks]
     train_b, val_b, test_b, split = split_blocks(blocks, args.test_fraction,
                                                  args.val_fraction, args.seed)
-    x_train, y_train, _, _ = windows_from_blocks(train_b, WINDOW_SAMPLES, HOP_SAMPLES)
-    x_val, y_val, _, _ = windows_from_blocks(val_b, WINDOW_SAMPLES, HOP_SAMPLES)
-    x_test, y_test, subj_test, sess_test = windows_from_blocks(
+    x_train, y_train, subj_train, sess_train, starts_train = windows_from_blocks(
+        train_b, WINDOW_SAMPLES, HOP_SAMPLES)
+    x_val, y_val, subj_val, sess_val, starts_val = windows_from_blocks(
+        val_b, WINDOW_SAMPLES, HOP_SAMPLES)
+    x_test, y_test, subj_test, sess_test, starts_test = windows_from_blocks(
         test_b, WINDOW_SAMPLES, HOP_SAMPLES)
 
     # Head classes = WISDM letters present in TRAIN+VAL only (a class the
@@ -629,19 +656,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         json.dump(split, f, indent=2, sort_keys=True)
         f.write("\n")
 
+    # Real per-window timestamps (unix seconds) + session/block ids persisted so
+    # evaluate.py can measure actual within-session transition latency and
+    # honor session boundaries (audit WS-07-F01/F03, spec s12).
     np.savez_compressed(os.path.join(args.out, "train_data.npz"),
                         X=x_train, y=y_train_ids,
-                        letters=np.asarray(letters))
+                        letters=np.asarray(letters),
+                        subjects=subj_train, sessions=sess_train,
+                        starts=starts_train)
     np.savez_compressed(os.path.join(args.out, "val_data.npz"),
                         X=x_val, y=y_val_ids,
-                        letters=np.asarray(letters))
+                        letters=np.asarray(letters),
+                        subjects=subj_val, sessions=sess_val,
+                        starts=starts_val)
     y_test_onto = np.asarray([WISDM_LABEL_MAPPING.get(c, "other_movement")
                               for c in y_test])
     y_test_ids = np.asarray([letter_to_id.get(c, -1) for c in y_test],
                             dtype=np.int64)
     np.savez_compressed(os.path.join(args.out, "eval_data.npz"),
                         X=x_test, y_ontology=y_test_onto, letters=y_test,
-                        subjects=subj_test, sessions=sess_test, y=y_test_ids)
+                        subjects=subj_test, sessions=sess_test, y=y_test_ids,
+                        starts=starts_test)
 
     print(json.dumps({
         "ok": True,

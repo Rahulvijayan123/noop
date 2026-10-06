@@ -29,7 +29,8 @@ final class ActivityContextClassTests: XCTestCase {
             "fidgeting", "light_activity", "walking", "brisk_walking", "running", "cycling",
             "vigorous_activity", "unknown",
         ])
-        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-2")
+        // act-class-3: `confidence` is now the subclass mass with `familyConfidence` alongside (I9).
+        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-3")
     }
 
     func testTheRequestedVocabularyIsAllRepresented() {
@@ -118,7 +119,10 @@ final class ActivityContextClassTests: XCTestCase {
     func testWalkingFamilyConfidenceAndTheBriskRunnerUp() {
         let k = classify(locomotion: [.walking: 0.55, .briskWalking: 0.35, .stationary: 0.10])
         XCTAssertEqual(k.activityClass, .walking)
-        XCTAssertEqual(k.confidence, 0.90, accuracy: 1e-9, "walking and brisk walking are one belief")
+        // I9: `confidence` is the chosen class's own (subclass) mass, not the walking-family mass; the
+        // family belief is published separately as `familyConfidence`.
+        XCTAssertEqual(k.confidence, 0.55, accuracy: 1e-9)
+        XCTAssertEqual(k.familyConfidence, 0.90, accuracy: 1e-9, "walking and brisk walking are one belief")
         XCTAssertEqual(k.runnerUp, .briskWalking)
         XCTAssertEqual(k.runnerUpConfidence, 0.35, accuracy: 1e-9)
         XCTAssertEqual(k.locomotion, .walking)
@@ -127,7 +131,18 @@ final class ActivityContextClassTests: XCTestCase {
     func testBriskWalkingWinsWhenItLeadsTheFamily() {
         let k = classify(locomotion: [.walking: 0.30, .briskWalking: 0.62, .stationary: 0.08])
         XCTAssertEqual(k.activityClass, .briskWalking)
+        XCTAssertEqual(k.confidence, 0.62, accuracy: 1e-9, "subclass mass, not the 0.92 family")
+        XCTAssertEqual(k.familyConfidence, 0.92, accuracy: 1e-9)
         XCTAssertEqual(k.runnerUp, .walking)
+    }
+
+    func testBriskWalkingPublishesSubclassNotFamilyConfidence() {
+        // WS-06-F01 / A05 mirror: walking 0.26 / brisk 0.27 chooses "Brisk walking"; classConfidence
+        // must be the brisk-walking posterior mass (~0.27), not the walking-family mass (0.53).
+        let k = classify(locomotion: [.walking: 0.26, .briskWalking: 0.27, .stationary: 0.47])
+        XCTAssertEqual(k.activityClass, .briskWalking)
+        XCTAssertEqual(k.confidence, 0.27, accuracy: 1e-9)
+        XCTAssertEqual(k.familyConfidence, 0.53, accuracy: 1e-9)
     }
 
     func testStairsAreReportedAsWalkingWithTheHeadKeepingTheDetail() {
@@ -283,7 +298,9 @@ final class ActivityContextClassTests: XCTestCase {
         let data = try JSONEncoder().encode(run)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(json["activity_class"] as? String, "walking")
-        XCTAssertEqual(try XCTUnwrap(json["class_confidence"] as? Double), 0.95, accuracy: 0.011)
+        // I9: class_confidence is the chosen class's own mass (walking + stairs), not the family mass
+        // (walking + brisk + stairs = 0.95) that the run previously reported.
+        XCTAssertEqual(try XCTUnwrap(json["class_confidence"] as? Double), 0.90, accuracy: 0.011)
         XCTAssertEqual(try JSONDecoder().decode(ActivityContextRun.self, from: data), run)
 
         // A run written before the taxonomy existed still reads.

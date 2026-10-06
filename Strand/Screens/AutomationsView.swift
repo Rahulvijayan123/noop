@@ -264,10 +264,10 @@ struct AutomationsView: View {
                             .padding(.top, 6)
                     }
                     rowDivider
-                    stepperRow(label: String(localized: "Sitting for"), help: String(localized: "Minutes seated before the first nudge."),
+                    stepperRow(label: String(localized: "Still for"), help: String(localized: "Minutes still before the first nudge."),
                                value: $inactivity.thresholdMinutes, suffix: String(localized: "min"), range: 15...120, step: 5)
                     rowDivider
-                    stepperRow(label: String(localized: "Re-nudge every"), help: String(localized: "If you're still seated, buzz again this often."),
+                    stepperRow(label: String(localized: "Re-nudge every"), help: String(localized: "If you're still sedentary, buzz again this often."),
                                value: $inactivity.reNudgeMinutes, suffix: String(localized: "min"), range: 15...120, step: 15)
                     rowDivider
                     stepperRow(label: String(localized: "Buzz strength"), help: String(localized: "How strong the buzz is."),

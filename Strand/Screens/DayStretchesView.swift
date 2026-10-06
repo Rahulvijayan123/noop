@@ -51,6 +51,8 @@ struct FamilyTotal: Identifiable, Equatable {
     let seconds: Int
     /// Stretches of a minute or longer, the ones the lists show.
     let stretches: Int
+    /// The finer labels inside this family ("Brisk walking", "Taking stairs"), longest first.
+    var breakdown: [FineLabelShare] = []
     var id: ActivityFamily { family }
 }
 
@@ -67,7 +69,8 @@ enum DayStretchTotals {
         }
         return seconds
             .filter { $0.value > 0 }
-            .map { FamilyTotal(family: $0.key, seconds: $0.value, stretches: counts[$0.key] ?? 0) }
+            .map { FamilyTotal(family: $0.key, seconds: $0.value, stretches: counts[$0.key] ?? 0,
+                               breakdown: DayFineLabels.breakdown(doc, family: $0.key)) }
             .sorted { $0.seconds != $1.seconds ? $0.seconds > $1.seconds : $0.family.title < $1.family.title }
     }
 }
@@ -78,11 +81,14 @@ struct DayStretchesSection: View {
     @ObservedObject var timeline: DayTimelineModel
     /// Visible x window, shared with the heart-rate graph above so the two stay lined up while zooming.
     let window: ClosedRange<Date>
+    /// The local day the section speaks about; the improvement queue's prompt budget is keyed to it.
+    let dayStart: Date
     /// Open a stretch up close, where the wearer can say whether it is right.
     let onOpen: (StretchTarget) -> Void
     /// Show a span on the heart-rate graph.
     let onZoom: (ClosedRange<Date>) -> Void
 
+    @EnvironmentObject private var repo: Repository
     @ObservedObject private var feedback = StretchFeedbackCenter.shared
     @State private var openParts: Set<StretchDayPart> = []
 
@@ -134,37 +140,69 @@ struct DayStretchesSection: View {
         let layout = DayStretchLayout(episodes: episodes)
         #if DEBUG
         if !DemoLayout.listsOnly {
-            laneCard(episodes)
+            laneCard(episodes, events: doc.events)
             FamilyTileGrid(totals: DayStretchTotals.familyTotals(doc, episodes: episodes)) { family in
                 StretchFamilyView(scope: .family(family), timeline: timeline, onZoom: onZoom)
             }
         }
         #else
-        laneCard(episodes)
+        laneCard(episodes, events: doc.events)
         FamilyTileGrid(totals: DayStretchTotals.familyTotals(doc, episodes: episodes)) { family in
             StretchFamilyView(scope: .family(family), timeline: timeline, onZoom: onZoom)
         }
         #endif
         recentList(layout)
+        // "Help improve activity detection": the day's few uncertain stretches, one tap to answer.
+        // Empty (and invisible) when the day has nothing worth asking or its question budget is used up.
+        ActivityImprovementSection(episodes: episodes, dayStart: dayStart, deviceId: repo.deviceId)
         earlierList(layout)
         positionChangesLink(doc)
+        StrapSignalCard(dayStart: dayStart, window: window)
+        ActivityCalibrationEntry()
         footnote
     }
 
     // MARK: Lane
 
-    private func laneCard(_ episodes: [ActivityEpisode]) -> some View {
+    private func laneCard(_ episodes: [ActivityEpisode], events: [ActivityTransitionEvent]) -> some View {
         let marks = episodes.sorted { $0.durationSeconds > $1.durationSeconds }
-        return Chart {
+        let ticks = LanePositionChanges.ticks(events)
+        let span = max(1, window.upperBound.timeIntervalSince(window.lowerBound))
+        return VStack(alignment: .leading, spacing: 10) {
+        Chart {
             ForEach(marks) { ep in
+                let range = laneRange(ep)
                 RectangleMark(
-                    xStart: .value("Start", laneRange(ep).lowerBound),
-                    xEnd: .value("End", laneRange(ep).upperBound),
-                    yStart: .value("Bottom", 0.0),
+                    xStart: .value("Start", range.lowerBound),
+                    xEnd: .value("End", range.upperBound),
+                    yStart: .value("Bottom", 0.30),
                     yEnd: .value("Top", 1.0)
                 )
                 .cornerRadius(2)
                 .foregroundStyle(ActivityFamily.of(ep.label).color.opacity(0.40 + 0.60 * ep.confidence))
+                // A stretch wide enough on screen carries its own finer label.
+                .annotation(position: .overlay, alignment: .center) {
+                    if Double(ep.durationSeconds) / span >= 0.16 {
+                        Text(ep.label)
+                            .font(StrandFont.caption.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                            .shadow(color: .black.opacity(0.35), radius: 1)
+                    }
+                }
+            }
+            ForEach(Array(ticks.enumerated()), id: \.offset) { _, event in
+                let at = Date(timeIntervalSince1970: TimeInterval(event.ts))
+                let half = span * 0.0025
+                RectangleMark(
+                    xStart: .value("Start", at.addingTimeInterval(-half)),
+                    xEnd: .value("End", at.addingTimeInterval(half)),
+                    yStart: .value("Bottom", 0.0),
+                    yEnd: .value("Top", 0.22)
+                )
+                .cornerRadius(1)
+                .foregroundStyle(StrandPalette.metricAmber.opacity(0.45 + 0.55 * event.probability))
             }
         }
         // The lane runs the full width of its card.
@@ -193,12 +231,14 @@ struct DayStretchesSection: View {
                     }
             }
         }
-        .frame(height: 68)
+        .frame(height: 84)
+        .accessibilityLabel(Text("Your day, as a timeline. The lists below have the same information."))
+        FineLabelLegend(shares: DayFineLabels.shares(episodes, in: window), showsPositionChanges: !ticks.isEmpty)
+        }
         .padding(.horizontal, NoopMetrics.space2)
         .padding(.vertical, NoopMetrics.space3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(NoopPanelSurface(cornerRadius: 20))
-        .accessibilityLabel(Text("Your day, as a timeline. The lists below have the same information."))
     }
 
     private var axisFormat: Date.FormatStyle {
@@ -325,7 +365,7 @@ struct DayStretchesSection: View {
     }
 
     private var footnote: some View {
-        Text("Fainter bars are less sure. A wrist can't see height, so sitting and standing are best guesses.")
+        Text("Fainter bars are less sure. Ticks under the bar are position changes. A wrist can't see height, so sitting and standing are best guesses.")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
             .padding(.horizontal, NoopMetrics.space1)
@@ -356,6 +396,11 @@ struct FamilyTileGrid<Destination: View>: View {
 struct FamilyTile: View {
     let total: FamilyTotal
 
+    /// Worth listing only when the family holds more than one label, or a label more specific than its name.
+    private var showsBreakdown: Bool {
+        total.breakdown.count > 1 || (total.breakdown.first.map { $0.label != total.family.title } ?? false)
+    }
+
     var body: some View {
         let family = total.family
         VStack(alignment: .leading, spacing: 6) {
@@ -380,6 +425,24 @@ struct FamilyTile: View {
             Text(total.stretches == 0 ? String(localized: "Brief moments") : StretchFormat.count(total.stretches))
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
+            if showsBreakdown {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(total.breakdown.prefix(3)) { share in
+                        HStack(spacing: 4) {
+                            Text(share.label)
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                                .lineLimit(1)
+                            Spacer(minLength: 4)
+                            Text(StretchFormat.duration(share.seconds))
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .monospacedDigit()
+                        }
+                    }
+                }
+                .padding(.top, 2)
+            }
         }
         .padding(12)
         .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
@@ -428,6 +491,10 @@ struct StretchRow: View {
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .monospacedDigit()
+                    Text(EpisodeReading.summary(episode))
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .lineLimit(2)
                     StretchVerdictBadge(feedback: verdict)
                 }
             }

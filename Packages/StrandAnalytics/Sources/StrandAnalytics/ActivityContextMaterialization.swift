@@ -17,6 +17,10 @@ import WhoopStore
 //      a finished day reads time outside logged sleep as awake, a live one as unknown.
 //   4. A day that ended less than `recentWindowS` ago, last looked at `recheckIntervalS` or more ago -> derive:
 //      sleep, workouts and wrist-off events (the inputs that are not streams) may have changed.
+//   5. When the caller tracks an input fingerprint (the cheap COUNT/MAX witness over the day's streams), a day
+//      whose input no longer matches the fingerprint recorded when it was last derived, or what this process
+//      last saw, -> derive: a late IMU/step/wear backfill inside a covered span never moves the newest
+//      heart-rate second, so only the fingerprint sees it (spec §4 A07, WS-10-F03).
 // Days that are not recent are limited to `maxBacklogPerPass` per pass, newest first, so a first run over months
 // of history spreads across passes instead of stalling one.
 
@@ -34,13 +38,18 @@ public enum ActivityContextMaterialization {
         }
     }
 
-    /// What this process last saw of a day: when, and the newest heart-rate second then. Kept in memory only.
+    /// What this process last saw of a day: when, the newest heart-rate second then, and (when the caller
+    /// tracks one) the fingerprint of the day's whole input then. Kept in memory only.
     public struct Check: Equatable, Sendable {
         public var at: Int
         public var newestHeartRateTs: Int?
+        /// Fingerprint of the day's input (HR, motion, IMU/encoder, sleep/workout/wear spans) the last time
+        /// this process looked. nil when the caller does not track one.
+        public var inputFingerprint: String?
 
-        public init(at: Int, newestHeartRateTs: Int?) {
+        public init(at: Int, newestHeartRateTs: Int?, inputFingerprint: String? = nil) {
             self.at = at; self.newestHeartRateTs = newestHeartRateTs
+            self.inputFingerprint = inputFingerprint
         }
     }
 
@@ -50,11 +59,23 @@ public enum ActivityContextMaterialization {
         /// Newest heart-rate second the database holds inside the day; nil when there is none.
         public var newestHeartRateTs: Int?
         public var lastCheck: Check?
+        /// Cheap fingerprint of the day's input as the caller reads it now (for example the store's
+        /// `dayStreamFingerprint`: COUNT/MAX index walks that materialise no rows). nil when the caller
+        /// does not track the non-HR input, in which case no fingerprint rule applies.
+        public var inputFingerprint: String?
+        /// The same fingerprint as recorded when the day was last derived (its ledger record). nil when
+        /// the ledger does not carry one (older rows) or the caller has none. The caller must write the
+        /// fingerprint it derived back here (or into `Check.inputFingerprint`) or the mismatch below
+        /// would flag the day again on every pass.
+        public var storedInputFingerprint: String?
 
         public init(day: Day, ledger: ActivityContextDayRow? = nil, newestHeartRateTs: Int? = nil,
-                    lastCheck: Check? = nil) {
+                    lastCheck: Check? = nil, inputFingerprint: String? = nil,
+                    storedInputFingerprint: String? = nil) {
             self.day = day; self.ledger = ledger
             self.newestHeartRateTs = newestHeartRateTs; self.lastCheck = lastCheck
+            self.inputFingerprint = inputFingerprint
+            self.storedInputFingerprint = storedInputFingerprint
         }
     }
 
@@ -118,6 +139,16 @@ public enum ActivityContextMaterialization {
 
         if isRecent(c.day, now: now, config: config),
            now - (c.lastCheck?.at ?? ledger.computedAt) >= config.recheckIntervalS { return true }
+
+        // Late data the HR witness cannot see — an IMU/step/wear backfill landing inside an old day's
+        // covered span — never moves `newestHeartRateTs`, and an old day is not re-read by rule 4. When
+        // the caller tracks an input fingerprint, recheck whenever the streams now read differ from the
+        // fingerprint recorded when the day was last derived or from what this process last saw. It is a
+        // cheap string compare, never a re-decode, so every old day can be asked every pass.
+        if let current = c.inputFingerprint {
+            if let stored = c.storedInputFingerprint, stored != current { return true }
+            if let seen = c.lastCheck?.inputFingerprint, seen != current { return true }
+        }
         return false
     }
 

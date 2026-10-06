@@ -205,7 +205,7 @@ Deno.test('stretch feedback validator: corrected_label is only for an incorrect 
     assertEquals(accepted.item.corrected_label, label);
     assertEquals(reasonOf({ verdict: 'correct', corrected_label: label }), 'invalid_corrected_label', label);
   }
-  assertEquals(STRETCH_CORRECTED_LABELS.length, 12);
+  assertEquals(STRETCH_CORRECTED_LABELS.length, 17);
   const incorrectWithoutLabel = validateStretchFeedbackItem(item({ verdict: 'incorrect', corrected_label: null }));
   assert(incorrectWithoutLabel.ok);
   assertEquals(incorrectWithoutLabel.item.corrected_label, null);

@@ -288,6 +288,11 @@ public struct ActivityContextDecoder: Sendable {
         tracking.activePostural = nil
         tracking.lastWindowFill = 0
         tracking.armDisplay = nil
+        // The display label is carried state too: after a data gap or an off-wrist return the new
+        // context must not keep publishing the stale pre-gap wording or its hysteresis candidate
+        // (WS-05-F03). Resetting to the default ("Unclear", no candidate) lets the first fresh
+        // observation adopt its own label immediately.
+        tracking.display = DisplayState()
     }
 
     private mutating func predictBody(shift: Double) {

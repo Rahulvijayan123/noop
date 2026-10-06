@@ -188,6 +188,12 @@ extension ActivityContextDecoder {
 }
 
 /// Convenience encoder window generators.
+///
+/// `coarse(_:p:baseline:)` models a HART window as *calibrated by fixture*: the test fixes
+/// `calibrated` directly (it is not provenance — no calibration artifact exists for HART today;
+/// the real wire path defaults to uncalibrated, see `MotionEncoderOutput.init(prediction:)`).
+/// This keeps scenario posteriors stable while `ActivityContextModel` weights honest wire
+/// windows at the uncalibrated 0.6 factor.
 enum SimEncoder {
     static func coarse(_ dominant: String, p: Double = 0.92, baseline: Bool = false) -> (Int) -> MotionEncoderOutput? {
         return { ts in

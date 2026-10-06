@@ -17,21 +17,31 @@ import Foundation
 
 /// Compact features of one 4-s (typically) window of the 100 Hz IMU, computed where the raw samples
 /// live (the Python service, or `ImuFeatureExtractor` on device). Versioned by
-/// `ActivityContextVersions.featureSchema`.
+/// `ActivityContextVersions.featureSchema` — imu-feat-2 (2026): the one cross-runtime contract.
 public struct ImuWindowFeatures: Codable, Equatable, Sendable {
     public var startTs: Int
     public var endTs: Int
     /// RMS of gravity-removed acceleration magnitude, g.
     public var accelRmsG: Double
-    /// RMS gyroscope magnitude, deg/s.
+    /// RMS gyroscope magnitude, deg/s (imu-feat-2: true RMS in both runtimes; imu-feat-1's Swift
+    /// mean-under-an-RMS-name is obsolete, WS-04-F01). Rate-invariant like any RMS; unlike the
+    /// per-second jerk it carries no bandwidth caveat — magnitude RMS is exact across rates.
     public var gyroRmsDps: Double
-    /// RMS first difference of acceleration magnitude (impact / explosiveness), g per sample.
+    /// RMS first difference of acceleration magnitude × sample rate, g PER SECOND (imu-feat-2,
+    /// WS-04-F02). Rate-invariant up to the documented bandwidth residual (≤5% clean, ≤10% noise).
+    /// The Swift label is kept as `jerkRms` for source compatibility with the server adapter
+    /// (ActivityContextDays); the wire key below is the unambiguous `jerk_rms_gps`.
     public var jerkRms: Double
-    /// Dominant rhythmic frequency in the 1.2–3.5 Hz band, Hz; nil when no peak clears the strength bar.
+    /// Dominant rhythmic frequency in the 0.8–3.5 Hz band, Hz; nil when no peak clears the strength
+    /// bar. Widened from 1.2–3.5 to be honest for slow gait; HART's 4-s input contract is unchanged
+    /// and slow-gait recognition still needs ~8 s windows (WS-04-F03).
     public var cadenceHz: Double?
     /// Normalized strength 0…1 of that rhythmic peak.
     public var cadenceStrength: Double
-    /// Angle between the mean gravity direction in the first and last half of the window, degrees.
+    /// Angle between the mean gravity direction of the window's first and second halves, degrees.
+    /// The half-window centers are 2 s apart in a 4 s window, so this is a ~2-s-horizon change
+    /// (WS-04-F04). The decoder substitutes it for the 5-s `net5` only when the gravity stream is
+    /// absent — a documented 0.4× scale; decoder semantics are unchanged.
     public var orientationChangeDeg: Double?
 
     public init(startTs: Int, endTs: Int, accelRmsG: Double, gyroRmsDps: Double, jerkRms: Double,
@@ -42,17 +52,18 @@ public struct ImuWindowFeatures: Codable, Equatable, Sendable {
         self.orientationChangeDeg = orientationChangeDeg
     }
 
-    /// Adapts on-device `ImuFeatureExtractor` output for a window.
+    /// Adapts on-device `ImuFeatureExtractor` output for a window — identity mapping onto the
+    /// imu-feat-2 fields (imu-feat-1 aliased mean→RMS here; that alias is gone, WS-04-F01).
     public init(startTs: Int, endTs: Int, features: ImuActivityFeatures, orientationChangeDeg: Double? = nil) {
         self.init(startTs: startTs, endTs: endTs, accelRmsG: features.accelEnergyG,
-                  gyroRmsDps: features.gyroEnergyDps, jerkRms: features.jerkRms,
+                  gyroRmsDps: features.gyroRmsDps, jerkRms: features.jerkRmsGps,
                   cadenceHz: features.cadenceHz, cadenceStrength: features.cadenceStrength,
                   orientationChangeDeg: orientationChangeDeg)
     }
 
     enum CodingKeys: String, CodingKey {
         case startTs = "s", endTs = "e"
-        case accelRmsG = "accel_rms_g", gyroRmsDps = "gyro_rms_dps", jerkRms = "jerk_rms"
+        case accelRmsG = "accel_rms_g", gyroRmsDps = "gyro_rms_dps", jerkRms = "jerk_rms_gps"
         case cadenceHz = "cadence_hz", cadenceStrength = "cadence_strength"
         case orientationChangeDeg = "orientation_change_deg"
     }
@@ -68,7 +79,10 @@ public struct MotionEncoderOutput: Codable, Equatable, Sendable {
     /// Class probabilities keyed by label raw value. The v1 head gives `stationary`, `walking`,
     /// `running`, `other_movement`; a richer encoder may add `stairs`, `cycling`, `vehicle_motion` …
     public var classProbs: [String: Double]
-    /// False for the heuristic baseline, whose scores are not calibrated probabilities.
+    /// True only when the encoder's scores come from an explicit, versioned calibration artifact
+    /// (A01). It is carried on the wire from the serve response's `calibrated` field, which is
+    /// derived from the manifest's `calibration` section — never inferred from encoder identity
+    /// or the `baseline` flag. There is no fitted artifact today, so this is false everywhere.
     public var calibrated: Bool
     /// The encoder itself abstained (its own `unknown` / below its confidence bar).
     public var abstained: Bool
@@ -84,13 +98,78 @@ public struct MotionEncoderOutput: Codable, Equatable, Sendable {
     }
 
     /// Wraps a v1 window prediction (HART or baseline) without changing it.
-    public init(prediction: ActivityWindowPrediction, encoderId: String? = nil, encoderVersion: String) {
+    ///
+    /// A01: `calibrated` comes from the prediction's own wire field (the serve response's
+    /// per-window `calibrated`, derived from the manifest's calibration artifact) unless a
+    /// caller overrides it. It is never derived from the `baseline` heuristic flag — model
+    /// identity is not calibration provenance, and no fitted calibration artifact exists
+    /// today, so every real decoded window is honestly uncalibrated (weight 0.6 in
+    /// `ActivityContextModel`).
+    public init(prediction: ActivityWindowPrediction, encoderId: String? = nil, encoderVersion: String,
+                calibrated: Bool? = nil) {
         self.init(encoderId: encoderId ?? (prediction.baseline ? "baseline" : "hart"),
                   encoderVersion: encoderVersion,
                   startTs: prediction.startTs, endTs: prediction.endTs,
                   classProbs: prediction.probs,
-                  calibrated: !prediction.baseline,
+                  calibrated: calibrated ?? prediction.calibrated,
                   abstained: prediction.label == .unknown)
+    }
+
+    /// Older persisted encoder windows predate `calibrated` (A01) and decode as uncalibrated —
+    /// a missing key never fails a stored snapshot and never reads as calibrated. (Snapshots
+    /// from older decoder versions are still re-decoded by the `hsmm` version check.)
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        encoderId = try c.decode(String.self, forKey: .encoderId)
+        encoderVersion = try c.decode(String.self, forKey: .encoderVersion)
+        startTs = try c.decode(Int.self, forKey: .startTs)
+        endTs = try c.decode(Int.self, forKey: .endTs)
+        classProbs = try c.decode([String: Double].self, forKey: .classProbs)
+        calibrated = try c.decodeIfPresent(Bool.self, forKey: .calibrated) ?? false
+        abstained = try c.decodeIfPresent(Bool.self, forKey: .abstained) ?? false
+        embedding = try c.decodeIfPresent([Float].self, forKey: .embedding)
+    }
+}
+
+/// One window's output of the learned raw-IMU transition expert (see `Tools/ActivityContext`), in a
+/// model-agnostic shape like `MotionEncoderOutput`. The expert classifies a 4-s window into five
+/// canonical classes — `none` (no posture change) and the four transitions the HSMM can be in — and is
+/// carried through the feature window as `ActivityFeatures.transition`.
+///
+/// The decoder consumes only the five class probabilities and `abstained` (see channel 4b in
+/// `ActivityContextModel.score`). `confidence`, `modelVersion` and `preprocessingVersion` are
+/// provenance, carried but not consumed, so swapping the expert (or its feature schema) changes
+/// nothing downstream. Absent evidence skips the channel entirely — the day decodes exactly as it did
+/// before the expert existed.
+public struct TransitionEncoderEvidence: Codable, Equatable, Sendable {
+    /// Canonical class probabilities (the expert's own calibration).
+    public var none: Double
+    public var sitToStand: Double
+    public var standToSit: Double
+    public var lieDown: Double
+    public var getUp: Double
+    /// The expert's confidence in its output; provenance only, not consumed by the decoder.
+    public var confidence: Double
+    public var modelVersion: String
+    public var preprocessingVersion: String
+    /// The expert abstained (its own unknown / below its confidence bar): the channel is skipped and
+    /// the no-model fallback (channel 3b) stays in charge.
+    public var abstained: Bool
+
+    public init(none: Double, sitToStand: Double, standToSit: Double, lieDown: Double, getUp: Double,
+                confidence: Double, modelVersion: String, preprocessingVersion: String,
+                abstained: Bool = false) {
+        self.none = none; self.sitToStand = sitToStand; self.standToSit = standToSit
+        self.lieDown = lieDown; self.getUp = getUp; self.confidence = confidence
+        self.modelVersion = modelVersion; self.preprocessingVersion = preprocessingVersion
+        self.abstained = abstained
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case none, confidence, abstained
+        case sitToStand = "sit_to_stand", standToSit = "stand_to_sit"
+        case lieDown = "lie_down", getUp = "get_up"
+        case modelVersion = "model_version", preprocessingVersion = "preprocessing_version"
     }
 }
 
@@ -174,6 +253,9 @@ public struct ActivityObservation: Equatable, Sendable {
     public var imu: ImuWindowFeatures?
     /// A new encoder window that completed at or before `ts`.
     public var encoder: MotionEncoderOutput?
+    /// A new learned transition-expert window that completed at or before `ts` (optional; absent means
+    /// the expert did not speak for this second, which is exactly the pre-expert behaviour).
+    public var transition: TransitionEncoderEvidence?
     public var wear: WearEvidence
     /// Staged sleep: `.asleep` only on a night's sleep epochs. Lying awake inside the night is `.awake`.
     public var sleep: SleepEvidence
@@ -186,11 +268,13 @@ public struct ActivityObservation: Equatable, Sendable {
 
     public init(ts: Int, dynAccelG: Double? = nil, gravity: [Double]? = nil, stepTicks: Int? = nil,
                 strapClass: Int? = nil, hrBpm: Int? = nil, imu: ImuWindowFeatures? = nil,
-                encoder: MotionEncoderOutput? = nil, wear: WearEvidence = .unknown,
+                encoder: MotionEncoderOutput? = nil, transition: TransitionEncoderEvidence? = nil,
+                wear: WearEvidence = .unknown,
                 sleep: SleepEvidence = .unknown, inBed: Bool = false, loggedWorkout: Bool = false,
                 workoutKind: WorkoutKind = .unspecified) {
         self.ts = ts; self.dynAccelG = dynAccelG; self.gravity = gravity; self.stepTicks = stepTicks
         self.strapClass = strapClass; self.hrBpm = hrBpm; self.imu = imu; self.encoder = encoder
+        self.transition = transition
         self.wear = wear; self.sleep = sleep; self.inBed = inBed; self.loggedWorkout = loggedWorkout
         self.workoutKind = workoutKind
     }
@@ -255,6 +339,9 @@ struct ActivityFeatures: Equatable {
     // Encoder.
     var encoder: MotionEncoderOutput?
     var encoderAgeS: Int?
+    // Learned transition expert (optional; absent == channel skipped == pre-expert behaviour).
+    var transition: TransitionEncoderEvidence?
+    var transitionAgeS: Int?
     // Provenance (last 30 s).
     var evidence: ActivityEvidenceSummary
     /// Seconds of data in the trailing 10 s window (warm-up indicator), 0…10.
@@ -295,6 +382,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
     var hrBuckets: [HRBucket] = []
     var imu: ImuWindowFeatures?
     var encoder: MotionEncoderOutput?
+    var transition: TransitionEncoderEvidence?
     var lastSleep: SleepEvidence = .unknown
     var lastSleepTs: Int?
     var lastWear: WearEvidence = .unknown
@@ -304,6 +392,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
     var lastHr: Int?
     var imuSeenTs: Int?
     var encoderSeenTs: Int?
+    var transitionSeenTs: Int?
 
     init() {}
 
@@ -311,8 +400,8 @@ struct ActivityFeatureWindow: Codable, Equatable {
     /// defaults); `ActivityContextDecoder` then rejects them on the decoder version, so the day is decoded
     /// afresh rather than the file failing to read.
     private enum CodingKeys: String, CodingKey {
-        case samples, hrBuckets, imu, encoder, lastSleep, lastSleepTs, lastWear, lastWorkoutTs, lastWorkoutKind
-        case lastHrTs, lastHr, imuSeenTs, encoderSeenTs
+        case samples, hrBuckets, imu, encoder, transition, lastSleep, lastSleepTs, lastWear, lastWorkoutTs, lastWorkoutKind
+        case lastHrTs, lastHr, imuSeenTs, encoderSeenTs, transitionSeenTs
     }
 
     init(from decoder: Decoder) throws {
@@ -321,6 +410,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
         hrBuckets = try c.decodeIfPresent([HRBucket].self, forKey: .hrBuckets) ?? []
         imu = try c.decodeIfPresent(ImuWindowFeatures.self, forKey: .imu)
         encoder = try c.decodeIfPresent(MotionEncoderOutput.self, forKey: .encoder)
+        transition = try c.decodeIfPresent(TransitionEncoderEvidence.self, forKey: .transition)
         lastSleep = try c.decode(SleepEvidence.self, forKey: .lastSleep)
         lastSleepTs = try c.decodeIfPresent(Int.self, forKey: .lastSleepTs)
         lastWear = try c.decode(WearEvidence.self, forKey: .lastWear)
@@ -330,6 +420,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
         lastHr = try c.decodeIfPresent(Int.self, forKey: .lastHr)
         imuSeenTs = try c.decodeIfPresent(Int.self, forKey: .imuSeenTs)
         encoderSeenTs = try c.decodeIfPresent(Int.self, forKey: .encoderSeenTs)
+        transitionSeenTs = try c.decodeIfPresent(Int.self, forKey: .transitionSeenTs)
     }
 
     mutating func reset() { self = ActivityFeatureWindow() }
@@ -338,6 +429,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
     mutating func push(_ obs: ActivityObservation, restingHR: Double, maxHR: Double) -> ActivityFeatures {
         if let imu = obs.imu { self.imu = imu; imuSeenTs = obs.ts }
         if let enc = obs.encoder { self.encoder = enc; encoderSeenTs = obs.ts }
+        if let trans = obs.transition { self.transition = trans; transitionSeenTs = obs.ts }
         lastSleep = obs.sleep
         if obs.sleep != .unknown { lastSleepTs = obs.ts }
         lastWear = obs.wear
@@ -533,6 +625,12 @@ struct ActivityFeatureWindow: Codable, Equatable {
         var enc: MotionEncoderOutput? = nil, encAge: Int? = nil
         if let e = encoder, now - e.endTs <= 6 { enc = e; encAge = max(0, now - e.endTs) }
 
+        // Learned transition expert: held for a few seconds like the encoder, then ignored.
+        var trans: TransitionEncoderEvidence? = nil, transAge: Int? = nil
+        if let t = transition, let seen = transitionSeenTs, now - seen <= 6 {
+            trans = t; transAge = max(0, now - seen)
+        }
+
         // Provenance over the last 30 s.
         let hasDyn = w30.contains { $0.dynG != nil }
         let hasGrav = w30.contains { $0.ux != nil }
@@ -561,7 +659,9 @@ struct ActivityFeatureWindow: Codable, Equatable {
                                 hrSlope: slope,
                                 wear: lastWear, sleep: lastSleep, loggedWorkout: workout,
                                 workoutKind: workout ? lastWorkoutKind : .unspecified,
-                                encoder: enc, encoderAgeS: encAge, evidence: evidence,
+                                encoder: enc, encoderAgeS: encAge,
+                                transition: trans, transitionAgeS: transAge,
+                                evidence: evidence,
                                 windowFill: min(10, w10.count))
     }
 }

@@ -108,7 +108,8 @@ final class ActivityContextCoordinator {
         guard let w = decision.window else { return "Stand reminder: \(decision.reason.rawValue)" }
         func percent(_ v: Double) -> Int { Int((v * 100).rounded()) }
         return "Stand reminder: \(decision.reason.rawValue) (\(windowMinutes)-min window: \(w.movementSeconds) s "
-            + "standing or moving, \(percent(w.coverage))% observed, \(percent(w.sedentaryShare))% seated)"
+            + "standing or moving, \(percent(w.coverage))% observed, \(percent(w.sedentaryShare))% sedentary "
+            + "(sitting or standing))"
     }
 
     // MARK: - Persisted context
@@ -148,27 +149,39 @@ final class ActivityContextCoordinator {
         let ledgers = await repo.activityContextLedgers(store: store, ids: ids, days: days)
 
         var owners: [Int: Repository.ActivityContextOwner] = [:]
+        var fingerprints: [Int: String] = [:]
         var candidates: [ActivityContextMaterialization.Candidate] = []
         for day in days {
             guard let owner = await repo.activityContextOwner(store: store, ids: ids, from: day.start, to: day.end) else { continue }
             owners[day.start] = owner
+            // A07: the cheap store-level day-stream fingerprint (count/max-ts per stream) rides on the
+            // candidate so `needsWork` re-examines a day whose streams changed under an unchanged ledger
+            // — a late backfill to an old day with no new HR must not stay invisible until the horizon
+            // rolls over it. (Equal-count *value* corrections are caught by the track's content
+            // fingerprint once the day is re-examined; the last-seen route here is in-session — the
+            // ledger column that would persist it across launches is the documented follow-up.)
+            let fingerprint = (try? await store.dayStreamFingerprint(deviceId: owner.deviceId, from: day.start, to: day.end)) ?? ""
+            if !fingerprint.isEmpty { fingerprints[day.start] = fingerprint }
             candidates.append(.init(day: day, ledger: ledgers[owner.deviceId]?[day.start],
-                                    newestHeartRateTs: owner.newestHeartRateTs, lastCheck: checks[day.start]))
+                                    newestHeartRateTs: owner.newestHeartRateTs, lastCheck: checks[day.start],
+                                    inputFingerprint: fingerprints[day.start]))
         }
 
         let planned = ActivityContextMaterialization.plan(candidates, now: nowSec)
         let due = planned.filter { day in failures[day.start].map { nowSec - $0 >= Self.retryAfterFailureS } ?? true }
         for day in due {
             guard let owner = owners[day.start] else { continue }
-            await materialize(day, owner: owner, ledger: ledgers[owner.deviceId]?[day.start], ids: ids, store: store)
+            await materialize(day, owner: owner, ledger: ledgers[owner.deviceId]?[day.start],
+                              inputFingerprint: fingerprints[day.start], ids: ids, store: store)
         }
         let oldDays = planned.filter { !ActivityContextMaterialization.isRecent($0, now: nowSec) }.count
         return oldDays >= ActivityContextMaterialization.Config().maxBacklogPerPass
     }
 
     private func materialize(_ day: Day, owner: Repository.ActivityContextOwner, ledger: ActivityContextDayRow?,
-                             ids: [String], store: WhoopStore) async {
-        checks[day.start] = .init(at: Int(Date().timeIntervalSince1970), newestHeartRateTs: owner.newestHeartRateTs)
+                             inputFingerprint: String?, ids: [String], store: WhoopStore) async {
+        checks[day.start] = .init(at: Int(Date().timeIntervalSince1970), newestHeartRateTs: owner.newestHeartRateTs,
+                                  inputFingerprint: inputFingerprint)
         guard let loaded = await loadDay(day) else {
             failures[day.start] = Int(Date().timeIntervalSince1970)
             return
@@ -188,9 +201,13 @@ final class ActivityContextCoordinator {
             // wear (only during an opt-in Raw Data collector session), so `motionRmsG` falls back to the 1 Hz
             // stream and `gyroRmsDps` stays honestly nil here rather than inventing a reading.
             let lookup = ActivityContextLookup(intervals: intervals)
+            // The phone's day document carries runs, not per-epoch wear signal (that is server-only, in the
+            // C10 epochs), so every window resolves wearSignal nil here. These windows only feed the
+            // diagnostic line today; no score or baseline reads them yet.
             let windows = HRVWindowBuilder.build(kind: .canonical5m, dayStart: document.dayStart, dayEnd: document.dayEnd,
                                                  rr: beats, gravity: gravity, activity: lookup,
-                                                 transitionEvents: document.events)
+                                                 transitionEvents: document.events,
+                                                 epochWearSignal: [])
             return (intervals, windows)
         }.value
         log(HRVWindowSummary.diagLine(hrvWindows, kind: .canonical5m, day: day.key))

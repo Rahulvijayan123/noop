@@ -39,6 +39,24 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   Downloaded at train time (never committed or redistributed); only aggregate
   held-out metrics are recorded (`Tools/ActivityContext/eval/RESULTS.md`).
 
+## Transition expert (postural transitions)
+- **FORTH-TRACE** (Karagiannaki, Panousopoulou, Tsakalides; Zenodo record 841301,
+  DOI 10.5281/zenodo.841301, CC BY-SA 4.0) — left/right-wrist Shimmer IMU with
+  explicit sit-to-stand / stand-to-sit (and stand-to-walk / walk-to-stand) labels at
+  51.2 Hz; the only public wrist dataset with explicit postural-transition labels.
+  Used to train/validate the transition expert. Downloaded at train time (never
+  committed or redistributed); attribution and share-alike obligations apply to the
+  dataset itself (the trained model is this project's own artifact).
+- **Smartphone-Based Recognition of Human Activities and Postural Transitions**
+  ("HAPT"; Reyes-Ortiz, Anguita, Ghio, Oneto, Parra; UCI archive.ics.uci.edu
+  dataset 341, DOI 10.24432/C54G7M, CC BY 4.0) — waist-phone 50 Hz accelerometer +
+  gyroscope with all six explicit postural transitions (sit↔stand, sit/stand↔lie).
+  Used as cross-placement transfer training data; reported separately by placement.
+- **PAMAP2 Physical Activity Monitoring** (Reiss & Stricker; UCI
+  archive.ics.uci.edu dataset 231, DOI 10.24432/C5NW2H, CC BY 4.0) — wrist (hand)
+  IMU at 100 Hz with sitting/standing/lying protocol states; transitions derived
+  from state boundaries. Used as wrist-domain transition training data.
+
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device
   SQLite layout (`DataBase/<user_id>/de/<user_id>.db`, JSON `value` columns, the `*_day`

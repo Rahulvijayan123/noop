@@ -104,13 +104,93 @@ def test_infer_happy_path_baseline(proc):
 def test_every_window_carries_encoder_independent_features(proc):
     resp = _roundtrip(proc, {"id": "f1", "op": "infer", "run": _golden_run()})
     assert resp["ok"] is True
-    assert resp["feature_schema"] == "imu-feat-1"
+    assert resp["feature_schema"] == "imu-feat-2"
     for w in resp["windows"]:
-        assert set(w["feat"]) == {"accel_rms_g", "gyro_rms_dps", "jerk_rms", "cadence_hz",
+        assert set(w["feat"]) == {"accel_rms_g", "gyro_rms_dps", "jerk_rms_gps", "cadence_hz",
                                   "cadence_strength", "orientation_change_deg"}
         assert w["feat"]["accel_rms_g"] > 0.05
-        assert 1.2 <= w["feat"]["cadence_hz"] <= 3.5
+        # imu-feat-2 band is 0.8-3.5 Hz (effective upper edge 3.333 @30 Hz; WS-04-F05).
+        assert 0.8 <= w["feat"]["cadence_hz"] <= 3.5
         assert w["feat"]["cadence_strength"] >= 0.3
+        assert w["feat"]["jerk_rms_gps"] > 1.0  # per-second (g/s), not per-sample
+
+
+def test_calibration_status_comes_from_the_manifest_not_model_kind(proc):
+    # A01: the baseline manifest has no calibration artifact -> calibrated false everywhere,
+    # even though the response is model_status=baseline. Never derived from model_kind.
+    resp = _roundtrip(proc, {"id": "cal1", "op": "infer", "run": _golden_run()})
+    assert resp["ok"] is True
+    assert resp["calibrated"] is False
+    assert resp["calibration_version"] is None
+    for w in resp["windows"]:
+        assert w["calibrated"] is False
+
+
+def test_manifest_with_calibration_artifact_reports_calibrated(tmp_path):
+    # A01: a manifest that DOES carry a versioned calibration section reports calibrated=True
+    # with the artifact version, top-level and per window.
+    import copy
+    with open(os.path.join(FIXTURES, "manifest.baseline.json")) as f:
+        m = json.load(f)
+    m["calibration"] = {
+        "version": "ts-v1",
+        "method": "temperature_scaling",
+        "fit_subjects": [1, 2, 3],
+        "nll": 0.72,
+        "brier": 0.11,
+        "reliability": {"ece": 0.012},
+        "thresholds": {"max_prob": 0.80, "margin": 0.15},
+    }
+    p = tmp_path / "manifest.calibrated.json"
+    p.write_text(json.dumps(m))
+    proc = _start_serve(str(p))
+    try:
+        resp = _roundtrip(proc, {"id": "cal2", "op": "infer", "run": _golden_run()})
+        assert resp["ok"] is True
+        assert resp["calibrated"] is True
+        assert resp["calibration_version"] == "ts-v1"
+        for w in resp["windows"]:
+            assert w["calibrated"] is True
+    finally:
+        if proc.poll() is None:
+            try:
+                _roundtrip(proc, {"id": "t", "op": "shutdown"})
+            except Exception:
+                proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_malformed_calibration_section_is_uncalibrated_not_an_error(tmp_path):
+    # A01: absent or INVALID -> calibrated=false (conservative). A malformed section must not
+    # hard-fail the manifest; it simply cannot claim calibration.
+    import copy
+    with open(os.path.join(FIXTURES, "manifest.baseline.json")) as f:
+        m = json.load(f)
+    m["calibration"] = {"nll": 0.72}          # missing version + method
+    p = tmp_path / "manifest.badcal.json"
+    p.write_text(json.dumps(m))
+    proc = _start_serve(str(p))
+    try:
+        resp = _roundtrip(proc, {"id": "cal3", "op": "infer", "run": _golden_run()})
+        assert resp["ok"] is True
+        assert resp["calibrated"] is False
+        assert resp["calibration_version"] is None
+        for w in resp["windows"]:
+            assert w["calibrated"] is False
+    finally:
+        if proc.poll() is None:
+            try:
+                _roundtrip(proc, {"id": "t", "op": "shutdown"})
+            except Exception:
+                proc.kill()
+            proc.wait(timeout=10)
+
+
+def test_ping_reports_calibration_status(proc):
+    resp = _roundtrip(proc, {"id": "cal4", "op": "ping"})
+    assert resp["ok"] is True
+    assert resp["calibrated"] is False
+    assert resp["calibration_version"] is None
 
 
 def test_default_hop_is_the_training_hop(proc):

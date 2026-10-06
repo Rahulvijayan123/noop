@@ -63,6 +63,35 @@ def test_model_predicts_and_is_deterministic(model):
     assert abs(sum(p1.probs.values()) - 1.0) < 1e-6
 
 
+def test_prediction_calibrated_comes_from_manifest_artifact(model):
+    """A01: Prediction.calibrated must come from the manifest's calibration artifact, never
+    from model_kind ('hart'). The fixture manifest has no artifact -> False; with a
+    calibration section present, the same model reports True."""
+    import copy
+    from activity_context.manifest import load_manifest
+
+    with open(os.path.join(FIXTURES, "golden_imu_frames.json")) as f:
+        gj = json.load(f)
+    seconds = []
+    for hx in gj["frames"]:
+        base_ts, cols = decode_frame_hex(hx)
+        seconds.append((base_ts, cols))
+    start = min(t for t, _ in seconds)
+    end = max(t for t, _ in seconds) + 1
+    wins = windows_from_seconds(seconds, start, end)
+    assert wins
+
+    assert model.predict_window(wins[0].data).calibrated is False   # no artifact in fixture
+
+    man = load_manifest(os.path.join(FIXTURES, "manifest.hart.example.json"))
+    man2 = copy.deepcopy(man)
+    man2.calibration = {"version": "ts-v1", "method": "temperature_scaling"}
+    model2 = HARTModel(man2, CHECKPOINT)
+    p = model2.predict_window(wins[0].data)
+    assert p.calibrated is True
+    assert p.label in ("unknown", "stationary", "walking", "running", "other_movement")
+
+
 def test_corrupt_checkpoint_refused(tmp_path):
     from activity_context.manifest import load_manifest
     man = load_manifest(os.path.join(FIXTURES, "manifest.hart.example.json"))

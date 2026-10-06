@@ -217755,7 +217755,327 @@
         "Date of birth": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Geburtsdatum"}}, "es": {"stringUnit": {"state": "translated", "value": "Fecha de nacimiento"}}, "fr": {"stringUnit": {"state": "translated", "value": "Date de naissance"}}, "it": {"stringUnit": {"state": "translated", "value": "Data di nascita"}}, "pl": {"stringUnit": {"state": "translated", "value": "Data urodzenia"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "Data de nascimento"}}, "ru": {"stringUnit": {"state": "translated", "value": "Дата рождения"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "出生日期"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "出生日期"}}}},
         "Day cycle": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Tageszyklus"}}, "es": {"stringUnit": {"state": "translated", "value": "Ciclo diario"}}, "fr": {"stringUnit": {"state": "translated", "value": "Cycle journalier"}}, "it": {"stringUnit": {"state": "translated", "value": "Ciclo giornaliero"}}, "pl": {"stringUnit": {"state": "translated", "value": "Cykl dobowy"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "Ciclo diário"}}, "ru": {"stringUnit": {"state": "translated", "value": "Суточный цикл"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "每日周期"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "每日週期"}}}},
         "Raw on-device stages": {"localizations": {"de": {"stringUnit": {"state": "translated", "value": "Rohe Phasen vom Gerät"}}, "es": {"stringUnit": {"state": "translated", "value": "Fases sin procesar del dispositivo"}}, "fr": {"stringUnit": {"state": "translated", "value": "Stades bruts de l'appareil"}}, "it": {"stringUnit": {"state": "translated", "value": "Fasi grezze dal dispositivo"}}, "pl": {"stringUnit": {"state": "translated", "value": "Surowe fazy z urządzenia"}}, "pt-PT": {"stringUnit": {"state": "translated", "value": "Estágios brutos do dispositivo"}}, "ru": {"stringUnit": {"state": "translated", "value": "Исходные стадии с устройства"}}, "zh-Hans": {"stringUnit": {"state": "translated", "value": "设备端原始睡眠阶段"}}, "zh-Hant": {"stringUnit": {"state": "translated", "value": "裝置端原始睡眠階段"}}}},
-        "Oura": {"shouldTranslate": false}
+        "Oura": {"shouldTranslate": false},
+    "Still for": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Still for"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Still für"
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quieto durante"
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Immobile pendant"
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fermo per"
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bez ruchu przez"
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Imóvel durante"
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Без движения в течение"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "静止多久后"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靜止多久後"
+          }
+        }
+      }
+    },
+    "Minutes still before the first nudge.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minutes still before the first nudge."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minuten ohne Bewegung vor dem ersten Anstoß."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minutos quieto antes del primer aviso."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minutes immobile avant le premier rappel."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minuti fermo prima del primo promemoria."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minut bez ruchu przed pierwszym szturchnięciem."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Minutos imóvel antes do primeiro empurrão."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Минут без движения до первого напоминания."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "静止多少分钟后发出第一次提醒。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "靜止多少分鐘後發出第一次提醒。"
+          }
+        }
+      }
+    },
+    "If you're still sedentary, buzz again this often.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "If you're still sedentary, buzz again this often."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn du noch immer ohne Bewegung bist, so oft erneut vibrieren."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Si sigues sedentario, vibrar de nuevo con esta frecuencia."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Si vous êtes toujours sédentaire, vibrer à nouveau à cette fréquence."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se sei ancora sedentario, vibra di nuovo con questa frequenza."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jeśli nadal jesteś w bezruchu, brzęcz ponownie tak często."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Se ainda estiver sedentário, toque novamente com esta frequência."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Если вы всё ещё без движения, вибрация повторится с такой периодичностью."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果你仍然久坐不动，就每隔这么久再震动一次。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果你仍然久坐不動，每隔這麼久再震動一次。"
+          }
+        }
+      }
+    },
+    "You've been sedentary for about %lld min. Time to move.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You've been sedentary for about %lld min. Time to move."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Du bist seit etwa %lld Min. ohne Bewegung. Zeit für Bewegung."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Llevas unos %lld min sedentario. Hora de moverte."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Vous êtes sédentaire depuis environ %lld min. Il est temps de bouger."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sei sedentario da circa %lld min. È ora di muoversi."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jesteś w bezruchu od około %lld min. Czas się ruszyć."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Está sedentário há cerca de %lld min. Hora de mudar."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Вы без движения около %lld мин. Пора подвигаться."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你已经久坐不动约 %lld 分钟了。该动一动了。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你已經久坐不動約 %lld 分鐘了。該動一動了。"
+          }
+        }
+      }
+    },
+    "Time to move. You've been sedentary a while.": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Time to move. You've been sedentary a while."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zeit für Bewegung. Du bist schon eine Weile ohne Bewegung."
+          }
+        },
+        "es": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hora de moverte. Llevas un rato sedentario."
+          }
+        },
+        "fr": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Il est temps de bouger. Vous êtes sédentaire depuis un moment."
+          }
+        },
+        "it": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "È ora di muoversi. Sei sedentario da un po'."
+          }
+        },
+        "pl": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Czas się ruszyć. Jesteś w bezruchu od jakiegoś czasu."
+          }
+        },
+        "pt-PT": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hora de mudar. Está sedentário há algum tempo."
+          }
+        },
+        "ru": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Пора подвигаться. Вы давно без движения."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该动一动了。你已经久坐不动一阵子了。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "該動一動了。你已經久坐不動一陣子了。"
+          }
+        }
+      }
+    }
   },
   "version": "1.0"
 }

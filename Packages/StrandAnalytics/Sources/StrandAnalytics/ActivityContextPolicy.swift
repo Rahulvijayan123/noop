@@ -143,6 +143,11 @@ public enum ActivityContextPolicy {
                 let acc = buckets[bucketStart] ?? BucketAccumulator(startTs: bucketStart, endTs: bucketStart + epochS)
                 acc.observed.insert(t)
                 acc.valid.insert(t)
+                // WS-05-F11: assign each real second exactly one label — that of the chronologically
+                // latest accepted window covering it (windows are visited in sorted start order, so a
+                // later visit overwrites an earlier one, matching the epoch tie-break rule). The 4-s /
+                // 2-s-hop overlap therefore never double-counts a second in activeS/stillS.
+                acc.secondLabels[t] = label
                 acc.votes[label, default: 0] += 1
                 acc.totalWeight += 1
                 acc.confidenceWeight += maxProb
@@ -180,9 +185,19 @@ public enum ActivityContextPolicy {
                                       motion: motion, posture: .unknown, exercise: .unknown,
                                       sleepState: .unknown, exertion: .unknown, wear: .unknown,
                                       confidence: confidence, observedS: observed, validS: validCount)
-            drafts.append(EpochDraft(epoch: epoch,
-                                     activeS: Int(acc.votes[.walking] ?? 0) + Int(acc.votes[.running] ?? 0),
-                                     stillS: Int(acc.votes[.stationary] ?? 0)))
+            // WS-05-F11: activeS/stillS count real seconds, one per second (deduplicated across
+            // overlapping 4-s / 2-s-hop windows), consistent with validS. Each valid second is
+            // assigned exactly one label, so activeS + stillS <= validS <= observedS always holds.
+            var activeS = 0
+            var stillS = 0
+            for (_, label) in acc.secondLabels {
+                switch label {
+                case .walking, .running: activeS += 1
+                case .stationary: stillS += 1
+                default: break
+                }
+            }
+            drafts.append(EpochDraft(epoch: epoch, activeS: activeS, stillS: stillS))
         }
 
         applyEnrichment(&drafts, exerciseSessions: exerciseSessions, sleepSessions: sleepSessions,
@@ -385,6 +400,9 @@ private final class BucketAccumulator {
     var observed: Set<Int> = []
     var valid: Set<Int> = []
     var votes: [MotionLabel: Double] = [:]
+    /// Per-second label assignment used for second-accurate activeS/stillS (WS-05-F11).
+    /// Each valid second appears exactly once with the label of the latest covering window.
+    var secondLabels: [Int: MotionLabel] = [:]
     var totalWeight: Double = 0
     var confidenceWeight: Double = 0
     var bestLabel: MotionLabel? = nil

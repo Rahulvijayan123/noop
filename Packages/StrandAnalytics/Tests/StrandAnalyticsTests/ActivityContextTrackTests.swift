@@ -394,6 +394,93 @@ final class ActivityContextTrackTests: XCTestCase {
         XCTAssertGreaterThan(updated.observedSeconds, cached.observedSeconds)
     }
 
+    // MARK: Invalidation (spec §13): same bounds and count, changed content
+
+    func testRenamingAWorkoutSportWithIdenticalBoundsRecomputes() throws {
+        var sim = ActivitySim()
+        sim.desk(60)
+        let workoutStart = sim.ts
+        sim.run(120)
+        let workoutEnd = sim.ts
+        sim.desk(60)
+        let input = sim.trackInput(workouts: [DayStateWorkout(start: workoutStart, end: workoutEnd, sport: "Run")])
+        let (cached, _) = ActivityContextDayBuilder.update(cached: nil, input: input, now: 100)
+
+        // The wearer edits the workout's sport with identical bounds: the covered span and the
+        // observation count are unchanged, so only the fingerprint — which now carries the sport kind the
+        // decoder sees — can see the change. Before the fix the span-only hash read the same and the day
+        // was reused with a stale document (WS-10-F04).
+        var renamed = input
+        renamed.workouts = [DayStateWorkout(start: workoutStart, end: workoutEnd, sport: "Cycling")]
+        XCTAssertEqual(ActivityContextTrackBuilder.observations(for: renamed).count,
+                       ActivityContextTrackBuilder.observations(for: input).count)
+        let (_, how) = ActivityContextDayBuilder.update(cached: cached, input: renamed, now: 200)
+        XCTAssertEqual(how, .recomputed(reason: "context_changed"))
+
+        // A rename that maps to the same kind ("Run" -> "Running") is the same evidence to the decoder and
+        // must not invalidate the day.
+        var sameKind = input
+        sameKind.workouts = [DayStateWorkout(start: workoutStart, end: workoutEnd, sport: "Running")]
+        let (_, how2) = ActivityContextDayBuilder.update(cached: cached, input: sameKind, now: 300)
+        XCTAssertEqual(how2, .reused)
+    }
+
+    func testAnEqualCountSampleReplacementRecomputes() throws {
+        var sim = ActivitySim()
+        sim.desk(60)
+        let replace = sim.ts + 30
+        sim.desk(120)
+        let input = sim.trackInput()
+        let (cached, _) = ActivityContextDayBuilder.update(cached: nil, input: input, now: 100)
+
+        // A corrected HR value for one second: the same number of rows, the same spans, different content.
+        var corrected = input
+        corrected.hr = corrected.hr.map { $0.ts == replace ? HRSample(ts: replace, bpm: 128) : $0 }
+        XCTAssertEqual(corrected.hr.count, input.hr.count)
+        XCTAssertEqual(ActivityContextTrackBuilder.observations(for: corrected).count,
+                       ActivityContextTrackBuilder.observations(for: input).count)
+        let (_, how) = ActivityContextDayBuilder.update(cached: cached, input: corrected, now: 200)
+        XCTAssertEqual(how, .recomputed(reason: "context_changed"))
+    }
+
+    func testReServedEncoderProbabilitiesWithTheSameWindowsRecompute() throws {
+        var sim = ActivitySim()
+        sim.desk(60); sim.walk(60)
+        var input = sim.trackInput()
+        func windows(_ p: Double) -> [ActivityWindowPrediction] {
+            let start = sim.observations.first!.ts
+            return (0..<12).map { i in
+                let end = start + (i + 1) * 10
+                return ActivityWindowPrediction(startTs: end - 4, endTs: end, label: .walking,
+                                                probs: ["walking": p, "stationary": (1 - p) / 2,
+                                                        "running": (1 - p) / 2])
+            }
+        }
+        input.encoderWindows = windows(0.91)
+        let (cached, _) = ActivityContextDayBuilder.update(cached: nil, input: input, now: 100)
+
+        // The server re-serves the same windows — same count, bounds and labels — with different
+        // probabilities. The fingerprint must still move.
+        var reserved = input
+        reserved.encoderWindows = windows(0.55)
+        XCTAssertEqual(reserved.encoderWindows.count, input.encoderWindows.count)
+        let (_, how) = ActivityContextDayBuilder.update(cached: cached, input: reserved, now: 200)
+        XCTAssertEqual(how, .recomputed(reason: "context_changed"))
+    }
+
+    func testUnchangedInputStillReusesTheStoredDay() throws {
+        var sim = ActivitySim()
+        sim.desk(60); sim.walk(60); sim.desk(60)
+        let input = sim.trackInput()
+        let (cached, _) = ActivityContextDayBuilder.update(cached: nil, input: input, now: 100)
+        // Determinism: the same input hashes the same, so the same document is returned, never re-decoded.
+        XCTAssertEqual(ActivityContextDayBuilder.fingerprint(input, through: cached.dataThrough),
+                       cached.contextFingerprint)
+        let (again, how) = ActivityContextDayBuilder.update(cached: cached, input: input, now: 200)
+        XCTAssertEqual(how, .reused)
+        XCTAssertEqual(again.generatedAt, cached.generatedAt, "the stored document is returned as it was")
+    }
+
     func testStoredDocumentsFromAnotherVersionOrDayAreRecomputed() throws {
         let day = piecewiseDay()
         let input = day.sim.trackInput()

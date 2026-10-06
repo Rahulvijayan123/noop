@@ -122,4 +122,35 @@ final class ActivityContextAggregateTests: XCTestCase {
         ], from: t0, to: t0 + 400)
         XCTAssertEqual(try XCTUnwrap(s.aggregate(for: .standing)?.meanConfidence), 0.75, accuracy: 1e-9)
     }
+
+    func testAggregateCarriesTheDominantWindowDurationAndCount() throws {
+        // WS-12-F04: a 60-s window and a 900-s window must not be presented as one comparable number. The
+        // aggregate reports the count and the dominant recording duration so the consumer can tell.
+        let s = ActivityContextAggregator.summarize([
+            iv(0, 60, .sittingDesk, rmssd: 40, beats: 40),
+            iv(60, 960, .sittingDesk, rmssd: 60, beats: 800),
+        ], from: t0, to: t0 + 960)
+        let a = try XCTUnwrap(s.aggregate(for: .sittingDesk))
+        XCTAssertEqual(a.rmssdIntervals, 2)
+        XCTAssertEqual(a.rmssdWindowDominantS, 900, "the 900-s window contributes most of the beats")
+        // Pooled over successive differences (beats − 1 per legacy row), not a beat-weighted mean of RMSSDs.
+        XCTAssertEqual(try XCTUnwrap(a.rmssd), ((40.0 * 40 * 39 + 60.0 * 60 * 799) / 838).squareRoot(), accuracy: 1e-9)
+    }
+
+    func testSingleWindowReportsItsExactDuration() throws {
+        let s = ActivityContextAggregator.summarize([
+            iv(0, 300, .sitting, rmssd: 50, beats: 300),
+        ], from: t0, to: t0 + 300)
+        let a = try XCTUnwrap(s.aggregate(for: .sitting))
+        XCTAssertEqual(a.rmssdIntervals, 1)
+        XCTAssertEqual(a.rmssdWindowDominantS, 300)
+    }
+
+    func testNoHrvMeansNoWindowDefinition() throws {
+        let s = ActivityContextAggregator.summarize([iv(0, 300, .walking, hr: 100, hrN: 300)], from: t0, to: t0 + 300)
+        let a = try XCTUnwrap(s.aggregate(for: .walking))
+        XCTAssertNil(a.rmssd)
+        XCTAssertNil(a.rmssdWindowDominantS)
+        XCTAssertEqual(a.rmssdIntervals, 0)
+    }
 }

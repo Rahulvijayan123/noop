@@ -58,12 +58,19 @@ public enum ActivityDisplay {
 
         // Moving states first: they are the strongest and least ambiguous claims.
         let running = locomotion[.running]
-        let walkFamily = locomotion[.walking] + locomotion[.briskWalking]
+        // The label is chosen on the walking FAMILY mass (walking + brisk walking + stairs, the same family
+        // `ActivityClassifier` sums). The class confidence a consumer reads for the chosen label is the
+        // SUBclass mass: "Brisk walking" at 0.27 means brisk walking at 0.27, not the family (I9 / A05).
+        // The subclass is picked on the masses the classifier reports (brisk vs walking + stairs), so the
+        // published subclass never carries less mass than its walking sibling.
+        let walking = locomotion[.walking], brisk = locomotion[.briskWalking], stairs = locomotion[.stairs]
+        let walkFamily = walking + brisk + stairs
         if running >= 0.5 { return "Running" }
         if walkFamily >= 0.5 {
-            return locomotion[.briskWalking] > locomotion[.walking] ? "Brisk walking" : "Walking"
+            if stairs > max(walking, brisk) { return "Taking stairs" }
+            return brisk > walking + stairs ? "Brisk walking" : "Walking"
         }
-        if locomotion[.stairs] >= 0.4 { return "Taking stairs" }
+        if stairs >= 0.4 { return "Taking stairs" }
         if locomotion[.cycling] >= 0.5 { return "Cycling" }
         if locomotion[.vehicleMotion] >= 0.5 { return "In a vehicle" }
         if locomotion[.other] >= 0.5 {

@@ -49,6 +49,23 @@ final class ActivityEncoderWindowsTests: XCTestCase {
         XCTAssertNil(f.orientationChangeDeg)
     }
 
+    func testLegacyImuFeat1JerkIsReadAsPerSecond() throws {
+        // A document from a server still on imu-feat-1 names jerk `jerk_rms`, in g per 30 Hz sample. It must
+        // keep its features (not drop them for the missing `jerk_rms_gps` key) and read jerk in g/s.
+        let walk = window(120, .walking, ["walking": 1])
+        var doc = ActivityEncoderWindowSet(encoderId: "hart", encoderVersion: "v", windows: [walk])
+            .jsonObject(dayStart: dayStart)
+        doc["features"] = ["accel_rms_g", "gyro_rms_dps", "jerk_rms", "cadence_hz", "cadence_strength",
+                           "orientation_change_deg"]
+        doc["feature_scale"] = [100_000, 1_000, 100_000, 1_000, 10_000, 100]
+        doc["f"] = [[13542, 41250, 1234, 1833, 4521, NSNull()]]
+        let back = try XCTUnwrap(ActivityEncoderWindowSet.decode(doc, encoderId: "hart", encoderVersion: "v"))
+        let f = try XCTUnwrap(back.features.first)
+        XCTAssertEqual(f.jerkRms, 0.01234 * 30, accuracy: 1e-9)
+        XCTAssertEqual(f.accelRmsG, 0.13542, accuracy: 1e-9)
+        XCTAssertEqual(ActivityEncoderWindowSet.featureKeys[2], "jerk_rms_gps")
+    }
+
     func testDocumentIsCompact() throws {
         var windows: [ActivityWindowPrediction] = []
         var features: [ImuWindowFeatures] = []
@@ -135,5 +152,115 @@ final class ActivityEncoderWindowsTests: XCTestCase {
         withEmpty.encoderWindows = []
         XCTAssertEqual(ActivityContextDayBuilder.fingerprint(withEmpty, through: nil),
                        ActivityContextDayBuilder.fingerprint(input, through: nil))
+    }
+
+    // MARK: Learned transition-expert rows (additive over `hart-windows-1`)
+
+    func testTransitionWindowsRoundTripThroughTheCompactDocument() throws {
+        let walk = window(120, .walking, ["walking": 0.912, "stationary": 0.05, "other_movement": 0.038])
+        let still = window(122, .unknown, ["stationary": 0.62, "other_movement": 0.38])
+        let trans = ActivityTransitionWindow(startTs: walk.startTs, endTs: walk.endTs,
+                                             probabilities: [0.08, 0.74, 0.06, 0.04, 0.08],
+                                             modelVersion: "transition-test-1",
+                                             preprocessingVersion: "transition-feat-1")
+        let set = ActivityEncoderWindowSet(encoderId: "hart", encoderVersion: "hart-wisdm-v0",
+                                           windows: [still, walk], transitions: [trans])
+        let object = set.jsonObject(dayStart: dayStart)
+        XCTAssertEqual(object["t_schema"] as? String, "transition-1")
+        XCTAssertEqual(object["t_v"] as? String, "transition-test-1")
+        XCTAssertEqual(object["t_pv"] as? String, "transition-feat-1")
+        let t = try XCTUnwrap(object["t"] as? [Any])
+        XCTAssertEqual(t.count, 2, "one row per window, sorted like the windows")
+        // `walk` (120) sorts before `still` (122); only `walk` carries transition output.
+        let row = try XCTUnwrap(t[0] as? [Int])
+        XCTAssertEqual(row, [80, 740, 60, 40, 80], "per mille in canonical class order")
+        XCTAssertTrue(t[1] is NSNull, "the window without transition output carries a null row")
+
+        let back = try roundTrip(set)
+        XCTAssertEqual(back.transitions.count, 1)
+        let backTrans = try XCTUnwrap(back.transitions.first)
+        XCTAssertEqual(backTrans.startTs, walk.startTs)
+        XCTAssertEqual(backTrans.endTs, walk.endTs)
+        XCTAssertEqual(backTrans.probabilities.map { ($0 * 1000).rounded() / 1000 }, [0.08, 0.74, 0.06, 0.04, 0.08])
+        XCTAssertEqual(backTrans.modelVersion, "transition-test-1")
+        XCTAssertEqual(backTrans.preprocessingVersion, "transition-feat-1")
+        XCTAssertEqual(back.windows.map(\.label), [.walking, .unknown])
+    }
+
+    func testDocumentWithoutTransitionRowsReadsExactlyAsBefore() throws {
+        let walk = window(120, .walking, ["walking": 0.912, "stationary": 0.05, "other_movement": 0.038])
+        let set = ActivityEncoderWindowSet(encoderId: "hart", encoderVersion: "hart-wisdm-v0",
+                                           windows: [walk])
+        let object = set.jsonObject(dayStart: dayStart)
+        XCTAssertNil(object["t"], "no transitions, no t column")
+        XCTAssertNil(object["t_schema"])
+        XCTAssertNil(object["t_v"])
+
+        let back = try roundTrip(set)
+        XCTAssertTrue(back.transitions.isEmpty)
+        XCTAssertEqual(back.windows, set.windows)
+        XCTAssertEqual(back.features, set.features)
+    }
+
+    func testUnparseableTransitionRowsAreDroppedNotFatal() throws {
+        let a = window(0, .walking, ["walking": 1])
+        let b = window(10, .running, ["running": 1])
+        let c = window(20, .stationary, ["stationary": 1])
+        let set = ActivityEncoderWindowSet(encoderId: "hart", encoderVersion: "v",
+                                           windows: [a, b, c],
+                                           transitions: [
+                                               ActivityTransitionWindow(startTs: a.startTs, endTs: a.endTs,
+                                                                        probabilities: [0.9, 0.03, 0.03, 0.02, 0.02],
+                                                                        modelVersion: "t", preprocessingVersion: "p"),
+                                               ActivityTransitionWindow(startTs: b.startTs, endTs: b.endTs,
+                                                                        probabilities: [0.05, 0.9, 0.02, 0.02, 0.01],
+                                                                        modelVersion: "t", preprocessingVersion: "p"),
+                                               ActivityTransitionWindow(startTs: c.startTs, endTs: c.endTs,
+                                                                        probabilities: [0.95, 0.02, 0.01, 0.01, 0.01],
+                                                                        modelVersion: "t", preprocessingVersion: "p"),
+                                           ])
+        var doc = set.jsonObject(dayStart: dayStart)
+        var t = doc["t"] as! [Any]
+        t[1] = [5000, 0, 0, 0, 0]   // out of range: that row's transition is dropped, not the doc
+        doc["t"] = t
+        let back = try XCTUnwrap(ActivityEncoderWindowSet.decode(doc, encoderId: "hart", encoderVersion: "v"))
+        XCTAssertEqual(back.windows.count, 3, "the window rows survive")
+        XCTAssertEqual(back.transitions.map { [$0.startTs, $0.endTs] },
+                       [[a.startTs, a.endTs], [c.startTs, c.endTs]],
+                       "the malformed row's transition is dropped, the others are kept")
+
+        // A `t` that does not line up with the windows is ignored entirely, never fatal.
+        doc["t"] = [0, 1, 2]
+        let ragged = try XCTUnwrap(ActivityEncoderWindowSet.decode(doc, encoderId: "hart", encoderVersion: "v"))
+        XCTAssertTrue(ragged.transitions.isEmpty)
+        XCTAssertEqual(ragged.windows.count, 3)
+
+        // A `t_schema` the reader does not know is ignored, never fatal.
+        doc["t_schema"] = "transition-99"
+        doc["t"] = t
+        let unknownSchema = try XCTUnwrap(ActivityEncoderWindowSet.decode(doc, encoderId: "hart", encoderVersion: "v"))
+        XCTAssertTrue(unknownSchema.transitions.isEmpty)
+        XCTAssertEqual(unknownSchema.windows.count, 3)
+    }
+
+    func testTransitionWindowsAttachToObservationsByEndSecondLikeEncoderWindows() throws {
+        var sim = ActivitySim()
+        sim.desk(60)
+        var input = sim.trackInput()
+        let w = ActivityTransitionWindow(startTs: input.dayStart + 20, endTs: input.dayStart + 24,
+                                         probabilities: [0.06, 0.85, 0.03, 0.03, 0.03],
+                                         modelVersion: "transition-test-1",
+                                         preprocessingVersion: "transition-feat-1")
+        input.transitionWindows = [w]
+
+        let observations = ActivityContextTrackBuilder.observations(for: input)
+        let atEnd = try XCTUnwrap(observations.first { $0.ts == w.endTs }?.transition)
+        XCTAssertEqual(atEnd.sitToStand, 0.85, accuracy: 1e-9)
+        XCTAssertEqual(atEnd.none, 0.06, accuracy: 1e-9)
+        XCTAssertEqual(atEnd.modelVersion, "transition-test-1")
+        XCTAssertEqual(atEnd.preprocessingVersion, "transition-feat-1")
+        XCTAssertFalse(atEnd.abstained)
+        XCTAssertNil(observations.first { $0.ts == w.endTs - 1 }?.transition,
+                     "the window attaches at its end second, not before")
     }
 }

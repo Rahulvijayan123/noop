@@ -4,7 +4,7 @@ import WhoopProtocol
 
 /// Deterministic wrist-sensor data for one UTC day as the worker has it after inference: the stored 1 Hz
 /// heart rate, gravity and step-counter rows, and the Python service's per-window predictions (4 s windows
-/// on a 2 s hop, each with its `imu-feat-1` features).
+/// on a 2 s hop, each with its `imu-feat-2` features).
 ///
 /// Magnitudes follow this strap's measured distributions: resting dynAccel about 8 mg, walking about
 /// 135 mg with roughly 1.5 step-counter ticks a second.
@@ -37,10 +37,10 @@ struct DaySim {
     static let walkingProbs: [String: Double] = [
         "walking": 0.9, "stationary": 0.05, "running": 0.02, "other_movement": 0.03, "unknown": 0.0]
     static let stationaryFeatures: [String: Double] = [
-        "accel_rms_g": 0.009, "gyro_rms_dps": 3, "jerk_rms": 0.03, "cadence_strength": 0.1,
+        "accel_rms_g": 0.009, "gyro_rms_dps": 3, "jerk_rms_gps": 0.03, "cadence_strength": 0.1,
         "orientation_change_deg": 0.5]
     static let walkingFeatures: [String: Double] = [
-        "accel_rms_g": 0.14, "gyro_rms_dps": 60, "jerk_rms": 0.2, "cadence_hz": 1.9,
+        "accel_rms_g": 0.14, "gyro_rms_dps": 60, "jerk_rms_gps": 0.2, "cadence_hz": 1.9,
         "cadence_strength": 0.7, "orientation_change_deg": 6]
 
     private mutating func emit(dyn: Double, ticks: Int, activityClass: Int, bpm: Int,

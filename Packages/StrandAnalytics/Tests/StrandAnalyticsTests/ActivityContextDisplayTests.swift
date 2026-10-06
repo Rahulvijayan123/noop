@@ -70,6 +70,12 @@ final class ActivityContextDisplayTests: XCTestCase {
                        "the walking family adds up before it is named")
         XCTAssertEqual(label(locomotion: [.running: 0.7, .briskWalking: 0.2]), "Running")
         XCTAssertEqual(label(locomotion: [.stairs: 0.5, .walking: 0.3]), "Taking stairs")
+        XCTAssertEqual(label(locomotion: [.stairs: 0.35, .walking: 0.3, .briskWalking: 0.1, .stationary: 0.25]),
+                       "Taking stairs", "stairs counts toward the walking family and wins when it leads it")
+        XCTAssertEqual(label(locomotion: [.walking: 0.25, .briskWalking: 0.15, .stairs: 0.15, .stationary: 0.45]),
+                       "Walking", "the family total includes stairs, so this is a walk, not stillness")
+        XCTAssertEqual(label(locomotion: [.briskWalking: 0.3, .walking: 0.1, .stairs: 0.15, .stationary: 0.45]),
+                       "Brisk walking")
         XCTAssertEqual(label(locomotion: [.cycling: 0.6]), "Cycling")
         XCTAssertEqual(label(locomotion: [.vehicleMotion: 0.6]), "In a vehicle")
         XCTAssertEqual(label(locomotion: [.other: 0.7], arm: [.exerciseMotion: 0.6]), "Exercising")

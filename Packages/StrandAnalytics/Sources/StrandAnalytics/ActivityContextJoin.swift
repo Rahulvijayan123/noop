@@ -1,16 +1,21 @@
 import Foundation
 
-// ActivityContextJoin.swift — duration-weighted joins from activity epochs to physiological
+// ActivityContextJoin.swift — full-support joins from activity epochs to physiological
 // support intervals (spec §9 / contract C4).
 //
 // Every physiological result in the repo already carries an explicit support interval (15-min HRV
 // slots `[slot*900, (slot+1)*900)`, 5-min nightly windows, per-sleep-session RR/resting-HR spans).
 // This join answers "what was the activity over the WHOLE interval" — never "whatever label
-// happened at the final second". Partial epochs are weighted by their overlap duration; abstained
-// seconds within an epoch count toward unknown share, not toward any label.
+// happened at the final second". Every second of the support `[start, end)` is counted exactly
+// once (spec §9 contract item 1): partial epochs are weighted by their overlap duration, abstained
+// AND unobserved seconds within an epoch count toward unknown share (WS-10-F02), and seconds with
+// no epoch at all (gaps/tails) count unknown too — so Sum(shares) + unknownShare == 1 over the
+// full duration, always (A02). See `coverage(for:)` for the same-duration coverage measure.
 //
 // The resting-eligibility view here is the C4 NEW view only: exported for a future
 // context-filtered resting HRV comparison, deliberately NOT wired to any existing metric or score.
+// It consumes COARSE-POLICY epochs only (see the measurement-independence rule on
+// `restingEligibility`): it never reads HR/HRV/respiration by construction.
 
 public enum ActivityContextJoin {
 
@@ -19,20 +24,28 @@ public enum ActivityContextJoin {
     /// Resting-eligibility coverage floor (C4: >= 90% qualified temporal coverage).
     public static let restingCoverageFloor: Double = 0.90
 
-    /// Duration-weighted activity composition over `[start, end)`.
+    /// Full-support duration-weighted activity composition over `[start, end)` (spec §9 / A02).
+    ///
+    /// Every second of the support is counted EXACTLY once against the full `end - start`
+    /// duration: covered-valid seconds go to their label; abstained seconds, unobserved
+    /// seconds inside covered epochs, and fully uncovered seconds (gaps and tails) all count
+    /// toward `unknownShare`. Invariants (spec §9 contract item 2):
+    ///   • Sum(shares) + unknownShare == 1 over the FULL interval, always;
+    ///   • coverage = covered support seconds / (end - start) <= 1 (see `coverage(for:)`),
+    ///     with `low_coverage` firing at `coverage <= 0.5` (boundary decided explicitly).
     ///
     /// - Returns: shares keyed by motion label (valid seconds only; `.unknown` never appears as a
-    ///   key), `unknownShare` (abstained + unknown-epoch seconds), `transitions` (label changes
-    ///   between consecutive overlapping epochs), `recentActivity` (seconds from the interval end
-    ///   since the last supported non-stationary epoch ended; nil when none), `postureSource`
-    ///   ("user_confirmed" | "none" in v1; "model" reserved), and derived `qualityReasons`.
-    ///   Sum(shares) + unknownShare == 1.
+    ///   key), `unknownShare`, `transitions` (label changes between consecutive overlapping
+    ///   epochs), `recentActivity` (seconds from the interval end since the last supported
+    ///   non-stationary epoch ended; nil when none), `postureSource` ("user_confirmed" | "none"
+    ///   in v1; "model" reserved), and derived `qualityReasons`.
     public static func context(for interval: [Int],
                                epochs: [ActivityEpoch],
                                config: ActivityPolicyConfig = .default) -> ActivityContextSummary {
         let start = interval[0]
         let end = interval[1]
-        guard end > start else {
+        let duration = Double(end - start)
+        guard duration > 0 else {
             return ActivityContextSummary(shares: [:], unknownShare: 1.0, transitions: 0,
                                           recentActivity: nil, postureSource: "none",
                                           qualityReasons: ["invalid_interval"])
@@ -44,30 +57,14 @@ public enum ActivityContextJoin {
                                           qualityReasons: ["no_data"])
         }
 
-        var totalWeight = 0.0
-        var weighted: [(epoch: ActivityEpoch, weight: Double)] = []
-        for e in overlapping {
-            let w = Double(min(e.endTs, end) - max(e.startTs, start))
-            totalWeight += w
-            weighted.append((e, w))
-        }
-
-        var shares: [MotionLabel: Double] = [:]
-        var unknown = 0.0
-        for item in weighted {
-            let validFraction = 1.0 - item.epoch.unknownFraction
-            if item.epoch.motion != .unknown {
-                shares[item.epoch.motion, default: 0] += item.weight * validFraction
-            }
-            unknown += item.weight * item.epoch.unknownFraction
-        }
-        guard totalWeight > 0 else {
-            return ActivityContextSummary(shares: [:], unknownShare: 1.0, transitions: 0,
-                                          recentActivity: nil, postureSource: "none",
-                                          qualityReasons: ["no_data"])
-        }
-        for key in shares.keys { shares[key] = shares[key]! / totalWeight }
-        let unknownShare = unknown / totalWeight
+        // Full-support accounting (spec §9 contract item 2, A02): shares + unknownShare
+        // sum to 1 over the WHOLE `[start, end)` support, not just the epoch-covered
+        // weight. Uncovered seconds and within-epoch unobserved seconds both count
+        // unknown (WS-10-F02), so `shares + unknownShare == 1` always holds.
+        let accounting = account(start: start, end: end, epochs: overlapping)
+        var shares = accounting.shares
+        for key in shares.keys { shares[key] = shares[key]! / duration }
+        let unknownShare = accounting.unknownSeconds / duration
 
         // Transitions between CONSECUTIVE overlapping epochs (adjacent on the grid only).
         let ordered = overlapping.sorted { $0.startTs < $1.startTs }
@@ -89,8 +86,13 @@ public enum ActivityContextJoin {
         let postureSource: String = ordered.contains { $0.posture != .unknown } ? "user_confirmed" : "none"
 
         var reasons: [String] = []
-        let coverageRatio = totalWeight / Double(end - start)
-        if coverageRatio < 0.5 { reasons.append("low_coverage") }
+        let coverageRatio = accounting.coveredSeconds / duration
+        // Boundary decided explicitly (A02 / WS-10-F01): coverage is measured against the
+        // same full-support duration, and at exactly 0.5 the interval is half data-missing,
+        // so low_coverage MUST fire there (the old strict < silently cleared the warning at
+        // the spec's own example value). Uncovered seconds are data-missing and
+        // distinguishable from the fully-empty "no_data" case.
+        if coverageRatio <= 0.5 { reasons.append("low_coverage") }
         if unknownShare >= 0.5 { reasons.append("unknown_motion") }
         if ordered.contains(where: { $0.wear == .offWrist }) { reasons.append("off_wrist") }
         if ordered.contains(where: { $0.exertion == .postActivity }) { reasons.append("post_activity") }
@@ -99,6 +101,87 @@ public enum ActivityContextJoin {
         return ActivityContextSummary(shares: shares, unknownShare: unknownShare,
                                       transitions: transitions, recentActivity: recentActivity,
                                       postureSource: postureSource, qualityReasons: reasons)
+    }
+
+    /// Full-support coverage of `[start, end)` (spec §9 contract item 2).
+    ///
+    /// Fraction of the support interval covered by at least one epoch, in [0, 1],
+    /// measured against the SAME duration as `context(for:)`. Uncovered seconds are
+    /// data-missing: they are exactly what pushes `unknownShare` above the
+    /// covered-internal abstention, and they are signalled by the `low_coverage`
+    /// reason (firing at `coverage <= 0.5`, boundary decided explicitly per A02).
+    public static func coverage(for start: Int, end: Int, epochs: [ActivityEpoch]) -> Double {
+        let duration = Double(end - start)
+        guard duration > 0 else { return 0 }
+        let overlapping = epochs.filter { $0.startTs < end && $0.endTs > start }
+        guard !overlapping.isEmpty else { return 0 }
+        return account(start: start, end: end, epochs: overlapping).coveredSeconds / duration
+    }
+
+    /// Convenience overload taking explicit start/end.
+    public static func coverage(for interval: [Int], epochs: [ActivityEpoch]) -> Double {
+        coverage(for: interval[0], end: interval[1], epochs: epochs)
+    }
+
+    /// Per-second accounting over `[start, end)`.
+    ///
+    /// Every second of the support is counted EXACTLY once:
+    ///   • a second inside a winning epoch contributes the epoch's valid fraction to
+    ///     its label share and the rest to unknown (abstained `observed - valid` AND
+    ///     unobserved `duration - observed` seconds both count unknown — WS-10-F02);
+    ///   • a second with no epoch (gap or interval tail) is fully unknown.
+    /// `shares + unknownSeconds == end - start` by construction (up to fp rounding), so
+    /// normalizing by `end - start` yields `Sum(shares) + unknownShare == 1` always.
+    ///
+    /// Valid seconds are allocated proportionally across the winning width: an epoch
+    /// stores only `validS`/`observedS`, not per-second validity, so the join uses
+    /// `validS / durationSeconds` (equivalently, treats the winning span as a uniform
+    /// sample of the epoch's grid).
+    ///
+    /// Overlap rule (deterministic, spec §9 contract item 1): when epochs share a
+    /// second, the earliest-start epoch owns it; ties break by earliest end, then input
+    /// order. The coarse-policy grid never overlaps by construction, so this only
+    /// guards malformed/merged input and prevents a shared second from being
+    /// double-counted (incl. duplicate copies of one epoch).
+    private static func account(start: Int, end: Int,
+                                epochs: [ActivityEpoch]) -> (shares: [MotionLabel: Double],
+                                                             unknownSeconds: Double,
+                                                             coveredSeconds: Double) {
+        let segments = epochs.enumerated().map { (index, e) in
+            (index: index, epoch: e, s: max(e.startTs, start), e2: min(e.endTs, end))
+        }.sorted { a, b in
+            if a.s != b.s { return a.s < b.s }
+            if a.e2 != b.e2 { return a.e2 < b.e2 }
+            return a.index < b.index
+        }
+
+        var shares: [MotionLabel: Double] = [:]
+        var unknown = 0.0
+        var covered = 0.0
+        var cursor = start
+        for seg in segments {
+            if seg.e2 <= cursor { continue }            // fully claimed by an earlier epoch
+            if seg.s > cursor {
+                unknown += Double(seg.s - cursor)       // uncovered gap -> data-missing
+            }
+            let width = Double(seg.e2 - max(seg.s, cursor))
+            guard width > 0 else { continue }
+            let grid = Double(seg.epoch.durationSeconds)
+            // Clamped to [0, 1] so a malformed epoch (validS > grid width) can never
+            // push shares + unknownShare above 1: the conservation contract holds for
+            // any input.
+            let validFraction = grid > 0 ? min(1.0, Double(seg.epoch.validS) / grid) : 0
+            if seg.epoch.motion != .unknown {
+                shares[seg.epoch.motion, default: 0] += width * validFraction
+            }
+            unknown += width * (1 - validFraction)
+            covered += width
+            cursor = max(cursor, seg.e2)
+        }
+        if cursor < end {
+            unknown += Double(end - cursor)             // uncovered tail -> data-missing
+        }
+        return (shares, unknown, covered)
     }
 
     /// Convenience overload taking explicit start/end.
@@ -149,6 +232,17 @@ public enum ActivityContextJoin {
 
     /// C4 resting-eligibility verdict for a fixed measurement window — NEW view, not wired anywhere.
     ///
+    /// MEASUREMENT-INDEPENDENCE RULE (spec §8 circularity, WS-08-F01/F02): eligibility for a
+    /// physiological comparison consumes COARSE-POLICY epochs only (motion/steps/contact/
+    /// annotations — `ActivityContextPolicy` never reads HR by construction, and `ActivityEpoch`
+    /// carries no HR/HRV/respiration field). The GRANULAR HSMM decoder path IS HR-fused upstream:
+    /// `MotionEncoderOutput.classProbs` feeds windows whose confidence/abstention can shift with
+    /// hrRel (ActivityContextModel HR channels), so a granular head can change epoch abstention
+    /// and flip resting eligibility for the same motion. Granular-decoder epochs MUST NOT gate
+    /// resting pools without an hr-free variant; only the coarse-policy epoch path may feed this
+    /// verdict. Counterfactual invariance is pinned by
+    /// `testJoinAndEligibilityInvariantToNonConsumedEpochFields`.
+    ///
     /// Eligible when, over `[window.start, window.end)`:
     ///   • >= 90% supported stationary time (stationary seconds / window duration),
     ///   • >= 90% qualified temporal coverage (valid epoch seconds / window duration),
@@ -156,6 +250,11 @@ public enum ActivityContextJoin {
     ///     the window (a trailing stationary run with no gaps, no supported activity),
     ///   • on-wrist (at least one on_wrist epoch, none off_wrist),
     ///   • awake (no asleep epoch, at least one awake epoch).
+    ///
+    /// Full-duration accounting: `stationaryFraction` and `coverageFraction` are measured against
+    /// the whole `window` duration (never the overlapping-epoch weight), and unobserved seconds
+    /// inside a partially-observed epoch are NOT valid coverage (WS-10-F02: the valid fraction is
+    /// `validS / durationSeconds`, not `validS / observedS`).
     ///
     /// With default v1 inputs (wear unknown, sleep unknown) the verdict is `not eligible` with an
     /// explicit reason — the policy never pretends quiet IMU proves on-wrist or awake.
@@ -177,7 +276,11 @@ public enum ActivityContextJoin {
         var stationaryWeight = 0.0
         for e in overlapping {
             let w = Double(min(e.endTs, end) - max(e.startTs, start))
-            let validFraction = 1.0 - e.unknownFraction
+            // WS-10-F02: unobserved seconds inside the epoch (duration - observed) are NOT
+            // valid coverage — the valid fraction is validS / durationSeconds, not
+            // validS / observedS. Clamped to [0, 1] against malformed input.
+            let validFraction = e.durationSeconds > 0
+                ? min(1.0, Double(e.validS) / Double(e.durationSeconds)) : 0
             validWeight += w * validFraction
             if e.motion == .stationary { stationaryWeight += w * validFraction }
         }

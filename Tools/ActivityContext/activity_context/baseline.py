@@ -28,7 +28,12 @@ from .preprocess import Window, TARGET_HZ
 MOTION_LABELS: tuple = ("stationary", "walking", "running", "other_movement", "unknown")
 
 # Feature / rule constants (ImuFeatureExtractor.swift parity where available).
-CADENCE_BAND_HZ = (1.2, 3.5)          # ImuFeatureExtractor.cadenceBand
+# imu-feat-2: the FEATURE-level band is 0.8-3.5 Hz. This only makes the cadence FEATURE honest for
+# slow gait (~48-72 steps/min); it does NOT change the HART 4-s window input contract, and slow-gait
+# RECOGNITION still needs longer windows (~8 s; WS-04-F03). The baseline classifier below keeps its
+# conservative strength gate, so weak/ambiguous rhythms still fall back to unknown/other_movement.
+# Effective band is quantised to rate/lag: 0.789-3.333 Hz @30 Hz, 0.8-3.448 Hz @100 Hz (WS-04-F05).
+CADENCE_BAND_HZ = (0.8, 3.5)          # ImuFeatureExtractor.cadenceBand
 MIN_CADENCE_STRENGTH = 0.20           # ImuFeatureExtractor.minCadenceStrength
 # Conservative rule thresholds (see module docstring; tuned on golden fixtures
 # where the synthetic gait reads accel-energy ~0.20 g / gyro ~33 deg/s and the
@@ -41,10 +46,17 @@ RUNNING_CADENCE_MIN_HZ = 2.2          # >= 132 steps/min -> running (conservativ
 
 @dataclass
 class ImuFeatures:
-    """Mirror of ImuActivityFeatures (ImuFeatureExtractor.swift)."""
+    """Features computed here (30 Hz) in the imu-feat-2 meaning.
+
+    ``gyro_mean_dps`` is the MEAN gyro magnitude, deliberately not the
+    ``gyro_rms_dps`` contract: it feeds only the stationary gate below (a
+    threshold tuned on the mean), while features.py publishes the RMS of the
+    same signal as the versioned feature. ``jerk_rms_gps`` is per-second
+    (RMS of the first difference x sample rate, g/s), the imu-feat-2 contract.
+    """
     accel_energy_g: float
-    gyro_energy_dps: float
-    jerk_rms: float
+    gyro_mean_dps: float
+    jerk_rms_gps: float
     cadence_hz: Optional[float]
     cadence_strength: float
     sample_count: int
@@ -54,7 +66,10 @@ def extract_features(window: Window) -> ImuFeatures:
     """ImuFeatureExtractor-style features over one 120-sample window.
 
     cadence comes from the normalized autocorrelation peak of the accel-
-    magnitude AC in the gait band (1.2-3.5 Hz); strength < 0.20 -> None.
+    magnitude AC in the gait band (imu-feat-2: 0.8-3.5 Hz); strength < 0.20 -> None.
+    A 4-s window resolves ~0.9 Hz at usable strength; confident detection of
+    slower rhythms still needs ~8-s windows (see docs/activity-physiology-audit
+    CONTRACTS.md).
     """
     s = window.data
     n = s.shape[0]
@@ -62,11 +77,13 @@ def extract_features(window: Window) -> ImuFeatures:
         return ImuFeatures(0.0, 0.0, 0.0, None, 0.0, n)
     amag = np.linalg.norm(s[:, 0:3], axis=1)
     gmag = np.linalg.norm(s[:, 3:6], axis=1)
-    gyro_energy = float(gmag.mean())
+    gyro_mean = float(gmag.mean())
     mean = float(amag.mean())
     ac = amag - mean
     accel_energy = float(np.sqrt(np.mean(ac * ac)))
-    jerk = float(np.sqrt(np.mean(np.diff(amag) ** 2))) if n > 1 else 0.0
+    # imu-feat-2 jerk: RMS of the per-sample first difference x sample rate -> per-second (g/s),
+    # so 30 Hz and 100 Hz paths agree (residual <=5% clean, <=10% with sensor noise; WS-04-F02).
+    jerk_gps = (float(np.sqrt(np.mean(np.diff(amag) ** 2))) * TARGET_HZ) if n > 1 else 0.0
 
     ac0 = float(np.dot(ac, ac))
     best_f: Optional[float] = None
@@ -80,7 +97,7 @@ def extract_features(window: Window) -> ImuFeatures:
                 best_s = strength
                 best_f = TARGET_HZ / lag
     cadence = best_f if best_s >= MIN_CADENCE_STRENGTH else None
-    return ImuFeatures(accel_energy, gyro_energy, jerk, cadence, max(0.0, best_s), n)
+    return ImuFeatures(accel_energy, gyro_mean, jerk_gps, cadence, max(0.0, best_s), n)
 
 
 @dataclass
@@ -110,7 +127,7 @@ def classify_window(window: Window) -> BaselineResult:
         return BaselineResult("unknown", _unknown_probs(), f)
 
     if (f.accel_energy_g <= STATIONARY_ACCEL_MAX_G
-            and f.gyro_energy_dps <= STATIONARY_GYRO_MAX_DPS):
+            and f.gyro_mean_dps <= STATIONARY_GYRO_MAX_DPS):
         label = "stationary"
     elif f.cadence_hz is not None and f.cadence_strength >= RHYTHMIC_STRENGTH:
         label = "running" if f.cadence_hz >= RUNNING_CADENCE_MIN_HZ else "walking"

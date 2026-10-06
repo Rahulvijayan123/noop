@@ -41,7 +41,8 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// Unix seconds, exclusive.
     public var end: Int
     public var activityClass: ActivityClass
-    /// Belief that the wearer was in this class's family over the interval (see `ActivityClassification`).
+    /// Belief that the wearer was in this class — the SUBCLASS posterior mass (act-class-2),
+    /// not the family mass; `ActivityClassification.familyConfidence` carries the family.
     public var confidence: Double
     public var runnerUp: ActivityClass?
     public var runnerUpConfidence: Double

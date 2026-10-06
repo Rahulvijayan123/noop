@@ -14,7 +14,7 @@ import Foundation
 // through a context prior. Heads are marginals of those two filtered posteriors; none is ever a raw
 // per-window classifier output.
 //
-// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.2`). They were set from this strap's own
+// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.5`). They were set from this strap's own
 // distributions where those exist (dynamic-acceleration percentiles for still / walking / running
 // seconds) and from physiological plausibility elsewhere. They are versioned, centralized, and meant
 // to be replaced by fitted values once labelled data exists; tests pin behaviour, not the numbers.
@@ -330,9 +330,9 @@ enum ActivityContextModel {
     // MARK: Channel weights and "no information" constants
 
     static let wMotion = 1.0, wGait = 1.0, wOrient = 0.7, wEncoder = 0.8, wArm = 0.4, wHR = 0.35, wGate = 1.0
-    static let wShift = 1.0, wHRTrend = 0.6
+    static let wShift = 1.0, wHRTrend = 0.6, wTransition = 0.6
     static let uMotion = 0.20, uGait = 0.35, uOrient = 0.35, uEncoder = 0.30, uArm = 0.25, uHR = 0.55, uGate = 0.30
-    static let uShift = 0.30
+    static let uShift = 0.30, uTransition = 0.30
 
     /// Fewer evidence channels than this and the unknown mode earns a bonus per missing channel.
     static let minChannels = 3
@@ -381,10 +381,12 @@ enum ActivityContextModel {
     }
 
     /// Whether a logged workout of `kind` explains `mode`. A logged run says nothing for cycling, and a
-    /// logged ride says nothing for stairs; an unrecognised sport keeps the permissive behaviour.
+    /// logged ride says nothing for stairs. A workout whose sport is unrecognised is evidence of generic
+    /// exercise only: the wearer was demonstrably exercising, but the sport is unknown, so it never names
+    /// cycling, stairs or a vehicle (WS-06-F03). The kind-specific mappings are unchanged.
     static func workoutCovers(_ mode: BodyMode, kind: WorkoutKind) -> Bool {
         switch kind {
-        case .unspecified: return true
+        case .unspecified: return mode == .otherExercise
         case .running: return mode == .otherExercise
         case .walking: return mode == .stairs
         case .cycling: return mode == .cycling
@@ -547,6 +549,42 @@ enum ActivityContextModel {
                 if let age = f.encoderAgeS { w *= age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5) }
                 add(v, unknownValue: uEncoder, weight: w)
             }
+        }
+
+        // 4b. Learned raw-IMU transition expert (optional; see `Tools/ActivityContext`). A small
+        // classifier over 4-s windows says whether a posture change happened in this window and which
+        // of the four it was. It is the one channel that names the transition modes directly; channel
+        // 3b stays as the no-model fallback. Absent or abstained evidence skips the channel entirely,
+        // so a day without the expert decodes exactly as before it existed.
+        //
+        // Likelihood magnitudes follow the encoder channel's compat conventions: a 0.05 floor (the
+        // same floor channel 3b gives its transition modes). The four transition modes take their own
+        // class probability, which already excludes P(none) (the five sum to one), so a confident "none"
+        // leaves them at the floor and the expert cannot invent a transition it did not see; scaling by
+        // (1 − P(none)) again would make a 50/50 window count as evidence against. "None" means "no posture change", which
+        // walking, running and every other non-transition mode satisfy as much as sitting does, so all of
+        // them take the same P(none) support: the channel only moves mass between "a transition" and "not a
+        // transition", never between stationary and moving. Class probabilities are read in the fixed
+        // canonical order, and `add` accumulates modes in a fixed order, so no sum depends on dictionary
+        // iteration order. The unknown mode takes the mean of the known values, so the channel never
+        // moves mass into or out of "unknown" (it says nothing about whether the body state is knowable).
+        if let trans = f.transition, !trans.abstained {
+            let noneP = min(1, max(0, trans.none))
+            var v = [Double](repeating: 1, count: n)
+            var sum = 0.0, count = 0
+            for m in 0..<n where m != unknownIdx {
+                switch BodyMode(rawValue: m)! {
+                case .sitToStand: v[m] = 0.05 + 0.95 * min(1, max(0, trans.sitToStand))
+                case .standToSit: v[m] = 0.05 + 0.95 * min(1, max(0, trans.standToSit))
+                case .lyingDown: v[m] = 0.05 + 0.95 * min(1, max(0, trans.lieDown))
+                case .gettingUp: v[m] = 0.05 + 0.95 * min(1, max(0, trans.getUp))
+                default: v[m] = 0.05 + 0.95 * noneP
+                }
+                sum += v[m]; count += 1
+            }
+            var w = wTransition
+            if let age = f.transitionAgeS { w *= age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5) }
+            add(v, unknownValue: count > 0 ? sum / Double(count) : 1, weight: w)
         }
 
         // 5. Instantaneous arm pattern → body mode compat (couples desk-like motion to seated, etc.).

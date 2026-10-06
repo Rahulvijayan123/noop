@@ -36,7 +36,9 @@ import Foundation
 public enum ActivityClassVersions {
     /// 2: `sleeping` and an in-bed `lyingDown` take their mass from the staged night and stillness, not
     /// from the posture head's recumbent lean.
-    public static let taxonomy = "act-class-2"
+    /// 3: `ActivityClassification.confidence` is the chosen class's own (subclass) posterior mass, with the
+    /// family mass in `familyConfidence` (I9), so stored class confidences are derived again.
+    public static let taxonomy = "act-class-3"
     /// Version of how runs become persisted intervals (merge / fold / split rules and the per-interval
     /// HR, HRV, respiration and cadence statistics). Bump when any of those rules change so stored days
     /// are derived again.
@@ -205,10 +207,16 @@ extension ActivityClass {
 /// One canonical answer with its uncertainty.
 public struct ActivityClassification: Equatable, Sendable {
     public var activityClass: ActivityClass
-    /// Belief that the wearer is in this class's *family* (the body state, not the wording): seated for
-    /// `sitting` and `sitting_desk` alike, the walking family for `walking` and `brisk_walking`.
+    /// Belief in the *specific* published class — the subclass posterior mass, not the family's
+    /// (I9 / WS-06-F01 / A05). For `brisk_walking` this is the `brisk_walking` head mass; for `walking`
+    /// it is `walking` plus the folded `stairs` mass (stairs are reported as walking). The walking-family
+    /// mass (walking + brisk walking + stairs) is published separately in `familyConfidence`.
     /// 0 for `unknown` (no claim). Range 0…1.
     public var confidence: Double
+    /// Belief in the class's *family* (the body state behind the wording): the walking family for
+    /// `walking` and `brisk_walking` alike, the seated family for `sitting`/`sitting_desk`, and equal to
+    /// `confidence` for classes whose family is the class itself. Range 0…1.
+    public var familyConfidence: Double
     /// The best alternative reading and its mass; nil when the evidence offers nothing else.
     public var runnerUp: ActivityClass?
     public var runnerUpConfidence: Double
@@ -221,11 +229,13 @@ public struct ActivityClassification: Equatable, Sendable {
     public var locomotion: LocomotionClass?
     public var armBehavior: ArmBehaviorClass?
 
-    public init(activityClass: ActivityClass, confidence: Double, runnerUp: ActivityClass? = nil,
+    public init(activityClass: ActivityClass, confidence: Double, familyConfidence: Double = 0,
+                runnerUp: ActivityClass? = nil,
                 runnerUpConfidence: Double = 0, evidenceQuality: Double = 0,
                 posture: PostureClass? = nil, locomotion: LocomotionClass? = nil,
                 armBehavior: ArmBehaviorClass? = nil) {
         self.activityClass = activityClass; self.confidence = confidence
+        self.familyConfidence = familyConfidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
         self.evidenceQuality = evidenceQuality
         self.posture = posture; self.locomotion = locomotion; self.armBehavior = armBehavior
@@ -281,7 +291,8 @@ public enum ActivityClassifier {
                                 evidenceQuality: Double) -> ActivityClassification {
         let quality = min(1, max(0, evidenceQuality))
         if wear == .offWrist {
-            return ActivityClassification(activityClass: .offWrist, confidence: 1, evidenceQuality: quality)
+            return ActivityClassification(activityClass: .offWrist, confidence: 1, familyConfidence: 1,
+                                         evidenceQuality: quality)
         }
 
         let label = ActivityDisplay.derive(posture: posture, locomotion: locomotion, arm: armBehavior,
@@ -314,23 +325,30 @@ public enum ActivityClassifier {
         if sleep == .asleep { candidates[.sleeping] = lying }
         else { candidates[.lyingDown] = lying }
 
+        // `confidence` is the published class's own (subclass) mass; `family` is the family mass the
+        // label is chosen on (I9 / WS-06-F01 / A05). They differ only for the walking speed subclasses.
         let confidence: Double
+        let family: Double
         var sameFamily: Set<ActivityClass> = [cls]
         switch cls {
-        case .offWrist: confidence = 1
-        case .unknown: confidence = 0
-        case .running: confidence = locomotion[.running]
-        case .walking, .briskWalking: confidence = walkFamily
-        case .cycling: confidence = locomotion[.cycling]
-        case .vigorousActivity: confidence = other
-        case .lightActivity: confidence = other + stationary * transition
-        case .sleeping: confidence = lying; sameFamily = [.sleeping, .lyingDown]
-        case .lyingDown: confidence = lying; sameFamily = [.sleeping, .lyingDown]
+        case .offWrist: confidence = 1; family = 1
+        case .unknown: confidence = 0; family = 0
+        case .running: confidence = locomotion[.running]; family = confidence
+        case .walking, .briskWalking:
+            confidence = cls == .briskWalking ? locomotion[.briskWalking] : locomotion[.walking] + locomotion[.stairs]
+            family = walkFamily
+        case .cycling: confidence = locomotion[.cycling]; family = confidence
+        case .vigorousActivity: confidence = other; family = confidence
+        case .lightActivity: confidence = other + stationary * transition; family = confidence
+        case .sleeping: confidence = lying; family = confidence; sameFamily = [.sleeping, .lyingDown]
+        case .lyingDown: confidence = lying; family = confidence; sameFamily = [.sleeping, .lyingDown]
         case .sitting, .sittingDesk:
-            confidence = stationary * seated + locomotion[.vehicleMotion]; sameFamily = [.sitting, .sittingDesk]
-        case .standing: confidence = stationary * upright
-        case .fidgeting: confidence = stationary * (seated + upright)
-        case .stationary: confidence = stationary * (1 - recumbent)
+            confidence = stationary * seated + locomotion[.vehicleMotion]
+            family = confidence
+            sameFamily = [.sitting, .sittingDesk]
+        case .standing: confidence = stationary * upright; family = confidence
+        case .fidgeting: confidence = stationary * (seated + upright); family = confidence
+        case .stationary: confidence = stationary * (1 - recumbent); family = confidence
         }
 
         var runnerUp: ActivityClass?
@@ -343,6 +361,7 @@ public enum ActivityClassifier {
 
         return ActivityClassification(
             activityClass: cls, confidence: min(1, max(0, confidence)),
+            familyConfidence: min(1, max(0, family)),
             runnerUp: runnerUp, runnerUpConfidence: min(1, runnerUpMass), evidenceQuality: quality,
             posture: posture.top(excluding: .unknown)?.0,
             locomotion: locomotion.top(excluding: .unknown)?.0,

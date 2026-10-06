@@ -167,7 +167,8 @@ struct TestCentreView: View {
                 domainModesCard.staggeredAppear(index: 0)
                 diagnosticToolsCard.staggeredAppear(index: 1)
                 if is5MG { rawDataCollectorCard.staggeredAppear(index: 2) }
-                if is5MG { fiveMGProtocolDiagnosticsCard.staggeredAppear(index: 3) }
+                if is5MG { activityCalibrationCard.staggeredAppear(index: 3) }
+                if is5MG { fiveMGProtocolDiagnosticsCard.staggeredAppear(index: 4) }
                 if ouraPaired { ouraCard.staggeredAppear(index: 2) }
                 exportCard.staggeredAppear(index: 2)
                 experimentalAlgorithmsCard.staggeredAppear(index: 3)
@@ -240,6 +241,28 @@ struct TestCentreView: View {
                 }
                 .buttonStyle(NoopButtonStyle(.primary, fullWidth: true))
                 Text(live.connected ? "WHOOP 5/MG connected." : "Connect your WHOOP 5/MG to start a raw-data session.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(live.connected ? StrandPalette.textSecondary : StrandPalette.statusWarning)
+            }
+        }
+    }
+
+    @ViewBuilder private var activityCalibrationCard: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                Text("ACTIVITY CALIBRATION")
+                    .font(StrandFont.overline)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text("Guided labeled movement sessions for activity research.")
+                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                NavigationLink {
+                    ActivityCalibrationView()
+                } label: {
+                    Label("Open activity calibration", systemImage: "figure.mind.and.body")
+                }
+                .buttonStyle(NoopButtonStyle(.primary, fullWidth: true))
+                Text(live.connected ? "WHOOP 5/MG connected." : "Connect your WHOOP 5/MG to run a calibration session.")
                     .font(StrandFont.caption)
                     .foregroundStyle(live.connected ? StrandPalette.textSecondary : StrandPalette.statusWarning)
             }

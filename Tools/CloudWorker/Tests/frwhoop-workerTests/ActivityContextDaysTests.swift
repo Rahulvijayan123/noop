@@ -55,7 +55,7 @@ final class ActivityContextDaysTests: XCTestCase {
         XCTAssertNil(f.cadenceHz)
         XCTAssertNil(f.orientationChangeDeg)
 
-        for required in ["accel_rms_g", "gyro_rms_dps", "jerk_rms", "cadence_strength"] {
+        for required in ["accel_rms_g", "gyro_rms_dps", "jerk_rms_gps", "cadence_strength"] {
             var partial = DaySim.walkingFeatures
             partial[required] = nil
             XCTAssertNil(ActivityContextDays.imuFeatures(window(features: partial)),
@@ -134,12 +134,14 @@ final class ActivityContextDaysTests: XCTestCase {
         let input = ActivityContextDays.trackInput(
             windows: sim.windows, streams: sim.streams,
             sleep: [(start: dayStart + 100, end: dayStart + 200)],
-            exercise: [(start: dayStart + 300, end: dayStart + 400)],
+            exercise: [(start: dayStart + 300, end: dayStart + 400, sport: "cycling")],
             dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
         XCTAssertEqual(input.dayStart, dayStart)
         XCTAssertEqual(input.dayEnd, dayEnd)
         XCTAssertEqual(input.sleep.map { [$0.start, $0.end] }, [[dayStart + 100, dayStart + 200]])
         XCTAssertEqual(input.workouts.map { [$0.start, $0.end] }, [[dayStart + 300, dayStart + 400]])
+        XCTAssertEqual(input.workouts.map(\.sport), ["cycling"],
+                       "the phone's sport name must survive into the decoder input (audit WS-11-F08)")
         XCTAssertEqual(input.hr.count, 30)
         XCTAssertEqual(input.gravity.count, 30)
         XCTAssertEqual(input.steps.count, 30)
@@ -148,6 +150,30 @@ final class ActivityContextDaysTests: XCTestCase {
         XCTAssertEqual(input.encoderVersion, "hart-activity-1")
         XCTAssertFalse(input.sleepKnownOutsideSessions,
                        "time outside a logged night is unknown on the server, never presumed awake")
+    }
+
+    /// WS-11-F08: the worker must pass the phone's sport name through to the decoder, and stay
+    /// honestly "unspecified" (never a fabricated value) when the row carries none.
+    func testWorkoutSportIsPassedThroughOrHonestlyUnspecified() throws {
+        var sim = DaySim(start: dayStart + 3_600)
+        sim.still(120)
+
+        let withSport = ActivityContextDays.trackInput(
+            windows: [], streams: sim.streams, sleep: [],
+            exercise: [(start: dayStart + 10, end: dayStart + 90, sport: "Cycling")],
+            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "streams-activity-1")
+        XCTAssertEqual(withSport.workouts.map(\.sport), ["Cycling"],
+                       "the row's sport must not be discarded on its way to the decoder")
+        XCTAssertEqual(WorkoutKind(sport: try XCTUnwrap(withSport.workouts.first).sport), .cycling,
+                       "a cycling workout must read as cycling to the shared decoder, as it does on the phone")
+
+        let noSport = ActivityContextDays.trackInput(
+            windows: [], streams: sim.streams, sleep: [],
+            exercise: [(start: dayStart + 10, end: dayStart + 90, sport: "")],
+            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "streams-activity-1")
+        XCTAssertEqual(noSport.workouts.map(\.sport), [""],
+                       "a row with no sport stays empty, not a guessed name")
+        XCTAssertEqual(WorkoutKind(sport: try XCTUnwrap(noSport.workouts.first).sport), .unspecified)
     }
 
     func testWristEventsBecomeOffWristSpansClippedToTheDaysReach() {

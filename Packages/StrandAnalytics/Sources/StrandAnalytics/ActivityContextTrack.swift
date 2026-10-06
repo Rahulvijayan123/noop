@@ -38,6 +38,10 @@ public struct ActivityContextTrackInput {
     public var encoderVersion: String
     /// Optional per-window features computed from the 30 Hz IMU branch (see `Tools/ActivityContext`).
     public var imuWindows: [ImuWindowFeatures]
+    /// Optional learned raw-IMU transition-expert output (see `Tools/ActivityContext`), one entry per
+    /// 4-s window, model-agnostic. Attached by end second exactly like `encoderWindows`; absent when
+    /// the expert did not run for the day (the decoder's no-model fallback then stays in charge).
+    public var transitionWindows: [ActivityTransitionWindow]
 
     public init(dayStart: Int, dayEnd: Int,
                 hr: [HRSample] = [], gravity: [GravitySample] = [], steps: [StepSample] = [],
@@ -45,13 +49,14 @@ public struct ActivityContextTrackInput {
                 workouts: [DayStateWorkout] = [], offWrist: [DayStateSpan] = [],
                 encoderWindows: [ActivityWindowPrediction] = [],
                 encoderId: String = "hart", encoderVersion: String = "unknown",
-                imuWindows: [ImuWindowFeatures] = []) {
+                imuWindows: [ImuWindowFeatures] = [],
+                transitionWindows: [ActivityTransitionWindow] = []) {
         self.dayStart = dayStart; self.dayEnd = dayEnd
         self.hr = hr; self.gravity = gravity; self.steps = steps
         self.sleep = sleep; self.inBed = inBed; self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
         self.workouts = workouts; self.offWrist = offWrist
         self.encoderWindows = encoderWindows; self.encoderId = encoderId; self.encoderVersion = encoderVersion
-        self.imuWindows = imuWindows
+        self.imuWindows = imuWindows; self.transitionWindows = transitionWindows
     }
 }
 
@@ -168,6 +173,23 @@ public enum ActivityContextTrackBuilder {
         var imuAt: [Int: ImuWindowFeatures] = [:]
         for f in input.imuWindows where f.endTs >= lo && f.endTs < hi { imuAt[f.endTs] = f }
 
+        // Learned transition-expert windows, keyed by end second exactly like the encoder windows.
+        var transitionAt: [Int: TransitionEncoderEvidence] = [:]
+        for w in input.transitionWindows where w.endTs >= lo && w.endTs < hi {
+            func classProb(_ index: Int) -> Double {
+                guard index < w.probabilities.count, w.probabilities[index].isFinite else { return 0 }
+                return min(1, max(0, w.probabilities[index]))
+            }
+            // Canonical class order: none, sit_to_stand, stand_to_sit, lie_down, get_up.
+            let none = classProb(0), sitToStand = classProb(1), standToSit = classProb(2)
+            let lieDown = classProb(3), getUp = classProb(4)
+            transitionAt[w.endTs] = TransitionEncoderEvidence(
+                none: none, sitToStand: sitToStand, standToSit: standToSit, lieDown: lieDown, getUp: getUp,
+                confidence: max(none, max(sitToStand, max(standToSit, max(lieDown, getUp)))),
+                modelVersion: w.modelVersion, preprocessingVersion: w.preprocessingVersion,
+                abstained: w.abstained)
+        }
+
         let sleepSpans = input.sleep.sorted { $0.start < $1.start }
         let bedSpans = input.inBed.sorted { $0.start < $1.start }
         let offSpans = input.offWrist.sorted { $0.start < $1.start }
@@ -185,7 +207,7 @@ public enum ActivityContextTrackBuilder {
         for ts in lo..<hi {
             let isOff = inside(offSpans, &offCursor, ts, start: \.start, end: \.end)
             let hasData = hrAt[ts] != nil || gravAt[ts] != nil || classAt[ts] != nil || tickAt[ts] != nil
-                || encoderAt[ts] != nil || imuAt[ts] != nil
+                || encoderAt[ts] != nil || imuAt[ts] != nil || transitionAt[ts] != nil
             guard isOff || hasData else { continue }
 
             var o = ActivityObservation(ts: ts)
@@ -204,6 +226,7 @@ public enum ActivityContextTrackBuilder {
             o.strapClass = classAt[ts]
             o.encoder = encoderAt[ts]
             o.imu = imuAt[ts]
+            o.transition = transitionAt[ts]
             let inBedSpan = inside(bedSpans, &bedCursor, ts, start: \.start, end: \.end)
             if inside(sleepSpans, &sleepCursor, ts, start: \.start, end: \.end) {
                 o.sleep = .asleep
@@ -573,8 +596,10 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
     public var observedSeconds: Int
     /// Whether time outside logged sleep was treated as awake (a finished day) or unknown (a live one).
     public var sleepKnownOutsideSessions: Bool
-    /// Hash of the sleep, in-bed, workout and off-wrist spans inside the covered range. Editing a night, adding a
-    /// workout or a late wrist-off event changes it, and the day is then decoded again from the start.
+    /// Hash of the sleep, in-bed, workout and off-wrist spans inside the covered range, the workout sport kinds,
+    /// and a per-stream digest of the covered samples (including late-arriving encoder windows). Editing a
+    /// night, adding a workout, a late wrist-off event, a sport rename, or a corrected value changes it, and
+    /// the day is then decoded again from the start.
     public var contextFingerprint: String?
     public var runs: [ActivityContextRun]
     public var events: [ActivityTransitionEvent]
@@ -634,8 +659,12 @@ public enum ActivityContextDayUpdate: Equatable, Sendable {
 
 public enum ActivityContextDayBuilder {
 
-    /// FNV-1a over the sleep, workout and off-wrist spans clipped to `[dayStart, through)`. Spans are clipped
-    /// so a stretch still open at `through` hashes the same once the day has grown past it.
+    /// FNV-1a over the sleep, workout and off-wrist spans clipped to `[dayStart, through)`, the workout
+    /// sport kinds the decoder sees, and a per-stream digest of the covered span's samples. Spans and
+    /// samples at or past `through` are excluded, so a stretch still open at `through` (or data the day
+    /// has not read yet) hashes the same once the day has grown past it — but a sport rename with
+    /// identical bounds, a corrected sample value, or a re-served encoder window now changes the hash,
+    /// and the day is decoded again instead of reusing a stale document (spec §4 A07, WS-10-F04).
     static func fingerprint(_ input: ActivityContextTrackInput, through: Int?) -> String {
         let hi = min(through ?? input.dayEnd, input.dayEnd)
         func clipped(_ spans: [(Int, Int)]) -> [String] {
@@ -644,37 +673,118 @@ public enum ActivityContextDayBuilder {
                 return end > lo ? "\(lo)-\(end)" : nil
             }.sorted()
         }
-        let parts: [(String, [(Int, Int)])] = [
-            ("s", input.sleep.map { ($0.start, $0.end) }),
-            ("b", input.inBed.map { ($0.start, $0.end) }),
-            ("w", input.workouts.map { ($0.start, $0.end) }),
-            ("o", input.offWrist.map { ($0.start, $0.end) }),
+        // Workout spans carry the sport KIND the decoder actually sees. `WorkoutKind` folds free-text
+        // spellings ("Run" and "Running" are the same evidence), so a rename that does not change the
+        // decoded behaviour hashes the same; a rename to a different kind does not.
+        let workouts = input.workouts.compactMap { w -> String? in
+            let lo = max(w.start, input.dayStart), end = min(w.end, hi)
+            guard end > lo else { return nil }
+            return "\(lo)-\(end):\(WorkoutKind(sport: w.sport).rawValue)"
+        }.sorted()
+        let parts: [(String, [String])] = [
+            ("s", clipped(input.sleep.map { ($0.start, $0.end) })),
+            ("b", clipped(input.inBed.map { ($0.start, $0.end) })),
+            ("w", workouts),
+            ("o", clipped(input.offWrist.map { ($0.start, $0.end) })),
         ]
-        var text = parts.map { "\($0.0):" + clipped($0.1).joined(separator: ",") }.joined(separator: "|")
-        // Encoder windows reach the phone minutes after the strap's own streams, usually for seconds already
-        // decoded. They change the evidence of those seconds, so they are part of the context: a window that
-        // arrives late re-decodes the day instead of being silently skipped. Only windows the decoder would
-        // already have used (ending before `through`) count, and a day without any hashes as before.
-        let used = input.encoderWindows.filter { $0.endTs >= input.dayStart && $0.endTs < hi }
-        if !used.isEmpty {
-            var eh: UInt64 = 0xcbf29ce484222325
-            func mix(_ s: String) { for b in s.utf8 { eh = (eh ^ UInt64(b)) &* 0x100000001b3 } }
-            for w in used.sorted(by: { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }) {
-                mix("\(w.startTs)-\(w.endTs)=\(w.label.rawValue)")
-                for key in w.probs.keys.sorted() { mix("\(key):\(Int(((w.probs[key] ?? 0) * 1000).rounded()))") }
-            }
-            let usedFeatures = input.imuWindows.filter { $0.endTs >= input.dayStart && $0.endTs < hi }.count
-            text += "|e:\(input.encoderId)/\(input.encoderVersion)/\(used.count)/\(usedFeatures)/\(String(eh, radix: 16))"
-        }
+        let text = parts.map { "\($0.0):" + $0.1.joined(separator: ",") }.joined(separator: "|")
+
         var h: UInt64 = 0xcbf29ce484222325
         for b in text.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+        // Per-stream content digest over the covered span, folded in the streams' own (time-ordered)
+        // delivery, one pass per stream. The decoder consumes all of these, so an equal-count
+        // replacement — a corrected HR row, edited gravity or steps, a re-served encoder window, new
+        // IMU features — changes the hash even though no span bound and no row count moved.
+        foldString(input.encoderId, into: &h)
+        foldString(input.encoderVersion, into: &h)
+        fold(input.hr, into: &h, lo: input.dayStart, hi: hi, ts: { $0.ts }) { s, h in
+            foldInt(s.bpm, into: &h)
+        }
+        fold(input.gravity, into: &h, lo: input.dayStart, hi: hi, ts: { $0.ts }) { s, h in
+            foldWord(s.x.bitPattern, into: &h)
+            foldWord(s.y.bitPattern, into: &h)
+            foldWord(s.z.bitPattern, into: &h)
+            foldWord(s.dynAccel?.bitPattern ?? .max, into: &h)
+        }
+        fold(input.steps, into: &h, lo: input.dayStart, hi: hi, ts: { $0.ts }) { s, h in
+            foldInt(s.counter, into: &h)
+            foldWord(s.activityClass.map(UInt64.init) ?? .max, into: &h)
+        }
+        // Encoder windows reach the phone from the server minutes after the strap's own streams, and merged
+        // per-UTC-day sets carry no ordering promise, so they are folded in a fixed order: an unchanged set must
+        // never read as changed (that would re-decode the whole day on every pass).
+        let encoderWindows = input.encoderWindows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        let imuWindows = input.imuWindows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        fold(encoderWindows, into: &h, lo: input.dayStart, hi: hi, ts: { $0.endTs }) { w, h in
+            foldInt(w.startTs, into: &h)
+            foldString(w.label.rawValue, into: &h)
+            // `probs` is a dictionary; fold in sorted-key order so the hash never depends on its
+            // internal iteration order.
+            for key in w.probs.keys.sorted() {
+                foldString(key, into: &h)
+                foldWord(w.probs[key]!.bitPattern, into: &h)
+            }
+            foldWord(w.baseline ? 1 : 0, into: &h)
+            foldWord(w.calibrated ? 1 : 0, into: &h)
+        }
+        fold(imuWindows, into: &h, lo: input.dayStart, hi: hi, ts: { $0.endTs }) { f, h in
+            foldWord(f.accelRmsG.bitPattern, into: &h)
+            foldWord(f.gyroRmsDps.bitPattern, into: &h)
+            foldWord(f.jerkRms.bitPattern, into: &h)
+            foldWord(f.cadenceHz?.bitPattern ?? .max, into: &h)
+            foldWord(f.cadenceStrength.bitPattern, into: &h)
+            foldWord(f.orientationChangeDeg?.bitPattern ?? .max, into: &h)
+        }
+        // Learned transition-expert windows arrive with the encoder windows and change the same seconds'
+        // evidence, so they fold the same way. A day without any hashes exactly as before.
+        let transitionWindows = input.transitionWindows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        fold(transitionWindows, into: &h, lo: input.dayStart, hi: hi, ts: { $0.endTs }) { w, h in
+            foldInt(w.startTs, into: &h)
+            for p in w.probabilities { foldWord(p.bitPattern, into: &h) }
+            foldWord(w.abstained ? 1 : 0, into: &h)
+            foldString(w.modelVersion, into: &h)
+            foldString(w.preprocessingVersion, into: &h)
+        }
         return String(h, radix: 16)
     }
 
+    /// FNV-1a fold of one 64-bit word's raw little-endian bytes, so values hash by their stored bits
+    /// (deterministic for the same stored sample) rather than by a decimal spelling.
+    private static func foldWord(_ word: UInt64, into h: inout UInt64) {
+        for i in 0..<8 {
+            let b = UInt8(truncatingIfNeeded: word >> (UInt64(i) * 8))
+            h = (h ^ UInt64(b)) &* 0x100000001b3
+        }
+    }
+
+    /// FNV-1a fold of an integer's raw bits.
+    private static func foldInt(_ value: Int, into h: inout UInt64) {
+        foldWord(UInt64(bitPattern: Int64(value)), into: &h)
+    }
+
+    /// FNV-1a fold of a string's UTF-8 bytes.
+    private static func foldString(_ string: String, into h: inout UInt64) {
+        for b in string.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
+    }
+
+    /// Fold every sample of `stream` whose timestamp is inside `[lo, hi)` (the covered span), starting
+    /// with its timestamp and then whatever `body` folds. Samples at or past `hi` are excluded exactly
+    /// like open spans, so data the day has not read yet never moves the fingerprint.
+    private static func fold<S>(_ stream: [S], into h: inout UInt64, lo: Int, hi: Int,
+                                ts: (S) -> Int, body: (S, inout UInt64) -> Void) {
+        for s in stream {
+            let t = ts(s)
+            guard t >= lo, t < hi else { continue }
+            foldInt(t, into: &h)
+            body(s, &h)
+        }
+    }
+
     /// Bring a day's document up to date with the streams now stored. Continues the stored decoder when the
-    /// stored span is unchanged (same ontology / decoder, same number of observed seconds before the cut),
-    /// and decodes the whole day otherwise: a newer ontology or decoder, a different day, or data that
-    /// arrived late inside the already-covered span (a backfill) would otherwise be silently missed.
+    /// stored span is unchanged (same ontology / decoder, same number of observed seconds before the cut,
+    /// and the same fingerprint over the covered span), and decodes the whole day otherwise: a newer
+    /// ontology or decoder, a different day, or data that arrived late inside the already-covered span (a
+    /// backfill, a sport rename, a corrected value) would otherwise be silently missed.
     ///
     /// `progress` is for the one case that takes noticeable time, decoding a whole day from scratch. When it
     /// is given, the day is decoded in pieces of `chunkObservations` seconds and every finished piece before
@@ -699,10 +809,12 @@ public enum ActivityContextDayBuilder {
         guard cached.publishIntervalS == max(1, config.publishIntervalS) else { return fresh("config_changed") }
         guard let through = cached.dataThrough, let snapshot = cached.snapshot else { return fresh("no_snapshot") }
         guard cached.sleepKnownOutsideSessions == input.sleepKnownOutsideSessions else { return fresh("sleep_context_changed") }
-        guard cached.contextFingerprint == fingerprint(input, through: through) else { return fresh("context_changed") }
-
         let covered = all.prefix { $0.ts < through }.count
         guard covered == cached.observedSeconds else { return fresh("late_data") }
+        // A same-count change — a corrected value, a sport rename, a re-served encoder window — leaves
+        // the observation count alone, so only the fingerprint (which now carries sport kinds and a
+        // per-stream content digest) can see it.
+        guard cached.contextFingerprint == fingerprint(input, through: through) else { return fresh("context_changed") }
         let newer = Array(all.dropFirst(covered))
         guard !newer.isEmpty else {
             var same = cached
@@ -784,6 +896,9 @@ public struct ActivityEpisode: Equatable, Sendable, Identifiable {
     public var uncertainty: Double
     public var sleep: SleepContextState
     public var wear: WearContextState
+    /// Awake inside the night's in-bed window ("Resting in bed"), so a classifier reading the episode can
+    /// name the same body state its label does.
+    public var inBed: Bool = false
 
     public var id: Int { start }
     public var durationSeconds: Int { end - start }
@@ -807,7 +922,8 @@ public enum ActivityContextEpisodes {
             ActivityEpisode(start: $0.start, end: $0.end, label: $0.displayContext ?? unclear,
                             posture: $0.posture, locomotion: $0.locomotion, armBehavior: $0.armBehavior,
                             intensity: $0.intensity, confidence: $0.overallConfidence,
-                            uncertainty: $0.overallUncertainty, sleep: $0.sleep, wear: $0.wear)
+                            uncertainty: $0.overallUncertainty, sleep: $0.sleep, wear: $0.wear,
+                            inBed: $0.inBed)
         }
     }
 }

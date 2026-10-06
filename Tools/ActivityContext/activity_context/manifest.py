@@ -47,6 +47,9 @@ WISDM_LABEL_MAPPING: Dict[str, str] = {
 
 ONTOLOGY_MOTION_LABELS = ("stationary", "walking", "running", "other_movement", "unknown")
 
+# Canonical transition-expert ontology (spec s5): exactly five classes, this order.
+TRANSITION_CLASSES = ("none", "sit_to_stand", "stand_to_sit", "lie_down", "get_up")
+
 DEFAULT_THRESHOLDS = {"max_prob": 0.80, "margin": 0.15}   # spec s8 starting values
 
 
@@ -74,6 +77,34 @@ class Manifest:
     # identifiers). Kept optional so baseline/fixture manifests stay valid.
     split: Optional[Dict[str, Any]] = None
     data: Optional[Dict[str, Any]] = None
+    # Optional calibration artifact (A01). ``calibrated`` is TRUE only when this
+    # section is present and well-formed; nothing else (model_kind, !baseline)
+    # may claim calibrated status. There is no fitted artifact today, so every
+    # shipped manifest decodes as uncalibrated.
+    calibration: Optional[Dict[str, Any]] = None
+
+    @property
+    def calibrated(self) -> bool:
+        """True only for an explicit, versioned calibration artifact.
+
+        Absent or malformed -> False (never inferred from model_kind)."""
+        c = self.calibration
+        if not isinstance(c, dict):
+            return False
+        return (isinstance(c.get("version"), str) and bool(c["version"])
+                and isinstance(c.get("method"), str) and bool(c["method"]))
+
+    @property
+    def calibration_version(self) -> Optional[str]:
+        """Version of the fitted calibration artifact, or None when uncalibrated."""
+        if not self.calibrated:
+            return None
+        return self.calibration["version"]
+
+    # Optional learned transition-expert section (spec: evidence channel). Absent ==
+    # no transition expert == today's behavior everywhere (fail-open). Present but
+    # unloadable == soft-fail with status transition_unavailable, never fatal.
+    transition: Optional[Dict[str, Any]] = None
 
     def class_id_to_label(self, class_id: int) -> str:
         if not 0 <= class_id < len(self.class_map):
@@ -100,6 +131,10 @@ class Manifest:
             out["split"] = self.split
         if self.data is not None:
             out["data"] = self.data
+        if self.calibration is not None:
+            out["calibration"] = self.calibration
+        if self.transition is not None:
+            out["transition"] = self.transition
         return out
 
 
@@ -138,6 +173,8 @@ def validate_manifest(data: Dict[str, Any]) -> Manifest:
         deps=_require(data, "deps", dict),
         split=data.get("split"),
         data=data.get("data"),
+        calibration=data.get("calibration"),
+        transition=None,  # validated below (needs the class checks first)
     )
     if m.model_kind not in ("baseline", "hart"):
         raise ManifestError(f"model_kind must be 'baseline' or 'hart', got {m.model_kind!r}")
@@ -155,6 +192,28 @@ def validate_manifest(data: Dict[str, Any]) -> Manifest:
                 raise ManifestError(f"class_map label {c!r} is not a WISDM letter {sorted(valid)}")
     if len(set(m.class_map)) != len(m.class_map):
         raise ManifestError("class_map contains duplicate labels")
+
+    # Optional transition-expert section: additive, optional, fail-open by design.
+    # Validation only checks the invariants the serve path relies on; a present
+    # but unloadable artifact is a SOFT failure (transition_unavailable), never a
+    # manifest error, so a broken transition artifact can never take the general
+    # activity lane down with it (spec s21).
+    if data.get("transition") is not None:
+        t = data.get("transition")
+        if not isinstance(t, dict):
+            raise ManifestError("transition section must be an object")
+        kind = t.get("model_kind")
+        if kind not in ("xgb", "logistic", "hart"):
+            raise ManifestError(f"transition.model_kind must be xgb|logistic|hart, got {kind!r}")
+        classes = t.get("classes")
+        if tuple(classes or ()) != TRANSITION_CLASSES:
+            raise ManifestError(f"transition.classes must be {TRANSITION_CLASSES}")
+        thr = t.get("thresholds") or {}
+        for k in ("max_prob", "margin"):
+            v = thr.get(k)
+            if v is not None and (not isinstance(v, (int, float)) or not 0.0 < float(v) <= 1.0):
+                raise ManifestError(f"transition.thresholds.{k} must be a probability in (0, 1]")
+        m.transition = t
 
     for k in ("max_prob", "margin"):
         v = m.thresholds.get(k)
@@ -186,6 +245,18 @@ def validate_manifest(data: Dict[str, Any]) -> Manifest:
                 raise ManifestError(f"split.{key} must be a list of subject ints when present")
     if m.data is not None and not isinstance(m.data, dict):
         raise ManifestError("data must be a JSON object when present")
+
+    # A01 calibration provenance: the section is optional; absent or invalid ->
+    # calibrated=False (conservative, uncalibrated). A malformed section never
+    # hard-fails the manifest — calibration is a claim, and an invalid claim
+    # is simply not made. Only `version` + `method` are required to count.
+    if "calibration" in data and not isinstance(data["calibration"], dict):
+        m.calibration = None
+    elif isinstance(m.calibration, dict):
+        c = m.calibration
+        if not (isinstance(c.get("version"), str) and bool(c.get("version"))
+                and isinstance(c.get("method"), str) and bool(c.get("method"))):
+            m.calibration = None
 
     if m.model_kind == "hart":
         ck = m.checkpoint

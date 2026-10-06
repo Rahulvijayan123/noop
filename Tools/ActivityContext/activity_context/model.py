@@ -220,6 +220,9 @@ class Prediction:
     probs: Dict[str, float]        # ontology labels incl. "unknown"
     logits: Optional[np.ndarray]   # raw WISDM-class logits (18,) when HART
     baseline: bool
+    # A01 calibration provenance: true only when the manifest carries a
+    # versioned calibration artifact (never from model_kind/baseline).
+    calibrated: bool = False
 
 
 def abstain(probs: Dict[str, float], max_prob: float, margin: float) -> str:
@@ -278,7 +281,8 @@ class HARTModel:
         if window.shape != (WINDOW_SAMPLES, N_CHANNELS):
             raise ModelError(f"window must be ({WINDOW_SAMPLES}, {N_CHANNELS}), got {window.shape}")
         if not np.isfinite(window).all():
-            return Prediction("unknown", {"unknown": 1.0}, None, baseline=False)
+            # No model output exists for this window: uncalibrated by definition.
+            return Prediction("unknown", {"unknown": 1.0}, None, baseline=False, calibrated=False)
         x = (window - self.mean) / self.scale
         t = torch.from_numpy(np.asarray(x, dtype=np.float32)).unsqueeze(0)
         with torch.no_grad():
@@ -287,8 +291,11 @@ class HARTModel:
         probs = self._ontology_probs(logits)
         th = self.manifest.thresholds
         label = abstain(probs, float(th["max_prob"]), float(th["margin"]))
+        # calibrated comes from the manifest's calibration artifact, never from
+        # model_kind: with no fitted artifact today this is always False.
         return Prediction(label=label, probs=probs,
-                          logits=logits, baseline=False)
+                          logits=logits, baseline=False,
+                          calibrated=self.manifest.calibrated)
 
     def close(self) -> None:
         self.model = None

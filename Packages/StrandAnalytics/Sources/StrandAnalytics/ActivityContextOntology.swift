@@ -18,9 +18,17 @@ public enum ActivityContextVersions {
     public static let ontology = "v2.0"
     /// Temporal decoder structure + parameter tables. 1.3: sleep evidence is the staged sleep (wake inside a
     /// night is awake, not asleep) and the night's in-bed window is carried beside it (`SleepContext.inBed`).
-    public static let decoder = "hsmm-1.3"
+    /// 1.4: `workoutCovers(.unspecified)` covers only generic exercise (WS-06-F03), `resetBelief` clears the
+    /// carried display label + hysteresis candidate (WS-05-F03), and encoder windows are uncalibrated unless
+    /// the serve response says otherwise (A01).
+    /// 1.5: adds the optional learned raw-IMU transition expert evidence channel (`ActivityContextModel`
+    /// channel 4b) and the `transition` field on observations/features/windows.
+    public static let decoder = "hsmm-1.5"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
-    public static let featureSchema = "imu-feat-1"
+    /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
+    /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump
+    /// (decoder snapshot restore + track isCurrent checks compare against this value).
+    public static let featureSchema = "imu-feat-2"
 }
 
 // MARK: - Head vocabularies

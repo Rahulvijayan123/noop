@@ -128,3 +128,6 @@ Config/CloudPushSecrets.xcconfig
 # Supabase CLI local state (linked project ref, branches)
 supabase/.temp/
 supabase/.branches/
+
+# Activity physiology audit scratch (spec-18) — worker findings ledger, never committed
+_audit/

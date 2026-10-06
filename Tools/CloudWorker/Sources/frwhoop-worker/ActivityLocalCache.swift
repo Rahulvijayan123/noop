@@ -57,15 +57,16 @@ struct ActivityLocalCache {
 
     // MARK: Inference
 
-    /// Digest of everything a serve answer depends on: the model and preprocessing versions and the exact
-    /// request body (range, seconds, head and tail context).
+    /// Digest of everything a serve answer depends on: the model, preprocessing and transition-expert
+    /// versions and the exact request body (range, seconds, head and tail context).
     static func inferenceKey(request: ActivityPythonService.RunRequest, modelVersion: String,
-                             preprocessingVersion: String) -> String {
+                             preprocessingVersion: String, transitionVersion: String = "none") -> String {
         var data = Data()
         func add(_ text: String) { data.append(contentsOf: Array(text.utf8)); data.append(0x0A) }
-        add("activity-infer-1")
+        add("activity-infer-2")
         add(modelVersion)
         add(preprocessingVersion)
+        add(transitionVersion)
         add("\(request.startTs)-\(request.endTs)")
         add("h\(request.headB64.count)"); request.headB64.forEach(add)
         add("c\(request.columnsB64.count)"); request.columnsB64.forEach(add)
@@ -137,19 +138,36 @@ struct ActivityLocalCache {
             var probs: [String: Double]
             var baseline: Bool
             var feat: [String: Double]
+            var calibrated: Bool?
+            var transition: Transition?
+        }
+        struct Transition: Codable {
+            var probs: [String: Double]
+            var label: String
+            var confidence: Double
+            var abstained: Bool
+            var ts: Double?
         }
         var modelVersion: String?
         var preprocessingVersion: String?
         var featureSchema: String?
+        var transitionSchema: String?
+        var transitionVersion: String?
         var windows: [Window]
 
         init(_ r: ActivityPythonService.InferResult) {
             modelVersion = r.modelVersion
             preprocessingVersion = r.preprocessingVersion
             featureSchema = r.featureSchema
+            transitionSchema = r.transitionSchema
+            transitionVersion = r.transitionVersion
             windows = r.windows.map {
                 Window(s: $0.start, e: $0.end, label: $0.label, probs: $0.probs, baseline: $0.baseline,
-                       feat: $0.features)
+                       feat: $0.features, calibrated: $0.calibrated,
+                       transition: $0.transition.map {
+                           Transition(probs: $0.probs, label: $0.label, confidence: $0.confidence,
+                                      abstained: $0.abstained, ts: $0.ts)
+                       })
             }
         }
 
@@ -157,11 +175,17 @@ struct ActivityLocalCache {
             ActivityPythonService.InferResult(
                 ok: true, modelVersion: modelVersion, preprocessingVersion: preprocessingVersion,
                 windows: windows.map {
-                    ActivityPythonService.WindowPrediction(start: $0.s, end: $0.e, label: $0.label,
-                                                           probs: $0.probs, baseline: $0.baseline,
-                                                           features: $0.feat)
+                    ActivityPythonService.WindowPrediction(
+                        start: $0.s, end: $0.e, label: $0.label, probs: $0.probs, baseline: $0.baseline,
+                        calibrated: $0.calibrated ?? false, features: $0.feat,
+                        transition: $0.transition.map {
+                            ActivityPythonService.TransitionOutput(probs: $0.probs, label: $0.label,
+                                                                   confidence: $0.confidence,
+                                                                   abstained: $0.abstained, ts: $0.ts)
+                        })
                 },
-                error: nil, errorKind: nil, featureSchema: featureSchema)
+                error: nil, errorKind: nil, featureSchema: featureSchema,
+                transitionSchema: transitionSchema, transitionVersion: transitionVersion)
         }
     }
 }

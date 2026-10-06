@@ -81,7 +81,7 @@ enum CoachActivityContext {
                 .classes.first
             var line = "  \(clock(stretch.start, timeZone))-\(clock(stretch.end, timeZone)) \(stretch.activityClass.displayName), \(duration(stretch.end - stretch.start))"
             if let hr = detail?.hrMean { line += ", heart rate \(Int(hr.rounded())) bpm" }
-            if let hrv = detail?.rmssd { line += ", HRV \(Int(hrv.rounded())) ms" }
+            if let detail, let hrv = hrvPhrase(detail) { line += ", \(hrv)" }
             lines.append(line)
         }
         lines.append(notes)
@@ -100,7 +100,7 @@ enum CoachActivityContext {
         } else {
             parts.append("no heart rate")
         }
-        if let hrv = a.rmssd { parts.append("HRV (RMSSD) \(Int(hrv.rounded())) ms") }
+        if let hrv = hrvPhrase(a) { parts.append(hrv) }
         if let resp = a.respRateBpm { parts.append("respiratory rate \(String(format: "%.1f", resp)) breaths/min") }
         if a.rmssd == nil && a.respRateBpm == nil { parts.append("no HRV or respiratory rate") }
         if a.stepTicks > 0 {
@@ -133,6 +133,19 @@ enum CoachActivityContext {
             }
         }
         return out
+    }
+
+    /// The per-activity RMSSD, honestly defined: the value plus how many windows it came from and the
+    /// dominant recording duration, so a 60-s window is never presented as comparable to a 15-min one
+    /// (spec §9.5). Intervals are cut between `minVariabilityIntervalS` (60 s) and `maxIntervalS` (900 s).
+    private static func hrvPhrase(_ a: ActivityClassAggregate) -> String? {
+        guard let hrv = a.rmssd else { return nil }
+        var phrase = "HRV (RMSSD) \(Int(hrv.rounded())) ms from \(a.rmssdIntervals) window"
+        if a.rmssdIntervals != 1 { phrase += "s" }
+        if let duration = a.rmssdWindowDominantS {
+            phrase += a.rmssdIntervals == 1 ? " (\(duration) s)" : " (dominant \(duration) s)"
+        }
+        return phrase
     }
 
     // MARK: Wording

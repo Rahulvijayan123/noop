@@ -38,6 +38,23 @@ final class ActivityContextJoinTests: XCTestCase {
                                           config: config).epochs
     }
 
+    /// Manual epoch with explicit observed/valid seconds (for overlap / partial-epoch
+    /// fixtures the builder cannot express directly).
+    private func epoch(_ start: Int, _ end: Int, motion: MotionLabel,
+                       observedS: Int? = nil, validS: Int? = nil,
+                       posture: PostureLabel = .unknown,
+                       sleepState: SleepStateLabel = .unknown,
+                       wear: WearState = .unknown,
+                       exertion: ExertionContext = .unknown,
+                       confidence: Double = 0.9) -> ActivityEpoch {
+        let obs = observedS ?? (end - start)
+        let val = validS ?? obs
+        return ActivityEpoch(startTs: start, endTs: end, motion: motion,
+                             posture: posture, exercise: .unknown, sleepState: sleepState,
+                             exertion: exertion, wear: wear,
+                             confidence: confidence, observedS: obs, validS: val)
+    }
+
     // MARK: - context(for:)
 
     func testDurationWeightedSharesWithPartialOverlap() {
@@ -120,6 +137,134 @@ final class ActivityContextJoinTests: XCTestCase {
             postureAnnotations: [PostureAnnotation(start: base, end: base + 30, posture: .sitting)]).epochs
         let s = ActivityContextJoin.context(for: base, end: base + 60, epochs: epochs)
         XCTAssertEqual(s.postureSource, "user_confirmed")
+    }
+
+    // MARK: - Full-support normalization (spec §9 / A02, WS-10-F01/F02, WS-12-F02)
+
+    func testSpec300SecondExampleFullSupportNormalization() {
+        // Spec §9 / A02 example: five fully-valid 30-s stationary epochs covering
+        // [base, base+150) inside a 300-s support. Every support second must count
+        // exactly once: 150 covered-valid seconds -> stationary, 150 uncovered
+        // seconds -> unknown. Old behavior returned stationary 1.0 with NO warning
+        // at exactly 0.5 coverage; the fixed join must read 0.5/0.5 and fire the
+        // low_coverage reason (uncovered time is data-missing, not "no_data").
+        let epochs = build(run(.stationary, from: base, to: base + 150),
+                           runStart: base, runEnd: base + 150)
+        XCTAssertEqual(epochs.count, 5)
+        let s = ActivityContextJoin.context(for: base, end: base + 300, epochs: epochs)
+        XCTAssertEqual(s.share(of: .stationary), 0.5, accuracy: 1e-9)
+        XCTAssertEqual(s.unknownShare, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .stationary) + s.unknownShare, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(ActivityContextJoin.coverage(for: base, end: base + 300, epochs: epochs),
+                       0.5, accuracy: 1e-9,
+                       "coverage is measured against the same full-support duration")
+        XCTAssertTrue(s.qualityReasons.contains("low_coverage"), "\(s.qualityReasons)")
+        XCTAssertFalse(s.qualityReasons.contains("no_data"),
+                       "partial coverage is data-missing, distinguishable from no-data")
+    }
+
+    func testUnobservedSecondsInsideEpochCountUnknown() {
+        // WS-10-F02: one 30-s epoch with only 16 observed/valid stationary seconds;
+        // the remaining 14 grid seconds are unobserved and must count unknown.
+        // unknownFraction alone is (observedS-validS)/observedS == 0 here, so the
+        // join must use the grid width (validS/durationSeconds) instead of crediting
+        // the whole 30-s width to the label.
+        let epochs = build(run(.stationary, from: base, to: base + 16),
+                           runStart: base, runEnd: base + 16)
+        XCTAssertEqual(epochs.count, 1)
+        XCTAssertEqual(epochs[0].observedS, 16)
+        XCTAssertEqual(epochs[0].validS, 16)
+        let s = ActivityContextJoin.context(for: base, end: base + 30, epochs: epochs)
+        XCTAssertEqual(s.share(of: .stationary), 16.0 / 30.0, accuracy: 1e-9)
+        XCTAssertEqual(s.unknownShare, 14.0 / 30.0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .stationary) + s.unknownShare, 1.0, accuracy: 1e-9)
+    }
+
+    func testOverlappingEpochsNeverDoubleCountASecond() {
+        // Spec §9 contract 1: overlapping/conflicting epochs resolve deterministically
+        // and no support second is double-counted. Documented rule: the earliest-start
+        // epoch owns a shared second; ties break by earliest end, then input order.
+        // The coarse-policy grid never overlaps by construction, so this only guards
+        // malformed/merged input (incl. duplicate copies).
+        let a = epoch(base, base + 60, motion: .stationary, observedS: 60, validS: 60)
+        let b = epoch(base + 30, base + 90, motion: .walking, observedS: 60, validS: 60)
+        let s = ActivityContextJoin.context(for: base, end: base + 90, epochs: [b, a])
+        XCTAssertEqual(s.share(of: .stationary), 60.0 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .walking), 30.0 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s.unknownShare, 0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .stationary) + s.share(of: .walking) + s.unknownShare,
+                       1.0, accuracy: 1e-9)
+        XCTAssertEqual(ActivityContextJoin.coverage(for: base, end: base + 90, epochs: [b, a]),
+                       1.0, accuracy: 1e-9)
+
+        // A third epoch fully inside an already-claimed span is skipped: no second is
+        // counted twice, and the result is identical regardless of input order.
+        let c = epoch(base + 40, base + 50, motion: .running, observedS: 10, validS: 10)
+        let s2 = ActivityContextJoin.context(for: base, end: base + 90, epochs: [c, a, b])
+        XCTAssertEqual(s2.share(of: .running), 0, accuracy: 1e-9)
+        XCTAssertEqual(s2.share(of: .stationary), 60.0 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s2.share(of: .walking), 30.0 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s2, ActivityContextJoin.context(for: base, end: base + 90, epochs: [a, b, c]))
+
+        // Two identical copies of one epoch must not double-count.
+        let dup = epoch(base + 120, base + 150, motion: .stationary, observedS: 30, validS: 30)
+        let s3 = ActivityContextJoin.context(for: base + 120, end: base + 150, epochs: [dup, dup])
+        XCTAssertEqual(s3.share(of: .stationary), 1.0, accuracy: 1e-9)
+        XCTAssertEqual(s3.unknownShare, 0, accuracy: 1e-9)
+        XCTAssertEqual(ActivityContextJoin.coverage(for: base + 120, end: base + 150,
+                                                    epochs: [dup, dup]), 1.0, accuracy: 1e-9)
+    }
+
+    func testGapAndTailConserveDuration() {
+        // Covered [0,60) stationary, gap [60,120), covered [120,150) walking, tail
+        // [150,180): shares + unknownShare must sum to 1 over the FULL 180-s support.
+        let a = epoch(base, base + 60, motion: .stationary, observedS: 60, validS: 60)
+        let b = epoch(base + 120, base + 150, motion: .walking, observedS: 30, validS: 30)
+        let s = ActivityContextJoin.context(for: base, end: base + 180, epochs: [a, b])
+        XCTAssertEqual(s.share(of: .stationary), 60.0 / 180.0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .walking), 30.0 / 180.0, accuracy: 1e-9)
+        XCTAssertEqual(s.unknownShare, 90.0 / 180.0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .stationary) + s.share(of: .walking) + s.unknownShare,
+                       1.0, accuracy: 1e-9)
+        XCTAssertEqual(ActivityContextJoin.coverage(for: base, end: base + 180, epochs: [a, b]),
+                       90.0 / 180.0, accuracy: 1e-9)
+    }
+
+    func testMixedPartialEpochOverlapConservesDuration() {
+        // A partially-valid overlapping epoch: only 15 of its 60 grid seconds are
+        // observed/valid, so the 30-s span it wins is split 15/45 valid/unknown.
+        // Every second of the 90-s support is accounted exactly once.
+        let a = epoch(base, base + 60, motion: .stationary, observedS: 60, validS: 60)
+        let b = epoch(base + 30, base + 90, motion: .walking, observedS: 15, validS: 15)
+        let s = ActivityContextJoin.context(for: base, end: base + 90, epochs: [a, b])
+        XCTAssertEqual(s.share(of: .stationary), 60.0 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .walking), 7.5 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s.unknownShare, 22.5 / 90.0, accuracy: 1e-9)
+        XCTAssertEqual(s.share(of: .stationary) + s.share(of: .walking) + s.unknownShare,
+                       1.0, accuracy: 1e-9)
+    }
+
+    func testHrvSlotHalfEmptyReadsPartialSharesNotFullCoverage() {
+        // WS-12-F02: a 900-s slot with 400 s of stationary and 500 s of nothing must
+        // read stationary 0.44 / unknown 0.56 over the WHOLE slot — never the old
+        // "400 of 400 recognised" (shares 1.0, unknownShare 0).
+        let epochs = build(run(.stationary, from: base, to: base + 400),
+                           runStart: base, runEnd: base + 400)
+        let slot = ActivityContextJoin.hrvSlotContexts(slots: [base], epochs: epochs)[0]
+        XCTAssertEqual(slot.shares["stationary"] ?? 0, 400.0 / 900.0, accuracy: 1e-9)
+        XCTAssertEqual(slot.unknownShare, 500.0 / 900.0, accuracy: 1e-9)
+        XCTAssertEqual((slot.shares["stationary"] ?? 0) + slot.unknownShare, 1.0, accuracy: 1e-9)
+    }
+
+    func testSleepSessionContextsInheritFullSupportSemantics() {
+        // sleepSessionContexts inherits the corrected arithmetic: a session with 60 s
+        // of stationary in a 120-s span reads stationary 0.5 / unknown 0.5.
+        let epochs = build(run(.stationary, from: base, to: base + 60),
+                           runStart: base, runEnd: base + 60)
+        let sessions = ActivityContextJoin.sleepSessionContexts(
+            sessions: [(start: base, end: base + 120)], epochs: epochs)
+        XCTAssertEqual(sessions[0].shares["stationary"] ?? 0, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(sessions[0].unknownShare, 0.5, accuracy: 1e-9)
     }
 
     // MARK: - HRV slots
@@ -293,6 +438,50 @@ final class ActivityContextJoinTests: XCTestCase {
         let r2 = ActivityContextJoin.restingEligibility(window: [base, base + 300], priorSeconds: 360, epochs: asleep)
         XCTAssertFalse(r2.eligible)
         XCTAssertTrue(r2.reasons.contains("asleep"), "\(r2.reasons)")
+    }
+
+    func testRestingEligibilityCountsUnobservedEpochSecondsAsNotValid() {
+        // WS-10-F02 in the eligibility view: an epoch with 20 observed/valid seconds
+        // in a 30-s grid provides 20 s of valid coverage, not 30. Old code divided
+        // by observedS (validFraction 1.0) and over-credited the whole epoch width.
+        let epochs = [epoch(base - 360, base, motion: .stationary, observedS: 360, validS: 360),
+                      epoch(base, base + 30, motion: .stationary, observedS: 20, validS: 20)]
+        let r = ActivityContextJoin.restingEligibility(
+            window: [base, base + 300], priorSeconds: 360, epochs: epochs)
+        XCTAssertFalse(r.eligible)
+        XCTAssertEqual(r.coverageFraction, 20.0 / 300.0, accuracy: 1e-9)
+        XCTAssertTrue(r.reasons.contains("insufficient_coverage"), "\(r.reasons)")
+        XCTAssertEqual(r.priorStillnessS, 360, "the 360-s prior stationary run still counts")
+    }
+
+    func testJoinAndEligibilityInvariantToNonConsumedEpochFields() {
+        // Spec §8 counterfactual replay: hold motion/contact/annotations fixed and
+        // vary ONLY fields the coarse-policy path cannot derive from HR. The coarse
+        // policy never reads HR (ActivityContextPolicy), so ActivityEpoch carries no
+        // HR-bearing field at all; the join/eligibility output must be bit-identical
+        // when called with epochs that differ only in fields NOT consumed
+        // (confidence, exercise). The GRANULAR HSMM path IS HR-fused upstream
+        // (MotionEncoderOutput.classProbs -> ActivityContextModel, WS-08-F01/F02) and
+        // must NOT gate resting pools without an hr-free variant — see the rule
+        // comment on ActivityContextJoin.restingEligibility.
+        let epochs = eligibleFixture()
+        let varied = epochs.map { e in
+            ActivityEpoch(startTs: e.startTs, endTs: e.endTs, motion: e.motion,
+                          posture: e.posture, exercise: .true, sleepState: e.sleepState,
+                          exertion: e.exertion, wear: e.wear,
+                          confidence: 0.05, observedS: e.observedS, validS: e.validS)
+        }
+        XCTAssertNotEqual(epochs, varied, "the fixture must actually differ on non-consumed fields")
+
+        let c1 = ActivityContextJoin.context(for: base, end: base + 300, epochs: epochs)
+        let c2 = ActivityContextJoin.context(for: base, end: base + 300, epochs: varied)
+        XCTAssertEqual(c1, c2, "join output must be bit-identical when only non-consumed fields differ")
+
+        let r1 = ActivityContextJoin.restingEligibility(window: [base, base + 300],
+                                                        priorSeconds: 360, epochs: epochs)
+        let r2 = ActivityContextJoin.restingEligibility(window: [base, base + 300],
+                                                        priorSeconds: 360, epochs: varied)
+        XCTAssertEqual(r1, r2, "eligibility must be bit-identical when only non-consumed fields differ")
     }
 
     // MARK: - Codable / C10 document

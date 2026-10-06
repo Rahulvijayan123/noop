@@ -15,14 +15,17 @@ import WhoopProtocol
 // a caller can ignore a weak/absent peak; it is a FEATURE, never fed to a physiological gate. Validated
 // to recover MULTIPLE injected cadences, not one lucky match (see ImuFeatureExtractorTests).
 
-/// Compact activity features over a window of raw IMU samples.
+/// Compact activity features over a window of raw IMU samples — the imu-feat-2 contract (WS-04-F01..F06).
 public struct ImuActivityFeatures: Equatable, Sendable, Codable {
     /// RMS of the accel-magnitude AC (gravity removed), in g — overall movement intensity.
     public let accelEnergyG: Double
-    /// Mean gyroscope magnitude over the window, in °/s — rotational intensity.
-    public let gyroEnergyDps: Double
-    /// RMS of the accel first-difference (jerk), in g/sample — impact / explosiveness (jumps, foot-strike).
-    public let jerkRms: Double
+    /// RMS gyroscope magnitude over the window, in °/s — rotational intensity (imu-feat-2: true RMS,
+    /// not the imu-feat-1 mean; the two differ by up to ~25% on symmetric oscillation).
+    public let gyroRmsDps: Double
+    /// RMS of the accel-magnitude first difference × `sampleRateHz`, in g/s — impact / explosiveness
+    /// (jumps, foot-strike). imu-feat-2 defines jerk PER SECOND so 30 Hz and 100 Hz paths agree within
+    /// the documented bandwidth residual (≤5% clean, ≤10% with sensor noise; WS-04-F02).
+    public let jerkRmsGps: Double
     /// Dominant cadence in the gait band (`cadenceBand`), Hz — nil when no rhythmic peak clears
     /// `minCadenceStrength`. Multiply by 60 for steps/min.
     public let cadenceHz: Double?
@@ -31,17 +34,22 @@ public struct ImuActivityFeatures: Equatable, Sendable, Codable {
     public let cadenceStrength: Double
     public let sampleCount: Int
 
-    public init(accelEnergyG: Double, gyroEnergyDps: Double, jerkRms: Double,
+    public init(accelEnergyG: Double, gyroRmsDps: Double, jerkRmsGps: Double,
                 cadenceHz: Double?, cadenceStrength: Double, sampleCount: Int) {
-        self.accelEnergyG = accelEnergyG; self.gyroEnergyDps = gyroEnergyDps; self.jerkRms = jerkRms
+        self.accelEnergyG = accelEnergyG; self.gyroRmsDps = gyroRmsDps; self.jerkRmsGps = jerkRmsGps
         self.cadenceHz = cadenceHz; self.cadenceStrength = cadenceStrength; self.sampleCount = sampleCount
     }
 }
 
 public enum ImuFeatureExtractor {
 
-    /// Cadence search band, Hz — human gait/pedal foot rate (≈72–210 steps/min). Below the IMU Nyquist.
-    public static let cadenceBand: ClosedRange<Double> = 1.2...3.5
+    /// Cadence search band, Hz — human gait/pedal foot rate (≈48–210 steps/min). imu-feat-2 widens the
+    /// FEATURE-level band from 1.2–3.5 Hz to include slow gait (WS-04-F03). This only makes the cadence
+    /// feature honest: HART's 4-s window input contract is unchanged, and slow-gait RECOGNITION still
+    /// needs longer windows — a 4-s window already resolves ~0.9 Hz at usable strength, but confident
+    /// slower-rhythm detection needs ~8 s. The band is quantised to rate/lag, so the effective band is
+    /// 0.789–3.333 Hz @30 Hz and 0.8–3.448 Hz @100 Hz (WS-04-F05).
+    public static let cadenceBand: ClosedRange<Double> = 0.8...3.5
     /// A cadence peak below this normalized autocorrelation strength is treated as "no rhythm" (→ nil Hz).
     public static let minCadenceStrength = 0.20
 
@@ -49,21 +57,24 @@ public enum ImuFeatureExtractor {
     public static func extract(_ samples: [RawImuSample], sampleRateHz: Int) -> ImuActivityFeatures {
         let n = samples.count
         guard n >= 8, sampleRateHz > 0 else {
-            return ImuActivityFeatures(accelEnergyG: 0, gyroEnergyDps: 0, jerkRms: 0,
+            return ImuActivityFeatures(accelEnergyG: 0, gyroRmsDps: 0, jerkRmsGps: 0,
                                        cadenceHz: nil, cadenceStrength: 0, sampleCount: n)
         }
         let amag = samples.map { ($0.ax * $0.ax + $0.ay * $0.ay + $0.az * $0.az).squareRoot() }
         let gmag = samples.map { ($0.gx * $0.gx + $0.gy * $0.gy + $0.gz * $0.gz).squareRoot() }
 
-        let gyroEnergy = gmag.reduce(0, +) / Double(n)
+        // imu-feat-2: true RMS of gyro magnitude (not the imu-feat-1 mean).
+        let gyroSq = gmag.reduce(0) { $0 + $1 * $1 }
+        let gyroRms = (gyroSq / Double(n)).squareRoot()
         // Accel AC: remove the DC (≈gravity) then RMS.
         let mean = amag.reduce(0, +) / Double(n)
         let ac = amag.map { $0 - mean }
         let accelEnergy = (ac.reduce(0) { $0 + $1 * $1 } / Double(n)).squareRoot()
-        // Jerk: RMS of |accel| first difference.
+        // imu-feat-2 jerk: RMS of |accel| first difference × sample rate -> per-second (g/s), so
+        // 100 Hz and the 30 Hz Python path agree within the documented bandwidth residual.
         var jerkSq = 0.0
         for i in 1..<n { let d = amag[i] - amag[i - 1]; jerkSq += d * d }
-        let jerk = (jerkSq / Double(n - 1)).squareRoot()
+        let jerk = (jerkSq / Double(n - 1)).squareRoot() * Double(sampleRateHz)
 
         // Cadence: normalized autocorrelation of the AC series over the gait-band lags; the strongest
         // peak's frequency + strength. Strength = peak ACF / zero-lag ACF (0…1), so it's amplitude-scale
@@ -83,7 +94,7 @@ public enum ImuFeatureExtractor {
             }
         }
         let cadence = bestStrength >= minCadenceStrength ? bestFreq : nil
-        return ImuActivityFeatures(accelEnergyG: accelEnergy, gyroEnergyDps: gyroEnergy, jerkRms: jerk,
+        return ImuActivityFeatures(accelEnergyG: accelEnergy, gyroRmsDps: gyroRms, jerkRmsGps: jerk,
                                    cadenceHz: cadence, cadenceStrength: max(0, bestStrength), sampleCount: n)
     }
 

@@ -9,12 +9,27 @@ enum ActivityEncoderWindowsStore {
     /// The decoder's view of a job's windows, limited to the ones that END inside the UTC day: the decoder
     /// keys a window by its end second, so that is the day the window belongs to.
     static func windowSet(windows: [ActivityPythonService.WindowPrediction], dayStart: Int, dayEnd: Int,
-                          modelVersion: String) -> ActivityEncoderWindowSet {
+                          modelVersion: String,
+                          transitionVersion: String = "none",
+                          preprocessingVersion: String = "unknown") -> ActivityEncoderWindowSet {
         let encoderId = windows.contains { !$0.baseline } ? "hart" : "baseline"
+        // Transition windows are optional: the version marker "none" is the documented
+        // "no expert ran" state and produces an empty list, exactly like a set built
+        // before the expert existed (the persisted doc then omits the `t` rows).
+        let transitions: [ActivityTransitionWindow]
+        if transitionVersion == "none" {
+            transitions = []
+        } else {
+            transitions = windows.compactMap {
+                ActivityContextDays.transitionWindow($0, modelVersion: transitionVersion,
+                                                     preprocessingVersion: preprocessingVersion)
+            }
+        }
         return ActivityEncoderWindowSet(
             encoderId: encoderId, encoderVersion: modelVersion,
             windows: windows.compactMap(ActivityContextDays.encoderWindow),
-            features: windows.compactMap(ActivityContextDays.imuFeatures))
+            features: windows.compactMap(ActivityContextDays.imuFeatures),
+            transitions: transitions)
             .clipped(from: dayStart, to: dayEnd)
     }
 

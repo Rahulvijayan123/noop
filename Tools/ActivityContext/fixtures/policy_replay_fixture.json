@@ -1,0 +1,1699 @@
+{
+  "config": {
+    "gapResetSeconds": 4,
+    "requiredConsecutiveVotes": 2
+  },
+  "expect": {
+    "epochs": [
+      {
+        "e": 1758000030,
+        "motion": "walking",
+        "observedS": 30,
+        "s": 1758000000,
+        "validS": 30
+      },
+      {
+        "e": 1758000060,
+        "motion": "walking",
+        "observedS": 30,
+        "s": 1758000030,
+        "validS": 30
+      },
+      {
+        "e": 1758000150,
+        "motion": "stationary",
+        "observedS": 30,
+        "s": 1758000120,
+        "validS": 30
+      },
+      {
+        "e": 1758000180,
+        "motion": "walking",
+        "observedS": 30,
+        "s": 1758000150,
+        "validS": 30
+      },
+      {
+        "e": 1758000210,
+        "motion": "stationary",
+        "observedS": 30,
+        "s": 1758000180,
+        "validS": 30
+      },
+      {
+        "e": 1758000240,
+        "motion": "stationary",
+        "observedS": 30,
+        "s": 1758000210,
+        "validS": 30
+      },
+      {
+        "e": 1758000330,
+        "motion": "running",
+        "observedS": 30,
+        "s": 1758000300,
+        "validS": 30
+      },
+      {
+        "e": 1758000360,
+        "motion": "running",
+        "observedS": 30,
+        "s": 1758000330,
+        "validS": 30
+      }
+    ],
+    "transitions": [
+      {
+        "from": "stationary",
+        "offset": 1758000150,
+        "to": "walking"
+      },
+      {
+        "from": "walking",
+        "offset": 1758000190,
+        "to": "stationary"
+      }
+    ]
+  },
+  "meta": {
+    "base": 1758000000,
+    "description": "Synthetic timestamped windows across 3 sessions with 2 known within-session transitions; expected ActivityContextPolicy epochs/transitions. See generate_policy_replay_fixture.py.",
+    "generator": "Tools/ActivityContext/fixtures/generate_policy_replay_fixture.py",
+    "n_windows": 115,
+    "name": "policy-replay-3-sessions"
+  },
+  "runEnd": 1758000360,
+  "runStart": 1757999940,
+  "windows": [
+    {
+      "baseline": false,
+      "e": 1758000004,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000000,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000006,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000002,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000008,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000004,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000010,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000006,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000012,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000008,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000014,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000010,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000016,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000012,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000018,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000014,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000020,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000016,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000022,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000018,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000024,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000020,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000026,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000022,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000028,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000024,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000030,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000026,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000032,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000028,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000034,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000030,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000036,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000032,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000038,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000034,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000040,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000036,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000042,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000038,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000044,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000040,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000046,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000042,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000048,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000044,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000050,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000046,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000052,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000048,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000054,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000050,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000056,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000052,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000058,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000054,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000060,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000056,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000124,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000120,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000126,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000122,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000128,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000124,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000130,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000126,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000132,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000128,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000134,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000130,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000136,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000132,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000138,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000134,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000140,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000136,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000142,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000138,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000144,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000140,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000146,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000142,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000148,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000144,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000150,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000146,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000154,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000150,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000156,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000152,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000158,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000154,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000160,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000156,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000162,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000158,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000164,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000160,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000166,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000162,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000168,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000164,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000170,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000166,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000172,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000168,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000174,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000170,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000176,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000172,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000178,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000174,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000180,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000176,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000182,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000178,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000184,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000180,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000186,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000182,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000188,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000184,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000190,
+      "label": "walking",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.95
+      },
+      "s": 1758000186,
+      "truth": "walking"
+    },
+    {
+      "baseline": false,
+      "e": 1758000194,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000190,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000196,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000192,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000198,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000194,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000200,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000196,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000202,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000198,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000204,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000200,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000206,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000202,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000208,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000204,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000210,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000206,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000212,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000208,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000214,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000210,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000216,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000212,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000218,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000214,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000220,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000216,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000222,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000218,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000224,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000220,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000226,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000222,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000228,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000224,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000230,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000226,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000232,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000228,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000234,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000230,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000236,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000232,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000238,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000234,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000240,
+      "label": "stationary",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.05,
+        "stationary": 0.95,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000236,
+      "truth": "stationary"
+    },
+    {
+      "baseline": false,
+      "e": 1758000304,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000300,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000306,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000302,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000308,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000304,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000310,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000306,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000312,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000308,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000314,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000310,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000316,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000312,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000318,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000314,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000320,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000316,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000322,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000318,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000324,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000320,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000326,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000322,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000328,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000324,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000330,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000326,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000332,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000328,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000334,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000330,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000336,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000332,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000338,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000334,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000340,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000336,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000342,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000338,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000344,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000340,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000346,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000342,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000348,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000344,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000350,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000346,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000352,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000348,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000354,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000350,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000356,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000352,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000358,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000354,
+      "truth": "running"
+    },
+    {
+      "baseline": false,
+      "e": 1758000360,
+      "label": "running",
+      "probs": {
+        "other_movement": 0.05,
+        "running": 0.95,
+        "stationary": 0.05,
+        "unknown": 0.05,
+        "walking": 0.05
+      },
+      "s": 1758000356,
+      "truth": "running"
+    }
+  ]
+}

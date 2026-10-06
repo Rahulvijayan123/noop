@@ -123,6 +123,61 @@ final class ActivityPythonServiceTests: XCTestCase {
         }
     }
 
+    /// WS-11-F01: a host whose HART checkpoint failed to load answers ping with
+    /// model_status "hart_unavailable" while still reporting ok:true. Only the
+    /// known-available statuses may pass the guard; every non-loaded status must
+    /// fail soft so the lane never claims a job it would dead-letter.
+    func testParsePingModelStatusTruthTable() {
+        func status(_ modelStatus: String?, ok: Bool = true) -> ActivityPythonService.PingStatus {
+            var obj: [String: Any] = ["ok": ok]
+            if let modelStatus { obj["model_status"] = modelStatus }
+            return ActivityPythonService.parsePing(obj)
+        }
+        for unavailable in ["hart_unavailable", "model_missing", "missing"] {
+            XCTAssertFalse(status(unavailable).modelAvailable, "\(unavailable) must be unavailable")
+            XCTAssertEqual(status(unavailable).modelStatus, unavailable)
+        }
+        XCTAssertFalse(status(nil, ok: false).modelAvailable,
+                       "an exchange that did not succeed is never model-available")
+        for loaded in ["baseline", "hart_loaded", "loaded"] {
+            XCTAssertTrue(status(loaded).modelAvailable, "\(loaded) must be available")
+            XCTAssertEqual(status(loaded).modelStatus, loaded)
+        }
+        // An explicit model_available flag still wins (an older serve.py sends it).
+        XCTAssertTrue(ActivityPythonService.parsePing(["ok": true, "model_available": true]).modelAvailable)
+        XCTAssertFalse(ActivityPythonService.parsePing(["ok": true, "model_available": false]).modelAvailable)
+    }
+
+    /// A01/WS-01-F03: serve.py now reports its calibration claim (`calibrated` /
+    /// `calibration_version` from the manifest artifact). The worker must carry it,
+    /// and an older serve.py that never sends it must read as nil, never as
+    /// calibrated.
+    func testParsePingCarriesCalibrationClaim() {
+        let ping = ActivityPythonService.parsePing([
+            "ok": true, "model_status": "hart_loaded",
+            "calibrated": true, "calibration_version": "cal-1",
+        ])
+        XCTAssertEqual(ping.calibrated, true)
+        XCTAssertEqual(ping.calibrationVersion, "cal-1")
+
+        let legacy = ActivityPythonService.parsePing(["ok": true, "model_status": "hart_loaded"])
+        XCTAssertNil(legacy.calibrated, "absence must not read as calibrated")
+        XCTAssertNil(legacy.calibrationVersion)
+    }
+
+    /// The per-window `calibrated` flag from serve.py reaches the parsed window.
+    func testInferParsesPerWindowCalibratedFlag() throws {
+        service = try makeService()
+        _ = try service.ping()
+        var request = emptyRun()
+        request.extra = ["win_calibrated": true]
+        let calibrated = try XCTUnwrap(try service.infer(run: request).windows.first)
+        XCTAssertTrue(calibrated.calibrated)
+
+        let plain = try XCTUnwrap(try service.infer(run: emptyRun()).windows.first)
+        XCTAssertFalse(plain.calibrated, "the model-less stub is never calibrated by default")
+    }
+
     func testInferRequestShapeAndResponseParsing() throws {
         service = try makeService()
         _ = try service.ping()
@@ -172,16 +227,16 @@ final class ActivityPythonServiceTests: XCTestCase {
 
     // MARK: - IMU features (ActivityContext v2)
 
-    /// The per-window `imu-feat-1` facts and the schema stamp come through the parse.
+    /// The per-window `imu-feat-2` facts and the schema stamp come through the parse.
     func testInferParsesPerWindowImuFeaturesAndSchema() throws {
         service = try makeService()
         _ = try service.ping()
         let result = try service.infer(run: emptyRun(start: 500, end: 504))
-        XCTAssertEqual(result.featureSchema, "imu-feat-1")
+        XCTAssertEqual(result.featureSchema, "imu-feat-2")
         let window = try XCTUnwrap(result.windows.first)
         XCTAssertEqual(window.features["accel_rms_g"] ?? -1, 0.012, accuracy: 1e-12)
         XCTAssertEqual(window.features["gyro_rms_dps"] ?? -1, 3.5, accuracy: 1e-12)
-        XCTAssertEqual(window.features["jerk_rms"] ?? -1, 0.04, accuracy: 1e-12)
+        XCTAssertEqual(window.features["jerk_rms_gps"] ?? -1, 0.04, accuracy: 1e-12)
         XCTAssertEqual(window.features["cadence_hz"] ?? -1, 1.8, accuracy: 1e-12)
         XCTAssertEqual(window.features["cadence_strength"] ?? -1, 0.31, accuracy: 1e-12)
         XCTAssertEqual(window.features["orientation_change_deg"] ?? -1, 2.5, accuracy: 1e-12)
@@ -198,6 +253,63 @@ final class ActivityPythonServiceTests: XCTestCase {
         XCTAssertNil(window.features["orientation_change_deg"])
         XCTAssertNotNil(window.features["accel_rms_g"])
         XCTAssertEqual(window.features.count, 4)
+    }
+
+    /// The optional transition-expert evidence parses per window (five classes, refined ts).
+    func testInferParsesPerWindowTransitionEvidence() throws {
+        service = try makeService()
+        _ = try service.ping()
+        var request = emptyRun()
+        request.extra = ["transition": "plain"]
+        let result = try service.infer(run: request)
+        XCTAssertEqual(result.transitionSchema, "transition-1")
+        XCTAssertEqual(result.transitionVersion, "stub-transition")
+        XCTAssertEqual(service.reportedTransitionVersion, "stub-transition")
+        let window = try XCTUnwrap(result.windows.first)
+        let transition = try XCTUnwrap(window.transition)
+        XCTAssertEqual(transition.probs["none"] ?? -1, 0.22, accuracy: 1e-12)
+        XCTAssertEqual(transition.probs["sit_to_stand"] ?? -1, 0.61, accuracy: 1e-12)
+        XCTAssertEqual(transition.probs["get_up"] ?? -1, 0.03, accuracy: 1e-12)
+        XCTAssertEqual(transition.label, "sit_to_stand")
+        XCTAssertFalse(transition.abstained)
+        XCTAssertEqual(transition.ts ?? -1, Double(emptyRun().startTs) + 1.77, accuracy: 1e-9)
+        // the general window fields are untouched by the transition evidence
+        XCTAssertEqual(window.label, "stationary")
+        XCTAssertFalse(window.baseline)
+    }
+
+    /// An older serve.py (or an unloaded expert) sends no `transition`; every window is unchanged.
+    func testInferAgainstAnOlderServiceWithoutTransitions() throws {
+        service = try makeService()
+        _ = try service.ping()
+        let result = try service.infer(run: emptyRun())
+        XCTAssertNil(result.transitionSchema)
+        let window = try XCTUnwrap(result.windows.first)
+        XCTAssertNil(window.transition)
+        XCTAssertEqual(window.label, "stationary")
+    }
+
+    /// A JSON-null or malformed `transition` object is dropped, never fatal (fail-open).
+    func testMalformedTransitionEvidenceIsDroppedNotFatal() throws {
+        service = try makeService()
+        _ = try service.ping()
+        for knob in ["null", "bad"] {
+            var request = emptyRun()
+            request.extra = ["transition": knob]
+            let result = try service.infer(run: request)
+            XCTAssertTrue(result.ok)
+            let window = try XCTUnwrap(result.windows.first)
+            XCTAssertNil(window.transition, "knob \(knob)")
+            XCTAssertEqual(window.label, "stationary")
+        }
+    }
+
+    /// Ping carries the transition expert's version when one is loaded (absent -> nil, never an error).
+    func testPingReportsTransitionVersion() throws {
+        service = try makeService()
+        let status = try service.ping()
+        XCTAssertEqual(status.transitionVersion, "stub-transition")
+        XCTAssertEqual(service.reportedTransitionVersion, "stub-transition")
     }
 
     /// An older serve.py has no `feat` or `feature_schema`; the parse still succeeds.

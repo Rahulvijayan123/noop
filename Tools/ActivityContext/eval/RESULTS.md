@@ -50,12 +50,30 @@ reports and the fine-tuned checkpoint live in scratch
 | running | 0 | 0 | 603 | 16 | 226 |
 | other_movement | 364 | 43 | 2 | 5,168 | 2,982 |
 
-### Transition delay (s to first accepted correct prediction after a truth change; 47 transitions)
+### Transition delay (corrected 2026-10-05: within-session transitions only)
 
-| variant | mean | median | p90 |
-|---|---|---|---|
-| raw per-window | 155.3 | 2.0 | 56.8 |
-| policy (causal vote, 2 consecutive, gap reset 4 s) | 194.2 | 2.0 | 59.6 |
+The table previously reported 47 "transitions" with mean delays of 155.3 s (raw) / 194.2 s
+(policy). **Those numbers were invalid.** The original evaluator ignored session/block boundaries
+and timestamps: it counted a label change at every WISDM block boundary (blocks are separated by
+recording pauses) and then scanned into *later* sessions for the first matching prediction,
+producing delays up to 6,288 s. Re-run with the repaired session-aware evaluator
+(`activity_context/evaluate.py`, spec-18 audit) against the same held-out windows with real
+per-window timestamps:
+
+| variant | within-session transitions | detected | missed | censored |
+|---|---|---|---|---|
+| raw per-window | **0** | 0 | 0 | 0 |
+| policy (causal vote, 2 consecutive, gap reset 4 s) | **0** | 0 | 0 | 0 |
+
+**Zero within-session ground-truth transitions exist in the held-out WISDM watch blocks** — every
+truth change happens across a block boundary (a recording gap), so the held-out WISDM data cannot
+measure transition latency at all. For reference, with an explicitly stated block-local metric —
+at every block boundary, the delay to the first accepted prediction matching the new block's
+truth, searched only within that block — the held-out set (144 supported-truth blocks) gives
+mean **6.9 s**, median 0 s (correct from the first window), p90 10 s, with 11 of 144 blocks never
+locking on. Transition-delay evaluation on real within-session transitions requires continuous
+labeled sessions (see docs/activity-physiology-audit/WHOOP_COLLECTION_PROTOCOL.md); concatenated
+unrelated blocks must never be used to manufacture transitions.
 
 ### Per-subject coverage (all 18 sessions each)
 
@@ -88,16 +106,22 @@ documented disagreement to review before any posture/resting use.
 
 ## Baseline comparison (same held-out windows, conservative heuristic)
 
-| metric | HART | baseline |
-|---|---|---|
-| coverage | 0.664 | 0.857 |
-| macro-F1 (supported) | 0.660 | 0.365 |
-| accepted windows | 10,205 | 13,165 |
+| metric | HART | baseline (original 1.2–3.5 Hz band) | baseline (current imu-feat-2 band) |
+|---|---|---|---|
+| coverage | 0.664 | 0.857 | 0.815 |
+| macro-F1 (supported) | 0.660 | 0.365 | 0.383 |
+| accepted windows | 10,205 | 13,165 | 12,525 |
 
 The baseline accepts far more windows (its one-hot scores always pass the
 0.80/0.15 thresholds) but is much less accurate: HART trades coverage for
 precision, and its accepted-prediction precision (0.78–1.00 per class) beats
-the heuristic across the board.
+the heuristic across the board. **2026-10-05 correction:** the original baseline
+column was computed with the pre-imu-feat-2 cadence band (1.2–3.5 Hz); the
+widened 0.8–3.5 Hz feature band changes the heuristic's own numbers (recomputed
+on the same held-out windows with the current code: coverage 0.8153,
+macro-F1 0.3829, 12,525 accepted — machine-readable:
+`_audit/eval_rerun_baseline_real_timestamps.json` in the audit scratch). The
+HART column is unchanged (bit-exact reproduction, see the audit report).
 
 ## Commands (run from `Tools/ActivityContext`, venv = scratch, NOT the repo)
 

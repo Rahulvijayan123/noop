@@ -42,6 +42,9 @@ public struct ActivityClassAggregate: Equatable, Sendable {
     public var rmssd: Double?
     /// Intervals that contributed an RMSSD.
     public var rmssdIntervals: Int
+    /// Recording duration (seconds) of the window that contributed the most RMSSD beats; nil with no RMSSD.
+    /// Carried so a consumer never presents a 60-s window as comparable to a 15-min one (spec §9.5).
+    public var rmssdWindowDominantS: Int?
     public var respRateBpm: Double?
     public var stepTicks: Int
     public var cadenceSpm: Double?
@@ -70,6 +73,7 @@ public enum ActivityContextAggregator {
             var hrSum = 0.0, hrWeight = 0.0
             var hrMin: Int?, hrMax: Int?
             var rmssdSumSq = 0.0, rmssdDiffCount = 0.0, rmssdIntervals = 0
+            var rmssdDurBeats: [Int: Double] = [:]
             var respSum = 0.0, respWeight = 0.0
             var ticks = 0.0
             var cadenceSum = 0.0, cadenceWeight = 0.0
@@ -99,6 +103,7 @@ public enum ActivityContextAggregator {
                 a.rmssdSumSq += components.sumSq * share
                 a.rmssdDiffCount += Double(components.count) * share
                 a.rmssdIntervals += 1
+                a.rmssdDurBeats[iv.durationSeconds, default: 0] += Double(components.count) * share
             }
             if let r = iv.respRateBpm, iv.respBreaths > 0 {
                 let w = Double(iv.respBreaths) * share
@@ -109,14 +114,16 @@ public enum ActivityContextAggregator {
             byClass[iv.activityClass] = a
         }
 
-        let classes = byClass.map { cls, a in
-            ActivityClassAggregate(
+        let classes = byClass.map { cls, a -> ActivityClassAggregate in
+            let dominant = dominantWindowSeconds(a.rmssdDurBeats)
+            return ActivityClassAggregate(
                 activityClass: cls, seconds: Int(a.seconds.rounded()), intervals: a.intervals,
                 meanConfidence: a.seconds > 0 ? a.confidence / a.seconds : 0,
                 hrMean: a.hrWeight > 0 ? a.hrSum / a.hrWeight : nil, hrMin: a.hrMin, hrMax: a.hrMax,
                 hrSamples: Int(a.hrWeight.rounded()),
                 rmssd: a.rmssdDiffCount > 0 ? (a.rmssdSumSq / a.rmssdDiffCount).squareRoot() : nil,
                 rmssdIntervals: a.rmssdIntervals,
+                rmssdWindowDominantS: dominant,
                 respRateBpm: a.respWeight > 0 ? a.respSum / a.respWeight : nil,
                 stepTicks: Int(a.ticks.rounded()),
                 cadenceSpm: a.cadenceWeight > 0 ? a.cadenceSum / a.cadenceWeight : nil)
@@ -139,5 +146,16 @@ public enum ActivityContextAggregator {
         let count = iv.rrBeats - 1
         guard count >= 1 else { return nil }
         return (r * r * Double(count), count)
+    }
+
+    /// Dominant recording duration: the window length that contributed the most RMSSD beats. Ties go to the
+    /// longer window, so the label names the definition the number is dominated by. Nil with no RMSSD beats.
+    private static func dominantWindowSeconds(_ beatsByDuration: [Int: Double]) -> Int? {
+        var dominant: Int?
+        var dominantBeats = -1.0
+        for (duration, beats) in beatsByDuration.sorted(by: { $0.key < $1.key }) where beats >= dominantBeats {
+            dominant = duration; dominantBeats = beats
+        }
+        return dominant
     }
 }

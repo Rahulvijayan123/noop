@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "PolyForm Noncommercial 1.0.0 (see repo LICENSE); HART code MIT; WISDM data CC BY 4.0" }
 dependencies = [
-    "numpy==2.2.6",
+    # numpy<2 required by the pinned model stack (pyarrow 14 / datasets 2.14.4,
+    # audit WS-07-F09): numpy 2.2.6 breaks pyarrow 14 at import time.
+    "numpy==1.26.4",
 ]
 
 [project.optional-dependencies]
@@ -19,6 +21,12 @@ model = [
     "transformers==4.56.0",
     "granite-tsfm==0.3.3",   # HART TSPulseForClassification adapter (imported lazily/optionally)
     "safetensors==0.8.0",
+    # Reproducible HART env (audit WS-07-F09 / WS-03-F02): datasets 2.14.x uses
+    # pa.PyExtensionType, removed in pyarrow>=16, so pyarrow MUST stay <16 and
+    # numpy<2; this exact combo (datasets 2.14.4 + pyarrow 14.0.1 + numpy 1.26.4)
+    # is the verified-working environment.
+    "datasets==2.14.4",
+    "pyarrow==14.0.1",
 ]
 dev = [
     "pytest>=8.0,<10",

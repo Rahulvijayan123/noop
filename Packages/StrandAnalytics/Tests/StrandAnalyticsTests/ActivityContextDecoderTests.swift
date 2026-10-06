@@ -42,6 +42,44 @@ final class ActivityContextDecoderTests: XCTestCase {
 
     private func mean(_ xs: [Double]) -> Double { xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count) }
 
+    // MARK: Learned transition-expert helpers
+
+    private func decode(_ observations: [ActivityObservation],
+                        config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (decoder: ActivityContextDecoder, states: [ActivityContextState]) {
+        var d = ActivityContextDecoder(config: config)
+        let states = d.run(observations)
+        return (d, states)
+    }
+
+    private func transitionEvidence(none: Double = 0.05, sitToStand: Double = 0.0, standToSit: Double = 0.0,
+                                    lieDown: Double = 0.0, getUp: Double = 0.0,
+                                    abstained: Bool = false) -> TransitionEncoderEvidence {
+        TransitionEncoderEvidence(none: none, sitToStand: sitToStand, standToSit: standToSit,
+                                  lieDown: lieDown, getUp: getUp,
+                                  confidence: [none, sitToStand, standToSit, lieDown, getUp].max() ?? 0,
+                                  modelVersion: "transition-test-1",
+                                  preprocessingVersion: "transition-feat-1",
+                                  abstained: abstained)
+    }
+
+    /// Attach learned transition evidence to the seconds of `obs` for which `when` is true.
+    private func withTransition(_ obs: [ActivityObservation], when: (Int) -> Bool,
+                                none: Double = 0.05, sitToStand: Double = 0.0, standToSit: Double = 0.0,
+                                lieDown: Double = 0.0, getUp: Double = 0.0,
+                                abstained: Bool = false) -> [ActivityObservation] {
+        var out = obs
+        for i in out.indices where when(out[i].ts) {
+            out[i].transition = transitionEvidence(none: none, sitToStand: sitToStand, standToSit: standToSit,
+                                                   lieDown: lieDown, getUp: getUp, abstained: abstained)
+        }
+        return out
+    }
+
+    private func peakPostural(_ states: [ActivityContextState], from: Int, to: Int) -> Double {
+        self.states(in: states, from: from, to: to).map { $0.posture[PostureClass.posturalTransition] }.max() ?? 0
+    }
+
     // MARK: Versions and wire format
 
     func testVersionStampsArePinned() {
@@ -49,8 +87,8 @@ final class ActivityContextDecoderTests: XCTestCase {
         // tables or the feature layout change behaviour.
         XCTAssertEqual(ActivityContextVersions.schema, 2)
         XCTAssertEqual(ActivityContextVersions.ontology, "v2.0")
-        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.3")
-        XCTAssertEqual(ActivityContextVersions.featureSchema, "imu-feat-1")
+        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.5")
+        XCTAssertEqual(ActivityContextVersions.featureSchema, "imu-feat-2")  // bumped by I4 (true gyro RMS, per-second jerk)
     }
 
     func testOntologyMatchesTheSpecifiedVocabularies() {
@@ -87,8 +125,8 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(loco["walking"]), 0.5)
         let versions = try XCTUnwrap(json["versions"] as? [String: Any])
         XCTAssertEqual(versions["ontology"] as? String, "v2.0")
-        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.3")
-        XCTAssertEqual(versions["feature_schema"] as? String, "imu-feat-1")
+        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.5")
+        XCTAssertEqual(versions["feature_schema"] as? String, "imu-feat-2")  // I4 bumped the feature contract
         XCTAssertEqual(versions["schema"] as? Int, 2)
         let intensity = try XCTUnwrap(json["intensity"] as? Double)
         XCTAssertTrue((0...1).contains(intensity))
@@ -219,6 +257,27 @@ final class ActivityContextDecoderTests: XCTestCase {
         let (_, encoded) = decode(withEncoder)
         let end = try XCTUnwrap(encoded.last)
         XCTAssertGreaterThan(end.locomotion[.stairs], 0.25)
+    }
+
+    func testAnUnspecifiedWorkoutCoversOnlyGenericExerciseNotSpecialists() throws {
+        // WS-06-F03: an unrecognised sport names only generic exercise. A logged workout of unknown
+        // sport with a quiet wrist must not promote cycling, stairs or a vehicle — the promotion gate
+        // requires the encoder to name the mode or a compatible workout kind to cover it.
+        var sim = ActivitySim()
+        var opt = ActivitySim.Options()
+        opt.hr = 128; opt.workout = true; opt.workoutKind = .unspecified
+        sim.still(60)
+        for _ in 0..<300 {
+            sim.emit(dyn: 0.12 + sim.rand() * 0.12, ticks: 0, cls: 0, rotate: sim.noise(0.3), jitter: sim.noise(6), opt: opt)
+        }
+        let (_, published) = decode(sim)
+        let steady = states(in: published, from: published[0].ts + 150, to: published.last!.ts)
+        XCTAssertFalse(steady.isEmpty)
+        for s in steady {
+            XCTAssertLessThan(s.locomotion[.cycling], 0.12, "unknown-sport workout is no evidence of cycling")
+            XCTAssertLessThan(s.locomotion[.stairs], 0.12, "unknown-sport workout is no evidence of stairs")
+            XCTAssertLessThan(s.locomotion[.vehicleMotion], 0.12, "unknown-sport workout is no evidence of a vehicle")
+        }
     }
 
     // MARK: Walking ↔ stationary
@@ -643,6 +702,27 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertLessThan(end.locomotion[.walking] + end.locomotion[.briskWalking], 0.1)
     }
 
+    func testADataGapClearsTheDisplayLabelAndHysteresisCandidate() throws {
+        // WS-05-F03: after a >120 s gap the decoder must not carry the pre-gap display label or its
+        // hysteresis candidate into the new context. A session that ended walking, then a gap, then a
+        // quiet wrist must not keep reading "Walking" for the first post-gap seconds.
+        var sim = ActivitySim()
+        sim.walk(90)
+        let gapStart = sim.ts
+        sim.gap(600)
+        sim.still(40)
+        let (_, published) = decode(sim)
+        let afterGap = states(in: published, from: gapStart, to: published.last!.ts)
+        XCTAssertFalse(afterGap.isEmpty)
+        let first = try XCTUnwrap(afterGap.first)
+        XCTAssertLessThan(first.locomotion[.walking] + first.locomotion[.briskWalking], 0.1,
+                          "the post-gap heads must not read walking")
+        XCTAssertNotEqual(first.displayContext, "Walking",
+                          "the stale pre-gap label must not survive the gap")
+        let end = try XCTUnwrap(published.last)
+        XCTAssertEqual(end.locomotion.top?.0, .stationary)
+    }
+
     func testAShortGapKeepsTheContext() throws {
         var sim = ActivitySim()
         sim.desk(240)
@@ -822,5 +902,254 @@ final class ActivityContextDecoderTests: XCTestCase {
         let hart = try final(false), baseline = try final(true)
         XCTAssertGreaterThanOrEqual(hart.locomotion[.walking] + hart.locomotion[.briskWalking],
                                     baseline.locomotion[.walking] + baseline.locomotion[.briskWalking] - 1e-9)
+    }
+
+    // MARK: Learned raw-IMU transition expert
+
+    private func eventProbability(_ states: [ActivityContextState], _ kind: ActivityTransitionKind) -> Double {
+        states.flatMap { $0.history.recentEvents }.filter { $0.kind == kind }.map { $0.probability }.max() ?? 0
+    }
+
+    func testSitToStandTransitionEvidenceRaisesTheSitToStandPosterior() throws {
+        // A sit-to-stand shift (desk → burst that leaves the wrist elsewhere → walk). The learned expert
+        // naming sit-to-stand must lift the sit-to-stand mass (the posture head's postural-transition
+        // share and the sit-to-stand-like event probability) above the same stream without it.
+        var sim = ActivitySim()
+        sim.desk(300)
+        let shiftStart = sim.ts
+        sim.postureShift(netDegrees: -75, seconds: 3)
+        sim.walk(40)
+        let plain = sim.observations
+        let expert = withTransition(plain, when: { $0 >= shiftStart - 1 && $0 < shiftStart + 8 },
+                                    none: 0.06, sitToStand: 0.85)
+
+        let (_, plainStates) = decode(plain)
+        let (_, expertStates) = decode(expert)
+
+        let withPeak = peakPostural(expertStates, from: shiftStart, to: shiftStart + 10)
+        let withoutPeak = peakPostural(plainStates, from: shiftStart, to: shiftStart + 10)
+        XCTAssertGreaterThan(withPeak, withoutPeak + 0.05,
+                             "the expert's sit-to-stand claim must raise the transition mass")
+        // The sit-to-stand-like event fires in both streams; the expert raises its probability (the
+        // sitToStand posterior at flag time).
+        let plainProb = eventProbability(plainStates, .sitToStandLike)
+        let expertProb = eventProbability(expertStates, .sitToStandLike)
+        XCTAssertGreaterThan(expertProb, 0.5)
+        XCTAssertGreaterThan(expertProb, plainProb + 0.1)
+    }
+
+    func testStandToSitTransitionEvidenceRaisesTheStandToSitPosterior() throws {
+        // The same claim for stand-to-sit, the transition that ends standing (walk → stop → shift that
+        // leaves the wrist lower → desk). The expert naming stand-to-sit must raise the stand-to-sit
+        // mass and the stand-to-sit-like event probability over the same stream without it.
+        var sim = ActivitySim()
+        sim.walk(60); sim.still(8)
+        let shiftStart = sim.ts
+        sim.postureShift(netDegrees: 70, seconds: 3)
+        sim.desk(60)
+        let plain = sim.observations
+        let expert = withTransition(plain, when: { $0 >= shiftStart - 1 && $0 < shiftStart + 8 },
+                                    none: 0.06, standToSit: 0.85)
+
+        let (_, plainStates) = decode(plain)
+        let (_, expertStates) = decode(expert)
+        let withPeak = peakPostural(expertStates, from: shiftStart, to: shiftStart + 10)
+        let withoutPeak = peakPostural(plainStates, from: shiftStart, to: shiftStart + 10)
+        XCTAssertGreaterThan(withPeak, withoutPeak + 0.05)
+        let plainProb = eventProbability(plainStates, .standToSitLike)
+        let expertProb = eventProbability(expertStates, .standToSitLike)
+        XCTAssertGreaterThan(expertProb, 0.4)
+        XCTAssertGreaterThan(expertProb, plainProb + 0.1)
+    }
+
+    func testGettingUpAndLyingDownEvidenceRaiseTheirModes() throws {
+        // Getting up: waking in bed, a shift that leaves the wrist up, then walking. The expert naming
+        // get-up raises the getting-up-like event probability over the same stream without it.
+        var sim = ActivitySim()
+        sim.sleeping(400)
+        var awake = ActivitySim.Options(); awake.sleep = .awake
+        sim.still(20, opt: awake)
+        let upShift = sim.ts
+        sim.postureShift(netDegrees: 80, seconds: 4, opt: awake)
+        sim.walk(40, opt: awake)
+        let plain = sim.observations
+        let expert = withTransition(plain, when: { $0 >= upShift - 1 && $0 < upShift + 8 },
+                                    none: 0.06, getUp: 0.85)
+        let (_, plainStates) = decode(plain)
+        let (_, expertStates) = decode(expert)
+        let plainProb = eventProbability(plainStates, .gettingUpLike)
+        let expertProb = eventProbability(expertStates, .gettingUpLike)
+        XCTAssertGreaterThan(expertProb, 0.5)
+        XCTAssertGreaterThan(expertProb, plainProb + 0.1)
+
+        // Lying down: desk → a shift that leaves the wrist recumbent → sleep. The shift alone leaves the
+        // transition direction ambiguous (no lying-down-like event without the expert); the expert
+        // naming lie-down disambiguates it and flags the event.
+        var bed = ActivitySim()
+        bed.desk(200)
+        let lieShift = bed.ts
+        bed.postureShift(netDegrees: -70, seconds: 3)
+        bed.sleeping(60)
+        let bedPlain = bed.observations
+        let bedExpert = withTransition(bedPlain, when: { $0 >= lieShift - 1 && $0 < lieShift + 8 },
+                                       none: 0.06, lieDown: 0.85)
+        let (_, bedPlainStates) = decode(bedPlain)
+        let (_, bedExpertStates) = decode(bedExpert)
+        XCTAssertFalse(anyEvent(bedPlainStates, .lyingDownLike),
+                       "the shift alone must not name lying-down")
+        XCTAssertTrue(anyEvent(bedExpertStates, .lyingDownLike),
+                      "the expert naming lie-down must disambiguate the shift")
+        XCTAssertGreaterThan(eventProbability(bedExpertStates, .lyingDownLike), 0.6)
+    }
+
+    func testNoneDominantEvidenceSuppressesUnsupportedTransitionMass() throws {
+        // A posture-shift stream (channel 3b supports the transition modes). The expert saying "none"
+        // must pull the transition mass back down compared with the same stream without it.
+        var sim = ActivitySim()
+        sim.desk(150)
+        let shiftStart = sim.ts
+        sim.postureShift(netDegrees: 70, seconds: 3)
+        sim.desk(90)
+        let plain = sim.observations
+        let noneDominant = withTransition(plain, when: { $0 >= shiftStart - 1 && $0 < shiftStart + 8 },
+                                          none: 0.94, sitToStand: 0.02, standToSit: 0.02,
+                                          lieDown: 0.01, getUp: 0.01)
+
+        let (_, a) = decode(plain)
+        let (_, b) = decode(noneDominant)
+        let peakA = peakPostural(a, from: shiftStart, to: shiftStart + 10)
+        let peakB = peakPostural(b, from: shiftStart, to: shiftStart + 10)
+        XCTAssertGreaterThan(peakA, peakB + 0.1,
+                             "a confident 'none' must suppress the transition mass the shift alone would raise")
+        // The expert's "none" must never itself raise a transition mode above the fallback's level.
+        XCTAssertLessThan(peakB, 0.20)
+        for kind in [ActivityTransitionKind.standToSitLike, .sitToStandLike, .lyingDownLike, .gettingUpLike] {
+            XCTAssertFalse(anyEvent(b, kind), "\(kind) must not fire under a dominant 'none'")
+        }
+    }
+
+    func testNoneEvidenceLeavesLocomotionMassUnchanged() throws {
+        // "None" is "no posture change", which walking and running satisfy too: a confident none on
+        // every second must not drain locomotion mass toward the stationary modes.
+        var sim = ActivitySim()
+        sim.still(60); sim.walk(180); sim.walk(120, brisk: true)
+        let plain = sim.observations
+        let none = withTransition(plain, when: { _ in true }, none: 0.94, sitToStand: 0.02,
+                                  standToSit: 0.02, lieDown: 0.01, getUp: 0.01)
+        let (_, a) = decode(plain)
+        let (_, b) = decode(none)
+        XCTAssertEqual(a.count, b.count)
+        for (x, y) in zip(a, b) {
+            let moveA = x.locomotion[.walking] + x.locomotion[.briskWalking] + x.locomotion[.running]
+            let moveB = y.locomotion[.walking] + y.locomotion[.briskWalking] + y.locomotion[.running]
+            XCTAssertEqual(moveA, moveB, accuracy: 0.02, "at \(x.ts)")
+        }
+    }
+
+    func testAbsentOrAbstainedTransitionEvidenceIsExactlyTodaySBehavior() throws {
+        // The channel is skipped when the expert is absent or abstains: the published states and events
+        // must be bit-for-bit what they were before the expert existed.
+        var sim = ActivitySim()
+        sim.desk(120); sim.postureShift(netDegrees: 70, seconds: 3); sim.walk(60); sim.still(60)
+        let plain = sim.observations
+        let abstained = withTransition(plain, when: { $0 % 7 == 0 }, none: 0.06, sitToStand: 0.85,
+                                       abstained: true)
+
+        let (_, a) = decode(plain)
+        let (_, b) = decode(abstained)
+        XCTAssertEqual(a.map { $0.ts }, b.map { $0.ts })
+        for (x, y) in zip(a, b) {
+            XCTAssertEqual(x.posture, y.posture, "at \(x.ts)")
+            XCTAssertEqual(x.locomotion, y.locomotion, "at \(x.ts)")
+            XCTAssertEqual(x.armBehavior, y.armBehavior, "at \(x.ts)")
+            XCTAssertEqual(x.displayContext, y.displayContext, "at \(x.ts)")
+            XCTAssertEqual(x.overallConfidence, y.overallConfidence, accuracy: 1e-12, "at \(x.ts)")
+            XCTAssertEqual(x.overallUncertainty, y.overallUncertainty, accuracy: 1e-12, "at \(x.ts)")
+            XCTAssertEqual(x.transition, y.transition)
+            XCTAssertEqual(x.history.recentEvents, y.history.recentEvents, "at \(x.ts)")
+        }
+    }
+
+    func testTransitionEvidenceAgesOutAndDecaysWithWindowAge() throws {
+        // A single second of expert evidence on a quiet desk stream: it lifts the transition mass while
+        // it is young (full weight up to 2 s, then decaying), and once it is older than the 6 s hold it
+        // is dropped, so the stream converges back to the one with no expert.
+        var sim = ActivitySim()
+        sim.desk(180)
+        let evStart = sim.ts
+        sim.desk(20)
+        let plain = sim.observations
+        let oneShot = withTransition(plain, when: { $0 == evStart }, none: 0.06, sitToStand: 0.85)
+
+        let (_, plainStates) = decode(plain)
+        let (_, oneStates) = decode(oneShot)
+
+        func postural(at ts: Int, _ states: [ActivityContextState]) -> Double {
+            states.first { $0.ts == ts }?.posture[PostureClass.posturalTransition] ?? 0
+        }
+        // Fresh evidence (age 0–2 s, full weight) lifts the sit-to-stand mass above the plain stream.
+        let fresh = postural(at: evStart, oneStates) - postural(at: evStart, plainStates)
+        XCTAssertGreaterThan(fresh, 1e-6, "young evidence must be felt")
+        // 5 s later the weight has decayed to 0.5× (and the posterior relaxes): the lift is smaller.
+        let aged = postural(at: evStart + 5, oneStates) - postural(at: evStart + 5, plainStates)
+        XCTAssertLessThan(aged, fresh, "the evidence's effect must decay as it ages")
+        XCTAssertGreaterThan(aged, 0, "the decayed evidence is still (weakly) present at age 5")
+        // Past the 6 s hold the evidence is dropped: the difference collapses to ~0.
+        XCTAssertEqual(postural(at: evStart + 10, oneStates), postural(at: evStart + 10, plainStates),
+                       accuracy: 1e-6, "evidence older than the hold is ignored")
+        XCTAssertEqual(postural(at: evStart + 15, oneStates), postural(at: evStart + 15, plainStates),
+                       accuracy: 1e-8, "the posterior converges back to the no-expert stream")
+    }
+
+    func testTransitionEncoderEvidenceCodableRoundTripUsesSnakeCaseKeys() throws {
+        let evidence = TransitionEncoderEvidence(none: 0.10, sitToStand: 0.60, standToSit: 0.10,
+                                                 lieDown: 0.05, getUp: 0.15, confidence: 0.72,
+                                                 modelVersion: "transition-test-1",
+                                                 preprocessingVersion: "transition-feat-1",
+                                                 abstained: false)
+        let data = try JSONEncoder().encode(evidence)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(Set(json.keys),
+                       Set(["none", "sit_to_stand", "stand_to_sit", "lie_down", "get_up",
+                            "confidence", "model_version", "preprocessing_version", "abstained"]))
+        XCTAssertEqual(json["sit_to_stand"] as? Double, 0.60)
+        XCTAssertEqual(json["model_version"] as? String, "transition-test-1")
+        XCTAssertEqual(json["preprocessing_version"] as? String, "transition-feat-1")
+
+        let back = try JSONDecoder().decode(TransitionEncoderEvidence.self, from: data)
+        XCTAssertEqual(back, evidence)
+        // Re-encoding the decoded value is a fixed point.
+        let again = try JSONSerialization.jsonObject(with: JSONEncoder().encode(back)) as? NSDictionary
+        XCTAssertEqual(again, json as NSDictionary)
+    }
+
+    func testLearnedNoneEvidenceDoesNotFirePosturalEventsInNegativeScenarios() throws {
+        // Reach-and-return, fidgeting and walking arm-swing are not posture changes. A learned expert
+        // that says "none" throughout must keep the no-model fallback from firing postural events.
+        func noneThrough(_ obs: [ActivityObservation]) -> [ActivityObservation] {
+            withTransition(obs, when: { _ in true }, none: 0.94, sitToStand: 0.02, standToSit: 0.02,
+                           lieDown: 0.01, getUp: 0.01)
+        }
+        var reach = ActivitySim()
+        reach.desk(200); reach.postureShift(netDegrees: 70, seconds: 3); reach.desk(2)
+        reach.postureShift(netDegrees: -70, seconds: 3); reach.desk(120)
+        let (_, reachStates) = decode(noneThrough(reach.observations))
+        for kind in [ActivityTransitionKind.standToSitLike, .sitToStandLike, .lyingDownLike, .gettingUpLike] {
+            XCTAssertFalse(anyEvent(reachStates, kind), "\(kind) must not fire for a reach-and-return")
+        }
+
+        var fidget = ActivitySim()
+        fidget.still(20); fidget.fidget(150)
+        let (_, fidgetStates) = decode(noneThrough(fidget.observations))
+        for kind in [ActivityTransitionKind.standToSitLike, .sitToStandLike, .lyingDownLike, .gettingUpLike] {
+            XCTAssertFalse(anyEvent(fidgetStates, kind), "\(kind) must not fire for fidgeting")
+        }
+
+        var swing = ActivitySim()
+        swing.still(20); swing.walk(90)
+        let (_, swingStates) = decode(noneThrough(swing.observations))
+        for kind in [ActivityTransitionKind.standToSitLike, .sitToStandLike, .lyingDownLike, .gettingUpLike] {
+            XCTAssertFalse(anyEvent(swingStates, kind), "\(kind) must not fire for walking arm-swing")
+        }
     }
 }

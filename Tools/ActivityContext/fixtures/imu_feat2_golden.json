@@ -1,0 +1,36 @@
+{
+  "schema": "imu-feat-2",
+  "description": "Cross-runtime golden fixture (WS-04-F06). Same physical 4-s signal, synthesized identically in both runtimes: az = 1.0 + 0.25*sin(2*pi*2.0*t) g, gx = 45.0*sin(2*pi*2.0*t) deg/s. Python consumes the 30 Hz resampled form (its Window contract), Swift the 100 Hz archive. gyro_rms_dps and cadence are rate-invariant; jerk_rms_gps converges across rates within the documented bandwidth tolerance (<=5% clean, WS-04-F02).",
+  "signal": {
+    "seconds": 4.0,
+    "accel_az": "1.0 + 0.25*sin(2*pi*2.0*t)",
+    "gyro_gx": "45.0*sin(2*pi*2.0*t)",
+    "cadence_hz": 2.0
+  },
+  "cases": [
+    {
+      "runtime": "python",
+      "rate_hz": 30,
+      "sample_count": 120,
+      "accel_rms_g": 0.17678,
+      "gyro_rms_dps": 31.82,
+      "jerk_rms_gps": 2.19676,
+      "cadence_hz": 2.0,
+      "cadence_strength": 0.875
+    },
+    {
+      "runtime": "swift",
+      "rate_hz": 100,
+      "sample_count": 400,
+      "accel_rms_g": 0.17678,
+      "gyro_rms_dps": 31.82,
+      "jerk_rms_gps": 2.21722,
+      "cadence_hz": 2.0,
+      "cadence_strength": 0.875
+    }
+  ],
+  "tolerances": {
+    "cross_rate_jerk_rel": 0.05,
+    "feature_abs": 0.01
+  }
+}

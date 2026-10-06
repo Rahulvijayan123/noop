@@ -119,12 +119,34 @@ public final class ImuSessionFileStore {
         return true
     }
 
+    /// WS-02-F01/F02 (spec §6): per-reason counts of shape-valid IMU frames the durable store
+    /// dropped — payload-CRC failure, zero/constant/rail-saturated payloads. `.none`/`.malformed`
+    /// never appear here: non-IMU frames return 0 from `append` before reaching the tally. A frame
+    /// counted here is NEVER stored, so upstream can see the rejection rate and no corrupt/stuck
+    /// payload can become a stationary window.
+    public private(set) var rawImuRejections: [Whoop5RawImu.RawImuRejectReason: Int] = [:]
+
+    /// Test seam: clear the rejection tally. The store is a process-wide singleton, so tests reset
+    /// here (or snapshot deltas) between cases.
+    public func resetRawImuRejections() { rawImuRejections = [:] }
+
     /// C8 Fix B: append one complete 1244-byte 5/MG IMU frame (or no-op for any other frame).
     /// The store gates on `Whoop5RawImu`'s exact shape, so the transport packet type is NOT
     /// trusted — decode is authoritative (mirrors Android `ImuSessionFileStore.append`).
     @discardableResult
     func append(deviceId: String, frame: [UInt8], receivedAtMs: Int64) -> Int {
         guard let ts = Whoop5RawImu.baseTs(frame), let columns = Whoop5RawImu.rawColumns(frame) else { return 0 }
+        // WS-02-F01/F02: the durable IMU gate lives HERE, at the store boundary — the live seam
+        // (BLEManager → Collector.recordGroundTruthImu) and both Backfiller routes all land on this
+        // method. A shape-valid frame that fails the payload CRC32 or the conservative plausibility
+        // check is counted with an explicit reason and never stored: a corrupt or stuck payload
+        // must not become a valid stationary window (spec §6). `rawColumns` already proved shape,
+        // so `storeAcceptance` can only reject on CRC/plausibility here.
+        let rejection = Whoop5RawImu.storeAcceptance(of: frame)
+        guard rejection == .none else {
+            rawImuRejections[rejection, default: 0] += 1
+            return 0
+        }
         var count = 0
         for window in windows() where window.deviceId == deviceId && Int64(ts) >= window.from
             && (window.to == nil || Int64(ts) <= window.to!) {

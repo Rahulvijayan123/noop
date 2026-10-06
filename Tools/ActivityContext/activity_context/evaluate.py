@@ -8,9 +8,19 @@ model, applies the manifest abstention thresholds (max_prob 0.80 / margin
   * per-class precision / recall / F1 over ACCEPTED predictions
   * confusion matrix (ontology labels incl. unknown)
   * acceptance coverage and per-class counts by subject/session
-  * transition delay (seconds to correct the prediction after a ground-truth
-    label change) — the temporal policy lives on the Swift side; this reports
-    the per-window classifier's raw delay for comparison.
+  * session-aware transition metrics (spec s12 / audit A03): only genuine
+    WITHIN-session ground-truth changes count as transitions; concatenated
+    constant blocks never create one. Undetected transitions are counted as
+    misses and CENSORED at the session end (never scanned into a later
+    session, never silently omitted); detected ones report latency
+    (mean/median/p50/p90/p95) plus a signed onset error. Real per-window
+    timestamps persisted by activity-train (eval_data.npz "starts") are used
+    when present; legacy artifacts without them fall back to fabricated
+    i*HOP_SECONDS spacing and the report flags timestamps=fabricated.
+  * the temporal policy lives on the Swift side (ActivityContextPolicy); this
+    reports the per-window classifier's raw delay AND the Python vote mirror
+    (smooth_predictions) delay for comparison. smooth_predictions is an
+    APPROXIMATION of the Swift policy, never a certificate (spec A04).
 """
 
 from __future__ import annotations
@@ -26,7 +36,7 @@ import numpy as np
 
 from .baseline import MOTION_LABELS, classify_window
 from .manifest import Manifest, load_manifest
-from .preprocess import HOP_SECONDS
+from .preprocess import HOP_SECONDS, WINDOW_SECONDS
 
 
 def build_predictor(manifest: Manifest, checkpoint_dir: Optional[str]):
@@ -79,7 +89,14 @@ def evaluate(x: np.ndarray, y_ontology: np.ndarray, predictor,
              thresholds: Dict[str, float],
              letters: Optional[np.ndarray] = None,
              subjects: Optional[np.ndarray] = None,
-             sessions: Optional[np.ndarray] = None) -> Dict:
+             sessions: Optional[np.ndarray] = None,
+             starts: Optional[np.ndarray] = None) -> Dict:
+    """Run per-window evaluation + session-aware transition metrics.
+
+    `starts` carries the real per-window start times (seconds) persisted by
+    activity-train; when None the transition report uses fabricated i*HOP_SECONDS
+    spacing and flags timestamps=fabricated (legacy artifact, audit WS-07-F03).
+    """
     labels = list(MOTION_LABELS)
     conf = {t: {u: 0 for u in labels} for t in labels}
     preds: List[str] = []
@@ -104,9 +121,11 @@ def evaluate(x: np.ndarray, y_ontology: np.ndarray, predictor,
                       "count": int(np.sum(y_ontology == t))}
 
     coverage = accepted / len(x) if len(x) else 0.0
-    smoothed = smooth_predictions(preds, sessions=sessions)
-    transition_delay = _transition_delay(y_ontology, preds)
-    transition_delay_policy = _transition_delay(y_ontology, preds, smoothed)
+    smoothed = smooth_predictions(preds, sessions=sessions, starts=starts)
+    transition_delay = _transition_delay(y_ontology, preds,
+                                         sessions=sessions, starts=starts)
+    transition_delay_policy = _transition_delay(y_ontology, preds, smoothed,
+                                                sessions=sessions, starts=starts)
     report = {
         "n_windows": int(len(x)),
         "n_accepted": accepted,
@@ -171,21 +190,32 @@ def smooth_predictions(preds: List[str],
                        required_votes: int = POLICY_REQUIRED_CONSECUTIVE_VOTES,
                        gap_reset_seconds: int = POLICY_GAP_RESET_SECONDS,
                        sessions: Optional[np.ndarray] = None,
+                       starts: Optional[np.ndarray] = None,
                        ) -> List[str]:
-    """Causal vote/hysteresis mirroring the Swift policy (spec s8): a label
-    flip needs `required_votes` consecutive disagreeing accepted windows; an
-    abstaining (unknown) window does not vote; history resets when a window
-    starts more than `gap_reset_seconds` after the previous one. When `sessions`
-    (block indices) is given, a session change is treated as a gap reset too —
-    the eval windows carry no timestamps, and WISDM blocks are separated by
-    >1 s recording pauses (train.py splits sessions at >1 s gaps)."""
+    """Causal vote/hysteresis mirror of the Swift ActivityContextPolicy.
+
+    APPROXIMATION ONLY — never a certificate (spec A04, audit WS-07-F04): the
+    deployed Swift path (ActivityContextPolicy.buildEpochs) additionally folds
+    per-window votes into 30-s UTC epochs with per-second accounting, and its
+    gap reset compares a window's start against the PREVIOUS WINDOW'S END
+    (start > prev_end + gapResetSeconds) while this mirror compares window
+    starts (start - prev_start > gapResetSeconds). Do not use these numbers to
+    certify Swift temporal behavior.
+
+    A label flip needs `required_votes` consecutive disagreeing accepted
+    windows; an abstaining (unknown) window does not vote and never invents
+    coverage (audit WS-07-F11); history resets when a window starts more than
+    `gap_reset_seconds` after the previous one, and when a `sessions` (block
+    index) change occurs. `starts` (real per-window start times, seconds) is
+    used for the gap test when present; otherwise fabricated i*HOP_SECONDS
+    spacing is assumed (legacy eval_data.npz, audit WS-07-F03)."""
     smoothed: List[str] = []
     cur: Optional[str] = None
     pending: Optional[Tuple[str, int]] = None
     prev_start: Optional[float] = None
     prev_sess: Optional[int] = None
     for i, p in enumerate(preds):
-        start = i * HOP_SECONDS
+        start = float(starts[i]) if starts is not None else i * HOP_SECONDS
         sess = int(sessions[i]) if sessions is not None else None
         if (prev_start is not None and start - prev_start > gap_reset_seconds) or                 (sessions is not None and prev_sess is not None and sess != prev_sess):
             cur, pending = None, None
@@ -210,31 +240,121 @@ def smooth_predictions(preds: List[str],
 
 
 def _transition_delay(y: np.ndarray, preds: List[str],
-                      smoothed: Optional[List[str]] = None) -> Dict:
-    """Mean/median/p90 delay (seconds) to first accepted correct prediction
-    after each ground-truth transition.
+                      smoothed: Optional[List[str]] = None,
+                      sessions: Optional[np.ndarray] = None,
+                      starts: Optional[np.ndarray] = None) -> Dict:
+    """Session-aware transition latency with censoring (spec s12 / audit A03).
+
+    Evaluates ONLY ground-truth label changes that occur INSIDE one contiguous
+    session (`sessions` = per-window block index). A session boundary is never
+    a transition: concatenating unrelated constant blocks must not invent one
+    (spec s12 "Do not create transitions by concatenating unrelated blocks").
+
+    For each genuine within-session transition at window i (truth A->B):
+      * the search for the first accepted correct prediction runs ONLY within
+        the same session (windows [i, session_end)) — never into a later
+        session, never silently omitted (audit WS-07-F01/F02);
+      * a match before the session ends is DETECTED: delay = (prediction start
+        - truth-change start), and a signed onset error = (start of the
+        contiguous B-run containing the match - truth-change start), which is
+        negative when the policy/classifier flipped BEFORE the truth change;
+      * no match by the end of the session's last window is a MISS, CENSORED
+        at the session end (right-censored: only the horizon is known, the
+        detection time is not); it counts toward both n_misses and n_censored.
 
     `preds` is the raw per-window classifier; `smoothed` (when given) is the
-    causal vote/hysteresis output (the temporal policy that actually ships on
-    the Swift side, spec s8 / ActivityPolicyConfig). Windows are 4 s on a 2 s
-    hop, so the minimum observable delay is 2 s.
+    causal vote/hysteresis output (the Python policy mirror). `starts` carries
+    real per-window start times (seconds) when present; otherwise fabricated
+    i*HOP_SECONDS spacing is used and the report flags timestamps=fabricated.
+    Windows are 4 s on a 2 s hop, so the minimum observable delay is 2 s.
     """
-    delays = []
+    series = smoothed if smoothed is not None else preds
+    n = len(y)
+    if sessions is None:
+        sess_arr = np.zeros(n, dtype=np.int64)          # whole series = one session
+    else:
+        sess_arr = np.asarray(sessions, dtype=np.int64)
+    if starts is None:
+        starts_arr = np.arange(n, dtype=np.float64) * HOP_SECONDS
+        timestamps = "fabricated"
+    else:
+        starts_arr = np.asarray(starts, dtype=np.float64)
+        timestamps = "real"
+
+    delays: List[float] = []
+    onset_errors: List[float] = []
+    horizons: List[float] = []
+    n_transitions = n_detected = n_misses = n_censored = 0
     prev = None
-    for i in range(len(y)):
-        if y[i] != prev and prev is not None:
+    prev_sess = None
+    for i in range(n):
+        sess = int(sess_arr[i])
+        if prev_sess is not None and sess != prev_sess:
+            prev = None            # session boundary: previous label is meaningless
+        if prev is not None and y[i] != prev:
+            # Genuine within-session ground-truth transition at window i.
+            n_transitions += 1
             target = y[i]
-            for j in range(i, len(y)):
-                if (smoothed if smoothed is not None else preds)[j] == target:
-                    delays.append((j - i) * HOP_SECONDS)
+            # Search bound = first window of a LATER session (session end).
+            j_end = n
+            for j in range(i + 1, n):
+                if int(sess_arr[j]) != sess:
+                    j_end = j
                     break
+            found = None
+            for j in range(i, j_end):
+                if series[j] == target:
+                    found = j
+                    break
+            if found is not None:
+                n_detected += 1
+                delays.append(float(starts_arr[found] - starts_arr[i]))
+                # Signed onset error: start of the contiguous target-run that
+                # contains the match (may begin BEFORE the truth change).
+                k = found
+                while k > 0 and int(sess_arr[k - 1]) == sess and series[k - 1] == target:
+                    k -= 1
+                onset_errors.append(float(starts_arr[k] - starts_arr[i]))
+            else:
+                # Undetected: right-censored at the end of the session's last
+                # window (the last instant a correct prediction was possible).
+                n_misses += 1
+                n_censored += 1
+                last_idx = j_end - 1 if j_end > i else i
+                horizons.append(float(starts_arr[last_idx] + WINDOW_SECONDS
+                                      - starts_arr[i]))
         prev = y[i]
-    if not delays:
-        return {"n_transitions": 0}
-    return {"n_transitions": len(delays),
-            "mean_s": round(float(np.mean(delays)), 3),
-            "median_s": round(float(np.median(delays)), 3),
-            "p90_s": round(float(np.percentile(delays, 90)), 3)}
+        prev_sess = sess
+
+    def _stats(vals: List[float]) -> Optional[Dict]:
+        if not vals:
+            return None
+        v = np.asarray(vals, dtype=np.float64)
+        return {"n": int(len(v)),
+                "mean_s": round(float(v.mean()), 3),
+                "median_s": round(float(np.median(v)), 3),
+                "p50_s": round(float(np.percentile(v, 50)), 3),
+                "p90_s": round(float(np.percentile(v, 90)), 3),
+                "p95_s": round(float(np.percentile(v, 95)), 3),
+                "max_s": round(float(v.max()), 3)}
+
+    d = _stats(delays)
+    report: Dict = {
+        "n_transitions": n_transitions,
+        "n_detected": n_detected,
+        "n_misses": n_misses,
+        "n_censored": n_censored,
+        "delay_s": d,
+        "onset_error_s": _stats(onset_errors),
+        "censoring_horizon_s": _stats(horizons),
+        "timestamps": timestamps,
+        # Legacy flat keys kept for backward-compatible consumers (detected-only).
+        "mean_s": d["mean_s"] if d else None,
+        "median_s": d["median_s"] if d else None,
+        "p90_s": d["p90_s"] if d else None,
+        "p95_s": d["p95_s"] if d else None,
+    }
+    return report
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -254,9 +374,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     letters = z["letters"] if "letters" in z else None
     subjects = z["subjects"] if "subjects" in z else None
     sessions = z["sessions"] if "sessions" in z else None
+    starts = z["starts"] if "starts" in z else None
+    if starts is None:
+        # Legacy artifact produced before activity-train persisted timestamps
+        # (audit WS-07-F03): keep old behavior but say so explicitly — the
+        # transition report uses fabricated i*HOP_SECONDS spacing.
+        print("warning: eval_data.npz has no per-window timestamps ('starts' "
+              "key missing — pre-fix artifact); transition metrics use "
+              "fabricated i*HOP_SECONDS spacing and flag timestamps="
+              "fabricated. Regenerate with activity-train to measure real "
+              "latency/gaps.", file=sys.stderr)
     predictor = build_predictor(manifest, args.checkpoint)
     report = evaluate(x, y, predictor, manifest.thresholds,
-                      letters=letters, subjects=subjects, sessions=sessions)
+                      letters=letters, subjects=subjects, sessions=sessions,
+                      starts=starts)
     report["model_version"] = manifest.model_version
     report["model_kind"] = manifest.model_kind
 

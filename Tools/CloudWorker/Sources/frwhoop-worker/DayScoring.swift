@@ -1636,7 +1636,7 @@ struct DayScorer {
                    limit 1
                 )
                 select start_ts::text, end_ts::text, motion_label, posture,
-                       exercise_session, sleep_state, exertion_context, wear_state,
+                       exercise_session, sleep_state, exertion_context, wear_state, wear_signal,
                        confidence::text, observed_s::text, valid_s::text,
                        model_version, preprocessing_version, ontology_version,
                        fingerprint, result_revision::text
@@ -1667,6 +1667,7 @@ struct DayScorer {
                 sleepState: SleepStateLabel(rawValue: r["sleep_state"] ?? "") ?? .unknown,
                 exertion: ExertionContext(rawValue: r["exertion_context"] ?? "") ?? .unknown,
                 wear: WearState(rawValue: r["wear_state"] ?? "") ?? .unknown,
+                wearSignal: WearSignalState(rawValue: r["wear_signal"] ?? "") ?? nil,
                 confidence: Double(r["confidence"] ?? "") ?? 0,
                 observedS: Int(r["observed_s"] ?? "") ?? 0,
                 validS: Int(r["valid_s"] ?? "") ?? 0))

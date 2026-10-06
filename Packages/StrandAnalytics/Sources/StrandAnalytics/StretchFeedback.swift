@@ -18,15 +18,25 @@ public enum StretchVerdict: String, Codable, Sendable {
 }
 
 /// What the wearer says the stretch actually was, when the model got it wrong. Raw values are the wire codes.
+///
+/// A correction is a PARTIAL multi-head label, never a full one: `briskWalking` names only the locomotion
+/// head, `deskWork` only posture and arm behaviour, and `notWearing` / `other` name no head at all. The
+/// heads a correction leaves blank mean "unknown" — the wearer was not asked, so nothing is invented.
+/// `partialHeads(for:)` is the canonical mapping to the ontology codes.
 public enum StretchCorrection: String, Codable, CaseIterable, Sendable {
     case sitting
     case standing
     case lyingDown = "lying_down"
     case asleep
     case walking
+    case briskWalking = "brisk_walking"
     case running
+    case stairs
     case cycling
     case inVehicle = "in_vehicle"
+    case deskWork = "desk_work"
+    case typing
+    case fidgeting
     case exercise
     case otherMovement = "other_movement"
     case notWearing = "not_wearing"
@@ -39,13 +49,64 @@ public enum StretchCorrection: String, Codable, CaseIterable, Sendable {
         case .lyingDown: return "Lying down"
         case .asleep: return "Asleep"
         case .walking: return "Walking"
+        case .briskWalking: return "Brisk walking"
         case .running: return "Running"
+        case .stairs: return "Stairs"
         case .cycling: return "Cycling"
         case .inVehicle: return "In a vehicle"
+        case .deskWork: return "Desk work"
+        case .typing: return "Typing"
+        case .fidgeting: return "Fidgeting"
         case .exercise: return "Exercising"
         case .otherMovement: return "Moving about"
         case .notWearing: return "Not wearing the strap"
         case .other: return "Something else"
+        }
+    }
+
+    /// The canonical ontology heads this correction stands for: `(posture, locomotion, armBehavior)` raw
+    /// values, `nil` where the wearer said nothing about a head. `nil` is "unknown", never an invented
+    /// class. `notWearing` is a wear-context fact, not a head reading, and `other` carries no head at all,
+    /// so both map to `(nil, nil, nil)` — they are stored as corrections, never as false head labels.
+    public static func partialHeads(for correction: StretchCorrection) -> (posture: String?, locomotion: String?, armBehavior: String?) {
+        switch correction {
+        case .sitting: return ("seated_likely", nil, nil)
+        case .standing: return ("upright_stationary", nil, nil)
+        case .lyingDown: return ("recumbent", "stationary", nil)
+        case .asleep: return ("recumbent", "stationary", "quiet")
+        case .walking: return (nil, "walking", nil)
+        case .briskWalking: return (nil, "brisk_walking", nil)
+        case .running: return (nil, "running", nil)
+        case .stairs: return (nil, "stairs", nil)
+        case .cycling: return (nil, "cycling", nil)
+        case .inVehicle: return (nil, "vehicle_motion", nil)
+        case .deskWork: return ("seated_likely", nil, "desk_like")
+        case .typing: return ("seated_likely", nil, "repetitive_hand_motion")
+        case .fidgeting: return ("seated_likely", nil, "fidgeting")
+        case .exercise: return (nil, nil, "exercise_motion")
+        case .otherMovement: return (nil, nil, nil)
+        case .notWearing: return (nil, nil, nil)
+        case .other: return (nil, nil, nil)
+        }
+    }
+
+    /// The canonical class this correction names exactly, or nil when it has no one-to-one class
+    /// (stairs, vehicle, typing, exercise, moving about, other). An answer equal to the predicted class
+    /// confirms the prediction rather than correcting it.
+    public var activityClass: ActivityClass? {
+        switch self {
+        case .sitting: return .sitting
+        case .standing: return .standing
+        case .lyingDown: return .lyingDown
+        case .asleep: return .sleeping
+        case .walking: return .walking
+        case .briskWalking: return .briskWalking
+        case .running: return .running
+        case .cycling: return .cycling
+        case .deskWork: return .sittingDesk
+        case .fidgeting: return .fidgeting
+        case .notWearing: return .offWrist
+        case .stairs, .inVehicle, .typing, .exercise, .otherMovement, .other: return nil
         }
     }
 }
