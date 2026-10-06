@@ -71,393 +71,342 @@ struct SleepFeatureSection: View {
     }
 }
 
-/// The whole "Sleep details" section: two always-visible cards plus an expander that reveals the
-/// rest.
+
+/// The "Sleep details" section: one surface, a headline strip with the three numbers that matter, and a
+/// list of chapters (Continuity, Regularity, Architecture, Physiology, Settling, Breathing). Each chapter
+/// is a single line that opens in place, so the page reads as one calm list instead of six boxes.
 struct SleepFeatureCards: View {
     let document: SleepFeatureDocument
     let night: SleepFeatureNight
 
-    @State private var expanded = false
+    @State private var open: Set<Chapter> = []
+
+    enum Chapter: String, CaseIterable, Hashable {
+        case continuity, regularity, architecture, physiology, settling, breathing
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Sleep details", overline: "Server enrichment")
 
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SleepFeatureContinuityCard(continuity: night.continuity)
-                SleepFeatureRegularityCard(regularity: document.regularity)
+            NoopCard(padding: 0, tint: StrandPalette.restColor) {
+                VStack(alignment: .leading, spacing: 0) {
+                    headline
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .padding(.top, NoopMetrics.cardPadding)
+                        .padding(.bottom, 14)
 
-                if expanded {
-                    SleepFeatureArchitectureCard(architecture: night.architecture)
-                    SleepFeaturePhysiologyCard(physiology: night.stagePhysiology)
-                    SleepFeatureSettlingCard(settling: night.settling)
-                    SleepFeatureBreathingCard(breathing: night.respiratoryVariability)
+                    ForEach(Chapter.allCases, id: \.self) { chapter in
+                        hairline
+                        chapterRow(chapter)
+                    }
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture { withAnimation(StrandMotion.interactive) { expanded.toggle() } }
+        }
+    }
 
-            Button {
-                withAnimation(StrandMotion.interactive) { expanded.toggle() }
-            } label: {
-                HStack(spacing: 6) {
-                    Text(expanded ? "Show fewer" : "Show all sleep details")
-                        .font(StrandFont.footnote)
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
+    private var hairline: some View {
+        Rectangle().fill(StrandPalette.hairline).frame(height: 1)
+            .padding(.leading, NoopMetrics.cardPadding)
+    }
+
+    // MARK: Headline
+
+    private var headline: some View {
+        let c = night.continuity
+        let continuityOK = c.map { $0.status != .withheld && $0.status != .notApplicable } ?? false
+        let sri = document.regularity?.sri7d
+        let sriValue: String = {
+            guard let sri, sri.status == .available, let v = sri.value else { return "–" }
+            return String(format: "%.0f", v)
+        }()
+        return HStack(alignment: .top, spacing: 0) {
+            heroStat(label: "Awake in bed",
+                     value: continuityOK ? SleepFeatureFormat.compactMinutes(c?.wasoMin) : "–")
+            heroDivider
+            heroStat(label: "Longest stretch",
+                     value: continuityOK ? SleepFeatureFormat.compactMinutes(c?.longestSleepBoutMin) : "–")
+            heroDivider
+            heroStat(label: "Regularity", value: sriValue, unit: sriValue == "–" ? nil : "/100")
+        }
+    }
+
+    private func heroStat(label: String, value: String, unit: String? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 2) {
+                Text(value)
+                    .font(StrandFont.number(24, weight: .medium))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if let unit {
+                    Text(unit).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                 }
-                .foregroundStyle(StrandPalette.accent)
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 8)
+            }
+            Text(label).strandOverline().lineLimit(1).minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var heroDivider: some View {
+        Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 36)
+            .padding(.trailing, 12)
+    }
+
+    // MARK: Chapters
+
+    private func chapterRow(_ chapter: Chapter) -> some View {
+        let info = summary(for: chapter)
+        let isOpen = open.contains(chapter)
+        return VStack(alignment: .leading, spacing: 0) {
+            Button {
+                guard info.hasDetail else { return }
+                withAnimation(StrandMotion.interactive) {
+                    if isOpen { open.remove(chapter) } else { open.insert(chapter) }
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: info.icon)
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(info.tint)
+                        .frame(width: 30, height: 30)
+                        .background(info.tint.opacity(0.14), in: Circle())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(info.title)
+                            .font(StrandFont.subhead.weight(.semibold))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text(info.line)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    if info.hasDetail {
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .rotationEffect(.degrees(isOpen ? 180 : 0))
+                    }
+                }
+                .padding(.horizontal, NoopMetrics.cardPadding)
+                .padding(.vertical, 12)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(expanded ? "Collapse sleep details" : "Expand sleep details")
-        }
-    }
-}
+            .accessibilityLabel("\(info.title). \(info.line)")
+            .accessibilityHint(info.hasDetail ? (isOpen ? "Collapse" : "Expand") : "")
 
-// MARK: - Continuity
-
-/// Continuity card: the four numbers spec 7.5 asks for. Withheld/partial nights show the block's
-/// machine-readable reasons instead of inventing values.
-struct SleepFeatureContinuityCard: View {
-    let continuity: SleepContinuity?
-
-    var body: some View {
-        NoopCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 8) {
-                cardHeader("Continuity", status: continuity?.status,
-                           caption: "Waking patterns across the night")
-
-                if let continuity, continuity.status != .withheld, continuity.status != .notApplicable {
-                    LazyVGrid(columns: [GridItem(.flexible(), spacing: NoopMetrics.gap),
-                                        GridItem(.flexible(), spacing: NoopMetrics.gap)],
-                              alignment: .leading, spacing: 10) {
-                        SleepFeatureRow(label: "WASO",
-                                        value: SleepFeatureFormat.minutes(continuity.wasoMin))
-                        SleepFeatureRow(label: "Awakenings/hr",
-                                        value: SleepFeatureFormat.value(continuity.recurrentAwakeningIndexPerH))
-                        SleepFeatureRow(label: "Longest sleep bout",
-                                        value: SleepFeatureFormat.minutes(continuity.longestSleepBoutMin))
-                        SleepFeatureRow(label: "Maintenance eff.",
-                                        value: SleepFeatureFormat.percent(continuity.sleepMaintenanceEfficiencyPct))
-                    }
-                    if !continuity.reasons.isEmpty {
-                        reasonLine(continuity.reasons)
-                    }
-                } else {
-                    withheldLine("Continuity isn't published for this night.",
-                                 reasons: continuity?.reasons)
-                }
+            if isOpen && info.hasDetail {
+                detail(for: chapter)
+                    .padding(.leading, NoopMetrics.cardPadding + 42)
+                    .padding(.trailing, NoopMetrics.cardPadding)
+                    .padding(.bottom, 14)
+                    .transition(.opacity)
             }
         }
     }
 
-    private func cardHeader(_ title: String, status: SleepMetricStatus?, caption: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).strandOverline()
-                Text(caption).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+    private struct ChapterSummary {
+        var title: String
+        var icon: String
+        var tint: Color
+        var line: String
+        var hasDetail: Bool
+    }
+
+    private func available(_ s: SleepMetricStatus?) -> Bool {
+        guard let s else { return false }
+        return s != .withheld && s != .notApplicable && s != .notRun && s != .timeout && s != .error
+    }
+
+    private func partialNote(_ s: SleepMetricStatus?) -> String { s == .partial ? " · partial" : "" }
+
+    private func summary(for chapter: Chapter) -> ChapterSummary {
+        switch chapter {
+        case .continuity:
+            let c = night.continuity
+            let ok = available(c?.status)
+            return ChapterSummary(
+                title: "Continuity", icon: "waveform.path", tint: StrandPalette.restColor,
+                line: ok ? "\(SleepFeatureFormat.value(c?.recurrentAwakeningIndexPerH, suffix: " wakes/hr")) · \(SleepFeatureFormat.percent(c?.sleepMaintenanceEfficiencyPct)) maintained\(partialNote(c?.status))"
+                         : "Not published for this night", hasDetail: ok || !(c?.reasons.isEmpty ?? true))
+        case .regularity:
+            let r = document.regularity
+            let sri = r?.sri7d
+            let line: String
+            if let sri, sri.status == .available, let v = sri.value {
+                line = "SRI \(String(format: "%.0f", v)) of 100 · \(sri.validDays ?? 0) days"
+            } else if r?.clockProfile != nil {
+                line = "SRI still building · timing variability available"
+            } else {
+                line = "Not enough history yet"
             }
-            Spacer(minLength: 8)
-            SleepFeatureStatusPill(status: status)
+            return ChapterSummary(title: "Regularity", icon: "metronome", tint: StrandPalette.metricCyan,
+                                  line: line, hasDetail: sri != nil || r?.clockProfile != nil)
+        case .architecture:
+            let a = night.architecture
+            let ok = available(a?.status)
+            let transitions = a?.transitionCounts.flatMap { $0 }.reduce(0, +) ?? 0
+            let line = ok
+                ? "REM first at \(SleepFeatureFormat.minutes(a?.remLatencyFromOnsetMin)) · \(transitions) stage changes\(partialNote(a?.status))"
+                : "Not published for this night"
+            return ChapterSummary(title: "Architecture", icon: "square.stack.3d.up", tint: StrandPalette.restBright,
+                                  line: line, hasDetail: ok)
+        case .physiology:
+            let p = night.stagePhysiology
+            let ok = p?.stages.isEmpty == false
+            let line = ok
+                ? "Deep \(SleepFeatureFormat.value(p?.deep?.hrMedianBpm, suffix: " bpm")) · REM \(SleepFeatureFormat.value(p?.rem?.hrMedianBpm, suffix: " bpm"))"
+                : "Not available for this night"
+            return ChapterSummary(title: "Physiology by stage", icon: "heart.text.square", tint: StrandPalette.accent,
+                                  line: line, hasDetail: ok)
+        case .settling:
+            let s = night.settling
+            let ok = available(s?.status)
+            let line = ok
+                ? "Heart rate drops \(SleepFeatureFormat.value(s?.hrDropBpm, suffix: " bpm")) in \(SleepFeatureFormat.minutes(s?.hrSettlingLatencyMin))"
+                : "Not available for this night"
+            return ChapterSummary(title: "Falling asleep", icon: "moon.zzz", tint: StrandPalette.metricRose,
+                                  line: line, hasDetail: ok)
+        case .breathing:
+            let b = night.respiratoryVariability
+            let ok = available(b?.status)
+            let line = ok
+                ? "\(SleepFeatureFormat.value(b?.rateBpm, suffix: " br/min")) · estimated from heart rhythm"
+                : "Not available for this night"
+            return ChapterSummary(title: "Breathing", icon: "lungs", tint: StrandPalette.signalYellow,
+                                  line: line, hasDetail: ok)
         }
     }
 
-    private func withheldLine(_ message: String, reasons: [String]?) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(message)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let reasons, !reasons.isEmpty { reasonLine(reasons) }
-        }
-    }
+    // MARK: Chapter details
 
-    private func reasonLine(_ reasons: [String]) -> some View {
-        Text(reasons.joined(separator: " · "))
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-// MARK: - Regularity
-
-/// Regularity card: SRI 7d with an honest coverage/history line, plus onset/wake variability.
-/// A withheld SRI shows WHY it is withheld (never a fake value); timing variability is still
-/// shown because the sidecar delivers it independently of the SRI gates (contract section 3).
-struct SleepFeatureRegularityCard: View {
-    let regularity: SleepRegularity?
-
-    var body: some View {
-        NoopCard(tint: StrandPalette.metricCyan) {
+    @ViewBuilder private func detail(for chapter: Chapter) -> some View {
+        switch chapter {
+        case .continuity:
+            let c = night.continuity
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Regularity").strandOverline()
-                        Text("Sleep regularity index (SRI)").font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    Spacer(minLength: 8)
-                    SleepFeatureStatusPill(status: regularity?.status)
+                if available(c?.status) {
+                    detailRow("Awake after falling asleep", SleepFeatureFormat.minutes(c?.wasoMin))
+                    detailRow("Awakenings per hour", SleepFeatureFormat.value(c?.recurrentAwakeningIndexPerH))
+                    detailRow("Longest sleep bout", SleepFeatureFormat.minutes(c?.longestSleepBoutMin))
+                    detailRow("Maintenance efficiency", SleepFeatureFormat.percent(c?.sleepMaintenanceEfficiencyPct))
                 }
-
-                if let sri = regularity?.sri7d {
-                    if sri.status == .available, let value = sri.value {
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(String(format: "%.0f", value))
-                                .font(StrandFont.number(26, weight: .medium))
-                                .foregroundStyle(StrandPalette.metricCyan)
-                            Text("/ 100")
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                            Spacer()
-                        }
-                        // History + coverage: how many days and paired minutes stand behind the
-                        // number — the denominator of the SRI gate, not a score.
+                reasons(c?.reasons)
+            }
+        case .regularity:
+            let r = document.regularity
+            VStack(alignment: .leading, spacing: 8) {
+                if let sri = r?.sri7d {
+                    if sri.status == .available, let v = sri.value {
+                        detailRow("Sleep regularity index", String(format: "%.0f / 100", v))
                         if let paired = sri.pairedMinutes, let eligible = sri.eligibleMinutes, eligible > 0 {
-                            let coverage = min(1.0, Double(paired) / Double(eligible))
-                            Text("\(sri.validDays ?? 0) monitored days · \(SleepFeatureFormat.percent(coverage * 100)) paired coverage")
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
+                            detailRow("Paired coverage",
+                                      SleepFeatureFormat.percent(min(1.0, Double(paired) / Double(eligible)) * 100))
                         }
-                        if !sri.reasons.isEmpty { reasonLine(sri.reasons) }
+                        detailRow("Monitored days", "\(sri.validDays ?? 0)")
                     } else {
-                        // Honest withheld state: reasons first, never a number.
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("SRI withheld")
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                            if let paired = sri.pairedMinutes, let days = sri.validDays {
-                                Text("\(days) monitored days · \(paired) paired minutes")
-                                    .font(StrandFont.footnote)
-                                    .foregroundStyle(StrandPalette.textTertiary)
-                            }
-                            if !sri.reasons.isEmpty { reasonLine(sri.reasons) }
-                        }
+                        detailRow("Sleep regularity index", "Withheld")
+                        if let days = sri.validDays { detailRow("Monitored days", "\(days)") }
                     }
-                } else {
-                    Text("Not enough monitored history for a regularity reading yet.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    reasons(sri.reasons)
                 }
-
-                // Timing variability rides independently of the SRI gates (contract section 3).
-                if let clock = regularity?.clockProfile {
-                    HStack(spacing: 12) {
-                        SleepFeatureRow(label: "Onset",
-                                        value: SleepFeatureFormat.minutes(clock.sleepOnset?.circadianSdMin,
-                                                                          prefix: "±"))
-                        SleepFeatureRow(label: "Wake",
-                                        value: SleepFeatureFormat.minutes(clock.finalWake?.circadianSdMin,
-                                                                          prefix: "±"))
-                        SleepFeatureRow(label: "Night shift",
-                                        value: SleepFeatureFormat.minutes(clock.adjacentNightPhaseShiftMin?.value))
-                    }
-                    Text("Variability across recent nights, in minutes")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                if let clock = r?.clockProfile {
+                    detailRow("Bedtime varies by", SleepFeatureFormat.minutes(clock.sleepOnset?.circadianSdMin, prefix: "±"))
+                    detailRow("Wake time varies by", SleepFeatureFormat.minutes(clock.finalWake?.circadianSdMin, prefix: "±"))
+                    detailRow("Shift from last night",
+                              SleepFeatureFormat.minutes(clock.adjacentNightPhaseShiftMin?.value))
+                    note("Variability across recent nights")
                 }
             }
-        }
-    }
-
-    private func reasonLine(_ reasons: [String]) -> some View {
-        Text(reasons.joined(separator: " · "))
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-// MARK: - Architecture
-
-/// Architecture card: stage bout medians, REM/deep latency from sleep onset, and a compact
-/// transition summary. The latency numbers are from ACTUAL sleep onset (contract section 3
-/// architecture — NOT YASA's recording-start Lat_REM).
-struct SleepFeatureArchitectureCard: View {
-    let architecture: SleepArchitecture?
-
-    var body: some View {
-        NoopCard(tint: StrandPalette.restBright) {
+        case .architecture:
+            let a = night.architecture
+            let transitions = a?.transitionCounts.flatMap { $0 }.reduce(0, +) ?? 0
             VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Architecture").strandOverline()
-                        Text("Stage structure and transitions").font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    Spacer(minLength: 8)
-                    SleepFeatureStatusPill(status: architecture?.status)
-                }
-
-                if let architecture, architecture.status != .withheld, architecture.status != .notApplicable {
-                    HStack(spacing: 12) {
-                        SleepFeatureRow(label: "REM latency",
-                                        value: SleepFeatureFormat.minutes(architecture.remLatencyFromOnsetMin))
-                        SleepFeatureRow(label: "Deep latency",
-                                        value: SleepFeatureFormat.minutes(architecture.deepLatencyFromOnsetMin))
-                        SleepFeatureRow(label: "REM bout",
-                                        value: SleepFeatureFormat.minutes(architecture.bouts(for: "rem")?.medianMin))
-                        SleepFeatureRow(label: "Deep bout",
-                                        value: SleepFeatureFormat.minutes(architecture.bouts(for: "deep")?.medianMin))
-                    }
-
-                    let transitions = architecture.transitionCounts.flatMap { $0 }.reduce(0, +)
-                    HStack(spacing: 12) {
-                        SleepFeatureRow(label: "Stage transitions",
-                                        value: transitions > 0 ? "\(transitions)" : "Not available")
-                        SleepFeatureRow(label: "Entropy",
-                                        value: SleepFeatureFormat.value(architecture.entropyRateBitsPerTransition,
-                                                                        suffix: " bits"))
-                    }
-                    Text("Latency from actual sleep onset, not recording start")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                } else {
-                    Text("Architecture isn't published for this night.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let arch = architecture, !arch.reasons.isEmpty { reasonLine(arch.reasons) }
-                }
+                detailRow("REM latency", SleepFeatureFormat.minutes(a?.remLatencyFromOnsetMin))
+                detailRow("Deep latency", SleepFeatureFormat.minutes(a?.deepLatencyFromOnsetMin))
+                detailRow("Typical REM bout", SleepFeatureFormat.minutes(a?.bouts(for: "rem")?.medianMin))
+                detailRow("Typical deep bout", SleepFeatureFormat.minutes(a?.bouts(for: "deep")?.medianMin))
+                detailRow("Stage changes", transitions > 0 ? "\(transitions)" : "Not available")
+                detailRow("Entropy", SleepFeatureFormat.value(a?.entropyRateBitsPerTransition, suffix: " bits"))
+                note("Latency counts from actual sleep onset, not recording start")
             }
-        }
-    }
-
-    private func reasonLine(_ reasons: [String]) -> some View {
-        Text(reasons.joined(separator: " · "))
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-// MARK: - Physiology
-
-/// Physiology card: a small stage-by-metric comparison (heart rate and RMSSD per stage).
-/// Model-dependent by nature (contract section 3 stage_physiology: stages come from sleep-v2).
-struct SleepFeaturePhysiologyCard: View {
-    let physiology: SleepStagePhysiology?
-
-    private struct StageColumns: Identifiable {
-        let stage: String
-        let label: String
-        let metrics: SleepStagePhysiologyMetrics?
-        var id: String { stage }
-    }
-
-    private var columns: [StageColumns] {
-        [
-            StageColumns(stage: "light", label: "Light", metrics: physiology?.light),
-            StageColumns(stage: "deep", label: "Deep", metrics: physiology?.deep),
-            StageColumns(stage: "rem", label: "REM", metrics: physiology?.rem),
-        ]
-    }
-
-    var body: some View {
-        NoopCard(tint: StrandPalette.accent) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Physiology").strandOverline()
-                        Text("Heart rate and RMSSD by stage").font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    Spacer(minLength: 8)
-                    SleepFeatureStatusPill(status: physiology?.status)
+        case .physiology:
+            let p = night.stagePhysiology
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 0) {
+                    Text("").frame(maxWidth: .infinity, alignment: .leading)
+                    stageHeader("Light"); stageHeader("Deep"); stageHeader("REM")
                 }
-
-                if physiology?.stages.isEmpty == false {
-                    HStack(alignment: .top, spacing: NoopMetrics.gap) {
-                        ForEach(columns) { column in
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(column.label).strandOverline()
-                                SleepFeatureRow(label: "HR",
-                                                value: SleepFeatureFormat.value(column.metrics?.hrMedianBpm,
-                                                                                suffix: " bpm"))
-                                SleepFeatureRow(label: "RMSSD",
-                                                value: SleepFeatureFormat.value(column.metrics?.rmssdMs?.median,
-                                                                                suffix: " ms"))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                    Text("Stages are model estimates from sleep-v2, not ground truth")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    Text("Stage physiology isn't available for this night.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                stageRow("Heart rate", [p?.light, p?.deep, p?.rem].map {
+                    SleepFeatureFormat.value($0?.hrMedianBpm, suffix: "", short: true) })
+                stageRow("RMSSD (ms)", [p?.light, p?.deep, p?.rem].map {
+                    SleepFeatureFormat.value($0?.rmssdMs?.median, suffix: "", short: true) })
+                note("Stages are model estimates from sleep-v2, not ground truth")
             }
-        }
-    }
-}
-
-// MARK: - Settling
-
-/// Settling card: the heart-rate and skin-temperature curves around sleep onset, aligned on the
-/// same minute axis with the onset marked at t=0. Anchored at the canonical ACTUAL sleep onset s
-/// (first sleep epoch), which is minute 0 of the sidecar's curves (contract section 3 settling).
-/// Invalid minutes are real gaps — the path never bridges them, so a missing minute never
-/// invents a plateau (contract section 4).
-struct SleepFeatureSettlingCard: View {
-    let settling: SleepSettling?
-
-    var body: some View {
-        NoopCard(tint: StrandPalette.metricRose) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Settling").strandOverline()
-                        Text("Heart rate and temperature around sleep onset").font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    Spacer(minLength: 8)
-                    SleepFeatureStatusPill(status: settling?.status)
-                }
-
-                if let settling, settling.status != .withheld, settling.status != .notApplicable {
-                    // The onset s = the curve's earliest timestamp + 30 min (the sidecar emits
-                    // one entry per minute over [-30, +90) relative to s).
-                    let onset = SettlingCurves.onset(hr: settling.hrCurve, temp: settling.tempCurve)
-                    SettlingCurves(hr: settling.hrCurve, temp: settling.tempCurve, onsetTs: onset)
-                        .frame(height: 110)
+        case .settling:
+            let s = night.settling
+            VStack(alignment: .leading, spacing: 10) {
+                if let s {
+                    let onset = SettlingCurves.onset(hr: s.hrCurve, temp: s.tempCurve)
+                    SettlingCurves(hr: s.hrCurve, temp: s.tempCurve, onsetTs: onset)
+                        .frame(height: 80)
                         .accessibilityHidden(true)
-
-                    HStack(spacing: 12) {
-                        SleepFeatureRow(label: "HR drop",
-                                        value: SleepFeatureFormat.value(settling.hrDropBpm, suffix: " bpm"))
-                        SleepFeatureRow(label: "Settling",
-                                        value: SleepFeatureFormat.minutes(settling.hrSettlingLatencyMin))
-                    }
-                    Text("Minutes from sleep onset (t = 0)")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                } else {
-                    Text("Settling curves aren't available for this night.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let s = settling, !s.reasons.isEmpty { reasonLine(s.reasons) }
+                    detailRow("Heart rate drop", SleepFeatureFormat.value(s.hrDropBpm, suffix: " bpm"))
+                    detailRow("Time to settle", SleepFeatureFormat.minutes(s.hrSettlingLatencyMin))
+                    note("Minutes around sleep onset; the dashed line is the moment you fell asleep")
+                    reasons(s.reasons)
                 }
+            }
+        case .breathing:
+            let b = night.respiratoryVariability
+            VStack(alignment: .leading, spacing: 8) {
+                detailRow("Rate", SleepFeatureFormat.value(b?.rateBpm, suffix: " br/min"))
+                detailRow("Variability", SleepFeatureFormat.percent(b?.cvInterval.map { $0 * 100 }))
+                detailRow("Coverage", SleepFeatureFormat.percent(b?.quality?.nightRunCoverage.map { $0 * 100 }))
+                note("Estimated from heart-rate rhythm, not airflow. An unobserved breath is not an apnea.")
+                reasons(b?.reasons)
             }
         }
     }
 
-    private func reasonLine(_ reasons: [String]) -> some View {
-        Text(reasons.joined(separator: " · "))
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+    }
+
+    private func stageHeader(_ text: String) -> some View {
+        Text(text).strandOverline().frame(width: 52, alignment: .trailing)
+    }
+
+    private func stageRow(_ label: String, _ values: [String]) -> some View {
+        HStack(spacing: 0) {
+            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            ForEach(Array(values.enumerated()), id: \.offset) { _, v in
+                Text(v).font(StrandFont.bodyNumber).foregroundStyle(StrandPalette.textPrimary)
+                    .frame(width: 52, alignment: .trailing)
+            }
+        }
+    }
+
+    private func note(_ text: String) -> some View {
+        Text(text)
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
+    }
+
+    @ViewBuilder private func reasons(_ list: [String]?) -> some View {
+        if let list, !list.isEmpty { note(list.joined(separator: " · ")) }
     }
 }
 
@@ -558,133 +507,22 @@ private struct MiniCurve: View {
     }
 }
 
-// MARK: - Breathing
-
-/// Breathing card: RSA-derived rate and interval variability with honest estimate wording
-/// (contract section 3 respiratory_variability: "estimated from heart-rate rhythm, not airflow").
-struct SleepFeatureBreathingCard: View {
-    let breathing: SleepRespiratoryVariability?
-
-    var body: some View {
-        NoopCard(tint: StrandPalette.signalYellow) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Breathing").strandOverline()
-                        Text("RSA-derived estimate").font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    Spacer(minLength: 8)
-                    SleepFeatureStatusPill(status: breathing?.status)
-                }
-
-                if let breathing, breathing.status != .withheld, breathing.status != .notApplicable {
-                    HStack(spacing: 12) {
-                        SleepFeatureRow(label: "Rate",
-                                        value: SleepFeatureFormat.value(breathing.rateBpm, suffix: " br/min"))
-                        SleepFeatureRow(label: "Variability",
-                                        value: SleepFeatureFormat.percent(breathing.cvInterval.map { $0 * 100 }))
-                        SleepFeatureRow(label: "Coverage",
-                                        value: SleepFeatureFormat.percent(breathing.quality?.nightRunCoverage.map { $0 * 100 }))
-                    }
-                    Text("Estimated from heart-rate rhythm, not airflow")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if breathing.unobservedBreathIsNotApnea == true {
-                        Text("An unobserved breath is not an apnea.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    if !breathing.reasons.isEmpty { reasonLine(breathing.reasons) }
-                } else {
-                    Text("Breathing estimate isn't available for this night.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let b = breathing, !b.reasons.isEmpty { reasonLine(b.reasons) }
-                }
-            }
-        }
-    }
-
-    private func reasonLine(_ reasons: [String]) -> some View {
-        Text(reasons.joined(separator: " · "))
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-}
-
-// MARK: - Shared small pieces
-
-/// One label/value line inside a card (label overline, value in the metric number font).
-private struct SleepFeatureRow: View {
-    let label: String
-    let value: String
-
-    init(label: String, value: String) {
-        self.label = label
-        self.value = value
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).strandOverline()
-            Text(value)
-                .font(StrandFont.bodyNumber)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
-        }
-    }
-}
-
-/// A tiny status pill (Available / Partial / Withheld / …) so the section explains WHY a number
-/// is missing instead of silently omitting it. `.unknown` renders nothing (a future status is
-/// "don't guess", never a wrong claim).
-private struct SleepFeatureStatusPill: View {
-    let status: SleepMetricStatus?
-
-    var body: some View {
-        if let status {
-            switch status {
-            case .available:
-                pill("Available", StrandPalette.statusPositive)
-            case .partial:
-                pill("Partial", StrandPalette.signalYellow)
-            case .withheld:
-                pill("Withheld", StrandPalette.textTertiary)
-            case .notApplicable:
-                pill("N/A", StrandPalette.textTertiary)
-            case .notRun:
-                pill("Not run", StrandPalette.textTertiary)
-            case .timeout, .error:
-                pill("Unavailable", StrandPalette.metricRose)
-            case .unknown:
-                EmptyView()
-            }
-        }
-    }
-
-    private func pill(_ text: String, _ color: Color) -> some View {
-        Text(text)
-            .font(StrandFont.captionNumber)
-            .foregroundStyle(color)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .background(color.opacity(0.14), in: Capsule(style: .continuous))
-    }
-}
 
 /// Number formatting for the sleep-features cards. Honesty rule: a nil value formats as
 /// "Not available" (spec 7.5 "show estimate/source and missing-data explanations"; contract:
 /// null/absent is the ONLY representation of an unavailable metric — never a fabricated 0).
 enum SleepFeatureFormat {
-    static func value(_ value: Double?, suffix: String = "") -> String {
-        guard let value else { return "Not available" }
-        return String(format: "%.1f", value) + suffix
+    static func value(_ value: Double?, suffix: String = "", short: Bool = false) -> String {
+        guard let value else { return short ? "–" : "Not available" }
+        return String(format: short ? "%.0f" : "%.1f", value) + suffix
+    }
+
+    /// "1h 05m" / "12m" for the headline strip; a missing value is a dash, never a zero.
+    static func compactMinutes(_ value: Double?) -> String {
+        guard let value else { return "–" }
+        let total = Int(value.rounded())
+        if total < 60 { return "\(total)m" }
+        return "\(total / 60)h \(String(format: "%02d", total % 60))m"
     }
 
     static func percent(_ value: Double?) -> String {
