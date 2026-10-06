@@ -42,7 +42,7 @@ def test_no_vendored_oxford_code_in_the_package():
                                                 ("def", "merge_bouts"), ("def", "window_predictions_to_seconds"),
                                                 ("def", "windows_within_bouts"), ("def", "summarise_bouts"))]
     oxford = "Copyright © 2022, University of Oxford"
-    for root in (os.path.join(PKG, "activity_context"), os.path.join(PKG, "tests")):
+    for root in (ELDERNET_PKG, os.path.join(PKG, "tests", "eldernet")):
         for dirpath, _, names in os.walk(root):
             for n in names:
                 if not n.endswith(".py"):
