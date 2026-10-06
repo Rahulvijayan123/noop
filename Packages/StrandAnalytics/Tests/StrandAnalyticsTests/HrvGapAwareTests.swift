@@ -73,6 +73,25 @@ final class HrvGapAwareTests: XCTestCase {
         XCTAssertEqual(HRVAnalyzer.rmssdGapAware(cleaned.nn, cleaned.contiguous), HRVAnalyzer.rmssdRaw(cleaned.nn))
     }
 
+    // 5b. `rmssdGapAware` is exactly `sqrt(sumSq / count)` of `rmssdSumSquaresGapAware`'s own components
+    // (the refactor that exposed the components for `ActivityContextAggregator`'s cross-interval
+    // recombination must not change the single-window answer).
+    func testSumSquaresComponentsReproduceRmssdGapAware() {
+        let nn = [500.0, 500.0, 1000.0, 1000.0, 1050.0]
+        let contiguous = [false, true, false, true, true]
+        let components = HRVAnalyzer.rmssdSumSquaresGapAware(nn, contiguous)
+        XCTAssertEqual(components.count, 3, "indices 1, 3 and 4 are contiguous; index 2 straddles a drop")
+        XCTAssertEqual(components.sumSq, 2_500.0, accuracy: 1e-9)
+        let expected = (components.sumSq / Double(components.count)).squareRoot()
+        XCTAssertEqual(HRVAnalyzer.rmssdGapAware(nn, contiguous)!, expected, accuracy: 1e-9)
+
+        // No valid pair -> count 0, sumSq 0, and the convenience wrapper is nil (not 0/0).
+        let noPairs = HRVAnalyzer.rmssdSumSquaresGapAware([600.0, 900.0], [false, false])
+        XCTAssertEqual(noPairs.count, 0)
+        XCTAssertEqual(noPairs.sumSq, 0)
+        XCTAssertNil(HRVAnalyzer.rmssdGapAware([600.0, 900.0], [false, false]))
+    }
+
     // 6. Boundary cases: empty, all-dropped, sub-window series, single survivor, zero valid pairs.
     func testBoundaryCases() {
         let empty = HRVAnalyzer.cleanRRGapAware([])

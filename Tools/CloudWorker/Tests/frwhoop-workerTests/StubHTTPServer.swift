@@ -5,6 +5,13 @@ import Glibc
 import Darwin
 #endif
 
+/// `SOCK_STREAM` is an `Int32` on Darwin and a `__socket_type` enum in Glibc.
+#if canImport(Glibc)
+private let streamSocketType = Int32(SOCK_STREAM.rawValue)
+#else
+private let streamSocketType = SOCK_STREAM
+#endif
+
 /// A minimal HTTP/1.1 stub server for the inference-client tests.
 ///
 /// It binds 127.0.0.1 on an EPHEMERAL port (`port: 0`) and reports the port the
@@ -49,7 +56,7 @@ final class StubHTTPServer {
         // A client that aborts mid-response (the timeout test) must not kill the
         // test process with SIGPIPE.
         _ = signal(SIGPIPE, SIG_IGN)
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        let fd = socket(AF_INET, streamSocketType, 0)
         precondition(fd >= 0, "socket() failed")
         var yes: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
@@ -209,7 +216,7 @@ final class StubHTTPServer {
 /// A loopback port that nothing is listening on: bind an ephemeral port, read it,
 /// then close the socket. A connection to it is refused.
 func closedLoopbackPort() -> UInt16 {
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    let fd = socket(AF_INET, streamSocketType, 0)
     var addr = sockaddr_in()
     addr.sin_family = sa_family_t(AF_INET)
     addr.sin_port = 0

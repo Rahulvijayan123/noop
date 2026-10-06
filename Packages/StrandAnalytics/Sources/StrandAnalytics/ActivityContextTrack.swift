@@ -650,7 +650,22 @@ public enum ActivityContextDayBuilder {
             ("w", input.workouts.map { ($0.start, $0.end) }),
             ("o", input.offWrist.map { ($0.start, $0.end) }),
         ]
-        let text = parts.map { "\($0.0):" + clipped($0.1).joined(separator: ",") }.joined(separator: "|")
+        var text = parts.map { "\($0.0):" + clipped($0.1).joined(separator: ",") }.joined(separator: "|")
+        // Encoder windows reach the phone minutes after the strap's own streams, usually for seconds already
+        // decoded. They change the evidence of those seconds, so they are part of the context: a window that
+        // arrives late re-decodes the day instead of being silently skipped. Only windows the decoder would
+        // already have used (ending before `through`) count, and a day without any hashes as before.
+        let used = input.encoderWindows.filter { $0.endTs >= input.dayStart && $0.endTs < hi }
+        if !used.isEmpty {
+            var eh: UInt64 = 0xcbf29ce484222325
+            func mix(_ s: String) { for b in s.utf8 { eh = (eh ^ UInt64(b)) &* 0x100000001b3 } }
+            for w in used.sorted(by: { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }) {
+                mix("\(w.startTs)-\(w.endTs)=\(w.label.rawValue)")
+                for key in w.probs.keys.sorted() { mix("\(key):\(Int(((w.probs[key] ?? 0) * 1000).rounded()))") }
+            }
+            let usedFeatures = input.imuWindows.filter { $0.endTs >= input.dayStart && $0.endTs < hi }.count
+            text += "|e:\(input.encoderId)/\(input.encoderVersion)/\(used.count)/\(usedFeatures)/\(String(eh, radix: 16))"
+        }
         var h: UInt64 = 0xcbf29ce484222325
         for b in text.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
         return String(h, radix: 16)

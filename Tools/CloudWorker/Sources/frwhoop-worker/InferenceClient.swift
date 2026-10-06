@@ -541,7 +541,10 @@ final class InferenceClient {
         // timeout is >= it so a slow-but-progressing body is not cut off early.
         cfg.timeoutIntervalForRequest = Double(self.timeoutMS) / 1000.0
         cfg.timeoutIntervalForResource = Double(self.timeoutMS) / 1000.0 + 10.0
+        #if !canImport(FoundationNetworking)
+        // Linux's FoundationNetworking exposes this read-only (it never waits), so only Apple sets it.
         cfg.waitsForConnectivity = false
+        #endif
         self.session = URLSession(configuration: cfg)
     }
 

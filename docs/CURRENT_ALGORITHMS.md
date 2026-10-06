@@ -484,7 +484,7 @@ When resting HR is known, VO₂max is estimated with Uth 2004, `15.3 × HRmax / 
 
 ### Input
 
-The decoder reads what the strap actually sends: gravity and dynamic acceleration, the cumulative step counter, heart rate (scaled by the profile's HRmax), the detected nights (each night's in-bed window and its staged sleep epochs, so lying awake in bed is awake and in bed, never asleep), logged workouts, and wrist-on / wrist-off events. When a raw-IMU session covers the time, the HART motion encoder adds gait rhythm and a named activity. Every five seconds it publishes three independent probability heads (posture, locomotion, arm behaviour) and never forces a class.
+The decoder reads what the strap actually sends: gravity and dynamic acceleration, the cumulative step counter, heart rate (scaled by the profile's HRmax), the detected nights (each night's in-bed window and its staged sleep epochs, so lying awake in bed is awake and in bed, never asleep), logged workouts, and wrist-on / wrist-off events. When raw IMU covers the time, the HART motion encoder adds gait rhythm and a named activity. A WHOOP 5/MG records it on its own (one minute in every three by default, or continuously), the server runs HART over it (100 Hz resampled to 30 Hz, 4 s windows) and the phone fetches the windows back for its decoder, so they reach a stretch a few minutes after the strap's own streams do and the day is re-decoded when they arrive. HART tells stationary, walking, running and other movement apart; it does not tell sitting from standing or lying. Every five seconds it publishes three independent probability heads (posture, locomotion, arm behaviour) and never forces a class.
 
 ### Classes
 

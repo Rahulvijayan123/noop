@@ -1228,6 +1228,11 @@ struct DayScorer {
             dayWindow: LocalDayWindows(timeZone: tz).window(ofDayKey: claim.day),
             wristOff: wristOff,
             bandSleepState: sleepState,
+            // Stage nights with SleepStagerV2, as the app does (`PuffinExperiment.experimentalSleepV2Enabled`
+            // defaults on). `analyzeDay`'s parameter defaults to V1 for pure-function callers, and this call
+            // used to take that default, so a server-scored night was staged by a different recipe than the
+            // same night on the phone.
+            useSleepStagerV2: true,
             activityEpochs: publishedActivity.epochs,
             // A day still in progress counts resting energy only up to now; a finished day is unaffected.
             energyAsOf: now

@@ -199,6 +199,7 @@ final class ImuObjectLaneTests: XCTestCase {
             }
             let resumed = clock.value
             store.records += records(ts: resumed...(resumed + 299))
+            clock.advance(300)   // the 300 s of capture take 300 s; the object goes out once its window closes
             let rows = try await nextRows(source, after: cursor)
             XCTAssertEqual(firstTs(rows), resumed, "idle for \(idleMinutes) min stranded later data")
             XCTAssertEqual(rows.count, 300)
@@ -222,7 +223,9 @@ final class ImuObjectLaneTests: XCTestCase {
         let cursor = start - 3 * 86_400
         let store = FakeImuStore(records: records(ts: (cursor - 299)...cursor))
         let source = makeSource(store: store, clock: clock)
-        store.records += records(ts: (start - 120)...(start + 59))
+        // A live capture: the second after the object's 300 s window is already stored, so the window is
+        // closed and the object may go out as soon as the scan reaches it.
+        store.records += records(ts: (start - 120)...(start + 180))
         var rows: [PushBinaryRow] = []
         var passes = 0
         while rows.isEmpty && passes < 8 {
@@ -241,7 +244,8 @@ final class ImuObjectLaneTests: XCTestCase {
             _ = try await nextRows(source, after: cursor)
         }
         let ahead = clock.value + 900
-        store.records += records(ts: ahead...(ahead + 299))
+        // The strap keeps streaming: the second after the window closes it, whatever the phone clock says.
+        store.records += records(ts: ahead...(ahead + 300))
         let rows = try await nextRows(source, after: cursor)
         XCTAssertEqual(firstTs(rows), ahead)
     }
@@ -253,9 +257,53 @@ final class ImuObjectLaneTests: XCTestCase {
             _ = try await nextRows(source, after: cursor)
         }
         clock.set(Self.sessionStart + 60)
-        store.records += records(ts: Self.sessionStart...(Self.sessionStart + 299))
+        store.records += records(ts: Self.sessionStart...(Self.sessionStart + 300))
         let rows = try await nextRows(source, after: cursor)
         XCTAssertEqual(firstTs(rows), Self.sessionStart)
+    }
+
+    // MARK: - an object goes out once its window has closed
+
+    func testAnOpenWindowIsHeldUntilItClosesSoTheLaneDoesNotUploadSlivers() async throws {
+        let (clock, store, source, cursor) = try await caughtUp()
+        // 45 s of a live capture so far: nothing newer exists and the 300 s window is still open.
+        let start = clock.value
+        store.records += records(ts: start...(start + 44))
+        clock.advance(45)
+        let early = try await nextRows(source, after: cursor)
+        XCTAssertTrue(early.isEmpty, "a 45 s sliver must wait for its window to fill")
+        // The capture paused (part-time) and the phone clock passes the window's end: it goes out as it is.
+        clock.set(start + 300)
+        let closed = try await nextRows(source, after: cursor)
+        XCTAssertEqual(closed.count, 45)
+        XCTAssertEqual(firstTs(closed), start)
+    }
+
+    func testANewerSecondClosesTheWindowAtOnce() async throws {
+        let (clock, store, source, cursor) = try await caughtUp()
+        let start = clock.value
+        store.records += records(ts: start...(start + 300))
+        let rows = try await nextRows(source, after: cursor)
+        XCTAssertEqual(rows.count, 300, "the 301st second proves the window closed")
+    }
+
+    func testTheStoreIsReadUnderItsOwnDeviceIdNotTheUploadId() async throws {
+        let store = FakeImuStore(records: records(ts: 1_000...1_400))
+        let source = ImuObjectSource(store: store, deviceId: { "whoop-MGB0214654" },
+                                     storeDeviceId: { cloud in cloud == "whoop-MGB0214654" ? "whoop-LOCAL-UUID" : cloud },
+                                     now: { 50_000 })
+        let page = try await source.binaryPage(table: .rawImuSession, deviceId: "whoop-MGB0214654", afterRowId: 999,
+                                               limit: 5_001, limits: sourceLimits())
+        XCTAssertEqual(page.rows.count, 300)
+        XCTAssertEqual(Set(store.readDeviceIds), ["whoop-LOCAL-UUID"])
+        let row = try await source.binaryRecordAt(table: .rawImuSession, deviceId: "whoop-MGB0214654", rowId: 1_299)
+        XCTAssertNotNil(row, "point reads go to the store under its own id too")
+        let fingerprint = try await source.binaryFingerprintAt(table: .rawImuSession, deviceId: "whoop-MGB0214654",
+                                                               rowId: 1_299, protocolVersion: PushProtocol.objectVersion)
+        XCTAssertEqual(fingerprint, try PushProtocol.binaryKeyFingerprint(table: .rawImuSession,
+                                                                          deviceId: "whoop-MGB0214654", row: row!),
+                       "the cursor stays keyed by the id the object is uploaded under")
+        XCTAssertEqual(Set(store.readDeviceIds), ["whoop-LOCAL-UUID"])
     }
 
     // MARK: - P2-5 flush-before-read / cursor never skips un-flushed seconds
@@ -575,8 +623,11 @@ private final class FakeImuStore: ImuObjectReading, @unchecked Sendable {
         self.pendingFrontier = pendingFrontier
     }
 
+    private(set) var readDeviceIds: [String] = []
+
     func readImuRecords(deviceId: String, fromTs: Int64, toTs: Int64) async throws -> [ImuSourceRecord] {
         reads += 1
+        readDeviceIds.append(deviceId)
         return records.filter { $0.ts >= fromTs && $0.ts <= toTs && (pendingFrontier == nil || $0.ts < pendingFrontier!) }
     }
 

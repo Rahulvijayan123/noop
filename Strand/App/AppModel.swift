@@ -271,6 +271,8 @@ final class AppModel: ObservableObject {
     private var hostedRefreshTask: Task<Void, Never>?
     private var historySeedTask: Task<Void, Never>?
     private var hostedSyncInFlight = false
+    /// When the HART windows were last asked for (`syncActivityWindows`).
+    private var activityWindowsSyncedAt: Date?
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
     /// Days the change feed announced whose read failed for a reason that can clear; asked for again next pass.
@@ -381,6 +383,8 @@ final class AppModel: ObservableObject {
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
         PhysiologyContextStore.shared.reset()
+        ActivityEncoderWindowStore.shared.reset()
+        activityWindowsSyncedAt = nil
         applyPowerSaving()
     }
 
@@ -545,8 +549,56 @@ final class AppModel: ObservableObject {
         }
         reportHostedSync(outcomes: outcomes, written: written, candidateCount: candidates.count,
                          feedFailures: feedFailures)
-        if written > 0 { await repo.refresh() }
+        let windowsChanged = await syncActivityWindows(now: now)
+        if written > 0 || windowsChanged { await repo.refresh() }
         return written
+    }
+
+    /// How often HART's windows are asked for. The server reruns HART once a few minutes of raw motion have
+    /// been uploaded, and every new set re-decodes the day on the phone, so asking more often buys nothing.
+    static let activityWindowsRefreshSeconds: TimeInterval = 300
+
+    /// Fetch HART's per-window output for yesterday and today (local), so the activity decoder on this phone
+    /// uses it. Only for the account that owns this phone's strap data: the windows describe its uploads.
+    /// Returns true when any stored day changed (the caller refreshes the pages that decode).
+    @discardableResult
+    func syncActivityWindows(now: Date = Date()) async -> Bool {
+        guard cloudScoringIsAuthoritative, let account = CloudPushRuntime.shared.runningScope,
+              let scores = CloudPushRuntime.shared.scoreRepository() else { return false }
+        let store = ActivityEncoderWindowStore.shared
+        guard CloudLocalDataBinding.isOwner(account.ownerId), let device = hostedReadCandidates.first else {
+            store.setScope(nil)
+            return false
+        }
+        if let last = activityWindowsSyncedAt, now.timeIntervalSince(last) < Self.activityWindowsRefreshSeconds {
+            return false
+        }
+        activityWindowsSyncedAt = now
+        let scope = ActivityEncoderWindowStore.Scope(ownerId: account.ownerId, deviceId: device)
+        store.setScope(scope)
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Calendar.current.startOfDay(for: now))
+            ?? now.addingTimeInterval(-86_400)
+        let days = ActivityEncoderWindowStore.utcDays(from: Int(yesterday.timeIntervalSince1970),
+                                                      to: Int(now.timeIntervalSince1970) + 1)
+        do {
+            let fetched = try await scores.activityWindows(days: days, deviceId: device,
+                                                           known: store.revisions(days: days))
+            guard CloudPushRuntime.shared.runningScope == account else { return false }
+            var changed = false
+            for day in fetched {
+                guard let json = day.windowsJSON else { continue }
+                let record = ActivityEncoderWindowStore.DayRecord(
+                    day: day.day, resultRevision: day.resultRevision, encoderId: day.encoderId,
+                    modelVersion: day.modelVersion, windowsJSON: json)
+                if store.save(record, scope: scope) { changed = true }
+            }
+            if changed { activityContext.requestMaterialization() }
+            return changed
+        } catch {
+            // A server without the route yet (404) or a transient failure: the decoder simply runs without
+            // HART until the next pass.
+            return false
+        }
     }
 
     /// Say what a sync pass found when it is not simply "everything is current", once per distinct state.
