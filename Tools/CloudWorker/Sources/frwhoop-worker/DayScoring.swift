@@ -1373,6 +1373,33 @@ struct DayScorer {
                                    sleepIntervals: result.sleepSessions.flatMap {
                                        DayStateSpan.asleep(stages: $0.stages, start: $0.start, end: $0.end)
                                    }.map { (start: $0.start, end: $0.end) })
+        // Phase 1 sleep analytics (docs/sleep-analytics/spec.md worker steps 1–2, 5): bounded
+        // ADDITIVE document under `daily.sleep_analytics_v1`, built from the exact lineage of
+        // the canonical pass — the same already-loaded streams, the same resolved main-night
+        // group (`result.mainNightBlocks`), the same wrist-off intervals, and the same sleep
+        // edits the enrichment lane reads. It is computed once, after the effective canonical
+        // result is resolved, and attached to the SNAPSHOT daily only (never the legacy daily,
+        // never server_daily_scores). ANY failure/nil withholds only this document: the do/catch
+        // keeps `snapshotDaily` exactly as before, so existing job fencing, pending/stale
+        // semantics and the canonical payload are untouched (spec worker step 5). A `no_data`
+        // day returns earlier (no sessions), so no document is attached there either.
+        do {
+            // The same rows the enrichment lane and the candidate lane read; a read failure
+            // withholds the document rather than risking a stale (un-edited) lineage on the wire.
+            let sleepEdits = try loadSleepEdits(userId: claim.userId, deviceId: claim.deviceId,
+                                                day: claim.day)
+            if let sleepAnalytics = self.sleepAnalyticsPayload(
+                result: result, claim: claim,
+                hr: hr, rr: rr, gravity: gravity, skinTemp: skinTemp,
+                skinFamily: skinFamily, edits: sleepEdits,
+                offWristIntervals: wristOff) {
+                snapshotDaily["sleep_analytics_v1"] = sleepAnalytics
+            }
+        } catch {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: day \(claim.day) device \(claim.deviceId.prefix(8)) "
+                + "sleep_analytics_v1 withheld reason=edits_read_failed\n").data(using: .utf8)!)
+        }
         let nights = legacyNights(from: result, claim: claim, computedAt: computedAt)
 
         let legacy: [String: Any] = [
