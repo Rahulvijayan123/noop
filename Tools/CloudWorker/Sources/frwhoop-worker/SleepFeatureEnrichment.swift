@@ -107,6 +107,9 @@ enum SleepFeatureEnrichment {
                 "input_revision": input.inputRevision,
                 "interval_start_utc": isoUTC(input.intervalStart),
                 "interval_end_utc": isoUTC(input.intervalEnd),
+                // The canonical staging algorithm actually claimed for the day
+                // (context-carried, echoed per response night; contract §9).
+                "stage_algorithm_version": input.stageAlgorithmVersion,
             ],
             "nights": nights,
             "hr_samples": input.hr.map { ["ts": $0.ts, "bpm": Double($0.bpm)] },
@@ -204,79 +207,162 @@ enum SleepFeatureEnrichment {
     // MARK: - History loader (DB; one bounded query)
 
     /// Load the last `days` published snapshot sleep arrays (newest
-    /// result_revision per day) and fold each night's stages to a UTC
-    /// 1-minute sleep/wake grid.
+    /// result_revision per day, under the CLAIMED algorithm version) and fold
+    /// each history day to a full LOCAL-day UTC 1-minute sleep/wake grid.
     ///
-    /// Validity policy (honest wave-1 limitation, machine-readable in the
-    /// request's history block): a minute is `valid` when it is inside a
-    /// staged session span; sleep/wake comes from the staged labels. Minutes
-    /// OUTSIDE staged spans are `valid: false` — the published snapshot
-    /// cannot establish a per-minute daytime wear decision, so they are
-    /// EXCLUDED rather than marked awake (spec A3: "do not mark every
-    /// interval outside the main night as awake"). The SRI gates in the
-    /// sidecar then decide whether an SRI window is publishable at all.
+    /// Validity policy (contract §5, both branches):
+    ///   * inside a staged session span: `valid`, sleep where staged sleep
+    ///     covers >= 30 s of the minute, wake otherwise (the staged decision);
+    ///   * outside staged spans: `valid` with state WAKE when the minute has
+    ///     >= 30 s of HR presence (worn — the strap streams HR ~1/s while
+    ///     worn), `invalid` otherwise (off-wrist / unmonitored — never marked
+    ///     awake, spec A3).
+    /// A published night with NO stage array carries an unknown classification
+    /// and contributes no staged minutes (never fabricated wake).
+    ///
+    /// Bounded: two queries per enrichment call — the snapshot sleep arrays
+    /// (one per day) and one per-minute HR presence aggregate over the window.
+    /// A DST day's local span is 23/25 h; the grid is the true local-day span,
+    /// never a fixed 1440 minutes.
     static func loadHistory(db: PostgresClientProtocol, userId: String, deviceId: String,
-                            days: Int, todayDay: String) throws -> SleepFeatureHistory? {
+                            days: Int, todayDay: String, ianaTimezone: String,
+                            algorithmVersion: String) throws -> SleepFeatureHistory? {
+        let tz = TimeZone(identifier: ianaTimezone) ?? TimeZone(identifier: "UTC")!
+        // The window's unix bounds: the earliest local midnight in the window
+        // to the current day's local midnight (DST-correct per day).
+        guard let windowStart = localMidnight(dayBefore: days, of: todayDay, tz: tz),
+              let windowEnd = localMidnight(dayBefore: 0, of: todayDay, tz: tz),
+              windowEnd > windowStart else { return nil }
+
+        // Query 1: the staged nights, newest revision per day UNDER THE CLAIMED
+        // ALGORITHM (like-for-like device/algorithm comparison, spec 4.3; a
+        // day republished under another algorithm never mixes into the window).
         let rows = try db.query("""
             select day::text as day, result_revision::text as rev, payload->'sleep' as sleep
               from public.scoring_snapshots_v2 s
              where user_id = $1::uuid and device_id = $2::uuid
+               and algorithm_version = $5::text
                and day < $3::date
                and day >= ($3::date - make_interval(days => $4::int))
                and result_revision = (
                     select max(result_revision) from public.scoring_snapshots_v2 s2
                      where s2.user_id = s.user_id and s2.device_id = s.device_id
-                       and s2.day = s.day)
+                       and s2.day = s.day and s2.algorithm_version = $5::text)
              order by day
-            """, [userId, deviceId, todayDay, String(days)])
+            """, [userId, deviceId, todayDay, String(days), algorithmVersion])
         guard !rows.isEmpty else { return nil }
+
+        // Query 2: per-minute HR presence over the same window (worn evidence).
+        let hrRows = try db.query("""
+            select ((ts / 60) * 60)::text as minute, count(*)::text as n
+              from public.noop_hr_samples
+             where user_id = $1::uuid and device_id = $2::uuid
+               and ts >= $3::bigint and ts < $4::bigint
+             group by 1
+            """, [userId, deviceId, String(windowStart), String(windowEnd)])
+        var hrByMinute: [Int: Int] = [:]
+        hrByMinute.reserveCapacity(hrRows.count)
+        for r in hrRows {
+            if let m = Int(r["minute"] ?? ""), let n = Int(r["n"] ?? "") {
+                hrByMinute[m] = n
+            }
+        }
+
         var dayRevisions: [(day: String, revision: Int64)] = []
         var minutes: [(day: String, ts: Int, state: Int, valid: Bool)] = []
         for row in rows {
             let day = row["day"] ?? ""
             guard let rev = Int64(row["rev"] ?? "") else { continue }
+            guard let dayStart = localMidnight(ofDay: day, tz: tz) else { continue }
+            // next local midnight, DST-correct (23/25 h days)
+            guard let nextDayStart = nextLocalMidnight(afterUnix: dayStart, tz: tz) else { continue }
             dayRevisions.append((day, rev))
-            guard let sleepText = row["sleep"], !sleepText.isEmpty,
-                  let data = sleepText.data(using: .utf8),
-                  let nights = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
-                continue
-            }
-            for night in nights {
-                guard let startAt = night["start_at"] as? String, let endAt = night["end_at"] as? String,
-                      let start = unixSeconds(startAt), let end = unixSeconds(endAt),
-                      end > start else { continue }
-                // The minute grid of the staged span: sleep where staged
-                // sleep covers the majority of the minute, wake otherwise.
-                var stages: [(start: Int, end: Int, stage: String)] = []
-                if let arr = night["stages"] as? [[String: Any]] {
+
+            // The day's staged spans (sleep seconds per minute + session spans).
+            var sleepSecByMinute: [Int: Double] = [:]
+            var sessionSpans: [(Int, Int)] = []
+            if let sleepText = row["sleep"], !sleepText.isEmpty,
+               let data = sleepText.data(using: .utf8),
+               let nights = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
+                for night in nights {
+                    guard let startAt = night["start_at"] as? String, let endAt = night["end_at"] as? String,
+                          let start = unixSeconds(startAt), let end = unixSeconds(endAt),
+                          end > start else { continue }
+                    sessionSpans.append((start, end))
+                    guard let arr = night["stages"] as? [[String: Any]] else { continue }
                     for s in arr {
-                        if let st = s["start"] as? Int, let en = s["end"] as? Int,
-                           let stage = s["stage"] as? String, en > st {
-                            stages.append((st, en, stage))
+                        guard let st = s["start"] as? Int, let en = s["end"] as? Int,
+                              let stage = s["stage"] as? String, en > st, stage != "wake" else { continue }
+                        var m = (max(st, dayStart) / 60) * 60
+                        let hi = min(en, nextDayStart)
+                        while m < hi {
+                            let lo = max(st, m)
+                            let hiS = min(en, m + 60)
+                            if hiS > lo {
+                                sleepSecByMinute[m, default: 0.0] += Double(hiS - lo)
+                            }
+                            m += 60
                         }
                     }
                 }
-                // A published night with NO stage array carries an unknown
-                // classification: its span cannot honestly be folded to
-                // sleep/wake, and marking it "wake" would fabricate exactly
-                // the daytime-awake assumption spec A3 forbids. It contributes
-                // NO minutes (the day keeps its revision for the digest, and
-                // its span stays excluded from SRI pairing).
-                if stages.isEmpty { continue }
-                stages.sort { $0.start < $1.start }
-                var m = start
-                while m + 60 <= end {
-                    let sleepSec = stages.filter { $0.stage != "wake" }
-                        .reduce(0.0) { acc, s in
-                            acc + Double(max(0, min(s.end, m + 60) - max(s.start, m)))
-                        }
+            }
+
+            // The full local-day grid.
+            var m = dayStart
+            while m < nextDayStart {
+                let staged = sessionSpans.contains { span in m >= span.0 && (m + 60) <= span.1 }
+                if staged {
+                    let sleepSec = sleepSecByMinute[m] ?? 0.0
                     minutes.append((day, m, sleepSec >= 30.0 ? 1 : 0, true))
-                    m += 60
+                } else if (hrByMinute[m] ?? 0) >= 30 {
+                    // Worn but outside any staged session: monitored awake.
+                    minutes.append((day, m, 0, true))
+                } else {
+                    // Off-wrist / unmonitored: excluded, never awake.
+                    minutes.append((day, m, 0, false))
                 }
+                m += 60
             }
         }
         guard !dayRevisions.isEmpty else { return nil }
         return SleepFeatureHistory(dayRevisions: dayRevisions, minutes: minutes)
+    }
+
+    /// Local midnight (unix) of `ofDay` ("YYYY-MM-DD") in `tz`.
+    static func localMidnight(ofDay day: String, tz: TimeZone) -> Int? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = tz
+        f.dateFormat = "yyyy-MM-dd"
+        guard let d = f.date(from: day) else { return nil }
+        return Int(d.timeIntervalSince1970)
+    }
+
+    /// Local midnight `days` before `ofDay` in `tz` (calendar days, not 86400 s).
+    static func localMidnight(dayBefore days: Int, of day: String, tz: TimeZone) -> Int? {
+        guard let base = localMidnight(ofDay: day, tz: tz) else { return nil }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = tz
+        guard let d = cal.date(byAdding: .day, value: -days, to: Date(timeIntervalSince1970: TimeInterval(base))) else {
+            return nil
+        }
+        return Int(d.timeIntervalSince1970)
+    }
+
+    /// The next local midnight after `unix` in `tz` (DST-correct: 23/25 h days).
+    static func nextLocalMidnight(afterUnix unix: Int, tz: TimeZone) -> Int? {
+        var t = unix + 23 * 3600
+        while t < unix + 26 * 3600 {
+            let date = Date(timeIntervalSince1970: TimeInterval(t))
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = tz
+            let comps = cal.dateComponents([.hour, .minute, .second], from: date)
+            if comps.hour == 0 && comps.minute == 0 && comps.second == 0 {
+                return t
+            }
+            t += 60
+        }
+        return nil
     }
 
     static func unixSeconds(_ iso: String) -> Int? {

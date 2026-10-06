@@ -100,10 +100,20 @@ def _theil_slope(xs: Sequence[float], ys: Sequence[float]) -> float | None:
     return slope if math.isfinite(slope) else None
 
 
+#: The production rolling-RMSSD window floor (``HRVAnalyzer.rollingRmssd``,
+#: ``minBeatsPerWindow`` = 8): a window with fewer than 8 clean intervals emits
+#: NO point on the production curve, so the settling curve (spec A5 "EXISTING
+#: valid 5-minute window RMSSDs") honours the same floor — a sparse window is
+#: not a valid window (audit P2-3).
+PROD_MIN_BEATS_PER_WINDOW = 8
+
+
 def _window_rmssd(beats, t_start: int, t_end: int, tuning: HrvTuning):
     """Production-semantics pooled RMSSD for one half-open 5-minute window.
 
     Returns (rmssd_ms | None, valid_pairs, coverage, clean_beat_ms).
+    ``rmssd_ms`` is None when fewer than ``PROD_MIN_BEATS_PER_WINDOW`` clean
+    intervals survive (the production curve's own gate).
     """
     in_window = [b for b in beats if t_start <= b.ts < t_end]
     window_ms = max(0, t_end - t_start) * 1000
@@ -126,6 +136,10 @@ def _window_rmssd(beats, t_start: int, t_end: int, tuning: HrvTuning):
     coverage = min(1.0, clean_ms / float(window_ms)) if window_ms > 0 else 0.0
     rmssd = math.sqrt(sum_sq / pairs) if pairs else None
     if rmssd is not None and not math.isfinite(rmssd):
+        rmssd = None
+    if len(clean_nn) < PROD_MIN_BEATS_PER_WINDOW:
+        # The production rolling curve emits nothing below its own floor; the
+        # settling curve must not be looser than the curve it reuses.
         rmssd = None
     return rmssd, pairs, coverage, clean_ms
 

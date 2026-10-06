@@ -239,6 +239,17 @@ def _circular_metric(minutes: Sequence[float]) -> dict[str, Any]:
             "status": WITHHELD,
             "reasons": ["insufficient_nights"],
         }
+    # A circular SD needs >= 2 observations: with n == 1 the wrapped
+    # resultant is 1 and the SD formula yields a fake 0 (audit P2-4). The
+    # mean may still publish; the SD is withheld, honestly.
+    if n < 2:
+        return {
+            "circadian_mean_min": json_finite(mean_min),
+            "circadian_sd_min": None,
+            "n": n,
+            "status": PARTIAL,
+            "reasons": ["insufficient_nights_for_sd"],
+        }
     return {
         "circadian_mean_min": json_finite(mean_min),
         "circadian_sd_min": json_finite(sd_min),
@@ -246,6 +257,57 @@ def _circular_metric(minutes: Sequence[float]) -> dict[str, Any]:
         "status": AVAILABLE,
         "reasons": [],
     }
+
+
+def _history_night_minutes(history_days, tz) -> list[dict[str, Any]]:
+    """Per-night timing from the history grid (minute resolution).
+
+    For each history day: monitored minutes group into contiguous spans; the
+    span holding the day's LONGEST sleep run is the night (naps excluded the
+    same way the request's is_nap rule excludes them). bed = span start,
+    onset = first sleep minute, wake = last sleep minute end, midsleep =
+    midpoint. Days with no sleep run are skipped.
+    """
+    out: list[dict[str, Any]] = []
+    for day in history_days:
+        valid = [m for m in day.minutes if m.valid]
+        if not valid:
+            continue
+        # contiguous monitored spans (60 s spacing)
+        spans: list[list[Any]] = []
+        for m in valid:
+            if spans and m.ts == spans[-1][-1].ts + 60:
+                spans[-1].append(m)
+            else:
+                spans.append([m])
+        # longest sleep run per span
+        best: tuple[int, list[Any]] | None = None  # (sleep_run_minutes, span)
+        for span in spans:
+            run = 0
+            best_run = 0
+            for m in span:
+                run = run + 1 if m.state == 1 else 0
+                best_run = max(best_run, run)
+            if best_run > 0 and (best is None or best_run > best[0]):
+                best = (best_run, span)
+        if best is None:
+            continue
+        span = best[1]
+        sleep_ts = [m.ts for m in span if m.state == 1]
+        if not sleep_ts:
+            continue
+        onset_ts = min(sleep_ts)
+        wake_ts = max(sleep_ts) + 60
+        bed_ts = span[0].ts
+        out.append({
+            "night": bed_ts,
+            "bed": _local_minute(bed_ts, tz),
+            "onset": _local_minute(onset_ts, tz),
+            "wake": _local_minute(wake_ts, tz),
+            "midsleep": _local_minute((onset_ts + wake_ts) // 2, tz),
+            "offset": datetime.fromtimestamp(bed_ts, tz=tz).utcoffset(),
+        })
+    return sorted(out, key=lambda d: d["night"])
 
 
 def _clock_profile(req: SleepFeaturesRequest) -> dict[str, Any]:
@@ -298,6 +360,27 @@ def _clock_profile(req: SleepFeaturesRequest) -> dict[str, Any]:
 
     dst_transition_days = sum(1 for a, b in zip(offsets, offsets[1:]) if a != b)
 
+    timing_source = "request_nights"
+    if len(midsleep_by_night) < 2:
+        # The request carries only the current day's nights (one main night in
+        # production), so schedule variability over ONE night is degenerate
+        # (audit P1-3). The 31-day history grid the worker already sends
+        # carries the multi-night schedule: derive per-night timing from its
+        # monitored spans (bed = span start of the span holding the day's
+        # longest sleep run; onset/wake = first/last sleep minute; midsleep =
+        # their midpoint). Minute-resolution, staged-grid-derived — labeled so
+        # the consumer cannot mistake it for exact staged boundaries.
+        derived = _history_night_minutes(req.history_days, tz)
+        if len(derived) >= 2:
+            timing_source = "history_grid"
+            bed = [d["bed"] for d in derived]
+            onset = [d["onset"] for d in derived]
+            final_wake = [d["wake"] for d in derived]
+            midsleep = [d["midsleep"] for d in derived]
+            midsleep_by_night = [(d["night"], d["midsleep"]) for d in derived]
+            offsets = [d["offset"] for d in derived]
+            dst_transition_days = sum(1 for a, b in zip(offsets, offsets[1:]) if a != b)
+
     diffs = [
         _shortest_circular_diff_min(m1, m2)
         for (_, m1), (_, m2) in zip(midsleep_by_night, midsleep_by_night[1:])
@@ -314,6 +397,7 @@ def _clock_profile(req: SleepFeaturesRequest) -> dict[str, Any]:
                        "reasons": ["insufficient_nights"]}
 
     return {
+        "timing_source": timing_source,
         "bed_time": _circular_metric(bed),
         "sleep_onset": _circular_metric(onset),
         "final_wake": _circular_metric(final_wake),
@@ -360,7 +444,9 @@ def compute(req: SleepFeaturesRequest, cfg: SleepFeaturesConfig) -> dict:
 
     clock_metrics = (clock["bed_time"], clock["sleep_onset"], clock["final_wake"],
                      clock["midsleep"], clock["adjacent_night_phase_shift_min"])
-    timing_available = any(m["status"] == AVAILABLE for m in clock_metrics)
+    # A PARTIAL clock metric still delivers values (e.g. an n=1 mean with the
+    # SD withheld), so it counts as delivered timing for the block status.
+    timing_available = any(m["status"] in (AVAILABLE, PARTIAL) for m in clock_metrics)
     # ``social_jetlag_min`` is a known first-wave capability gap
     # (workday_labels_unavailable); like the capabilities gate it does not
     # degrade the block status or block reasons.  The four schedule metrics

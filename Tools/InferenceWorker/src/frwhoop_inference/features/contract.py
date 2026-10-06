@@ -27,7 +27,9 @@ MAX_TEMP_SAMPLES = 60_000
 MAX_RR_BEATS = 120_000
 MAX_BREATH_INTERVALS = 20_000
 MAX_HISTORY_DAYS = 31
-MAX_HISTORY_MINUTES_PER_DAY = 1440
+#: A local day is 1440 minutes except on DST fall-back days (1500); the cap
+#: admits both so an honest 25 h grid is not refused.
+MAX_HISTORY_MINUTES_PER_DAY = 1500
 #: A history day with fewer valid minutes than this is "missing" for SRI
 #: pairing purposes (a whole night off the wrist cannot be treated as a
 #: schedule observation). 12 h is the spec's "monitored valid day" floor.
@@ -144,6 +146,12 @@ class SleepFeaturesContext:
     interval_start: int
     interval_end: int
     history_revision_digest: str | None
+    #: The canonical staging algorithm actually claimed for the day (the
+    #: worker's ``v2AlgorithmVersion``). Echoed per night so stage-conditioned
+    #: features can be compared like-for-like (spec 4.3). The wire parser
+    #: REQUIRES the key (the worker always sends it); the dataclass default
+    #: exists only for direct in-process construction (unit tests).
+    stage_algorithm_version: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -202,11 +210,16 @@ def parse_request(body: Any) -> SleepFeaturesRequest:
     _require(history_digest is None or isinstance(history_digest, str),
              "invalid_context", "history_revision_digest must be a string or absent",
              field_name="context.history_revision_digest")
+    stage_algorithm_version = raw_ctx.get("stage_algorithm_version")
+    _require(isinstance(stage_algorithm_version, str) and stage_algorithm_version,
+             "invalid_context", "context.stage_algorithm_version must be a non-empty string",
+             field_name="context.stage_algorithm_version")
     context = SleepFeaturesContext(
         user_id=raw_ctx["user_id"], device_id=raw_ctx["device_id"], day=raw_ctx["day"],
         iana_timezone=raw_ctx["iana_timezone"], input_revision=int(raw_ctx["input_revision"]),
         interval_start=interval_start, interval_end=interval_end,
         history_revision_digest=history_digest,
+        stage_algorithm_version=stage_algorithm_version,
     )
 
     nights = _parse_nights(body.get("nights"))
@@ -370,8 +383,9 @@ def _parse_history(raw: Any) -> tuple[HistoryDayIn, ...]:
         where = f"history.days[{i}]"
         _require(isinstance(d, Mapping), "invalid_history", f"{where} must be an object")
         day = d.get("day")
-        _require(isinstance(day, str) and len(day) == 10 and day[4] == "-", "invalid_history",
-                 f"{where}.day must be YYYY-MM-DD")
+        import re as _re
+        _require(isinstance(day, str) and _re.fullmatch(r"\d{4}-\d{2}-\d{2}", day or ""),
+                 "invalid_history", f"{where}.day must be YYYY-MM-DD")
         minutes_raw = d.get("minutes") or []
         _require(isinstance(minutes_raw, list) and len(minutes_raw) <= MAX_HISTORY_MINUTES_PER_DAY,
                  "invalid_history", f"{where}.minutes must be a bounded list")

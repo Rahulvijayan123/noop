@@ -296,14 +296,26 @@ struct DayScorer {
         // The production RSA breath track, exported verbatim (spec A7).
         let breathTrack = SleepStager.respBreathTrack(beats)
 
-        // The 31-day sleep/wake history for the regularity block (one bounded
-        // query; nil when there is no published history yet).
+        // The 31-day sleep/wake history for the regularity block (two bounded
+        // queries; nil when there is no published history yet).
         let history = try? SleepFeatureEnrichment.loadHistory(
             db: db, userId: claim.userId, deviceId: claim.deviceId,
-            days: 31, todayDay: claim.day)
+            days: 31, todayDay: claim.day, ianaTimezone: claim.timezoneId,
+            algorithmVersion: v2StageAlgorithmVersion)
 
+        // The MAIN session (longest, same selector the candidate lane uses) is
+        // the night; every other session the day detected (naps) is labelled
+        // is_nap so schedule metrics (bed time, onset, midsleep) read the night,
+        // not the nap (contract §1).
+        let main = Self.mainSleepSession(sessions)
         var nights: [SleepFeatureNightInput] = []
-        for (i, session) in sessions.enumerated() {
+        for session in sessions {
+            // The main session (longest span; first on a tie, matching
+            // mainSleepSession's selector) is the night; ties keep only the
+            // FIRST match a night so exactly one session is the night.
+            let isMain = main.map { mainSpan in
+                (session.end - session.start) == (mainSpan.end - mainSpan.start)
+            } == true && !nights.contains(where: { !$0.isNap })
             let nightId = "sleep-\(claim.deviceId)-\(session.start)"
             let userEdited = edits.contains { edit in
                 guard let originalStart = edit.payload.member("originalStart")?.doubleValue.map({ Int($0) }),
@@ -314,7 +326,7 @@ struct DayScorer {
             }
             nights.append(SleepFeatureNightInput(
                 nightId: nightId, start: session.start, end: session.end,
-                isNap: false, userEdited: userEdited, stages: session.stages))
+                isNap: !isMain, userEdited: userEdited, stages: session.stages))
         }
 
         let request = SleepFeatureEnrichment.buildRequest(SleepFeatureEnrichment.AssemblyInput(
@@ -1156,7 +1168,8 @@ struct DayScorer {
     /// (FRWHOOP_INFERENCE_URL unset). In that case NOTHING candidate-related runs:
     /// no selection read, no per-stream assembly, no digest — the canonical path is
     /// byte-identical to the pre-migration worker.
-    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true, candidateLane: Bool = false)
+    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true, candidateLane: Bool = false,
+                               enrichFeatures: Bool = false)
         throws -> ScoredDay {
         // The claim's snapshot was sealed just before this call, so "now" is the
         // claim's input revision time for the candidate-debt freshness check.
@@ -1411,11 +1424,18 @@ struct DayScorer {
 
         // Sleep-phenotype enrichment (docs/SLEEP_FEATURES_CONTRACT.md section 6):
         // one bounded request per claimed day through the dedicated sidecar
-        // endpoint, attached under `daily.sleep_features`. OFF unless the
-        // sidecar is configured; ANY failure (timeout, refusal, malformed
-        // response) leaves the snapshot byte-identical in its core fields —
-        // core publication never depends on the enrichment.
-        if let client = featureEnrichmentClient, status != "no_data" {
+        // endpoint, attached under `daily.sleep_features`. Gated to the V2
+        // SNAPSHOT path (`enrichFeatures`): the legacy fleet path publishes
+        // only the legacy payload and discards the snapshot, so an enrichment
+        // there would be a wasted sidecar call (and a day processed by both
+        // queues would call twice). OFF unless the sidecar is configured;
+        // ANY failure (timeout, refusal, malformed response) leaves the
+        // snapshot byte-identical in its core fields — core publication never
+        // depends on the enrichment. The call is a bounded loopback JSON
+        // request (no waveform download / model inference), made once per
+        // claimed day inside the payload build, with the history read on the
+        // same snapshot as the inputs (consistent).
+        if enrichFeatures, let client = featureEnrichmentClient, status != "no_data" {
             if let features = try? attachSleepFeatures(
                 client: client, claim: claim, result: result,
                 hr: hr, rr: rr, skinTemp: skinTemp, skinFamily: skinFamily,

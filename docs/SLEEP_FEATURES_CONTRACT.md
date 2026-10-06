@@ -142,7 +142,11 @@ monitored valid days, ≥4 day-equivalents (96 h) of valid paired minutes, ≥80
 eligible pair duration. Keys: `sri_7d`, `sri_14d`, `sri_30d`, each {`value`, `paired_minutes`,
 `eligible_minutes`, `valid_days`, `status`, `reasons`}, plus `pair_coverage_by_hour` (24 ints)
 and `clock_profile`. Withheld reasons include `insufficient_history`, `no_valid_daytime_decision`.
-Timing variability (delivered even when SRI withheld): per-metric circular mean/SD
+Timing variability (delivered even when SRI withheld), multi-night: when the request
+carries fewer than 2 main nights (the production case — one day), the schedule metrics
+derive from the history grid's monitored spans, labeled `clock_profile.timing_source:
+"history_grid"` (minute resolution; a circular SD is never published from a single
+observation — n=1 publishes the mean, withholds the SD). Per-metric circular mean/SD
 (`circadian_sd_min`) for `bed_time`, `sleep_onset`, `final_wake`, `midsleep` (midpoint
 between actual sleep onset and final wake), using the night's IANA timezone, local clock
 minutes → angles; `adjacent_night_phase_shift_min` (median, signed shortest circular

@@ -37,6 +37,13 @@ let package = Package(
                 .product(name: "WhoopStore", package: "WhoopStore"),
             ]
         ),
-        .testTarget(name: "frwhoop-workerTests", dependencies: ["frwhoop-worker"]),
+        .testTarget(
+            name: "frwhoop-workerTests",
+            dependencies: ["frwhoop-worker"],
+            // The committed sleep-features fixture pair (the Swift-assembled
+            // request + the real Python sidecar's response to it) is a test
+            // RESOURCE: the cross-language contract tests read both files.
+            resources: [.copy("Fixtures")]
+        ),
     ]
 )

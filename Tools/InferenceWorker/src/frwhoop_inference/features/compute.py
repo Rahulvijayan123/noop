@@ -188,7 +188,10 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
             "is_nap": night.is_nap,
             "user_edited": night.user_edited,
             "stage_source": "sleep-v2",
-            "stage_algorithm_version": "sleep-stager-v2",
+            # The canonical staging algorithm actually claimed for the day
+            # (context-carried; contract section 9). "sleep-v2" would be a
+            # made-up version, not the claimed one.
+            "stage_algorithm_version": req.context.stage_algorithm_version,
             **blocks,
             "metric_status": {
                 "night_gate": {"status": night_gate, "reasons": gate_reasons},

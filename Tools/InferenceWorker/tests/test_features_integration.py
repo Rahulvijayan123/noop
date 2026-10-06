@@ -142,6 +142,7 @@ def _request(**overrides):
             "iana_timezone": "America/Los_Angeles", "input_revision": 42,
             "interval_start_utc": "2026-10-05T00:00:00Z",
             "interval_end_utc": "2026-10-06T00:00:00Z",
+            "stage_algorithm_version": "frwhoop-server-1",
         },
         "nights": [{
             "night_id": "sleep-d-fixture-%d" % N0,
@@ -182,6 +183,9 @@ def test_fixture_night_full_document():
     night = doc["nights"][0]
     assert night["night_id"] == req.nights[0].night_id
     assert night["stage_source"] == "sleep-v2"
+    # The claimed staging algorithm is echoed per night (audit P2-1: the
+    # actual claimed version, never a made-up one).
+    assert night["stage_algorithm_version"] == "frwhoop-server-1"
     # All six per-night blocks present with honest statuses.
     for key in ("continuity", "architecture", "stage_physiology", "settling",
                 "thermal", "respiratory_variability"):
@@ -255,6 +259,50 @@ def test_uninterrupted_sleep_zero_events_is_valid_zero():
     cont = doc["nights"][0]["continuity"]
     assert cont["recurrent_awakenings"] == 0
     assert cont["waso_min"] == 0.0
+
+
+def test_committed_fixture_pair_round_trips_over_real_http():
+    """The committed cross-language fixture pair (the Swift-assembled request
+    + the captured Python response) through a REAL loopback server round trip:
+    the route must accept the Swift wire shape verbatim and answer a document
+    the committed response fixture is a member of (same schema/keys)."""
+    import json
+    import threading
+    import time
+    import urllib.request
+    import os
+
+    fixture_path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "..", "Tools", "CloudWorker",
+        "Tests", "frwhoop-workerTests", "Fixtures", "sleep_features_request.json")
+    if not os.path.exists(fixture_path):  # pragma: no cover - fixture is committed
+        pytest.skip("cross-language fixture not present")
+    body = json.load(open(fixture_path))
+    req = parse_request(body)  # the exact Swift wire shape validates
+
+    from frwhoop_inference.server import Application, InferenceServer
+    app = Application.build(registry=None)
+    srv = InferenceServer(("127.0.0.1", 0), app)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    time.sleep(0.3)
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(
+            f"http://127.0.0.1:{port}/v1/sleep-features",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"}), timeout=30)
+        doc = json.loads(r.read())
+    finally:
+        srv.shutdown()
+    assert r.status == 200
+    assert doc["status"] == "available"
+    assert doc["algorithm_version"] == "nara-sleep-features-1"
+    # the committed response fixture is the same document modulo wall-clock
+    resp_path = fixture_path.replace("request.json", "response.json")
+    committed = json.load(open(resp_path))
+    for key in ("nights", "regularity", "dependencies", "capabilities"):
+        assert key in doc and key in committed
+    assert set(doc["nights"][0]) == set(committed["nights"][0])
 
 
 def test_unknown_gap_stays_uns_no_transitions_across():

@@ -9,6 +9,9 @@ dependencies = [
     # Pinned scientific stack. neurokit2 is the audited HRV dependency (MIT, 0.2.13).
     # numpy/scipy/pandas are pinned to the exact versions installed by `uv sync`.
     "neurokit2==0.2.13",
+    # Sleep-phenotype enrichment (spec A1/A2): hypnogram analysis ONLY - YASA's
+    # pretrained PSG classifiers are never applied to WHOOP signals (spec 3).
+    "yasa==0.8.0",
     "numpy==2.5.3",
     "pandas==2.3.3",
     "scipy==1.18.1",

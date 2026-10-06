@@ -553,8 +553,12 @@ struct ScoringLane {
                 measurementRevision: 0
             )
             let started = Date()
+            // `enrichFeatures: true`: this is the V2 SNAPSHOT path — the only
+            // path that publishes the snapshot payload the sleep-features
+            // document attaches to (the legacy fleet path discards it).
             let payloads = try scorer.scoreAndBuildPayloads(claim: claim, buildSeries: publishesSeries,
-                                                            candidateLane: candidate != nil)
+                                                            candidateLane: candidate != nil,
+                                                            enrichFeatures: true)
             let snapshotData = try jsonText(payloads.snapshot)
             let durationMS = Int(Date().timeIntervalSince(started) * 1000)
             let publishJSON = try db.callFunctionForJSONRaw(

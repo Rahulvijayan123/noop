@@ -355,7 +355,15 @@ def test_no_history_delivers_timing_and_withholds_sri():
         assert w["value"] is None
         assert w["paired_minutes"] == 0 and w["eligible_minutes"] == 0
     assert block["pair_coverage_by_hour"] == [0] * 24
-    assert block["clock_profile"]["bed_time"]["status"] == "available"
+    # A single request night: the MEAN may publish, the circular SD needs
+    # >= 2 nights (audit P2-4: n=1 must not yield a fake 0 SD).
+    bed = block["clock_profile"]["bed_time"]
+    assert bed["status"] == "partial"
+    assert bed["n"] == 1
+    assert bed["circadian_mean_min"] is not None
+    assert bed["circadian_sd_min"] is None
+    assert "insufficient_nights_for_sd" in bed["reasons"]
+    assert block["clock_profile"]["timing_source"] == "request_nights"
     assert block["status"] == "partial"
 
 
@@ -477,7 +485,10 @@ def test_all_wake_night_has_no_onset_or_midsleep():
                                                     stage="wake"),))
     req = make_request(nights=[night_all_wake])
     cp = compute(req, CONFIG)["clock_profile"]
-    assert cp["bed_time"]["status"] == "available"
+    # One all-wake night: bed_time mean with SD withheld (n=1), the three
+    # sleep-anchored metrics withheld entirely (no sleep to anchor on).
+    assert cp["bed_time"]["status"] == "partial"
+    assert cp["bed_time"]["circadian_sd_min"] is None
     assert cp["sleep_onset"]["status"] == "withheld"
     assert cp["final_wake"]["status"] == "withheld"
     assert cp["midsleep"]["status"] == "withheld"
@@ -545,17 +556,21 @@ def test_invalid_timezone_withholds_clock_metrics():
 
 
 def test_block_status_partial_with_single_night_phase_shift_null():
-    # Full history + one main night: SRI available, all four schedule metrics
-    # available, but adjacent-night phase shift needs >= 2 nights -> partial.
+    # Full history + one main night: the request carries a single exact night,
+    # so the multi-night schedule (timing variability AND the adjacent-night
+    # phase shift) derives from the HISTORY GRID (audit P1-3: the 31-day
+    # history the worker already sends carries the multi-night schedule).
     req = make_request(history_days=REGULAR_DAYS,
                        nights=[night("n1", utc_ts(2026, 11, 1, 23, 50),
                                      utc_ts(2026, 11, 2, 7, 50))])
     block = compute(req, CONFIG)
     assert block["sri_7d"]["status"] == "available"
+    assert block["clock_profile"]["timing_source"] == "history_grid"
     assert block["clock_profile"]["bed_time"]["status"] == "available"
-    assert block["clock_profile"]["adjacent_night_phase_shift_min"]["status"] == "withheld"
-    assert block["status"] == "partial"
-    assert "insufficient_nights" in block["reasons"]
+    assert block["clock_profile"]["bed_time"]["n"] == 10
+    assert block["clock_profile"]["adjacent_night_phase_shift_min"]["status"] == "available"
+    assert block["clock_profile"]["adjacent_night_phase_shift_min"]["n"] == 9
+    assert block["status"] == "available"
     assert block["pair_policy"] == "elapsed_24h"
 
 
