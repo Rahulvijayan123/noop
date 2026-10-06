@@ -16,7 +16,8 @@ gait; stationary / cycling / vehicle = non-gait; running reported separately; mi
 | 3 h Capture-24 segments (P001 / P002 / P004, literal `pipelines.general --device cpu`) | is_gait agreement 1.000 on 10,791 windows each; bouts, walking minutes, bout windows identical (43 / 35 / 27 bouts); quality max abs diff <= 3.6e-5 (cadence, step count) |
 | detector probability | max abs diff vs upstream <= 3.6e-6 (torch 2.8 here vs 2.0.1 upstream) |
 | resampler | nearest-neighbour index map bit-identical to `actipy.processing.resample` |
-| vendored model | max abs diff vs upstream `build_model`: detection 3.6e-7, regression heads 0 |
+| model code | upstream's own `models.py`, imported from the operator's sha256-verified checkout (no Oxford code in Nara's repo; ELDERNET.md "Licence"): all six heads bit-identical to the previously vendored copy on 919 windows (200 random + 719 Capture-24 hop-5); the three 3 h segments re-run byte-identical (arrays, CSVs, compare reports). The vendored copy itself had matched upstream `build_model` within 3.6e-7 (detection), 0 (regression heads) |
+| bout rules | upstream's own `gait_quality.detection` / `quality` functions through the same adapter (toy example and 3 h segments above) |
 | determinism | bit-identical across reruns, batch positions and request chunking (no edge exclusion needed) |
 
 Whole-day departures (six full Capture-24 VAL days, 24-30 h each):
@@ -29,7 +30,25 @@ Whole-day departures (six full Capture-24 VAL days, 24-30 h each):
   19-115 of ~17,600-21,400 hop-5 windows (0.1-0.6 % of windows; up to ~13 % of that day's gait windows),
   max |Δ gait_prob| 0.27-0.56. This is the main known difference from upstream on uncalibrated straps.
 
+Resampling (not a departure from upstream inference, but from upstream fine-tuning): served 100 → 30 Hz is
+nearest-neighbour without anti-aliasing, exactly as upstream inference; upstream fine-tuning resampled band-limited
+(`scipy.signal.resample` per 10 s window). Against a polyphase anti-aliased resampler (`resample_poly` 3/10) is_gait
+flips on **2.5 %** of hop-5 windows (161 / 6,477 on the three 3 h segments above, Capture-24 train subjects; gait
+windows 1,197 vs 1,200; mean cadence / speed shift on windows both call gait ≤ 0.02 steps/min / 0.01 m/s),
+re-measured 2026-10-06. On labelled VAL windows of six Capture-24 VAL subjects (74,460 windows, 6,022 gait) there
+is no accuracy loss: F1 0.539 nearest-neighbour vs 0.537 band-limited per window vs 0.557 polyphase, AUROC 0.957 /
+0.959 / 0.956, ECE 0.017 / 0.022 / 0.029; nearest vs band-limited flip 0.46 % of those windows (the audit's
+measurement, re-run 2026-10-06 through the upstream adapter with identical results). WHOOP's high-frequency
+content is unmeasured; check on WHOOP walking before candidate use.
+
 ## 2. Gait detection on the frozen TEST subjects (evaluated once)
+
+> **Provenance: transcribed from non-persisted console output of the single TEST run by the agent; not
+> machine-verifiable** (the run's report and ledger line were lost in an SSD disconnect). Counts and hashes are
+> consistent: test_sha256 `677165e7…`, calibration `cal:16191350862fb8de` (bundle
+> `eldernet-437a38b+cal:16191350862fb8de`); the 2026-10-06 audit recomputed the split hash and the per-dataset
+> window and subject counts from the extraction parts' identity and truth columns only (no TEST predictions
+> read). The ledger was not reconstructed and TEST was not re-run (owner decision).
 
 | TEST set | subjects | gait / non-gait windows | P | R | F1 | AUROC | ECE |
 |---|---|---|---|---|---|---|---|
@@ -45,11 +64,14 @@ Brackets: 95 % subject-cluster bootstrap. * small sample (< 5 subjects or < 50 w
 trustworthy. Running windows (not in P/R): called gait in 4.1 % (Capture-24), 7.3 % (WISDM), 33 % (MHEALTH).
 
 **Integrity note.** These numbers are the console output of the single TEST evaluation (ledger stamp time
-1791310368, bundle `eldernet-437a38b+cal:16191350862fb8de`, test_sha256 `677165e7…`). The machine report and the
-ledger file were lost when the external SSD disconnected uncleanly about two minutes after the run. They have
-**not** been regenerated: doing so needs a recorded rerun (`rerun_reason=artifact_lost_identical_rebuild`), which
-is left to the owner. `test_ledger.jsonl` therefore currently holds only the external-set entries (GOTOV,
-OxWalk).
+1791310368 = 2026-10-06T18:12:48Z as printed, bundle `eldernet-437a38b+cal:16191350862fb8de`, test_sha256
+`677165e7…`). The machine report and the ledger line were lost when the external SSD disconnected uncleanly
+about two minutes after the run. They have **not** been regenerated: doing so needs a recorded rerun
+(`rerun_reason=artifact_lost_identical_rebuild`), which is left to the owner. `test_ledger.jsonl` therefore holds
+only the external-set entries (GOTOV, OxWalk). The lost evaluation stays binding through a forward guard, not a
+ledger edit: `activity_context/eldernet/integrity_ext.py` `SPENT_EXPERIMENTS` lists this experiment (and the two
+external sets), and `validate test` refuses it before loading anything unless given an enumerated rerun reason
+plus detail, recording any such run as a rerun of this opening (ELDERNET.md §7).
 
 Reading: on lab protocols and older adults (GOTOV, below) detection is near-perfect; in free-living Capture-24
 precision is 0.88 but recall 0.52. Capture-24's camera-annotated "walking" episodes include standing pauses and
@@ -65,9 +87,47 @@ interrupted household gait.
 * Operating threshold for >= 95 % precision (`inertia.abstention.select_operating_point`, cluster bootstrap q05
   >= 0.95, stable above tau): **tau = 0.93** ("strong", VAL precision 0.974, recall 0.27). On TEST:
   Capture-24 P 0.982 [0.970, 0.991] / R 0.312; pooled P 0.983 / R 0.316. A high-precision setting, not a default.
-* **Gait prevalence for the decoder's π** (Capture-24 VAL, hop 5): **0.065** of labelled windows (14,707 /
-  225,188); 0.125 of windows that reach the classifier (not pre-filtered); mean served gait_prob 0.061. Pooled VAL
-  (all six datasets) 0.068. Lab datasets are protocol-driven (0.11-0.99) and should not set π.
+* **Decoder π** (Capture-24 VAL, hop 5; `validate prior`, VALIDATION.json `decoder_prior`). The gait term is
+  r(gait) = q/π, r(non-gait) = (1 − q)/(1 − π); it is mean-neutral over the windows the decoder sees exactly when
+  π = E[q] over those windows. They are all served windows of worn time — labelled, masked, unlabelled, and
+  pre-filtered (q = 0 on the wire):
+
+  | Capture-24 VAL windows (20 subjects) | n | share | mean served gait_prob | pre-filtered |
+  |---|---|---|---|---|
+  | **all (what the decoder sees)** | 376,755 | 1.00 | **0.0849** (subject-bootstrap 95 % CI 0.076-0.095; per subject 0.056-0.130) | 0.44 |
+  | labelled gait / non-gait | 225,188 | 0.60 | 0.061 (gait prevalence **0.065**: 14,707 / 225,188) | 0.48 |
+  | labelled but masked (mixed, other, running) | 27,869 | 0.07 | 0.227 | 0.02 |
+  | unlabelled | 123,698 | 0.33 | 0.096 | 0.46 |
+  | not pre-filtered | 210,777 | 0.56 | 0.152 (gait prevalence 0.125) | 0 |
+
+  **Recommended π = 0.085.** The previous value, the labelled-window prevalence 0.065, gives E[q/π] = 1.31 over
+  the windows the decoder sees — a standing pull toward gait. Pooled VAL labelled prevalence (all six datasets)
+  0.068. Lab datasets are protocol-driven (0.11-0.99) and should not set π.
+
+### Running, cycling and vehicle windows (VAL only; for the decoder's gait-row compat)
+
+Served gait_prob on VAL windows whose truth is running (>= 90 % pure) or whose majority label is exactly cycling /
+vehicle in the crosswalk (and >= 90 % non-gait); `validate other-motion`, VALIDATION.json `val_other_motion`.
+"q > π" uses π = 0.085.
+
+| VAL windows | n | subjects | mean | p10 / p25 / median / p75 / p90 | >= 0.5 | >= 0.93 | q > π |
+|---|---|---|---|---|---|---|---|
+| running, pooled | 351 | 11 | 0.096 | 0.005 / 0.016 / 0.055 / 0.099 / 0.201 | 3.4 % | 0.3 % | 32 % |
+| — WISDM-2019 jogging (B) | 308 | 8 | 0.096 | 0.005 / 0.016 / 0.057 / 0.103 / 0.194 | 3.2 % | 0.3 % | 34 % |
+| — MHEALTH jogging (10) | 21 | 2 | 0.022 | 0.009 / 0.013 / 0.019 / 0.029 / 0.035 | 0 % | 0 % | 0 % |
+| — MHEALTH running (11) | 21 | 2 | 0.163 | 0.015 / 0.036 / 0.055 / 0.176 / 0.481 | 9.5 % | 0 % | 29 % |
+| — PAMAP2 running (5) | 1 | 1 | 0.177 | — | 0 | 0 | 1 / 1 |
+| — Capture-24 running | 0 | — | (no running in the 20 VAL subjects) | | | | |
+| cycling, pooled | 3,462 | 13 | 0.061 | 0.015 / 0.021 / 0.032 / 0.059 / 0.136 | 0.8 % | 0 % | 17 % |
+| — Capture-24 bicycling | 3,401 | 9 | 0.061 | 0.015 / 0.021 / 0.032 / 0.059 / 0.135 | 0.9 % | 0 % | 17 % |
+| vehicle (Capture-24 driving, car, bus, vehicle) | 14,183 | 13 | 0.091 | 0.001 / 0.006 / 0.028 / 0.114 / 0.273 | 2.9 % | 0.1 % | 30 % |
+| reference: walking / stairs (gait), pooled | 15,636 | 33 | 0.538 | 0.094 / 0.214 / 0.465 / 0.953 / 0.994 | 48 % | 28 % | 91 % |
+| reference: stationary, pooled | 197,295 | 32 | 0.025 | 0.000 / 0.000 / 0.000 / 0.010 / 0.060 | 0.7 % | 0.1 % | 8 % |
+
+Reading: ElderNet does not call running gait (it was fine-tuned on walking only): two thirds of running windows sit
+at or below π, so a `run` entry in the gait row would push run down on most running seconds; neutral (today's
+compat) matches the data. Cycling and vehicle look like non-gait. Small samples: running is 351 windows from 11
+lab subjects, none free-living.
 
 ## 3. External sets (never used for fitting; evaluated once through the ledger)
 
@@ -105,9 +165,18 @@ runs) — treat as upper bounds. Load to first ping 1.0-1.9 s; peak RSS **~650 M
 | Capture-24 hour (108 / 719 gait) | 2.4 s | 11.1 s |
 | gait-dense (toy recording tiled, 474 / 719 gait) | 14.8 s (load 30-40) | 33.1 s (load 30-40) |
 
-Unloaded cost is ~1.9 ms per window per head (NNPACK disabled: torch otherwise routes the depthwise
-anti-alias convolution through NNPACK one group at a time, ~15x slower). A gait-dense hour at hop 1 can approach
-the default 60 s timeout on a loaded host: the worker should keep hop 5 and <= 1 h requests.
+Cost is ~1.7-1.9 ms per window per head with NNPACK disabled, as served. Re-measured 2026-10-06
+(`python -m activity_context.eldernet.bench --nnpack --npy <Capture-24 hour>`: the 640 non-pre-filtered hop-5
+windows, torch 2.8.0, 1 thread, batch 64, best of 2, 1-min load average 7-9): with NNPACK enabled torch routes the
+depthwise anti-alias convolution through NNPACK one group at a time, 71-74 ms per window per head, **39-44x
+slower**; outputs differ by at most **7.6e-6 in the detection logits** (the audit's 64-window sample: 3.9e-6),
+**3.8e-5 steps/min cadence** (audit: 2.3e-5), 4.1e-5 steps per window, <= 2.7e-6 for speed / stride /
+regularity (VALIDATION.json `bench.nnpack_check`). The earlier "~15x, ~1e-8" note was wrong. A gait-dense hour at
+hop 1 can approach the default 60 s timeout on a loaded host: the worker should keep hop 5 and <= 1 h requests.
+
+Request chunking: windows are cut only fully inside a request's `[start_ts, end_ts]`, so the hop-5 window that
+would straddle a chunk boundary (start `end_ts − 5`) is never produced — at the worker's 1-hour chunks, 719 of 720
+hop-5 windows per hour (ELDERNET.md §2.4). Every window that is produced is bit-identical whatever the chunking.
 
 ## 5. Not measured / limitations
 
@@ -117,3 +186,6 @@ the default 60 s timeout on a loaded host: the worker should keep hop 5 and <= 1
 * No WHOOP-recorded ground truth: all wrist data here are other devices (Axivity, GENEActiv, smartwatches) with
   their own axis frames; the WHOOP strap's frame and wrist position are not validated.
 * Gravity calibration is not applied (§1); its effect on WHOOP straps is unmeasured.
+* Anti-aliasing: nearest-neighbour resampling (as upstream inference) vs the band-limited resampling of upstream
+  fine-tuning flips ~2.5 % of Capture-24 windows (§1); WHOOP's high-frequency content is unmeasured.
+* The frozen-split TEST numbers (§2) are a transcript, not a machine report (§2 provenance).

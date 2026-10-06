@@ -1497,6 +1497,107 @@
    "vs_previous_vendored_copy": "all six heads bit-identical on 919 windows (200 random + 719 Capture-24 P001 hop-5 windows), 2026-10-06"
   },
   "resampler": "nearest-neighbour index map bit-identical to actipy.processing.resample (n = 12345..360007 at 50/100 Hz)",
+  "resampling_ablation": {
+   "capture24_3h_segments_train_subjects_hop5_nn_vs_polyphase": {
+    "P001": {
+     "cadence_spm_mad": 0.6930890525259623,
+     "cadence_spm_mean_diff": 0.020349363001381477,
+     "dprob_p99": 0.3329414268159038,
+     "flips": 75,
+     "gait_aa": 232,
+     "gait_nn": 253,
+     "n": 2159,
+     "regularity_mad": 0.02002921618702935,
+     "regularity_mean_diff": 0.004923003784767011,
+     "speed_mps_mad": 0.014380339151475487,
+     "speed_mps_mean_diff": 0.005447931333286006,
+     "steps_mad": 0.16502153931594477,
+     "steps_mean_diff": 0.07620702720269924,
+     "stride_m_mad": 0.046152755400029624,
+     "stride_m_mean_diff": 0.01622711594511823
+    },
+    "P002": {
+     "cadence_spm_mad": 0.48528310442809647,
+     "cadence_spm_mean_diff": -0.0019048399144483677,
+     "dprob_p99": 0.26753632130623334,
+     "flips": 48,
+     "gait_aa": 779,
+     "gait_nn": 747,
+     "n": 2159,
+     "regularity_mad": 0.020201069541043615,
+     "regularity_mean_diff": -0.006153784576344716,
+     "speed_mps_mad": 0.01536003644395423,
+     "speed_mps_mean_diff": 0.003447938735656067,
+     "steps_mad": 0.08609397098401887,
+     "steps_mean_diff": 0.017791186682426238,
+     "stride_m_mad": 0.03256211455039307,
+     "stride_m_mean_diff": 0.0005721139327115071
+    },
+    "P004": {
+     "cadence_spm_mad": 0.5165901622552981,
+     "cadence_spm_mean_diff": -0.019132241435434627,
+     "dprob_p99": 0.3026834343435855,
+     "flips": 38,
+     "gait_aa": 189,
+     "gait_nn": 197,
+     "n": 2159,
+     "regularity_mad": 0.022117016879820275,
+     "regularity_mean_diff": 0.006799636280228351,
+     "speed_mps_mad": 0.017909252866246235,
+     "speed_mps_mean_diff": 0.0098431046152937,
+     "steps_mad": 0.15753248642230855,
+     "steps_mean_diff": 0.04365253174441985,
+     "stride_m_mad": 0.044902056113056754,
+     "stride_m_mean_diff": 0.014447489689136374
+    },
+    "total": {
+     "flip_rate": 0.0248571869692759,
+     "flips": 161,
+     "gait_aa": 1200,
+     "gait_nn": 1197,
+     "n": 6477
+    }
+   },
+   "capture24_val_6_subjects_labelled_windows": {
+    "fft": {
+     "auroc": 0.9590560402597184,
+     "ece": 0.02211781275059523,
+     "f1": 0.536903690369037,
+     "mean_p": 0.06086604496875248,
+     "precision": 0.8325191905094208,
+     "recall": 0.396213882431086
+    },
+    "flip_nn_vs_fft": 0.00464679022293849,
+    "n": 74460,
+    "n_gait": 6022,
+    "nn": {
+     "auroc": 0.9568935329510452,
+     "ece": 0.01741869349234127,
+     "f1": 0.5389913352588314,
+     "mean_p": 0.06603465007968391,
+     "precision": 0.8140939597315436,
+     "recall": 0.4028561939554965
+    },
+    "poly": {
+     "auroc": 0.9564192183527578,
+     "ece": 0.028636736987007336,
+     "f1": 0.5569536423841059,
+     "mean_p": 0.05593741605052115,
+     "precision": 0.8304805793285056,
+     "recall": 0.41896379940219197
+    },
+    "subjects": [
+     "P003",
+     "P005",
+     "P019",
+     "P022",
+     "P025",
+     "P026"
+    ]
+   },
+   "caveat": "WHOOP high-frequency content unmeasured; check nearest vs anti-aliased on WHOOP walking before candidate use",
+   "what": "served nearest-neighbour 100->30 Hz (= upstream inference, actipy) vs band-limited resampling (upstream fine-tuning used scipy.signal.resample per 10 s window, data_parsing/MOBILISE_D_parsing.py) and a polyphase anti-aliased resampler (resample_poly 3/10); measured 2026-10-06 through the upstream adapter"
+  },
   "toy_example_13min": {
    "bouts": 6,
    "max_abs_dprob": 3.62e-06,
