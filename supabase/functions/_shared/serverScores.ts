@@ -2,6 +2,13 @@ import { IdentityError, resolveUploadIdentity, resolveJwtUser, bearerToken, look
 import { createNoopDeviceResolver, findNoopDevice } from './devices.ts';
 import { isSafeExternalDeviceId, isUuid } from './keys.ts';
 import { STRETCH_FEEDBACK_MAX_BODY_BYTES, validateStretchFeedback } from './stretchFeedback.ts';
+import {
+  EXPOSURE_MAX_BODY_BYTES,
+  parseContextHistoryQuery,
+  parseContextQuery,
+  parseExposureReadQuery,
+  submitExposureEvents,
+} from './physiologyContext.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -96,6 +103,64 @@ export function parseSeriesQuery(params: URLSearchParams) {
   return { from: new Date(start * 1000).toISOString(), to: new Date(end * 1000).toISOString(), metrics };
 }
 
+/** The raw-IMU lane's lineage: the only one that writes `activity_encoder_windows` today. */
+const ACTIVITY_WINDOWS_ALGORITHM = 'hart-activity-1';
+const ACTIVITY_WINDOWS_MAX_DAYS = 3;
+
+/**
+ * `GET /activity-windows?days=<YYYY-MM-DD>[,…][&known=<YYYY-MM-DD>:<revision>,…]`: HART's per-window output
+ * (`hart-windows-1`) for up to three UTC days. A local day spans two UTC days, so the phone asks for both. A
+ * day listed in `known` at its current result revision comes back without its windows (`unchanged: true`), so
+ * an unchanged day costs a few bytes rather than its whole document.
+ */
+function isCalendarDay(day: string): boolean {
+  const at = new Date(`${day}T00:00:00Z`);
+  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === day;
+}
+
+export function parseActivityWindowsQuery(params: URLSearchParams) {
+  const raw = params.get('days');
+  if (raw == null) throw fail('invalid_days', 400);
+  const days = raw.split(',');
+  if (days.length < 1 || days.length > ACTIVITY_WINDOWS_MAX_DAYS || new Set(days).size !== days.length
+      || days.some((d) => !DAY_RE.test(d) || !isCalendarDay(d))) {
+    throw fail('invalid_days', 400);
+  }
+  const known = new Map<string, string>();
+  const rawKnown = params.get('known');
+  if (rawKnown != null && rawKnown !== '') {
+    for (const entry of rawKnown.split(',')) {
+      const m = /^(\d{4}-\d{2}-\d{2}):(\d{1,18})$/.exec(entry);
+      if (!m || !days.includes(m[1])) throw fail('invalid_known', 400);
+      known.set(m[1], m[2]);
+    }
+  }
+  return { days, known };
+}
+
+export async function readActivityWindows({ rest, userId, deviceId, days, known }: {
+  rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
+}) {
+  const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}&algorithm_version=eq.${ACTIVITY_WINDOWS_ALGORITHM}`;
+  const heads = await rest.select('activity_encoder_windows', `${owner}&day=in.(${days.join(',')})`
+    + '&select=day,encoder_id,model_version,preprocessing_version,feature_schema,window_count,first_ts,last_ts,'
+    + 'result_revision,computed_at') ?? [];
+  const wanted = heads.filter((h: any) => known.get(h.day) !== String(h.result_revision)).map((h: any) => h.day);
+  const bodies = wanted.length
+    ? await rest.select('activity_encoder_windows',
+      `${owner}&day=in.(${wanted.join(',')})&select=day,result_revision,windows`) ?? []
+    : [];
+  const bodyByDay = new Map(bodies.map((b: any) => [b.day, b]));
+  return heads.map((h: any) => {
+    const body: any = bodyByDay.get(h.day);
+    // A republish between the two reads makes the body newer than its head; the body's revision is the one
+    // that describes the windows sent.
+    return body
+      ? { ...h, result_revision: String(body.result_revision), windows: body.windows }
+      : { ...h, result_revision: String(h.result_revision), unchanged: true };
+  });
+}
+
 async function boundedBody(req: Request, maxBytes = 8192): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
   if (bytes.length > maxBytes) throw fail('payload_too_large', 413);
@@ -162,6 +227,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isRead = req.method === 'GET' && route === '/';
   const isDays = req.method === 'GET' && route === '/days';
   const isSeries = req.method === 'GET' && route === '/series';
+  const isActivityWindows = req.method === 'GET' && route === '/activity-windows';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
   const isRegister = req.method === 'POST' && route === '/devices';
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
@@ -170,8 +236,15 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isPlacementPost = req.method === 'POST' && route === '/placement';
   const isPlacementGet = req.method === 'GET' && route === '/placement';
   const isStretchFeedback = req.method === 'POST' && route === '/stretch-feedback';
-  if (!isRead && !isDays && !isSeries && !isDiagnostics && !isRegister && !isOverride && !isComputeSubmit
-      && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback) {
+  // Physiology context (contracts.md §8). Device-scoped reads take deviceId from the query like /series;
+  // exposure events are account-level and take no device.
+  const isContext = req.method === 'GET' && route === '/context';
+  const isContextHistory = req.method === 'GET' && route === '/context/history';
+  const isExposurePost = req.method === 'POST' && route === '/exposures';
+  const isExposureGet = req.method === 'GET' && route === '/exposures';
+  if (!isRead && !isDays && !isSeries && !isActivityWindows && !isDiagnostics && !isRegister && !isOverride
+      && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
+      && !isContext && !isContextHistory && !isExposurePost && !isExposureGet) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -206,24 +279,28 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
     }
-    const requestBody = isRead || isDays || isSeries || isDiagnostics || isComputeRead || isPlacementGet
-      ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES : undefined);
-    const externalDeviceId = isRead || isDays || isSeries || isDiagnostics || isComputeRead
+    const requestBody = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
+        || isPlacementGet || isContext || isContextHistory || isExposureGet
+      ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
+        : isExposurePost ? EXPOSURE_MAX_BODY_BYTES : undefined);
+    const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
+        || isContext || isContextHistory
       ? url.searchParams.get('deviceId')
-      : (isPlacementGet || isStretchFeedback) ? null
+      : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
     // user-level declaration (the RPC's NULL device scope). Stretch feedback carries a device per
     // item, which is resolved leniently inside its handler, so it has no request-level device.
-    if (!isPlacementGet && !isStretchFeedback && !(isPlacementPost && externalDeviceId == null)
+    if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet
+        && !(isPlacementPost && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
     // user-level when absent; GET is owner-scoped and never device-scoped).
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
-      : (isPlacementPost || isPlacementGet || isStretchFeedback) ? null
+      : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -247,6 +324,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         p_user: user.id, p_from: query.from, p_to: query.to, ...(query.metrics ? { p_metrics: query.metrics } : {}),
       });
       return Response.json({ series, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isActivityWindows) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseActivityWindowsQuery(url.searchParams);
+      const days = await readActivityWindows({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isComputeSubmit || isComputeRead) {
       if (!deviceId) throw fail('device_registration_pending',409);
@@ -302,6 +385,40 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       // every other score route, no new auth path.
       const outcome = await submitStretchFeedback({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
       return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isContext || isContextHistory) {
+      // One device-day's context document, or the device's episodes/bouts/daily values over a range. The
+      // owner is the credential's and the device the caller's own (findNoopDevice); the RPCs check both again.
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      if (isContext) {
+        const query = parseContextQuery(url.searchParams);
+        const context = await rest.rpc('physiology_context_read_v1', {
+          p_user: user.id, p_device: deviceId, p_day: query.day, p_mode: query.mode, p_metric: query.metric,
+        });
+        return Response.json({ context, identity }, { headers: { 'cache-control': 'no-store' } });
+      }
+      const query = parseContextHistoryQuery(url.searchParams);
+      const history = await rest.rpc('physiology_context_history_read_v1', {
+        p_user: user.id, p_device: deviceId, p_from: query.from, p_to: query.to, p_mode: query.mode,
+      });
+      return Response.json({ history, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isExposurePost) {
+      // Account-level exposure revisions; owner and uploading source from the credential, never the body.
+      const outcome = await submitExposureEvents({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
+      return Response.json({ ...outcome, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isExposureGet) {
+      const query = parseExposureReadQuery(url.searchParams);
+      const read = await rest.rpc('exposure_events_read_v1', {
+        p_owner: user.id, p_from: query.from, p_to: query.to, p_include_history: query.history,
+      });
+      return Response.json({
+        events: Array.isArray(read?.events) ? read.events : [],
+        ...(query.history ? { revisions: Array.isArray(read?.revisions) ? read.revisions : [] } : {}),
+        truncated: read?.truncated === true,
+        identity,
+      }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isPlacementGet) {
       // Owner-scoped read for reconciliation. device_id is returned as the EXTERNAL device id

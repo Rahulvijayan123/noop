@@ -15,6 +15,7 @@ extension ActivityContextInterval {
             sleepState: sleep.rawValue, wearState: wear.rawValue, intensity: intensity,
             stepTicks: stepTicks, cadenceSpm: cadenceSpm, hrSamples: hrSamples, hrMean: hrMean,
             hrMin: hrMin, hrMax: hrMax, hrSlope: hrSlope, rmssd: rmssd, rrBeats: rrBeats,
+            rrDiffSqSumMs2: rrDiffSqSumMs2, rrDiffCount: rrDiffCount,
             respRateBpm: respRateBpm, respBreaths: respBreaths)
     }
 
@@ -36,6 +37,7 @@ extension ActivityContextInterval {
             intensity: row.intensity, stepTicks: row.stepTicks, cadenceSpm: row.cadenceSpm,
             hrSamples: row.hrSamples, hrMean: row.hrMean, hrMin: row.hrMin, hrMax: row.hrMax,
             hrSlope: row.hrSlope, rmssd: row.rmssd, rrBeats: row.rrBeats,
+            rrDiffSqSumMs2: row.rrDiffSqSumMs2, rrDiffCount: row.rrDiffCount,
             respRateBpm: row.respRateBpm, respBreaths: row.respBreaths)
     }
 }

@@ -551,13 +551,19 @@ final class ActivityPythonService {
 
     // MARK: - Parsing
 
-    private static func parsePing(_ obj: [String: Any]) -> PingStatus {
+    /// Ping statuses that mean "no model to infer with". serve.py answers ping `ok:true` with
+    /// `hart_unavailable` when a HART manifest is present but the model failed to load (torch missing, bad
+    /// checkpoint digest); every infer would then return `model_missing`, so the lane must back off before
+    /// claiming instead of failing (and eventually dead-lettering) every job.
+    static let unavailableModelStatuses: Set<String> = ["model_missing", "missing", "hart_unavailable"]
+
+    static func parsePing(_ obj: [String: Any]) -> PingStatus {
         let ok = (obj["ok"] as? Bool) ?? false
         var modelAvailable = ok
         var modelStatus = "unknown"
         if let raw = obj["model_status"] as? String {
             modelStatus = raw
-            modelAvailable = ok && raw != "model_missing" && raw != "missing"
+            modelAvailable = ok && !unavailableModelStatuses.contains(raw)
         }
         if let raw = obj["model_available"] as? Bool {
             modelAvailable = ok && raw

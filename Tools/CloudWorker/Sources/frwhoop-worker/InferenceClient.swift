@@ -541,7 +541,10 @@ final class InferenceClient {
         // timeout is >= it so a slow-but-progressing body is not cut off early.
         cfg.timeoutIntervalForRequest = Double(self.timeoutMS) / 1000.0
         cfg.timeoutIntervalForResource = Double(self.timeoutMS) / 1000.0 + 10.0
+        #if !canImport(FoundationNetworking)
+        // Linux's FoundationNetworking exposes this read-only (it never waits), so only Apple sets it.
         cfg.waitsForConnectivity = false
+        #endif
         self.session = URLSession(configuration: cfg)
     }
 
@@ -584,6 +587,28 @@ final class InferenceClient {
         } catch {
             throw InferenceClientError.malformed("healthz decode failed: \(error)")
         }
+    }
+
+    /// POST /v1/sleep-features (the deterministic sleep-phenotype
+    /// enrichment; spec 7.1). Not an inference request and NOT a candidate
+    /// provider, so the response is returned RAW — the enrichment lane owns
+    /// its own typed validation (SleepFeatureEnrichment.validateResponse),
+    /// and no InferenceResponse contract applies to it. Same bounded-wait
+    /// transport as `/v1/infer`, with a shorter default budget.
+    func sleepFeatures(body: Data, timeoutMSOverride: Int? = nil) throws -> Data {
+        var urlRequest = URLRequest(url: endpoint("/v1/sleep-features"))
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        urlRequest.httpBody = body
+        let budget = timeoutMSOverride.map { max(250, min($0, timeoutMS)) } ?? timeoutMS
+        let (data, http) = try send(urlRequest, timeoutMS: budget)
+        try Self.checkStatus(http, data: data)
+        guard data.count <= maxResponseBytes else {
+            throw InferenceClientError.malformed(
+                "sleep-features response body \(data.count) bytes exceeds cap \(maxResponseBytes)")
+        }
+        return data
     }
 
     /// GET /v1/providers (capability manifest).

@@ -261,6 +261,57 @@ public actor ServerScoreRepository {
         status == 409 && (body?.contains("device_registration_pending") ?? false)
     }
 
+    // MARK: - activity encoder windows
+
+    /// One UTC day of `GET scores/activity-windows`: the server's HART windows, or `unchanged` when the day
+    /// was listed in `known` at its current revision (the windows are then left out).
+    public struct ActivityWindowsDay: Equatable, Sendable {
+        public var day: String
+        public var resultRevision: String
+        public var encoderId: String
+        public var modelVersion: String
+        /// The `hart-windows-1` object re-serialized as JSON text; nil when `unchanged`.
+        public var windowsJSON: String?
+        public var unchanged: Bool { windowsJSON == nil }
+    }
+
+    /// HART's per-window output for up to three UTC days, skipping the windows of any day whose revision the
+    /// caller already holds (`known`: day → result revision). A day the server has nothing for is absent.
+    public func activityWindows(days: [String], deviceId: String,
+                                known: [String: String] = [:]) async throws -> [ActivityWindowsDay] {
+        guard let endpoint else { throw ReadError.notConfigured }
+        guard let identity = identity() else { throw ReadError.missingIdentity }
+        guard !days.isEmpty else { return [] }
+        var components = URLComponents(url: endpoint.appendingPathComponent("activity-windows"),
+                                       resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "deviceId", value: deviceId),
+                     URLQueryItem(name: "days", value: days.joined(separator: ","))]
+        let held = days.compactMap { day in known[day].map { "\(day):\($0)" } }
+        if !held.isEmpty { items.append(URLQueryItem(name: "known", value: held.joined(separator: ","))) }
+        components?.queryItems = items
+        guard let url = components?.url else { throw ReadError.malformed("activity-windows endpoint") }
+        let body = try await get(url: url, identity: identity)
+        return Self.activityWindowsDays(from: body)
+    }
+
+    static func activityWindowsDays(from body: [String: Any]) -> [ActivityWindowsDay] {
+        ((body["days"] as? [[String: Any]]) ?? []).compactMap { entry in
+            guard let day = entry["day"] as? String,
+                  let revision = (entry["result_revision"] as? String)
+                    ?? (entry["result_revision"] as? NSNumber)?.stringValue else { return nil }
+            var json: String?
+            if (entry["unchanged"] as? Bool) != true {
+                guard let windows = entry["windows"] as? [String: Any],
+                      let data = try? JSONSerialization.data(withJSONObject: windows) else { return nil }
+                json = String(data: data, encoding: .utf8)
+            }
+            return ActivityWindowsDay(day: day, resultRevision: revision,
+                                      encoderId: entry["encoder_id"] as? String ?? "hart",
+                                      modelVersion: entry["model_version"] as? String ?? "unknown",
+                                      windowsJSON: json)
+        }
+    }
+
     // MARK: - intraday series
 
     /// The dense intraday series between two instants (`GET scores/series`), cached under `cacheKey`.
@@ -579,6 +630,15 @@ public struct HostedDayResult: Equatable {
     /// so offline renders the exact timeline the network read produced for the same
     /// owner + device + result revision.
     public let activityContext: ActivityContextDocument?
+    /// The optional sleep-features enrichment document (`daily.sleep_features`, spec-25 §7.3).
+    /// Nil when the payload has no key, when it is malformed, or when this app build has not
+    /// learned a newer schema yet — never fatal. The Sleep page renders the Sleep details section
+    /// only when this is non-nil, so builds without the payload render exactly as before.
+    ///
+    /// Cache: like `activityContext`, this rides inside the `daily` object that `snapshot()` keeps
+    /// verbatim in `rawJSON`, so `writeCache` persists it automatically — no new cache field and a
+    /// cached read re-parses through `snapshot()` offline.
+    public let sleepFeatures: SleepFeatureDocument?
 
     init?(day: String, object: [String: Any]) {
         guard let daily = object["daily"] as? [String: Any],
@@ -620,6 +680,7 @@ public struct HostedDayResult: Equatable {
             return HrvSeriesPoint(startTs: start, rmssd: rmssd, cleanBeats: beats)
         }.sorted { $0.startTs < $1.startTs }
         self.activityContext = Self.activityContext(from: daily)
+        self.sleepFeatures = Self.sleepFeatures(from: daily)
         self.sleep = ((object["sleep"] as? [Any]) ?? []).compactMap { entry -> CachedSleepSession? in
             guard let night = entry as? [String: Any],
                   night["is_nap"] as? Bool != true,
@@ -666,6 +727,21 @@ public struct HostedDayResult: Equatable {
         guard JSONSerialization.isValidJSONObject(raw) else { return nil }
         guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
         return try? JSONDecoder().decode(ActivityContextDocument.self, from: data)
+    }
+
+    /// Decode the optional sleep-features document (`daily.sleep_features`) into the SHARED
+    /// StrandAnalytics schema — the same types the worker serializes with.
+    ///
+    /// Deliberately non-fatal on every failure mode (spec-25 §7.3 "Decode in HostedDayResult with
+    /// a shared typed document; missing/malformed/future-schema data must not break the entire
+    /// day"): a missing key, a non-object value, a future schema bump or a malformed field all
+    /// return nil and leave the rest of the hosted result intact. Old payloads without the key are
+    /// unaffected — the snapshot publishes without `sleep_features` when the sidecar is absent.
+    static func sleepFeatures(from daily: [String: Any]) -> SleepFeatureDocument? {
+        guard let raw = daily["sleep_features"] else { return nil }
+        guard JSONSerialization.isValidJSONObject(raw) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        return try? JSONDecoder().decode(SleepFeatureDocument.self, from: data)
     }
 }
 

@@ -39,7 +39,10 @@ import Foundation
 /// `renew_scoring_v2` + `fail_scoring_v2` pair (there is no bare release RPC).
 struct ScoringLane {
     let db: PostgresClient
-    let scorer: DayScorer
+    /// `var` so `main.swift` can attach the sleep-feature enrichment sidecar
+    /// after the shared `InferenceClient` is built (same post-init wiring the
+    /// candidate stage uses; see `scoring.candidate` in main.swift).
+    var scorer: DayScorer
     let ingestSecret: String
     var leaseSeconds: Int = 300
     var maxFailures: Int = 8
@@ -550,8 +553,12 @@ struct ScoringLane {
                 measurementRevision: 0
             )
             let started = Date()
+            // `enrichFeatures: true`: this is the V2 SNAPSHOT path — the only
+            // path that publishes the snapshot payload the sleep-features
+            // document attaches to (the legacy fleet path discards it).
             let payloads = try scorer.scoreAndBuildPayloads(claim: claim, buildSeries: publishesSeries,
-                                                            candidateLane: candidate != nil)
+                                                            candidateLane: candidate != nil,
+                                                            enrichFeatures: true)
             let snapshotData = try jsonText(payloads.snapshot)
             let durationMS = Int(Date().timeIntervalSince(started) * 1000)
             let publishJSON = try db.callFunctionForJSONRaw(

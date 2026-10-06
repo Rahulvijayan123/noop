@@ -137,6 +137,7 @@ struct SleepView: View {
     /// The analytical cards to render, in saved order minus the hidden set.
     private var sleepVisibleSections: [SleepSection] {
         SleepLayoutPrefs.visibleOrder(orderRaw: sleepSectionOrderRaw, hiddenRaw: sleepHiddenSectionsRaw)
+            .filter { $0 != .sleepMarks }
     }
 
     var body: some View {
@@ -469,11 +470,32 @@ struct SleepView: View {
         switch section {
         case .sleepMarks:      SleepMarkCard()
         case .stages:          hero(model)
-        case .bodyClock:       bodyClockDial(model)
-        case .nightDetail:     NightDetailCard(model: model)
-        case .sleepDebt:       SleepDebtLedgerCard(model: model)
-        case .stagesVsTypical: StagesVsTypicalCard(model: model)
-        case .asleepDuration:  durationTrend(model)
+        case .bodyClock:
+            Button { router.openRhythm() } label: { bodyClockDial(model).contentShape(Rectangle()) }
+                .buttonStyle(LiquidPressStyle())
+        case .nightDetail:
+            metricLink("sleep_efficiency") { NightDetailCard(model: model) }
+            // Sleep details (spec 7.5): rendered only when a hosted sleep-features document exists
+            // for the current night. With no payload this renders nothing, so feature-off builds
+            // are byte-identical to before.
+            let session = heroNight(model).session
+            SleepFeatureSection(startTs: session.effectiveStartTs, endTs: session.endTs)
+        case .sleepDebt:       metricLink("sleep_debt_min") { SleepDebtLedgerCard(model: model) }
+        case .stagesVsTypical: metricLink("restorative_pct") { StagesVsTypicalCard(model: model) }
+        case .asleepDuration:  metricLink("sleep_total_min") { durationTrend(model) }
+        }
+    }
+
+    /// Makes a whole Sleep card open the matching metric's detail page (history, trend, explanation).
+    @ViewBuilder
+    private func metricLink<Content: View>(_ key: String, @ViewBuilder _ content: () -> Content) -> some View {
+        if let metric = MetricCatalog.metric(key: key, source: "my-whoop") {
+            NavigationLink { MetricDetailView(metric: metric) } label: {
+                content().contentShape(Rectangle())
+            }
+            .buttonStyle(LiquidPressStyle())
+        } else {
+            content()
         }
     }
 
@@ -794,14 +816,6 @@ struct SleepView: View {
                     footer: { stageBreakdownRows(s) }
                 )
             }
-            // #407 — subordinate movement/restlessness trace UNDER the hypnogram, on the SAME timeline, for
-            // the SAME main-night GROUP blocks the hero resolved (mergeDay's group). Shown only for a real
-            // (≥2-segment) hypnogram so the strip aligns with a genuine timeline; the proportional stage-bar
-            // fallback has no timeline to anchor to. Placed OUTSIDE the fixed-height ChartCard so it doesn't
-            // clip the hypnogram. Honest empty state inside `motionStrip` when no group fragment has motion.
-            if intervals.count >= 2 {
-                motionStrip(night)
-            }
             // H9 — when the engine's Rest confidence flags this night's staging as low-confidence (a
             // high-efficiency night whose deep+REM share is implausibly low → a likely staging miss, not
             // a real night with no restorative sleep), say so honestly under the breakdown rather than
@@ -899,34 +913,6 @@ struct SleepView: View {
                     stageBreakdownRows(s, palette: style.stagePalette)
             }
         )
-    }
-
-    /// #407 — the per-epoch movement/restlessness strip drawn UNDER the hypnogram, on the SAME timeline.
-    /// Reads the already-resolved main-night GROUP's persisted motion off `night.motionEpochs` (laid
-    /// fragment-by-fragment in `mergeDay`, NO re-resolution of the night). The left inset (44pt axis + 12pt
-    /// spacing) matches the Hypnogram's `HStack` so the strip's plot lines up under the stage bands above.
-    /// When the night has no persisted motion (older rows whose `motionJSON` is NULL) it shows an HONEST
-    /// empty note rather than a fabricated flat zero trace.
-    @ViewBuilder
-    private func motionStrip(_ night: Night) -> some View {
-        // Label above the trace, plot inset 10pt to line up with the stage-timeline rows' strips
-        // (the old 44+12 gutter matched the removed Hypnogram's y-axis column). (ryanAtriumAi #988)
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Move")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-            if night.motionEpochs.count >= 2 {
-                MotionTrace(epochs: night.motionEpochs, height: 40, tint: StrandPalette.restColor)
-                    .padding(.horizontal, 10)
-            } else {
-                Text("No movement detail for this night")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                    .accessibilityLabel(Text("No movement detail recorded for this night"))
-            }
-        }
-        .accessibilityElement(children: .contain)
     }
 
     /// H9 — true when this night's staging is LOW-CONFIDENCE: a high-efficiency night (lots of measured
@@ -1107,53 +1093,39 @@ struct SleepView: View {
     /// In bed and Asleep are separate because they are different moments: the window opens when the wrist
     /// first goes still, and lying awake after that is wake on the staged timeline. A night without a real
     /// timeline (imported, or a stage-less stub) has only the window start, and keeps the two-time row.
+    /// Equal-width columns so the labels and times line up; tapping the card opens the sleep-time editor.
     @ViewBuilder
     private func sleepWindowRow(_ night: Night) -> some View {
-        // A frosted Rest-tinted card (was a flat surfaceRaised block) so the window row sits in the
-        // same colour world as the rest of the screen. Bevel treatment — content unchanged.
-        NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: NoopMetrics.rowSpacing) {
+        let card = NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.restColor) {
+            HStack(alignment: .top, spacing: 8) {
                 if let asleep = night.asleepText {
-                    // Three times with their icons fit a wide phone; a narrow one drops the icons.
-                    ViewThatFits(in: .horizontal) {
-                        threeTimeRow(night, asleep: asleep, icons: true)
-                        threeTimeRow(night, asleep: asleep, icons: false)
-                    }
+                    sleepTime(icon: "bed.double.fill", label: "In bed", value: night.onsetText)
+                    windowDivider
+                    sleepTime(icon: "moon.zzz.fill", label: "Asleep", value: asleep)
                 } else {
-                    HStack(spacing: 0) {
-                        sleepTime(icon: "moon.zzz.fill", label: "Asleep", value: night.onsetText)
-                        Spacer(minLength: 12)
-                        windowDivider
-                        Spacer(minLength: 12)
-                        sleepTime(icon: "sun.max.fill", label: "Woke", value: night.wakeText)
-                        Spacer(minLength: 8)
-                        wakeEditButton(night)
-                    }
-                    .frame(maxWidth: .infinity)
+                    sleepTime(icon: "moon.zzz.fill", label: "Asleep", value: night.onsetText)
                 }
+                windowDivider
+                sleepTime(icon: "sun.max.fill", label: "Woke", value: night.wakeText)
             }
         }
-    }
-
-    private func threeTimeRow(_ night: Night, asleep: String, icons: Bool) -> some View {
-        HStack(spacing: 0) {
-            sleepTime(icon: icons ? "bed.double.fill" : nil, label: "In bed", value: night.onsetText)
-            Spacer(minLength: 8)
-            windowDivider
-            Spacer(minLength: 8)
-            sleepTime(icon: icons ? "moon.zzz.fill" : nil, label: "Asleep", value: asleep)
-            Spacer(minLength: 8)
-            windowDivider
-            Spacer(minLength: 8)
-            sleepTime(icon: icons ? "sun.max.fill" : nil, label: "Woke", value: night.wakeText)
-            Spacer(minLength: 8)
-            wakeEditButton(night)
+        if let target = night.editTarget {
+            Button {
+                wakeEdit = WakeEdit(detectedStartTs: target.startTs,
+                                    bedTs: target.effectiveStartTs,
+                                    wakeTs: target.endTs,
+                                    stagesJSON: target.stagesJSON,
+                                    userEdited: target.userEdited)
+            } label: { card.contentShape(Rectangle()) }
+            .buttonStyle(LiquidPressStyle())
+            .accessibilityHint("Edit sleep times")
+        } else {
+            card
         }
-        .frame(maxWidth: .infinity)
     }
 
     private var windowDivider: some View {
-        Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 30)
+        Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 36)
     }
 
     /// A compact explainer popover: the verbatim foundation reason text, with the nap suffix appended for a
@@ -1189,52 +1161,23 @@ struct SleepView: View {
         .accessibilityElement(children: .combine)
     }
 
-    private func sleepTime(icon: String?, label: LocalizedStringKey, value: String) -> some View {
-        HStack(spacing: 10) {
-            if let icon {
+    private func sleepTime(icon: String, label: LocalizedStringKey, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 5) {
                 Image(systemName: icon)
-                    .font(StrandFont.headline)
+                    .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.restColor)
                     .accessibilityHidden(true)
+                Text(label).strandOverline().lineLimit(1)
             }
-            VStack(alignment: .leading, spacing: 1) {
-                Text(label).strandOverline()
-                Text(value).font(StrandFont.number(22)).foregroundStyle(StrandPalette.textPrimary)
-            }
+            Text(value)
+                .font(StrandFont.number(17))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
-    }
-
-    /// Pencil affordance that opens the wake-time editor for `night`. Auto-detection misreads the wake
-    /// time most often (a late lie-in, or a morning stir read as still-asleep), so a one-tap correction
-    /// lives right next to the "Woke" value. A filled pencil marks a night already hand-corrected. (#318)
-    ///
-    /// The hero shows a MERGED/synthetic Night — its `session` carries no `stagesJSON` and a reset
-    /// `userEdited` (mergeDay), with the real stage data in `night.stages`. So resolve the actual stored
-    /// block we're editing — the one whose wake time IS the night's wake — and edit against its detected
-    /// startTs key, current effective bed/wake (to seed the pickers), stagesJSON, and edited state.
-    @ViewBuilder
-    private func wakeEditButton(_ night: Night) -> some View {
-        // Resolve the real stored block by identity (the night's main block), never by re-scanning
-        // `allSessions` for a wake-time match — that guess could pick the wrong source/night and, when
-        // it missed, fall back to the synthetic effective onset (not a real key) so the edit no-oped.
-        if let target = night.editTarget {
-            let isEdited = target.userEdited
-            Button {
-                wakeEdit = WakeEdit(detectedStartTs: target.startTs,
-                                    bedTs: target.effectiveStartTs,
-                                    wakeTs: target.endTs,
-                                    stagesJSON: target.stagesJSON,
-                                    userEdited: isEdited)
-            } label: {
-                Image(systemName: isEdited ? "pencil.circle.fill" : "pencil.circle")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.restColor)
-            }
-            .buttonStyle(LiquidPressStyle())
-            .help("Edit sleep times")
-            .accessibilityLabel(isEdited ? "Edit sleep times (edited)" : "Edit sleep times")
-        }
     }
 
     /// Full-width proportional stacked stage bar (fallback when no intervals).

@@ -202,16 +202,25 @@ enum ActivityContextDays {
 
     /// The day document for a stream-day job, or nil when the stored streams hold nothing to describe.
     /// `now` bounds an open WRIST_OFF span and decides whether the day has been through sleep detection.
+    ///
+    /// `encoder` is the day's stored HART windows (`activity_encoder_windows`), when the raw-IMU lane has
+    /// produced any: the stream day then decodes with the same encoder evidence the phone does.
     static func buildStreamDay(day: String, dayBounds: (start: Int, end: Int), streams: Streams,
                                sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
                                exercise: [(start: Int, end: Int)],
-                               now: Int) throws -> Built? {
+                               now: Int, encoder: ActivityEncoderWindowSet? = nil) throws -> Built? {
         guard !streams.isEmpty else { return nil }
-        let input = trackInput(
+        var input = trackInput(
             windows: [], streams: streams, sleep: sleep, inBed: inBed, exercise: exercise,
             dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
             encoderVersion: streamsPreprocessingVersion,
             sleepKnownOutsideSessions: now >= dayBounds.end + streamsSleepSettleSeconds)
+        if let encoder, !encoder.isEmpty {
+            input.encoderWindows = encoder.windows
+            input.imuWindows = encoder.features
+            input.encoderId = encoder.encoderId
+            input.encoderVersion = encoder.encoderVersion
+        }
         let built = try build(input: input, day: day, modelVersion: streamsModelVersion,
                               preprocessingVersion: streamsPreprocessingVersion, generatedAt: now)
         return (built.runs > 0 || built.events > 0) ? built : nil

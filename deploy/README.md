@@ -111,6 +111,49 @@ everything else. The stage needs neither Python nor B2, so a host with no venv e
 `FRWHOOP_ACTIVITY_ENABLED=1 FRWHOOP_ACTIVITY_IMU=0`. `FRWHOOP_ACTIVITY_STREAMS=0` turns the stage off.
 Python on Ubuntu 24.04 needs `apt-get install python3.12-venv` before `python3 -m venv` works.
 
+### HART over the phone's raw motion (rawImuSession objects)
+
+Phones from `feat/hart-imu-wiring-20261005` on record the WHOOP 5/MG raw motion stream for HART on their own
+(part-time by default, see `ActivityImuCapture`) and upload it as `rawImuSession` objects. Before that build
+reaches anyone, the server needs four things, in this order:
+
+1. **Migration** (additive): the `activity_encoder_windows` table and its fenced publish.
+
+   ```bash
+   psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261005150000_activity_encoder_windows.sql
+   ```
+
+2. **Edge functions**: `scores` (the new `GET /scores/activity-windows` route the phone reads HART's windows
+   from) and `push` (its object lane must advertise `rawImuSession`; check `GET /push/capabilities` shows an
+   `objectLane`). A phone that meets an older `scores` simply decodes without HART.
+
+3. **The Python side on the worker host**: the venv and model above, plus the code itself. The release tarball
+   does not carry it, so copy it alongside:
+
+   ```bash
+   tar czf activity.tar.gz Tools/ActivityContext
+   scp activity.tar.gz root@HOST:/opt/ && ssh root@HOST 'rm -rf /opt/noop/Tools/ActivityContext &&
+     tar xzf /opt/activity.tar.gz -C /opt/noop && chown -R frwhoop:frwhoop /opt/noop/Tools/ActivityContext'
+   # the trained artifacts (hart-wisdm-v0, sha256 39dc12e0… for model.safetensors) are not in git:
+   scp config.json manifest.json model.safetensors root@HOST:/var/lib/frwhoop/activity-model/
+   ssh root@HOST 'chown -R frwhoop:frwhoop /var/lib/frwhoop/activity-model && chmod 0644 /var/lib/frwhoop/activity-model/*'
+   ```
+
+   Then run the ping check above; it must answer `"model_status": "hart_loaded"`. A worker from this branch
+   treats `hart_unavailable` as no model and claims nothing until it loads; older workers claimed and failed
+   every job.
+
+4. **The worker** from this branch, with `FRWHOOP_ACTIVITY_ENABLED=1` and the four `FRWHOOP_ACTIVITY_*` paths
+   above. It keeps downloaded objects and model answers in `FRWHOOP_ACTIVITY_CACHE_DIR` (default
+   `/var/lib/frwhoop/activity-cache`, already writable under the unit; `""` turns it off), so a day's job only
+   re-runs HART over the stretch that grew. The cache is disposable: delete it after replacing the model
+   without changing its version string.
+
+Verify after the first phone uploads: `object_manifests` gains `rawImuSession` rows, `activity_context_jobs`
+gains `hart-activity-1` jobs with non-empty `input_object_ids`, and the activity lane's heartbeat counters
+`windows_inferred`, `windows_reused` and `window_sets_published` climb. `window_set_failures` counts window
+sets that were not stored (a migration not applied shows up there; the v1 epochs are unaffected).
+
 ## Operate / verify
 
 ```bash
@@ -167,6 +210,38 @@ absent or not ready.
 Inference never runs inside a scoring transaction: the candidate stage executes
 after the canonical snapshot transaction has committed, calls the sidecar with no
 transaction open, and writes its result in a fresh committed transaction.
+
+### Sleep-phenotype enrichment lane (feature/sleep-phenotypes)
+
+The SAME sidecar process serves a second, dedicated endpoint for the descriptive
+sleep-phenotype enrichment: `POST /v1/sleep-features` (loopback-only, its own
+typed request/response; see `docs/SLEEP_FEATURES_CONTRACT.md`). It is NOT an
+inference request and NOT a candidate provider — a bundle of descriptive
+features is neither a scalar result nor stage segments, so it never touches the
+candidate lane's promotion semantics.
+
+- Trigger: the Swift worker's scoring pass attaches it to the snapshot payload
+  under `daily.sleep_features` BEFORE `publish_scoring_snapshot_v2` (a plain
+  loopback JSON call, no waveform download / model inference; the repeatable-read
+  transaction is bounded by the 3500 ms transport budget around the sidecar's
+  own 3000 ms compute budget, and a timeout publishes the core snapshot with
+  `sleep_features.status = "timeout"` — core scores never depend on it).
+- Rollback / off switch: unset `FRWHOOP_INFERENCE_URL` (or stop the sidecar).
+  Snapshots then publish without `daily.sleep_features`, byte-identical in every
+  core field; old clients and the scores route are unaffected either way. NO
+  database migration is involved (`publish_scoring_snapshot_v2` stores `daily`
+  verbatim as jsonb, and the scores edge route passes `daily` through).
+- One new pinned dependency: `yasa==0.8.0` in `Tools/InferenceWorker/pyproject.toml`
+  (hypnogram analysis only — YASA's PSG classifiers are never applied to WHOOP
+  signals). `uv.lock` is committed; deploy-prep resolves it from the lock like
+  every other sidecar dependency.
+- Deploy step (additive, after the normal sidecar provision): sync
+  `Tools/InferenceWorker` to `/opt/frwhoop-inference`, `uv sync --frozen` in its
+  venv, then `systemctl restart frwhoop-inference`. Verify with
+  `curl -s http://127.0.0.1:8787/healthz` and one loopback smoke POST.
+- Phone: no migration, no new route — the Sleep page reads the typed document
+  from the cached hosted snapshot (`HostedDayResult.sleepFeatures`), decoded
+  non-fatally.
 
 ## Sidecar provision (run once per host)
 

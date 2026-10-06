@@ -56,13 +56,21 @@ extension Repository {
                          lane: ActivityContextWorker.Lane = .page,
                          progress: (@Sendable (ActivityContextDayDocument) -> Void)? = nil)
         async -> ActivityContextDayDocument? {
-        let input = ActivityContextTrackInput(
+        var input = ActivityContextTrackInput(
             dayStart: s.start, dayEnd: s.end,
             hr: s.hr, gravity: s.gravity, steps: s.stepCounter,
             sleep: s.sleep, inBed: s.inBed,
             // A finished day has been through sleep detection; a live one has not seen the present yet.
             sleepKnownOutsideSessions: !s.isLiveDay,
             workouts: s.workouts, offWrist: s.offWrist)
+        // HART's verdicts on the raw motion this phone uploaded, when the server has produced any for the
+        // day. They arrive minutes after the strap's own streams; the day builder re-decodes when they do.
+        if let encoder = ActivityEncoderWindowStore.shared.windows(from: s.start, to: s.end) {
+            input.encoderWindows = encoder.windows
+            input.imuWindows = encoder.features
+            input.encoderId = encoder.encoderId
+            input.encoderVersion = encoder.encoderVersion
+        }
         let config = activityDecoderConfig
         return await ActivityContextWorker.shared.document(
             source: "\(s.sourceKey)@\(config.cacheTag)", input: input, config: config,

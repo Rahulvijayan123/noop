@@ -247,14 +247,45 @@ final class ActivityContextIntervalTests: XCTestCase {
     }
 
     func testNoVariabilityOrBreathingWhileMovingOrOffWrist() {
+        // Realistic motion for each: a committed walk/run carries wrist intensity well above the gate
+        // (walking's own strap anchor is ≈0.52; running's is higher), `.off` is excluded by wear regardless
+        // of intensity. This is a MOTION gate now (`maxVariabilityIntensity`), not a fixed class list — see
+        // `testLowMotionDuringANominallyMovingIntervalStillGetsVariability` for the converse.
         let beats = rsa(perMinute: 15, from: t0, seconds: 600)
-        for kind in [Kind.walking, .running, .off] {
-            let iv = build([run(kind, t0, t0 + 600)], rr: beats).first
+        for (kind, intensity) in [(Kind.walking, 0.6), (.running, 0.8), (.off, nil)] {
+            let iv = build([run(kind, t0, t0 + 600, intensity: intensity)], rr: beats).first
             XCTAssertNil(iv?.rmssd, "\(kind)")
             XCTAssertNil(iv?.respRateBpm, "\(kind)")
             XCTAssertEqual(iv?.rrBeats, 0)
             XCTAssertEqual(iv?.respBreaths, 0)
         }
+    }
+
+    func testLowMotionDuringANominallyMovingIntervalStillGetsVariability() throws {
+        // A `walking`-labelled stretch whose wrist was actually still (paused at a light, a treadmill
+        // pause the classifier hasn't caught up to yet) is no longer refused on sight: RR trustworthiness
+        // is judged by the interval's own measured motion, not by the semantic label stuck on it.
+        let beats = rsa(perMinute: 15, from: t0, seconds: 600)
+        let iv = try XCTUnwrap(build([run(.walking, t0, t0 + 600, intensity: 0.1)], rr: beats).first)
+        XCTAssertNotNil(iv.rmssd, "low measured motion, even under a walking label, should get a reading")
+    }
+
+    func testHighMotionDuringANominallyStillIntervalIsExcluded() throws {
+        // `lightActivity` was never in the old exclusion list, so a bursty, mislabelled `lightActivity`
+        // stretch used to get an RMSSD unconditionally. The motion gate now catches it on its own measured
+        // intensity, which the semantic label never could.
+        let beats = rsa(perMinute: 15, from: t0, seconds: 600)
+        let iv = try XCTUnwrap(build([run(.light, t0, t0 + 600, intensity: 0.7)], rr: beats).first)
+        XCTAssertNil(iv.rmssd, "high measured motion should be excluded even under a non-moving-family label")
+    }
+
+    func testNilIntensityDoesNotExcludeVariability() throws {
+        // Absence of a motion reading is not evidence of motion (the same convention
+        // `HRVAnalyzer.beatAccurateFraction` uses for a short series): a still interval that happens to
+        // carry no motion stream at all is not penalised for it.
+        let beats = rsa(perMinute: 15, from: t0, seconds: 600)
+        let iv = try XCTUnwrap(build([run(.sitting, t0, t0 + 600, intensity: nil)], rr: beats).first)
+        XCTAssertNotNil(iv.rmssd)
     }
 
     func testIntervalsUnderAMinuteGetNoVariabilityReading() throws {

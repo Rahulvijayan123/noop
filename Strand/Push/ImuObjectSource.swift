@@ -94,6 +94,10 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
 
     private let store: any ImuObjectReading
     private let deviceIdProvider: @Sendable () -> String?
+    /// The id the IMU store files this device's seconds under, given the id the coordinator uploads it as.
+    /// The two differ: the store is keyed by the BLE layer's local id, while the cloud knows the strap by
+    /// its `whoop-<serial>` id, the same one its heart rate and gravity go out under.
+    private let storeDeviceId: @Sendable (String) -> String
     private let now: @Sendable () -> Int64
     /// Asked on every page. Raw motion is the most sensitive thing this app uploads, and switching
     /// Cloud off does not stop the runtime, so the source itself refuses to hand anything out while
@@ -105,18 +109,20 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     private let lookbackSeconds: Int64
 
     private let lock = NSLock()
-    /// Where a gap scan stopped, so the next cycle resumes instead of re-reading the same window.
-    /// In-memory on purpose: a relaunch simply re-scans a few empty windows (each is a cheap,
+    /// Where a gap scan stopped, per device, so the next cycle resumes instead of re-reading the same
+    /// window. In-memory on purpose: a relaunch simply re-scans a few empty windows (each is a cheap,
     /// bucket-bounded read) and the cursor itself is the durable state.
-    private var scanFrontier: Int64?
+    private var scanFrontiers: [String: Int64] = [:]
 
     public init(store: any ImuObjectReading,
                 deviceId: @escaping @Sendable () -> String?,
+                storeDeviceId: @escaping @Sendable (String) -> String = { $0 },
                 now: @escaping @Sendable () -> Int64 = { Int64(Date().timeIntervalSince1970) },
                 lookbackSeconds: Int64 = 14 * 24 * 3600,
                 uploadAllowed: @escaping @Sendable () -> Bool = { true }) {
         self.store = store
         self.deviceIdProvider = deviceId
+        self.storeDeviceId = storeDeviceId
         self.now = now
         self.lookbackSeconds = lookbackSeconds
         self.uploadAllowed = uploadAllowed
@@ -154,12 +160,19 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         }
         guard !selected.isEmpty else { throw PushSourceReadError.requiresCompatibleEncoding }
         let hasMore = window.count > selected.count
+        // Still filling: an object goes out once its ~300 s window has closed, which is either a newer second
+        // already stored past it (a live stream closes it within seconds) or the phone clock passing its end
+        // (capture paused or stopped). Sending the open window would upload a sliver every lane pass, ~45 s:
+        // many tiny objects, each of which makes the server re-run its activity model over the whole day.
+        if !hasMore, now() < anchor + Self.targetObjectWindowSeconds {
+            return .init(rows: [], hasMore: false)
+        }
         return .init(rows: selected.map { .rawImuSession($0) }, hasMore: hasMore)
     }
 
     public func binaryRecordAt(table: PushBinaryTable, deviceId: String, rowId: Int64) async throws -> PushBinaryRow? {
         guard table == .rawImuSession else { return nil }
-        let records = try await store.readImuRecords(deviceId: deviceId, fromTs: rowId, toTs: rowId)
+        let records = try await store.readImuRecords(deviceId: storeDeviceId(deviceId), fromTs: rowId, toTs: rowId)
         guard let record = records.first(where: { $0.ts == rowId }) else { return nil }
         let data = Self.columnsData(record.columns)
         guard data.count == PushBinaryCodec.imuRecordPayloadBytes else { return nil }
@@ -172,11 +185,12 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         let fromTs = afterRowId + 1
         // P2-5: same flush-before-read + frontier fence as binaryPage — a still-buffered second
         // must never be skipped by the cursor.
-        let frontier = try await store.flushPendingFor(deviceId: deviceId)
+        let local = storeDeviceId(deviceId)
+        let frontier = try await store.flushPendingFor(deviceId: local)
         let toTs = frontier.map { min(afterRowId + Self.hardWindowSeconds, $0 - 1) }
             ?? afterRowId + Self.hardWindowSeconds
         guard toTs >= fromTs else { return [] }
-        let records = try await store.readImuRecords(deviceId: deviceId, fromTs: fromTs, toTs: toTs)
+        let records = try await store.readImuRecords(deviceId: local, fromTs: fromTs, toTs: toTs)
         return records.prefix(limit).compactMap { record in
             let data = Self.columnsData(record.columns)
             guard data.count == PushBinaryCodec.imuRecordPayloadBytes else { return nil }
@@ -201,12 +215,13 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
     private func nextWindow(deviceId: String, afterRowId: Int64,
                             limits: PushSourceReadLimits) async throws -> [ImuSourceRecord] {
         let fromTs = afterRowId + 1
+        let local = storeDeviceId(deviceId)
         // P2-5 flush-before-read: every page starts by flushing the device's RAM-only pending tail
         // so `readRecords` sees durable data. The returned flush frontier is the earliest second
         // whose flush FAILED (still buffered): the cursor must never advance at or past it, or
         // that second would be stranded below the cursor forever. Probes are fenced below the
         // frontier and the scan pauses once it blocks.
-        let flushFrontier = try await store.flushPendingFor(deviceId: deviceId)
+        let flushFrontier = try await store.flushPendingFor(deviceId: local)
         lock.lock()
         if let flushFrontier, flushFrontier <= fromTs {
             // The next second to read is not durable yet — pause this cycle. It is still buffered
@@ -218,7 +233,7 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         let trailingEdge = present - Self.frontierLagSeconds
         var probeStart: Int64
         // A marker ahead of the trailing edge (the phone clock moved backwards) is not trusted.
-        if let scan = scanFrontier, scan >= fromTs, scan <= trailingEdge {
+        if let scan = scanFrontiers[deviceId], scan >= fromTs, scan <= trailingEdge {
             probeStart = scan
         } else if afterRowId == 0 {
             // First-ever page for this device: the store's data lives at real epoch seconds, far
@@ -240,9 +255,18 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
             var probeEnd = min(probeStart + Self.hardWindowSeconds, Int64.max)
             // Never read (and thus never return) a second at or past the first non-durable second.
             if let flushFrontier, flushFrontier > probeStart { probeEnd = min(probeEnd, flushFrontier) }
-            let records = try await store.readImuRecords(deviceId: deviceId, fromTs: probeStart, toTs: probeEnd - 1)
+            var records = try await store.readImuRecords(deviceId: local, fromTs: probeStart, toTs: probeEnd - 1)
             if let first = records.min(by: { $0.ts < $1.ts }) {
-                lock.lock(); scanFrontier = nil; lock.unlock()
+                lock.lock(); scanFrontiers[deviceId] = nil; lock.unlock()
+                // The probe hour can end just after the first record, hiding the seconds that follow it.
+                // `binaryPage` tells a closed object window from a still-filling one by what lies past it, so
+                // the window must span a whole hard window from its first record (still fenced below the
+                // first non-durable second).
+                var windowEnd = first.ts + Self.hardWindowSeconds
+                if let flushFrontier, flushFrontier > first.ts { windowEnd = min(windowEnd, flushFrontier) }
+                if windowEnd > probeEnd {
+                    records = try await store.readImuRecords(deviceId: local, fromTs: first.ts, toTs: windowEnd - 1)
+                }
                 // All returned records are inside [first, first + hardWindow); sort + dedupe to
                 // satisfy the codec's strict rowid ordering even for a defensive adapter.
                 let sorted = records.filter { $0.ts >= first.ts }.sorted { $0.ts < $1.ts }
@@ -260,7 +284,7 @@ public final class ImuObjectSource: PushSnapshotSource, @unchecked Sendable {
         // never passes the trailing edge: windows nearer the present can still fill.
         let remembered = min(probeStart, trailingEdge)
         let mayAdvance = flushFrontier.map { remembered < $0 } ?? true
-        if remembered > fromTs && mayAdvance { scanFrontier = remembered }
+        if remembered > fromTs && mayAdvance { scanFrontiers[deviceId] = remembered }
         lock.unlock()
         return []
     }

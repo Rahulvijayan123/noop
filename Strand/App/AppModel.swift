@@ -271,6 +271,8 @@ final class AppModel: ObservableObject {
     private var hostedRefreshTask: Task<Void, Never>?
     private var historySeedTask: Task<Void, Never>?
     private var hostedSyncInFlight = false
+    /// When the HART windows were last asked for (`syncActivityWindows`).
+    private var activityWindowsSyncedAt: Date?
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
     /// Days the change feed announced whose read failed for a reason that can clear; asked for again next pass.
@@ -329,6 +331,7 @@ final class AppModel: ObservableObject {
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
+        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
@@ -360,6 +363,7 @@ final class AppModel: ObservableObject {
         await CloudPushRuntime.shared.flushAndKick()
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
+        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
         guard cloudScoringIsAuthoritative else { return }
         await confirmWearableLinkIfNeeded()
         startHistorySeedIfNeeded()
@@ -378,6 +382,9 @@ final class AppModel: ObservableObject {
         hostedRetry = HostedRetryLedger()
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
+        PhysiologyContextStore.shared.reset()
+        ActivityEncoderWindowStore.shared.reset()
+        activityWindowsSyncedAt = nil
         applyPowerSaving()
     }
 
@@ -476,6 +483,7 @@ final class AppModel: ObservableObject {
         // pre-adoption provisional device. Results are still stored under the stable `deviceId` namespace.
         let candidates = hostedReadCandidates
         IntradaySeriesStore.shared.setReadCandidates(candidates)
+        PhysiologyContextStore.shared.setReadCandidates(candidates)
         // G1 (findings/g1-day-ui.md Q3/Q5): "yesterday" is the previous LOCAL CALENDAR day, computed with
         // Calendar arithmetic — a fixed 86,400-second shift is the same calendar day on a 25-hour DST day
         // and skips the true previous day. Half-open [dayStart, dayStart+1day) bounds in the phone zone.
@@ -541,8 +549,56 @@ final class AppModel: ObservableObject {
         }
         reportHostedSync(outcomes: outcomes, written: written, candidateCount: candidates.count,
                          feedFailures: feedFailures)
-        if written > 0 { await repo.refresh() }
+        let windowsChanged = await syncActivityWindows(now: now)
+        if written > 0 || windowsChanged { await repo.refresh() }
         return written
+    }
+
+    /// How often HART's windows are asked for. The server reruns HART once a few minutes of raw motion have
+    /// been uploaded, and every new set re-decodes the day on the phone, so asking more often buys nothing.
+    static let activityWindowsRefreshSeconds: TimeInterval = 300
+
+    /// Fetch HART's per-window output for yesterday and today (local), so the activity decoder on this phone
+    /// uses it. Only for the account that owns this phone's strap data: the windows describe its uploads.
+    /// Returns true when any stored day changed (the caller refreshes the pages that decode).
+    @discardableResult
+    func syncActivityWindows(now: Date = Date()) async -> Bool {
+        guard cloudScoringIsAuthoritative, let account = CloudPushRuntime.shared.runningScope,
+              let scores = CloudPushRuntime.shared.scoreRepository() else { return false }
+        let store = ActivityEncoderWindowStore.shared
+        guard CloudLocalDataBinding.isOwner(account.ownerId), let device = hostedReadCandidates.first else {
+            store.setScope(nil)
+            return false
+        }
+        if let last = activityWindowsSyncedAt, now.timeIntervalSince(last) < Self.activityWindowsRefreshSeconds {
+            return false
+        }
+        activityWindowsSyncedAt = now
+        let scope = ActivityEncoderWindowStore.Scope(ownerId: account.ownerId, deviceId: device)
+        store.setScope(scope)
+        let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Calendar.current.startOfDay(for: now))
+            ?? now.addingTimeInterval(-86_400)
+        let days = ActivityEncoderWindowStore.utcDays(from: Int(yesterday.timeIntervalSince1970),
+                                                      to: Int(now.timeIntervalSince1970) + 1)
+        do {
+            let fetched = try await scores.activityWindows(days: days, deviceId: device,
+                                                           known: store.revisions(days: days))
+            guard CloudPushRuntime.shared.runningScope == account else { return false }
+            var changed = false
+            for day in fetched {
+                guard let json = day.windowsJSON else { continue }
+                let record = ActivityEncoderWindowStore.DayRecord(
+                    day: day.day, resultRevision: day.resultRevision, encoderId: day.encoderId,
+                    modelVersion: day.modelVersion, windowsJSON: json)
+                if store.save(record, scope: scope) { changed = true }
+            }
+            if changed { activityContext.requestMaterialization() }
+            return changed
+        } catch {
+            // A server without the route yet (404) or a transient failure: the decoder simply runs without
+            // HART until the next pass.
+            return false
+        }
     }
 
     /// Say what a sync pass found when it is not simply "everything is current", once per distinct state.

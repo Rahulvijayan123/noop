@@ -178,10 +178,22 @@ final class ActivityContextCoordinator {
 
         let streams = loaded.streams
         let beats = await repo.rrIntervals(from: streams.start, to: streams.end, limit: 250_000)
-        let document = loaded.document, hr = streams.hr, steps = streams.stepCounter
-        let built = await Task.detached(priority: .utility) {
-            ActivityContextIntervalBuilder.build(document: document, hr: hr, steps: steps, rr: beats)
+        let document = loaded.document, hr = streams.hr, steps = streams.stepCounter, gravity = streams.gravity
+        let (built, hrvWindows) = await Task.detached(priority: .utility) {
+            let intervals = ActivityContextIntervalBuilder.build(document: document, hr: hr, steps: steps, rr: beats)
+            // Fed by exactly the same live beat-to-beat R-R and the strap's always-on 1 Hz motion stream the
+            // interval build above uses (no fabricated/placeholder data): see `HRVWindow.swift`'s header for
+            // why this is a SEPARATE, canonical-duration population from `intervals`'s own per-interval RMSSD.
+            // `imuWindows` is left empty: the strap does not stream raw 100 Hz IMU continuously during normal
+            // wear (only during an opt-in Raw Data collector session), so `motionRmsG` falls back to the 1 Hz
+            // stream and `gyroRmsDps` stays honestly nil here rather than inventing a reading.
+            let lookup = ActivityContextLookup(intervals: intervals)
+            let windows = HRVWindowBuilder.build(kind: .canonical5m, dayStart: document.dayStart, dayEnd: document.dayEnd,
+                                                 rr: beats, gravity: gravity, activity: lookup,
+                                                 transitionEvents: document.events)
+            return (intervals, windows)
         }.value
+        log(HRVWindowSummary.diagLine(hrvWindows, kind: .canonical5m, day: day.key))
         let intervals = ActivityContextPersistence.clipped(built, from: day.start, to: day.end)
         let row = ActivityContextPersistence.dayRow(day: day.key, document: document, intervalCount: intervals.count,
                                                     computedAt: document.generatedAt, dayEnd: day.end)

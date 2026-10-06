@@ -71,11 +71,21 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     public var hrSlope: Double?
 
     // Beat-to-beat
-    /// RMSSD in ms over the interval's cleaned R-R; nil unless enough clean, trustworthy beats exist and the
-    /// wearer was not walking/running/cycling/exercising (motion corrupts beat timing).
+    /// RMSSD in ms over the interval's cleaned R-R; nil unless enough clean, trustworthy beats exist and
+    /// wrist motion was low enough for beat timing to be trusted (see
+    /// `ActivityContextIntervalBuilder.variabilityAllowed` — a continuous motion gate, not a fixed list of
+    /// excluded activity classes).
     public var rmssd: Double?
     /// Clean beats behind `rmssd` (0 when it is nil).
     public var rrBeats: Int
+    /// Sum of squared successive NN differences behind `rmssd` (ms²), UNROUNDED; 0 when `rmssd` is nil.
+    /// Lets a downstream rollup recombine RMSSD across several intervals as `sqrt(Σ this / Σ rrDiffCount)`
+    /// instead of averaging already-square-rooted RMSSD values (`ActivityContextAggregator`).
+    public var rrDiffSqSumMs2: Double
+    /// Successive-difference pairs behind `rrDiffSqSumMs2`. Not the same as `rrBeats`: a beat dropped by
+    /// cleaning removes one pair without removing a beat on either side of it, so this is `rrBeats − 1`
+    /// only when every clean beat was contiguous with its predecessor.
+    public var rrDiffCount: Int
     /// Breaths per minute from respiratory sinus arrhythmia in the interval; nil unless the wearer was
     /// still enough, long enough, and enough breaths were found.
     public var respRateBpm: Double?
@@ -92,6 +102,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 stepTicks: Int = 0, cadenceSpm: Double? = nil,
                 hrSamples: Int = 0, hrMean: Double? = nil, hrMin: Int? = nil, hrMax: Int? = nil,
                 hrSlope: Double? = nil, rmssd: Double? = nil, rrBeats: Int = 0,
+                rrDiffSqSumMs2: Double = 0, rrDiffCount: Int = 0,
                 respRateBpm: Double? = nil, respBreaths: Int = 0) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
@@ -103,6 +114,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         self.hrSamples = hrSamples; self.hrMean = hrMean; self.hrMin = hrMin; self.hrMax = hrMax
         self.hrSlope = hrSlope
         self.rmssd = rmssd; self.rrBeats = rrBeats
+        self.rrDiffSqSumMs2 = rrDiffSqSumMs2; self.rrDiffCount = rrDiffCount
         self.respRateBpm = respRateBpm; self.respBreaths = respBreaths
     }
 
@@ -123,6 +135,16 @@ public enum ActivityContextIntervalBuilder {
         public var maxIntervalS = 900
         /// Shortest interval that gets an HRV / respiratory-rate reading.
         public var minVariabilityIntervalS = 60
+        /// Motion-magnitude ceiling (`ActivityIntensity`'s 0...1 log scale) above which RR beat timing is
+        /// treated as corrupted. Replaces a fixed per-`ActivityClass` exclusion list: RR trustworthiness is
+        /// a property of what the wrist actually did, not of the semantic label attached to it afterwards.
+        /// 0.40 ≈ `ActivityIntensity.scale(g: 0.049)`, under 50 mg of gravity-removed wrist motion —
+        /// comfortably above this strap's own resting-wrist anchor (≈7 mg, intensity ≈0.17) and comfortably
+        /// below a committed walk (≈135 mg median, intensity ≈0.52) or run (≈400 mg median). A still
+        /// interval mislabelled as `walking`, or a brief lull inside a real walk, is now judged on its own
+        /// motion rather than refused on sight; a bursty, mislabelled `lightActivity` or `sitting` stretch
+        /// is correctly excluded instead of silently passing through the old list.
+        public var maxVariabilityIntensity = 0.40
         /// Clean beats RMSSD needs.
         public var minRmssdBeats = 20
         /// Breath intervals respiratory rate needs.
@@ -392,25 +414,29 @@ public enum ActivityContextIntervalBuilder {
         }
     }
 
-    /// Motion corrupts beat timing: no variability reading while the wearer walks, runs, rides or exercises.
-    private static func variabilityAllowed(_ c: ActivityClass) -> Bool {
-        switch c {
-        case .offWrist, .unknown: return false
-        case .walking, .briskWalking, .running, .cycling, .vigorousActivity: return false
-        default: return true
-        }
+    /// Motion corrupts beat timing. Gated on wear and on the interval's own measured motion magnitude
+    /// (`maxVariabilityIntensity`), never on the semantic activity class: see the config field's comment.
+    /// `nil` intensity (no motion stream for the interval) does not exclude — absence of a motion reading
+    /// is not evidence of motion, the same convention `HRVAnalyzer.beatAccurateFraction` uses for a short
+    /// series.
+    private static func variabilityAllowed(_ iv: ActivityContextInterval, config: Config) -> Bool {
+        guard iv.wear != .offWrist else { return false }
+        if let intensity = iv.intensity, intensity > config.maxVariabilityIntensity { return false }
+        return true
     }
 
     private static func fillVariability(_ iv: inout ActivityContextInterval, beats: [RRInterval],
                                         breathing: RespBreathTrack, config: Config) {
-        guard iv.durationSeconds >= config.minVariabilityIntervalS, variabilityAllowed(iv.activityClass),
-              iv.wear != .offWrist else { return }
+        guard iv.durationSeconds >= config.minVariabilityIntervalS,
+              variabilityAllowed(iv, config: config) else { return }
 
         if !beats.isEmpty {
             let a = lowerBound(beats, iv.start), b = lowerBound(beats, iv.end)
             if let r = rmssd(Array(beats[a..<b]), minBeats: config.minRmssdBeats) {
                 iv.rmssd = (r.value * 10).rounded() / 10
                 iv.rrBeats = r.beats
+                iv.rrDiffSqSumMs2 = r.sumSq
+                iv.rrDiffCount = r.diffCount
             }
         }
         if let e = breathing.estimate(from: iv.start, to: iv.end, currentFrom: iv.start,
@@ -432,7 +458,7 @@ public enum ActivityContextIntervalBuilder {
     /// RMSSD over a stretch of beats, with the same trust gates the rolling and nightly paths apply: a window
     /// whose beat time exceeds its wall clock (a doubled beat reads LOW) or whose beats are banked rather than
     /// timed is refused rather than shown.
-    static func rmssd(_ rows: [RRInterval], minBeats: Int) -> (value: Double, beats: Int)? {
+    static func rmssd(_ rows: [RRInterval], minBeats: Int) -> (value: Double, beats: Int, sumSq: Double, diffCount: Int)? {
         guard rows.count >= minBeats else { return nil }
         let tsSec = rows.map(\.ts)
         let ms = rows.map { Double($0.rrMs) }
@@ -442,8 +468,11 @@ public enum ActivityContextIntervalBuilder {
               HRVAnalyzer.beatValuesAreTrustworthy(
                 beatAccurateFraction: HRVAnalyzer.beatAccurateFraction(tsSec: tsSec, rrMs: ms)) else { return nil }
         let clean = HRVAnalyzer.cleanRRGapAware(ms)
-        guard clean.nn.count >= minBeats, let value = HRVAnalyzer.rmssdGapAware(clean.nn, clean.contiguous) else { return nil }
-        return (value, clean.nn.count)
+        guard clean.nn.count >= minBeats else { return nil }
+        let components = HRVAnalyzer.rmssdSumSquaresGapAware(clean.nn, clean.contiguous)
+        guard components.count >= 1 else { return nil }
+        let value = (components.sumSq / Double(components.count)).squareRoot()
+        return (value, clean.nn.count, components.sumSq, components.count)
     }
 }
 

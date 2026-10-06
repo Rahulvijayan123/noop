@@ -8,6 +8,18 @@ import WhoopStore
 struct DayScorer {
     let db: PostgresClient
 
+    /// The sleep-phenotype enrichment sidecar client (nil = the lane is OFF,
+    /// the snapshot publishes without `daily.sleep_features`, byte-identical
+    /// to the pre-feature worker). Set by `main.swift` from the same
+    /// `FRWHOOP_INFERENCE_URL` the candidate lane reads.
+    var featureEnrichmentClient: InferenceClient?
+
+    /// The stage algorithm version stamped into each enrichment night entry.
+    /// The canonical staging algorithm of the day being scored (the scoring
+    /// lane's `v2AlgorithmVersion`); the worker records it so a consumer can
+    /// compare stage-conditioned features like-for-like (spec 4.3).
+    var v2StageAlgorithmVersion: String = "frwhoop-server-1"
+
     struct Claim {
         let userId: String
         let deviceId: String
@@ -231,6 +243,103 @@ struct DayScorer {
                 "source_arbitration": "not_measured",
             ],
         ]
+    }
+
+
+    // MARK: - Sleep-phenotype enrichment (docs/SLEEP_FEATURES_CONTRACT.md)
+
+    /// Assemble the bounded enrichment request for the claimed day, call the
+    /// sidecar's dedicated endpoint, and return the validated response object
+    /// (nil on ANY failure — the caller then publishes the snapshot without
+    /// `daily.sleep_features`, core results intact).
+    ///
+    /// The inputs are the SAME rows the canonical pass scored (hr/rr/skinTemp
+    /// loaded for the night window, the V2-staged sessions of the DayResult),
+    /// so the enrichment describes exactly the night that was published. The
+    /// breath track is the production `SleepStager.respBreathTrack` output,
+    /// exported verbatim — never recomputed from a different cleaned series
+    /// (spec A7).
+    private func attachSleepFeatures(client: InferenceClient, claim: Claim,
+                                      result: AnalyticsEngine.DayResult,
+                                      hr: [HRSample], rr: [RRInterval],
+                                      skinTemp: [SkinTempSample], skinFamily: DeviceFamily,
+                                      dayStart: Int, dayEnd: Int,
+                                      nightWindow: (start: Int, end: Int)) throws -> [String: Any]? {
+        let sessions = result.sleepSessions
+        guard !sessions.isEmpty else { return nil }
+
+        // User edits for the day (one bounded query; the same rows the
+        // candidate lane reads). A session overlapping an accepted edit's
+        // original span is marked user_edited.
+        let edits = (try? loadSleepEdits(userId: claim.userId, deviceId: claim.deviceId,
+                                         day: claim.day)) ?? []
+
+        // Skin temperature in °C, the same family-aware conversion the app
+        // renders (WhoopProtocol.skinTempCelsius; the 4.0's per-device anchor
+        // is learned from this night's worn raws, exactly as AnalyticsEngine
+        // does). Worn/out-of-range gating is the enrichment's own minute
+        // coverage question — the samples are passed as-is and the sidecar
+        // reports per-minute validity.
+        let anchorRaw: Double? = skinFamily == .whoop4
+            ? Whoop4SkinTemp.deviceAnchorRaw(skinTemp.map { $0.raw }) : nil
+        let tempCelsius: [(ts: Int, celsius: Double)] = skinTemp.compactMap { s in
+            let c = skinTempCelsius(raw: s.raw, family: skinFamily,
+                                     anchorRaw: anchorRaw ?? Whoop4SkinTemp.anchorRaw)
+            guard c.isFinite, c > -10, c < 60 else { return nil }
+            return (s.ts, c)
+        }
+
+        // Observation-identity-deduped beats (the same rule the candidate
+        // lane uses — physical identity, never RR value alone).
+        let beats = Self.dedupByObservationIdentity(rr)
+
+        // The production RSA breath track, exported verbatim (spec A7).
+        let breathTrack = SleepStager.respBreathTrack(beats)
+
+        // The 31-day sleep/wake history for the regularity block (two bounded
+        // queries; nil when there is no published history yet).
+        let history = try? SleepFeatureEnrichment.loadHistory(
+            db: db, userId: claim.userId, deviceId: claim.deviceId,
+            days: 31, todayDay: claim.day, ianaTimezone: claim.timezoneId,
+            algorithmVersion: v2StageAlgorithmVersion)
+
+        // The MAIN session (longest, same selector the candidate lane uses) is
+        // the night; every other session the day detected (naps) is labelled
+        // is_nap so schedule metrics (bed time, onset, midsleep) read the night,
+        // not the nap (contract §1).
+        let main = Self.mainSleepSession(sessions)
+        var nights: [SleepFeatureNightInput] = []
+        for session in sessions {
+            // The main session (longest span; first on a tie, matching
+            // mainSleepSession's selector) is the night; ties keep only the
+            // FIRST match a night so exactly one session is the night.
+            let isMain = main.map { mainSpan in
+                (session.end - session.start) == (mainSpan.end - mainSpan.start)
+            } == true && !nights.contains(where: { !$0.isNap })
+            let nightId = "sleep-\(claim.deviceId)-\(session.start)"
+            let userEdited = edits.contains { edit in
+                guard let originalStart = edit.payload.member("originalStart")?.doubleValue.map({ Int($0) }),
+                      let originalEnd = edit.payload.member("originalEnd")?.doubleValue.map({ Int($0) }) else {
+                    return false
+                }
+                return session.start < originalEnd && originalStart < session.end
+            }
+            nights.append(SleepFeatureNightInput(
+                nightId: nightId, start: session.start, end: session.end,
+                isNap: !isMain, userEdited: userEdited, stages: session.stages))
+        }
+
+        let request = SleepFeatureEnrichment.buildRequest(SleepFeatureEnrichment.AssemblyInput(
+            userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+            timezoneId: claim.timezoneId, inputRevision: claim.inputRevision,
+            intervalStart: dayStart, intervalEnd: dayEnd,
+            stageAlgorithmVersion: v2StageAlgorithmVersion,
+            nights: nights, hr: hr, tempCelsius: tempCelsius, beats: beats,
+            breathTrack: breathTrack, history: history))
+        guard let response = SleepFeatureEnrichment.enrich(request: request, client: client) else {
+            return nil
+        }
+        return response
     }
 
     // MARK: - SpO₂ strap estimate
@@ -1059,7 +1168,8 @@ struct DayScorer {
     /// (FRWHOOP_INFERENCE_URL unset). In that case NOTHING candidate-related runs:
     /// no selection read, no per-stream assembly, no digest — the canonical path is
     /// byte-identical to the pre-migration worker.
-    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true, candidateLane: Bool = false)
+    func scoreAndBuildPayloads(claim: Claim, buildSeries: Bool = true, candidateLane: Bool = false,
+                               enrichFeatures: Bool = false)
         throws -> ScoredDay {
         // The claim's snapshot was sealed just before this call, so "now" is the
         // claim's input revision time for the candidate-debt freshness check.
@@ -1228,6 +1338,11 @@ struct DayScorer {
             dayWindow: LocalDayWindows(timeZone: tz).window(ofDayKey: claim.day),
             wristOff: wristOff,
             bandSleepState: sleepState,
+            // Stage nights with SleepStagerV2, as the app does (`PuffinExperiment.experimentalSleepV2Enabled`
+            // defaults on). `analyzeDay`'s parameter defaults to V1 for pure-function callers, and this call
+            // used to take that default, so a server-scored night was staged by a different recipe than the
+            // same night on the phone.
+            useSleepStagerV2: true,
             activityEpochs: publishedActivity.epochs,
             // A day still in progress counts resting energy only up to now; a finished day is unaffected.
             energyAsOf: now
@@ -1305,6 +1420,31 @@ struct DayScorer {
             snapshot["statusReasons"] = Self.partialReasons(rrCount: rr.count,
                                                             gravityCount: gravity.count,
                                                             detectedSessionCount: result.sleepSessions.count)
+        }
+
+        // Sleep-phenotype enrichment (docs/SLEEP_FEATURES_CONTRACT.md section 6):
+        // one bounded request per claimed day through the dedicated sidecar
+        // endpoint, attached under `daily.sleep_features`. Gated to the V2
+        // SNAPSHOT path (`enrichFeatures`): the legacy fleet path publishes
+        // only the legacy payload and discards the snapshot, so an enrichment
+        // there would be a wasted sidecar call (and a day processed by both
+        // queues would call twice). OFF unless the sidecar is configured;
+        // ANY failure (timeout, refusal, malformed response) leaves the
+        // snapshot byte-identical in its core fields — core publication never
+        // depends on the enrichment. The call is a bounded loopback JSON
+        // request (no waveform download / model inference), made once per
+        // claimed day inside the payload build, with the history read on the
+        // same snapshot as the inputs (consistent).
+        if enrichFeatures, let client = featureEnrichmentClient, status != "no_data" {
+            if let features = try? attachSleepFeatures(
+                client: client, claim: claim, result: result,
+                hr: hr, rr: rr, skinTemp: skinTemp, skinFamily: skinFamily,
+                dayStart: dayStart, dayEnd: dayEnd,
+                nightWindow: (nightStart, nightEnd)) {
+                var daily = (snapshot["daily"] as? [String: Any]) ?? [:]
+                daily["sleep_features"] = features
+                snapshot["daily"] = daily
+            }
         }
 
         var series: [String: Any]?

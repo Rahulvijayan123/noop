@@ -202,11 +202,14 @@ public enum HRVAnalyzer {
         return CleanSeries(nn: keptVal, contiguous: contiguous)
     }
 
-    /// Task Force RMSSD that counts a successive difference only when the two beats were adjacent in the
-    /// source (`CleanSeries.contiguous`). A difference spanning a dropped beat is skipped, so removing an
-    /// out-of-range/ectopic beat cannot splice its neighbours into a spurious delta. Identical to
-    /// `rmssdRaw` when there are no gaps. nil when no valid successive difference exists. Kotlin twin.
-    public static func rmssdGapAware(_ nn: [Double], _ contiguous: [Bool]) -> Double? {
+    /// The sum of squared successive differences and the count of pairs behind a gap-aware RMSSD — the
+    /// two numbers a downstream rollup needs to recombine RMSSD across several windows CORRECTLY
+    /// (`sqrt(Σ sumSq / Σ count)`), rather than averaging already-square-rooted RMSSD values, which is not
+    /// how a root-mean-square statistic composes (`ActivityContextAggregator` used to do exactly that).
+    /// Only counts a difference when the two beats were adjacent in the source (`CleanSeries.contiguous`),
+    /// so a difference spanning a dropped beat — and, by construction, a difference spanning the boundary
+    /// between two separately-cleaned windows — is never formed. Pure.
+    public static func rmssdSumSquaresGapAware(_ nn: [Double], _ contiguous: [Bool]) -> (sumSq: Double, count: Int) {
         precondition(nn.count == contiguous.count, "nn and contiguous must be the same length")
         var sumSq = 0.0
         var count = 0
@@ -219,7 +222,16 @@ public enum HRVAnalyzer {
             }
             i += 1
         }
-        return count < 1 ? nil : (sumSq / Double(count)).squareRoot()
+        return (sumSq, count)
+    }
+
+    /// Task Force RMSSD that counts a successive difference only when the two beats were adjacent in the
+    /// source (`CleanSeries.contiguous`). A difference spanning a dropped beat is skipped, so removing an
+    /// out-of-range/ectopic beat cannot splice its neighbours into a spurious delta. Identical to
+    /// `rmssdRaw` when there are no gaps. nil when no valid successive difference exists. Kotlin twin.
+    public static func rmssdGapAware(_ nn: [Double], _ contiguous: [Bool]) -> Double? {
+        let components = rmssdSumSquaresGapAware(nn, contiguous)
+        return components.count < 1 ? nil : (components.sumSq / Double(components.count)).squareRoot()
     }
 
     /// pNN50 that counts a successive pair only when the two beats were adjacent in the source, skipping
@@ -1020,7 +1032,7 @@ public enum HRVAnalyzer {
     // MARK: - Helpers
 
     /// Median of a non-empty array. (Caller guarantees non-empty.)
-    static func median(_ values: [Double]) -> Double {
+    public static func median(_ values: [Double]) -> Double {
         let s = values.sorted()
         let n = s.count
         if n == 0 { return 0 }
