@@ -305,6 +305,38 @@ def test_committed_fixture_pair_round_trips_over_real_http():
     assert set(doc["nights"][0]) == set(committed["nights"][0])
 
 
+def _same(a, b) -> bool:
+    if isinstance(a, dict) and isinstance(b, dict):
+        return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)
+    if isinstance(a, list) and isinstance(b, list):
+        return len(a) == len(b) and all(_same(x, y) for x, y in zip(a, b))
+    if isinstance(a, float) or isinstance(b, float):
+        return a == pytest.approx(b, rel=1e-9, abs=1e-12)
+    return a == b
+
+
+def test_full_night_fixture_reproduces_the_committed_response_within_budget():
+    """The committed fixture pair is a golden: computing the committed request must give
+    the committed response (so the per-minute/per-window bucketing in physiology.py cannot
+    drift), and a full 8 h night must stay far inside the 3 s route budget (the 4 vCPU
+    Droplet measured ~4x slower than a laptop; the pre-bucketing code needed ~4 s there)."""
+    import json
+    import os
+    import time
+
+    base = os.path.join(os.path.dirname(__file__), "..", "..", "CloudWorker", "Tests",
+                        "frwhoop-workerTests", "SleepFeatureWireFixtures")
+    req = parse_request(json.load(open(os.path.join(base, "sleep_features_request.json"))))
+    committed = json.load(open(os.path.join(base, "sleep_features_response.json")))
+    started = time.monotonic()
+    doc = json.loads(json.dumps(compute(req, budget_ms=60000)))
+    elapsed = time.monotonic() - started
+    for d in (doc, committed):
+        d.pop("duration_ms", None)
+    assert _same(doc, committed)
+    assert elapsed < 0.75, f"full-night enrichment took {elapsed:.2f}s"
+
+
 def test_unknown_gap_stays_uns_no_transitions_across():
     # A night whose middle 10 minutes carry NO stage coverage.
     segs = [
