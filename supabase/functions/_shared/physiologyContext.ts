@@ -3,7 +3,7 @@
 // submit path for POST /exposures, plus the query of GET /exposures.
 //
 // Everything here only shapes requests. Ownership comes from the credential the route resolved; the
-// database functions (20261005120000_physiology_context.sql) re-check owner and device and repeat every
+// database functions (20261006050000_physiology_context.sql) re-check owner and device and repeat every
 // exposure rule as a backstop (internal.exposure_event_invalid_reason). Keep the two rule sets equal.
 import type { SupabaseRest } from './rest.ts';
 

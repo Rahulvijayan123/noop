@@ -1,4 +1,4 @@
-// 20261005120000_physiology_context.sql on the production Postgres image, through the full ordered migration
+// 20261006050000_physiology_context.sql on the production Postgres image, through the full ordered migration
 // chain (supabase/tests/e2e/pipeline_db.sh builds it, with GoTrue's auth schema and PostgREST in front).
 // Docker-gated like auth_isolation_sql_test.ts: skipped unless PIPELINE_TEST_DATABASE_CONTAINER and
 // PIPELINE_TEST_REST_URL are set. Run it on a fresh database (`pipeline_db.sh reset`): the enqueue step counts

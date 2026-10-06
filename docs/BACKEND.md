@@ -830,7 +830,7 @@ measurements (series points and nightly snapshot values) and stores one context 
 its own tables through fenced RPCs, so it never re-dirties scoring and a context failure never blocks scoring,
 series, BLE or uploads.
 
-- Migration `20261005120000_physiology_context.sql`: `physiology_context_jobs` (queue, enqueued from scoring
+- Migration `20261006050000_physiology_context.sql`: `physiology_context_jobs` (queue, enqueued from scoring
   completions by fingerprint), `physiology_context_days` (one immutable row per published revision; the summary
   document), `physiology_context_envelope_tables` (one interned envelope table per metric), current
   `physiology_context_daily_values` / `_bouts` / `_episodes`, insert-only `physiology_context_frozen_references`, and

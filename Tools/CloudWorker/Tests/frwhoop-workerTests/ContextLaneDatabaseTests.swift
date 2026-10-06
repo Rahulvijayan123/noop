@@ -8,7 +8,7 @@ import WhoopProtocol
 /// reads, builds and publishes → the stored day, daily values and bouts, read back through
 /// `physiology_context_read_v1`.
 ///
-/// Needs a scratch database with every migration applied, `20261005120000_physiology_context.sql` included:
+/// Needs a scratch database with every migration applied, `20261006050000_physiology_context.sql` included:
 /// set FRWHOOP_TEST_DB_URL (skipped otherwise), for example the harness database
 /// `supabase/tests/e2e/pipeline_db.sh up`. Each test creates its own owners and devices and deletes them
 /// afterwards (the account cascade removes everything they wrote). The lanes claim whatever is due, so run against
@@ -44,7 +44,7 @@ final class ContextLaneDatabaseTests: XCTestCase {
         db = try Self.connect()
         let present = try db.query(ContextSQL.tablesPresent, []).first?["present"]
         guard present.map(isTrue) == true else {
-            throw XCTSkip("apply 20261005120000_physiology_context.sql to the scratch database")
+            throw XCTSkip("apply 20261006050000_physiology_context.sql to the scratch database")
         }
         scoringDB = try Self.connect()
     }
