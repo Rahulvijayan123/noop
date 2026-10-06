@@ -10,12 +10,15 @@ never touch the HART or Inertia lanes, and neither of them imports this module.
             {"id":..,"ok":false,"error":"...","kind":"malformed|model_missing|weights_mismatch|timeout|internal|
              output_too_large"}
 
-The six heads are resolved (sha256-verified, never downloaded) and loaded once at start-up. Weights that cannot
-be loaded keep the process alive: ping answers ``model_available: false`` and every infer fails with the load
-failure's kind. Responses are compact JSON, NaN refused, at most 12 MiB per line (larger -> output_too_large).
+The six heads and the upstream architecture source (University of Oxford code the operator fetched; never in
+Nara's repository) are resolved (sha256-verified, never downloaded) and loaded once at start-up. Weights or source
+that cannot be loaded keep the process alive: ping answers ``model_available: false`` and every infer fails with
+the load failure's kind. Responses are compact JSON, NaN refused, at most 12 MiB per line (larger ->
+output_too_large).
 
-Run:  python -m activity_context.eldernet.serve [--weights-dir <dir>|$ELDERNET_WEIGHTS_DIR] [--timeout 60]
-          [--threads 1] [--max-batch 64] [--hop-s 5] [--calibration <nara.eldernet.calibration/1 json>]
+Run:  python -m activity_context.eldernet.serve [--weights-dir <dir>|$ELDERNET_WEIGHTS_DIR]
+          [--upstream-dir <dir>|$ELDERNET_UPSTREAM_DIR] [--timeout 60] [--threads 1] [--max-batch 64] [--hop-s 5]
+          [--calibration <nara.eldernet.calibration/1 json>]
 """
 
 from __future__ import annotations
@@ -112,6 +115,8 @@ def serve_forever(rt: ElderNetRuntime, timeout: float = DEFAULT_TIMEOUT_SECONDS)
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(description="Nara ElderNet gait-quality serve process (gait-quality-1)")
     ap.add_argument("--weights-dir", default=None, help="the six pinned heads (default $ELDERNET_WEIGHTS_DIR)")
+    ap.add_argument("--upstream-dir", default=None,
+                    help="the pinned upstream source checkout (default $ELDERNET_UPSTREAM_DIR)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="per-request timeout (s)")
     ap.add_argument("--threads", type=int, default=1, help="torch CPU threads (default 1)")
     ap.add_argument("--max-batch", type=int, default=64, help="inference batch size (fixed; padded)")
@@ -121,7 +126,7 @@ def main(argv: Optional[list] = None) -> int:
                     help="VAL-fitted gait_prob temperature + threshold (nara.eldernet.calibration/1); default none")
     args = ap.parse_args(argv)
     rt = build_runtime(args.weights_dir, threads=args.threads, max_batch=args.max_batch,
-                       calibration=args.calibration, default_hop_s=args.hop_s)
+                       calibration=args.calibration, default_hop_s=args.hop_s, upstream_dir=args.upstream_dir)
     if rt.error is not None:
         print(f"[eldernet.serve] model unavailable: {rt.error.kind}: {rt.error.message}", file=sys.stderr, flush=True)
     return serve_forever(rt, args.timeout)

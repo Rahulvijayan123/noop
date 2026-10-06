@@ -2,6 +2,8 @@
 
     python -m activity_context.eldernet.validate fit   [--work DIR]   # VAL -> eval/eldernet/calibration.json
     python -m activity_context.eldernet.validate test  [--work DIR]   # TEST through the ledger -> VALIDATION.json
+    python -m activity_context.eldernet.validate prior [--work DIR] [--write]          # VAL: decoder pi
+    python -m activity_context.eldernet.validate other-motion [--work DIR] [--write]   # VAL: running / cycling / vehicle
 
 Inputs are the per-window outputs of :mod:`.extract` (served detector, hop 5 s). Truth: walking / stairs = gait,
 stationary / cycling / vehicle = non-gait (crosswalk; ``datasets.py``), running reported separately, the rest
@@ -11,7 +13,13 @@ masked. A pre-filtered window keeps ``gait_prob`` 0 under any calibration (as se
 (Capture-24 — the only free-living wrist set, i.e. the WHOOP use case); then the operating threshold through ``inertia.abstention.select_operating_point`` (target precision
 0.95, subject-cluster bootstrap q05, stability above tau) on the pooled VAL windows (free-living Capture-24
 dominates them, as WHOOP data would). ``test`` opens the TEST payload only inside an
-``inertia.integrity.TestVault`` whose ledger is ``eval/eldernet/test_ledger.jsonl``.
+``inertia.integrity.TestVault`` whose ledger is ``eval/eldernet/test_ledger.jsonl``; the experiment is spent
+(``integrity_ext.SPENT_EXPERIMENTS``), so it refuses without an enumerated rerun reason.
+
+``prior`` and ``other-motion`` read VAL parts only (``--write`` merges them into ``VALIDATION.json``):
+the decoder prior pi that makes the gait channel mean-neutral over the windows the decoder sees (mean served
+gait_prob over every Capture-24 VAL window, unlabelled and pre-filtered included), and the served gait_prob
+distribution on running / jogging, cycling and vehicle windows (for the decoder's gait-row compat).
 """
 
 from __future__ import annotations
@@ -159,6 +167,8 @@ def evaluate_payload(test: Dict[str, Dict[str, np.ndarray]], cal: Dict) -> Dict:
 
 def test(work: str, out_dir: str = EVAL_DIR, rerun_reason: Optional[str] = None, rerun_detail: Optional[str] = None) -> Dict:
     from ..inertia.integrity import SplitLeakError, TestVault
+    from .integrity_ext import SPENT_EXPERIMENTS, spent_rerun_detail
+    rerun_detail = spent_rerun_detail(EXPERIMENT, rerun_reason, rerun_detail)    # spent: refuse before loading
     with open(os.path.join(out_dir, "calibration.json")) as f:
         cal = json.load(f)
     if cal["gait_prob"].get("fit") != "val" or cal["fit"].get("split") != "val":
@@ -178,26 +188,144 @@ def test(work: str, out_dir: str = EVAL_DIR, rerun_reason: Optional[str] = None,
                               rerun_reason=rerun_reason, rerun_detail=rerun_detail, before=before)
     rep.update({"calibration": {k: cal[k] for k in ("calibration_id", "gait_prob", "gait_threshold")},
                 "model_version": MODEL_VERSION, "preprocessing_version": PREPROCESSING_VERSION,
-                "upstream_commit": UPSTREAM_COMMIT})
+                "upstream_commit": UPSTREAM_COMMIT, "spent_before": SPENT_EXPERIMENTS.get(EXPERIMENT)})
     with open(os.path.join(out_dir, "VALIDATION_TEST.json"), "w") as f:
         json.dump(rep, f, indent=1, sort_keys=True, default=float)
         f.write("\n")
     return rep
 
 
+# ---------------------------------------------------------------------------
+# VAL-only measurements for the decoder (no fitting, no TEST)
+# ---------------------------------------------------------------------------
+
+LABELLED_PI = 0.065            # ELDERNET.md §8 before 2026-10-06: gait share of labelled Capture-24 VAL windows
+
+
+def _cluster_mean_ci(q: np.ndarray, subj: np.ndarray, n_boot: int = 2000, seed: int = 0):
+    """Subject-cluster bootstrap 95 % CI of the window-pooled mean."""
+    us = np.unique(subj)
+    sums = np.array([q[subj == u].sum() for u in us])
+    ns = np.array([(subj == u).sum() for u in us], float)
+    rng = np.random.default_rng(seed)
+    k = rng.integers(0, len(us), (n_boot, len(us)))
+    b = sums[k].sum(axis=1) / ns[k].sum(axis=1)
+    return [float(np.quantile(b, 0.025)), float(np.quantile(b, 0.975))]
+
+
+def decoder_prior(val: Dict[str, Dict[str, np.ndarray]]) -> Dict:
+    """pi = E[gait_prob] over every Capture-24 VAL window the served path emits (hop 5): then E[q / pi] =
+    E[(1 - q) / (1 - pi)] = 1 and the decoder's gait term is mean-neutral on the windows it actually sees
+    (pre-filtered windows carry q = 0 on the wire; unlabelled stretches are worn time too)."""
+    c = val["capture24"]
+    fin = c["finite"].astype(bool)
+    q, t = c["gait_prob"].astype(float)[fin], c["truth"][fin]
+    pre, subj, lab = c["prefiltered"].astype(bool)[fin], c["subject"][fin], c["label"].astype(str)[fin]
+    scored = (t == GAIT) | (t == NON_GAIT)
+    unlabelled = lab == "<NA>"
+    per_subject = np.array([q[subj == u].mean() for u in np.unique(subj)])
+    groups = {"all_windows": np.ones(len(q), bool), "labelled_gait_or_non_gait": scored,
+              "labelled_masked": ~scored & ~unlabelled, "unlabelled": unlabelled,
+              "not_prefiltered": ~pre, "prefiltered": pre}
+    pi = float(q.mean())
+    return {
+        "split": "val", "dataset": "capture24", "hop_s": 5, "n_subjects": int(len(per_subject)),
+        "n_windows": int(len(q)), "recommended_pi": round(pi, 3), "mean_gait_prob_all_windows": pi,
+        "ci95_subject_bootstrap": _cluster_mean_ci(q, subj),
+        "per_subject_mean": {"min": float(per_subject.min()), "median": float(np.median(per_subject)),
+                             "max": float(per_subject.max())},
+        "labelled_gait_prevalence": float((t[scored] == GAIT).mean()), "previous_pi": LABELLED_PI,
+        "mean_q_over_previous_pi": pi / LABELLED_PI,
+        "groups": {k: {"n": int(m.sum()), "frac_of_windows": float(m.mean()), "mean_gait_prob": float(q[m].mean()),
+                       "frac_prefiltered": float(pre[m].mean())} for k, m in groups.items()},
+        "why": "pi equal to the mean served gait_prob over all windows makes E[q/pi] = E[(1-q)/(1-pi)] = 1, so the "
+               "gait channel adds no net pull on average; the labelled-window prevalence leaves out the unlabelled "
+               "and masked windows the decoder also sees, and with it E[q/pi] = mean_q_over_previous_pi (> 1: a "
+               "standing pull toward gait)",
+    }
+
+
+def _dist(q: np.ndarray, pre: np.ndarray, subj: np.ndarray, pi: float) -> Dict:
+    if not len(q):
+        return {"n": 0}
+    p = np.quantile(q, [0.1, 0.25, 0.5, 0.75, 0.9])
+    return {"n": int(len(q)), "n_subjects": int(len(np.unique(subj))), "mean": float(q.mean()),
+            "p10": float(p[0]), "p25": float(p[1]), "median": float(p[2]), "p75": float(p[3]), "p90": float(p[4]),
+            "frac_is_gait_0.5": float((q >= 0.5).mean()), "frac_ge_0.93": float((q >= 0.93).mean()),
+            "frac_prefiltered": float(pre.mean()), "frac_q_above_pi": float((q > pi).mean()),
+            "mean_q_over_pi": float((q / pi).mean())}
+
+
+def other_motion(val: Dict[str, Dict[str, np.ndarray]], pi: float) -> Dict:
+    """Served gait_prob on VAL windows of running / jogging (truth RUNNING, >= 90 % pure), cycling and vehicle
+    (truth NON_GAIT whose majority label maps to exactly that locomotion class), with walking and stationary for
+    reference; per dataset (running by source label) and pooled."""
+    from ..inertia.mappings import load_mappings
+    from .datasets import _BIT
+    cw = load_mappings()
+    out: Dict = {"split": "val", "pi": pi, "datasets": {}, "pooled": {}}
+    pooled: Dict[str, list] = {}
+    for d, c in val.items():
+        fin = c["finite"].astype(bool)
+        lab, t = c["label"].astype(str), c["truth"]
+        q, pre, subj = c["gait_prob"].astype(float), c["prefiltered"].astype(bool), c["subject"]
+        masks = {L: (cw.class_target(d, L, "locomotion") if cw.has_label(d, L) else 0) for L in np.unique(lab)}
+        mk = np.array([masks[L] for L in lab], dtype=np.int64) if len(lab) else np.zeros(0, np.int64)
+        sel = {"running": fin & (t == RUNNING),
+               "cycling": fin & (t == NON_GAIT) & (mk == _BIT["cycling"]),
+               "vehicle": fin & (t == NON_GAIT) & (mk == _BIT["vehicle_motion"]),
+               "walking_gait_reference": fin & (t == GAIT),
+               "stationary_reference": fin & (t == NON_GAIT) & (mk == _BIT["stationary"])}
+        rep = {}
+        for g, m in sel.items():
+            if not m.any():
+                continue
+            rep[g] = _dist(q[m], pre[m], subj[m], pi)
+            pooled.setdefault(g, []).append((q[m], pre[m], subj[m]))
+        if sel["running"].any():
+            rep["running_by_label"] = {L: _dist(q[sel["running"] & (lab == L)], pre[sel["running"] & (lab == L)],
+                                                subj[sel["running"] & (lab == L)], pi)
+                                       for L in np.unique(lab[sel["running"]])}
+        out["datasets"][d] = rep
+    for g, parts in pooled.items():
+        out["pooled"][g] = _dist(*(np.concatenate([p[i] for p in parts]) for i in range(3)), pi)
+    return out
+
+
+def write_validation_key(key: str, value: Dict, out_dir: str = EVAL_DIR) -> None:
+    """Merge one VAL-only section into VALIDATION.json (its format: indent 1, sorted keys, no final newline)."""
+    path = os.path.join(out_dir, "VALIDATION.json")
+    with open(path, encoding="utf-8") as f:
+        doc = json.load(f)
+    doc[key] = value
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(json.dumps(doc, indent=1, sort_keys=True, default=float))
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="ElderNet frozen-split validation (VAL fit, TEST once)")
-    ap.add_argument("cmd", choices=("fit", "test"))
+    ap.add_argument("cmd", choices=("fit", "test", "prior", "other-motion"))
     ap.add_argument("--work", default=None)
     ap.add_argument("--out", default=EVAL_DIR)
     ap.add_argument("--rerun-reason", default=None)
     ap.add_argument("--rerun-detail", default=None)
+    ap.add_argument("--write", action="store_true", help="prior / other-motion: merge into VALIDATION.json")
     args = ap.parse_args(argv)
     from .extract import work_dir
     work = work_dir(args.work)
     if args.cmd == "fit":
         doc = fit(work, args.out)
         print(json.dumps({k: doc[k] for k in ("calibration_id", "gait_prob", "gait_threshold")}), file=sys.stderr)
+    elif args.cmd in ("prior", "other-motion"):
+        val = load_split(work, "val")
+        prior = decoder_prior(val)
+        if args.cmd == "prior":
+            key, rep = "decoder_prior", prior
+        else:
+            key, rep = "val_other_motion", other_motion(val, prior["recommended_pi"])
+        if args.write:
+            write_validation_key(key, rep, args.out)
+        print(json.dumps(rep, indent=1, default=float))
     else:
         rep = test(work, args.out, args.rerun_reason, args.rerun_detail)
         print(json.dumps(rep["pooled"]["upstream_default"], default=float)[:400], file=sys.stderr)

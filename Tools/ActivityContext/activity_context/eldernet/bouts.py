@@ -1,98 +1,65 @@
-# Bout assembly ported from yonbrand/gait-quality gait_quality/detection.py (window_predictions_to_seconds,
-# merge_bouts, detect_bouts) and gait_quality/quality.py (summarise_bouts, summarise_recording), upstream commit
-# 437a38bcc69f42717fe73c1f7dbea7e1f7a50d23. Copyright © 2022, University of Oxford; University of Oxford
-# SSL-wearables Academic Use Licence (Tools/ActivityContext/NOTICE.md). Re-expressed without pandas; same rules.
-"""Offline bout assembly (run.py only — the serve path is per-window and never builds bouts).
+"""Offline bout assembly through upstream's own functions (run.py only — the serve path is per-window).
 
-* centre-second voting: window i (hop 1 s) votes for second ``i + 5``;
-* gaps of <= ``merge_gap_s`` seconds between gait runs are bridged, then runs shorter than ``min_bout_s``
-  dropped (upstream defaults 3 s and 10 s, ``pipelines/config.yaml``);
-* bout summary = per-metric median over the bout's windows, ``duration = (n - 1) * stride + window``;
-  recording summary = walking minutes, bout count, per-metric median / p10 / p90 (numpy linear percentiles).
+Nothing here re-implements upstream: every rule is a call into the verified upstream modules
+(:mod:`.upstream`, the operator's checkout of the pinned commit; University of Oxford Academic Use Licence):
+
+* ``gait_quality.detection.window_predictions_to_seconds`` (centre-second voting), ``merge_bouts`` (gaps of
+  <= ``merge_gap_s`` bridged, then runs shorter than ``min_bout_s`` dropped; upstream defaults 3 s / 10 s) and
+  ``detect_bouts``;
+* ``gait_quality.quality.windows_within_bouts`` for the window starts re-cut inside each bout (Nara's windows are
+  then looked up by start second, so the samples are the ``eldernet-prep-1`` ones), ``summarise_bouts`` and
+  ``summarise_recording`` (pandas; imported only here, never by the serve).
+
+This module only converts between Nara's row dicts and upstream's arrays / DataFrames.
 """
 
 from __future__ import annotations
 
-from typing import Dict, List, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from . import WINDOW_S
+from . import RATE_HZ, UPSTREAM_HOP_S, WINDOW_S, WINDOW_SAMPLES
+from . import upstream
 
 
-def window_predictions_to_seconds(pred: np.ndarray, window_s: int = WINDOW_S) -> np.ndarray:
-    pred = np.asarray(pred, dtype=int)
-    n_seconds = len(pred) + window_s - 1
-    out = np.zeros(max(n_seconds, 0), dtype=int)
-    if len(pred):
-        out[np.arange(len(pred)) + window_s // 2] = pred
-    return out
-
-
-def merge_bouts(pred: np.ndarray, min_bout_s: int = 10, merge_gap_s: int = 3) -> np.ndarray:
-    pred = np.asarray(pred, dtype=int)
+def second_labels(window_pred: np.ndarray, min_bout_s: int = 10, merge_gap_s: int = 3,
+                  upstream_dir: Optional[str] = None) -> np.ndarray:
+    """Per-window gait (hop 1 s) -> merged per-second labels (upstream detection rules)."""
+    det = upstream.detection(upstream_dir)
+    pred = np.asarray(window_pred, dtype=int)
     if not len(pred):
         return pred
-    d = np.diff(np.concatenate([[0], pred, [0]]))
-    starts, ends = list(np.flatnonzero(d == 1)), list(np.flatnonzero(d == -1))
-    if not starts:
-        return np.zeros_like(pred)
-    i = 0
-    while i < len(starts) - 1:
-        if starts[i + 1] - ends[i] <= merge_gap_s:
-            ends[i] = ends[i + 1]
-            starts.pop(i + 1)
-            ends.pop(i + 1)
-        else:
-            i += 1
-    merged = np.zeros_like(pred)
-    for a, b in zip(starts, ends):
-        if b - a >= min_bout_s:
-            merged[a:b] = 1
-    return merged
+    seconds = det.window_predictions_to_seconds(pred, WINDOW_S)
+    return np.asarray(det.merge_bouts(seconds, min_bout_sec=min_bout_s, merge_gap_sec=merge_gap_s), dtype=int)
 
 
-def detect_bouts(second_labels: np.ndarray) -> List[Dict[str, int]]:
-    d = np.diff(np.concatenate([[0], np.asarray(second_labels, dtype=int), [0]]))
-    return [{"bout_id": i, "start_sec": int(a), "end_sec": int(b), "duration_sec": int(b - a)}
-            for i, (a, b) in enumerate(zip(np.flatnonzero(d == 1), np.flatnonzero(d == -1)), 1)]
+def detect_bouts(labels: np.ndarray, upstream_dir: Optional[str] = None) -> List[Dict[str, int]]:
+    """Bout dicts (``bout_id``, ``start_sec``, ``end_sec``, ``duration_sec``, ``start_sample``, ``end_sample``)."""
+    return upstream.detection(upstream_dir).detect_bouts(np.asarray(labels, dtype=int), RATE_HZ)
 
 
-def bout_window_starts(bouts: Sequence[Dict[str, int]], n_seconds_total: float, window_s: int = WINDOW_S,
-                       stride_s: int = 1) -> List[tuple]:
-    """(bout_id, start second) of every window re-cut inside each bout (upstream windows_within_bouts)."""
-    out = []
-    for b in bouts:
-        end = min(b["end_sec"], n_seconds_total)
-        for s in range(b["start_sec"], int(np.floor(end - window_s + 1e-9)) + 1, stride_s):
-            out.append((b["bout_id"], s))
-    return out
+def bout_window_starts(bouts: Sequence[Dict[str, int]], n_samples_30hz: int,
+                       upstream_dir: Optional[str] = None) -> List[Tuple[int, int]]:
+    """(bout_id, start second) of every window upstream re-cuts inside each bout of an ``n_samples_30hz`` signal."""
+    if not bouts:
+        return []
+    q = upstream.quality(upstream_dir)
+    placeholder = np.zeros((int(n_samples_30hz), 3), dtype=np.int8)      # only the positions are used
+    _, bout_ids, starts = q.windows_within_bouts(placeholder, list(bouts), WINDOW_SAMPLES, RATE_HZ * UPSTREAM_HOP_S)
+    return [(int(b), int(s) // RATE_HZ) for b, s in zip(bout_ids, starts)]
 
 
-def summarise_bouts(rows: List[Dict], metrics: Sequence[str], window_s: int = WINDOW_S, stride_s: int = 1) -> List[Dict]:
-    out = []
-    for bid in sorted({r["bout_id"] for r in rows}):
-        rs = [r for r in rows if r["bout_id"] == bid]
-        item = {"bout_id": bid, "n_windows": len(rs), "duration_sec": (len(rs) - 1) * stride_s + window_s,
-                "start_time": min(r["timestamp"] for r in rs)}
-        for m in metrics:
-            v = np.array([r[m] for r in rs], dtype=float)
-            item[m] = float(np.median(v)) if len(v) else float("nan")
-        out.append(item)
-    return out
+def summarise(rows: List[Dict], labels: np.ndarray, metrics: Sequence[str],
+              upstream_dir: Optional[str] = None) -> Tuple[List[Dict], Dict]:
+    """(bout rows, recording summary) by upstream ``summarise_bouts`` / ``summarise_recording``."""
+    import pandas as pd
+    q = upstream.quality(upstream_dir)
+    frame = pd.DataFrame(rows, columns=["timestamp", "bout_id", "start_sample"] + list(metrics))
+    frame.attrs["window_sec"] = WINDOW_S
+    frame.attrs["stride_sec"] = UPSTREAM_HOP_S
+    bout_rows = q.summarise_bouts(frame).to_dict("records") if len(frame) else []
+    return bout_rows, dict(q.summarise_recording(frame, np.asarray(labels)))
 
 
-def summarise_recording(rows: List[Dict], second_labels: np.ndarray, metrics: Sequence[str]) -> Dict:
-    s = {"walking_time_min": float(np.sum(second_labels)) / 60.0,
-         "n_bouts": len({r["bout_id"] for r in rows}), "n_walking_windows": len(rows)}
-    for m in metrics:
-        v = np.array([r[m] for r in rows], dtype=float)
-        v = v[np.isfinite(v)]
-        s[f"{m}_median"] = float(np.median(v)) if len(v) else float("nan")
-        s[f"{m}_p10"] = float(np.percentile(v, 10)) if len(v) else float("nan")
-        s[f"{m}_p90"] = float(np.percentile(v, 90)) if len(v) else float("nan")
-    return s
-
-
-__all__ = ["window_predictions_to_seconds", "merge_bouts", "detect_bouts", "bout_window_starts",
-           "summarise_bouts", "summarise_recording"]
+__all__ = ["second_labels", "detect_bouts", "bout_window_starts", "summarise"]

@@ -65,23 +65,28 @@ Inertia-1 (yang-ai-lab/Inertia-1)
 scipy / torch (optional [inertia] extra) and scikit-learn / pandas / pyarrow ([inertia-train])
   BSD-3-Clause / BSD-style / Apache-2.0 respectively; runtime dependencies only, not vendored.
 
-ElderNet gait quality (yonbrand/gait-quality) — activity_context/eldernet/
+ElderNet gait quality (yonbrand/gait-quality) — used by activity_context/eldernet/, NOT redistributed
   https://github.com/yonbrand/gait-quality
   Pinned commit: 437a38bcc69f42717fe73c1f7dbea7e1f7a50d23
   Copyright © 2022, University of Oxford
-  License: University of Oxford SSL-wearables Academic Use Licence (full text below) — internal academic,
-  non-commercial research only; accepted by the owner on 2026-10-05 (Nara is PolyForm Noncommercial).
-  Used for: the ElderNet architecture (ResNet-18 from OxWearables/ssl-wearables + FC heads) and its six
-  fine-tuned checkpoints (gait detection, gait speed, stride length, cadence, stride regularity, step count).
-  Vendored / re-expressed files (each carries this notice, the upstream path and the SHA):
-    vendor/models.py   <- models.py (Downsample, ResBlock, Resnet feature extractor, LinearLayers, Classifier,
-                          Regressor, ElderNet)
-    vendor/__init__.py (notice + file map only)
-    bouts.py           <- gait_quality/detection.py (centre-second voting, merge_bouts, detect_bouts),
-                          gait_quality/quality.py (summarise_bouts, summarise_recording)
-  Modified versions remain under the same licence; under its clause 1.2(d) the University is granted a
-  licence to any modified source code. Weights: fetched by sha256 from the pinned commit
-  (python -m activity_context.eldernet.weights fetch), never committed.
+  License: University of Oxford SSL-wearables Academic Use Licence (reproduced below for reference; the
+  governing copy is upstream LICENSE.md, which the fetch step downloads and sha256-verifies) — use is limited
+  to the licensee's own internal academic, non-commercial research; no service for or on behalf of third
+  parties; commercial use needs a licence from Oxford University Innovation. Accepted by the owner on
+  2026-10-05 for that use (Nara is PolyForm Noncommercial). Running ElderNet as a service on other people's
+  data (the worker lane on beta testers' data) may fall outside it: see ELDERNET.md "Licence".
+  This repository contains NO University of Oxford source code and NO ElderNet weights. The operator obtains
+  both from the pinned commit at install time, under the Oxford licence:
+    python -m activity_context.eldernet.weights fetch --dest <weights dir>     (six heads, sha256-pinned)
+    python -m activity_context.eldernet.upstream fetch --dest <source dir>     (source files, sha256-pinned)
+  activity_context/eldernet/upstream.py (Nara's code) holds only the manifest (path, size, sha256) and imports
+  upstream's own models.py (ElderNet architecture: ResNet-18 from OxWearables/ssl-wearables + FC heads) and
+  gait_quality/detection.py / quality.py (offline bout rules) from that directory after verifying every file,
+  without modifying them (upstream models.weight_init is not called: ELDERNET.md §1). Nara's own code —
+  preprocessing (eldernet-prep-1, an independent numpy implementation of actipy's documented nearest-neighbour
+  resampling behaviour; no actipy code), the window-local pre-filter, serve/runtime, validation — is Nara's.
+  Earlier commits of this repository (up to 0b6d34f5) vendored upstream models.py and re-expressed the bout
+  rules; those files were removed. Under clause 1.2(d) the University holds a licence to any modified source.
   Citation: Brand, Y. E., Buchman, A. S., Kluge, F., Palmerini, L., Becker, C., Cereatti, A., Maetzler, W.,
   Vereijken, B., Yarnall, A. J., Rochester, L., Del Din, S., Mueller, A., Hausdorff, J. M., & Perlman, O.
   (2026). Continuous Assessment of Daily-Living Gait Using Self-Supervised Learning of Wrist-Worn

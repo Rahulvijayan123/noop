@@ -21,9 +21,18 @@ def weights_dir_or_skip():
 
 
 def upstream_dir_or_skip():
+    """An upstream checkout with the toy example (``upstream fetch --with-examples`` or a full clone)."""
     d = os.environ.get("ELDERNET_UPSTREAM_DIR", "").strip()
     if not d or not os.path.isdir(os.path.join(d, "examples")):
         pytest.skip("ELDERNET_UPSTREAM_DIR (upstream gait-quality checkout) not set")
+    return d
+
+
+def upstream_source_or_skip():
+    """The pinned upstream source (the model architecture is never in Nara's repository; ELDERNET.md §1)."""
+    d = os.environ.get("ELDERNET_UPSTREAM_DIR", "").strip()
+    if not d or not os.path.isfile(os.path.join(d, "models.py")):
+        pytest.skip("ELDERNET_UPSTREAM_DIR not set (the upstream ElderNet source is fetched, never committed)")
     return d
 
 

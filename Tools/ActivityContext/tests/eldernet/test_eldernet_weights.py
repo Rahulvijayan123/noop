@@ -8,7 +8,7 @@ import pytest
 from activity_context.eldernet import HEAD_NAMES, UPSTREAM_COMMIT
 from activity_context.eldernet.weights import MANIFEST, WeightFile, WeightsError, resolve, verify_file, wire_hashes
 
-from ._helpers import weights_dir_or_skip
+from ._helpers import upstream_source_or_skip, weights_dir_or_skip
 
 
 def _fake_manifest(tmp_path, names=HEAD_NAMES):
@@ -68,6 +68,7 @@ def test_missing_file_wrong_sha_wrong_size(tmp_path):
 @pytest.fixture(scope="module")
 def cadence_state(tmp_path_factory):
     torch = pytest.importorskip("torch")
+    upstream_source_or_skip()
     from activity_context.eldernet.model import build_head
     torch.manual_seed(0)
     sd = build_head("cadence").state_dict()
@@ -117,6 +118,7 @@ def test_non_state_dict_file_is_a_mismatch(tmp_path):
 def test_real_weights_verify_and_load_strictly():
     pytest.importorskip("torch")
     from activity_context.eldernet.model import load_heads
+    upstream_source_or_skip()
     paths = resolve(weights_dir_or_skip())
     heads = load_heads(paths)
     assert set(heads.models) == set(HEAD_NAMES)

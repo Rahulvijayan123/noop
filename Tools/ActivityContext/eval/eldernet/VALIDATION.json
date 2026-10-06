@@ -191,6 +191,60 @@
     }
    ],
    "serve_peak_rss_mb": 649.5
+  },
+  "nnpack_check": {
+   "heads": {
+    "cadence": {
+     "max_abs_diff": 3.814697265625e-05,
+     "ms_per_window_nnpack_off": 1.708,
+     "ms_per_window_nnpack_on": 71.887,
+     "speedup_off": 42.1
+    },
+    "gait_detection": {
+     "max_abs_diff": 7.62939453125e-06,
+     "ms_per_window_nnpack_off": 1.857,
+     "ms_per_window_nnpack_on": 71.772,
+     "speedup_off": 38.7
+    },
+    "gait_length": {
+     "max_abs_diff": 2.7418136596679688e-06,
+     "ms_per_window_nnpack_off": 1.7,
+     "ms_per_window_nnpack_on": 70.795,
+     "speedup_off": 41.6
+    },
+    "gait_speed": {
+     "max_abs_diff": 4.76837158203125e-07,
+     "ms_per_window_nnpack_off": 1.706,
+     "ms_per_window_nnpack_on": 74.305,
+     "speedup_off": 43.6
+    },
+    "regularity": {
+     "max_abs_diff": 1.817941665649414e-06,
+     "ms_per_window_nnpack_off": 1.695,
+     "ms_per_window_nnpack_on": 71.159,
+     "speedup_off": 42.0
+    },
+    "step_count": {
+     "max_abs_diff": 4.100799560546875e-05,
+     "ms_per_window_nnpack_off": 1.702,
+     "ms_per_window_nnpack_on": 70.642,
+     "speedup_off": 41.5
+    }
+   },
+   "load_avg_1m": 7.1,
+   "n_windows": 640,
+   "nnpack_available": true,
+   "threads": 1,
+   "torch": "2.8.0",
+   "units": {
+    "cadence": "steps/min",
+    "gait_detection": "logits",
+    "gait_length": "m",
+    "gait_speed": "m/s",
+    "regularity": "0-1",
+    "step_count": "steps per 10 s"
+   },
+   "what": "NNPACK on vs off (model.no_nnpack, as served) on the 640 non-pre-filtered hop-5 windows of the public Capture-24 P001 hour; torch 2.8.0, 1 thread, batch 64, best of 2; arm64 Mac (16 cores) under other load (1-min load average 7-9); measured 2026-10-06"
   }
  },
  "calibration": {
@@ -262,6 +316,66 @@
   "preprocessing_version": "eldernet-prep-1",
   "schema": "nara.eldernet.calibration/1",
   "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23"
+ },
+ "decoder_prior": {
+  "ci95_subject_bootstrap": [
+   0.07564589815454373,
+   0.09486473666796925
+  ],
+  "dataset": "capture24",
+  "groups": {
+   "all_windows": {
+    "frac_of_windows": 1.0,
+    "frac_prefiltered": 0.4405462435800454,
+    "mean_gait_prob": 0.08488478266832648,
+    "n": 376755
+   },
+   "labelled_gait_or_non_gait": {
+    "frac_of_windows": 0.5977040782471368,
+    "frac_prefiltered": 0.4839822725900137,
+    "mean_gait_prob": 0.06097189587226393,
+    "n": 225188
+   },
+   "labelled_masked": {
+    "frac_of_windows": 0.07397114835901315,
+    "frac_prefiltered": 0.016577559295274318,
+    "mean_gait_prob": 0.22684662060560012,
+    "n": 27869
+   },
+   "not_prefiltered": {
+    "frac_of_windows": 0.5594537564199547,
+    "frac_prefiltered": 0.0,
+    "mean_gait_prob": 0.15172796981741532,
+    "n": 210777
+   },
+   "prefiltered": {
+    "frac_of_windows": 0.4405462435800454,
+    "frac_prefiltered": 1.0,
+    "mean_gait_prob": 0.0,
+    "n": 165978
+   },
+   "unlabelled": {
+    "frac_of_windows": 0.32832477339385013,
+    "frac_prefiltered": 0.456992028973791,
+    "mean_gait_prob": 0.09643356025856933,
+    "n": 123698
+   }
+  },
+  "hop_s": 5,
+  "labelled_gait_prevalence": 0.06530987441604348,
+  "mean_gait_prob_all_windows": 0.08488478266832648,
+  "mean_q_over_previous_pi": 1.305919733358869,
+  "n_subjects": 20,
+  "n_windows": 376755,
+  "per_subject_mean": {
+   "max": 0.13022620635154702,
+   "median": 0.08826329183961762,
+   "min": 0.056362501577403905
+  },
+  "previous_pi": 0.065,
+  "recommended_pi": 0.085,
+  "split": "val",
+  "why": "pi equal to the mean served gait_prob over all windows makes E[q/pi] = E[(1-q)/(1-pi)] = 1, so the gait channel adds no net pull on average; the labelled-window prevalence leaves out the unlabelled and masked windows the decoder also sees, and with it E[q/pi] = mean_q_over_previous_pi (> 1: a standing pull toward gait)"
  },
  "gotov": {
   "auroc": {
@@ -1376,7 +1490,114 @@
    }
   },
   "determinism": "bit-identical across reruns, batch positions (1..91-row slices) and request chunking (golden request split at 50 s)",
+  "model_adapter": {
+   "capture24_3h_segments_rerun": "P001 / P002 / P004 nara-dump through the adapter: arrays, the four CSVs and the compare reports byte-identical to the saved pre-change outputs",
+   "now": "architecture = upstream models.py imported from the operator's sha256-verified checkout of 437a38bc (activity_context/eldernet/upstream.py); no Oxford code in the repository",
+   "previous_vendored_copy_vs_upstream_build_model": "max |diff| vs upstream build_model: detection 3.6e-07, regression heads 0.0 (200 random windows)",
+   "vs_previous_vendored_copy": "all six heads bit-identical on 919 windows (200 random + 719 Capture-24 P001 hop-5 windows), 2026-10-06"
+  },
   "resampler": "nearest-neighbour index map bit-identical to actipy.processing.resample (n = 12345..360007 at 50/100 Hz)",
+  "resampling_ablation": {
+   "capture24_3h_segments_train_subjects_hop5_nn_vs_polyphase": {
+    "P001": {
+     "cadence_spm_mad": 0.6930890525259623,
+     "cadence_spm_mean_diff": 0.020349363001381477,
+     "dprob_p99": 0.3329414268159038,
+     "flips": 75,
+     "gait_aa": 232,
+     "gait_nn": 253,
+     "n": 2159,
+     "regularity_mad": 0.02002921618702935,
+     "regularity_mean_diff": 0.004923003784767011,
+     "speed_mps_mad": 0.014380339151475487,
+     "speed_mps_mean_diff": 0.005447931333286006,
+     "steps_mad": 0.16502153931594477,
+     "steps_mean_diff": 0.07620702720269924,
+     "stride_m_mad": 0.046152755400029624,
+     "stride_m_mean_diff": 0.01622711594511823
+    },
+    "P002": {
+     "cadence_spm_mad": 0.48528310442809647,
+     "cadence_spm_mean_diff": -0.0019048399144483677,
+     "dprob_p99": 0.26753632130623334,
+     "flips": 48,
+     "gait_aa": 779,
+     "gait_nn": 747,
+     "n": 2159,
+     "regularity_mad": 0.020201069541043615,
+     "regularity_mean_diff": -0.006153784576344716,
+     "speed_mps_mad": 0.01536003644395423,
+     "speed_mps_mean_diff": 0.003447938735656067,
+     "steps_mad": 0.08609397098401887,
+     "steps_mean_diff": 0.017791186682426238,
+     "stride_m_mad": 0.03256211455039307,
+     "stride_m_mean_diff": 0.0005721139327115071
+    },
+    "P004": {
+     "cadence_spm_mad": 0.5165901622552981,
+     "cadence_spm_mean_diff": -0.019132241435434627,
+     "dprob_p99": 0.3026834343435855,
+     "flips": 38,
+     "gait_aa": 189,
+     "gait_nn": 197,
+     "n": 2159,
+     "regularity_mad": 0.022117016879820275,
+     "regularity_mean_diff": 0.006799636280228351,
+     "speed_mps_mad": 0.017909252866246235,
+     "speed_mps_mean_diff": 0.0098431046152937,
+     "steps_mad": 0.15753248642230855,
+     "steps_mean_diff": 0.04365253174441985,
+     "stride_m_mad": 0.044902056113056754,
+     "stride_m_mean_diff": 0.014447489689136374
+    },
+    "total": {
+     "flip_rate": 0.0248571869692759,
+     "flips": 161,
+     "gait_aa": 1200,
+     "gait_nn": 1197,
+     "n": 6477
+    }
+   },
+   "capture24_val_6_subjects_labelled_windows": {
+    "fft": {
+     "auroc": 0.9590560402597184,
+     "ece": 0.02211781275059523,
+     "f1": 0.536903690369037,
+     "mean_p": 0.06086604496875248,
+     "precision": 0.8325191905094208,
+     "recall": 0.396213882431086
+    },
+    "flip_nn_vs_fft": 0.00464679022293849,
+    "n": 74460,
+    "n_gait": 6022,
+    "nn": {
+     "auroc": 0.9568935329510452,
+     "ece": 0.01741869349234127,
+     "f1": 0.5389913352588314,
+     "mean_p": 0.06603465007968391,
+     "precision": 0.8140939597315436,
+     "recall": 0.4028561939554965
+    },
+    "poly": {
+     "auroc": 0.9564192183527578,
+     "ece": 0.028636736987007336,
+     "f1": 0.5569536423841059,
+     "mean_p": 0.05593741605052115,
+     "precision": 0.8304805793285056,
+     "recall": 0.41896379940219197
+    },
+    "subjects": [
+     "P003",
+     "P005",
+     "P019",
+     "P022",
+     "P025",
+     "P026"
+    ]
+   },
+   "caveat": "WHOOP high-frequency content unmeasured; check nearest vs anti-aliased on WHOOP walking before candidate use",
+   "what": "served nearest-neighbour 100->30 Hz (= upstream inference, actipy) vs band-limited resampling (upstream fine-tuning used scipy.signal.resample per 10 s window, data_parsing/MOBILISE_D_parsing.py) and a polyphase anti-aliased resampler (resample_poly 3/10); measured 2026-10-06 through the upstream adapter"
+  },
   "toy_example_13min": {
    "bouts": 6,
    "max_abs_dprob": 3.62e-06,
@@ -1395,7 +1616,6 @@
    "walking_time_min": 7.833,
    "windows_csv_rows": 416
   },
-  "vendored_model": "max |diff| vs upstream build_model: detection 3.6e-07, regression heads 0.0 (200 random windows)",
   "whole_day_capture24_val": {
    "capture24:P003": {
     "calibration": {
@@ -1841,6 +2061,11 @@
     ]
    }
   },
+  "provenance": {
+   "ledger_stamp_source": "console output (the ledger line itself was lost)",
+   "statement": "Transcribed from non-persisted console output of the single TEST run by the agent; not machine-verifiable (the run's report VALIDATION_TEST.json and its ledger line were lost in an SSD disconnect). Counts and hashes are consistent: test_sha256 677165e7..., calibration cal:16191350862fb8de (bundle eldernet-437a38b+cal:16191350862fb8de), split counts recomputed from identity columns only. The ledger was not reconstructed; TEST was not re-run (owner decision). The experiment is listed in activity_context/eldernet/integrity_ext.py SPENT_EXPERIMENTS, so any re-run needs an enumerated rerun reason and is recorded as a rerun.",
+   "status": "transcribed, not machine-verifiable"
+  },
   "source": "console transcript of the single TEST evaluation (ledger stamp below). The machine report VALIDATION_TEST.json and the ledger file were lost when the external SSD disconnected uncleanly ~2 min later; regenerating them needs a recorded rerun (rerun_reason artifact_lost_identical_rebuild), left to the owner. calibration.json hashes to the stamped bundle (cal:16191350862fb8de)."
  },
  "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23",
@@ -1915,5 +2140,451 @@
    "pi_scored_not_prefiltered": 0.17040110650069157,
    "served_is_gait_rate_all_windows": 0.12954630671166104
   }
+ },
+ "val_other_motion": {
+  "datasets": {
+   "capture24": {
+    "cycling": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.008526903851808291,
+     "frac_prefiltered": 0.0026462805057336078,
+     "frac_q_above_pi": 0.1649514848573949,
+     "mean": 0.06075089379430331,
+     "mean_q_over_pi": 0.714716397580039,
+     "median": 0.031990621942352686,
+     "n": 3401,
+     "n_subjects": 9,
+     "p10": 0.014757874754343495,
+     "p25": 0.020581349866148024,
+     "p75": 0.05851947854385359,
+     "p90": 0.13498194724007526
+    },
+    "stationary_reference": {
+     "frac_ge_0.93": 0.0005132272663649513,
+     "frac_is_gait_0.5": 0.006656402121339368,
+     "frac_prefiltered": 0.5625437409602015,
+     "frac_q_above_pi": 0.07581766434936779,
+     "mean": 0.024085407438442886,
+     "mean_q_over_pi": 0.2833577345699162,
+     "median": 0.0,
+     "n": 192897,
+     "n_subjects": 20,
+     "p10": 0.0,
+     "p25": 0.0,
+     "p75": 0.009526430731258959,
+     "p90": 0.05704781074158618
+    },
+    "vehicle": {
+     "frac_ge_0.93": 0.0009165902841429881,
+     "frac_is_gait_0.5": 0.029260382147641543,
+     "frac_prefiltered": 0.02347881266304731,
+     "frac_q_above_pi": 0.29782133540153705,
+     "mean": 0.09062641088530372,
+     "mean_q_over_pi": 1.0661930692388673,
+     "median": 0.027681638869477186,
+     "n": 14183,
+     "n_subjects": 13,
+     "p10": 0.0011597818184985753,
+     "p25": 0.0057978317415307845,
+     "p75": 0.11418055781675085,
+     "p90": 0.2730772303516393
+    },
+    "walking_gait_reference": {
+     "frac_ge_0.93": 0.25885632691915417,
+     "frac_is_gait_0.5": 0.4527775889032434,
+     "frac_prefiltered": 0.008975317875841436,
+     "frac_q_above_pi": 0.9014754878629224,
+     "mean": 0.516228209264253,
+     "mean_q_over_pi": 6.073273050167681,
+     "median": 0.42103955904823304,
+     "n": 14707,
+     "n_subjects": 20,
+     "p10": 0.08677786775233172,
+     "p25": 0.20366139686171048,
+     "p75": 0.940049205231103,
+     "p90": 0.9936082723000078
+    }
+   },
+   "hhar_watch": {
+    "cycling": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.0,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.3840659512647599,
+     "mean_q_over_pi": 4.518422956055998,
+     "median": 0.3840659512647599,
+     "n": 1,
+     "n_subjects": 1,
+     "p10": 0.3840659512647599,
+     "p25": 0.3840659512647599,
+     "p75": 0.3840659512647599,
+     "p90": 0.3840659512647599
+    },
+    "walking_gait_reference": {
+     "frac_ge_0.93": 0.7454545454545455,
+     "frac_is_gait_0.5": 1.0,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.9441900109095586,
+     "mean_q_over_pi": 11.108117775406573,
+     "median": 0.9676606780215422,
+     "n": 165,
+     "n_subjects": 1,
+     "p10": 0.8740986212466118,
+     "p25": 0.9281520681655006,
+     "p75": 0.9875640631578289,
+     "p90": 0.9951353059955526
+    }
+   },
+   "mhealth": {
+    "cycling": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.0,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 0.6190476190476191,
+     "mean": 0.12358384072108092,
+     "mean_q_over_pi": 1.4539275378950691,
+     "median": 0.10434633168877627,
+     "n": 21,
+     "n_subjects": 2,
+     "p10": 0.055960977455567974,
+     "p25": 0.06123683778242329,
+     "p75": 0.1659759334210927,
+     "p90": 0.2151589696273094
+    },
+    "running": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.047619047619047616,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 0.14285714285714285,
+     "mean": 0.09256154240891831,
+     "mean_q_over_pi": 1.0889593224578622,
+     "median": 0.032630593034161486,
+     "n": 42,
+     "n_subjects": 2,
+     "p10": 0.01241153356623131,
+     "p25": 0.015748464416520818,
+     "p75": 0.05404572807971274,
+     "p90": 0.23712000990087342
+    },
+    "running_by_label": {
+     "10": {
+      "frac_ge_0.93": 0.0,
+      "frac_is_gait_0.5": 0.0,
+      "frac_prefiltered": 0.0,
+      "frac_q_above_pi": 0.0,
+      "mean": 0.0223331985082291,
+      "mean_q_over_pi": 0.2627435118615188,
+      "median": 0.019054413110608313,
+      "n": 21,
+      "n_subjects": 2,
+      "p10": 0.009105079923458962,
+      "p25": 0.012630283685653058,
+      "p75": 0.02936548409469724,
+      "p90": 0.03484944602980817
+     },
+     "11": {
+      "frac_ge_0.93": 0.0,
+      "frac_is_gait_0.5": 0.09523809523809523,
+      "frac_prefiltered": 0.0,
+      "frac_q_above_pi": 0.2857142857142857,
+      "mean": 0.16278988630960753,
+      "mean_q_over_pi": 1.915175133054206,
+      "median": 0.0551920346729256,
+      "n": 21,
+      "n_subjects": 2,
+      "p10": 0.015027849363064644,
+      "p25": 0.035876194627076585,
+      "p75": 0.17624769429743944,
+      "p90": 0.4805967247334682
+     }
+    },
+    "stationary_reference": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.0,
+     "frac_prefiltered": 0.6931818181818182,
+     "frac_q_above_pi": 0.125,
+     "mean": 0.03292249373814625,
+     "mean_q_over_pi": 0.38732345574289706,
+     "median": 0.0,
+     "n": 88,
+     "n_subjects": 2,
+     "p10": 0.0,
+     "p25": 0.0,
+     "p75": 0.04085633817088558,
+     "p90": 0.09082190076480182
+    },
+    "walking_gait_reference": {
+     "frac_ge_0.93": 0.5476190476190477,
+     "frac_is_gait_0.5": 0.9761904761904762,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.9001681221464292,
+     "mean_q_over_pi": 10.590213201722694,
+     "median": 0.9342294895417371,
+     "n": 42,
+     "n_subjects": 2,
+     "p10": 0.7652713915471757,
+     "p25": 0.895043469582846,
+     "p75": 0.97549918399606,
+     "p90": 0.9911153671078824
+    }
+   },
+   "opportunity": {
+    "stationary_reference": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.07066381156316917,
+     "frac_prefiltered": 0.004282655246252677,
+     "frac_q_above_pi": 0.5610278372591007,
+     "mean": 0.16686571251068816,
+     "mean_q_over_pi": 1.963126029537507,
+     "median": 0.10302615237077892,
+     "n": 467,
+     "n_subjects": 1,
+     "p10": 0.014444679314715556,
+     "p25": 0.04115422978277747,
+     "p75": 0.227068618320957,
+     "p90": 0.39453668667655406
+    },
+    "walking_gait_reference": {
+     "frac_ge_0.93": 0.45161290322580644,
+     "frac_is_gait_0.5": 0.967741935483871,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.8901265813904519,
+     "mean_q_over_pi": 10.472077428122963,
+     "median": 0.9258937739274211,
+     "n": 62,
+     "n_subjects": 1,
+     "p10": 0.7816221680956889,
+     "p25": 0.8375143296032997,
+     "p75": 0.9706820900710988,
+     "p90": 0.9839382133626743
+    }
+   },
+   "pamap2": {
+    "cycling": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.0,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 0.1794871794871795,
+     "mean": 0.05223242695895582,
+     "mean_q_over_pi": 0.6144991406935976,
+     "median": 0.04047109385121958,
+     "n": 39,
+     "n_subjects": 1,
+     "p10": 0.014362594499508,
+     "p25": 0.02267132482181628,
+     "p75": 0.07436899165503658,
+     "p90": 0.1086800025572748
+    },
+    "running": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.0,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.17701411902978095,
+     "mean_q_over_pi": 2.0825190474091877,
+     "median": 0.17701411902978095,
+     "n": 1,
+     "n_subjects": 1,
+     "p10": 0.17701411902978095,
+     "p25": 0.17701411902978095,
+     "p75": 0.17701411902978095,
+     "p90": 0.17701411902978095
+    },
+    "running_by_label": {
+     "5": {
+      "frac_ge_0.93": 0.0,
+      "frac_is_gait_0.5": 0.0,
+      "frac_prefiltered": 0.0,
+      "frac_q_above_pi": 1.0,
+      "mean": 0.17701411902978095,
+      "mean_q_over_pi": 2.0825190474091877,
+      "median": 0.17701411902978095,
+      "n": 1,
+      "n_subjects": 1,
+      "p10": 0.17701411902978095,
+      "p25": 0.17701411902978095,
+      "p75": 0.17701411902978095,
+      "p90": 0.17701411902978095
+     }
+    },
+    "stationary_reference": {
+     "frac_ge_0.93": 0.0,
+     "frac_is_gait_0.5": 0.0,
+     "frac_prefiltered": 0.3198757763975155,
+     "frac_q_above_pi": 0.21739130434782608,
+     "mean": 0.04510324191768319,
+     "mean_q_over_pi": 0.5306263755021551,
+     "median": 0.015076425226987406,
+     "n": 322,
+     "n_subjects": 1,
+     "p10": 0.0,
+     "p25": 0.0,
+     "p75": 0.06842673324644659,
+     "p90": 0.12584298369507113
+    },
+    "walking_gait_reference": {
+     "frac_ge_0.93": 0.22727272727272727,
+     "frac_is_gait_0.5": 0.75,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.7051597103612974,
+     "mean_q_over_pi": 8.295996592485853,
+     "median": 0.6781872007038908,
+     "n": 44,
+     "n_subjects": 1,
+     "p10": 0.3943223633144183,
+     "p25": 0.5199935706770158,
+     "p75": 0.9287067770962657,
+     "p90": 0.9820655549921069
+    }
+   },
+   "wisdm2019_watch": {
+    "running": {
+     "frac_ge_0.93": 0.003246753246753247,
+     "frac_is_gait_0.5": 0.032467532467532464,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 0.34415584415584416,
+     "mean": 0.0960386100592287,
+     "mean_q_over_pi": 1.1298660006968082,
+     "median": 0.056904653199146005,
+     "n": 308,
+     "n_subjects": 8,
+     "p10": 0.004737960760038075,
+     "p25": 0.015607438816382466,
+     "p75": 0.10300461053309302,
+     "p90": 0.19350186273269868
+    },
+    "running_by_label": {
+     "B": {
+      "frac_ge_0.93": 0.003246753246753247,
+      "frac_is_gait_0.5": 0.032467532467532464,
+      "frac_prefiltered": 0.0,
+      "frac_q_above_pi": 0.34415584415584416,
+      "mean": 0.0960386100592287,
+      "mean_q_over_pi": 1.1298660006968082,
+      "median": 0.056904653199146005,
+      "n": 308,
+      "n_subjects": 8,
+      "p10": 0.004737960760038075,
+      "p25": 0.015607438816382466,
+      "p75": 0.10300461053309302,
+      "p90": 0.19350186273269868
+     }
+    },
+    "stationary_reference": {
+     "frac_ge_0.93": 0.003692132916785004,
+     "frac_is_gait_0.5": 0.010792388525986936,
+     "frac_prefiltered": 0.14825333712013633,
+     "frac_q_above_pi": 0.15876171542175518,
+     "mean": 0.04956262625288996,
+     "mean_q_over_pi": 0.5830897206222347,
+     "median": 0.008738380465101942,
+     "n": 3521,
+     "n_subjects": 8,
+     "p10": 0.0,
+     "p25": 0.0005917836558369962,
+     "p75": 0.0439837736604225,
+     "p90": 0.16044762121049774
+    },
+    "walking_gait_reference": {
+     "frac_ge_0.93": 0.5795454545454546,
+     "frac_is_gait_0.5": 0.9204545454545454,
+     "frac_prefiltered": 0.0,
+     "frac_q_above_pi": 1.0,
+     "mean": 0.8683915478433039,
+     "mean_q_over_pi": 10.21637115109769,
+     "median": 0.9487119600869426,
+     "n": 616,
+     "n_subjects": 8,
+     "p10": 0.5685733140305127,
+     "p25": 0.830652469952522,
+     "p75": 0.9901030520078125,
+     "p90": 0.9986336232085178
+    }
+   }
+  },
+  "pi": 0.085,
+  "pooled": {
+   "cycling": {
+    "frac_ge_0.93": 0.0,
+    "frac_is_gait_0.5": 0.008376660889659156,
+    "frac_prefiltered": 0.0025996533795493936,
+    "frac_q_above_pi": 0.1681109185441941,
+    "mean": 0.061129457265231744,
+    "mean_q_over_pi": 0.7191700854733146,
+    "median": 0.032169062669014196,
+    "n": 3462,
+    "n_subjects": 13,
+    "p10": 0.01477261198497047,
+    "p25": 0.02063100144479292,
+    "p75": 0.05931348514923807,
+    "p90": 0.13613519053858594
+   },
+   "running": {
+    "frac_ge_0.93": 0.002849002849002849,
+    "frac_is_gait_0.5": 0.03418803418803419,
+    "frac_prefiltered": 0.0,
+    "frac_q_above_pi": 0.32193732193732194,
+    "mean": 0.09585325013802502,
+    "mean_q_over_pi": 1.127685295741471,
+    "median": 0.05466022085789261,
+    "n": 351,
+    "n_subjects": 11,
+    "p10": 0.005051987296770955,
+    "p25": 0.015600348996373792,
+    "p75": 0.09911119945275756,
+    "p90": 0.20117177728340116
+   },
+   "stationary_reference": {
+    "frac_ge_0.93": 0.0005676778428241973,
+    "frac_is_gait_0.5": 0.006867888187739172,
+    "frac_prefiltered": 0.5534909653057604,
+    "frac_q_above_pi": 0.07869940951367242,
+    "mean": 0.024916290614453905,
+    "mean_q_over_pi": 0.2931328307582814,
+    "median": 0.0,
+    "n": 197295,
+    "n_subjects": 32,
+    "p10": 0.0,
+    "p25": 0.0,
+    "p75": 0.01018415243974687,
+    "p90": 0.06026803829054952
+   },
+   "vehicle": {
+    "frac_ge_0.93": 0.0009165902841429881,
+    "frac_is_gait_0.5": 0.029260382147641543,
+    "frac_prefiltered": 0.02347881266304731,
+    "frac_q_above_pi": 0.29782133540153705,
+    "mean": 0.09062641088530372,
+    "mean_q_over_pi": 1.0661930692388673,
+    "median": 0.027681638869477186,
+    "n": 14183,
+    "n_subjects": 13,
+    "p10": 0.0011597818184985753,
+    "p25": 0.0057978317415307845,
+    "p75": 0.11418055781675085,
+    "p90": 0.2730772303516393
+   },
+   "walking_gait_reference": {
+    "frac_ge_0.93": 0.27807623433103096,
+    "frac_is_gait_0.5": 0.481261192120747,
+    "frac_prefiltered": 0.00844205679201842,
+    "frac_q_above_pi": 0.9073292402148887,
+    "mean": 0.5376637730463786,
+    "mean_q_over_pi": 6.3254561534868055,
+    "median": 0.4648597298881427,
+    "n": 15636,
+    "n_subjects": 33,
+    "p10": 0.09391162193283681,
+    "p25": 0.21372238120641757,
+    "p75": 0.9534833365500344,
+    "p90": 0.9940045122302181
+   }
+  },
+  "split": "val"
  }
 }

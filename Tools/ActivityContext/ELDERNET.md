@@ -7,10 +7,38 @@ backbone self-supervised on UK Biobank wrist data, fine-tuned on Mobilise-D TVS,
 detection, gait speed, stride length, cadence, stride regularity and step count. It runs beside HART as its own
 expert; Inertia-1 (INERTIA1.md) stays dormant until its weights are public.
 
-Licence: the weights and model code carry the University of Oxford SSL-wearables **Academic Use Licence**
-(non-commercial academic research; notice "Copyright © 2022, University of Oxford"). Nara is non-commercial
-(PolyForm Noncommercial); the owner accepted this on 2026-10-05. Weights are fetched by sha256 from the pinned
-upstream commit and never committed to Nara's git.
+## Licence — read before enabling anything
+
+> **ElderNet (code and weights) is University of Oxford software under the SSL-wearables Academic Use Licence**
+> (upstream `LICENSE.md`; "Copyright © 2022, University of Oxford"). **Its use is limited to the licensee's own
+> internal academic, non-commercial research**; clause 1.1(b) excludes using it "for or on behalf of any third
+> party or to provide a service". **Running it as a service for other users — the worker lane on beta testers'
+> data — may fall outside that licence.** Whether Nara's use qualifies is an **owner decision**; a service or
+> commercial use needs a licence from Oxford University Innovation (enquiries@innovation.ox.ac.uk). The worker
+> lane stays **off by default** (`FRWHOOP_ELDERNET_ENABLED` unset, §6) and is not to be switched on for other
+> people's data until that is decided. (The owner accepted the licence for academic, non-commercial use on
+> 2026-10-05; Nara is PolyForm Noncommercial.)
+
+* **No Oxford code or weights are in this repository** (`NOTICE.md`). The operator fetches both from the pinned
+  commit at install time, under the Oxford licence, every file sha256-pinned:
+  `python -m activity_context.eldernet.weights fetch --dest <weights dir>` (the six heads) and
+  `python -m activity_context.eldernet.upstream fetch --dest <source dir> [--from-git <clone>] [--with-examples]`
+  (`LICENSE.md`, `models.py`, `gait_quality/__init__.py`, `detection.py`, `quality.py`, `pipelines/config.yaml`;
+  GitHub raw at the commit, or `git archive` of a local clone; `--with-examples` adds the toy recording the golden
+  and parity tests use). A full clone checked out at the commit works as is. Point `ELDERNET_WEIGHTS_DIR` /
+  `--weights-dir` and `ELDERNET_UPSTREAM_DIR` / `--upstream-dir` at them (`… verify` checks a directory). Nothing
+  downloads at serve time.
+* `activity_context/eldernet/upstream.py` (Nara's adapter) reads each upstream file once, checks size and sha256,
+  and compiles exactly those bytes into private module objects (never in `sys.modules`; their imports resolve only
+  to the other verified upstream modules, anything else upstream-internal is refused). The serve executes only
+  `models.py` (the architecture: `Resnet` feature extractor + `ElderNet`, built as upstream
+  `gait_quality/weights.py::build_model` does); the offline `run` CLI also `gait_quality/detection.py` /
+  `quality.py` (bout rules; pandas). One upstream function is not run: `models.weight_init` imports upstream
+  `utils.py` (pingouin, seaborn, `matplotlib.use('TkAgg')`) and re-seeds the global RNGs, so the adapter replaces
+  that name with a no-op in its private copy; the strict checkpoint load then overwrites every parameter and
+  buffer. No upstream file is modified. Outputs are bit-identical to the previously vendored copy (VALIDATION.md §1).
+* Commits up to `0b6d34f5` carried a vendored copy of upstream `models.py` and a re-expression of the bout rules;
+  they are gone from the tree, not from git history (rewriting history is an owner decision).
 
 This file is the contract between `activity_context/eldernet/` (Python), the worker and the decoder.
 
@@ -18,7 +46,10 @@ This file is the contract between `activity_context/eldernet/` (Python), the wor
 
 Wrist-worn; units g, gravity kept (|a| ≈ 1 at rest); fine-tuned on older adults (systematic shift expected on
 young healthy wearers — Nara validates before any metric is used as evidence); 30 Hz, 10 s windows
-(3 × 300), fixed by the architecture; quality metrics are only meaningful on detected gait.
+(3 × 300), fixed by the architecture; quality metrics are only meaningful on detected gait. The architecture
+settings Nara passes to upstream's constructors (`QUALITY_HEADS`: `max_mu`, regressor layers, batch norm;
+feature vector 128) equal upstream `pipelines/config.yaml` (sha256-pinned; checked by the tests) — `max_mu`
+is a multiplier outside the checkpoint, so a wrong value would not be caught by the strict load.
 
 ## 2. Preprocessing `eldernet-prep-1` (WHOOP → model input)
 
@@ -28,11 +59,24 @@ young healthy wearers — Nara validates before any metric is used as evidence);
    upstream steps target multi-day files and would fabricate or discard motion here. Each contiguous run is
    processed on its own.
 3. 100 → 30 Hz with the same resampler upstream uses. **Decided: reproduced exactly** — `actipy.processing.resample`
-   is nearest-neighbour (no anti-alias filter); `preprocess.py` reproduces its index map bit-for-bit (numpy only, so
-   the serve needs no pandas/actipy).
-4. 10 s windows (300 samples) on a grid anchored at the request `start_ts`, fully inside the run. **Decided:** hop
-   5 s served by default (`--hop-s` / request `hop_s` ∈ {1, 2, 5, 10}; 1 = upstream `window_overlap_sec` 9); edge
-   margin 0 — the nearest-neighbour map has no transient, so a window reads exactly its own 10 s of samples.
+   is nearest-neighbour (no anti-alias filter); `preprocess.py` reproduces its index map bit-for-bit with Nara's own
+   numpy code (no actipy code; the serve needs no pandas/actipy).
+   **Caveat — aliasing.** Upstream *inference* is nearest-neighbour without anti-aliasing, but upstream
+   *fine-tuning* resampled band-limited (`scipy.signal.resample` per 10 s window,
+   `data_parsing/MOBILISE_D_parsing.py`). On Capture-24 the two disagree on is_gait for ~2.5 % of hop-5 windows
+   (161 / 6,477 vs a polyphase anti-aliased resampler, three 3 h segments; gait windows 1,197 vs 1,200) with no
+   accuracy loss on VAL (six VAL subjects; VALIDATION.md §1). WHOOP's content above 15 Hz is unmeasured: before
+   any `candidate` use, compare nearest-neighbour vs anti-aliased on WHOOP walking (is_gait flip rate, cadence /
+   speed shift).
+4. 10 s windows (300 samples) on a grid anchored at the request `start_ts`, fully inside the run **and inside
+   `[start_ts, end_ts]`** (`head_b64` / `tail_b64` seconds only extend the run, never add windows). **Decided:**
+   hop 5 s served by default (`--hop-s` / request `hop_s` ∈ {1, 2, 5, 10}; 1 = upstream `window_overlap_sec` 9);
+   edge margin 0 — the nearest-neighbour map has no transient, so a window reads exactly its own 10 s of samples.
+   **Chunk boundaries:** the window that would straddle the end of one request and the start of the next (start
+   `end_ts − 5` at hop 5) is never produced. The worker sends 1-hour chunks, so 1 of every 720 hop-5 windows is
+   missing (719 per chunk) and the gait channel has no window for the 5 s after each chunk boundary (a window is
+   held while its age is below `hop_s`, §5). Chunking otherwise changes nothing (every window is bit-identical
+   whichever request it comes from).
 5. Upstream auto-calibration / non-wear detection. **Decided: both off** (ping `preprocessing` says so). Non-wear
    needs >= 72 h upstream; gravity calibration needs the whole recording and is the one measured whole-day
    difference from upstream (0.1-0.6 % of windows flip is_gait on Capture-24 days it changes; VALIDATION.md §1).
@@ -52,9 +96,18 @@ window.
 Same framing as `activity_context.serve` (`ping` / `infer` / `shutdown`, one JSON object per line, SIGALRM
 timeout), same `run` request object. A separate process; never imported by the HART serve.
 
+Start: `python -m activity_context.eldernet.serve --weights-dir <dir> --upstream-dir <dir>` (or
+`$ELDERNET_WEIGHTS_DIR` / `$ELDERNET_UPSTREAM_DIR`; the worker's child inherits the worker's environment). Both
+are verified at start-up; a missing weights / source directory or file is `model_missing`, a size / sha256 /
+state-dict mismatch of either is `weights_mismatch` (the message names the file), and the process stays up with
+`model_available: false`.
+
 ping → `{"id","op":"ping","ok":true,"model_available":bool,"model_status":"eldernet_loaded"|"eldernet_unavailable",
-"model_error","model_id":"eldernet","model_version","weights":{name: sha256},"upstream_commit",
-"preprocessing_version","package_version"}`
+"model_error","model_id":"eldernet","model_version","weights":{name: sha256},"weights_digest","upstream_source":
+{path: sha256},"upstream_commit","preprocessing_version","package_version",…}` — `weights_digest` is the §5
+deployment digest of `weights` (pinned: `01b2f982a0a2664f455a529a8c483a10106a7ddcd89c326e3d15e24fa4cf4ca6`);
+`upstream_source` the pinned sha256 of the upstream files the serve verifies (`LICENSE.md`, `models.py`). Both are
+reported whether or not the model loaded. The infer response is unchanged.
 
 infer response:
 
@@ -197,19 +250,55 @@ annotated steps where available (OxWalk); speed ordinal checks (GOTOV slow < nor
 upstream `pipelines.general` on whole recordings; latency/RAM. Splits are the frozen subject splits in
 `Tools/ActivityContext/splits/`.
 
+* `python -m activity_context.eldernet.validate fit | test | prior | other-motion` — `fit`, `prior` and
+  `other-motion` read VAL parts only; `test` opens TEST only inside the ledgered `TestVault`
+  (`eval/eldernet/test_ledger.jsonl`); external sets go through `integrity_ext.evaluate_external_once`.
+* **Spent experiments stay spent.** `integrity_ext.SPENT_EXPERIMENTS` (a reviewed constant) lists every experiment
+  whose held-out payload has been opened: the frozen-split TEST `eldernet_frozen_detection_v1` (opened once at
+  2026-10-06T18:12:48Z; its report and ledger line were lost in an SSD disconnect, so the ledger alone would allow
+  a "first" run again) and the two external sets. For a listed experiment `test` / `evaluate_external_once` refuse
+  before loading anything unless given an enumerated `--rerun-reason` (`inertia.integrity.RERUN_REASONS`:
+  `artifact_lost_identical_rebuild`, `evaluator_bug_fix`, `post_audit_rule_change`, `provenance_rebuild`) and a
+  `--rerun-detail`; the ledger line then written records the rerun and names the opening it repeats. The ledger is
+  never edited; whether to re-run TEST (e.g. `artifact_lost_identical_rebuild` to regain a machine report) is the
+  owner's decision.
+
 ## 8. Results and operating values (eval/eldernet/VALIDATION.md, VALIDATION.json)
 
 * Parity: upstream toy example and three 3 h Capture-24 segments reproduce upstream bouts and metrics (detection
-  agreement 1.000, quality within 3.6e-5).
+  agreement 1.000, quality within 3.6e-5). Through the upstream adapter (§ Licence) every head is bit-identical to
+  the previously vendored copy, and the 3 h segments re-run byte-identical.
 * Served defaults: no calibration, `gait_threshold` 0.5 (upstream argmax). VAL fit (`eval/eldernet/calibration.json`,
   `--calibration`): T = 1.047 (free-living; ≈ upstream already calibrated), high-precision threshold 0.93.
-* Detection (served defaults): Capture-24 TEST P 0.88 / R 0.52 (free-living, AUROC 0.967); GOTOV older adults P 0.97 /
-  R 1.00; OxWalk P 0.98 / R 0.87. Steps per 10 s window on OxWalk: MAE 1.0 (bias −0.3). GOTOV speed / cadence
-  ordered slow < normal < fast in 19 / 21 and 20 / 21 participants.
-* Decoder π: **0.065** (Capture-24 VAL, gait share of labelled 10 s windows at hop 5; 0.125 if pre-filtered windows
-  are excluded).
-* Serve: ~650 MB RSS, ~1.9 ms per window per head on one thread; keep hop 5 and <= 1 h requests under the 60 s
-  timeout.
+* Detection (served defaults). **Frozen-split TEST: transcribed from non-persisted console output of the single
+  TEST run by the agent; not machine-verifiable** (the run's report and ledger line were lost in an SSD
+  disconnect); counts and hashes are consistent (test_sha256 `677165e7…`, calibration `cal:16191350862fb8de`):
+  Capture-24 TEST P 0.88 / R 0.52 (free-living, AUROC 0.967). External sets (machine reports and ledger lines
+  present): GOTOV older adults P 0.97 / R 1.00; OxWalk P 0.98 / R 0.87. Steps per 10 s window on OxWalk: MAE 1.0
+  (bias −0.3). GOTOV speed / cadence ordered slow < normal < fast in 19 / 21 and 20 / 21 participants.
+* Decoder π: **0.085 recommended** — the mean served `gait_prob` over all 376,755 Capture-24 VAL windows at hop 5
+  (20 subjects; unlabelled and pre-filtered windows included; subject-bootstrap 95 % CI 0.076–0.095; per-subject
+  0.056–0.130). That value makes the gait channel mean-neutral over the windows the decoder actually sees
+  (E[q/π] = E[(1 − q)/(1 − π)] = 1). The labelled-window gait prevalence is 0.065 (0.125 if pre-filtered windows
+  are excluded); with π = 0.065, E[q/π] = 1.31 — a standing pull toward gait, because the unlabelled (33 % of
+  windows, mean q 0.096) and masked (7 %, mean q 0.227) windows the decoder also sees are left out. VAL only
+  (`validate prior`; VALIDATION.json `decoder_prior`). Setting π is the decoder's / owner's call.
+* Gait-row compat, VAL (`validate other-motion`; VALIDATION.json `val_other_motion`): running / jogging windows
+  (WISDM jogging, MHEALTH jogging + running, PAMAP2 running: n 351, 11 subjects; Capture-24 VAL has none) get
+  mean `gait_prob` 0.096, median 0.055, 3.4 % ≥ 0.5, and 68 % lie at or below π = 0.085 — ElderNet does not call
+  running gait, so `run` in the gait row would be pushed down on most running seconds (keeping it neutral matches
+  the data). Cycling (n 3,462: mean 0.061, median 0.032, 0.8 % ≥ 0.5) and vehicle (n 14,183: mean 0.091, median
+  0.028, p90 0.27, 2.9 % ≥ 0.5) behave as non-gait.
+* Deployment weights digest (§5 definition; ping `weights_digest`):
+  **`01b2f982a0a2664f455a529a8c483a10106a7ddcd89c326e3d15e24fa4cf4ca6`** (`weights.DEPLOYMENT_WEIGHTS_DIGEST`,
+  asserted in `tests/eldernet/test_eldernet_upstream.py`). Verified 2026-10-06 against the other two definitions:
+  Swift `GaitQualityModelInfo.weightsCanonicalText` (same text, recomputed in Swift: same digest) and the SQL text
+  `publish_activity_gait_windows_day` hashes (`'eldernet-weights-1' || chr(10) || string_agg(key || '=' || value ||
+  chr(10) … order by key collate "C")`: the same bytes for these ASCII names). `FRWHOOP_ELDERNET_WEIGHTS_SHA256`
+  pins it.
+* Serve: ~650 MB RSS, ~1.7–1.9 ms per window per head on one thread with NNPACK disabled (as served; NNPACK on is
+  71–74 ms, 39–44× slower, outputs within 7.6e-6 logits / 3.8e-5 steps/min); keep hop 5 and <= 1 h requests under
+  the 60 s timeout. At 1-hour chunks one hop-5 window per chunk boundary is not produced (1 of 720; §2.4).
 
 ## Replay record format (ElderNet extension of `nara-activity-replay-1`)
 

@@ -1,9 +1,9 @@
 """ElderNet runtime: load the six heads once, then turn requests into ``gait-quality-1`` responses.
 
-``build_runtime`` never raises: a missing weights directory/file is ``model_missing``, a size/sha256/state-dict
-mismatch ``weights_mismatch``, anything else ``internal``; the process stays up, ``ping`` reports
-``model_available: false`` and every ``infer`` fails with that kind (ELDERNET.md §4). Nothing here imports the
-HART model stack or the Inertia lane.
+``build_runtime`` never raises: a missing weights directory/file or upstream source directory/file is
+``model_missing``, a size/sha256/state-dict mismatch (weights or upstream source) ``weights_mismatch``, anything
+else ``internal``; the process stays up, ``ping`` reports ``model_available: false`` and every ``infer`` fails
+with that kind (ELDERNET.md §4). Nothing here imports the HART model stack or the Inertia lane.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ from . import (ALLOWED_HOP_S, DEFAULT_HOP_S, ERROR_KINDS, MODEL_ID, MODEL_VERSIO
                UPSTREAM_COMMIT, WINDOW_S, WIRE_SCHEMA)
 from .gait import GaitCalibration, score_windows, wire_windows
 from .preprocess import stack_windows, windows_from_seconds
-from .weights import MANIFEST, WeightsError, wire_hashes
+from .upstream import source_hashes
+from .weights import MANIFEST, WeightsError, weights_digest, wire_hashes
 
 MAX_OUTPUT_BYTES = 12 * 1024 * 1024          # below the worker's 16 MiB line cap
 MAX_WINDOWS_PER_RESPONSE = 200_000
@@ -66,15 +67,17 @@ def load_calibration(path: Optional[str]) -> Optional[GaitCalibration]:
 
 def build_runtime(weights_dir: Optional[str] = None, *, threads: Optional[int] = 1, max_batch: int = 64,
                   calibration: Optional[str] = None, default_hop_s: int = DEFAULT_HOP_S,
-                  heads: Optional[Any] = None) -> ElderNetRuntime:
-    """Resolve + verify + load once. ``heads`` injects pre-built heads (tests)."""
+                  heads: Optional[Any] = None, upstream_dir: Optional[str] = None) -> ElderNetRuntime:
+    """Resolve + verify + load once: the weights (``weights_dir`` / $ELDERNET_WEIGHTS_DIR) first, then the
+    upstream architecture source (``upstream_dir`` / $ELDERNET_UPSTREAM_DIR). ``heads`` injects pre-built heads
+    (tests)."""
     t0 = time.perf_counter()
     try:
         cal = load_calibration(calibration)
         if heads is None:
             from .model import load_heads
             from .weights import resolve
-            heads = load_heads(resolve(weights_dir), threads=threads, max_batch=max_batch)
+            heads = load_heads(resolve(weights_dir), threads=threads, max_batch=max_batch, upstream_dir=upstream_dir)
         return ElderNetRuntime(heads=heads, status="eldernet_loaded", calibration=cal, default_hop_s=default_hop_s,
                                load_seconds=time.perf_counter() - t0)
     except WeightsError as exc:
@@ -187,6 +190,7 @@ def handle_ping(rt: ElderNetRuntime) -> Dict[str, Any]:
         "ok": True, "model_available": rt.available, "model_status": rt.status,
         "model_error": f"{rt.error.kind}: {rt.error.message}" if rt.error is not None else None,
         "model_id": MODEL_ID, "model_version": MODEL_VERSION, "weights": wire_hashes(MANIFEST),
+        "weights_digest": weights_digest(wire_hashes(MANIFEST)), "upstream_source": source_hashes(),
         "upstream_commit": UPSTREAM_COMMIT, "preprocessing_version": PREPROCESSING_VERSION,
         "package_version": __version__, "schema": WIRE_SCHEMA, "window_s": WINDOW_S,
         "hop_s": rt.default_hop_s, "gait_threshold": rt.gait_threshold,

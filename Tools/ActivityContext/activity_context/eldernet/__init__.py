@@ -2,14 +2,18 @@
 
 A separate, optional expert beside HART and Inertia: real public fine-tuned weights from
 ``yonbrand/gait-quality`` (Brand et al., npj Digital Medicine 2026), University of Oxford Academic Use
-Licence ("Copyright © 2022, University of Oxford"). Nothing here is imported by ``activity_context`` itself,
-so the HART serve process never loads torch or this package.
+Licence ("Copyright © 2022, University of Oxford"). Nara's repository contains no Oxford code or weights: the
+operator fetches both at the pinned commit (``weights`` / ``upstream`` fetch CLIs) and this package imports
+upstream's own modules from that checkout after checking every file's sha256. Nothing here is imported by
+``activity_context`` itself, so the HART serve process never loads torch or this package.
 
 Modules
 -------
 weights    : pinned weight manifest (name -> upstream path, sha256, size), resolve / verify / fetch CLI.
-vendor/    : narrowly vendored ElderNet model definitions (Oxford licence header, upstream path + SHA).
-model      : the six heads loaded strictly (eval, inference_mode, CPU, fixed threads, batched).
+upstream   : pinned upstream source manifest, verified private import of upstream models.py / gait_quality,
+             fetch / verify CLI (operator, install time).
+model      : the six heads (upstream architecture) loaded strictly (eval, inference_mode, CPU, fixed threads).
+bouts      : offline bout assembly through upstream gait_quality.detection / quality (run.py only).
 preprocess : ``eldernet-prep-1`` (WHOOP NPB1 -> g -> nearest-neighbour 30 Hz per run -> 10 s windows).
 gait       : window-local static pre-filter + detector -> gait_prob / is_gait; quality heads on gait only.
 runtime    : load once, turn requests into ``gait-quality-1`` responses; serve: the stdin/stdout process.
@@ -57,6 +61,7 @@ QUALITY_HEADS: Dict[str, Tuple[str, float, int, bool]] = {
 }
 HEAD_NAMES: Tuple[str, ...] = (DETECTION_HEAD,) + tuple(QUALITY_HEADS)
 FEATURE_VECTOR_SIZE = 128
+BACKBONE_OUTPUT_SIZE = 1024                    # ResNet-18 output for 10 s epochs (upstream gait_quality/weights.py)
 
 ERROR_KINDS: Tuple[str, ...] = ("malformed", "model_missing", "weights_mismatch", "timeout", "internal",
                                 "output_too_large")
@@ -65,5 +70,5 @@ __all__ = [
     "PREPROCESSING_VERSION", "WIRE_SCHEMA", "MODEL_ID", "UPSTREAM_REPO", "UPSTREAM_COMMIT", "MODEL_VERSION",
     "UPSTREAM_LICENSE", "UPSTREAM_COPYRIGHT", "RATE_HZ", "WINDOW_S", "WINDOW_SAMPLES", "UPSTREAM_HOP_S",
     "DEFAULT_HOP_S", "ALLOWED_HOP_S", "AXES", "STATIC_VARIANCE_CEILING", "DEFAULT_GAIT_THRESHOLD",
-    "DETECTION_HEAD", "QUALITY_HEADS", "HEAD_NAMES", "FEATURE_VECTOR_SIZE", "ERROR_KINDS",
+    "DETECTION_HEAD", "QUALITY_HEADS", "HEAD_NAMES", "FEATURE_VECTOR_SIZE", "BACKBONE_OUTPUT_SIZE", "ERROR_KINDS",
 ]
