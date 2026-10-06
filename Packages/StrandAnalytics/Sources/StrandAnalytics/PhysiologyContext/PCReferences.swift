@@ -25,7 +25,7 @@ extension PhysiologyContext {
     }
 
     public struct ReferenceConfig: Codable, Equatable, Sendable {
-        public var version = "pc-reference-1"
+        public var version = "pc-reference-2"
 
         // Daily values (contracts §5).
         /// Minimum independent stable-awake windows behind a daily value (and behind a time-band stratum value).
@@ -74,6 +74,15 @@ extension PhysiologyContext {
         /// Modes allowed to register a frozen reference (frozen references are not keyed by mode in storage).
         public var frozenRegistrationModes: [ProcessingMode] = [.retrospective]
 
+        // Causal (live) partial days.
+        /// Parent series whose daily value accumulates over the day (a median of the windows, or a rate over the
+        /// waking time, seen so far). In causal mode such a value can describe a partial day (cutoff before the day
+        /// end) while its history holds whole days, and nothing records the local-time coverage of either. Its
+        /// recent / rolling / frozen comparisons therefore carry no distance (`partial_day_composition`), and the
+        /// value does not enter that day's episodes. The like-for-like causal comparison of stable-awake values is
+        /// the time-band stratum (conditioned view). Nightly values are complete when published and are not listed.
+        public var causalPartialDaySeriesMarkers: [String] = [".stable_awake_", "functional."]
+
         // Conditioned view (stable-awake time-band strata shrunk toward the all-day parent).
         /// Child (time-band) history window; kept within the 28-day cross-day invalidation horizon (contracts §6).
         public var conditionedWindowDays = 28
@@ -82,21 +91,46 @@ extension PhysiologyContext {
         public var conditionedMinChildDays = 3
         public var conditionedReadyChildDays = 7
 
-        // Scale floors.
+        // Scale floors (engineering choices in native resolution; notes/statistics.md §2.2).
         public var scaleFloors: [ScaleFloor] = [
             ScaleFloor(seriesPrefix: "hrv_rmssd.", floor: 0.05),
             ScaleFloor(seriesPrefix: "hrv_sdnn", floor: 0.05),
             ScaleFloor(seriesPrefix: "resting_hr.", floor: 1.0),
             ScaleFloor(seriesPrefix: "heart_rate.", floor: 1.0),
+            // Bout HR rise and post-effort HR decline: differences of integer-bpm readings.
             ScaleFloor(seriesPrefix: "hr_response.", floor: 1.0),
+            ScaleFloor(seriesPrefix: "hr_recovery_", floor: 1.0),
             ScaleFloor(seriesPrefix: "resp_rate.", floor: 0.3),
             ScaleFloor(seriesPrefix: "skin_temp.", floor: 0.1),
+            // Functional features (System G), by units. Rates per worn waking hour / per active minute: one count
+            // (one bout, one 60-s minimum bout of locomotion, one transition) in the minimum denominator that admits
+            // the value (4 worn waking hours, 5 active minutes), so a single count on a constant history alone
+            // stays within |z| ≤ 1.
+            ScaleFloor(seriesPrefix: "functional.bouts_per_worn_hour", floor: 0.25),
+            ScaleFloor(seriesPrefix: "functional.locomotion_s_per_worn_hour", floor: 15),
+            ScaleFloor(seriesPrefix: "functional.active_to_rest_per_min", floor: 0.2),
+            // One pause per 10 minutes of bout time (the middle duration-band edge).
+            ScaleFloor(seriesPrefix: "functional.pauses_per_bout_hour", floor: 6),
+            // Counts: integer resolution. Seconds totals: one 60-s minimum bout of locomotion. Medians of bout and
+            // rest durations: half the 60-s minimum bout.
+            ScaleFloor(seriesPrefix: "functional.bout_count", floor: 1),
+            ScaleFloor(seriesPrefix: "functional.locomotion_s", floor: 60),
+            ScaleFloor(seriesPrefix: "functional.median_bout_s", floor: 30),
+            ScaleFloor(seriesPrefix: "functional.rest_after_bout_median_s", floor: 30),
+            // Uncalibrated counter steps per minute: integer resolution; within-bout CV: one percentage point.
+            ScaleFloor(seriesPrefix: "functional.cadence_steps_per_min", floor: 1),
+            ScaleFloor(seriesPrefix: "functional.cadence_within_bout_cv", floor: 0.01),
         ]
-        /// Floor for unlisted identity-scale series, as a share of |center|.
+        /// Floor for unlisted identity-scale series: the larger of this share of |center| and
+        /// `defaultAbsoluteFloor` (reason `scale_floor_default`).
         public var defaultRelativeFloor = 0.02
-        /// Floor for unlisted ln-scale series (ln units).
+        /// Absolute floor of unlisted identity-scale series: one native unit. Conservative for series with a
+        /// fine resolution (it can only shrink their distances), and it keeps a zero-centred constant history
+        /// (e.g. a count that was 0 every day) from turning one count into near-infinite certainty.
+        public var defaultAbsoluteFloor = 1.0
+        /// Floor for unlisted ln-scale series (ln units; reason `scale_floor_default`).
         public var defaultLogFloor = 0.05
-        /// Absolute lower bound of every scale.
+        /// Numerical lower bound of every scale (no series reaches it with the floors above).
         public var minimumScale = 1e-6
 
         public init() {}
@@ -304,6 +338,18 @@ extension PhysiologyContext {
         public static let frozenNotRegistered: ReasonCode = "frozen_not_registered"
         public static let frozenRegistersInOtherMode: ReasonCode = "frozen_registers_in_other_mode"
         public static let frozenScaleRefloored: ReasonCode = "frozen_scale_floored_by_current_policy"
+        /// A frozen reference is registered for (series, regime, version) but its selection window does not end
+        /// before the scored day (e.g. a back-filled day inside it). The registered reference is the authority:
+        /// no second reference is registered, and this day has no frozen comparison.
+        public static let frozenWindowNotCompleteForDay: ReasonCode = "frozen_window_not_complete_for_day"
+        /// Causal mode: a frozen reference created for the scored day or later (or whose window ends on or after
+        /// it) was passed in and ignored; it was not available to a live decision on that day.
+        public static let frozenCreatedAfterDayIgnored: ReasonCode = "frozen_created_after_day_ignored"
+        /// No series-specific scale floor is listed; the default floor rule applied.
+        public static let scaleFloorDefault: ReasonCode = "scale_floor_default"
+        /// Causal partial day: the value accumulates over the day so far while its history holds whole days, so
+        /// no distance is given (see `causalPartialDaySeriesMarkers`).
+        public static let partialDayComposition: ReasonCode = "partial_day_composition"
         public static let pooledTowardParent: ReasonCode = "pooled_toward_parent"
         public static let contextUnsupportedParentOnly: ReasonCode = "context_unsupported_parent_only"
         public static let parentInsufficientChildOnly: ReasonCode = "parent_insufficient_child_only"
@@ -318,6 +364,7 @@ extension PhysiologyContext {
             winsorizedMeanEstimator, scaleFromRollingView, scaleFromRecentWindow, frozenHistoricalNotHealthy,
             frozenRegisteredThisRun, frozenNotRegistered, frozenRegistersInOtherMode, frozenScaleRefloored,
             pooledTowardParent, contextUnsupportedParentOnly, parentInsufficientChildOnly, noPopulationPrior,
+            frozenWindowNotCompleteForDay, frozenCreatedAfterDayIgnored, scaleFloorDefault, partialDayComposition,
         ]
 
         /// Marker between a parent series key and its local-time-band stratum (`<parent>.band_06_12`).
@@ -474,6 +521,11 @@ extension PhysiologyContext {
         /// Parent series get `recent`, `rolling` and `frozen`; time-band strata get `conditioned`. Only values of the
         /// same series, the same regime key (the documented comparability rule: equality) and the same mode are
         /// pooled; history from `day` or later is ignored even if the caller passes it.
+        ///
+        /// Frozen: a registered reference for (series, regime, version) is the authority. It scores days after its
+        /// window; a day inside or before it gets no frozen comparison, and no second reference is registered
+        /// while one exists. Causal mode ignores references created for `day` or later. Causal values of
+        /// day-accumulating series (`causalPartialDaySeriesMarkers`) carry no distance.
         public static func compare(_ values: [DailyValue], history: [DailyValue], frozen: [FrozenReference],
                                    day: String, policyFingerprint: String,
                                    config: ReferenceConfig) -> (comparisons: [ReferenceComparison],
@@ -504,11 +556,14 @@ extension PhysiologyContext {
                     continue
                 }
                 let rolling = rollingComparison(v, t: t, index: index, config: config)
-                comparisons.append(recentComparison(v, t: t, index: index, rolling: rolling.stats, config: config))
-                comparisons.append(rolling.comparison)
                 let f = frozenComparison(v, t: t, day: day, index: index, frozen: frozen,
                                          policyFingerprint: policyFingerprint, config: config)
-                comparisons.append(f.comparison)
+                var views = [recentComparison(v, t: t, index: index, rolling: rolling.stats, config: config),
+                             rolling.comparison, f.comparison]
+                if isCausalPartialDay(v.seriesKey, mode: v.mode, config: config) {
+                    views = views.map(withoutDistance)
+                }
+                comparisons += views
                 if let n = f.registered { newFrozen.append(n) }
             }
             let order: [ReferenceView: Int] = [.recent: 0, .rolling: 1, .frozen: 2, .conditioned: 3]
@@ -604,6 +659,25 @@ extension PhysiologyContext {
             config.excludedSeriesPrefixes.contains { seriesKey.hasPrefix($0) }
         }
 
+        /// A causal parent value of a day-accumulating series (`causalPartialDaySeriesMarkers`): it may describe
+        /// the day up to the cutoff only, while its history holds whole days.
+        static func isCausalPartialDay(_ seriesKey: String, mode: ProcessingMode, config: ReferenceConfig) -> Bool {
+            mode == .causalLive && !isStratum(seriesKey)
+                && config.causalPartialDaySeriesMarkers.contains { !$0.isEmpty && seriesKey.contains($0) }
+        }
+
+        /// The comparison with its distances removed (`partial_day_composition`): the reference (center, scale,
+        /// support) stays visible; z and both differences are dropped and a scoring status becomes provisional.
+        static func withoutDistance(_ c: ReferenceComparison) -> ReferenceComparison {
+            var c = c
+            if c.status == .ready { c.status = .provisional }
+            c.robustZ = nil
+            c.signedDifference = nil
+            c.transformedDifference = nil
+            c.reasons = Array(Set(c.reasons + [partialDayComposition])).sorted()
+            return c
+        }
+
         static func isLog(_ seriesKey: String, config: ReferenceConfig) -> Bool {
             config.logTransformSeriesPrefixes.contains { seriesKey.hasPrefix($0) }
         }
@@ -621,13 +695,20 @@ extension PhysiologyContext {
 
         static func inverse(_ x: Double, log: Bool) -> Double { log ? exp(x) : x }
 
-        /// The scale floor of a series on its transformed scale.
-        static func scaleFloor(_ seriesKey: String, center: Double?, config: ReferenceConfig) -> Double {
-            let match = config.scaleFloors.filter { seriesKey.hasPrefix($0.seriesPrefix) }
+        /// The listed floor of a series (longest matching prefix), if any.
+        static func listedFloor(_ seriesKey: String, config: ReferenceConfig) -> ScaleFloor? {
+            config.scaleFloors.filter { !$0.seriesPrefix.isEmpty && seriesKey.hasPrefix($0.seriesPrefix) }
                 .max { $0.seriesPrefix.count < $1.seriesPrefix.count }
+        }
+
+        /// The scale floor of a series on its transformed scale: the listed floor, else the default rule
+        /// (`defaultLogFloor` for ln series; the larger of `defaultRelativeFloor·|center|` and
+        /// `defaultAbsoluteFloor` for identity series).
+        static func scaleFloor(_ seriesKey: String, center: Double?, config: ReferenceConfig) -> Double {
             let f: Double
-            if let match { f = match.floor } else if isLog(seriesKey, config: config) { f = config.defaultLogFloor }
-            else { f = config.defaultRelativeFloor * abs(center ?? 0) }
+            if let match = listedFloor(seriesKey, config: config) { f = match.floor }
+            else if isLog(seriesKey, config: config) { f = config.defaultLogFloor }
+            else { f = max(config.defaultRelativeFloor * abs(center ?? 0), config.defaultAbsoluteFloor) }
             return max(config.minimumScale, f.isFinite ? f : 0)
         }
 
@@ -695,14 +776,30 @@ extension PhysiologyContext {
                                    policyFingerprint: policyFingerprint)
         }
 
-        /// The frozen reference of (series, regime) at the configured version that ended before day `t`.
-        static func frozenFor(seriesKey: String, regimeKey: String, frozen: [FrozenReference], before t: Int,
-                              config: ReferenceConfig) -> FrozenReference? {
-            frozen.filter {
+        /// The registered frozen reference of (series, regime) at the configured version: the authority, whatever
+        /// day it was created for. Storage is insert-only on (series, regime, version), so at most one exists; if
+        /// several are passed, the earliest selection wins deterministically. Callers use it only for days after
+        /// its window (`toDay < t`) and never register a second one while it exists.
+        ///
+        /// Causal mode first drops references created for day `t` or later or whose window ends on or after `t`
+        /// (`ignored` counts them): a live decision on day t could not have used them (the worker also filters by
+        /// registration time; this guard does not rely on it).
+        static func frozenAuthority(seriesKey: String, regimeKey: String, frozen: [FrozenReference],
+                                    mode: ProcessingMode, t: Int,
+                                    config: ReferenceConfig) -> (reference: FrozenReference?, ignored: Int) {
+            var candidates = frozen.filter {
                 $0.seriesKey == seriesKey && $0.regimeKey == regimeKey && $0.version == config.frozenVersion
-                    && (dayNumber($0.toDay).map { $0 < t } ?? false)
-                    && $0.center.isFinite && $0.scale.isFinite
-            }.min { ($0.fromDay, $0.id) < ($1.fromDay, $1.id) }
+                    && dayNumber($0.toDay) != nil && $0.center.isFinite && $0.scale.isFinite
+            }
+            var ignored = 0
+            if mode == .causalLive {
+                let available = candidates.filter {
+                    dayNumber($0.toDay)! < t && (dayNumber($0.createdForDay).map { $0 < t } ?? false)
+                }
+                ignored = candidates.count - available.count
+                candidates = available
+            }
+            return (candidates.min { ($0.fromDay, $0.id) < ($1.fromDay, $1.id) }, ignored)
         }
 
         // MARK: - Views
@@ -723,6 +820,7 @@ extension PhysiologyContext {
             let centerOrig = s.center.map { inverse($0, log: log) }
             let z: Double? = scoring ? zip3(x, s.center, scale).map { ($0 - $1) / $2 } : nil
             if scoring && floored { reasons.append(scaleFloored) }
+            if scoring && listedFloor(v.seriesKey, config: config) == nil { reasons.append(scaleFloorDefault) }
             if s.constant { reasons.append(constantHistory) }
             if scoring && config.smallSampleCorrection && s.estimator.hasSuffix("median_mad") && s.n < 40 {
                 reasons.append(smallSampleScaleCorrection)
@@ -832,8 +930,19 @@ extension PhysiologyContext {
                                      config: ReferenceConfig) -> (comparison: ReferenceComparison,
                                                                   registered: FrozenReference?) {
             var reasons: [ReasonCode] = [frozenHistoricalNotHealthy] + historyReasons(index, v)
-            var ref = frozenFor(seriesKey: v.seriesKey, regimeKey: v.regimeKey, frozen: frozen, before: t,
-                                config: config)
+            let authority = frozenAuthority(seriesKey: v.seriesKey, regimeKey: v.regimeKey, frozen: frozen,
+                                            mode: v.mode, t: t, config: config)
+            if authority.ignored > 0 { reasons.append(frozenCreatedAfterDayIgnored) }
+            var ref = authority.reference
+            if let f = ref, let to = dayNumber(f.toDay), to >= t {
+                // The registered reference is the authority (R-F7): a day inside or before its selection window
+                // neither registers another "version 1" nor gets a frozen comparison.
+                reasons.append(frozenWindowNotCompleteForDay)
+                var s = RefStats(); s.estimator = "frozen_median_mad"
+                s.n = f.supportDays; s.fromDay = f.fromDay; s.toDay = f.toDay
+                return (build(v, view: .frozen, stats: s, status: .unavailable, reasons: reasons, referenceId: f.id,
+                              config: config), nil)
+            }
             var registered: FrozenReference?
             if ref == nil {
                 let pts = index.points[HistoryIndex.key(v.mode, v.seriesKey, v.regimeKey)] ?? []

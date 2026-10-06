@@ -313,6 +313,80 @@ extension PhysiologyContext {
                               primaryAlarmIn90DaysShare: replicates == 0 ? 0 : Double(early) / Double(replicates))
         }
 
+        // MARK: - Document path (what one document's episode window shows)
+
+        public struct DocumentLoadResult: Equatable, Sendable {
+            /// Days of history loaded before the document day; nil = the whole series (full lookback).
+            public var historyDays: Int?
+            /// Share of documents whose episode list holds at least one CUSUM persistent shift.
+            public var shareWithEpisode: Double
+            public var episodesPerDocument: Double
+            /// Share of the window's scored days that entered the detectors (after the burn-in).
+            public var detectorDayShare: Double
+        }
+
+        public struct DocumentPathResult: Equatable, Sendable {
+            public var phi: Double
+            public var missingRate: Double
+            public var replicates: Int
+            public var loads: [DocumentLoadResult]
+        }
+
+        /// Null series of `days` days; one document on the last day, built by the public
+        /// `ChangeDetection.episodes` (90-day episode window) from the last `historyDays` days of history, as the
+        /// worker loads it, and from the whole series (full lookback, the path `evaluateNull` measures).
+        public static func evaluateDocuments(phi: Double, replicates: Int, days: Int = 300,
+                                             historyDays: [Int?] = [90, 160, nil], missingRate: Double = 0,
+                                             spec: SeriesSpec = .rmssd, change: ChangeConfig = .init(),
+                                             reference: ReferenceConfig = .init(), seed: UInt64) -> DocumentPathResult {
+            var s = Scenario(); s.days = days; s.phi = phi; s.missingRate = missingRate
+            guard let first = ContextReferences.dayNumber(spec.firstDay) else {
+                return DocumentPathResult(phi: phi, missingRate: missingRate, replicates: 0, loads: [])
+            }
+            let t = first + days - 1
+            let day = ContextReferences.dayKey(t)
+            var docs = [Int](repeating: 0, count: historyDays.count)
+            var eps = docs, fed = docs, scored = docs
+            let log = ContextReferences.isLog(spec.seriesKey, config: reference)
+            for rep in 0..<replicates {
+                let values = dailyValues(generate(s, seed: streamSeed(seed, "documents|\(phi)|\(missingRate)", rep)),
+                                         spec: spec, reference: reference)
+                let today = values.filter { $0.day == day }
+                for (k, load) in historyDays.enumerated() {
+                    let lo = load.map { t - $0 } ?? Int.min
+                    let history = values.filter {
+                        let n = ContextReferences.dayNumber($0.day)!
+                        return n >= lo && n < t
+                    }
+                    let out = ChangeDetection.episodes(today: today, history: history, frozen: [], boundaries: [],
+                                                       day: day, mode: .retrospective, finality: .final,
+                                                       policyFingerprint: "evaluation", change: change,
+                                                       reference: reference)
+                    let p = out.filter { $0.state == .persistentShift && $0.detector == primaryName(change) }
+                    eps[k] += p.count
+                    if !p.isEmpty { docs[k] += 1 }
+                    // Detector-day share of the window (the burn-in's cost).
+                    let pts = (history + today).compactMap { v -> ContextReferences.RefPoint? in
+                        guard let n = ContextReferences.dayNumber(v.day),
+                              let x = ContextReferences.forward(v.value, log: log) else { return nil }
+                        return ContextReferences.RefPoint(dayNum: n, day: v.day, value: v.value, x: x)
+                    }.sorted { $0.dayNum < $1.dayNum }
+                    let sc = ChangeDetection.score(points: pts, windowStart: t - max(1, change.windowDays),
+                                                   todayNum: t, frozen: nil, boundaryDays: [],
+                                                   seriesKey: spec.seriesKey, change: change, reference: reference)
+                    scored[k] += sc.filter { $0.rollingZ != nil }.count
+                    fed[k] += sc.filter { $0.rollingZ != nil && $0.detectorDay }.count
+                }
+            }
+            let n = Double(max(1, replicates))
+            return DocumentPathResult(phi: phi, missingRate: missingRate, replicates: replicates,
+                                      loads: historyDays.indices.map { k in
+                DocumentLoadResult(historyDays: historyDays[k], shareWithEpisode: Double(docs[k]) / n,
+                                   episodesPerDocument: Double(eps[k]) / n,
+                                   detectorDayShare: scored[k] == 0 ? 0 : Double(fed[k]) / Double(scored[k]))
+            })
+        }
+
         // MARK: - Step changes (detection delay, missed changes, adaptation)
 
         public struct DelaySummary: Equatable, Sendable {
@@ -326,10 +400,14 @@ extension PhysiologyContext {
             public var p90: Double?
             public var medianDelayCI: (lo: Double, hi: Double)?
             public var missedShareCI: (lo: Double, hi: Double)?
+            /// Median over detected series of `alarmAfterStartDays` as a document reports it (alarm − the
+            /// detector's own start estimate), next to the true delay (alarm − step).
+            public var medianAlarmAfterStart: Double?
             public var missedShare: Double { 1 - detectedShare }
             public static func == (a: DelaySummary, b: DelaySummary) -> Bool {
                 a.detectedShare == b.detectedShare && a.alreadyFlaggedShare == b.alreadyFlaggedShare
                     && a.medianDelay == b.medianDelay && a.p25 == b.p25
+                    && a.medianAlarmAfterStart == b.medianAlarmAfterStart
                     && a.p75 == b.p75 && a.p90 == b.p90 && a.medianDelayCI?.lo == b.medianDelayCI?.lo
                     && a.medianDelayCI?.hi == b.medianDelayCI?.hi && a.missedShareCI?.lo == b.missedShareCI?.lo
                     && a.missedShareCI?.hi == b.missedShareCI?.hi
@@ -352,7 +430,9 @@ extension PhysiologyContext {
         }
 
         /// `delays[i]`: days from the step to the alarm, `-1` when already flagged at the step, nil when missed.
-        static func summarize(_ delays: [Double?], horizon: Int, resamples: Int, seed: UInt64) -> DelaySummary {
+        /// `afterStart`: alarm − detector start of each detected alarm (the documents' `alarmAfterStartDays`).
+        static func summarize(_ delays: [Double?], afterStart: [Double] = [], horizon: Int, resamples: Int,
+                              seed: UInt64) -> DelaySummary {
             let detected = delays.compactMap { $0 }.filter { $0 >= 0 }
             let flagged = delays.compactMap { $0 }.filter { $0 < 0 }.count
             let n = Double(max(1, delays.count))
@@ -365,7 +445,8 @@ extension PhysiologyContext {
                 medianDelayCI: percentileBootstrapCI(detected, statistic: { RobustStats.median($0) },
                                                      resamples: resamples, seed: seed),
                 missedShareCI: percentileBootstrapCI(missed, statistic: { RobustStats.mean($0) },
-                                                     resamples: resamples, seed: seed &+ 7))
+                                                     resamples: resamples, seed: seed &+ 7),
+                medianAlarmAfterStart: RobustStats.median(afterStart))
         }
 
         /// Sustained step of `magnitudeSigma` at day `stepDay`; detection = first alarm in the step direction within
@@ -379,11 +460,14 @@ extension PhysiologyContext {
             let dir = magnitudeSigma >= 0 ? 1 : -1
             let name = primaryName(change)
             var dp: [Double?] = [], da: [Double?] = [], df: [Double?] = []
+            var ap: [Double] = [], aa: [Double] = [], af: [Double] = []
             var adapted = 0, visible = 0
-            /// (alarm day, last sustained day) pairs → delay, -1 (already flagged at the step) or nil (missed).
-            func first(_ alarms: [(Int, Int)]) -> Double? {
-                if let d = alarms.map(\.0).filter({ $0 >= stepDay && $0 < stepDay + horizon }).min() {
-                    return Double(d - stepDay)
+            /// (alarm day, last sustained day, start day) → delay, -1 (already flagged at the step) or nil (missed),
+            /// and the alarm − start of the first alarm inside the horizon.
+            func first(_ alarms: [(Int, Int, Int)], _ afterStart: inout [Double]) -> Double? {
+                if let a = alarms.filter({ $0.0 >= stepDay && $0.0 < stepDay + horizon }).min(by: { $0.0 < $1.0 }) {
+                    afterStart.append(Double(a.0 - a.2))
+                    return Double(a.0 - stepDay)
                 }
                 return alarms.contains { $0.0 < stepDay && $0.1 >= stepDay } ? -1 : nil
             }
@@ -392,11 +476,13 @@ extension PhysiologyContext {
                              change: change, reference: reference)
                 dp.append(first(sr.analysis.drafts.filter {
                     $0.state == .persistentShift && $0.detector == name && $0.direction == dir
-                }.compactMap { d in d.alarmIdx.map { (sr.dayIndex($0), sr.dayIndex(d.lastIdx)) } }))
+                }.compactMap { d in d.alarmIdx.map { (sr.dayIndex($0), sr.dayIndex(d.lastIdx), sr.dayIndex(d.startIdx)) } },
+                                &ap))
                 da.append(first(sr.analysis.alternative.filter { $0.direction == dir }
-                    .compactMap { d in d.alarmIdx.map { (sr.dayIndex($0), sr.dayIndex(d.lastIdx)) } }))
+                    .compactMap { d in d.alarmIdx.map { (sr.dayIndex($0), sr.dayIndex(d.lastIdx), sr.dayIndex(d.startIdx)) } },
+                                &aa))
                 df.append(first(sr.frozenRuns.filter { $0.direction == dir }
-                    .map { (sr.dayIndex($0.alarmIdx), sr.dayIndex($0.lastIdx)) }))
+                    .map { (sr.dayIndex($0.alarmIdx), sr.dayIndex($0.lastIdx), sr.dayIndex($0.firstHit)) }, &af))
                 let late = sr.analysis.scores.filter {
                     let d = $0.dayNum - sr.firstDayNum
                     return d >= stepDay + 36 && d <= stepDay + 42
@@ -408,9 +494,12 @@ extension PhysiologyContext {
             let n = Double(max(1, replicates))
             return StepResult(phi: phi, magnitudeSigma: magnitudeSigma, missingRate: missingRate,
                               replicates: replicates, horizonDays: horizon,
-                              primary: summarize(dp, horizon: horizon, resamples: resamples, seed: base),
-                              alternative: summarize(da, horizon: horizon, resamples: resamples, seed: base &+ 11),
-                              frozen: summarize(df, horizon: horizon, resamples: resamples, seed: base &+ 23),
+                              primary: summarize(dp, afterStart: ap, horizon: horizon, resamples: resamples,
+                                                 seed: base),
+                              alternative: summarize(da, afterStart: aa, horizon: horizon, resamples: resamples,
+                                                     seed: base &+ 11),
+                              frozen: summarize(df, afterStart: af, horizon: horizon, resamples: resamples,
+                                                seed: base &+ 23),
                               rollingAdaptedShare: Double(adapted) / n, frozenVisibleShare: Double(visible) / n)
         }
 
@@ -732,21 +821,42 @@ extension PhysiologyContext {
             out.append("")
             out.append("| φ | missing | CUSUM persistent / wk | persistence-rule / wk | frozen persistence / wk | excursions / wk | recurring / wk | ≥1 CUSUM alarm in 90 d |")
             out.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
-            for (phi, miss) in [(0.0, 0.0), (0.3, 0.0), (0.5, 0.0), (0.3, 0.3)] {
+            func cell(_ e: RateEstimate) -> String { "\(f(e.perWeek, 3)) (\(f(e.ciLow, 3))–\(f(e.ciHigh, 3)))" }
+            for (phi, miss) in [(0.0, 0.0), (0.3, 0.0), (0.5, 0.0), (0.3, 0.3), (0.0, 0.5), (0.3, 0.5), (0.5, 0.5),
+                                (0.5, 0.7)] {
                 let r = evaluateNull(phi: phi, replicates: replicates, missingRate: miss, resamples: resamples, seed: seed)
-                func cell(_ e: RateEstimate) -> String { "\(f(e.perWeek, 3)) (\(f(e.ciLow, 3))–\(f(e.ciHigh, 3)))" }
                 out.append("| \(f(phi, 1)) | \(pct(miss)) | \(cell(r.primary)) | \(cell(r.alternative)) | \(cell(r.frozen)) | \(cell(r.excursions)) | \(cell(r.recurring)) | \(pct(r.primaryAlarmIn90DaysShare)) |")
+            }
+            out.append("")
+            out.append("**Start-up included (counted from day 0, burn-in and assumed φ in force), 400 days.**")
+            out.append("")
+            out.append("| φ | missing | CUSUM persistent / wk | excursions / wk | ≥1 CUSUM alarm in the first 90 d |")
+            out.append("| --- | --- | --- | --- | --- |")
+            for phi in [0.0, 0.3, 0.5] {
+                let r = evaluateNull(phi: phi, replicates: replicates, burnIn: 0, resamples: resamples, seed: seed)
+                out.append("| \(f(phi, 1)) | 0 % | \(cell(r.primary)) | \(cell(r.excursions)) | \(pct(r.primaryAlarmIn90DaysShare)) |")
+            }
+            out.append("")
+            out.append("**Document path: one document on day 300 of a null series, built by `ChangeDetection.episodes` (90-day window) from the history a worker loads.** Share of documents with ≥ 1 CUSUM persistent shift / CUSUM persistent shifts per document / share of the window's scored days that entered the detectors.")
+            out.append("")
+            out.append("| φ | missing | 90-day load | 160-day load (worker) | full lookback (evaluated path) |")
+            out.append("| --- | --- | --- | --- | --- |")
+            for (phi, miss) in [(0.0, 0.0), (0.3, 0.0), (0.5, 0.0), (0.3, 0.5)] {
+                let r = evaluateDocuments(phi: phi, replicates: replicates, missingRate: miss, seed: seed)
+                let cells = r.loads.map { "\(pct($0.shareWithEpisode)) / \(f($0.episodesPerDocument)) / \(pct($0.detectorDayShare))" }
+                out.append("| \(f(phi, 1)) | \(pct(miss)) | \(cells.joined(separator: " | ")) |")
             }
             out.append("")
             out.append("**Sustained step down at day 70, horizon 28 days.** Delay in days from the step among detected series; 95 % percentile bootstrap over replicates.")
             out.append("")
-            out.append("| φ | step | missing | CUSUM missed | CUSUM delay median (CI) | p25–p75 / p90 | persistence-rule missed / median | frozen-rule missed / median | rolling adapted by +42 d | frozen still ≥ 2 at +42 d |")
-            out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+            out.append("| φ | step | missing | CUSUM missed | CUSUM delay median (CI) | p25–p75 / p90 | document alarmAfterStartDays median | persistence-rule missed / median | frozen-rule missed / median | rolling adapted by +42 d | frozen still ≥ 2 at +42 d |")
+            out.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
             for (phi, m, miss) in [(0.0, -1.0, 0.0), (0.0, -2.0, 0.0), (0.3, -1.0, 0.0), (0.3, -2.0, 0.0),
-                                   (0.5, -1.0, 0.0), (0.5, -2.0, 0.0), (0.3, -1.0, 0.3), (0.3, -2.0, 0.3)] {
+                                   (0.5, -1.0, 0.0), (0.5, -2.0, 0.0), (0.3, -1.0, 0.3), (0.3, -2.0, 0.3),
+                                   (0.3, -2.0, 0.5)] {
                 let r = evaluateStep(phi: phi, magnitudeSigma: m, replicates: replicates, missingRate: miss,
                                      resamples: resamples, seed: seed)
-                out.append("| \(f(phi, 1)) | \(f(m, 0)) SD | \(pct(miss)) | \(pct(r.primary.missedShare)) (\(ci(r.primary.missedShareCI))) | \(f(r.primary.medianDelay, 1)) (\(ci(r.primary.medianDelayCI, 1))) | \(f(r.primary.p25, 0))–\(f(r.primary.p75, 0)) / \(f(r.primary.p90, 0)) | \(pct(r.alternative.missedShare)) / \(f(r.alternative.medianDelay, 1)) | \(pct(r.frozen.missedShare)) / \(f(r.frozen.medianDelay, 1)) | \(pct(r.rollingAdaptedShare)) | \(pct(r.frozenVisibleShare)) |")
+                out.append("| \(f(phi, 1)) | \(f(m, 0)) SD | \(pct(miss)) | \(pct(r.primary.missedShare)) (\(ci(r.primary.missedShareCI))) | \(f(r.primary.medianDelay, 1)) (\(ci(r.primary.medianDelayCI, 1))) | \(f(r.primary.p25, 0))–\(f(r.primary.p75, 0)) / \(f(r.primary.p90, 0)) | \(f(r.primary.medianAlarmAfterStart, 1)) | \(pct(r.alternative.missedShare)) / \(f(r.alternative.medianDelay, 1)) | \(pct(r.frozen.missedShare)) / \(f(r.frozen.medianDelay, 1)) | \(pct(r.rollingAdaptedShare)) | \(pct(r.frozenVisibleShare)) |")
             }
             out.append("")
             out.append("**Gradual drift down (0.05 SD/day for 60 days = 3 SD), read through `ChangeDetection.episodes` on the last day.**")

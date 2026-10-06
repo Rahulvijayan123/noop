@@ -89,7 +89,7 @@ final class PCChangeDetectionTests: XCTestCase {
         let alarm = try XCTUnwrap(shift.alarmDay)
         XCTAssertGreaterThanOrEqual(alarm, Self.day(70))
         XCTAssertLessThanOrEqual(alarm, Self.day(76))
-        XCTAssertEqual(shift.detectionDelayDays, Ref.dayNumber(alarm)! - Ref.dayNumber(shift.startDay)!)
+        XCTAssertEqual(shift.alarmAfterStartDays, Ref.dayNumber(alarm)! - Ref.dayNumber(shift.startDay)!)
         XCTAssertEqual(shift.detector, "cusum")
         XCTAssertTrue(shift.reasons.contains(CD.detectorCusum))
         XCTAssertTrue(shift.reasons.contains(CD.frozenAndRollingAgree))
@@ -329,17 +329,25 @@ final class PCChangeDetectionTests: XCTestCase {
     }
 
     func testOnlySeriesWithoutSharedDeclaredInputsCountAsSeparateGroups() throws {
-        let cs = [Self.comparison("hrv_rmssd.sleep_night", z: -3), Self.comparison("functional.bouts_per_worn_hour", z: -3),
+        // Union-find mechanics on declared notes where nightly HRV and a bout-level functional feature share no
+        // group. (With the engine's notes they do share one: the functional selection reads the HR-confirmed
+        // sleep detector and heart-signal wear, R-F4; see the next assertion.)
+        let notes = [PC.DependenceNote(group: "beat_intervals", members: ["hrv_rmssd"], note: "test"),
+                     PC.DependenceNote(group: "strap_motion", members: ["functional_features", "eligibility_stillness"],
+                                       note: "test")]
+        let cs = [Self.comparison("hrv_rmssd.sleep_night", z: -3), Self.comparison("functional.median_bout_s", z: -3),
                   Self.comparison("hrv_rmssd.stable_awake_5min.band_06_12", z: -9, view: .conditioned),
                   Self.comparison("heart_rate.stable_awake_5min", z: 8, status: .insufficient)]
-        let m = try XCTUnwrap(CD.multiSignal(comparisons: cs, dependence: Self.notes, day: Self.day(0), config: .init()).first)
-        XCTAssertEqual(m.deviatingSeries, ["functional.bouts_per_worn_hour", "hrv_rmssd.sleep_night"])
+        let m = try XCTUnwrap(CD.multiSignal(comparisons: cs, dependence: notes, day: Self.day(0), config: .init()).first)
+        XCTAssertEqual(m.deviatingSeries, ["functional.median_bout_s", "hrv_rmssd.sleep_night"])
         XCTAssertEqual(m.independentGroupCount, 2)
         XCTAssertTrue(m.reasons.contains(CD.groupsNotProvenIndependent))
         XCTAssertFalse(m.reasons.contains(CD.sharedInputsNotIndependent))
+        XCTAssertEqual(CD.multiSignal(comparisons: cs, dependence: Self.notes, day: Self.day(0), config: .init())
+                        .first?.independentGroupCount, 1, "engine notes: the functional selection reads the sleep detector")
         // Stable-awake HRV and a functional feature share the stillness selection (strap motion): one group.
         let shared = [Self.comparison("hrv_rmssd.stable_awake_5min", z: -3), Self.comparison("functional.bouts_per_worn_hour", z: -3)]
-        XCTAssertEqual(CD.multiSignal(comparisons: shared, dependence: Self.notes, day: Self.day(0), config: .init())
+        XCTAssertEqual(CD.multiSignal(comparisons: shared, dependence: notes, day: Self.day(0), config: .init())
                         .first?.independentGroupCount, 1)
         // Nothing deviating: an explicit empty summary; nothing compared: no summary.
         let calm = CD.multiSignal(comparisons: [Self.comparison("hrv_rmssd.sleep_night", z: 0.2)], dependence: Self.notes,
@@ -347,5 +355,155 @@ final class PCChangeDetectionTests: XCTestCase {
         XCTAssertEqual(calm.first?.independentGroupCount, 0)
         XCTAssertEqual(calm.first?.reasons, [CD.noDeviatingSeries])
         XCTAssertTrue(CD.multiSignal(comparisons: [], dependence: Self.notes, day: Self.day(0), config: .init()).isEmpty)
+    }
+
+    /// V13: every series key the engine emits maps to at least one group the engine declares (no `undeclared:`
+    /// group, which would count as independent evidence by default).
+    func testEverySeriesKeyTheEngineEmitsMapsToADeclaredDependenceGroup() {
+        let declared = Set(Self.notes.flatMap(\.members))
+        let exertion = PC.ExertionConfig()
+        var keys = ["hrv_rmssd.sleep_night", "hrv_sdnn_index.sleep_night", "resting_hr.sleep_night",
+                    "resp_rate.sleep_night", "skin_temp.sleep_night", "heart_rate.sleep_night",
+                    "hrv_rmssd.stable_awake_5min", "hrv_sdnn.stable_awake_5min", "heart_rate.stable_awake_5min",
+                    "hrv_rmssd.stable_awake_5min.band_06_12", "hr_response.walk|rested",
+                    PC.ExertionBouts.recoverySeriesKey(kind: "walk", config: exertion),
+                    PC.ExertionBouts.recoverySeriesKey(kind: "workout_run", config: exertion)]
+        keys += [PC.Functional.seriesLocomotionPerWornHour, PC.Functional.seriesBoutsPerWornHour,
+                 PC.Functional.seriesMedianBout, PC.Functional.seriesPausesPerBoutHour,
+                 PC.Functional.seriesCadenceMean, PC.Functional.seriesCadenceCv, PC.Functional.seriesActiveToRest,
+                 PC.Functional.seriesRestAfterBout, PC.Functional.seriesLocomotionTotal, PC.Functional.seriesBoutCount]
+        for k in keys {
+            XCTAssertFalse(Set(CD.dependenceMembers(k)).isDisjoint(with: declared), "undeclared: \(k)")
+        }
+        // HR-derived bout series share heart rate (and the optical pulse) with every HR / HRV series.
+        let recovery = PC.ExertionBouts.recoverySeriesKey(kind: "walk", config: exertion)
+        let cs = [Self.comparison("hrv_rmssd.sleep_night", z: -3), Self.comparison(recovery, z: -3),
+                  Self.comparison("hr_response.walk|rested", z: 3)]
+        let m = CD.multiSignal(comparisons: cs, dependence: Self.notes, day: Self.day(0), config: .init()).first
+        XCTAssertEqual(m?.independentGroupCount, 1)
+        XCTAssertTrue(m?.dependenceGroups.contains("optical_pulse") ?? false)
+        XCTAssertFalse(m?.reasons.contains(CD.noDeclaredDependence) ?? true)
+    }
+
+    // MARK: Burn-in, autocorrelation fallback, history load (R-F2, R-F9)
+
+    /// Days whose rolling window is not inside the loaded history are scored for display, never fed to the
+    /// detectors: a level change inside the first 28 days of a series is not reported as a persistent shift
+    /// measured against a 7-day reference.
+    func testColdStartDaysAreScoredForDisplayButDoNotFeedTheDetectors() throws {
+        let xs: [Double?] = (0..<60).map { $0 < 7 ? Double(($0 * 3) % 5 - 2) * 0.2 : -4 + Double(($0 * 3) % 5 - 2) * 0.2 }
+        let vals = Self.values(pattern: xs)
+        let d = Self.day(59)
+        let eps = CD.episodes(today: vals.filter { $0.day == d }, history: vals.filter { $0.day < d }, frozen: [],
+                              boundaries: [], day: d, mode: .retrospective, finality: .final, policyFingerprint: "fp",
+                              change: .init(), reference: .init())
+        XCTAssertFalse(eps.contains { $0.state == .persistentShift || $0.state == .transientDeviation }, "\(eps)")
+        let status = try XCTUnwrap(eps.first { $0.direction == 0 })
+        XCTAssertEqual(status.state, .usualVariation)
+        XCTAssertTrue(status.reasons.contains(CD.detectorBurnIn))
+        XCTAssertEqual(status.startDay, Self.day(28), "the detectors' window starts after the burn-in")
+        // The burn-in days still carry their display distance (here: the step against the first 7 days).
+        let pts = Self.points(vals)
+        let sc = CD.score(points: pts, windowStart: Self.first, todayNum: Self.first + 59, frozen: nil,
+                          boundaryDays: [], seriesKey: Self.spec.seriesKey, change: .init(), reference: .init())
+        let day10 = try XCTUnwrap(sc.first { $0.dayNum == Self.first + 10 })
+        XCTAssertLessThan(try XCTUnwrap(day10.rollingZ), -2.5)
+        XCTAssertFalse(day10.detectorDay)
+        XCTAssertTrue(sc.filter { $0.dayNum - Self.first >= 28 }.allSatisfy(\.detectorDay))
+        // Without the burn-in the same history reports an episode measured against the first 7 days.
+        var noBurnIn = PC.ChangeConfig(); noBurnIn.detectorMinLookbackDays = 0
+        let cold = CD.episodes(today: vals.filter { $0.day == d }, history: vals.filter { $0.day < d }, frozen: [],
+                               boundaries: [], day: d, mode: .retrospective, finality: .final, policyFingerprint: "fp",
+                               change: noBurnIn, reference: .init())
+        XCTAssertTrue(cold.contains { $0.direction == -1 && $0.startDay == Self.day(7) }, "\(cold)")
+    }
+
+    /// With the worker's 160-day history load, a long-running series' document is exactly the full-lookback
+    /// (evaluated) path; a 90-day load is the burn-in-guarded subset of it.
+    func testWorkerHistoryLoadReproducesTheEvaluatedFullLookbackPath() throws {
+        for (seed, phi) in [(UInt64(31), 0.3), (32, 0.5)] {
+            var s = Self.scenario(days: 300, phi: phi); s.stepDay = 260; s.stepSigma = -3; s.missingRate = 0.1
+            let vals = Self.values(s, seed: seed)
+            let t = Self.first + 299, d = Self.day(299)
+            func eps(_ load: Int?) -> [PC.ChangeEpisode] {
+                let h = vals.filter { let n = Ref.dayNumber($0.day)!; return n < t && n >= t - (load ?? 100_000) }
+                return CD.episodes(today: vals.filter { $0.day == d }, history: h, frozen: [], boundaries: [], day: d,
+                                   mode: .retrospective, finality: .final, policyFingerprint: "fp", change: .init(),
+                                   reference: .init())
+            }
+            let full = eps(nil)
+            XCTAssertEqual(try PC.encoder().encode(eps(160)), try PC.encoder().encode(full), "seed \(seed)")
+            XCTAssertTrue(full.contains { $0.state == .persistentShift && $0.direction == -1 }, "\(full)")
+            // A 90-day load: the first 28 days of the window are burn-in, and every entry says so.
+            let short = eps(90)
+            XCTAssertTrue(short.allSatisfy { $0.reasons.contains(CD.detectorBurnIn) }, "\(short)")
+            XCTAssertFalse(full.contains { $0.reasons.contains(CD.detectorBurnIn) })
+            XCTAssertTrue(short.contains { $0.state == .persistentShift && $0.direction == -1 }, "\(short)")
+        }
+    }
+
+    /// R-F9: without enough consecutive-day pairs for φ̂ the CUSUM divides by the AR(1) factor of the
+    /// conservative fallback φ = 0.5 (√3), never by 1.
+    func testMissingAutocorrelationEstimateUsesTheConservativeFallbackNotNoAdjustment() throws {
+        func scores(phi: Double?) -> [CD.DayScore] {
+            (0..<12).map { CD.DayScore(dayNum: $0, day: Self.day($0), value: 1, x: 1, rollingZ: 3, rollingCenterX: 0,
+                                       rollingScale: 1, frozenZ: nil, phi: phi, resetBefore: nil) }
+        }
+        let change = PC.ChangeConfig()
+        // Clamp 2, k = 0.25, h = 7: adjusted by √3 each day adds 2/√3 − 0.25 ≈ 0.905 → S > 7 on the 8th day;
+        // with φ̂ = 0 it adds 1.75 → S > 7 on the 5th day.
+        let assumed = CD.cusumDrafts(scores(phi: nil), scored: Array(0..<12), change: change)
+        XCTAssertEqual(assumed.first { $0.direction == 1 }?.alarmIdx, 7)
+        let estimated = CD.cusumDrafts(scores(phi: 0), scored: Array(0..<12), change: change)
+        XCTAssertEqual(estimated.first { $0.direction == 1 }?.alarmIdx, 4)
+        // φ̂ pairs consecutive supported days up to `maxGapDays` apart, so an every-other-day series has an estimate
+        // (the autocorrelation of the sequence the CUSUM runs on) instead of no adjustment.
+        let alternate = Self.points(Self.values(pattern: (0..<56).map { $0 % 2 == 0 ? Double(($0 * 7) % 5 - 2) : nil }))
+        XCTAssertNotNil(CD.lagOneAutocorrelation(alternate[...], change: change))
+        XCTAssertNil(CD.lagOneAutocorrelation(alternate.prefix(15), change: change))
+        // Start of a series: past the 28-day burn-in, φ̂ needs 20 pairs on days d−69…d−14 (from day 34 on), so a
+        // step at day 28 is first accumulated with the fallback; the episode says so.
+        let xs: [Double?] = (0..<60).map { $0 < 28 ? Self.quiet(28)[$0] : -4 }
+        let vals = Self.values(pattern: xs)
+        let d = Self.day(40)
+        let out = CD.episodes(today: vals.filter { $0.day == d }, history: vals.filter { $0.day < d }, frozen: [],
+                              boundaries: [], day: d, mode: .retrospective, finality: .final, policyFingerprint: "fp",
+                              change: change, reference: .init())
+        let shift = try XCTUnwrap(out.first { $0.state == .persistentShift && $0.detector == "cusum" }, "\(out)")
+        XCTAssertEqual(shift.startDay, Self.day(28))
+        XCTAssertEqual(shift.alarmDay, Self.day(34), "six fallback days (2/√3 − k each) then one φ̂ = 0 day")
+        XCTAssertTrue(shift.reasons.contains(CD.autocorrelationAssumedConservative), "\(shift.reasons)")
+    }
+
+    /// P2: in causal mode today's stable-awake parent value (a partial day at the cutoff) is not fed to the
+    /// episodes; the series' episodes end with the previous day and say why.
+    func testCausalPartialDayValueStaysOutOfTheEpisodes() throws {
+        let series = "heart_rate.stable_awake_5min"
+        let t = Self.first + 80
+        let hist = (0..<80).map { i in
+            PC.DailyValue(day: Self.day(i), seriesKey: series, regimeKey: "r", metric: .heartRate,
+                          value: 70 + Double((i * 3) % 5 - 2), units: "bpm", supportCount: 8, supportUnit: "window",
+                          supportS: 2400, mode: .causalLive, finality: .provisional)
+        }
+        var today = hist[0]; today.day = Self.day(80); today.value = 50
+        let eps = CD.episodes(today: [today], history: hist, frozen: [], boundaries: [], day: Self.day(80),
+                              mode: .causalLive, finality: .provisional, policyFingerprint: "fp", change: .init(),
+                              reference: .init())
+        XCTAssertFalse(eps.isEmpty)
+        XCTAssertTrue(eps.allSatisfy { $0.reasons.contains(CD.partialDayValueExcluded) })
+        XCTAssertTrue(eps.allSatisfy { Ref.dayNumber($0.lastDay)! < t })
+        XCTAssertFalse(eps.contains { $0.state == .transientDeviation }, "the 50 bpm partial-day value is not an excursion")
+        // Retrospective (whole-day) values of the same series are analysed as usual.
+        let retro = hist.map { v -> PC.DailyValue in var w = v; w.mode = .retrospective; return w }
+        var r = today; r.mode = .retrospective
+        let reps = CD.episodes(today: [r], history: retro, frozen: [], boundaries: [], day: Self.day(80),
+                               mode: .retrospective, finality: .final, policyFingerprint: "fp", change: .init(),
+                               reference: .init())
+        XCTAssertTrue(reps.contains { $0.state == .transientDeviation && $0.lastDay == Self.day(80) }, "\(reps)")
+    }
+
+    static func points(_ vals: [PC.DailyValue]) -> [Ref.RefPoint] {
+        vals.map { Ref.RefPoint(dayNum: Ref.dayNumber($0.day)!, day: $0.day, value: $0.value, x: log($0.value)) }
+            .sorted { $0.dayNum < $1.dayNum }
     }
 }

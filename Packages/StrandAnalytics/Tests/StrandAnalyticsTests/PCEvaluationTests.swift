@@ -123,4 +123,32 @@ final class PCEvaluationTests: XCTestCase {
         XCTAssertGreaterThan(p.hi, 99.5)
         XCTAssertNil(E.stationaryBootstrapMeanCI([], meanBlock: 4, resamples: 10, seed: 1))
     }
+
+    /// R-F2: a document built from the worker's 160-day history load is exactly the evaluated full-lookback path;
+    /// a 90-day load only loses detector days (burn-in) and never adds false episodes beyond sampling error.
+    func testDocumentsBuiltFromTheWorkerHistoryLoadShowTheEvaluatedPath() {
+        for phi in [0.5] {
+            let r = E.evaluateDocuments(phi: phi, replicates: 40, seed: Self.seed)
+            let (short, worker, full) = (r.loads[0], r.loads[1], r.loads[2])
+            XCTAssertEqual(worker, PC.Evaluation.DocumentLoadResult(historyDays: 160,
+                                                                    shareWithEpisode: full.shareWithEpisode,
+                                                                    episodesPerDocument: full.episodesPerDocument,
+                                                                    detectorDayShare: 1), "φ=\(phi)")
+            XCTAssertEqual(full.detectorDayShare, 1)
+            // Dense series: days D−83…D have a rolling reference (≥ 7 days), days D−62…D are past the burn-in.
+            XCTAssertEqual(short.detectorDayShare, 63.0 / 84.0, accuracy: 1e-12)
+            XCTAssertLessThanOrEqual(short.shareWithEpisode, full.shareWithEpisode + 0.1, "φ=\(phi)")
+        }
+    }
+
+    /// R-F9: sparse series keep a bounded null rate (gap-aware φ̂, conservative fallback), and including the
+    /// start-up period (burn-in, fallback φ) does not raise the rate above the steady state.
+    func testSparseSeriesAndStartUpKeepTheNullRateBounded() {
+        let sparse = E.evaluateNull(phi: 0.5, replicates: 60, missingRate: 0.5, resamples: 100, seed: Self.seed)
+        XCTAssertLessThan(sparse.primary.perWeek, 0.035)
+        let steady = E.evaluateNull(phi: 0.3, replicates: 60, resamples: 100, seed: Self.seed)
+        let startUp = E.evaluateNull(phi: 0.3, replicates: 60, burnIn: 0, resamples: 100, seed: Self.seed)
+        XCTAssertLessThan(startUp.primary.perWeek, steady.primary.perWeek + 0.01)
+    }
 }
+

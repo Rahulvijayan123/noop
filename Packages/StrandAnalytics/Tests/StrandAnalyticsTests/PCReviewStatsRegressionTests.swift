@@ -2,11 +2,10 @@ import Foundation
 import XCTest
 @testable import StrandAnalytics
 
-/// SCRATCH — independent statistics / leakage review (docs/physiology-context/notes/review-statistics.md).
-/// Every test asserts the behaviour the spec asks for; a FAILURE demonstrates the finding named in the test.
-/// Not production tests: do not commit as-is.
 /// Regression tests from the independent statistics review (notes/review-statistics.md), kept so the repaired
-/// defects stay repaired. The two `testReviewPrint*` cases print re-check numbers and gate nothing.
+/// defects stay repaired (repairs: notes/review-statistics-repairs.md). Each test asserts the behaviour the spec
+/// asks for. The two `testReviewPrint*` cases print re-check numbers and gate nothing; they run only with
+/// `REVIEW_PRINT=1` (the 2000-replicate re-check takes about 11 minutes in a debug build).
 final class PCReviewStatsRegressionTests: XCTestCase {
     typealias PC = PhysiologyContext
     typealias Ref = PhysiologyContext.ContextReferences
@@ -200,7 +199,8 @@ final class PCReviewStatsRegressionTests: XCTestCase {
 
     // MARK: Numeric demonstrations (not assertions of defects)
 
-    func testReviewPrintSparseAndFallbackRates() {
+    func testReviewPrintSparseAndFallbackRates() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["REVIEW_PRINT"] == "1", "set REVIEW_PRINT=1 to print")
         let reps = Int(ProcessInfo.processInfo.environment["REVIEW_REPS"] ?? "") ?? 200
         for (phi, miss) in [(0.5, 0.0), (0.5, 0.5), (0.3, 0.5)] {
             let r = Ev.evaluateNull(phi: phi, replicates: reps, missingRate: miss, resamples: 200, seed: 99_173)
@@ -213,7 +213,8 @@ final class PCReviewStatsRegressionTests: XCTestCase {
 
 extension PCReviewStatsRegressionTests {
     /// Larger-replicate re-checks of cells that moved between seeds (prints only).
-    func testReviewPrintHighReplicateRechecks() {
+    func testReviewPrintHighReplicateRechecks() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["REVIEW_PRINT"] == "1", "set REVIEW_PRINT=1 to print")
         let reps = Int(ProcessInfo.processInfo.environment["REVIEW_BIG_REPS"] ?? "") ?? 2000
         for seed: UInt64 in [20_261_005, 31_337] {
             for (phi, m) in [(0.5, -2.0), (0.5, -1.0), (0.3, -2.0)] {

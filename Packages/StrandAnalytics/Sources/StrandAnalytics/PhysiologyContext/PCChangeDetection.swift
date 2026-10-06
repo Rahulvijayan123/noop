@@ -18,9 +18,16 @@ import Foundation
 extension PhysiologyContext {
 
     public struct ChangeConfig: Codable, Equatable, Sendable {
-        public var version = "pc-change-1"
+        public var version = "pc-change-2"
         /// Trailing days of history scored together with today.
         public var windowDays = 90
+        /// Burn-in. A scored day enters the detectors (CUSUM, persistence rule, transient / recurring excursions)
+        /// only when the loaded history of its (series, regime, mode) began at least this many calendar days
+        /// earlier, i.e. when its whole rolling window lies inside the loaded history. Earlier days are scored for
+        /// display only (`detector_burn_in`). This is the regime the evaluation measures (it discards the first 35
+        /// days of every synthetic series). With the worker's 160-day history load, every day of a long-running
+        /// series' 90-day window has this lookback and its φ̂ window as well.
+        public var detectorMinLookbackDays = 28
         /// Default persistent-shift detector: `cusum` (two-sided CUSUM on daily robust z) or `persistence`
         /// (`persistenceCount` of the last `persistenceWindow` supported days beyond `persistenceZ`, same sign).
         public var detector = "cusum"
@@ -34,8 +41,11 @@ extension PhysiologyContext {
         /// The statistic is capped at `cusumCapFactor * cusumH` so an episode ends soon after the evidence stops.
         public var cusumCapFactor = 1.25
         /// Divide the CUSUM input by the AR(1) long-run SD factor `sqrt((1 + φ) / (1 - φ))`, with φ the lag-1
-        /// autocorrelation of earlier days (consecutive-day pairs in the trailing `autocorrelationWindowDays`), so
-        /// positively autocorrelated days are not counted as independent evidence (research note 8).
+        /// autocorrelation of earlier days in the trailing `autocorrelationWindowDays`, so positively
+        /// autocorrelated days are not counted as independent evidence (research note 8). φ̂ pairs consecutive
+        /// supported days at most `maxGapDays` apart: it is the autocorrelation of the sequence the CUSUM runs on
+        /// (with days missing at random, AR(1) days observed with gaps are again AR(1)-correlated, with
+        /// coefficient E[φ^gap]), so a sparse series is neither left unadjusted nor over-corrected.
         public var cusumAutocorrelationAdjustment = true
         public var autocorrelationWindowDays = 56
         /// The most recent days are left out of the autocorrelation estimate, so a fresh change does not inflate
@@ -43,6 +53,11 @@ extension PhysiologyContext {
         public var autocorrelationGuardDays = 14
         public var autocorrelationMinPairs = 20
         public var autocorrelationMax = 0.8
+        /// φ used when φ̂ cannot be estimated (fewer than `autocorrelationMinPairs` consecutive-day pairs: sparse
+        /// series, or the start of a series): the largest φ the evaluation covers. It over-corrects for any
+        /// smaller true φ (fewer false episodes, later detection) and is reported as
+        /// `autocorrelation_assumed_conservative`. Never "no adjustment", which is the most liberal choice.
+        public var autocorrelationFallback = 0.5
         /// A gap of more than this many calendar days between supported days resets the detectors.
         public var maxGapDays = 7
         public var persistenceZ = 2.0
@@ -103,8 +118,11 @@ extension PhysiologyContext {
         public var detector: String
         /// Day the detector first fired; nil for transient / status entries.
         public var alarmDay: String?
-        /// Calendar days from `startDay` (the change-point estimate) to `alarmDay`.
-        public var detectionDelayDays: Int?
+        /// Calendar days from `startDay` (the detector's change-point estimate: the first day of the CUSUM run, or
+        /// the first qualifying day of a rule) to `alarmDay`. NOT a detection delay: the true change day is
+        /// unknown, and `startDay` can precede it. The evaluation's delay is alarm − true step (notes/statistics.md
+        /// §6 reports both). Decodes the former key `detection_delay_days`.
+        public var alarmAfterStartDays: Int?
         /// Supported (scored) days inside the episode.
         public var supportDays: Int
         /// Number of excursions (recurring episodes), else 1.
@@ -127,14 +145,14 @@ extension PhysiologyContext {
         public init(id: String, seriesKey: String, regimeKey: String, state: EpisodeState, direction: Int,
                     startDay: String, lastDay: String, ongoing: Bool, durationDays: Int, finality: Finality,
                     reasons: [ReasonCode], detector: String = "", alarmDay: String? = nil,
-                    detectionDelayDays: Int? = nil, supportDays: Int = 0, occurrences: Int = 1,
+                    alarmAfterStartDays: Int? = nil, supportDays: Int = 0, occurrences: Int = 1,
                     rollingMagnitude: Double? = nil, frozenMagnitude: Double? = nil, medianRollingZ: Double? = nil,
                     medianFrozenZ: Double? = nil, frozenReferenceId: String? = nil, trendPerWeek: Double? = nil,
                     trendDays: Int = 0, peakStatistic: Double? = nil, units: String = "", transform: String = "") {
             self.id = id; self.seriesKey = seriesKey; self.regimeKey = regimeKey; self.state = state
             self.direction = direction; self.startDay = startDay; self.lastDay = lastDay; self.ongoing = ongoing
             self.durationDays = durationDays; self.finality = finality; self.reasons = reasons
-            self.detector = detector; self.alarmDay = alarmDay; self.detectionDelayDays = detectionDelayDays
+            self.detector = detector; self.alarmDay = alarmDay; self.alarmAfterStartDays = alarmAfterStartDays
             self.supportDays = supportDays; self.occurrences = occurrences; self.rollingMagnitude = rollingMagnitude
             self.frozenMagnitude = frozenMagnitude; self.medianRollingZ = medianRollingZ
             self.medianFrozenZ = medianFrozenZ; self.frozenReferenceId = frozenReferenceId
@@ -144,10 +162,13 @@ extension PhysiologyContext {
 
         enum CodingKeys: String, CodingKey {
             case id, seriesKey, regimeKey, state, direction, startDay, lastDay, ongoing, durationDays, finality
-            case reasons, detector, alarmDay, detectionDelayDays, supportDays, occurrences, rollingMagnitude
+            case reasons, detector, alarmDay, alarmAfterStartDays, supportDays, occurrences, rollingMagnitude
             case frozenMagnitude, medianRollingZ, medianFrozenZ, frozenReferenceId, trendPerWeek, trendDays
             case peakStatistic, units, transform
         }
+
+        /// Keys of earlier document versions, read when the current key is absent.
+        enum LegacyKeys: String, CodingKey { case detectionDelayDays }
 
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -164,7 +185,8 @@ extension PhysiologyContext {
             reasons = try c.decode([ReasonCode].self, forKey: .reasons)
             detector = try c.decodeIfPresent(String.self, forKey: .detector) ?? ""
             alarmDay = try c.decodeIfPresent(String.self, forKey: .alarmDay)
-            detectionDelayDays = try c.decodeIfPresent(Int.self, forKey: .detectionDelayDays)
+            alarmAfterStartDays = try c.decodeIfPresent(Int.self, forKey: .alarmAfterStartDays)
+                ?? decoder.container(keyedBy: LegacyKeys.self).decodeIfPresent(Int.self, forKey: .detectionDelayDays)
             supportDays = try c.decodeIfPresent(Int.self, forKey: .supportDays) ?? 0
             occurrences = try c.decodeIfPresent(Int.self, forKey: .occurrences) ?? 1
             rollingMagnitude = try c.decodeIfPresent(Double.self, forKey: .rollingMagnitude)
@@ -220,7 +242,7 @@ extension PhysiologyContext {
 
     public enum ChangeDetection {
 
-        public static let version = "pc-change-1"
+        public static let version = "pc-change-2"
 
         // MARK: Reason codes
         public static let coincidesWithRegimeBoundary: ReasonCode = "coincides_with_regime_boundary"
@@ -245,6 +267,15 @@ extension PhysiologyContext {
         public static let detectorCusum: ReasonCode = "detector_cusum"
         public static let detectorPersistence: ReasonCode = "detector_persistence"
         public static let descriptiveOnly: ReasonCode = "descriptive_not_diagnostic"
+        /// Some days of the window were scored for display only: the series' loaded history did not yet cover
+        /// their rolling window (`detectorMinLookbackDays`), so they did not enter the detectors.
+        public static let detectorBurnIn: ReasonCode = "detector_burn_in"
+        /// At least one detector day of the CUSUM run (or of the window, on the status entry) had no φ̂ (too few
+        /// consecutive-day pairs) and used the conservative `autocorrelationFallback`.
+        public static let autocorrelationAssumedConservative: ReasonCode = "autocorrelation_assumed_conservative"
+        /// Causal mode: today's value of a day-accumulating series may describe a partial day, so it was left out
+        /// of the episodes, which therefore end with the previous supported day.
+        public static let partialDayValueExcluded: ReasonCode = "partial_day_value_excluded"
         // Multi-signal.
         public static let sharedInputsNotIndependent: ReasonCode = "shared_inputs_not_independent"
         public static let selectionReadsHeartRate: ReasonCode = "selection_reads_heart_rate"
@@ -259,7 +290,7 @@ extension PhysiologyContext {
             gapReset, tooFewSupportedDays, noReference, isolatedExcursion, recurringWithinWindow,
             startsAtWindowStart, noRecentSupport, detectorCusum, detectorPersistence, descriptiveOnly,
             sharedInputsNotIndependent, selectionReadsHeartRate, noDeclaredDependence, noDeviatingSeries,
-            groupsNotProvenIndependent,
+            groupsNotProvenIndependent, detectorBurnIn, autocorrelationAssumedConservative, partialDayValueExcluded,
         ]
 
         typealias Ref = ContextReferences
@@ -279,7 +310,13 @@ extension PhysiologyContext {
                                     reference: ReferenceConfig) -> [ChangeEpisode] {
             guard let t = Ref.dayNumber(day) else { return [] }
             let windowStart = t - max(1, change.windowDays)
-            let pool = history.filter { $0.day < day } + today.filter { $0.day == day }
+            // Causal partial day (P2): today's value of a day-accumulating series is not like for like with the
+            // whole-day history, so it stays out of the episodes (its comparison carries no distance either).
+            let todays = today.filter { $0.day == day }
+            let partial = Set(todays.filter { Ref.isCausalPartialDay($0.seriesKey, mode: $0.mode, config: reference) }
+                .map { $0.seriesKey + "\u{1f}" + $0.regimeKey })
+            let pool = history.filter { $0.day < day }
+                + todays.filter { !partial.contains($0.seriesKey + "\u{1f}" + $0.regimeKey) }
             let eligible = pool.filter {
                 $0.mode == mode && !Ref.isExcluded($0.seriesKey, reference)
                     && (change.episodesForStrata || !Ref.isStratum($0.seriesKey))
@@ -309,17 +346,26 @@ extension PhysiologyContext {
                 let series = parts[1], regime = parts[2]
                 let pts = index.points[key]!
                 guard pts.contains(where: { $0.dayNum >= windowStart && $0.dayNum <= t }) else { continue }
-                let f = Ref.frozenFor(seriesKey: series, regimeKey: regime, frozen: frozen, before: t + 1,
-                                      config: reference)
+                // The registered reference is the authority (same rule as the frozen comparison); it scores only
+                // days after its window.
+                let f = Ref.frozenAuthority(seriesKey: series, regimeKey: regime, frozen: frozen, mode: mode, t: t,
+                                            config: reference).reference
+                    .flatMap { (Ref.dayNumber($0.toDay) ?? .max) < t ? $0 : nil }
                     .flatMap { $0.transform == Ref.transformName(series, config: reference) ? $0 : nil }
                 let boundaryDays = (providedBoundaryDays + (regimeChangeDays[series] ?? [])).sorted()
                 let analysis = analyze(points: pts, windowStart: windowStart, todayNum: t, frozen: f,
                                        boundaryDays: boundaryDays, seriesKey: series, change: change,
                                        reference: reference)
                 let units = eligible.first { $0.seriesKey == series && $0.regimeKey == regime }?.units ?? ""
-                out += assemble(analysis, seriesKey: series, regimeKey: regime, todayNum: t, frozen: f,
-                                finality: finality, policyFingerprint: policyFingerprint, units: units,
-                                change: change, reference: reference)
+                var entries = assemble(analysis, seriesKey: series, regimeKey: regime, todayNum: t, frozen: f,
+                                       finality: finality, policyFingerprint: policyFingerprint, units: units,
+                                       change: change, reference: reference)
+                if partial.contains(series + "\u{1f}" + regime) {
+                    for i in entries.indices {
+                        entries[i].reasons = Array(Set(entries[i].reasons + [partialDayValueExcluded])).sorted()
+                    }
+                }
+                out += entries
             }
             return out.sorted { a, b in
                 if (a.seriesKey, a.regimeKey) != (b.seriesKey, b.regimeKey) {
@@ -349,6 +395,11 @@ extension PhysiologyContext {
             var phi: Double?
             /// Detector state resets before this day (gap or regime boundary).
             var resetBefore: ReasonCode?
+            /// The day enters the detectors (past the burn-in, `detectorMinLookbackDays`); otherwise it is scored
+            /// for display only.
+            var detectorDay = true
+            /// φ̂ was not estimable and the CUSUM used `autocorrelationFallback` for this day.
+            var phiAssumed = false
         }
 
         struct Draft: Equatable, Sendable {
@@ -394,6 +445,9 @@ extension PhysiologyContext {
             var scores: [DayScore] = []
             let frozenTo = frozen.flatMap { Ref.dayNumber($0.toDay) }
             let frozenStats = frozen.map { Ref.frozenStats($0, config: reference) }
+            // First loaded day of the series: the burn-in is measured from it (cold start of a new series, of a
+            // new regime, or of a truncated history load alike).
+            let firstLoaded = points.first?.dayNum ?? todayNum
             var lo = 0, aLo = 0, aHi = 0
             var prevDay: Int?
             for i in points.indices {
@@ -408,12 +462,14 @@ extension PhysiologyContext {
                     let z = (p.x - c) / sc
                     if z.isFinite { s.rollingZ = z; s.rollingCenterX = c; s.rollingScale = sc }
                 }
+                s.detectorDay = p.dayNum - firstLoaded >= max(0, change.detectorMinLookbackDays)
                 if change.cusumAutocorrelationAdjustment {
                     let hiDay = p.dayNum - max(1, change.autocorrelationGuardDays)
                     let loDay = hiDay - change.autocorrelationWindowDays
                     while aHi < i && points[aHi].dayNum <= hiDay { aHi += 1 }
                     while aLo < aHi && points[aLo].dayNum <= loDay { aLo += 1 }
                     s.phi = lagOneAutocorrelation(points[aLo..<aHi], change: change)
+                    s.phiAssumed = s.phi == nil
                 }
                 if let fs = frozenStats, let to = frozenTo, p.dayNum > to, let c = fs.center, let sc = fs.scale, sc > 0 {
                     let z = (p.x - c) / sc
@@ -432,9 +488,10 @@ extension PhysiologyContext {
             return scores
         }
 
-        /// Robust lag-1 autocorrelation of consecutive-day pairs: deviations from the median in MAD-scale units,
-        /// winsorized at ±3, `mean over pairs(d_t d_{t+1}) / mean over days(d_t²)` (missing days remove pairs, they
-        /// do not count as zero); clamped to [0, autocorrelationMax]; nil below the minimum pairs.
+        /// Robust lag-1 autocorrelation of consecutive supported days (pairs at most `maxGapDays` apart, the steps
+        /// the CUSUM takes without a reset): deviations from the median in MAD-scale units, winsorized at ±3,
+        /// `mean over pairs(d_t d_{t+1}) / mean over days(d_t²)` (missing days are never zero-filled); clamped to
+        /// [0, autocorrelationMax]; nil below the minimum pairs (the CUSUM then uses `autocorrelationFallback`).
         static func lagOneAutocorrelation(_ pts: ArraySlice<Ref.RefPoint>, change: ChangeConfig) -> Double? {
             guard pts.count > change.autocorrelationMinPairs else { return nil }
             let xs = pts.map(\.x)
@@ -445,7 +502,7 @@ extension PhysiologyContext {
             for j in arr.indices {
                 let d = min(3, max(-3, (arr[j].x - med) / sc))
                 den += d * d
-                if j + 1 < arr.count && arr[j + 1].dayNum == arr[j].dayNum + 1 {
+                if j + 1 < arr.count && arr[j + 1].dayNum - arr[j].dayNum <= max(1, change.maxGapDays) {
                     num += d * min(3, max(-3, (arr[j + 1].x - med) / sc)); pairs += 1
                 }
             }
@@ -454,9 +511,24 @@ extension PhysiologyContext {
             return r.isFinite ? min(change.autocorrelationMax, max(0, r)) : nil
         }
 
-        static func detect(_ scores: [DayScore], todayNum: Int, boundaryDays: [Int],
+        static func detect(_ input: [DayScore], todayNum: Int, boundaryDays: [Int],
                            change: ChangeConfig) -> SegmentAnalysis {
-            let scored = scores.indices.filter { scores[$0].rollingZ != nil }
+            // Detector days: past the burn-in and scored against a rolling reference.
+            var scores = input
+            let scored = scores.indices.filter { scores[$0].rollingZ != nil && scores[$0].detectorDay }
+            // A reset (gap, regime boundary) on a day that is not a detector day carries to the next detector day,
+            // so the detectors never bridge it.
+            var pending: ReasonCode?
+            var next = 0
+            for i in scores.indices {
+                let isScored = next < scored.count && scored[next] == i
+                if let r = scores[i].resetBefore, pending == nil || r == splitAtRegimeBoundary { pending = r }
+                if isScored {
+                    scores[i].resetBefore = pending
+                    pending = nil
+                    next += 1
+                }
+            }
             let cusum = cusumDrafts(scores, scored: scored, change: change)
             let persistence = persistenceDrafts(scores, scored: scored, change: change)
             let primaryIsCusum = change.detector != "persistence"
@@ -523,7 +595,12 @@ extension PhysiologyContext {
                     let sc = scores[i]
                     if let reset = sc.resetBefore { close(reset, ongoing: false); s = 0 }
                     var z = min(clamp, max(-clamp, sc.rollingZ!))
-                    if change.cusumAutocorrelationAdjustment, let phi = sc.phi { z /= ((1 + phi) / (1 - phi)).squareRoot() }
+                    if change.cusumAutocorrelationAdjustment {
+                        // No estimate → the conservative fallback, never "no adjustment" (R-F9).
+                        let phi = min(0.99, change.autocorrelationMax,
+                                      max(0, sc.phi ?? change.autocorrelationFallback))
+                        z /= ((1 + phi) / (1 - phi)).squareRoot()
+                    }
                     let next = min(cap, max(0, s + Double(dir) * z - k))
                     if next > 0 {
                         if run == nil {
@@ -738,7 +815,9 @@ extension PhysiologyContext {
             let log = Ref.isLog(seriesKey, config: reference)
             let transform = log ? "ln" : "identity"
             let recent = scores.last!.dayNum >= todayNum - change.ongoingMaxGapDays
-            let firstScored = scores.firstIndex { $0.rollingZ != nil }
+            // First and last detector days (the detectors' own window, after the burn-in).
+            let firstScored = scores.firstIndex { $0.rollingZ != nil && $0.detectorDay }
+            let burnIn = scores.contains { $0.rollingZ != nil && !$0.detectorDay }
             let fCenter = frozen.map { Ref.inverse($0.center, log: log) }
 
             // One draft per (start day, direction): keep the strongest state.
@@ -772,6 +851,11 @@ extension PhysiologyContext {
                     if let f = firstScored, startIdx == f { reasons.append(startsAtWindowStart) }
                 }
                 let span = Array(startIdx...lastIdx)
+                if detector == "cusum" || direction == 0,
+                   span.contains(where: { scores[$0].phiAssumed && scores[$0].detectorDay && scores[$0].rollingZ != nil }) {
+                    reasons.append(autocorrelationAssumedConservative)
+                }
+                if burnIn { reasons.append(detectorBurnIn) }
                 let rollingDiffs = span.compactMap { i in scores[i].rollingCenterX.map { scores[i].value - Ref.inverse($0, log: log) } }
                 let frozenDiffs = fCenter.map { c in span.filter { scores[$0].frozenZ != nil }.map { scores[$0].value - c } } ?? []
                 let id = "ep_" + PhysiologyContext.fnv1a("\(seriesKey)|\(regimeKey)|\(start.day)|\(direction)|\(policyFingerprint)")
@@ -781,8 +865,9 @@ extension PhysiologyContext {
                     durationDays: last.dayNum - start.dayNum + 1, finality: finality,
                     reasons: Array(Set(reasons)).sorted(), detector: detector,
                     alarmDay: alarmIdx.map { scores[$0].day },
-                    detectionDelayDays: alarmIdx.map { scores[$0].dayNum - start.dayNum },
-                    supportDays: span.filter { scores[$0].rollingZ != nil }.count, occurrences: occurrences,
+                    alarmAfterStartDays: alarmIdx.map { scores[$0].dayNum - start.dayNum },
+                    supportDays: span.filter { scores[$0].rollingZ != nil && scores[$0].detectorDay }.count,
+                    occurrences: occurrences,
                     rollingMagnitude: finite(RobustStats.median(rollingDiffs)),
                     frozenMagnitude: finite(RobustStats.median(frozenDiffs)),
                     medianRollingZ: finite(RobustStats.median(span.compactMap { scores[$0].rollingZ })),
@@ -801,12 +886,12 @@ extension PhysiologyContext {
             if !anyOngoing {
                 if a.scoredCount < change.minScoredDays || firstScored == nil {
                     var reasons: [ReasonCode] = [tooFewSupportedDays]
-                    if firstScored == nil { reasons.append(noReference) }
+                    if !scores.contains(where: { $0.rollingZ != nil }) { reasons.append(noReference) }
                     out.append(make(.insufficientEvidence, direction: 0, startIdx: 0, lastIdx: scores.count - 1,
                                     alarmIdx: nil, ongoing: true, detector: "", reasons: reasons, peak: nil,
                                     occurrences: 1))
                 } else {
-                    let lastScored = scores.lastIndex { $0.rollingZ != nil }!
+                    let lastScored = scores.lastIndex { $0.rollingZ != nil && $0.detectorDay }!
                     out.append(make(.usualVariation, direction: 0, startIdx: firstScored!, lastIdx: lastScored,
                                     alarmIdx: nil, ongoing: true, detector: "", reasons: [], peak: nil,
                                     occurrences: 1))
@@ -822,9 +907,8 @@ extension PhysiologyContext {
         /// Multi-signal summary that accounts for shared inputs (`dependence`).
         ///
         /// Deviating series (|robustZ| ≥ `multiSignalZ` in `multiSignalView`, ready or provisional) are mapped to
-        /// dependence members (metric, plus the selection they share: `sleep_detector` for sleep-night series,
-        /// `eligibility_stillness` for stable-awake series) and connected through every declared group they share.
-        /// `independentGroupCount` is the number of connected components.
+        /// dependence members (`dependenceMembers`: the metric, plus the selection they share) and connected through
+        /// every declared group they share. `independentGroupCount` is the number of connected components.
         public static func multiSignal(comparisons: [ReferenceComparison], dependence: [DependenceNote],
                                        day: String, config: ChangeConfig) -> [MultiSignalSummary] {
             let relevant = comparisons.filter {
@@ -844,7 +928,7 @@ extension PhysiologyContext {
                 var gs = dependence.filter { !Set($0.members).isDisjoint(with: members) }.map(\.group)
                 if gs.isEmpty { gs = ["undeclared:" + s]; reasons.insert(noDeclaredDependence) }
                 groupsOf[s] = Array(Set(gs)).sorted()
-                if s.hasSuffix(".sleep_night") { reasons.insert(selectionReadsHeartRate) }
+                if selectionUsesHeartRate(s) { reasons.insert(selectionReadsHeartRate) }
             }
             // Union-find over series sharing a group.
             var parent = Dictionary(uniqueKeysWithValues: deviating.map { ($0, $0) })
@@ -869,7 +953,26 @@ extension PhysiologyContext {
                                        components: components)]
         }
 
-        /// Dependence members of a series key: its metric plus the selection it shares with other series.
+        /// Selection members shared by every series whose existence or denominator depends on the sleep / wake
+        /// detector (gravity stillness confirmed by heart rate) and on wear (heart-signal presence).
+        static let sleepWearSelection = ["sleep_detector", "sleep_wake", "wear_state"]
+
+        /// Whether the series' selection reads heart rate (sleep / wake confirmation, heart-signal wear).
+        static func selectionUsesHeartRate(_ seriesKey: String) -> Bool {
+            dependenceMembers(seriesKey).contains("sleep_detector")
+        }
+
+        /// Dependence members of a series key: its metric (the input it is computed from) plus the selection it
+        /// shares with other series. Members are matched against `DependenceNote.members`.
+        ///
+        /// - Nightly (`*.sleep_night`): the sleep detector selects the night (it reads heart rate).
+        /// - Stable awake (`*.stable_awake*`): strap-motion stillness, plus the awake-and-worn gate (sleep / wake
+        ///   detector, heart-signal wear).
+        /// - Bout responses (`hr_response.*`) and post-effort declines (`hr_recovery_<s>s.*`): heart rate (so the
+        ///   `heart_rate` and `optical_pulse` groups) and the strap-motion bouts.
+        /// - Functional (`functional.*`): strap-motion features. Every functional value exists only with ≥ 4 worn
+        ///   waking hours, and the per-worn-hour / waking-time rates divide by that time: waking time subtracts
+        ///   the HR-confirmed sleep episodes and wear reads heart-signal presence (R-F4).
         public static func dependenceMembers(_ seriesKey: String) -> [String] {
             let head = String(seriesKey.split(separator: ".").first ?? "")
             var m: [String]
@@ -881,12 +984,14 @@ extension PhysiologyContext {
             case "heart_rate": m = [MetricKind.heartRate.rawValue]
             case "skin_temp": m = [MetricKind.skinTemperature.rawValue]
             case "hr_response": m = [MetricKind.heartRate.rawValue, "exertion_bouts"]
-            case "functional": m = ["functional_features"]
-            default: m = [head]
+            case "functional": m = ["functional_features"] + sleepWearSelection
+            default:
+                // `hr_recovery_60s.<kind>` (ExertionBouts.recoverySeriesKey): HR declines after strap-motion bouts.
+                m = head.hasPrefix("hr_recovery_") ? [MetricKind.heartRate.rawValue, "exertion_bouts"] : [head]
             }
-            if seriesKey.contains(".sleep_night") { m.append("sleep_detector") }
-            if seriesKey.contains(".stable_awake") { m.append("eligibility_stillness") }
-            return m
+            if seriesKey.contains(".sleep_night") { m += ["sleep_detector", "sleep_wake"] }
+            if seriesKey.contains(".stable_awake") { m += ["eligibility_stillness"] + sleepWearSelection }
+            return Array(Set(m)).sorted()
         }
     }
 }
