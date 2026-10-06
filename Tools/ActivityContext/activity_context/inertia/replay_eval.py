@@ -598,8 +598,9 @@ def _json_safe(o: Any) -> Any:
 # Sweep (VALIDATION) and final (TEST) drivers
 # ---------------------------------------------------------------------------
 
+# The candidate defaults of INERTIA1 §7 (hart_redundancy is the config floor; default 0.65 since the audit).
 DEFAULT_WEIGHTS = {"locomotion": 0.25, "posture": 0.25, "arm": 0.25, "body_budget": 0.5, "arm_budget": 0.5,
-                   "hart_redundancy": 0.5}
+                   "hart_redundancy": 0.65}
 BODY_GRID = ((0.1, 0.1), (0.1, 0.25), (0.1, 0.4), (0.25, 0.1), (0.25, 0.25), (0.4, 0.1))
 # The arm chain is fed by the body posterior, never the other way round, so the arm weight cannot move the
 # posture / locomotion objective: it stays at the candidate default and is not swept.
@@ -815,7 +816,7 @@ def run_sweep(bundle_dir: str, dataset: str, out_dir: str, jobs: int = 4, rho_ex
         print(json.dumps({"cfg": cfg, **{a: row[a]["objective"] for a in tabs}}), flush=True)
         return row
 
-    def cfg(l, p, rho=0.5):
+    def cfg(l, p, rho=DEFAULT_WEIGHTS["hart_redundancy"]):
         return {"locomotion": l, "posture": p, "arm": ARM_GRID[0], "body_budget": 0.5, "arm_budget": 0.5,
                 "hart_redundancy": float(rho)}
 
@@ -833,7 +834,8 @@ def run_sweep(bundle_dir: str, dataset: str, out_dir: str, jobs: int = 4, rho_ex
         # Stage 2: rho for A3 at A3's best body weights (rho only acts while the HART channel speaks).
         b3 = pick(stage1, "A3")
         rows_a3 = list(stage1) + [run_cfg(cfg(b3["weights"]["locomotion"], b3["weights"]["posture"], r))
-                                  for r in sorted(set(RHO_GRID) | {round(float(x), 2) for x in rho_extra}) if r != 0.5]
+                                  for r in sorted(set(RHO_GRID) | {round(float(x), 2) for x in rho_extra})
+                                  if r != DEFAULT_WEIGHTS["hart_redundancy"]]
         b3 = pick(rows_a3, "A3")
         best["A3"] = {"weights": b3["weights"], "objective": b3["A3"]["objective"]}
     result["configs"] = list(done.values())
@@ -938,6 +940,8 @@ def _final_body(payload, bundle_dir: str, dataset: str, sweep: Mapping[str, Any]
         sc["paired_bootstrap"] = {}
         for a, b in pairs:
             sc["paired_bootstrap"][f"{b}-{a}"] = _json_safe(paired_bootstrap(tables[a], tables[b], ops_for, n_boot=n_boot))
+        if dataset == "capture24" and "A2" in tables:
+            sc["posture_decomposition"] = _json_safe(posture_decomposition(tables["A0"], tables["A2"], recs, n_boot))
         res["configs"][label] = sc
 
         def _save(sc=sc, part=part):
@@ -946,6 +950,51 @@ def _final_body(payload, bundle_dir: str, dataset: str, sweep: Mapping[str, Any]
         retrying(_save, f"final {label}")
         print(json.dumps({"label": label, "seconds": round(time.time() - t, 1)}), flush=True)
     return res
+
+
+def posture_decomposition(t0: ArmTable, t2: ArmTable, recs: Sequence[rx.Recording], n_boot: int = 1000,
+                          seed: int = 20261005) -> Dict[str, Any]:
+    """Capture-24 posture accuracy (known-class argmax over recumbent / seated / upright) by truth group:
+    recumbent annotated *sleeping* vs awake lying vs the awake static postures, A0 vs A2, with a paired
+    subject-cluster bootstrap of the difference. Computed from the TEST tables already in memory."""
+    check_alignment({"A0": t0, "A2": t2})
+    by_id = {r.recording_id: r for r in recs}
+    sleeping = np.zeros(len(t0.ts), bool)
+    for rid in np.unique(t0.seq):
+        r = by_id[str(rid)]
+        idx = np.flatnonzero(t0.seq == rid)
+        sec = (t0.ts[idx] - r.t0 - 1).astype(np.int64)
+        lab = np.full(len(idx), -1, np.int64)
+        ok = (sec >= 0) & (sec < len(r.truth_label))
+        lab[ok] = np.asarray(r.truth_label)[sec[ok]]
+        names = np.array([("sleeping" in str(x).lower()) for x in r.labels] + [False])
+        sleeping[idx] = names[lab]                      # -1 (unannotated) -> the trailing False
+    T = t0.truth["posture"]
+    has = T.any(1)
+    tcls = np.where(has, T.argmax(1), -1)
+    groups = {"recumbent_sleeping": has & (tcls == 0) & sleeping, "recumbent_awake": has & (tcls == 0) & ~sleeping,
+              "seated_likely": has & (tcls == 1), "upright_stationary": has & (tcls == 2),
+              "awake_static (seated+upright)": has & ((tcls == 1) | (tcls == 2)),
+              "all static": has & (tcls >= 0) & (tcls <= 2)}
+    correct = {a: (tb.probs["posture"][:, :3].argmax(1) == tcls) for a, tb in (("A0", t0), ("A2", t2))}
+    subs = np.unique(t0.subject)
+    rng = np.random.default_rng(seed)
+    idx_b = [rng.integers(0, len(subs), len(subs)) for _ in range(n_boot)]
+    out: Dict[str, Any] = {"definition": "known-class argmax over recumbent/seated/upright; truth groups by the "
+                                         "per-second source annotation ('sleeping' in the Capture-24 label)",
+                           "groups": {}}
+    for g, m in groups.items():
+        if not m.any():
+            continue
+        d = np.array([(correct["A2"] & m)[t0.subject == s].sum() - (correct["A0"] & m)[t0.subject == s].sum()
+                      for s in subs], float)
+        n = np.array([m[t0.subject == s].sum() for s in subs], float)
+        bs = [d[i].sum() / n[i].sum() for i in idx_b if n[i].sum() > 0]
+        out["groups"][g] = {"states": int(m.sum()), "subjects": int((n > 0).sum()),
+                            "A0_accuracy": float(correct["A0"][m].mean()), "A2_accuracy": float(correct["A2"][m].mean()),
+                            "A2-A0": {"point": float(d.sum() / n.sum()), "ci_low": float(np.percentile(bs, 2.5)),
+                                      "ci_high": float(np.percentile(bs, 97.5)), "n_boot": len(bs)}}
+    return out
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
