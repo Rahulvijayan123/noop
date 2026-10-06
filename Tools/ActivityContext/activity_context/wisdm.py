@@ -202,9 +202,9 @@ def _rolling_median(x: np.ndarray, width: int) -> np.ndarray:
     if x.size == 0:
         return x.copy()
     h = width // 2
-    pad = np.pad(x, (h, h), mode="edge")
-    if pad.size < width:
+    if x.size <= h:
         return np.full_like(x, np.median(x))
+    pad = np.pad(x, (h, h), mode="reflect")         # edge values do not get h+1 votes
     return np.median(sliding_window_view(pad, width), axis=1)
 
 
