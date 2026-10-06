@@ -1,0 +1,1533 @@
+{
+ "bench": {
+  "gait_dense_hour": {
+   "load_to_ping_s": 1.879,
+   "model_available": true,
+   "platform": {
+    "cpu_count": 16,
+    "load_avg_1m_at_end": 29.5,
+    "machine": "arm64",
+    "max_batch": 64,
+    "python": "3.11.15",
+    "torch_threads": 1
+   },
+   "runs": [
+    {
+     "hop_s": 5,
+     "input": "synthetic_walk_hour",
+     "n_gait": 0,
+     "n_prefiltered": 0,
+     "n_windows": 719,
+     "request_bytes": 5771027,
+     "response_bytes": 49620,
+     "serve_duration_ms": 3198,
+     "wall_s": [
+      3.217
+     ]
+    },
+    {
+     "hop_s": 1,
+     "input": "synthetic_walk_hour",
+     "n_gait": 0,
+     "n_prefiltered": 0,
+     "n_windows": 3591,
+     "request_bytes": 5771027,
+     "response_bytes": 244453,
+     "serve_duration_ms": 14810,
+     "wall_s": [
+      14.84
+     ]
+    },
+    {
+     "hop_s": 5,
+     "input": "synthetic_rest_hour",
+     "n_gait": 0,
+     "n_prefiltered": 719,
+     "n_windows": 719,
+     "request_bytes": 5771027,
+     "response_bytes": 60529,
+     "serve_duration_ms": 70,
+     "wall_s": [
+      0.097
+     ]
+    },
+    {
+     "hop_s": 1,
+     "input": "synthetic_rest_hour",
+     "n_gait": 0,
+     "n_prefiltered": 3591,
+     "n_windows": 3591,
+     "request_bytes": 5771027,
+     "response_bytes": 298906,
+     "serve_duration_ms": 290,
+     "wall_s": [
+      0.356
+     ]
+    },
+    {
+     "hop_s": 5,
+     "input": "toy_tiled_hour",
+     "n_gait": 474,
+     "n_prefiltered": 0,
+     "n_windows": 719,
+     "request_bytes": 5771022,
+     "response_bytes": 99606,
+     "serve_duration_ms": 14797,
+     "wall_s": [
+      14.816
+     ]
+    },
+    {
+     "hop_s": 1,
+     "input": "toy_tiled_hour",
+     "n_gait": 2340,
+     "n_prefiltered": 0,
+     "n_windows": 3591,
+     "request_bytes": 5771022,
+     "response_bytes": 491411,
+     "serve_duration_ms": 33083,
+     "wall_s": [
+      33.109
+     ]
+    }
+   ],
+   "serve_peak_rss_mb": 647.6
+  },
+  "mixed_hours": {
+   "load_to_ping_s": 1.05,
+   "model_available": true,
+   "platform": {
+    "cpu_count": 16,
+    "load_avg_1m_at_end": 13.8,
+    "machine": "arm64",
+    "max_batch": 64,
+    "python": "3.11.15",
+    "torch_threads": 1
+   },
+   "runs": [
+    {
+     "hop_s": 5,
+     "input": "synthetic_walk_hour",
+     "n_gait": 0,
+     "n_prefiltered": 0,
+     "n_windows": 719,
+     "request_bytes": 5771027,
+     "response_bytes": 49620,
+     "serve_duration_ms": 1394,
+     "wall_s": [
+      1.395,
+      1.407
+     ]
+    },
+    {
+     "hop_s": 1,
+     "input": "synthetic_walk_hour",
+     "n_gait": 0,
+     "n_prefiltered": 0,
+     "n_windows": 3591,
+     "request_bytes": 5771027,
+     "response_bytes": 244452,
+     "serve_duration_ms": 6545,
+     "wall_s": [
+      6.457,
+      6.561
+     ]
+    },
+    {
+     "hop_s": 5,
+     "input": "synthetic_rest_hour",
+     "n_gait": 0,
+     "n_prefiltered": 719,
+     "n_windows": 719,
+     "request_bytes": 5771027,
+     "response_bytes": 60529,
+     "serve_duration_ms": 21,
+     "wall_s": [
+      0.035,
+      0.034
+     ]
+    },
+    {
+     "hop_s": 1,
+     "input": "synthetic_rest_hour",
+     "n_gait": 0,
+     "n_prefiltered": 3591,
+     "n_windows": 3591,
+     "request_bytes": 5771027,
+     "response_bytes": 298905,
+     "serve_duration_ms": 48,
+     "wall_s": [
+      0.062,
+      0.064
+     ]
+    },
+    {
+     "hop_s": 5,
+     "input": "c24_P001_hour1",
+     "n_gait": 108,
+     "n_prefiltered": 61,
+     "n_windows": 719,
+     "request_bytes": 5771022,
+     "response_bytes": 62408,
+     "serve_duration_ms": 2357,
+     "wall_s": [
+      2.444,
+      2.371
+     ]
+    },
+    {
+     "hop_s": 1,
+     "input": "c24_P001_hour1",
+     "n_gait": 543,
+     "n_prefiltered": 317,
+     "n_windows": 3591,
+     "request_bytes": 5771022,
+     "response_bytes": 308836,
+     "serve_duration_ms": 11050,
+     "wall_s": [
+      11.055,
+      11.067
+     ]
+    }
+   ],
+   "serve_peak_rss_mb": 649.5
+  }
+ },
+ "calibration": {
+  "calibration_id": "eldernet-val-T1.0473-tau0.930",
+  "fit": {
+   "datasets": [
+    "wisdm2019_watch",
+    "hhar_watch",
+    "pamap2",
+    "mhealth",
+    "opportunity",
+    "capture24"
+   ],
+   "n_val_gait": 15636,
+   "n_val_scored": 230576,
+   "rejected_rules": [
+    {
+     "T": 0.557066,
+     "capture24_val_ece": 0.026,
+     "reason": "worsened free-living calibration; lab sets dominated",
+     "rule": "temperature NLL, each VAL dataset weight 1"
+    }
+   ],
+   "split": "val",
+   "temperature_fit_datasets": [
+    "capture24"
+   ],
+   "temperature_weighting": "every classified (not pre-filtered) free-living VAL window weight 1",
+   "threshold_fit_datasets": [
+    "wisdm2019_watch",
+    "hhar_watch",
+    "pamap2",
+    "mhealth",
+    "opportunity",
+    "capture24"
+   ],
+   "val_split_sha256": "35e7f6b74e52eb9a096402af5a6bd5ae3698ee6216cc15f4ec3d7ebc55ad79e2"
+  },
+  "gait_prob": {
+   "T": 1.047343,
+   "fit": "val",
+   "method": "temperature"
+  },
+  "gait_threshold": 0.93,
+  "model_version": "eldernet-437a38b",
+  "operating_point": {
+   "cluster_bootstrap": {
+    "n_boot": 1000,
+    "quantile": 0.05,
+    "seed": 0,
+    "unit": "val subject (all subjects scored by the head)"
+   },
+   "n_val_class": 15636,
+   "n_val_subjects_class": 33,
+   "rule": "at tau: CP95 lower >= 0.95, cluster q05 >= 0.95, recall >= 0.1, >= 5 accepted val subjects; precision >= 0.95 for all tau' >= tau (n_acc >= 60)",
+   "status": "strong",
+   "tau": 0.93
+  },
+  "operating_point_evidence": {
+   "cluster_q05": 0.9512062492147061,
+   "cp_lower_95": 0.9695918204088945,
+   "n_acc": 4335,
+   "n_subjects_acc": 33,
+   "precision": 0.9739331026528258,
+   "recall": 0.2700179073931952,
+   "tau": 0.93,
+   "tp": 4222
+  },
+  "preprocessing_version": "eldernet-prep-1",
+  "schema": "nara.eldernet.calibration/1",
+  "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23"
+ },
+ "gotov": {
+  "auroc": {
+   "auroc": 0.9992595289384285,
+   "ci95": [
+    0.9982497214077352,
+    0.9999187933964253
+   ],
+   "n_boot": 300,
+   "warning": null
+  },
+  "cadence_ordinal": {
+   "frac_strictly_ordered": 0.9523809523809523,
+   "n_participants_all_paces": 21,
+   "n_strictly_ordered": 20,
+   "per_participant": {
+    "gotov:GOTOV02": {
+     "walkingFast": 119.8049545288086,
+     "walkingNormal": 114.50585556030273,
+     "walkingSlow": 104.69878768920898
+    },
+    "gotov:GOTOV03": {
+     "walkingFast": 115.78987884521484,
+     "walkingNormal": 110.11912536621094,
+     "walkingSlow": 105.36817932128906
+    },
+    "gotov:GOTOV04": {
+     "walkingFast": 129.34173583984375,
+     "walkingNormal": 125.72370147705078,
+     "walkingSlow": 90.99693298339844
+    },
+    "gotov:GOTOV05": {
+     "walkingFast": 124.7186393737793,
+     "walkingNormal": 118.1025276184082,
+     "walkingSlow": 109.27650451660156
+    },
+    "gotov:GOTOV06": {
+     "walkingFast": 133.24777221679688,
+     "walkingNormal": 118.92394256591797,
+     "walkingSlow": 113.37476348876953
+    },
+    "gotov:GOTOV07": {
+     "walkingFast": 122.68043518066406,
+     "walkingNormal": 117.31272888183594,
+     "walkingSlow": 110.62119674682617
+    },
+    "gotov:GOTOV08": {
+     "walkingFast": 122.50835418701172,
+     "walkingNormal": 111.13880920410156,
+     "walkingSlow": 104.73170471191406
+    },
+    "gotov:GOTOV09": {
+     "walkingFast": 125.76052474975586,
+     "walkingNormal": 115.7269172668457,
+     "walkingSlow": 111.1108169555664
+    },
+    "gotov:GOTOV10": {
+     "walkingFast": 126.47937774658203,
+     "walkingNormal": 114.85128021240234,
+     "walkingSlow": 103.07080459594727
+    },
+    "gotov:GOTOV11": {
+     "walkingFast": 116.59923553466797,
+     "walkingNormal": 108.18116760253906,
+     "walkingSlow": 101.10675048828125
+    },
+    "gotov:GOTOV12": {
+     "walkingFast": 116.0738525390625,
+     "walkingNormal": 113.78054809570312,
+     "walkingSlow": 105.80277252197266
+    },
+    "gotov:GOTOV13": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV14": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV15": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV16": {
+     "walkingFast": 117.20013046264648,
+     "walkingNormal": 116.14107513427734,
+     "walkingSlow": 107.39021301269531
+    },
+    "gotov:GOTOV17": {
+     "walkingFast": 125.91951751708984,
+     "walkingNormal": 121.75975036621094,
+     "walkingSlow": 115.76764678955078
+    },
+    "gotov:GOTOV18": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV19": {
+     "walkingFast": 115.50900268554688,
+     "walkingNormal": 108.98257446289062,
+     "walkingSlow": 102.16605377197266
+    },
+    "gotov:GOTOV20": {
+     "walkingFast": 107.87382507324219,
+     "walkingNormal": 102.04041290283203,
+     "walkingSlow": 94.71863555908203
+    },
+    "gotov:GOTOV21": {
+     "walkingFast": 121.26445770263672,
+     "walkingNormal": 113.65956115722656,
+     "walkingSlow": 104.02079772949219
+    },
+    "gotov:GOTOV22": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV23": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV24": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV25": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV26": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV27": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV28": {
+     "walkingFast": 124.79277801513672,
+     "walkingNormal": 119.60770416259766,
+     "walkingSlow": 110.21295928955078
+    },
+    "gotov:GOTOV29": {
+     "walkingFast": 115.38761520385742,
+     "walkingNormal": 112.20655059814453,
+     "walkingSlow": 106.71890258789062
+    },
+    "gotov:GOTOV30": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV31": {
+     "walkingFast": 133.32711791992188,
+     "walkingNormal": 128.90684509277344,
+     "walkingSlow": 116.77416229248047
+    },
+    "gotov:GOTOV32": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV33": {
+     "walkingFast": 113.46488952636719,
+     "walkingNormal": 111.10909271240234,
+     "walkingSlow": 107.248291015625
+    },
+    "gotov:GOTOV34": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV35": {
+     "walkingFast": 115.48480987548828,
+     "walkingNormal": 115.56307220458984,
+     "walkingSlow": 102.02677917480469
+    },
+    "gotov:GOTOV36": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    }
+   },
+   "pooled_median": {
+    "walkingFast": 121.26445770263672,
+    "walkingNormal": 114.85128021240234,
+    "walkingSlow": 105.80277252197266
+   },
+   "walkingFast_minus_walkingNormal": {
+    "frac_positive": 0.9523809523809523,
+    "median": 5.367706298828125,
+    "wilcoxon_p_one_sided": 9.5367431640625e-07
+   },
+   "walkingNormal_minus_walkingSlow": {
+    "frac_positive": 1.0,
+    "median": 7.32177734375,
+    "wilcoxon_p_one_sided": 4.76837158203125e-07
+   }
+  },
+  "calibrated_operating_point": {
+   "balanced_accuracy": 0.9760094417625679,
+   "ci95": {
+    "balanced_accuracy": [
+     0.9634795964123072,
+     0.9846892381391474
+    ],
+    "f1": [
+     0.9614859600839393,
+     0.9841285635315485
+    ],
+    "precision": [
+     0.9950993150314806,
+     1.0
+    ],
+    "recall": [
+     0.9274417904285206,
+     0.9701550070705511
+    ],
+    "specificity": [
+     0.9982047128542961,
+     1.0
+    ]
+   },
+   "f1": 0.9749480968858131,
+   "n_gait": 3697,
+   "n_non_gait": 9296,
+   "n_predicted_gait": 3528,
+   "n_subjects": 35,
+   "n_windows": 12993,
+   "precision": 0.9982993197278912,
+   "recall": 0.9526643224235867,
+   "small_sample": false,
+   "specificity": 0.9993545611015491,
+   "threshold": 0.93
+  },
+  "calibration": {
+   "calibration_id": "eldernet-val-T1.0473-tau0.930",
+   "gait_prob": {
+    "T": 1.047343,
+    "fit": "val",
+    "method": "temperature"
+   },
+   "gait_threshold": 0.93
+  },
+  "ece_calibrated": 0.0441016992729861,
+  "ece_uncalibrated": 0.04063862770468615,
+  "integrity": {
+   "bundle_sha256": "eldernet-437a38b+cal:16191350862fb8de",
+   "experiment": "eldernet_gotov_external_v1",
+   "n_evaluations_of_experiment_any_split": 1,
+   "n_evaluations_on_this_test_split": 1,
+   "n_test_evaluations": 1,
+   "rerun_detail": null,
+   "rerun_reason": null,
+   "rerun_reason_text": null,
+   "test_sha256": "465a59a91e7e7f4e2cdaa20b3a45d4ace66f73d3336ee323a976d97e637b55ff",
+   "time": 1791310774
+  },
+  "model_version": "eldernet-437a38b",
+  "n_participants": 35,
+  "n_windows_total": 36069,
+  "preprocessing_version": "eldernet-prep-1",
+  "recall_by_label": {
+   "walkingFast": {
+    "n": 1165,
+    "recall_default": 0.9982832618025751,
+    "recall_operating": 0.9708154506437768
+   },
+   "walkingNormal": {
+    "n": 1229,
+    "recall_default": 0.9934906427990235,
+    "recall_operating": 0.9576891781936534
+   },
+   "walkingSlow": {
+    "n": 1226,
+    "recall_default": 0.9991843393148451,
+    "recall_operating": 0.9567699836867863
+   },
+   "walkingStairsUp": {
+    "n": 77,
+    "recall_default": 0.935064935064935,
+    "recall_operating": 0.5324675324675324
+   }
+  },
+  "speed_ordinal": {
+   "frac_strictly_ordered": 0.9047619047619048,
+   "n_participants_all_paces": 21,
+   "n_strictly_ordered": 19,
+   "per_participant": {
+    "gotov:GOTOV02": {
+     "walkingFast": 1.4818482398986816,
+     "walkingNormal": 1.3890870809555054,
+     "walkingSlow": 1.137717843055725
+    },
+    "gotov:GOTOV03": {
+     "walkingFast": 1.546533465385437,
+     "walkingNormal": 1.480898380279541,
+     "walkingSlow": 1.3547694683074951
+    },
+    "gotov:GOTOV04": {
+     "walkingFast": 1.5299476385116577,
+     "walkingNormal": 1.516352891921997,
+     "walkingSlow": 0.8916999101638794
+    },
+    "gotov:GOTOV05": {
+     "walkingFast": 1.4463017582893372,
+     "walkingNormal": 1.419978380203247,
+     "walkingSlow": 1.264017939567566
+    },
+    "gotov:GOTOV06": {
+     "walkingFast": 1.5874710083007812,
+     "walkingNormal": 1.4764714241027832,
+     "walkingSlow": 1.3604656457901
+    },
+    "gotov:GOTOV07": {
+     "walkingFast": 1.4979758262634277,
+     "walkingNormal": 1.4334098100662231,
+     "walkingSlow": 1.324941098690033
+    },
+    "gotov:GOTOV08": {
+     "walkingFast": 1.5245394706726074,
+     "walkingNormal": 1.4099132418632507,
+     "walkingSlow": 1.259692132472992
+    },
+    "gotov:GOTOV09": {
+     "walkingFast": 1.5726425051689148,
+     "walkingNormal": 1.4439053535461426,
+     "walkingSlow": 1.3436078429222107
+    },
+    "gotov:GOTOV10": {
+     "walkingFast": 1.542143702507019,
+     "walkingNormal": 1.3484042882919312,
+     "walkingSlow": 1.1944878697395325
+    },
+    "gotov:GOTOV11": {
+     "walkingFast": 1.4685986042022705,
+     "walkingNormal": 1.3246659636497498,
+     "walkingSlow": 1.068783164024353
+    },
+    "gotov:GOTOV12": {
+     "walkingFast": 1.53092622756958,
+     "walkingNormal": 1.4733949899673462,
+     "walkingSlow": 1.2898976802825928
+    },
+    "gotov:GOTOV13": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV14": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV15": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV16": {
+     "walkingFast": 1.4727691411972046,
+     "walkingNormal": 1.4466038942337036,
+     "walkingSlow": 1.2157957553863525
+    },
+    "gotov:GOTOV17": {
+     "walkingFast": 1.4674142599105835,
+     "walkingNormal": 1.5230442881584167,
+     "walkingSlow": 1.4625424146652222
+    },
+    "gotov:GOTOV18": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV19": {
+     "walkingFast": 1.4850093126296997,
+     "walkingNormal": 1.3812482357025146,
+     "walkingSlow": 1.1934782266616821
+    },
+    "gotov:GOTOV20": {
+     "walkingFast": 1.4287387132644653,
+     "walkingNormal": 1.3190579414367676,
+     "walkingSlow": 1.2113372087478638
+    },
+    "gotov:GOTOV21": {
+     "walkingFast": 1.5427354574203491,
+     "walkingNormal": 1.4382725954055786,
+     "walkingSlow": 1.2777907848358154
+    },
+    "gotov:GOTOV22": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV23": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV24": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV25": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV26": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV27": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV28": {
+     "walkingFast": 1.527174711227417,
+     "walkingNormal": 1.4799507856369019,
+     "walkingSlow": 1.3074634075164795
+    },
+    "gotov:GOTOV29": {
+     "walkingFast": 1.4171802401542664,
+     "walkingNormal": 1.3854111433029175,
+     "walkingSlow": 1.263171672821045
+    },
+    "gotov:GOTOV30": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV31": {
+     "walkingFast": 1.5709850788116455,
+     "walkingNormal": 1.5424164533615112,
+     "walkingSlow": 1.4132392406463623
+    },
+    "gotov:GOTOV32": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV33": {
+     "walkingFast": 1.4376025199890137,
+     "walkingNormal": 1.375635027885437,
+     "walkingSlow": 1.2532458305358887
+    },
+    "gotov:GOTOV34": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    },
+    "gotov:GOTOV35": {
+     "walkingFast": 1.4188870191574097,
+     "walkingNormal": 1.511102557182312,
+     "walkingSlow": 1.2607672214508057
+    },
+    "gotov:GOTOV36": {
+     "walkingFast": null,
+     "walkingNormal": null,
+     "walkingSlow": null
+    }
+   },
+   "pooled_median": {
+    "walkingFast": 1.4979758262634277,
+    "walkingNormal": 1.4382725954055786,
+    "walkingSlow": 1.263171672821045
+   },
+   "walkingFast_minus_walkingNormal": {
+    "frac_positive": 0.9047619047619048,
+    "median": 0.06456601619720459,
+    "wilcoxon_p_one_sided": 0.00014638900756835938
+   },
+   "walkingNormal_minus_walkingSlow": {
+    "frac_positive": 1.0,
+    "median": 0.15391641855239868,
+    "wilcoxon_p_one_sided": 4.76837158203125e-07
+   }
+  },
+  "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23",
+  "upstream_default": {
+   "balanced_accuracy": 0.9909514017273158,
+   "ci95": {
+    "balanced_accuracy": [
+     0.9855832635064496,
+     0.9950278918754872
+    ],
+    "f1": [
+     0.9667411438420526,
+     0.9898497320576223
+    ],
+    "precision": [
+     0.9405712213008268,
+     0.9825619495713304
+    ],
+    "recall": [
+     0.9915690132182147,
+     0.998801532536168
+    ],
+    "specificity": [
+     0.9763475938785844,
+     0.9927476992779272
+    ]
+   },
+   "f1": 0.9808153477218226,
+   "n_gait": 3697,
+   "n_non_gait": 9296,
+   "n_predicted_gait": 3809,
+   "n_subjects": 35,
+   "n_windows": 12993,
+   "precision": 0.9663953793646627,
+   "recall": 0.9956721666215851,
+   "small_sample": false,
+   "specificity": 0.9862306368330465,
+   "threshold": 0.5
+  }
+ },
+ "model_version": "eldernet-437a38b",
+ "oxwalk": {
+  "status": "pending"
+ },
+ "parity": {
+  "capture24_3h_segments": {
+   "P001": {
+    "bouts": {
+     "n_bouts": {
+      "nara": 43.0,
+      "upstream": 43.0
+     },
+     "n_walking_windows": {
+      "nara": 747.0,
+      "upstream": 747.0
+     },
+     "walking_time_min": {
+      "nara": 18.9,
+      "upstream": 18.9
+     }
+    },
+    "cal": {
+     "agreement": 1.0,
+     "effective_threshold": 0.000169,
+     "max_abs_dprob_classified": 2.8919086708101283e-06,
+     "n_disagree": 0,
+     "n_disagree_outside_prefilter_diff": 0,
+     "n_is_gait_nara": 1266,
+     "n_is_gait_upstream": 1266,
+     "n_nara_only_prefiltered": 0,
+     "n_nara_only_prefiltered_upstream_gait": 0,
+     "n_prefiltered_nara": 704,
+     "n_prefiltered_upstream": 704,
+     "otsu_threshold": 0.00753957844822218,
+     "p99_abs_dprob_classified": 9.922916723209531e-07
+    },
+    "calib_ok": 0,
+    "n_windows": 10791,
+    "nocal": {
+     "agreement": 1.0,
+     "effective_threshold": 0.000169,
+     "max_abs_dprob_classified": 2.8919086708101283e-06,
+     "n_disagree": 0,
+     "n_disagree_outside_prefilter_diff": 0,
+     "n_is_gait_nara": 1266,
+     "n_is_gait_upstream": 1266,
+     "n_nara_only_prefiltered": 0,
+     "n_nara_only_prefiltered_upstream_gait": 0,
+     "n_prefiltered_nara": 704,
+     "n_prefiltered_upstream": 704,
+     "otsu_threshold": 0.00753957844822218,
+     "p99_abs_dprob_classified": 9.922916723209531e-07
+    },
+    "quality_common_windows": 747,
+    "quality_max_abs_diff": {
+     "cadence_steps_min": 3.4814453130138645e-05,
+     "gait_speed_m_s": 5.345198059170109e-07,
+     "regularity_eldernet": 1.2739598693883858e-06,
+     "step_count": 3.574069824185955e-05,
+     "stride_length_m": 1.5284408568794206e-06
+    },
+    "quality_only_nara": 0,
+    "quality_only_upstream": 0,
+    "segment": {
+     "n": 1080000,
+     "start_hour": 13,
+     "t0": 1479050280.0,
+     "walk_min": 36.334666666666664
+    }
+   },
+   "P002": {
+    "bouts": {
+     "n_bouts": {
+      "nara": 35.0,
+      "upstream": 35.0
+     },
+     "n_walking_windows": {
+      "nara": 3309.0,
+      "upstream": 3309.0
+     },
+     "walking_time_min": {
+      "nara": 60.4,
+      "upstream": 60.4
+     }
+    },
+    "cal": {
+     "agreement": 1.0,
+     "effective_threshold": 0.000169,
+     "max_abs_dprob_classified": 1.6329109184809454e-06,
+     "n_disagree": 0,
+     "n_disagree_outside_prefilter_diff": 0,
+     "n_is_gait_nara": 3770,
+     "n_is_gait_upstream": 3770,
+     "n_nara_only_prefiltered": 0,
+     "n_nara_only_prefiltered_upstream_gait": 0,
+     "n_prefiltered_nara": 1090,
+     "n_prefiltered_upstream": 1090,
+     "otsu_threshold": 0.0038073567425191924,
+     "p99_abs_dprob_classified": 7.238320761659978e-07
+    },
+    "calib_ok": 1,
+    "n_windows": 10791,
+    "nocal": {
+     "agreement": 1.0,
+     "effective_threshold": 0.000169,
+     "max_abs_dprob_classified": 1.6329109184809454e-06,
+     "n_disagree": 0,
+     "n_disagree_outside_prefilter_diff": 0,
+     "n_is_gait_nara": 3770,
+     "n_is_gait_upstream": 3770,
+     "n_nara_only_prefiltered": 0,
+     "n_nara_only_prefiltered_upstream_gait": 0,
+     "n_prefiltered_nara": 1090,
+     "n_prefiltered_upstream": 1090,
+     "otsu_threshold": 0.0038073567425191924,
+     "p99_abs_dprob_classified": 7.238320761659978e-07
+    },
+    "quality_common_windows": 3309,
+    "quality_max_abs_diff": {
+     "cadence_steps_min": 3.104736327941282e-05,
+     "gait_speed_m_s": 5.230079650475616e-07,
+     "regularity_eldernet": 8.6027030943292e-07,
+     "step_count": 2.527952880893025e-05,
+     "stride_length_m": 1.38396682736186e-06
+    },
+    "quality_only_nara": 0,
+    "quality_only_upstream": 0,
+    "segment": {
+     "n": 1080000,
+     "start_hour": 16,
+     "t0": 1463853180.0,
+     "walk_min": 59.3405
+    }
+   },
+   "P004": {
+    "bouts": {
+     "n_bouts": {
+      "nara": 27.0,
+      "upstream": 27.0
+     },
+     "n_walking_windows": {
+      "nara": 670.0,
+      "upstream": 670.0
+     },
+     "walking_time_min": {
+      "nara": 15.216666666666667,
+      "upstream": 15.216666666666667
+     }
+    },
+    "cal": {
+     "agreement": 1.0,
+     "effective_threshold": 0.000169,
+     "max_abs_dprob_classified": 2.8264417925027985e-06,
+     "n_disagree": 0,
+     "n_disagree_outside_prefilter_diff": 0,
+     "n_is_gait_nara": 974,
+     "n_is_gait_upstream": 974,
+     "n_nara_only_prefiltered": 0,
+     "n_nara_only_prefiltered_upstream_gait": 0,
+     "n_prefiltered_nara": 2008,
+     "n_prefiltered_upstream": 2008,
+     "otsu_threshold": 0.0025410390162784206,
+     "p99_abs_dprob_classified": 8.137571237515363e-07
+    },
+    "calib_ok": 0,
+    "n_windows": 10791,
+    "nocal": {
+     "agreement": 1.0,
+     "effective_threshold": 0.000169,
+     "max_abs_dprob_classified": 2.8264417925027985e-06,
+     "n_disagree": 0,
+     "n_disagree_outside_prefilter_diff": 0,
+     "n_is_gait_nara": 974,
+     "n_is_gait_upstream": 974,
+     "n_nara_only_prefiltered": 0,
+     "n_nara_only_prefiltered_upstream_gait": 0,
+     "n_prefiltered_nara": 2008,
+     "n_prefiltered_upstream": 2008,
+     "otsu_threshold": 0.0025410390162784206,
+     "p99_abs_dprob_classified": 8.137571237515363e-07
+    },
+    "quality_common_windows": 670,
+    "quality_max_abs_diff": {
+     "cadence_steps_min": 3.068115233872959e-05,
+     "gait_speed_m_s": 5.371276855514751e-07,
+     "regularity_eldernet": 1.3102630615491329e-06,
+     "step_count": 2.618632202189275e-05,
+     "stride_length_m": 1.908431091268703e-06
+    },
+    "quality_only_nara": 0,
+    "quality_only_upstream": 0,
+    "segment": {
+     "n": 1080000,
+     "start_hour": 4,
+     "t0": 1479797160.0,
+     "walk_min": 26.918166666666668
+    }
+   }
+  },
+  "determinism": "bit-identical across reruns, batch positions (1..91-row slices) and request chunking (golden request split at 50 s)",
+  "resampler": "nearest-neighbour index map bit-identical to actipy.processing.resample (n = 12345..360007 at 50/100 Hz)",
+  "toy_example_13min": {
+   "bouts": 6,
+   "max_abs_dprob": 3.62e-06,
+   "n_disagree": 0,
+   "n_is_gait_nara": 488,
+   "n_is_gait_upstream": 488,
+   "n_windows": 771,
+   "quality_max_abs_diff": {
+    "cadence_steps_min": 2.38e-05,
+    "gait_speed_m_s": 2.76e-07,
+    "regularity_eldernet": 4.72e-07,
+    "step_count": 3.92e-06,
+    "stride_length_m": 8.34e-07
+   },
+   "tolerance": "upstream tests/test_example_reproduction.py rtol = atol = 1e-4: all within",
+   "walking_time_min": 7.833,
+   "windows_csv_rows": 416
+  },
+  "vendored_model": "max |diff| vs upstream build_model: detection 3.6e-07, regression heads 0.0 (200 random windows)",
+  "whole_day_capture24_val": {
+   "capture24:P003": {
+    "calibration": {
+     "CalibErrorAfter(mg)": 4.5940877420055095,
+     "CalibErrorBefore(mg)": 4.5940877420055095,
+     "CalibNumSamples": 3773.0,
+     "CalibOK": 1.0,
+     "changed_data": false
+    },
+    "effective_upstream_threshold": 0.000169,
+    "hours": 27.0,
+    "n_nara_only_prefiltered": 0,
+    "n_nara_only_prefiltered_upstream_gait": 0,
+    "n_prefiltered_nara": 38094,
+    "n_prefiltered_upstream": 38094,
+    "n_windows_1s": 97191,
+    "otsu_threshold": 0.0014883249974372561
+   },
+   "capture24:P005": {
+    "calibration": {
+     "CalibErrorAfter(mg)": 9.374268592077334,
+     "CalibErrorBefore(mg)": 13.748800089082549,
+     "CalibNumSamples": 4630.0,
+     "CalibOK": 1.0,
+     "changed_data": true,
+     "max_abs_dprob": 0.27218913493961194,
+     "n_is_gait_cal": 899,
+     "n_is_gait_flips": 65,
+     "n_is_gait_uncal": 880,
+     "n_prefilter_flips": 4,
+     "n_windows_5s": 19799,
+     "p99_abs_dprob": 0.0443970466207137
+    },
+    "effective_upstream_threshold": 0.000169,
+    "hours": 27.5,
+    "n_nara_only_prefiltered": 0,
+    "n_nara_only_prefiltered_upstream_gait": 0,
+    "n_prefiltered_nara": 46740,
+    "n_prefiltered_upstream": 46740,
+    "n_windows_1s": 98991,
+    "otsu_threshold": 0.0012227414417780055
+   },
+   "capture24:P019": {
+    "calibration": {
+     "CalibErrorAfter(mg)": 2.53549986807116,
+     "CalibErrorBefore(mg)": 2.53549986807116,
+     "CalibNumSamples": 4375.0,
+     "CalibOK": 1.0,
+     "changed_data": false
+    },
+    "effective_upstream_threshold": 0.000169,
+    "hours": 26.58,
+    "n_nara_only_prefiltered": 0,
+    "n_nara_only_prefiltered_upstream_gait": 0,
+    "n_prefiltered_nara": 44350,
+    "n_prefiltered_upstream": 44350,
+    "n_windows_1s": 95691,
+    "otsu_threshold": 0.0013605510953017493
+   },
+   "capture24:P022": {
+    "calibration": {
+     "CalibErrorAfter(mg)": 5.641437770634737,
+     "CalibErrorBefore(mg)": 15.811225679463245,
+     "CalibNumSamples": 6536.0,
+     "CalibOK": 1.0,
+     "changed_data": true,
+     "max_abs_dprob": 0.3653164614925761,
+     "n_is_gait_cal": 1286,
+     "n_is_gait_flips": 62,
+     "n_is_gait_uncal": 1296,
+     "n_prefilter_flips": 8,
+     "n_windows_5s": 21359,
+     "p99_abs_dprob": 0.08748346808232343
+    },
+    "effective_upstream_threshold": 0.000169,
+    "hours": 29.67,
+    "n_nara_only_prefiltered": 0,
+    "n_nara_only_prefiltered_upstream_gait": 0,
+    "n_prefiltered_nara": 65733,
+    "n_prefiltered_upstream": 65733,
+    "n_windows_1s": 106791,
+    "otsu_threshold": 0.001176395104560973
+   },
+   "capture24:P025": {
+    "calibration": {
+     "CalibErrorAfter(mg)": 3.3075014982299757,
+     "CalibErrorBefore(mg)": 13.979021089053411,
+     "CalibNumSamples": 3953.0,
+     "CalibOK": 1.0,
+     "changed_data": true,
+     "max_abs_dprob": 0.5636567508398198,
+     "n_is_gait_cal": 826,
+     "n_is_gait_flips": 115,
+     "n_is_gait_uncal": 897,
+     "n_prefilter_flips": 5,
+     "n_windows_5s": 19439,
+     "p99_abs_dprob": 0.13795282654476088
+    },
+    "effective_upstream_threshold": 0.000169,
+    "hours": 27.0,
+    "n_nara_only_prefiltered": 0,
+    "n_nara_only_prefiltered_upstream_gait": 0,
+    "n_prefiltered_nara": 39863,
+    "n_prefiltered_upstream": 39863,
+    "n_windows_1s": 97191,
+    "otsu_threshold": 0.0011718110651370987
+   },
+   "capture24:P026": {
+    "calibration": {
+     "CalibErrorAfter(mg)": 3.7267966004500037,
+     "CalibErrorBefore(mg)": 14.892714706926531,
+     "CalibNumSamples": 3380.0,
+     "CalibOK": 1.0,
+     "changed_data": true,
+     "max_abs_dprob": 0.32384811813268033,
+     "n_is_gait_cal": 1038,
+     "n_is_gait_flips": 19,
+     "n_is_gait_uncal": 1035,
+     "n_prefilter_flips": 13,
+     "n_windows_5s": 17639,
+     "p99_abs_dprob": 0.050515219386303975
+    },
+    "effective_upstream_threshold": 0.000169,
+    "hours": 24.5,
+    "n_nara_only_prefiltered": 0,
+    "n_nara_only_prefiltered_upstream_gait": 0,
+    "n_prefiltered_nara": 34237,
+    "n_prefiltered_upstream": 34237,
+    "n_windows_1s": 88191,
+    "otsu_threshold": 0.0012478802190136523
+   }
+  }
+ },
+ "preprocessing_version": "eldernet-prep-1",
+ "schema": "nara.eldernet.validation/1",
+ "test": {
+  "datasets": {
+   "capture24": {
+    "aurc": 0.006,
+    "auroc": 0.967,
+    "auroc_ci95": [
+     0.96,
+     0.972
+    ],
+    "default_0.5": {
+     "balanced_accuracy": 0.757,
+     "f1": 0.654,
+     "f1_ci95": [
+      0.589,
+      0.708
+     ],
+     "precision": 0.876,
+     "precision_ci95": [
+      0.834,
+      0.909
+     ],
+     "recall": 0.522,
+     "recall_ci95": [
+      0.445,
+      0.588
+     ],
+     "specificity": 0.992
+    },
+    "ece_calibrated": 0.017,
+    "ece_uncalibrated": 0.019,
+    "n_gait": 52369,
+    "n_non_gait": 463101,
+    "n_subjects": 50,
+    "operating_0.93": {
+     "f1": 0.474,
+     "precision": 0.982,
+     "precision_ci95": [
+      0.97,
+      0.991
+     ],
+     "recall": 0.312,
+     "recall_ci95": [
+      0.237,
+      0.383
+     ]
+    },
+    "running": {
+     "frac_is_gait_default": 0.041,
+     "frac_is_gait_operating": 0.008,
+     "n": 639
+    },
+    "small_sample": false
+   },
+   "hhar_watch": {
+    "auroc": 1.0,
+    "default_0.5": {
+     "balanced_accuracy": 0.995,
+     "f1": 0.995,
+     "precision": 1.0,
+     "precision_ci95": [
+      1.0,
+      1.0
+     ],
+     "recall": 0.99,
+     "recall_ci95": [
+      0.988,
+      0.993
+     ],
+     "specificity": 1.0
+    },
+    "ece_calibrated": 0.05,
+    "ece_uncalibrated": 0.046,
+    "n_gait": 309,
+    "n_non_gait": 342,
+    "n_subjects": 2,
+    "operating_0.93": {
+     "f1": 0.723,
+     "precision": 1.0,
+     "precision_ci95": [
+      1.0,
+      1.0
+     ],
+     "recall": 0.566,
+     "recall_ci95": [
+      0.47,
+      0.656
+     ]
+    },
+    "small_sample": true
+   },
+   "mhealth": {
+    "auroc": 1.0,
+    "default_0.5": {
+     "balanced_accuracy": 0.995,
+     "f1": 0.986,
+     "precision": 0.973,
+     "precision_ci95": [
+      0.955,
+      1.0
+     ],
+     "recall": 1.0,
+     "recall_ci95": [
+      1.0,
+      1.0
+     ],
+     "specificity": 0.99
+    },
+    "ece_calibrated": 0.066,
+    "ece_uncalibrated": 0.062,
+    "n_gait": 36,
+    "n_non_gait": 103,
+    "n_subjects": 2,
+    "operating_0.93": {
+     "f1": 0.691,
+     "precision": 1.0,
+     "precision_ci95": [
+      1.0,
+      1.0
+     ],
+     "recall": 0.528,
+     "recall_ci95": [
+      0.524,
+      0.533
+     ]
+    },
+    "running": {
+     "frac_is_gait_default": 0.333,
+     "frac_is_gait_operating": 0.024,
+     "n": 42
+    },
+    "small_sample": true
+   },
+   "opportunity": {
+    "auroc": 0.981,
+    "default_0.5": {
+     "balanced_accuracy": 0.912,
+     "f1": 0.467,
+     "precision": 0.318,
+     "precision_ci95": null,
+     "recall": 0.875,
+     "recall_ci95": null,
+     "specificity": 0.948
+    },
+    "ece_calibrated": 0.147,
+    "ece_uncalibrated": 0.141,
+    "n_gait": 8,
+    "n_non_gait": 290,
+    "n_subjects": 1,
+    "operating_0.93": {
+     "f1": null,
+     "precision": 0.0,
+     "precision_ci95": null,
+     "recall": 0.0,
+     "recall_ci95": null
+    },
+    "small_sample": true
+   },
+   "pamap2": {
+    "auroc": 0.997,
+    "default_0.5": {
+     "balanced_accuracy": 0.966,
+     "f1": 0.955,
+     "precision": 0.975,
+     "precision_ci95": [
+      0.965,
+      0.984
+     ],
+     "recall": 0.935,
+     "recall_ci95": [
+      0.917,
+      0.953
+     ],
+     "specificity": 0.996
+    },
+    "ece_calibrated": 0.066,
+    "ece_uncalibrated": 0.062,
+    "n_gait": 124,
+    "n_non_gait": 697,
+    "n_subjects": 2,
+    "operating_0.93": {
+     "f1": 0.497,
+     "precision": 1.0,
+     "precision_ci95": [
+      1.0,
+      1.0
+     ],
+     "recall": 0.331,
+     "recall_ci95": [
+      0.281,
+      0.383
+     ]
+    },
+    "running": {
+     "frac_is_gait_default": 0.0,
+     "n": 9
+    },
+    "small_sample": true
+   },
+   "wisdm2019_watch": {
+    "auroc": 0.998,
+    "auroc_ci95": [
+     0.995,
+     0.999
+    ],
+    "default_0.5": {
+     "balanced_accuracy": 0.97,
+     "f1": 0.947,
+     "f1_ci95": [
+      0.907,
+      0.978
+     ],
+     "precision": 0.944,
+     "precision_ci95": [
+      0.918,
+      0.971
+     ],
+     "recall": 0.95,
+     "recall_ci95": [
+      0.894,
+      0.991
+     ],
+     "specificity": 0.991
+    },
+    "ece_calibrated": 0.055,
+    "ece_uncalibrated": 0.05,
+    "n_gait": 516,
+    "n_non_gait": 3212,
+    "n_subjects": 8,
+    "operating_0.93": {
+     "f1": 0.719,
+     "precision": 0.99,
+     "precision_ci95": [
+      0.976,
+      0.998
+     ],
+     "recall": 0.564,
+     "recall_ci95": [
+      0.424,
+      0.712
+     ]
+    },
+    "running": {
+     "frac_is_gait_default": 0.073,
+     "frac_is_gait_operating": 0.022,
+     "n": 275
+    },
+    "small_sample": false
+   }
+  },
+  "ledger_stamp": {
+   "bundle_sha256": "eldernet-437a38b+cal:16191350862fb8de",
+   "experiment": "eldernet_frozen_detection_v1",
+   "n_test_evaluations": 1,
+   "rerun_reason": null,
+   "test_sha256": "677165e798c4ab115d2100fe57b8af3657e2df7724547263622559146ef69e4a",
+   "time": 1791310368
+  },
+  "macro_over_datasets": {
+   "f1_default": 0.834,
+   "f1_operating": 0.621,
+   "precision_default": 0.848,
+   "precision_operating": 0.829,
+   "recall_default": 0.879,
+   "recall_operating": 0.383
+  },
+  "pooled": {
+   "aurc": 0.006,
+   "auroc": 0.967,
+   "auroc_ci95": [
+    0.96,
+    0.973
+   ],
+   "default_0.5": {
+    "balanced_accuracy": 0.761,
+    "f1": 0.661,
+    "f1_ci95": [
+     0.597,
+     0.714
+    ],
+    "precision": 0.879,
+    "precision_ci95": [
+     0.838,
+     0.91
+    ],
+    "recall": 0.53,
+    "recall_ci95": [
+     0.455,
+     0.595
+    ],
+    "specificity": 0.992
+   },
+   "ece_calibrated": 0.016,
+   "ece_uncalibrated": 0.018,
+   "n_gait": 53362,
+   "n_non_gait": 467745,
+   "n_subjects": 65,
+   "operating_0.93": {
+    "f1": 0.478,
+    "precision": 0.983,
+    "precision_ci95": [
+     0.971,
+     0.991
+    ],
+    "recall": 0.316,
+    "recall_ci95": [
+     0.243,
+     0.386
+    ]
+   }
+  },
+  "source": "console transcript of the single TEST evaluation (ledger stamp below). The machine report VALIDATION_TEST.json and the ledger file were lost when the external SSD disconnected uncleanly ~2 min later; regenerating them needs a recorded rerun (rerun_reason artifact_lost_identical_rebuild), left to the owner. calibration.json hashes to the stamped bundle (cal:16191350862fb8de)."
+ },
+ "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23",
+ "val_gait_prevalence": {
+  "capture24": {
+   "frac_gait_prefiltered": 0.008975317875841436,
+   "frac_prefiltered_scored": 0.4839822725900137,
+   "mean_gait_prob_scored": 0.06097189587226393,
+   "n_gait": 14707,
+   "n_scored": 225188,
+   "n_windows": 376755,
+   "pi_scored": 0.06530987441604348,
+   "pi_scored_not_prefiltered": 0.12542921317372485,
+   "served_is_gait_rate_all_windows": 0.04777375217316293
+  },
+  "hhar_watch": {
+   "frac_gait_prefiltered": 0.0,
+   "frac_prefiltered_scored": 0.0,
+   "mean_gait_prob_scored": 0.940815769586397,
+   "n_gait": 165,
+   "n_scored": 166,
+   "n_windows": 195,
+   "pi_scored": 0.9939759036144579,
+   "pi_scored_not_prefiltered": 0.9939759036144579,
+   "served_is_gait_rate_all_windows": 0.9384615384615385
+  },
+  "mhealth": {
+   "frac_gait_prefiltered": 0.0,
+   "frac_prefiltered_scored": 0.40397350993377484,
+   "mean_gait_prob_scored": 0.2867516638029774,
+   "n_gait": 42,
+   "n_scored": 151,
+   "n_windows": 1159,
+   "pi_scored": 0.2781456953642384,
+   "pi_scored_not_prefiltered": 0.4666666666666667,
+   "served_is_gait_rate_all_windows": 0.359792924935289
+  },
+  "opportunity": {
+   "frac_gait_prefiltered": 0.0,
+   "frac_prefiltered_scored": 0.003780718336483932,
+   "mean_gait_prob_scored": 0.2516335270107739,
+   "n_gait": 62,
+   "n_scored": 529,
+   "n_windows": 1338,
+   "pi_scored": 0.11720226843100189,
+   "pi_scored_not_prefiltered": 0.11764705882352941,
+   "served_is_gait_rate_all_windows": 0.3460388639760837
+  },
+  "pamap2": {
+   "frac_gait_prefiltered": 0.0,
+   "frac_prefiltered_scored": 0.254320987654321,
+   "mean_gait_prob_scored": 0.11749959457972926,
+   "n_gait": 44,
+   "n_scored": 405,
+   "n_windows": 695,
+   "pi_scored": 0.10864197530864197,
+   "pi_scored_not_prefiltered": 0.1456953642384106,
+   "served_is_gait_rate_all_windows": 0.11942446043165468
+  },
+  "pooled": {
+   "n_scored": 230576,
+   "pi_scored": 0.0678127819027132
+  },
+  "wisdm2019_watch": {
+   "frac_gait_prefiltered": 0.0,
+   "frac_prefiltered_scored": 0.126178390137781,
+   "mean_gait_prob_scored": 0.17148639122743553,
+   "n_gait": 616,
+   "n_scored": 4137,
+   "n_windows": 5334,
+   "pi_scored": 0.14890016920473773,
+   "pi_scored_not_prefiltered": 0.17040110650069157,
+   "served_is_gait_rate_all_windows": 0.12954630671166104
+  }
+ }
+}
