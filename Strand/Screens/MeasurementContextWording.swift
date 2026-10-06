@@ -203,6 +203,15 @@ enum PhysiologyContextWording {
     /// Plain meanings, written to follow "…: " in a sentence (lower case, no full stop). No illness, medication
     /// effect, psychological state or recovery is ever claimed.
     static let reasonPhrases: [String: String] = [
+        // Added with the review repairs (statistics, functional)
+        "detector_burn_in": String(localized: "not enough history yet to watch for changes"),
+        "frozen_window_not_complete_for_day": String(localized: "this day is inside the historical reference period"),
+        "partial_day_composition": String(localized: "the day is not finished, so it is not compared yet"),
+        "partial_day_value_excluded": String(localized: "an unfinished day is left out of change tracking"),
+        "insufficient_motion_coverage": String(localized: "too little movement data from the strap"),
+        "insufficient_motion_observed_time_for_rates": String(localized: "too little time with movement data to compare activity"),
+        "locomotion_unobservable_without_step_counter": String(localized: "walking can't be measured without the strap's step counter"),
+        "motion_evidence_unavailable": String(localized: "no movement data from the strap"),
         // Join (IntervalAlgebra)
         "invalid_interval": String(localized: "the measurement time is not valid"),
         "no_activity_records": String(localized: "no activity data covers it"),
@@ -510,6 +519,11 @@ enum PhysiologyContextWording {
     /// Developer detail: how inputs were cleaned, which estimator or detector ran, provenance of a daily value.
     /// Never shown in the normal flow; the raw code is listed under Diagnostics.
     static let diagnosticsOnlyReasons: Set<String> = [
+        // Declared target-dependent gates (shown in Diagnostics, never as a reason in the normal flow)
+        "hr_plausible_band", "rr_kernel_range", "ectopic_rejection", "sleep_detector_hr_confirmation",
+        "wear_from_heart_rate_presence",
+        // Statistical internals added with the review repairs
+        "autocorrelation_assumed_conservative", "frozen_created_after_day_ignored", "scale_floor_default",
         // Join and engine
         "overlapping_records_resolved", "history_from_future_dropped",
         // Signal validity input hygiene
