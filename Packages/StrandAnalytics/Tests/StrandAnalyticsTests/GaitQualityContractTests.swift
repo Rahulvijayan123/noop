@@ -45,9 +45,9 @@ final class GaitQualityContractTests: XCTestCase {
         input.gaitQuality = GaitQualityTrackInput(model: r.model, windows: r.windows)
 
         var config = ActivityDecoderConfig()
-        config.gaitQuality = GaitQualityEvidenceConfig.candidate(model: r.model, gaitPrior: 0.2,
-                                                                 expectedModelVersion: r.model.modelVersion,
-                                                                 expectedWeightsDigest: r.model.weightsDigest)
+        config.gaitQuality = GaitQualityEvidenceConfig(mode: .candidate, model: r.model, gaitPrior: 0.2,
+                                                       expectedModelVersion: r.model.modelVersion,
+                                                       expectedWeightsDigest: r.model.weightsDigest)
         let a = ActivityContextTrackBuilder.build(input, config: config)
         let b = ActivityContextTrackBuilder.build(input, config: config)
         let e = JSONEncoder()
@@ -68,19 +68,19 @@ final class GaitQualityContractTests: XCTestCase {
     }
 
     func testTheGoldenResponseThePythonServiceWritesDecodes() throws {
-        let r = try GaitQualityResponse.decode(try goldenData())
+        let r = try GaitKit.decode(try goldenData())
         check(r)
         let again = try JSONDecoder().decode(GaitQualityModelInfo.self, from: JSONEncoder().encode(r.model))
         XCTAssertEqual(again, r.model)
     }
 
     func testTheGoldenResponseDrivesTheDecoderDeterministically() throws {
-        try drive(try GaitQualityResponse.decode(try goldenData()))
+        try drive(try GaitKit.decode(try goldenData()))
     }
 
     /// The same two checks on this package's own synthetic fixture, so they run before the Python golden exists.
     func testTheSyntheticFixtureDrivesTheDecoderDeterministically() throws {
-        let r = try GaitQualityResponse.decode(try GaitKit.syntheticFixture())
+        let r = try GaitKit.decode(try GaitKit.syntheticFixture())
         check(r)
         try drive(r)
     }

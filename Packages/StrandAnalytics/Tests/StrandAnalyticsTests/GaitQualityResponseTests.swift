@@ -24,7 +24,7 @@ final class GaitQualityResponseTests: XCTestCase {
     }
 
     private func refuses(_ data: Data, _ expected: E? = nil, file: StaticString = #filePath, line: UInt = #line) {
-        XCTAssertThrowsError(try GaitQualityResponse.decode(data), file: file, line: line) { error in
+        XCTAssertThrowsError(try GaitKit.decode(data), file: file, line: line) { error in
             guard let expected else { return }
             XCTAssertEqual(error as? E, expected, file: file, line: line)
         }
@@ -33,7 +33,7 @@ final class GaitQualityResponseTests: XCTestCase {
     // MARK: - Accepted
 
     func testAValidResponseDecodesWithEveryField() throws {
-        let r = try GaitQualityResponse.decode(try good())
+        let r = try GaitKit.decode(try good())
         XCTAssertEqual(r.model, GaitKit.model())
         XCTAssertEqual(r.windows.count, 3)
         XCTAssertTrue(r.windows[0].prefiltered)
@@ -49,7 +49,7 @@ final class GaitQualityResponseTests: XCTestCase {
     }
 
     func testTheSyntheticFixtureDecodesAndItsDigestMatchesPython() throws {
-        let r = try GaitQualityResponse.decode(try GaitKit.syntheticFixture())
+        let r = try GaitKit.decode(try GaitKit.syntheticFixture())
         XCTAssertEqual(r.model.modelVersion, "eldernet-437a38b")
         XCTAssertEqual(r.model.hopS, 5)
         XCTAssertEqual(r.model.calibration?["gait_prob"], GaitQualityCalibrationEntry(method: "temperature", fit: "val",
@@ -66,7 +66,7 @@ final class GaitQualityResponseTests: XCTestCase {
     }
 
     func testAnUncalibratedResponseAndAnAbsentPrefilterFlagAreAccepted() throws {
-        let r = try GaitQualityResponse.decode(try good { obj in
+        let r = try GaitKit.decode(try good { obj in
             obj["calibration"] = NSNull()
             var ws = obj["windows"] as! [[String: Any]]
             ws[1]["prefiltered"] = false
@@ -77,16 +77,16 @@ final class GaitQualityResponseTests: XCTestCase {
     }
 
     func testIntegralFloatTimesAreAccepted() throws {
-        let r = try GaitQualityResponse.decode(try window { w in
+        let r = try GaitKit.decode(try window { w in
             w["s"] = 1_758_000_010.0; w["e"] = 1_758_000_020.0
         })
         XCTAssertEqual(r.windows[2].startTs, 1_758_000_010)
     }
 
     func testAProbabilityWithinTheRoundingToleranceOfTheThresholdMayFallEitherWay() throws {
-        XCTAssertNoThrow(try GaitQualityResponse.decode(try window { w in w["gait_prob"] = 0.4999995 }))
+        XCTAssertNoThrow(try GaitKit.decode(try window { w in w["gait_prob"] = 0.4999995 }))
         let below = try window(1) { w in w["gait_prob"] = 0.5000005 }
-        XCTAssertNoThrow(try GaitQualityResponse.decode(below))
+        XCTAssertNoThrow(try GaitKit.decode(below))
     }
 
     // MARK: - Refused
@@ -94,7 +94,7 @@ final class GaitQualityResponseTests: XCTestCase {
     func testServiceErrorsAreSurfacedWithTheirKind() {
         for kind in ["malformed", "model_missing", "weights_mismatch", "timeout", "internal", "output_too_large"] {
             let data = Data(#"{"id":"x","ok":false,"kind":"\#(kind)","error":"boom"}"#.utf8)
-            XCTAssertThrowsError(try GaitQualityResponse.decode(data)) { error in
+            XCTAssertThrowsError(try GaitKit.decode(data)) { error in
                 XCTAssertEqual(error as? E, .serviceError(kind: kind, message: "boom"))
                 XCTAssertEqual((error as? E)?.kind, kind)
             }
@@ -148,14 +148,14 @@ final class GaitQualityResponseTests: XCTestCase {
         let text = String(decoding: try good(), as: UTF8.self).replacingOccurrences(of: "\"gait_prob\":0.93",
                                                                                      with: "\"gait_prob\":NaN")
         XCTAssertTrue(text.contains("NaN"))
-        XCTAssertThrowsError(try GaitQualityResponse.decode(Data(text.utf8))) { error in
+        XCTAssertThrowsError(try GaitKit.decode(Data(text.utf8))) { error in
             XCTAssertEqual(error as? E, .notJSON(nonfinite: true))
             XCTAssertEqual((error as? E)?.kind, "nonfinite")
         }
         let inf = String(decoding: try good(), as: UTF8.self).replacingOccurrences(of: "\"speed_mps\":1.2",
                                                                                     with: "\"speed_mps\":Infinity")
-        XCTAssertThrowsError(try GaitQualityResponse.decode(Data(inf.utf8)))
-        XCTAssertThrowsError(try GaitQualityResponse.decode(Data("not json".utf8))) { error in
+        XCTAssertThrowsError(try GaitKit.decode(Data(inf.utf8)))
+        XCTAssertThrowsError(try GaitKit.decode(Data("not json".utf8))) { error in
             XCTAssertEqual(error as? E, .notJSON(nonfinite: false))
         }
     }
@@ -175,7 +175,7 @@ final class GaitQualityResponseTests: XCTestCase {
         refuses(try window(1) { $0["cadence_spm"] = 100 }, .metricsOnNonGaitWindow(index: 1))
         refuses(try window(0) { $0["steps"] = 3 }, .metricsOnNonGaitWindow(index: 0))
         // Absent is not zero: a gait window may carry no metric at all, and null means absent.
-        let r = try GaitQualityResponse.decode(try window { w in
+        let r = try GaitKit.decode(try window { w in
             for k in ["speed_mps", "cadence_spm", "stride_m", "regularity", "steps"] { w[k] = NSNull() }
         })
         XCTAssertFalse(r.windows[2].hasMetrics)
@@ -226,14 +226,14 @@ final class GaitQualityResponseTests: XCTestCase {
     // MARK: - Codable paths
 
     func testWindowAndModelCodableRoundTrip() throws {
-        let r = try GaitQualityResponse.decode(try GaitKit.syntheticFixture())
+        let r = try GaitKit.decode(try GaitKit.syntheticFixture())
         let e = JSONEncoder()
         for w in r.windows {
             XCTAssertEqual(try JSONDecoder().decode(GaitQualityWindow.self, from: e.encode(w)), w)
         }
         XCTAssertEqual(try JSONDecoder().decode(GaitQualityModelInfo.self, from: e.encode(r.model)), r.model)
         // The model's encoding is the response layout: a response rebuilt from it decodes to the same thing.
-        let rebuilt = try GaitQualityResponse.decode(try GaitKit.responseJSON(r.model, r.windows))
+        let rebuilt = try GaitKit.decode(try GaitKit.responseJSON(r.model, r.windows))
         XCTAssertEqual(rebuilt.model, r.model)
         XCTAssertEqual(rebuilt.windows, r.windows)
         // A non-gait window's encoding has no metric keys and no prefiltered flag.

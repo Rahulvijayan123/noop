@@ -704,7 +704,7 @@ enum ActivityContextModel {
         var favoursBrisk: Bool? = nil
         if let gaitQuality, let window = f.gaitQuality {
             let inertiaLocomotion = (inertia?.locomotion?.weight ?? 0) > 0
-            let t = gaitQuality.terms(for: window, hartSpeaks: f.encoder != nil,
+            let t = gaitQuality.gaitTerms(for: window, hartSpeaks: f.encoder != nil,
                                       inertiaLocomotionSpeaks: inertiaLocomotion)
             favoursBrisk = t.favoursBrisk
             let budgetLog = gaitQuality.budget * log(10)

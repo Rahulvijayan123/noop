@@ -93,7 +93,7 @@ public struct ActivityContextTrack: Sendable {
         var report = motionHeads
         if let n = next.motionHeads { report = report?.merged(with: n) ?? n }
         var gait = gaitQuality
-        if let n = next.gaitQuality { gait = gait?.merged(with: n) ?? n }
+        if let n = next.gaitQuality { gait = gait?.continued(by: n) ?? n }
         return ActivityContextTrack(states: states + next.states, events: merged, snapshot: next.snapshot,
                                     restore: restore, observedSeconds: observedSeconds + next.observedSeconds,
                                     lastTs: next.lastTs ?? lastTs, motionHeads: report, gaitQuality: gait)
@@ -115,7 +115,7 @@ public enum ActivityContextTrackBuilder {
             track.motionHeads = attach.merged(with: track.motionHeads ?? MotionHeadsTrackReport())
         }
         if let attach = prepared.gaitQuality {
-            track.gaitQuality = attach.merged(with: track.gaitQuality ?? GaitQualityTrackReport())
+            track.gaitQuality = attach.continued(by: track.gaitQuality ?? GaitQualityTrackReport())
         }
         return track
     }
@@ -164,17 +164,6 @@ public enum ActivityContextTrackBuilder {
         report.windowsIn = windows.count
         var out = observations(for: input)
         attachMotionHeads(windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
-        return report
-    }
-
-    /// What attaching ElderNet `windows` to `input`'s observed seconds would do, whatever any config says (the
-    /// worker's shadow rows report it).
-    public static func gaitAttachmentReport(for input: ActivityContextTrackInput,
-                                            windows: [GaitQualityWindow]) -> GaitQualityTrackReport {
-        var report = GaitQualityTrackReport()
-        report.windowsIn = windows.count
-        var out = observations(for: input)
-        attachGaitQuality(windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
         return report
     }
 

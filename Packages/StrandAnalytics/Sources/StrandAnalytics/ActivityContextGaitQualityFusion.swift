@@ -133,7 +133,7 @@ struct PreparedGaitQuality: Sendable {
         var favoursBrisk: Bool?
     }
 
-    func terms(for window: GaitQualityWindow, hartSpeaks: Bool, inertiaLocomotionSpeaks: Bool) -> Terms {
+    func gaitTerms(for window: GaitQualityWindow, hartSpeaks: Bool, inertiaLocomotionSpeaks: Bool) -> Terms {
         let w = effectiveWeights(hartSpeaks: hartSpeaks, inertiaLocomotionSpeaks: inertiaLocomotionSpeaks)
         var t = Terms()
         t.gait = (likelihood(window.gaitProb), w.gait)

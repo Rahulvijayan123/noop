@@ -95,6 +95,18 @@ enum GaitKit {
         }.joined(separator: "\n")
     }
 
+    /// Decode one response line the way the worker does: `JSONDecoder` + the strict `init(from:)`, with text that is
+    /// not JSON at all reported as `.notJSON` (nonfinite when it carries a NaN / Infinity token).
+    static func decode(_ data: Data) throws -> GaitQualityResponse {
+        do {
+            return try JSONDecoder().decode(GaitQualityResponse.self, from: data)
+        } catch is DecodingError {
+            let text = String(decoding: data, as: UTF8.self)
+            let nonfinite = text.range(of: #"[:\[,]\s*-?(NaN|Infinity)"#, options: .regularExpression) != nil
+            throw GaitQualityResponseError.notJSON(nonfinite: nonfinite)
+        }
+    }
+
     /// The synthetic fixture this package's tests decode (`Goldens/ElderNet/`), written per ELDERNET.md §4.
     static func syntheticFixture() throws -> Data {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()

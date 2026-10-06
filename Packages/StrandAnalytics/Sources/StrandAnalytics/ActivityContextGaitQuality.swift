@@ -86,7 +86,7 @@ public struct GaitQualityWindow: Codable, Equatable, Sendable {
         case speedMps = "speed_mps", cadenceSpm = "cadence_spm", strideM = "stride_m", regularity, steps
     }
 
-    /// Strict decode: the same structural checks as `GaitQualityResponse.decode` applies to a window (known keys
+    /// Strict decode: the same structural checks the response decoder applies to a window (known keys
     /// only, integral times, a 10-s window, a finite probability in [0, 1], `is_gait` present, metrics in their
     /// ranges and only on gait windows, a consistent pre-filter flag). The threshold check needs the model:
     /// `validate(against:index:)`. A replay record or a snapshot can never carry a window the wire would refuse.
@@ -113,7 +113,7 @@ public struct GaitQualityWindow: Codable, Equatable, Sendable {
         try c.encodeIfPresent(steps, forKey: .steps)
     }
 
-    /// The checks of `GaitQualityResponse.decode` that need the model: the window length and the agreement of
+    /// The checks of the response decoder that need the model: the window length and the agreement of
     /// `is_gait` with `gait_prob ≥ gait_threshold` (a pre-filtered window is non-gait whatever the threshold).
     public func validate(against model: GaitQualityModelInfo, index i: Int = 0) throws {
         guard endTs - startTs == model.windowS else { throw GaitQualityResponseError.invalidWindowTiming(index: i) }
@@ -124,7 +124,7 @@ public struct GaitQualityWindow: Codable, Equatable, Sendable {
     }
 
     /// True when the window carries any quality metric.
-    public var hasMetrics: Bool {
+    var hasMetrics: Bool {
         speedMps != nil || cadenceSpm != nil || strideM != nil || regularity != nil || steps != nil
     }
 }
@@ -183,7 +183,7 @@ public struct GaitQualityModelInfo: Codable, Equatable, Sendable {
         init?(intValue: Int) { nil }
     }
 
-    /// Strict decode: exactly the validation `GaitQualityResponse.decode` applies to the response's provenance
+    /// Strict decode: exactly the validation the response decoder applies to the response's provenance
     /// (`parseModel`), so a replay header or a stored config refuses what the wire decoder refuses.
     public init(from decoder: Decoder) throws {
         let json = try MotionHeadsJSON(from: decoder)
@@ -227,7 +227,7 @@ public struct GaitQualityModelInfo: Codable, Equatable, Sendable {
     /// The canonical text whose SHA-256 is `weightsDigest`: the prefix, then `name=sha256\n` per served head in
     /// sorted name order. (Python: `hashlib.sha256(("eldernet-weights-1\n" + "".join(f"{k}={v}\n" for k, v in
     /// sorted(weights.items()))).encode()).hexdigest()`.)
-    public var weightsCanonicalText: String {
+    var weightsCanonicalText: String {
         GaitQualityWire.weightsDigestPrefix + weights.keys.sorted().map { "\($0)=\(weights[$0]!)\n" }.joined()
     }
 
@@ -240,8 +240,11 @@ public struct GaitQualityModelInfo: Codable, Equatable, Sendable {
 
 // MARK: - Response
 
-/// A validated `gait-quality-1` infer response.
-public struct GaitQualityResponse: Equatable, Sendable {
+/// A validated `gait-quality-1` infer response. Decode one with `JSONDecoder().decode(GaitQualityResponse.self,
+/// from: line)`: `init(from:)` refuses anything that is not exactly the contract with a `GaitQualityResponseError`
+/// (thrown as is, never wrapped). Text that is not JSON at all (a NaN token, say) fails in `JSONDecoder` itself with a
+/// `DecodingError` before any of this runs; `GaitQualityResponseError.notJSON` is that case's counter kind.
+public struct GaitQualityResponse: Decodable, Equatable, Sendable {
     public var model: GaitQualityModelInfo
     public var windows: [GaitQualityWindow]
     /// Windows the service omitted because an output was nonfinite.
@@ -308,21 +311,14 @@ public enum GaitQualityResponseError: Error, Equatable, Sendable, CustomStringCo
 
 extension GaitQualityResponse {
 
-    /// Decode and validate one `gait-quality-1` infer response line. Throws `GaitQualityResponseError` for
-    /// anything that is not exactly the contract: an unknown schema, model id, weight name or window key, a
-    /// nonfinite or out-of-range number, a non-integral time, metrics on a non-gait window, an `is_gait` flag that
-    /// disagrees with the threshold, windows out of order.
-    public static func decode(_ data: Data) throws -> GaitQualityResponse {
-        let root: MotionHeadsJSON
-        do {
-            root = try JSONDecoder().decode(MotionHeadsJSON.self, from: data)
-        } catch {
-            let text = String(decoding: data, as: UTF8.self)
-            let nonfinite = text.range(of: #"[:\[,]\s*-?(NaN|Infinity)"#, options: .regularExpression) != nil
-            throw GaitQualityResponseError.notJSON(nonfinite: nonfinite)
-        }
+    /// Strict decode of one `gait-quality-1` infer response. Throws `GaitQualityResponseError` (as is) for anything
+    /// that is not exactly the contract: an unknown schema, model id, weight name or window key, a nonfinite or
+    /// out-of-range number, a non-integral time, metrics on a non-gait window, an `is_gait` flag that disagrees with
+    /// the threshold, windows out of order, or a service error (`ok: false`).
+    public init(from decoder: Decoder) throws {
+        let root = try MotionHeadsJSON(from: decoder)
         guard case .object(let obj) = root else { throw GaitQualityResponseError.notAnObject }
-        return try parse(obj)
+        self = try Self.parse(obj)
     }
 
     static func parse(_ obj: [String: MotionHeadsJSON]) throws -> GaitQualityResponse {
@@ -598,7 +594,7 @@ public struct GaitQualityTrackReport: Codable, Equatable, Sendable {
     public var dropped: Int { droppedNoObservation + droppedSuperseded + droppedOutOfRange }
 
     /// Two consecutive decodes of one stream (a resumed track): counts add, provenance must agree.
-    func merged(with next: GaitQualityTrackReport) -> GaitQualityTrackReport {
+    func continued(by next: GaitQualityTrackReport) -> GaitQualityTrackReport {
         var out = self
         out.stamp = stamp ?? next.stamp
         out.refusal = refusal ?? next.refusal
@@ -695,15 +691,6 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
         self.hartRedundancy = hartRedundancy; self.inertiaRedundancy = inertiaRedundancy
         self.accelerometerBudget = accelerometerBudget
         self.expectedModelVersion = expectedModelVersion; self.expectedWeightsDigest = expectedWeightsDigest
-    }
-
-    /// The candidate defaults (ELDERNET.md §5).
-    public static func candidate(model: GaitQualityModelInfo, gaitPrior: Double,
-                                 expectedModelVersion: String? = nil,
-                                 expectedWeightsDigest: String? = nil) -> GaitQualityEvidenceConfig {
-        GaitQualityEvidenceConfig(mode: .candidate, model: model, gaitPrior: gaitPrior,
-                                  expectedModelVersion: expectedModelVersion,
-                                  expectedWeightsDigest: expectedWeightsDigest)
     }
 
     public enum ValidationError: Error, Equatable, Sendable, CustomStringConvertible {

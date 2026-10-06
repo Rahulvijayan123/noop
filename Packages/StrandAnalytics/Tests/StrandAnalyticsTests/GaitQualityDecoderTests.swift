@@ -304,7 +304,7 @@ final class GaitQualityDecoderTests: XCTestCase {
                        "weights_digest_mismatch")
         XCTAssertEqual(GaitKit.config(gait: 0.9).gaitQuality!.evidenceRefusal?.hasPrefix("invalid_config"), true)
         XCTAssertNil(GaitKit.config(mode: .shadow).gaitQuality!.provenanceStamp)
-        let d = GaitQualityEvidenceConfig.candidate(model: m, gaitPrior: 0.2)
+        let d = GaitQualityEvidenceConfig(mode: .candidate, model: m, gaitPrior: 0.2)
         XCTAssertEqual([d.gaitWeight, d.briskWeight, d.hartRedundancy, d.inertiaRedundancy, d.accelerometerBudget,
                         d.briskCadenceSpm, d.briskSpeedMps], [0.25, 0, 0.65, 0.65, 0.5, 100, 1.34])
         XCTAssertEqual(d.briskRule, .cadence)
@@ -338,7 +338,7 @@ final class GaitQualityDecoderTests: XCTestCase {
               .outOfRange("briskCadenceSpm"))
         check(GaitQualityEvidenceConfig(mode: .candidate, model: m, gaitPrior: 0.2, briskSpeedMps: 0.1),
               .outOfRange("briskSpeedMps"))
-        XCTAssertNoThrow(try GaitQualityEvidenceConfig.candidate(model: m, gaitPrior: 0.2).validate())
+        XCTAssertNoThrow(try GaitQualityEvidenceConfig(mode: .candidate, model: m, gaitPrior: 0.2).validate())
     }
 
     func testARefusedConfigOrAnotherModelDecodesExactlyLikeElderNetOff() throws {
@@ -369,7 +369,7 @@ final class GaitQualityDecoderTests: XCTestCase {
             XCTAssertTrue(t.states.allSatisfy { $0.versions.gaitQuality == nil && $0.gait == nil }, label)
             XCTAssertEqual(try e.encode(t.states), try e.encode(off.states), label)
             XCTAssertEqual(try e.encode(t.snapshot), try e.encode(off.snapshot), label)
-            XCTAssertEqual(ActivityContextTrackBuilder.cacheTag(for: variant, config: config), ActivityDecoderConfig().cacheTag,
+            XCTAssertEqual(ActivityContextTrackBuilder.effectiveConfig(for: variant, config: config).cacheTag, ActivityDecoderConfig().cacheTag,
                            label)
             let doc = ActivityContextDayBuilder.update(cached: nil, input: variant, now: input.dayEnd, config: config).document
             XCTAssertNil(doc.versions.gaitQuality, label)
@@ -382,7 +382,7 @@ final class GaitQualityDecoderTests: XCTestCase {
         let stamp = try XCTUnwrap(config.gaitQuality?.provenanceStamp)
         XCTAssertEqual(on.gaitQuality?.stamp, stamp)
         XCTAssertEqual(on.snapshot.versions.gaitQuality, stamp)
-        XCTAssertEqual(ActivityContextTrackBuilder.cacheTag(for: withWindows, config: config), config.cacheTag)
+        XCTAssertEqual(ActivityContextTrackBuilder.effectiveConfig(for: withWindows, config: config).cacheTag, config.cacheTag)
         let doc = ActivityContextDayBuilder.update(cached: nil, input: withWindows, now: input.dayEnd, config: config).document
         XCTAssertEqual(doc.versions.gaitQuality, stamp)
     }
@@ -482,7 +482,6 @@ final class GaitQualityDecoderTests: XCTestCase {
         XCTAssertEqual(report.droppedNoObservation, 1)
         XCTAssertEqual(report.droppedOutOfRange, 1)
         XCTAssertEqual(report.windowsIn, 5)
-        XCTAssertEqual(ActivityContextTrackBuilder.gaitAttachmentReport(for: withGait, windows: windows).attached, 3)
         let track = ActivityContextTrackBuilder.build(withGait, config: config)
         XCTAssertEqual(track.observedSeconds, plain.count)
         XCTAssertEqual(track.gaitQuality?.attached, 3)
@@ -731,7 +730,8 @@ final class GaitQualityDecoderTests: XCTestCase {
                                                briskRule: .speed, expectedModelVersion: m.modelVersion,
                                                expectedWeightsDigest: m.weightsDigest)
         XCTAssertEqual(try JSONDecoder().decode(GaitQualityEvidenceConfig.self, from: JSONEncoder().encode(pinned)), pinned)
-        let unpinned = String(decoding: try JSONEncoder().encode(GaitQualityEvidenceConfig.candidate(model: m, gaitPrior: 0.2)),
+        let unpinned = String(decoding: try JSONEncoder().encode(GaitQualityEvidenceConfig(mode: .candidate, model: m,
+                                                                                          gaitPrior: 0.2)),
                               as: UTF8.self)
         XCTAssertFalse(unpinned.contains("expectedWeightsDigest"))
         var dc = ActivityDecoderConfig()
