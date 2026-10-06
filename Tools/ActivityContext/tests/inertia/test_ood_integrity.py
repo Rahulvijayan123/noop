@@ -51,20 +51,58 @@ def test_select_method_uses_val_only():
     assert sel["chosen"] == "a" and "VAL" in sel["rule"]
 
 
+def _vault(ledger, calls):
+    def load():
+        calls.append("load")
+        return {"x": 1, "uids": np.array(["u1", "u2"])}
+    return TestVault(load, lambda p: [p["uids"]], ledger)
+
+
 def test_evaluate_once_refuses_silent_rerun(tmp_path):
     ledger = str(tmp_path / "ledger.jsonl")
-    v = TestVault({"x": 1}, [np.array(["u1", "u2"])], ledger)
+    calls = []
+    v = _vault(ledger, calls)
     rep = v.evaluate_once("exp-a", "b" * 64, lambda p: {"ok": p["x"]}, declared=["exp-a"])
-    assert rep["integrity"]["n_test_evaluations"] == 1
+    assert rep["integrity"]["n_test_evaluations"] == 1 and calls == ["load"]
     with pytest.raises(SplitLeakError):
         v.evaluate_once("exp-a", "b" * 64, lambda p: {}, declared=["exp-a"])
     with pytest.raises(SplitLeakError):
         v.evaluate_once("exp-a", "c" * 64, lambda p: {}, declared=["exp-a"])
     with pytest.raises(SplitLeakError):
         v.evaluate_once("exp-undeclared", "d" * 64, lambda p: {}, declared=["exp-a"])
-    rep2 = v.evaluate_once("exp-a", "c" * 64, lambda p: {}, declared=["exp-a"], rerun_reason="bug fix")
+    with pytest.raises(SplitLeakError):                     # undeclared stays refused even with a reason
+        v.evaluate_once("exp-undeclared", "d" * 64, lambda p: {}, declared=["exp-a"],
+                        rerun_reason="evaluator_bug_fix", rerun_detail="x")
+    assert calls == ["load"]                                # refusals never materialise the test split
+    with pytest.raises(SplitLeakError):                     # free text is not a reason
+        v.evaluate_once("exp-a", "c" * 64, lambda p: {}, declared=["exp-a"], rerun_reason="bug fix")
+    with pytest.raises(SplitLeakError):                     # a reason needs detail
+        v.evaluate_once("exp-a", "c" * 64, lambda p: {}, declared=["exp-a"], rerun_reason="post_audit_rule_change")
+    rep2 = v.evaluate_once("exp-a", "c" * 64, lambda p: {}, declared=["exp-a"], rerun_reason="post_audit_rule_change",
+                           rerun_detail="G-4/G-5 rules changed after the audit")
     assert rep2["integrity"]["n_test_evaluations"] == 2
-    assert len(open(ledger).read().strip().splitlines()) == 2
+    assert rep2["integrity"]["rerun_reason"] == "post_audit_rule_change"
+    assert rep2["integrity"]["rerun_detail"].startswith("G-4")
+    lines = [json.loads(x) for x in open(ledger).read().strip().splitlines()]
+    assert len(lines) == 2 and lines[1]["rerun_reason"] == "post_audit_rule_change"
+
+
+def test_vault_takes_a_loader_not_arrays(tmp_path):
+    with pytest.raises(SplitLeakError):
+        TestVault({"test": np.zeros(3)}, [np.array(["u"])], str(tmp_path / "l.jsonl"))
+
+
+def test_vault_runs_prechecks_on_the_test_hash_before_the_evaluator(tmp_path):
+    calls = []
+    v = _vault(str(tmp_path / "l.jsonl"), calls)
+    seen = {}
+
+    def before(sha):
+        seen["sha"] = sha
+        raise SplitLeakError("calibration fit on test")
+    with pytest.raises(SplitLeakError):
+        v.evaluate_once("exp-a", "b" * 64, lambda p: calls.append("eval") or {}, declared=["exp-a"], before=before)
+    assert "eval" not in calls and len(seen["sha"]) == 64 and not (tmp_path / "l.jsonl").exists()
 
 
 def test_split_view_never_wraps_test():

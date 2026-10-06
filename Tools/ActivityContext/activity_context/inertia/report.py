@@ -24,10 +24,34 @@ def f(x: Any, nd: int = 3) -> str:
     return f"{x:.{nd}f}"
 
 
+FEW_SUBJECTS_MARK = "†"
+FEW_SUBJECTS_NOTE = (f"{FEW_SUBJECTS_MARK} = subject-cluster bootstrap over fewer than 10 subjects: the percentile CI "
+                     "under-covers (bootstrap.cluster_bootstrap warning); read it as descriptive.")
+DESCRIPTIVE_NOTE = ("*descriptive* = a dataset with <= 2 test subjects: its per-dataset (and LODO) numbers describe "
+                    "those subjects, not a population.")
+LOSO_NOTE = ("Limitation: leave-one-subject-out folds are defined in the split manifests (`loso_folds`) for the small "
+             "datasets but were NOT evaluated; every number here comes from the single frozen train/val/test split.")
+RECUMBENT_LABEL = "recumbent (mostly sleep-period lying in training data)"
+POSTURE_CAVEAT = ("Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the training data (awake "
+                  "lying is reported separately below); driving/passenger (vehicle) windows carry `seated_likely` "
+                  "because posture is genuinely labelled there; posture is MASKED on gait/cycling/exercise windows.")
+
+
 def ci(b: Dict[str, Any], nd: int = 3) -> str:
     if not b:
         return "–"
-    return f"{f(b.get('point'), nd)} [{f(b.get('ci_low'), nd)}, {f(b.get('ci_high'), nd)}]"
+    mark = FEW_SUBJECTS_MARK if b.get("warning") else ""
+    return f"{f(b.get('point'), nd)} [{f(b.get('ci_low'), nd)}, {f(b.get('ci_high'), nd)}]{mark}"
+
+
+def class_label(h: str, c: str) -> str:
+    return RECUMBENT_LABEL if (h, c) == ("posture", "recumbent") else c
+
+
+def gate_cell(gt: Dict[str, Any]) -> str:
+    if not gt:
+        return "–"
+    return f"P={f(gt.get('precision'))} n={f(gt.get('n_acc'))} → {gt.get('level', 'pass' if gt.get('pass') else 'fail')}"
 
 
 def _json_safe(o):
@@ -47,36 +71,47 @@ def _json_safe(o):
 
 def class_head_md(h: str, r: Dict[str, Any]) -> List[str]:
     p, u, b = r["pooled"], r.get("uncalibrated_softmax", {}), r.get("bootstrap_ci", {})
-    L = [f"### {h}", "", "| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | NLL raw→cal | Brier raw→cal | "
-         "ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |", "|---|---|---|---|---|---|---|---|---|",
-         f"| {f(p['n'])} | {f(p['accuracy'])} | {ci(b.get('balanced_accuracy'))} | {ci(b.get('macro_f1'))} | "
-         f"{f(u.get('nll'))}→{f(p['nll'])} | {f(u.get('brier'))}→{f(p['brier'])} | {f(u.get('ece_top_equal_width_15'))}→"
-         f"{f(p['ece_top_equal_width_15'])} ({f(p['ece_top_equal_width_15_null']['null_p95'])}) | "
-         f"{f(u.get('classwise_ece_equal_width_15'))}→{f(p['classwise_ece_equal_width_15'])} | {f(r['aurc']['aurc'])} |", ""]
+    L = [f"### {h}", ""]
+    if h == "posture":
+        L += [POSTURE_CAVEAT, ""]
+    L += ["| n | accuracy | balanced acc [95% CI] | macro-F1 [95% CI] | macro-F1 present-only (legacy) | NLL raw→cal | "
+          "Brier raw→cal | ECE-15 raw→cal (null p95) | classwise ECE raw→cal | AURC |", "|---|---|---|---|---|---|---|---|---|---|",
+          f"| {f(p['n'])} | {f(p['accuracy'])} | {ci(b.get('balanced_accuracy'))} | {ci(b.get('macro_f1'))} | "
+          f"{ci(b.get('macro_f1_present_supported')) if b.get('macro_f1_present_supported') else f(p.get('macro_f1_present_supported'))} | "
+          f"{f(u.get('nll'))}→{f(p['nll'])} | {f(u.get('brier'))}→{f(p['brier'])} | {f(u.get('ece_top_equal_width_15'))}→"
+          f"{f(p['ece_top_equal_width_15'])} ({f(p['ece_top_equal_width_15_null']['null_p95'])}) | "
+          f"{f(u.get('classwise_ece_equal_width_15'))}→{f(p['classwise_ece_equal_width_15'])} | {f(r['aurc']['aurc'])} |", "",
+          "macro-F1 = sklearn convention (mean F1 over the union of true and predicted classes; a class predicted while "
+          f"absent scores 0). Predicted while absent from this test set: {', '.join(p.get('predicted_absent_classes') or []) or 'none'}. "
+          "'present-only' = the earlier number over classes with test support only (kept for comparison).", ""]
     mb = r.get("majority_baseline", {})
     L += [f"Majority baseline (train-majority `{mb.get('class')}`): accuracy {f(mb.get('accuracy'))}, balanced acc "
           f"{f(mb.get('balanced_accuracy'))}, macro-F1 {f(mb.get('macro_f1'))}. Set-truth windows: {f(p.get('n_set_truth'))}; "
           f"windows whose truth is an unsupported class (not scored): "
           f"{f(sum(v['unsupported_truth_windows'] for v in p['per_class'].values()))}.", "",
-          "| class | supported | test support | P | R | F1 | classwise ECE | val status | tau | test gate | final status | unsupported-truth windows |",
-          "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+          "| class | supported | test support | P | R | F1 | P single-label (n) | classwise ECE | val status | tau | "
+          "pooled gate | dataset demotions | final status | unsupported-truth windows |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    sl = (r.get("single_label") or {}).get("per_class", {})
     for c in HEAD_CLASS_ORDERS[h]:
         pc = p["per_class"][c]
         g = r["gate"].get(c, {})
-        gt = g.get("test") or {}
-        gate = (f"P={f(gt.get('precision'))} n={f(gt.get('n_acc'))} {'pass' if gt.get('pass') else 'fail'}" if gt else "–")
         prf = [pc["precision"], pc["recall"], pc["f1"]] if pc["supported_by_head"] else [None, None, None]
-        L.append(f"| {c} | {f(pc['supported_by_head'])} | {f(pc['support'])} | {f(prf[0])} | {f(prf[1])} | "
-                 f"{f(prf[2])} | {f(pc.get('classwise_ece'))} | {g.get('val_status', 'unsupported')} | {f(g.get('tau'))} | "
-                 f"{gate} | {g.get('final_status', '–')} | {f(pc['unsupported_truth_windows'])} |")
-    L += ["", "Per dataset:", "", "| dataset | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | per-class F1 |",
-          "|---|---|---|---|---|---|---|"]
-    for d, dr in r["per_dataset"].items():
-        if not dr.get("n"):
-            continue
-        pcs = ", ".join(f"{c} {f(v['f1'], 2)} (n={v['support']})" for c, v in dr["per_class"].items() if v["support"])
-        L.append(f"| {d} | {f(dr['n'])} | {f(dr['balanced_accuracy'])} | {ci(dr.get('bootstrap_macro_f1'))} | "
-                 f"{f(dr['nll'])} | {f(dr['ece_top_equal_width_15'])} | {pcs} |")
+        s1 = sl.get(c)
+        single = f"{f(s1['precision'])} ({f(s1['support'])})" if s1 else "–"
+        dem = "; ".join(g.get("reasons", [])[1:] if g.get("reasons") and g["reasons"][0].startswith("pooled") else
+                        g.get("reasons", [])) or "–"
+        L.append(f"| {class_label(h, c)} | {f(pc['supported_by_head'])} | {f(pc['support'])} | {f(prf[0])} | {f(prf[1])} | "
+                 f"{f(prf[2])} | {single} | {f(pc.get('classwise_ece'))} | {g.get('val_status', 'unsupported')} | "
+                 f"{f(g.get('tau'))} | {gate_cell(g.get('test') or {})} | {dem} | {g.get('final_status', '–')} | "
+                 f"{f(pc['unsupported_truth_windows'])} |")
+    L += ["", "P single-label = precision (argmax) on windows whose truth is exactly one class, next to the set-target "
+          "scoring (where a set-target window is correct for any member). Final status = min(val status, pooled gate, "
+          "every wrist dataset with n_acc >= 30); the gate only demotes.", ""]
+    L += per_dataset_md(h, r)
+    aw = r.get("awake_lying")
+    if aw:
+        L += awake_lying_md(aw)
     L += ["", f"Wrist-only: n={f(r['wrist_only']['n'])}, macro-F1 {f(r['wrist_only']['macro_f1'])} ({r['wrist_only']['note']}).", "",
           "Coverage / precision at fixed confidence thresholds (top-label): " +
           "; ".join(f"≥{t['tau']}: cov {f(t['coverage'])}, P {f(t['precision'])}" for t in r["fixed_thresholds"]), "",
@@ -85,6 +120,54 @@ def class_head_md(h: str, r: Dict[str, Any]) -> List[str]:
     return L
 
 
+def per_dataset_md(h: str, r: Dict[str, Any]) -> List[str]:
+    """Per-dataset headline row + per-class P/R/F1 and per-dataset gate (G-5), descriptive flags (G-12)."""
+    L = ["Per dataset (macro-F1 = union convention):", "",
+         "| dataset | test subjects | n | balanced acc | macro-F1 [95% CI] | NLL | ECE-15 | note |", "|---|---|---|---|---|---|---|---|"]
+    for d, dr in r["per_dataset"].items():
+        if not dr.get("n"):
+            continue
+        note = "descriptive" if dr.get("descriptive_only") else ""
+        L.append(f"| {d} | {f(dr.get('n_test_subjects'))} | {f(dr['n'])} | {f(dr['balanced_accuracy'])} | "
+                 f"{ci(dr.get('bootstrap_macro_f1'))} | {f(dr['nll'])} | {f(dr['ece_top_equal_width_15'])} | {note} |")
+    ds = [d for d, dr in r["per_dataset"].items() if dr.get("n")]
+    L += ["", "Per dataset per class P/R/F1 (support) and the dataset gate at the frozen tau (P, n_acc → level; levels "
+          "with n_acc < 30 do not demote):", "",
+          "| class | " + " | ".join(ds) + " |", "|---|" + "---|" * len(ds)]
+    for c in HEAD_CLASS_ORDERS[h]:
+        cells, any_sup = [], False
+        g = r["gate"].get(c, {})
+        for d in ds:
+            v = r["per_dataset"][d]["per_class"][c]
+            if not v["supported_by_head"]:
+                cells.append("unsupported")
+                continue
+            any_sup = True
+            cell = f"{f(v['precision'], 2)}/{f(v['recall'], 2)}/{f(v['f1'], 2)} ({v['support']})"
+            gd = (g.get("per_dataset") or {}).get(d)
+            if gd and gd.get("n_acc"):
+                cell += f"; gate P {f(gd.get('precision'), 2)} n {gd['n_acc']} → {gd['level']}"
+            cells.append(cell)
+        if any_sup:
+            L.append(f"| {class_label(h, c)} | " + " | ".join(cells) + " |")
+    return L + ["", DESCRIPTIVE_NOTE, FEW_SUBJECTS_NOTE, ""]
+
+
+def awake_lying_md(aw: Dict[str, Any]) -> List[str]:
+    pc = aw.get("per_class_recumbent") or {}
+    g = aw.get("gate") or {}
+    L = ["Awake lying (recumbent scored on NON-sleep windows only; G-2):", "",
+         f"- recumbent truth windows: {f(aw.get('n_recumbent_truth_windows'))}, of which sleep-period "
+         f"{f(aw.get('n_sleep_period_recumbent_truth'))} ({f(aw.get('sleep_period_fraction_of_recumbent_truth'))}) and awake "
+         f"lying {f(aw.get('n_awake_lying_truth'))} (by dataset: "
+         + ", ".join(f"{d} {n}" for d, n in (aw.get("by_dataset_awake_lying_truth") or {}).items()) + ")",
+         f"- recumbent on non-sleep windows: P {f(pc.get('precision'))}, R {f(pc.get('recall'))}, F1 {f(pc.get('f1'))} "
+         f"(support {f(pc.get('support'))}, predicted {f(pc.get('predicted'))})"]
+    if g:
+        L.append(f"- awake-lying gate at the frozen tau: pooled {gate_cell(g.get('test') or {})}; per dataset "
+                 + ", ".join(f"{d} {gate_cell(v)}" for d, v in (g.get("per_dataset") or {}).items() if v.get("n_acc"))
+                 + f"; awake-lying status {g.get('final_status')} (reported only; the served recumbent status is the pooled one)")
+    return L + [""]
 def transition_md(r: Dict[str, Any]) -> List[str]:
     L = ["### transition (multi-label events)", "", "| event | supported | n (pos) | AUROC | AP | Brier raw→cal | ECE raw→cal | val→final status |",
          "|---|---|---|---|---|---|---|---|"]
@@ -148,15 +231,22 @@ def ood_md(r: Dict[str, Any]) -> List[str]:
 
 def render(rep: Dict[str, Any]) -> str:
     st = rep.get("integrity", {})
+    seal = rep.get("seal") or {}
+    prov = rep.get("provenance") or {}
+    rr = st.get("rerun_reason")
     L = [f"# Evaluation — `{rep['bundle_id']}` ({rep['role']})", "", BANNER, "",
-         f"- bundle_sha256 `{rep['bundle_sha256']}`; encoder `{rep['encoder']['encoder_id']}` ({rep['encoder'].get('kind')}); "
-         f"evidence_tier_max `{rep['evidence_tier_max']}`",
-         f"- evaluated once on the frozen test subjects through `load_bundle(...).apply(...)`; test_sha256 "
-         f"`{st.get('test_sha256')}`; evaluations of this experiment: {st.get('n_test_evaluations')} "
-         f"(rerun reason: {st.get('rerun_reason')}); bundle.apply vs training-side numpy max |Δ| (first 2,000 windows) "
+         f"- evaluated bundle_sha256 `{rep['bundle_sha256']}`; sealed bundle_sha256 `{seal.get('sealed_bundle_sha256', '–')}` "
+         f"(test_gate.json `{str(seal.get('test_gate_sha256', '–'))[:16]}`; the served artifact carries the gate); encoder "
+         f"`{rep['encoder']['encoder_id']}` ({rep['encoder'].get('kind')}); evidence_tier_max `{rep['evidence_tier_max']}`",
+         f"- provenance: git_commit `{prov.get('git_commit')}`, source_tree_sha256 `{str(prov.get('source_tree_sha256'))[:16]}`, "
+         f"source dirty {prov.get('source_dirty')}, allow_dirty {prov.get('allow_dirty')}",
+         f"- evaluated once on the frozen test subjects (assembled inside the TestVault) through `load_bundle(...).apply(...)`; "
+         f"test_sha256 `{st.get('test_sha256')}`; evaluations of this experiment on this test split: {st.get('n_test_evaluations')} "
+         f"(rerun reason: {rr or 'none'}{(' — ' + str(st.get('rerun_detail'))) if rr else ''}); bundle.apply vs training-side "
+         f"numpy max |Δ| (first 2,000 windows) "
          f"{f(rep.get('apply_vs_training_side_max_abs', rep.get('apply_vs_apply_arrays_max_abs')), 12)}",
          f"- test windows: " + ", ".join(f"{d['dataset']} {d['windows']:,} ({d['subjects']} subj)" for d in rep["test_windows"]),
-         f"- nonfinite windows dropped: {rep['n_nonfinite_dropped']}", ""]
+         f"- nonfinite windows dropped: {rep['n_nonfinite_dropped']}", "", FEW_SUBJECTS_NOTE, DESCRIPTIVE_NOTE, LOSO_NOTE, ""]
     for h in ("posture", "locomotion", "arm_behavior"):
         if h in rep["heads"]:
             L += class_head_md(h, rep["heads"][h])
@@ -190,4 +280,5 @@ def write_summary(eval_dir: str, bundles_root: str) -> str:
     return build_summary(eval_dir, bundles_root)
 
 
-__all__ = ["write_evaluation", "write_summary", "render", "BANNER", "f", "ci"]
+__all__ = ["write_evaluation", "write_summary", "render", "BANNER", "f", "ci", "class_label", "gate_cell",
+           "FEW_SUBJECTS_NOTE", "DESCRIPTIVE_NOTE", "LOSO_NOTE", "RECUMBENT_LABEL", "POSTURE_CAVEAT"]

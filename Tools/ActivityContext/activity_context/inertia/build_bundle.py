@@ -5,6 +5,11 @@ assemble -> standardiser on TRAIN -> per head: support, class weights, fit (+ ar
 VAL, operating points on VAL, priors -> transition + movement_intensity -> OOD reference on TRAIN with
 the threshold on VAL ID windows (method from the encoder's ood_bench VAL selection) -> manifest (spec §20
 fields, ``evidence_tier_max = "shadow"`` for every stand-in) -> write_bundle -> training_report.json.
+
+Provenance (G-7, :mod:`.provenance`): every bundle records ``git_commit`` (HEAD), ``source_tree_sha256`` and
+the dirty state of ``Tools/ActivityContext``. :func:`run_experiment` refuses to build when anything there is
+uncommitted/untracked unless ``allow_dirty`` (CLI ``--allow-dirty``), which caps the bundle at
+``evidence_tier_max = "offline"``. The synthetic smoke path (:func:`train_bundle` called directly) is exempt.
 """
 
 from __future__ import annotations
@@ -12,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import time
 from typing import Any, Dict, Optional
 
@@ -45,20 +49,9 @@ SERVE_HOP_S = 5
 
 
 def git_info() -> Dict[str, Any]:
-    """``git rev-parse HEAD`` + dirty flag of the worktree (overridable via INERTIA_GIT_COMMIT/INERTIA_GIT_DIRTY
-    when the pipeline runs from a snapshot copy of the package)."""
-    if os.environ.get("INERTIA_GIT_COMMIT"):
-        return {"git_commit": os.environ["INERTIA_GIT_COMMIT"],
-                "git_dirty": os.environ.get("INERTIA_GIT_DIRTY", "1") == "1",
-                "git_source": os.environ.get("INERTIA_GIT_SOURCE", "env")}
-    here = os.path.dirname(os.path.abspath(__file__))
-    try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=here, capture_output=True, text=True, timeout=10).stdout.strip()
-        dirty = bool(subprocess.run(["git", "status", "--porcelain"], cwd=here, capture_output=True, text=True,
-                                    timeout=30).stdout.strip())
-        return {"git_commit": head or None, "git_dirty": dirty}
-    except Exception:  # noqa: BLE001
-        return {"git_commit": None, "git_dirty": None}
+    """Provenance of the running code (no environment override; see :mod:`.provenance`)."""
+    from .provenance import provenance_info
+    return provenance_info()
 
 
 def _arch_mode(exp: Experiment, head: str, bundles_root: str) -> str:
@@ -136,11 +129,17 @@ def fit_ood(exp, cw, tr, va, z_tr, z_va, heads_arrays, heads_meta, choice):
     return model.arrays(method), meta, selection
 
 
-def run_experiment(exp: Experiment, cache_root: str = CACHE_ROOT, bundles_root: str = BUNDLES_ROOT,
-                   force: bool = False) -> Dict[str, Any]:
+def run_experiment(exp: Experiment, cache_root: Optional[str] = None, bundles_root: Optional[str] = None,
+                   force: bool = False, allow_dirty: bool = False) -> Dict[str, Any]:
+    from .paths import require_dir
+    from .provenance import check_provenance
     if exp.encoder.startswith("inertia-1/"):
         raise InertiaUnavailable("model_missing", "blocked: no checkpoint — no official Inertia-1 checkpoint is "
                                  "publicly available; embed with --checkpoint/$INERTIA1_CKPT_PATH first")
+    cache_root = require_dir(cache_root or CACHE_ROOT, "INERTIA_CACHE_DIR / INERTIA_DATA_ROOT (window cache)")
+    bundles_root = require_dir(bundles_root or BUNDLES_ROOT, "INERTIA_BUNDLES_DIR / INERTIA_DATA_ROOT (bundles)")
+    prov = dict(git_info(), allow_dirty=bool(allow_dirty))
+    tier = check_provenance(prov, allow_dirty)              # refuses a dirty source tree unless allow_dirty
     out_dir = os.path.join(bundles_root, exp.bundle_id)
     if os.path.isdir(out_dir) and os.listdir(out_dir):
         if not force:
@@ -150,12 +149,45 @@ def run_experiment(exp: Experiment, cache_root: str = CACHE_ROOT, bundles_root: 
     cw = load_mappings()
     specs = [exp.window] + ([exp.trn_window] if exp.trn_window else [])
     data = assemble(exp.encoder, specs, WRIST, cw, exp.ood_holdout, exp.train_datasets, ("train", "val"), cache_root)
-    sha = train_bundle(exp, data, out_dir, cw, _encoder_info(exp, cache_root), bundles_root)
-    return {"bundle_dir": out_dir, "bundle_sha256": sha, "seconds": round(time.time() - t0, 1)}
+    sha = train_bundle(exp, data, out_dir, cw, _encoder_info(exp, cache_root), bundles_root, provenance=prov,
+                       tier=tier)
+    return {"bundle_dir": out_dir, "bundle_sha256": sha, "seconds": round(time.time() - t0, 1),
+            "evidence_tier_max": tier}
 
 
-def train_bundle(exp: Experiment, data, out_dir: str, cw, enc_info: Dict[str, Any], bundles_root: str = BUNDLES_ROOT) -> str:
-    """Train all heads of ``exp`` on pre-assembled TRAIN/VAL data and write the bundle; returns bundle_sha256."""
+def recumbent_composition(a, cw) -> Dict[str, Any]:
+    """G-2: how much of the recumbent posture target is sleep-period lying (Capture-24 sleep diary labels)."""
+    from .mappings import bitmask
+    bit = bitmask(["recumbent"], "posture")
+    t = a.targets["posture"]
+    rec = (t.astype(np.int64) & bit) != 0
+    ds, lab = a.meta["dataset"].to_numpy(), a.meta["label"].to_numpy()
+    state: Dict[tuple, Optional[str]] = {}
+    sleep = np.zeros(len(t), bool)
+    for i in np.flatnonzero(rec):
+        key = (ds[i], lab[i])
+        if key not in state:
+            state[key] = cw.transition_state(ds[i], lab[i])
+        sleep[i] = state[key] == "sleep"
+    n = int(rec.sum())
+    return {"recumbent_windows": n, "sleep_period": int(sleep.sum()), "awake_lying": int(n - sleep.sum()),
+            "sleep_period_fraction": float(sleep.sum() / n) if n else None,
+            "awake_lying_by_dataset": {d: int((rec & ~sleep & (ds == d)).sum()) for d in sorted(set(ds[rec & ~sleep]))},
+            "note": "recumbent = mostly sleep-period lying in the training data (Capture-24 sleep diary); awake "
+                    "lying is reported separately in every evaluation"}
+
+
+def train_bundle(exp: Experiment, data, out_dir: str, cw, enc_info: Dict[str, Any], bundles_root: Optional[str] = None,
+                 provenance: Optional[Dict[str, Any]] = None, tier: str = "shadow") -> str:
+    """Train all heads of ``exp`` on pre-assembled TRAIN/VAL data and write the bundle; returns bundle_sha256.
+
+    ``provenance`` defaults to the running checkout's (recorded, not enforced: enforcement is in
+    :func:`run_experiment`); ``tier`` is the bundle's evidence_tier_max ("shadow" | "offline")."""
+    bundles_root = bundles_root or BUNDLES_ROOT
+    if provenance is None:
+        provenance = dict(git_info(), allow_dirty=None)
+    if tier not in ("shadow", "offline"):
+        raise ValueError(f"a stand-in/offline training run produces shadow or offline bundles, not {tier!r}")
     assert_head_inputs(HEAD_INPUTS)
     if set(data.meta["split"].unique()) - {"train", "val"}:
         raise RuntimeError("train_bundle received windows outside train/val")
@@ -206,11 +238,13 @@ def train_bundle(exp: Experiment, data, out_dir: str, cw, enc_info: Dict[str, An
                                                     "eval_hop_s": "same as train (documented in windows.py)",
                                                     "capture24_train_cap": "1000 per (subject, fine label)"},
         "n_windows": {"train": int(len(tr.meta)), "val": int(len(va.meta))}, "embedding_cache": data.emb_info,
-        "created_unix": int(time.time()), **git_info(),
+        "created_unix": int(time.time()), **provenance,
+        "composition": {"posture_recumbent_train": recumbent_composition(tr, cw),
+                        "posture_recumbent_val": recumbent_composition(va, cw)},
         "train_class_counts": {h: evidence[h]["support"]["counts"] for h in CLASS_HEADS if "support" in evidence.get(h, {})},
     }
     manifest = {
-        "bundle_id": exp.bundle_id, "evidence_tier_max": "shadow",
+        "bundle_id": exp.bundle_id, "evidence_tier_max": tier,
         "encoder": {"encoder_id": enc_info["encoder_id"], "embedding_dim": int(mu.shape[0]), "kind": enc_info["kind"],
                     "encoder_version": emb_info["encoder_version"], "checkpoint_sha256": None,
                     "config_sha256": enc_info["config_sha256"], "inertia_repo_commit": UPSTREAM_COMMIT,
@@ -266,4 +300,4 @@ def _jsonable(o):
     return o
 
 
-__all__ = ["run_experiment", "fit_ood", "git_info", "STANDIN_BANNER"]
+__all__ = ["run_experiment", "train_bundle", "fit_ood", "git_info", "recumbent_composition", "STANDIN_BANNER"]

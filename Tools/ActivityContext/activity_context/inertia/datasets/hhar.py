@@ -15,11 +15,12 @@ from typing import Dict, Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import HAR_ROOT, DatasetError, Recording, encode_labels, ms2_to_g
+from ..paths import under
+from . import HAR_ROOT, DatasetError, Recording, encode_labels, ms2_to_g, resolve_root
 
 DATASET = "hhar_watch"
 LOADER_VERSION = "hhar-loader-1"
-DEFAULT_ROOT = os.path.join(HAR_ROOT, "hhar", "Activity recognition exp")
+DEFAULT_ROOT = under(HAR_ROOT, "hhar", "Activity recognition exp")
 NULL_LABEL = "null"
 NOMINAL = {"lgwatch": 200.0, "gear": 100.0}
 MAX_STEP_S = 0.25
@@ -41,7 +42,7 @@ def _frame(root: str):
 
 
 def chosen_devices(root: Optional[str] = None) -> Dict[str, str]:
-    df = _frame(root or DEFAULT_ROOT)
+    df = _frame(resolve_root(root, DEFAULT_ROOT, DATASET))
     counts = df.groupby(["User", "Device"]).size().reset_index(name="n")
     out = {}
     for user, g in counts.groupby("User"):
@@ -55,7 +56,7 @@ def list_units(root: Optional[str] = None) -> List[str]:
 
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     df = _frame(root)
     dev = chosen_devices(root)
     for user in (subjects or sorted(dev)):

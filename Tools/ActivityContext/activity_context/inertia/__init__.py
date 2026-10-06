@@ -55,8 +55,12 @@ INERTIA_AXES: Tuple[str, ...] = ("ax", "ay", "az")
 ALLOWED_WINDOW_S: Tuple[int, ...] = (10, 30)
 ALLOWED_HOP_S: Tuple[int, ...] = (1, 2, 5, 10, 15, 30)
 
-# Evidence tiers, weakest first (INERTIA1.md §6/§8).
+# Evidence tiers, weakest first (INERTIA1.md §6/§8) — the wire vocabulary.
 EVIDENCE_TIERS: Tuple[str, ...] = ("shadow", "candidate", "production")
+# Bundle tiers: the wire tiers plus ``offline`` (a bundle built from a dirty source tree with --allow-dirty;
+# offline research only — the serve process refuses it, it never reaches the wire).
+BUNDLE_TIERS: Tuple[str, ...] = ("offline",) + EVIDENCE_TIERS
+TEST_GATE_SCHEMA = "nara.inertia.test_gate/1"
 
 # ---------------------------------------------------------------------------
 # Head class orders (INERTIA1.md §5). Fixed; ``unknown`` is never a trained class — it is the
@@ -85,6 +89,7 @@ __all__ = [
     "PREPROCESSING_VERSION", "WIRE_SCHEMA", "ENCODER_CONFIG_SCHEMA", "HEADS_SCHEMA", "CALIBRATION_SCHEMA",
     "OOD_SCHEMA", "SPLIT_SCHEMA", "MAPPINGS_SCHEMA", "UPSTREAM_REPO", "UPSTREAM_COMMIT", "UPSTREAM_LICENSE",
     "UPSTREAM_COPYRIGHT", "REAL_ENCODER_PREFIX", "STANDIN_PREFIX", "INERTIA_RATE_HZ", "INERTIA_AXES",
-    "ALLOWED_WINDOW_S", "ALLOWED_HOP_S", "EVIDENCE_TIERS", "HEAD_CLASS_ORDERS", "CLASSIFIER_HEADS",
+    "ALLOWED_WINDOW_S", "ALLOWED_HOP_S", "EVIDENCE_TIERS", "BUNDLE_TIERS", "TEST_GATE_SCHEMA", "HEAD_CLASS_ORDERS",
+    "CLASSIFIER_HEADS",
     "SOFTMAX_HEADS", "MULTILABEL_HEADS", "REGRESSION_HEADS", "ALL_HEADS",
 ]

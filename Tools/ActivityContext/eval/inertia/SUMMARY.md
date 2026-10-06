@@ -1,5 +1,7 @@
 # Inertia-1 heads — evaluation summary
 
+> **SUPERSEDED — pending re-evaluation.** These numbers were produced before the red-team fixes (subject-clustered strong/weak rule, per-dataset test gate with weak → abstain, sealed gate files, compatible-only merges, union macro-F1, awake-lying and single-label reporting, provenance). Every bundle is being retrained from a clean commit and re-evaluated (`post_audit_rule_change`); `pipeline_cli summary` regenerates this file with the per-dataset tables and the disclosures (WISDM/PAMAP2 test exposure during prototyping; evaluator field change between runs 1 and 2).
+
 > **STAND-IN ENCODERS — NOT INERTIA-1; real Inertia-1 evaluation blocked: no public checkpoint.** Every number below is a *measured* result for a stand-in encoder on public wrist data; nothing here is evidence about Inertia-1 itself.
 
 Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_cli embed --encoder inertia-1/ar_transformer-small/30s@20hz` fails with `model_missing: blocked: no checkpoint`). The bundles below use stand-in encoders (`standin:handcrafted-stats-v1` = engineered baseline, `standin:nara-imu-feat-1-accel` = what the decoder already sees, `standin:inertia-arch-random-init/ar_transformer-small/seed0` = negative control). All are `evidence_tier_max = shadow`.

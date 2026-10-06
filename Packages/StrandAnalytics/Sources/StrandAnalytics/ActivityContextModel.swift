@@ -413,6 +413,8 @@ enum ActivityContextModel {
         var motionHeadsApplied = false
         /// A specialist mode was plausible this second only because Inertia named it.
         var specialistOpenedByMotionHeads = false
+        /// The Inertia posture term was omitted this second (asleep / in bed: the sleep route speaks).
+        var motionHeadsPostureOmitted = false
     }
 
     /// Instantaneous soft arm-behaviour likelihoods (not normalized) from movement-pattern features.
@@ -467,8 +469,14 @@ enum ActivityContextModel {
         let unknownIdx = BodyMode.unknown.rawValue
         // Inertia terms for this second (nil when Inertia is off, no window applies, or it is OOD).
         var inertia: PreparedMotionHeads.Terms? = nil
+        var postureOmitted = false
         if let motionHeads, let window = f.motionHeads {
-            inertia = motionHeads.terms(for: window, hartSpeaks: f.encoder != nil)
+            // On an asleep / in-bed second the decoder's sleep and bed route already carries the posture
+            // evidence the wrist head would add; the Inertia posture term steps aside (and is counted).
+            inertia = motionHeads.terms(for: window, hartSpeaks: f.encoder != nil,
+                                        sleepRoute: f.sleep == .asleep || f.inBed)
+            postureOmitted = inertia?.postureOmitted ?? false
+            if inertia?.isEmpty ?? false { inertia = nil }
         }
         var specialistOpenedByMotionHeads = false
 
@@ -618,12 +626,17 @@ enum ActivityContextModel {
             let mode = BodyMode(rawValue: m)!
             let said = f.encoder?.classProbs[label] ?? 0
             let covered = f.loggedWorkout && profiles[m].workout >= 0.9 && workoutCovers(mode, kind: f.workoutKind)
-            // Inertia may open the gate only for a strong class at or above its threshold, on a window that is
-            // not OOD (`PreparedMotionHeads.terms`).
-            let namedByInertia = inertia?.opens.contains(m) ?? false
-            if namedByInertia && !(said >= 0.15 || covered) { specialistOpenedByMotionHeads = true }
-            var s = (said >= 0.15 || covered || namedByInertia) ? 1.0 : 0.04
-            if mode == .otherExercise { s = max(s, 0.04 + 0.96 * effort) }
+            // Inertia may name a specialist only for a strong class that is the window's argmax with its own
+            // q ≥ τ, on a window that is not OOD (`PreparedMotionHeads.terms`). Alone it opens the gate only as
+            // far as its per-second budget allows: never the encoder's full opening.
+            let closed = 0.04
+            let named = said >= 0.15 || covered
+            var s = named ? 1.0 : closed
+            if !named, let t = inertia, t.opens.contains(m) {
+                specialistOpenedByMotionHeads = true
+                s = t.openedSupport(m, closed: closed)
+            }
+            if mode == .otherExercise { s = max(s, closed + 0.96 * effort) }
             support[m] = s
         }
         if specialists { add(support, unknownValue: 1.0, weight: 1.0, isEvidence: false) }
@@ -673,7 +686,8 @@ enum ActivityContextModel {
         if weightSum > 0 { for m in 0..<n { dis[m] /= weightSum } }
         return Score(logL: logL, disagreement: dis, hasMotion: hasMotion, channels: channels,
                      postureShift: postureShift, arm: armTerm, motionHeadsApplied: inertia != nil,
-                     specialistOpenedByMotionHeads: specialistOpenedByMotionHeads)
+                     specialistOpenedByMotionHeads: specialistOpenedByMotionHeads,
+                     motionHeadsPostureOmitted: postureOmitted)
     }
 
     /// Arm-chain emission context: how plausible each arm class is given the body posterior.

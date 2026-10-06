@@ -266,6 +266,9 @@ struct ActivityFeatures: Equatable {
     /// The Inertia window that applies at this second (held for the bundle's hop), only while Inertia
     /// evidence is active.
     var motionHeads: MotionHeadsWindow?
+    /// The observation's in-bed flag for this second (read only by the Inertia posture channel, which steps
+    /// aside on asleep / in-bed seconds).
+    var inBed = false
 }
 
 /// Causal ring of recent seconds. Codable so a decoder restart resumes with its context intact.
@@ -381,6 +384,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
         if let first = samples.first, first.ts < cutoff { samples.removeAll { $0.ts < cutoff } }
 
         var f = features(at: obs.ts, restingHR: restingHR, maxHR: maxHR)
+        f.inBed = obs.inBed
         // An Inertia window applies each second while it is younger than one hop.
         if motionHeadsHoldS > 0, let heads = motionHeads, let seen = motionHeadsSeenTs,
            obs.ts >= seen, obs.ts - seen < motionHeadsHoldS {

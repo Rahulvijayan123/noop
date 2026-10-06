@@ -18,8 +18,13 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
 PKG = os.path.join(os.path.dirname(__file__), "..")
 
 
+_ENV_ALLOW = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONPATH", "VIRTUAL_ENV",
+              "ACTIVITY_HART_CHECKPOINT")
+
+
 def _env():
-    env = dict(os.environ)
+    """Explicit allowlist for the serve subprocess (never the full os.environ)."""
+    env = {k: os.environ[k] for k in _ENV_ALLOW if k in os.environ}
     env["PYTHONPATH"] = PKG + os.pathsep + env.get("PYTHONPATH", "")
     return env
 
@@ -228,7 +233,7 @@ def test_explicit_missing_manifest_hard_fails():
     missing = os.path.join(tempfile.mkdtemp(), "manifest.json")
     proc = subprocess.run(
         [sys.executable, "-m", "activity_context.serve", "--manifest", missing],
-        cwd=os.path.join(os.path.dirname(__file__), ".."),
+        cwd=os.path.join(os.path.dirname(__file__), ".."), env=_env(),
         capture_output=True, text=True, timeout=30)
     assert proc.returncode != 0
     line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""

@@ -35,18 +35,24 @@ final class ActivityInertiaStageTests: XCTestCase {
         return s
     }
 
+    /// The digest every stub bundle reports unless told otherwise.
+    private let stubSha = String(repeating: "ab", count: 32)
+
     private func inertia(_ behaviour: String = "ok", kind: String = "standin", tier: String = "shadow",
-                         mode: InertiaSettings.Mode = .shadow, timeout: Double = 5) throws -> InertiaStage {
+                         mode: InertiaSettings.Mode = .shadow, timeout: Double = 5,
+                         pin: String?? = .none, extraArgs: [String] = []) throws -> InertiaStage {
         guard let path = stub("stub_inertia_service.py") else { throw XCTSkip("stub_inertia_service.py not found") }
         var settings = InertiaSettings.fromEnvironment([
             "FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/opt/bundle",
             "FRWHOOP_INERTIA_TIMEOUT_SECONDS": String(timeout)], activityPython: "/usr/bin/python3")
         settings.mode = mode
         var config = try XCTUnwrap(settings.serviceConfig(activityHome: FileManager.default.currentDirectoryPath))
-        config.serveArgs = [path, "--behaviour", behaviour, "--kind", kind, "--tier", tier, "--sleep", "30"]
+        config.serveArgs = [path, "--behaviour", behaviour, "--kind", kind, "--tier", tier, "--sleep", "30"] + extraArgs
         let s = ActivityPythonService(config: config)
         services.append(s)
-        return InertiaStage(service: s, mode: mode)
+        // Candidate mode is always pinned (the settings refuse it otherwise); shadow only when asked.
+        let expected: String? = pin ?? (mode == .candidate ? stubSha : nil)
+        return InertiaStage(service: s, mode: mode, expectedBundleSHA256: expected)
     }
 
     /// Three 2-minute chunks inside the day (column payloads are not inspected by the stubs).
@@ -59,10 +65,11 @@ final class ActivityInertiaStageTests: XCTestCase {
         }
     }
 
-    private func infer(_ inertia: InertiaStage?, stats: inout ActivityLane.Stats) throws -> ActivityLane.ChunkInference {
+    private func infer(_ inertia: InertiaStage?, stats: inout ActivityLane.Stats,
+                       renew: () throws -> Bool = { true }) throws -> ActivityLane.ChunkInference {
         try ActivityLane.inferChunks(requests(), service: try hartService(), inertia: inertia,
                                      versions: (ActivityLane.baselineModelVersion, ActivityLane.baselinePreprocessingVersion),
-                                     stats: &stats, renew: { true })
+                                     stats: &stats, renew: renew)
     }
 
     private func daySim() -> DaySim {
@@ -126,11 +133,14 @@ final class ActivityInertiaStageTests: XCTestCase {
         let s = InertiaSettings.fromEnvironment([
             "FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_MODE": "candidate",
             "FRWHOOP_INERTIA_BUNDLE_DIR": "/opt/inertia/bundle", "FRWHOOP_INERTIA_CHECKPOINT": "/opt/inertia/enc.ckpt",
+            "FRWHOOP_INERTIA_BUNDLE_SHA256": stubSha.uppercased(),
             "FRWHOOP_INERTIA_PYTHON": "/opt/venv/bin/python", "FRWHOOP_INERTIA_TIMEOUT_SECONDS": "45"])
         XCTAssertEqual(s.mode, .candidate)
+        XCTAssertEqual(s.bundleSHA256, stubSha, "the pin is normalised to lower case")
         let c = try XCTUnwrap(s.serviceConfig(activityHome: "/srv/Tools/ActivityContext"))
         XCTAssertEqual(c.serveArgs, ["-m", "activity_context.inertia.serve", "--bundle", "/opt/inertia/bundle",
-                                     "--checkpoint", "/opt/inertia/enc.ckpt"])
+                                     "--checkpoint", "/opt/inertia/enc.ckpt", "--timeout", "40",
+                                     "--expect-bundle-sha256", stubSha])
         XCTAssertEqual(c.extraEnvironment["INERTIA1_CKPT_PATH"], "/opt/inertia/enc.ckpt")
         XCTAssertEqual(c.pythonBin, "/opt/venv/bin/python")
         XCTAssertEqual(c.requestTimeoutSeconds, 45)
@@ -268,7 +278,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertEqual(stats.inertiaWindows, heads.windows.count)
 
         let candidate = ActivityMotionHeadsDays.candidate(mode: .shadow, heads: heads, input: contextInput(),
-                                                         generatedAt: 1_789_500_000)
+                                                         generatedAt: 1_789_500_000, expectedBundleSHA256: nil)
         let text = try ActivityMotionHeadsDays.payload(day: day, mode: .shadow, collector: inferred.motionHeads,
                                                       candidate: candidate)
         let p = try payloadObject(text)
@@ -286,11 +296,19 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertGreaterThan(summary["n_ood"] as? Int ?? 0, 0)
         XCTAssertEqual(summary["n_chunks"] as? Int, 3)
         XCTAssertEqual((summary["class_order"] as? [String: [String]])?["posture"], MotionHead.posture.classOrder)
-        let windows = try XCTUnwrap(p["windows"] as? [[String: Any]])
-        XCTAssertEqual(windows.count, heads.windows.count)
-        XCTAssertEqual((windows[0]["p"] as? [Double])?.count, 4)
-        XCTAssertEqual((windows[0]["l"] as? [Double])?.count, 8)
-        XCTAssertNotNil(windows[0]["x"] as? Bool)
+        let windows = try XCTUnwrap(p["windows"] as? [String: Any])
+        XCTAssertEqual(windows["format"] as? String, "mh-col-1")
+        XCTAssertEqual(windows["n"] as? Int, heads.windows.count)
+        XCTAssertEqual(windows["w"] as? Int, 30)
+        XCTAssertEqual(windows["s0"] as? Int, heads.windows[0].startTs)
+        for key in ["ds", "x", "mi"] { XCTAssertEqual((windows[key] as? [Int])?.count, heads.windows.count, key) }
+        let columns = try XCTUnwrap(windows["heads"] as? [String: [String: [Int]]])
+        XCTAssertEqual(Set(columns.keys), ["posture", "locomotion", "arm_behavior", "transition"])
+        for (head, c) in columns {
+            XCTAssertEqual(c["i"]?.count, heads.windows.count, head)
+            XCTAssertEqual(c["p"]?.count, heads.windows.count, head)
+        }
+        XCTAssertEqual((windows["x"] as? [Int])?.reduce(0, +), heads.windows.filter(\.isOOD).count)
         // Deterministic.
         XCTAssertEqual(text, try ActivityMotionHeadsDays.payload(day: day, mode: .shadow, collector: inferred.motionHeads,
                                                                 candidate: candidate))
@@ -301,7 +319,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         let inferred = try infer(try inertia("ok", kind: "standin", tier: "shadow", mode: .candidate), stats: &stats)
         let heads = try XCTUnwrap(inferred.motionHeads.trackInput)
         let candidate = ActivityMotionHeadsDays.candidate(mode: .candidate, heads: heads, input: contextInput(),
-                                                         generatedAt: 1_789_500_000)
+                                                         generatedAt: 1_789_500_000, expectedBundleSHA256: stubSha)
         guard case .withheld(let why) = candidate else { return XCTFail("expected withheld, got \(candidate)") }
         XCTAssertEqual(why, "encoder_kind_standin")
         let p = try payloadObject(try ActivityMotionHeadsDays.payload(day: day, mode: .candidate,
@@ -312,7 +330,8 @@ final class ActivityInertiaStageTests: XCTestCase {
         var tierStats = ActivityLane.Stats()
         let shadowTier = try infer(try inertia("ok", kind: "inertia1", tier: "shadow", mode: .candidate), stats: &tierStats)
         let c2 = ActivityMotionHeadsDays.candidate(mode: .candidate, heads: try XCTUnwrap(shadowTier.motionHeads.trackInput),
-                                                  input: contextInput(), generatedAt: 1_789_500_000)
+                                                  input: contextInput(), generatedAt: 1_789_500_000,
+                                                  expectedBundleSHA256: stubSha)
         guard case .withheld(let why2) = c2 else { return XCTFail("expected withheld, got \(c2)") }
         XCTAssertEqual(why2, "evidence_tier_shadow")
     }
@@ -327,8 +346,11 @@ final class ActivityInertiaStageTests: XCTestCase {
         let heads = try XCTUnwrap(inferred.motionHeads.trackInput)
         let input = contextInput()
         let candidate = ActivityMotionHeadsDays.candidate(mode: .candidate, heads: heads, input: input,
-                                                         generatedAt: 1_789_500_000)
-        guard case .document(let doc) = candidate else { return XCTFail("expected a document, got \(candidate)") }
+                                                         generatedAt: 1_789_500_000, expectedBundleSHA256: stubSha)
+        guard case .document(let doc, let report) = candidate else { return XCTFail("expected a document, got \(candidate)") }
+        XCTAssertGreaterThan(report?.attached ?? 0, 0)
+        XCTAssertEqual((report?.attached ?? 0) + (report?.dropped ?? 0), heads.windows.count)
+        XCTAssertEqual(report?.stamp, doc.versions.motionHeads)
         let stamp = try XCTUnwrap(doc.versions.motionHeads)
         XCTAssertTrue(stamp.hasPrefix("inertia-1:abababababab:"), stamp)
         XCTAssertNil(doc.snapshot)
@@ -341,6 +363,291 @@ final class ActivityInertiaStageTests: XCTestCase {
         let stored = try XCTUnwrap(p["candidate_document"] as? [String: Any])
         XCTAssertEqual((stored["versions"] as? [String: Any])?["motion_heads"] as? String, stamp)
         XCTAssertEqual((p["summary"] as? [String: Any])?["candidate_stamp"] as? String, stamp)
+    }
+
+    // MARK: - Audit fixes: settings (G-11, G-15, W-5, W-7)
+
+    func testInertiaBooleansAcceptTheUsualSpellingsAndRefuseTheRest() {
+        let base = ["FRWHOOP_INERTIA_BUNDLE_DIR": "/b"]
+        for on in ["1", "true", "TRUE", "yes", "Yes", "on", " On "] {
+            let s = InertiaSettings.fromEnvironment(base.merging(["FRWHOOP_INERTIA_ENABLED": on]) { $1 })
+            XCTAssertTrue(s.enabled, on)
+            XCTAssertNil(s.configurationError, on)
+        }
+        for off in ["0", "false", "No", "OFF", ""] {
+            let s = InertiaSettings.fromEnvironment(base.merging(["FRWHOOP_INERTIA_ENABLED": off]) { $1 })
+            XCTAssertFalse(s.enabled, off)
+            XCTAssertNil(s.configurationError, "a recognised off is not an error: \(off)")
+        }
+        for junk in ["enable", "2", "y", "tru"] {
+            let s = InertiaSettings.fromEnvironment(base.merging(["FRWHOOP_INERTIA_ENABLED": junk]) { $1 })
+            XCTAssertFalse(s.enabled, junk)
+            XCTAssertTrue(s.configurationError?.contains("unknown FRWHOOP_INERTIA_ENABLED value \(junk)") ?? false,
+                          "an unknown value is reported, never silently ignored: \(s.configurationError ?? "nil")")
+        }
+        let badFlag = InertiaSettings.fromEnvironment(base.merging(["FRWHOOP_INERTIA_ENABLED": "1",
+                                                                    "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW": "maybe"]) { $1 })
+        XCTAssertFalse(badFlag.enabled)
+        XCTAssertTrue(badFlag.configurationError?.contains("FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW") ?? false)
+        let badTimeout = InertiaSettings.fromEnvironment(base.merging(["FRWHOOP_INERTIA_ENABLED": "1",
+                                                                       "FRWHOOP_INERTIA_TIMEOUT_SECONDS": "soon"]) { $1 })
+        XCTAssertFalse(badTimeout.enabled)
+        XCTAssertNotNil(badTimeout.configurationError)
+    }
+
+    func testCandidateModeNeedsAPinnedBundleAndTheStandInShadowIsAnExplicitShadowOnlyOptIn() throws {
+        let env = ["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b"]
+        let unpinned = InertiaSettings.fromEnvironment(env.merging(["FRWHOOP_INERTIA_MODE": "candidate"]) { $1 })
+        XCTAssertFalse(unpinned.enabled)
+        XCTAssertEqual(unpinned.configurationError, "FRWHOOP_INERTIA_BUNDLE_SHA256 is required in candidate mode")
+        let malformed = InertiaSettings.fromEnvironment(env.merging(["FRWHOOP_INERTIA_BUNDLE_SHA256": "abc"]) { $1 })
+        XCTAssertFalse(malformed.enabled)
+        XCTAssertEqual(malformed.configurationError, "FRWHOOP_INERTIA_BUNDLE_SHA256 must be 64 hex characters")
+        // Shadow: the pin is optional, and passed through (and enforced) when set.
+        let shadow = InertiaSettings.fromEnvironment(env)
+        XCTAssertTrue(shadow.enabled)
+        XCTAssertNil(shadow.bundleSHA256)
+        XCTAssertFalse(try XCTUnwrap(shadow.serviceConfig(activityHome: "/h")).serveArgs.contains("--expect-bundle-sha256"))
+        let pinnedShadow = InertiaSettings.fromEnvironment(env.merging(["FRWHOOP_INERTIA_BUNDLE_SHA256": stubSha]) { $1 })
+        let args = try XCTUnwrap(pinnedShadow.serviceConfig(activityHome: "/h")).serveArgs
+        XCTAssertEqual(Array(args.suffix(2)), ["--expect-bundle-sha256", stubSha])
+        // The stand-in opt-in: off by default, shadow only.
+        XCTAssertFalse(args.contains("--allow-standin-shadow"))
+        let standIn = InertiaSettings.fromEnvironment(env.merging(["FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW": "yes"]) { $1 })
+        XCTAssertTrue(standIn.enabled)
+        XCTAssertTrue(standIn.allowStandInShadow)
+        XCTAssertEqual(try XCTUnwrap(standIn.serviceConfig(activityHome: "/h")).serveArgs.last, "--allow-standin-shadow")
+        let candidateStandIn = InertiaSettings.fromEnvironment(env.merging([
+            "FRWHOOP_INERTIA_MODE": "candidate", "FRWHOOP_INERTIA_BUNDLE_SHA256": stubSha,
+            "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW": "1"]) { $1 })
+        XCTAssertFalse(candidateStandIn.enabled)
+        XCTAssertEqual(candidateStandIn.configurationError, "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW is for shadow mode only")
+    }
+
+    func testTheInertiaTimeoutFitsInsideTheLeaseAndTheChildTimesOutFirst() throws {
+        let env = ["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b"]
+        // Default lease 300 s: 60 s fits (≤ 100 s).
+        let fits = InertiaSettings.fromEnvironment(env)
+        XCTAssertEqual(fits.timeoutSeconds, 60)
+        XCTAssertTrue(fits.warnings.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(fits.serviceConfig(activityHome: "/h")).requestTimeoutSeconds, 60)
+        // A short lease clamps it to a third, with a warning.
+        let clamped = InertiaSettings.fromEnvironment(env.merging(["FRWHOOP_INERTIA_TIMEOUT_SECONDS": "90"]) { $1 },
+                                                      leaseSeconds: 120)
+        XCTAssertEqual(clamped.timeoutSeconds, 40)
+        XCTAssertEqual(clamped.warnings.count, 1)
+        XCTAssertTrue(clamped.warnings[0].contains("clamped to 40"), clamped.warnings[0])
+        let c = try XCTUnwrap(clamped.serviceConfig(activityHome: "/h"))
+        XCTAssertEqual(c.requestTimeoutSeconds, 40)
+        let i = try XCTUnwrap(c.serveArgs.firstIndex(of: "--timeout"))
+        XCTAssertEqual(c.serveArgs[i + 1], "35", "the child's own timeout answers before the worker's")
+        // Strictly below the worker's timeout everywhere.
+        for t in [0.5, 1, 4, 5, 5.5, 8, 10, 10.5, 33.3, 60, 100] as [Double] {
+            let child = InertiaSettings.serveTimeoutSeconds(workerTimeout: t)
+            XCTAssertLessThan(child, t, "\(t)")
+            XCTAssertGreaterThan(child, 0, "\(t)")
+        }
+        XCTAssertEqual(InertiaSettings.serveTimeoutSeconds(workerTimeout: 60), 55)
+        XCTAssertEqual(InertiaSettings.serveTimeoutSeconds(workerTimeout: 8), 5)
+        XCTAssertEqual(InertiaSettings.serveTimeoutSeconds(workerTimeout: 4), 2)
+        XCTAssertEqual(InertiaSettings.formatSeconds(2.5), "2.500")
+    }
+
+    // MARK: - Audit fixes: lease, pin, counters (G-11, G-15, S-8)
+
+    func testTheLeaseIsRenewedBeforeEveryInertiaCallAndALostLeaseEndsTheJob() throws {
+        var calls = 0
+        var stats = ActivityLane.Stats()
+        _ = try infer(try inertia("ok"), stats: &stats, renew: { calls += 1; return true })
+        XCTAssertEqual(calls, 6, "one renewal before each HART call and one before each Inertia call")
+        calls = 0
+        var off = ActivityLane.Stats()
+        _ = try infer(nil, stats: &off, renew: { calls += 1; return true })
+        XCTAssertEqual(calls, 3, "Inertia off: the lane renews exactly as before")
+        // The renewal before the first Inertia call fails: the job ends exactly as a lost lease before HART does.
+        calls = 0
+        var lost = ActivityLane.Stats()
+        XCTAssertThrowsError(try infer(try inertia("ok"), stats: &lost, renew: { calls += 1; return calls < 2 })) { error in
+            let pg = error as? PostgresClient.Error
+            XCTAssertEqual(pg?.kind, .stale)
+            XCTAssertEqual(pg?.sqlstate, "55000")
+            XCTAssertEqual(pg?.message, "activity lease lost during inference")
+        }
+        XCTAssertEqual(lost.inertiaChunks, 0, "no Inertia call without a live lease")
+        // A renewal that throws (connection lost) propagates too.
+        struct Boom: Error {}
+        calls = 0
+        var thrown = ActivityLane.Stats()
+        XCTAssertThrowsError(try infer(try inertia("ok"), stats: &thrown, renew: {
+            calls += 1
+            if calls == 2 { throw Boom() }
+            return true
+        })) { XCTAssertTrue($0 is Boom) }
+    }
+
+    func testAChildServingAnotherBundleThanThePinnedOneIsRefusedAndCounted() throws {
+        let reference = try baseline()
+        // At the start of the job (ping).
+        var stats = ActivityLane.Stats()
+        let other = String(repeating: "ef", count: 32)
+        let inferred = try infer(try inertia("ok", pin: .some(stubSha), extraArgs: ["--bundle-sha", other]), stats: &stats)
+        XCTAssertEqual(inferred.motionHeads.stopped, "bundle_mismatch")
+        XCTAssertEqual(inferred.motionHeads.chunks, 0)
+        XCTAssertEqual(stats.inertiaBundleRefused, 1)
+        XCTAssertEqual(stats.inertiaUnavailable, 0, "a pin refusal is its own counter")
+        XCTAssertEqual(stats.lastInertiaErrorKind, "bundle_mismatch")
+        XCTAssertNil(inferred.motionHeads.trackInput)
+        XCTAssertEqual(try hartPayloads(inferred).v1, reference.v1)
+        // A child that refused to load because of its own --expect-bundle-sha256 check (model unavailable, another
+        // digest reported) is counted as a pin refusal, not as a missing model.
+        var refusedStats = ActivityLane.Stats()
+        let refusedLoad = try infer(try inertia("model_missing", pin: .some(stubSha), extraArgs: ["--bundle-sha", other]),
+                                    stats: &refusedStats)
+        XCTAssertEqual(refusedLoad.motionHeads.stopped, "bundle_mismatch")
+        XCTAssertEqual(refusedStats.inertiaBundleRefused, 1)
+        XCTAssertEqual(refusedStats.inertiaUnavailable, 0)
+        // A missing model with the right digest is still a missing model.
+        var missingStats = ActivityLane.Stats()
+        let missing = try infer(try inertia("model_missing", pin: .some(stubSha)), stats: &missingStats)
+        XCTAssertEqual(missing.motionHeads.stopped, "model_unavailable")
+        XCTAssertEqual(missingStats.inertiaUnavailable, 1)
+        XCTAssertEqual(missingStats.inertiaBundleRefused, 0)
+        // Mid-job (the infer response names another bundle): refused, and Inertia stops for the job.
+        var midStats = ActivityLane.Stats()
+        let mid = try infer(try inertia("ok", pin: .some(stubSha), extraArgs: ["--infer-bundle-sha", other]), stats: &midStats)
+        XCTAssertEqual(mid.motionHeads.chunks, 1)
+        XCTAssertEqual(mid.motionHeads.failureKinds["bundle_mismatch"], 1)
+        XCTAssertEqual(mid.motionHeads.stopped, "bundle_mismatch")
+        XCTAssertEqual(midStats.inertiaBundleRefused, 1)
+        XCTAssertNil(mid.motionHeads.trackInput)
+        // The matching pin is accepted.
+        var okStats = ActivityLane.Stats()
+        let ok = try infer(try inertia("ok", pin: .some(stubSha)), stats: &okStats)
+        XCTAssertEqual(ok.motionHeads.responses.count, 3)
+        XCTAssertEqual(okStats.inertiaBundleRefused, 0)
+        // And a candidate decode with a pin that does not match is withheld, never decoded.
+        let heads = try XCTUnwrap(ok.motionHeads.trackInput)
+        guard case .withheld(let why) = ActivityMotionHeadsDays.candidate(
+            mode: .candidate, heads: heads, input: contextInput(), generatedAt: 1, expectedBundleSHA256: other)
+        else { return XCTFail("expected withheld") }
+        XCTAssertEqual(why, "bundle_sha256_mismatch")
+        guard case .withheld(let unpinned) = ActivityMotionHeadsDays.candidate(
+            mode: .candidate, heads: heads, input: contextInput(), generatedAt: 1, expectedBundleSHA256: nil)
+        else { return XCTFail("expected withheld") }
+        XCTAssertEqual(unpinned, "bundle_sha256_not_pinned")
+    }
+
+    func testTheShadowRowAndStatsCarryTheAttachDropAndOmitCounters() throws {
+        // Shadow: a dry-run attachment report.
+        var stats = ActivityLane.Stats()
+        let inferred = try infer(try inertia("ok"), stats: &stats)
+        let input = contextInput()
+        let context = ActivityLane.ContextDayBuild(built: nil, input: input, generatedAt: 1_789_500_000)
+        let shadowStage = try inertia("ok")
+        let text = ActivityLane.motionHeadsPayload(day: day, inertia: shadowStage, collector: inferred.motionHeads,
+                                                   context: context, stats: &stats)
+        let summary = try XCTUnwrap(try payloadObject(text)["summary"] as? [String: Any])
+        let report = try XCTUnwrap(summary["track_report"] as? [String: Any])
+        let n = inferred.motionHeads.trackInput?.windows.count ?? -1
+        let attached = try XCTUnwrap(report["attached"] as? Int)
+        let dropped = (report["dropped_no_observation"] as? Int ?? 0) + (report["dropped_superseded"] as? Int ?? 0)
+            + (report["dropped_out_of_range"] as? Int ?? 0)
+        XCTAssertGreaterThan(attached, 0)
+        XCTAssertEqual(attached + dropped, n)
+        XCTAssertEqual(report["windows_in"] as? Int, n)
+        XCTAssertEqual(report["posture_omitted_sleep"] as? Int, 0)
+        XCTAssertEqual(stats.inertiaWindowsAttached, attached)
+        XCTAssertEqual(stats.inertiaWindowsDropped, dropped)
+        // Candidate over a sleeping day: the decode's own report, posture omissions included.
+        var sim = DaySim(start: dayStart + 36_000)
+        sim.still(360)
+        var sleepInput = ActivityContextDays.trackInput(
+            windows: sim.windows, streams: sim.streams, sleep: [(dayStart + 36_000, dayStart + 36_360)], exercise: [],
+            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "stub-model")
+        sleepInput.sleepKnownOutsideSessions = true
+        var cStats = ActivityLane.Stats()
+        let real = try infer(try inertia("ok", kind: "inertia1", tier: "candidate", mode: .candidate), stats: &cStats)
+        let cText = ActivityLane.motionHeadsPayload(
+            day: day, inertia: try inertia("ok", kind: "inertia1", tier: "candidate", mode: .candidate),
+            collector: real.motionHeads,
+            context: ActivityLane.ContextDayBuild(built: nil, input: sleepInput, generatedAt: 1_789_500_000),
+            stats: &cStats)
+        let cSummary = try XCTUnwrap(try payloadObject(cText)["summary"] as? [String: Any])
+        let cReport = try XCTUnwrap(cSummary["track_report"] as? [String: Any])
+        XCTAssertNotNil(cReport["stamp"] as? String)
+        XCTAssertGreaterThan(cReport["posture_omitted_sleep"] as? Int ?? 0, 0, "asleep seconds drop the posture term")
+        XCTAssertEqual(cStats.inertiaCandidateDocuments, 1)
+        XCTAssertEqual(cStats.inertiaPostureOmitted, cReport["posture_omitted_sleep"] as? Int)
+        XCTAssertEqual(cStats.inertiaWindowsAttached, cReport["attached"] as? Int)
+    }
+
+    // MARK: - Audit fixes: retention-sized windows (W-6)
+
+    func testTheStoredWindowsAreColumnarSmallIntegersAndCappedPerDay() throws {
+        func spec(_ head: MotionHead) -> MotionHeadSpec {
+            let classes = head.classOrder
+            var prior: [String: Double] = [:]
+            for c in classes { prior[c] = head.isCategorical ? 1 / Double(classes.count) : 0.05 }
+            return MotionHeadSpec(classOrder: classes, prior: prior,
+                                  status: Dictionary(uniqueKeysWithValues: classes.map { ($0, .strong) }))
+        }
+        func collector(hop: Int) -> MotionHeadsCollector {
+            let bundle = MotionHeadsBundleInfo(
+                encoderId: "standin:handcrafted-stats-v1", encoderKind: .standin, encoderVersion: "t",
+                checkpointSha256: nil, headsVersion: "cap-test", bundleSha256: stubSha, evidenceTierMax: .shadow,
+                windowS: 30, hopS: hop,
+                heads: [.posture: spec(.posture), .locomotion: spec(.locomotion), .armBehavior: spec(.armBehavior),
+                        .transition: spec(.transition)],
+                ood: MotionHeadsOODInfo(method: "knn", threshold: 1))
+            let P = MotionHead.posture.classOrder, L = MotionHead.locomotion.classOrder, A = MotionHead.armBehavior.classOrder
+            func peaked(_ classes: [String], _ k: Int, _ p: Double) -> [String: Double] {
+                Dictionary(uniqueKeysWithValues: classes.enumerated().map {
+                    ($0.element, $0.offset == k ? p : (1 - p) / Double(classes.count - 1))
+                })
+            }
+            let windows = stride(from: dayStart, to: dayEnd - 30, by: hop).map { s -> MotionHeadsWindow in
+                let k = (s / hop) % 4
+                return MotionHeadsWindow(startTs: s, endTs: s + 30, posture: peaked(P, k, 0.873),
+                                         locomotion: peaked(L, k + 1, 0.666), armBehavior: peaked(A, k, 0.512),
+                                         transition: Dictionary(uniqueKeysWithValues: MotionHead.transition.classOrder
+                                             .enumerated().map { ($0.element, $0.offset == k ? 0.9 : 0.123) }),
+                                         movementIntensity: 0.4567, oodScore: 0.3, isOOD: s % 60 == 0)
+            }
+            var c = MotionHeadsCollector()
+            c.responses = [MotionHeadsResponse(bundle: bundle, windows: windows)]
+            c.chunks = 24
+            return c
+        }
+        // A full day at a 5-s hop: 17,274 windows, stored, under the cap.
+        let full = collector(hop: 5)
+        let text = try XCTUnwrap(try ActivityMotionHeadsDays.payload(day: day, mode: .shadow, collector: full,
+                                                                     candidate: .notRequested))
+        let p = try payloadObject(text)
+        let w = try XCTUnwrap(p["windows"] as? [String: Any])
+        let n = full.responses[0].windows.count
+        XCTAssertEqual(w["n"] as? Int, n)
+        let windowsBytes = try JSONSerialization.data(withJSONObject: w).count
+        XCTAssertLessThanOrEqual(windowsBytes, ActivityMotionHeadsDays.maxWindowsBytes, "\(windowsBytes) bytes")
+        XCTAssertLessThanOrEqual(text.utf8.count, 600 * 1024, "the whole shadow row stays near 0.5 MB/day/bundle")
+        let heads = try XCTUnwrap(w["heads"] as? [String: [String: [Int]]])
+        // Window 1 (k = 1): posture top is class 1 at 87 %, locomotion class 2 at 67 %, intensity 46 %.
+        XCTAssertEqual(heads["posture"]?["i"]?[1], 1)
+        XCTAssertEqual(heads["posture"]?["p"]?[1], 87)
+        XCTAssertEqual(heads["locomotion"]?["i"]?[1], 2)
+        XCTAssertEqual(heads["locomotion"]?["p"]?[1], 67)
+        XCTAssertEqual(heads["transition"]?["p"]?[1], 90)
+        XCTAssertEqual((w["mi"] as? [Int])?[1], 46)
+        XCTAssertEqual((w["ds"] as? [Int])?.prefix(3).map { $0 }, [0, 5, 5])
+        XCTAssertEqual((w["x"] as? [Int])?.prefix(13).map { $0 }, [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        XCTAssertEqual((p["summary"] as? [String: Any])?["windows_omitted"] as? Bool, false)
+        // A 1-s hop would be five times that: the windows are omitted and the summary says so.
+        let dense = try payloadObject(try ActivityMotionHeadsDays.payload(day: day, mode: .shadow, collector: collector(hop: 1),
+                                                                         candidate: .notRequested))
+        XCTAssertTrue(dense["windows"] is NSNull)
+        XCTAssertEqual((dense["summary"] as? [String: Any])?["windows_omitted"] as? Bool, true)
+        XCTAssertEqual(ActivityMotionHeadsDays.percent(nil), -1)
+        XCTAssertEqual(ActivityMotionHeadsDays.percent(.nan), -1)
+        XCTAssertEqual(ActivityMotionHeadsDays.percent(1e300), 100, "clamped before conversion: never a trap")
     }
 
     func testNothingValidMeansNoShadowRow() throws {

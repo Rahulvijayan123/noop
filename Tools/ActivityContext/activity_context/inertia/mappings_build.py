@@ -15,6 +15,11 @@ output file (so it can be audited without reading code):
 * ``set_families``: a set target whose members lack direct evidence is credited to the family
   representative, which then ``covers`` the unsupported members (INERTIA1.md §5 ``covers``).
 * ``ood_holdout``: activities withheld from the OOD-benchmark bundle (Agent C ``ood_candidates``).
+* rationales: rows Agent C left blank get the explicit one-line reason from :mod:`.mappings_rationales`
+  (never an invented "the label names the target"); a blank row without an entry is refused.
+* portability: machine-specific absolute paths are rewritten to ``$INERTIA_DATA_ROOT/...`` / ``$WISDM_DIR``.
+* window-assignment convention: states the rule ``windows.py`` implements (>= 90 % one non-null label); the
+  audit's "100 % for transition-adjacent windows" was never implemented and is withdrawn.
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from . import HEAD_CLASS_ORDERS, MAPPINGS_SCHEMA
@@ -124,15 +130,43 @@ def _state(rows: Dict[str, Dict[str, Any]], dataset: str, label: str) -> Optiona
     return "other"
 
 
+WINDOW_RULE = ("assign a window the mapped target only if ONE non-null source label covers >= 90% of its samples "
+               "(windows.py PURITY; the remaining <= 10% may be unlabelled or another label); otherwise MASK. Never "
+               "majority-vote across labels with different targets. (The audit draft's extra '100% for "
+               "transition-adjacent windows' rule was never implemented and is withdrawn.)")
+# absolute local prefixes (any machine) -> environment-variable form
+_PORTABLE = ((re.compile(r"(?<![\w$])/(?:[^/\"]+/)*?nara-activity-research/scratch/wisdm-data/unpacked/data/wisdm-dataset"),
+              "$WISDM_DIR"),
+             (re.compile(r"(?<![\w$])/(?:[^/\"]+/)*?research/(?=(?:har-datasets|inertia-[a-z0-9-]+)/)"), "$INERTIA_DATA_ROOT/"))
+C24_ORA_NOTE = ("$INERTIA_DATA_ROOT/har-datasets/capture24/ora_stream: 48 complete participant files, every one verified "
+                "identical to the HF mirror on 2026-10-05 (row counts, timestamps, x/y/z <= 1e-6, annotations; "
+                "research/inertia-work/agentFP/c24_verify); the downloader stopped at P008 and is not running")
+
+
+def portable(o: Any) -> Any:
+    """Rewrite machine-specific absolute paths (recursively) to environment-variable form."""
+    if isinstance(o, dict):
+        return {k: portable(v) for k, v in o.items()}
+    if isinstance(o, list):
+        return [portable(v) for v in o]
+    if isinstance(o, str):
+        for pat, rep in _PORTABLE:
+            o = pat.sub(rep, o)
+    return o
+
+
 def normalise(src: Dict[str, Any], src_sha256: str, src_path: str) -> Dict[str, Any]:
+    from .mappings import MappingError
+    from .mappings_rationales import RATIONALES
     rows = copy.deepcopy(src["mappings"])
     for r in rows:
         r["source_label"] = str(r["source_label"])
         if not str(r.get("rationale") or "").strip():
-            # 98 direct-name rows were left blank by Agent C (e.g. HHAR 'Stair up' -> stairs).
-            r["rationale"] = (f"direct: the source label names the target "
-                              f"('{r.get('source_label_name', r['source_label'])}' -> {r['nara_target']})")
-            r["rationale_source"] = "normaliser (Agent C left the rationale blank for this direct name match)"
+            key = (r["dataset"], r["source_label"], r["nara_head"])
+            if key not in RATIONALES:
+                raise MappingError(f"{key}: blank rationale and no explicit entry in mappings_rationales.RATIONALES")
+            r["rationale"] = RATIONALES[key]
+            r["rationale_source"] = "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)"
         role = ROLES[r["dataset"]][0]
         r["audit_used_for_training"] = bool(r["used_for_training"])
         if role != "train_wrist" and r["used_for_training"]:
@@ -150,17 +184,21 @@ def normalise(src: Dict[str, Any], src_sha256: str, src_path: str) -> Dict[str, 
     roles = {ds: {"role": r, "licence": lic, "placement": pl, "note": ROLE_NOTES[r]}
              for ds, (r, lic, pl) in ROLES.items()}
     roles["dsads"]["note"] = "CC BY 4.0 but the arm segment of the RA/LA units is not stated; not in the v1 list"
-    meta = copy.deepcopy(src["datasets"])
+    meta = portable(copy.deepcopy(src["datasets"]))
     meta["capture24"]["mirror_verification"] = (
-        "HF mirror nz00shuuuu verified identical to the ORA release for P011, P023, P053, P099, P135 "
-        "(x/y/z within float32 rounding 5e-7; timestamps and annotations exactly equal) by Agent C")
+        "HF mirror nz00shuuuu verified identical to the ORA release for every complete ORA file (48 participants, "
+        "449,565,923 rows; x/y/z within float32 rounding <= 4.8e-7; timestamps and annotations exactly equal; "
+        "2026-10-05); Agent C had checked P011, P023, P053, P099, P135")
+    meta["capture24"].setdefault("local_paths", {})["canonical_ora_stream"] = C24_ORA_NOTE
+    conventions = copy.deepcopy(src["conventions"])
+    conventions["window_assignment"]["classification_heads"] = WINDOW_RULE
     return {
         "schema": MAPPINGS_SCHEMA,
-        "source": {"path": src_path, "schema": src.get("schema"), "sha256": src_sha256,
+        "source": {"path": portable(src_path), "schema": src.get("schema"), "sha256": src_sha256,
                    "author": src.get("author"), "generated": src.get("generated")},
         "head_class_orders": {h: list(v) for h, v in HEAD_CLASS_ORDERS.items()},
         "ontology_source": src.get("ontology_source"),
-        "conventions": src["conventions"],
+        "conventions": conventions,
         "dataset_roles": roles,
         "datasets": meta,
         "transition_states_rule": (
@@ -211,7 +249,8 @@ def summarize_states(doc: Dict[str, Any]) -> Dict[str, Dict[str, int]]:
     return out
 
 
-__all__ = ["normalise", "build_file", "summarize_states", "ROLES", "EVENT_PAIRS", "TRANSITION_RULES"]
+__all__ = ["normalise", "build_file", "summarize_states", "portable", "ROLES", "EVENT_PAIRS", "TRANSITION_RULES",
+           "WINDOW_RULE"]
 
 
 def _labels(doc: Dict[str, Any], ds: str) -> List[str]:

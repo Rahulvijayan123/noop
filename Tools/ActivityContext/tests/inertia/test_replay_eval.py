@@ -137,3 +137,42 @@ def test_rho_hat_mirrors():
     np.testing.assert_allclose(li, 0.0, atol=1e-12)
     li = ev.inertia_loglr({"stationary": 0.05, "walking": 0.9, "running": 0.05}, prep)
     assert li[names.index("walk")] > 0 > li[names.index("seated")]
+
+
+def test_replay_test_decode_is_ledgered(monkeypatch, tmp_path):
+    """G-16: the replay's TEST decode goes through a TestVault with its own ledger: the test recordings are
+    loaded only inside the vault, and a completed decode cannot be silently repeated."""
+    from activity_context.inertia.integrity import SplitLeakError
+    loads = []
+    recs = [_rec("r1", "1605", 30, "walking"), _rec("r2", "1607", 30, "stationary")]
+
+    def fake_load(path):
+        loads.append(path)
+        return recs
+    monkeypatch.setattr(rd, "replay_root", lambda: str(tmp_path))
+    monkeypatch.setattr(rx, "load_recordings", fake_load)
+    arms = {"A0s": object(), "A0": object(), "A1": object()}
+    monkeypatch.setattr(ev, "baseline_tables", lambda dataset, split, r, jobs=4: (dict(arms), {"split": split}))
+    monkeypatch.setattr(ev, "val_operating_points", lambda tb, h: {})
+    monkeypatch.setattr(ev, "score_arm", lambda tb, r, ops=None, with_events=False: {"scored": True})
+    monkeypatch.setattr(ev, "paired_bootstrap", lambda a, b, ops=None, n_boot=1000: {"diff": 0.0})
+    monkeypatch.setattr(ev, "xctest_fingerprint", lambda bundle=None: "e" * 64)
+    out = tmp_path / "out"
+    r = ev.run_baseline("wisdm", str(out), ledger_dir=str(tmp_path))
+    assert r["integrity"]["experiment"] == "replay-baseline/wisdm" and r["integrity"]["bundle_sha256"] == "e" * 64
+    assert any(p.endswith("recordings_wisdm_test.npz") for p in loads)
+    n_test_loads = sum(p.endswith("_test.npz") for p in loads)
+    with pytest.raises(SplitLeakError):
+        ev.run_baseline("wisdm", str(out), ledger_dir=str(tmp_path))
+    assert sum(p.endswith("_test.npz") for p in loads) == n_test_loads        # refused before loading test
+    r2 = ev.run_baseline("wisdm", str(out), ledger_dir=str(tmp_path), rerun_reason="evaluator_bug_fix",
+                         rerun_detail="unit test")
+    assert r2["integrity"]["n_test_evaluations"] == 2
+    lines = (tmp_path / ev.REPLAY_LEDGER).read_text().strip().splitlines()
+    assert len(lines) == 2
+
+
+def test_replay_finals_are_preregistered():
+    from activity_context.inertia.experiments import REPLAY_DECLARED
+    assert "replay-final/wisdm/shadow-primary-hc" in REPLAY_DECLARED
+    assert "replay-final/capture24/shadow-primary-art" in REPLAY_DECLARED and "replay-baseline/capture24" in REPLAY_DECLARED

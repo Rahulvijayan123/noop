@@ -102,9 +102,46 @@ public enum ActivityContextTrackBuilder {
                              config: ActivityDecoderConfig = ActivityDecoderConfig(),
                              resuming snapshot: ActivityDecoderSnapshot? = nil) -> ActivityContextTrack {
         let (obs, attach) = observations(for: input, config: config)
-        var track = decode(obs, config: config, resuming: snapshot)
+        var track = decode(obs, config: effectiveConfig(for: input, config: config), resuming: snapshot)
         if let attach { track.motionHeads = attach.merged(with: track.motionHeads ?? MotionHeadsTrackReport()) }
         return track
+    }
+
+    /// Whether `config`'s Inertia evidence is actually accepted for `input`: the config accepts its bundle and
+    /// the input carries windows from exactly that bundle.
+    public static func acceptsMotionHeads(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> Bool {
+        guard let heads = config.motionHeads, heads.evidenceRefusal == nil, let mh = input.motionHeads else { return false }
+        return mh.bundle.bundleSha256 == heads.bundle.bundleSha256 && mh.bundle == heads.bundle
+    }
+
+    /// The config a decode of `input` actually runs with: `config` itself when it has no motion-heads entry or
+    /// when its Inertia evidence is accepted for this input (`acceptsMotionHeads`), and otherwise `config`
+    /// without the entry. So the `inertia-1:` / `standin-test:` stamp, the held window in the snapshot and the
+    /// cache-tag suffix appear only on a track Inertia evidence really shaped; a refused config, a bundle
+    /// mismatch or an input without windows decodes (and is keyed) exactly like Inertia off.
+    public static func effectiveConfig(for input: ActivityContextTrackInput, config: ActivityDecoderConfig)
+        -> ActivityDecoderConfig {
+        guard config.motionHeads != nil, !acceptsMotionHeads(for: input, config: config) else { return config }
+        var plain = config
+        plain.motionHeads = nil
+        return plain
+    }
+
+    /// The cache key component for a decode of `input` with `config` (`effectiveConfig(for:config:).cacheTag`):
+    /// it carries the Inertia suffix only when Inertia evidence is accepted for this input.
+    public static func cacheTag(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> String {
+        effectiveConfig(for: input, config: config).cacheTag
+    }
+
+    /// What attaching `windows` to `input`'s observed seconds would do, whatever any config says (the worker's
+    /// shadow rows report it so window/second alignment can be checked before Inertia is ever evidence).
+    public static func attachmentReport(for input: ActivityContextTrackInput,
+                                        windows: [MotionHeadsWindow]) -> MotionHeadsTrackReport {
+        var report = MotionHeadsTrackReport()
+        report.windowsIn = windows.count
+        var out = observations(for: input)
+        attachMotionHeads(windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
+        return report
     }
 
     /// Feed ready-made observations (one per second, time ordered) through a decoder.
@@ -144,15 +181,19 @@ public enum ActivityContextTrackBuilder {
         -> (observations: [ActivityObservation], report: MotionHeadsTrackReport?) {
         var out = observations(for: input)
         guard let heads = config.motionHeads else { return (out, nil) }
-        var report = MotionHeadsTrackReport(stamp: heads.provenanceStamp, refusal: heads.evidenceRefusal)
-        guard let mh = input.motionHeads else { return (out, report) }
+        // The stamp is set only once the evidence is accepted for THIS input (config accepted, same bundle).
+        var report = MotionHeadsTrackReport(stamp: nil, refusal: heads.evidenceRefusal)
+        guard let mh = input.motionHeads else {
+            if report.refusal == nil { report.refusal = "no_motion_heads_input" }
+            return (out, report)
+        }
         report.windowsIn = mh.windows.count
         guard report.refusal == nil else { return (out, report) }
-        guard mh.bundle.bundleSha256 == heads.bundle.bundleSha256, mh.bundle == heads.bundle else {
-            report.stamp = nil
+        guard acceptsMotionHeads(for: input, config: config) else {
             report.refusal = "bundle_mismatch"
             return (out, report)
         }
+        report.stamp = heads.provenanceStamp
         attachMotionHeads(mh.windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
         return (out, report)
     }
@@ -723,9 +764,11 @@ public enum ActivityContextDayBuilder {
                               progress: ((ActivityContextDayDocument) -> Void)? = nil)
         -> (document: ActivityContextDayDocument, how: ActivityContextDayUpdate) {
         let all = ActivityContextTrackBuilder.observations(for: input, config: config).observations
+        // Decoded without the Inertia entry unless its evidence is accepted for this input (no stamp otherwise).
+        let decodeConfig = ActivityContextTrackBuilder.effectiveConfig(for: input, config: config)
 
         func fresh(_ reason: String) -> (ActivityContextDayDocument, ActivityContextDayUpdate) {
-            let document = decodeFromStart(all, input: input, now: now, config: config,
+            let document = decodeFromStart(all, input: input, now: now, config: decodeConfig,
                                            chunkObservations: chunkObservations, progress: progress)
             return (document, .recomputed(reason: reason))
         }
@@ -747,7 +790,7 @@ public enum ActivityContextDayBuilder {
             return (same, .reused)
         }
 
-        let track = ActivityContextTrackBuilder.decode(newer, config: config, resuming: snapshot)
+        let track = ActivityContextTrackBuilder.decode(newer, config: decodeConfig, resuming: snapshot)
         guard track.restore == .resumed else { return fresh("restore_\(track.restore)") }
 
         var doc = cached

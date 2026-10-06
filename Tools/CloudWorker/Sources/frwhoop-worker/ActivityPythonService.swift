@@ -217,6 +217,12 @@ final class ActivityPythonService {
         return ping.ok && ping.modelAvailable
     }
 
+    /// The string fields of the last ping (the Inertia service reports its `bundle_sha256` there).
+    var lastPingDetails: [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        return lastPingStatus?.details ?? [:]
+    }
+
     var restartCountValue: Int {
         lock.lock(); defer { lock.unlock() }
         return restartCount
@@ -652,12 +658,17 @@ final class ActivityPythonService {
             details: details)
     }
 
-    private static func parseInfer(_ obj: [String: Any]) -> InferResult {
+    /// Window times outside this magnitude are dropped: the lane converts them with `Int(_:)`, which traps for
+    /// values at or beyond 2^63 (and for non-finite ones), and no real unix second comes near it.
+    static let maxWindowTimeMagnitude = 9e15
+
+    static func parseInfer(_ obj: [String: Any]) -> InferResult {
         let ok = (obj["ok"] as? Bool) ?? false
         var windows: [WindowPrediction] = []
         if let raw = obj["windows"] as? [[String: Any]] {
             for w in raw {
                 guard let s = w["s"] as? Double, let e = w["e"] as? Double,
+                      s.isFinite, e.isFinite, abs(s) < maxWindowTimeMagnitude, abs(e) < maxWindowTimeMagnitude,
                       let label = w["label"] as? String else { continue }
                 var probs: [String: Double] = [:]
                 if let rawProbs = w["probs"] as? [String: Any] {

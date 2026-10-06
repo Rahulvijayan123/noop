@@ -669,11 +669,13 @@ activity job (unchanged claim / download / decode / lease renewal)
 
 ### Inertia-1 motion heads (shadow / candidate, off by default)
 
-A second, optional expert beside HART (contract: `Tools/ActivityContext/INERTIA1.md`). With
-`FRWHOOP_INERTIA_ENABLED=1` and `FRWHOOP_INERTIA_BUNDLE_DIR` set, the activity lane starts a SECOND Python
-child (`python -m activity_context.inertia.serve --bundle <dir> [--checkpoint <path>]`, its own timeout,
-restart cap and response cap) and, after each HART chunk, asks it for `motion-heads-1` windows (posture,
-locomotion, arm, transition heads, movement intensity, OOD) for the same chunk.
+A second, optional expert beside HART (contract: `Tools/ActivityContext/INERTIA1.md` §8). With
+`FRWHOOP_INERTIA_ENABLED` on (`1`/`true`/`yes`/`on`; any other value keeps it off and is logged) and
+`FRWHOOP_INERTIA_BUNDLE_DIR` set, the activity lane starts a SECOND Python child (`python -m
+activity_context.inertia.serve --bundle <dir> [--checkpoint <path>] --timeout <s> [--expect-bundle-sha256 <hex>]
+[--allow-standin-shadow]`, its own timeout, restart cap and response cap) and, after each HART chunk, renews the
+job lease and asks it for `motion-heads-1` windows (posture, locomotion, arm, transition heads, movement
+intensity, OOD) for the same chunk.
 
 ```text
 activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (isolated)
@@ -688,19 +690,47 @@ activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (
 - **Never gates, never fails a job.** Inertia is not part of the readiness gate. A missing model (ping
   `model_available: false`), timeout, crash, malformed or invalid output is counted (`inertia_failures`,
   `inertia_unavailable`), logged once per distinct kind, and the HART path continues. A timeout, crash or
-  `model_missing` stops Inertia for the rest of that job, so a broken child costs at most one timeout.
+  `model_missing` stops Inertia for the rest of that job, so a broken child costs at most one timeout. The
+  one exception is the lease: it is renewed before every Inertia call exactly as before every HART call, and a
+  lost lease ends the job the same way.
+- **Timeouts.** `FRWHOOP_INERTIA_TIMEOUT_SECONDS` (default 60) is clamped to a third of
+  `FRWHOOP_ACTIVITY_LEASE_SECONDS` (logged at start-up when it is); the child's own `--timeout` is set strictly
+  below it (worker − 5 s, at least 5 s while that is still below), so the child's structured `timeout` answer
+  arrives before the worker kills the line.
+- **Bundle pin.** `FRWHOOP_INERTIA_BUNDLE_SHA256` (64 hex) names the one head bundle the worker accepts. It is
+  required in candidate mode and enforced in shadow mode when set: passed to the child as
+  `--expect-bundle-sha256`, and checked by the worker against the ping and every response. A different served
+  bundle turns Inertia off for that job (`inertia_bundle_refused`, logged); the decoder refuses it too
+  (`bundle_sha256_mismatch`).
+- **Stand-in shadow (opt-in).** `FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW=1` (default off, shadow mode only; a
+  configuration error in candidate mode) passes `--allow-standin-shadow`, so the shadow lane can be exercised
+  on real WHOOP data before an Inertia-1 checkpoint exists. Those rows are stored with
+  `encoder_kind = standin` and can never feed the decoder: the decoder refuses stand-ins and the table refuses a
+  stand-in candidate document. Without the flag a stand-in bundle answers `model_available: false` and nothing
+  is stored.
 - **The published documents are untouched.** v1 epochs and the `activity_context_days` document are
   byte-identical with Inertia on or off; the candidate comparison is stored only in
   `activity_motion_heads_days.candidate_document` (the read surface would otherwise rank it first).
 - **Evidence gate.** Candidate decodes run only for `encoder_kind = inertia1` (a pinned Inertia-1
-  checkpoint) with `evidence_tier_max >= candidate`; anything else (every stand-in today) stores
-  `withheld_reason` (`encoder_kind_standin`, `evidence_tier_shadow`, ...). `FRWHOOP_INERTIA_MODE` accepts
-  only `shadow` (default) and `candidate`; production evidence needs a code and config change.
+  checkpoint) with `evidence_tier_max >= candidate` and the pinned bundle; anything else (every stand-in today)
+  stores `withheld_reason` (`encoder_kind_standin`, `evidence_tier_shadow`, `bundle_sha256_mismatch`, ...).
+  `FRWHOOP_INERTIA_MODE` accepts only `shadow` (default) and `candidate`; production evidence needs a code and
+  config change.
 - **Storage.** `activity_motion_heads_days`, one row per `(user_id, device_id, day, bundle_id, mode)`,
   migration `20261005170000_activity_motion_heads.sql`. Service role writes through the fenced
   `publish_activity_motion_heads_day(token, revision, payload)` (live lease and current revision, else
-  NULL; stable `invalid_motion_heads_*` errors; 16 MiB payload, 8 MiB windows); owners may select their own
-  rows. Contract: `supabase/functions/tests/activity_motion_heads_contract.sql`.
+  NULL, counted as `inertia_shadow_fenced`; stable `invalid_motion_heads_*` errors; 16 MiB payload); owners may
+  select their own rows. Per-window predictions are columnar small integers (`mh-col-1`: per head the top-class
+  index and its probability in percent, an OOD flag, start deltas; about 0.5 MB per full day per bundle, omitted
+  above 512 KiB, refused above 1 MiB). `summary.track_report` says how the windows met the day's observed
+  seconds (attached / dropped, and in candidate mode the decode's posture omissions on the sleep route). A
+  `candidate_document` is only ever stored for `encoder_kind = 'inertia1'`, `mode = 'candidate'`, tier
+  candidate or production (table CHECK and RPC). Contract:
+  `supabase/functions/tests/activity_motion_heads_contract.sql`.
+- **Retention.** `prune_activity_motion_heads_days(keep_days default 30, max_rows default 10000)` (service role
+  only) deletes rows computed more than 30 days ago and returns the count. The lane calls it every 6 h while
+  Inertia is on (`inertia_rows_pruned`, `inertia_prune_failures`); with Inertia off nothing new is written, and
+  the remaining rows can be pruned from cron: `select public.prune_activity_motion_heads_days(30, 10000);`.
 - **Deploy order.** Migration first. A worker with Inertia on and no migration still publishes v1 and v2;
   the shadow write fails under its savepoint and is counted (`inertia_shadow_failures`).
 - **Rollback.** Unset `FRWHOOP_INERTIA_ENABLED` and restart. Nothing reads the table.
@@ -708,6 +738,7 @@ activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (
 
   ```sql
   select day, mode, bundle_id, encoder_kind, evidence_tier_max, n_windows, n_ood, withheld_reason,
+         summary->'track_report'->>'attached' as attached, summary->>'windows_omitted' as windows_omitted,
          candidate_document is not null as has_candidate, computed_at
   from public.activity_motion_heads_days order by computed_at desc limit 10;
   ```

@@ -34,7 +34,10 @@ from .mappings import load_mappings
 from .splits import load_splits, subject_split_map
 from .windows import SPECS, WINDOWS_VERSION, window_recording
 
-CACHE_ROOT = os.environ.get("INERTIA_CACHE_DIR", "/Volumes/External SSD/Nara Whoop App V2/research/inertia-cache")
+from .paths import cache_root as _cache_root, require_dir
+
+# $INERTIA_CACHE_DIR or $INERTIA_DATA_ROOT/inertia-cache; "" when unconfigured (every entry point refuses "").
+CACHE_ROOT = _cache_root()
 
 
 class CacheError(RuntimeError):
@@ -42,7 +45,7 @@ class CacheError(RuntimeError):
 
 
 def windows_dir(root: str, spec: str, dataset: str) -> str:
-    return os.path.join(root, "windows", spec, dataset)
+    return os.path.join(require_dir(root, "INERTIA_CACHE_DIR / INERTIA_DATA_ROOT (window cache)"), "windows", spec, dataset)
 
 
 def _work(args) -> Dict[str, Any]:
@@ -228,7 +231,8 @@ def embed_dataset(encoder_spec: str, spec: str, dataset: str, root: str = CACHE_
 
 
 def load_embeddings(encoder_id: str, spec: str, dataset: str, root: str = CACHE_ROOT):
-    d = os.path.join(root, "emb", encoder_slug(encoder_id), spec)
+    d = os.path.join(require_dir(root, "INERTIA_CACHE_DIR / INERTIA_DATA_ROOT (embedding cache)"), "emb",
+                     encoder_slug(encoder_id), spec)
     with open(os.path.join(d, f"{dataset}.json")) as f:
         rec = json.load(f)
     man = read_manifest(root, spec, dataset)

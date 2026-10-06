@@ -1,7 +1,7 @@
 {
  "schema": "nara.inertia.mappings/1",
  "source": {
-  "path": "/Volumes/External SSD/Nara Whoop App V2/research/inertia-work/agentC/label_mappings.json",
+  "path": "$INERTIA_DATA_ROOT/inertia-work/agentC/label_mappings.json",
   "schema": "nara-inertia-label-crosswalk/1",
   "sha256": "480f8831e79a5471121166f695727a3e3d2716295eddcc16a0c6d4bade964a2b",
   "author": "Agent C (dataset/label audit)",
@@ -50,7 +50,7 @@
   "set_target": "nara_target is a list: the true class is one of these (dataset does not resolve them). Loss = -log(sum_k p_k) over the listed classes. If the training code cannot do set-valued targets, treat the row as MASK - do NOT collapse to the first element (that would fabricate e.g. 'walking, not brisk').",
   "used_for_training": "false = documented candidate or excluded; true = approved for v1 training (subject to window rules)",
   "window_assignment": {
-   "classification_heads": "assign a window the mapped target only if a single source label covers >= 90% of the window (and 100% for transition-adjacent windows); otherwise MASK. Never majority-vote across labels with different targets.",
+   "classification_heads": "assign a window the mapped target only if ONE non-null source label covers >= 90% of its samples (windows.py PURITY; the remaining <= 10% may be unlabelled or another label); otherwise MASK. Never majority-vote across labels with different targets. (The audit draft's extra '100% for transition-adjacent windows' rule was never implemented and is withdrawn.)",
    "interior_only": "transition 'none' negatives only for windows whose span is >= 5 s from every segment boundary, recording edge, gap, or unlabeled interval",
    "centre_inside_interval": "HAPT posture 'postural_transition' only when the labeled transition interval contains the window centre",
    "event_interval_inside_window": "event positive when the (bounded) event interval lies inside [w0+1 s, w1-1 s]"
@@ -185,9 +185,9 @@
    "registration": false,
    "size": "~6.5-7 GB zip (151 x ~45-56 MB csv.gz)",
    "local_paths": {
-    "canonical_ora_stream": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/capture24/ora_stream (CRC-verified members; streaming continues in a detached process)",
-    "hf_mirror_validated": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/capture24/hf_mirror_nz00shuuuu (151 parquet, 8.6 GB; verified identical to ORA for P011,P023,P053,P099,P135)",
-    "dictionary": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/capture24/hf_mirror_nz00shuuuu/label_mappings.parquet (ORA annotation-label-dictionary.csv arrives at end of zip stream)"
+    "canonical_ora_stream": "$INERTIA_DATA_ROOT/har-datasets/capture24/ora_stream: 48 complete participant files, every one verified identical to the HF mirror on 2026-10-05 (row counts, timestamps, x/y/z <= 1e-6, annotations; research/inertia-work/agentFP/c24_verify); the downloader stopped at P008 and is not running",
+    "hf_mirror_validated": "$INERTIA_DATA_ROOT/har-datasets/capture24/hf_mirror_nz00shuuuu (151 parquet, 8.6 GB; verified identical to ORA for P011,P023,P053,P099,P135)",
+    "dictionary": "$INERTIA_DATA_ROOT/har-datasets/capture24/hf_mirror_nz00shuuuu/label_mappings.parquet (ORA annotation-label-dictionary.csv arrives at end of zip stream)"
    },
    "streams": [
     {
@@ -219,7 +219,7 @@
    "transition_timing": "label changes are separated by unannotated gaps: median 25 s (p10 23 s, p75 56 s); only 51 of 13,145 changes are direct -> interval-bounded events only",
    "wrist_relevant": true,
    "nara_priority": "primary (free-living, wrist, 100 Hz like WHOOP, MET per annotation)",
-   "mirror_verification": "HF mirror nz00shuuuu verified identical to the ORA release for P011, P023, P053, P099, P135 (x/y/z within float32 rounding 5e-7; timestamps and annotations exactly equal) by Agent C"
+   "mirror_verification": "HF mirror nz00shuuuu verified identical to the ORA release for every complete ORA file (48 participants, 449,565,923 rows; x/y/z within float32 rounding <= 4.8e-7; timestamps and annotations exactly equal; 2026-10-05); Agent C had checked P011, P023, P053, P099, P135"
   },
   "wisdm2019_watch": {
    "name": "WISDM Smartphone and Smartwatch Activity and Biometrics (UCI 507)",
@@ -227,7 +227,7 @@
    "license": "CC BY 4.0",
    "registration": false,
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/nara-activity-research/scratch/wisdm-data/unpacked/data/wisdm-dataset"
+    "raw": "$WISDM_DIR"
    },
    "streams": [
     {
@@ -252,7 +252,7 @@
    "registration": false,
    "size": "822 MB zip; Watch_accelerometer.csv 327 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/hhar/Activity recognition exp"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/hhar/Activity recognition exp"
    },
    "streams": [
     {
@@ -276,7 +276,7 @@
    "registration": false,
    "size": "688 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/pamap2/PAMAP2_Dataset"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/pamap2/PAMAP2_Dataset"
    },
    "streams": [
     {
@@ -310,7 +310,7 @@
    "registration": false,
    "size": "76 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/mhealth/MHEALTHDATASET"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/mhealth/MHEALTHDATASET"
    },
    "streams": [
     {
@@ -343,7 +343,7 @@
    "registration": false,
    "size": "80 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/uci_hapt/RawData"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/uci_hapt/RawData"
    },
    "streams": [
     {
@@ -367,7 +367,7 @@
    "registration": false,
    "size": "311 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/harth/harth"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/harth/harth"
    },
    "streams": [
     {
@@ -395,7 +395,7 @@
    "registration": false,
    "size": "44 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/har70plus/har70plus"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/har70plus/har70plus"
    },
    "streams": [
     {
@@ -423,7 +423,7 @@
    "registration": false,
    "size": "307 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/opportunity/OpportunityUCIDataset/dataset"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/opportunity/OpportunityUCIDataset/dataset"
    },
    "streams": [
     {
@@ -456,7 +456,7 @@
    "registration": false,
    "size": "171 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/dsads/data"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/dsads/data"
    },
    "streams": [
     {
@@ -484,7 +484,7 @@
    "registration": false,
    "size": "420 MB (acc csv zips only)",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/realworld2016/s1..s15/acc_<activity>_csv.zip"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/realworld2016/s1..s15/acc_<activity>_csv.zip"
    },
    "streams": [
     {
@@ -511,7 +511,7 @@
    "registration": false,
    "size": "919 MB + 266 MB zips (7.8 GB unzipped)",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/gotov"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/gotov"
    },
    "streams": [
     {
@@ -543,7 +543,7 @@
    "registration": false,
    "size": "774 MB (raw/inertial/50hz only; video not downloaded)",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/wear/raw_inertial_50hz/sbj_0..23.csv"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/wear/raw_inertial_50hz/sbj_0..23.csv"
    },
    "streams": [
     {
@@ -570,7 +570,7 @@
    "registration": false,
    "size": "838 MB watch_acc zip (9.8 GB unzipped, 244,802 files) + 225 MB labels",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/extrasensory"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/extrasensory"
    },
    "streams": [
     {
@@ -594,7 +594,7 @@
    "registration": false,
    "size": "70 MB rar",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/ut_complex_shoaib2016/UT_Data_Complex"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/ut_complex_shoaib2016/UT_Data_Complex"
    },
    "streams": [
     {
@@ -618,7 +618,7 @@
    "registration": false,
    "size": "1.3 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/uci_adl_wrist/HMP_Dataset"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/uci_adl_wrist/HMP_Dataset"
    },
    "streams": [
     {
@@ -642,7 +642,7 @@
    "registration": false,
    "size": "21 MB",
    "local_paths": {
-    "raw": "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets/daphnet_fog/dataset_fog_release/dataset"
+    "raw": "$INERTIA_DATA_ROOT/har-datasets/daphnet_fog/dataset_fog_release/dataset"
    },
    "streams": [
     {
@@ -3143,9 +3143,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('Stair up' -> stairs)",
+   "rationale": "'Stair up' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -3204,9 +3204,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('Stair down' -> stairs)",
+   "rationale": "'Stair down' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -3385,9 +3385,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> stationary)",
+   "rationale": "'lying' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -3450,9 +3450,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> stationary)",
+   "rationale": "'sitting' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -3503,9 +3503,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> upright_stationary)",
+   "rationale": "'standing' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -3516,9 +3516,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> stationary)",
+   "rationale": "'standing' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -3853,9 +3853,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('watching TV' -> stationary)",
+   "rationale": "'watching TV' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4045,9 +4045,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('ascending stairs' -> stairs)",
+   "rationale": "'ascending stairs' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4109,9 +4109,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('descending stairs' -> stairs)",
+   "rationale": "'descending stairs' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4300,9 +4300,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('folding laundry' -> stationary)",
+   "rationale": "'folding laundry' is done standing at one spot (hands busy, feet still): no sustained gait, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4601,9 +4601,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing still (1 min)' -> upright_stationary)",
+   "rationale": "'standing still (1 min)' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4614,9 +4614,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing still (1 min)' -> stationary)",
+   "rationale": "'standing still (1 min)' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4664,9 +4664,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting and relaxing (1 min)' -> seated_likely)",
+   "rationale": "'sitting and relaxing (1 min)' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4677,9 +4677,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting and relaxing (1 min)' -> stationary)",
+   "rationale": "'sitting and relaxing (1 min)' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4727,9 +4727,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying down (1 min)' -> recumbent)",
+   "rationale": "'lying down (1 min)' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4740,9 +4740,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying down (1 min)' -> stationary)",
+   "rationale": "'lying down (1 min)' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -4866,9 +4866,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('climbing stairs (1 min)' -> stairs)",
+   "rationale": "'climbing stairs (1 min)' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -5167,9 +5167,9 @@
    "nara_target": "running",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('jogging (1 min)' -> running)",
+   "rationale": "'jogging (1 min)' is jogging/running gait; Nara's running class does not separate jogging from running",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -5229,9 +5229,9 @@
    "nara_target": "running",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('running (1 min)' -> running)",
+   "rationale": "'running (1 min)' is jogging/running gait; Nara's running class does not separate jogging from running",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -5417,9 +5417,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('SITTING' -> stationary)",
+   "rationale": "'SITTING' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -5482,9 +5482,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('STANDING' -> stationary)",
+   "rationale": "'STANDING' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -5547,9 +5547,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('LAYING' -> stationary)",
+   "rationale": "'LAYING' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6245,9 +6245,9 @@
    "nara_target": "running",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('running' -> running)",
+   "rationale": "direct (source label equals Nara class): label name 'running' (code 2) -> running",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6368,9 +6368,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('stairs (ascending)' -> stairs)",
+   "rationale": "'stairs (ascending)' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6430,9 +6430,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('stairs (descending)' -> stairs)",
+   "rationale": "'stairs (descending)' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6480,9 +6480,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> upright_stationary)",
+   "rationale": "'standing' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6494,9 +6494,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> stationary)",
+   "rationale": "'standing' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6546,9 +6546,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> seated_likely)",
+   "rationale": "'sitting' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6560,9 +6560,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> stationary)",
+   "rationale": "'sitting' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6612,9 +6612,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> recumbent)",
+   "rationale": "'lying' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6626,9 +6626,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> stationary)",
+   "rationale": "'lying' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -6690,9 +6690,9 @@
    "nara_target": "cycling",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('cycling (sit)' -> cycling)",
+   "rationale": "'cycling (sit)' is pedalling a bicycle (seated), which is the Nara cycling class",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7059,9 +7059,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('stairs (ascending)' -> stairs)",
+   "rationale": "'stairs (ascending)' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7121,9 +7121,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('stairs (descending)' -> stairs)",
+   "rationale": "'stairs (descending)' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7171,9 +7171,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> upright_stationary)",
+   "rationale": "'standing' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7185,9 +7185,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> stationary)",
+   "rationale": "'standing' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7237,9 +7237,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> seated_likely)",
+   "rationale": "'sitting' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7251,9 +7251,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> stationary)",
+   "rationale": "'sitting' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7303,9 +7303,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> recumbent)",
+   "rationale": "'lying' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7317,9 +7317,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> stationary)",
+   "rationale": "'lying' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role pooled_ablation_non_wrist: non-wrist: pooled-placement ablation / transition-timing reference only (CC BY 4.0)"
   },
@@ -7493,9 +7493,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('Locomotion: Sit' -> seated_likely)",
+   "rationale": "'Locomotion: Sit' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -7506,9 +7506,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('Locomotion: Sit' -> stationary)",
+   "rationale": "'Locomotion: Sit' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -7568,9 +7568,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('Locomotion: Lie' -> stationary)",
+   "rationale": "'Locomotion: Lie' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -10703,9 +10703,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> seated_likely)",
+   "rationale": "'sitting' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10717,9 +10717,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> stationary)",
+   "rationale": "'sitting' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10769,9 +10769,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> upright_stationary)",
+   "rationale": "'standing' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10783,9 +10783,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> stationary)",
+   "rationale": "'standing' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10835,9 +10835,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying on back' -> recumbent)",
+   "rationale": "'lying on back' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10849,9 +10849,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying on back' -> stationary)",
+   "rationale": "'lying on back' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10901,9 +10901,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying on right side' -> recumbent)",
+   "rationale": "'lying on right side' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10915,9 +10915,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying on right side' -> stationary)",
+   "rationale": "'lying on right side' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -10979,9 +10979,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('ascending stairs' -> stairs)",
+   "rationale": "'ascending stairs' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -11041,9 +11041,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('descending stairs' -> stairs)",
+   "rationale": "'descending stairs' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -11091,10 +11091,10 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing in an elevator still' -> upright_stationary)",
+   "rationale": "'standing in an elevator still' is standing still (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": false,
    "ood": "novelty: elevator",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -11427,9 +11427,9 @@
    "nara_target": "running",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('running on treadmill 8 km/h' -> running)",
+   "rationale": "'running on treadmill 8 km/h': 8 km/h treadmill running is running gait (belt speed above the walk-run transition)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_other: excluded from v1 training (see note) (CC BY 4.0)"
   },
@@ -11932,9 +11932,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('climbing stairs down' -> stairs)",
+   "rationale": "'climbing stairs down' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -11994,9 +11994,9 @@
    "nara_target": "stairs",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('climbing stairs up' -> stairs)",
+   "rationale": "'climbing stairs up' is stair ambulation, which is exactly the Nara stairs class (direction is not distinguished)",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12122,9 +12122,9 @@
    "nara_target": "running",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('running/jogging' -> running)",
+   "rationale": "direct (source label equals Nara class): source label 'running' -> running",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12235,9 +12235,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> seated_likely)",
+   "rationale": "'sitting' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12249,9 +12249,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting' -> stationary)",
+   "rationale": "'sitting' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12301,9 +12301,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> upright_stationary)",
+   "rationale": "'standing' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12315,9 +12315,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing' -> stationary)",
+   "rationale": "'standing' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12367,9 +12367,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> recumbent)",
+   "rationale": "'lying' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12381,9 +12381,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying' -> stationary)",
+   "rationale": "'lying' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
   },
@@ -12433,9 +12433,9 @@
    "nara_target": "upright_stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing (rest between activities)' -> upright_stationary)",
+   "rationale": "'standing (rest between activities)' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12447,9 +12447,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('standing (rest between activities)' -> stationary)",
+   "rationale": "'standing (rest between activities)' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12503,9 +12503,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying down left' -> recumbent)",
+   "rationale": "'lying down left' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12517,9 +12517,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying down left' -> stationary)",
+   "rationale": "'lying down left' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12573,9 +12573,9 @@
    "nara_target": "recumbent",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying down right' -> recumbent)",
+   "rationale": "'lying down right' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12587,9 +12587,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('lying down right' -> stationary)",
+   "rationale": "'lying down right' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12643,9 +12643,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting on sofa, watching TV' -> seated_likely)",
+   "rationale": "'sitting on sofa, watching TV' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12657,9 +12657,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting on sofa, watching TV' -> stationary)",
+   "rationale": "'sitting on sofa, watching TV' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12726,9 +12726,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting on couch, feet on couch, reading newspaper' -> stationary)",
+   "rationale": "'sitting on couch, feet on couch, reading newspaper' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12782,9 +12782,9 @@
    "nara_target": "seated_likely",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting on office chair, computer work' -> seated_likely)",
+   "rationale": "'sitting on office chair, computer work' is seated by protocol, so the posture target is seated_likely",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12796,9 +12796,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('sitting on office chair, computer work' -> stationary)",
+   "rationale": "'sitting on office chair, computer work' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12931,9 +12931,9 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('stand and wash dishes' -> stationary)",
+   "rationale": "'stand and wash dishes' is standing in place by protocol: no ambulation, so locomotion is stationary",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -12999,9 +12999,9 @@
    "nara_target": "other",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('stacking shelves' -> other)",
+   "rationale": "'stacking shelves' mixes short steps with reaching/pushing, neither still nor sustained gait, so locomotion is other",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -13065,9 +13065,9 @@
    "nara_target": "other",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('vacuum cleaning' -> other)",
+   "rationale": "'vacuum cleaning' mixes short steps with reaching/pushing, neither still nor sustained gait, so locomotion is other",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -13079,9 +13079,9 @@
    "nara_target": "repetitive_hand_motion",
    "target_type": "class",
    "mapping_confidence": "low",
-   "rationale": "direct: the source label names the target ('vacuum cleaning' -> repetitive_hand_motion)",
+   "rationale": "'vacuum cleaning' is a sustained, repetitive push-pull arm movement, so the arm target is repetitive_hand_motion",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": false
   },
   {
@@ -13333,9 +13333,9 @@
    "nara_target": "cycling",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('cycle at a normal pace' -> cycling)",
+   "rationale": "direct (source label equals Nara class): source label 'cycling' -> cycling",
    "used_for_training": false,
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
    "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
   },
@@ -21344,14 +21344,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('home activity;miscellaneous;sitting;9060 sitting/lying reading or without observable/identifiable activities;MET 1.3' -> stationary)",
+   "rationale": "Compendium 9060 'sitting/lying reading or without observable/identifiable activities' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9060",
    "met": 1.3,
    "labeled_hours": 103.198,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -21617,14 +21617,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('home activity;miscellaneous;sitting;7010 sitting/lying and watching television with TV on as the primary activity;MET 1.0' -> stationary)",
+   "rationale": "Compendium 7010 'sitting/lying and watching television with TV on as the primary activity' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "7010",
    "met": 1.0,
    "labeled_hours": 47.97,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -21799,14 +21799,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('home activity;miscellaneous;sitting;9055 sitting/lying talking in person/using a mobile phone/smartphone/tablet or talking on the phone/computer (skype chatting);MET 1.5' -> stationary)",
+   "rationale": "Compendium 9055 'sitting/lying talking in person/using a mobile phone/smartphone/tablet or talking on the phone/computer (skype chatting)' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9055",
    "met": 1.5,
    "labeled_hours": 43.356,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -22699,14 +22699,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('leisure;miscellaneous;sitting;9060 (generic) sitting/lying reading or without observable/identifiable activities;MET 1.3' -> stationary)",
+   "rationale": "Compendium 9060 '(generic) sitting/lying reading or without observable/identifiable activities' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9060",
    "met": 1.3,
    "labeled_hours": 23.846,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -22966,14 +22966,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;leisure;activities for maintenance of a household;miscellaneous;9100 retreat/family reunion activities involving sitting eating relaxing talking with more than one person;MET 1.8' -> stationary)",
+   "rationale": "Compendium 9100 'retreat/family reunion activities involving sitting eating relaxing talking with more than one person' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9100",
    "met": 1.8,
    "labeled_hours": 19.226,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -23059,14 +23059,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('home activity;miscellaneous;sitting;9060 sitting/lying reading or without observable activities;MET 1.3' -> stationary)",
+   "rationale": "Compendium 9060 'sitting/lying reading or without observable activities' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9060",
    "met": 1.3,
    "labeled_hours": 17.986,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -23329,14 +23329,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;leisure;activties for maintenance of a household;miscellaneous;9100 retreat/family reunion activities involving sitting eating relaxing talking with more than one person;MET 1.8' -> stationary)",
+   "rationale": "Compendium 9100 'retreat/family reunion activities involving sitting eating relaxing talking with more than one person' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9100",
    "met": 1.8,
    "labeled_hours": 14.062,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -24488,14 +24488,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('occupation;office and administrative support;11600 (generic) standing tasks such as store clerk/libarian/packing boxes/repair heavy parts;MET 3.0' -> stationary)",
+   "rationale": "Compendium 11600 '(generic) standing tasks such as store clerk/libarian/packing boxes/repair heavy parts' is work done standing in place; occasional steps are not sustained gait or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "11600",
    "met": 3.0,
    "labeled_hours": 9.364,
    "willetts_specific_2018": "mixed-activity",
    "walmsley_2020": "light",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -24842,14 +24842,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;household chores;washing/ironing/mending clothes;5070 ironing;MET 1.8' -> stationary)",
+   "rationale": "Compendium 5070 ironing is done standing in place at a board (no gait), so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "5070",
    "met": 1.8,
    "labeled_hours": 7.536,
    "willetts_specific_2018": "household-chores",
    "walmsley_2020": "light",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -28567,14 +28567,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('home activity;miscellaneous;sitting;7010 lying and watching television with TV on as the primary activity;MET 1.0' -> stationary)",
+   "rationale": "Compendium 7010 'lying and watching television with TV on as the primary activity' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "7010",
    "met": 1.0,
    "labeled_hours": 1.642,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -28660,14 +28660,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "high",
-   "rationale": "direct: the source label names the target ('leisure;miscellaneous;sitting;9060 (generic) sitting/lying reading or without observable activities;MET 1.3' -> stationary)",
+   "rationale": "Compendium 9060 '(generic) sitting/lying reading or without observable activities' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9060",
    "met": 1.3,
    "labeled_hours": 1.568,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -30078,14 +30078,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('occupation;office and administrative support;11600 (generic) standing tasks such as store clerk/librarian/packing boxes/repair heavy parts;MET 3.0' -> stationary)",
+   "rationale": "Compendium 11600 '(generic) standing tasks such as store clerk/librarian/packing boxes/repair heavy parts' is work done standing in place; occasional steps are not sustained gait or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "11600",
    "met": 3.0,
    "labeled_hours": 1.134,
    "willetts_specific_2018": "standing",
    "walmsley_2020": "light",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -30963,14 +30963,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;leisure;activties for maintenance of a household;with children;5170 sitting playing with child(ren);MET 2.2' -> stationary)",
+   "rationale": "Compendium 5170 'sitting playing with child(ren)' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "5170",
    "met": 2.2,
    "labeled_hours": 0.881,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -31493,14 +31493,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;leisure;activities for maintenance of a household;with children;5170 sitting playing with child(ren);MET 2.2' -> stationary)",
+   "rationale": "Compendium 5170 'sitting playing with child(ren)' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "5170",
    "met": 2.2,
    "labeled_hours": 0.713,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -34497,14 +34497,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;leisure;activties for maintenance of a household;9100 retreat/family reunion activities involving sitting eating relaxing talking with more than one person;MET 1.8' -> stationary)",
+   "rationale": "Compendium 9100 'retreat/family reunion activities involving sitting eating relaxing talking with more than one person' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "9100",
    "met": 1.8,
    "labeled_hours": 0.324,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -34675,14 +34675,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('leisure;miscellaneous;sitting;21016 sitting child care only active periods;MET 2.0' -> stationary)",
+   "rationale": "Compendium 21016 'sitting child care only active periods' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "21016",
    "met": 2.0,
    "labeled_hours": 0.318,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -35029,14 +35029,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('home activity;leisure;activties for maintenance of a household;5170 sitting playing with child(ren);MET 2.2' -> stationary)",
+   "rationale": "Compendium 5170 'sitting playing with child(ren)' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "5170",
    "met": 2.2,
    "labeled_hours": 0.288,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {
@@ -38211,14 +38211,14 @@
    "nara_target": "stationary",
    "target_type": "class",
    "mapping_confidence": "medium",
-   "rationale": "direct: the source label names the target ('leisure;miscellaneous;21016 sitting child care only active periods;MET 2.0' -> stationary)",
+   "rationale": "Compendium 21016 'sitting child care only active periods' is a sitting/lying activity with no ambulation or vehicle travel, so locomotion is stationary",
    "used_for_training": true,
    "compendium_code": "21016",
    "met": 2.0,
    "labeled_hours": 0.032,
    "willetts_specific_2018": "sitting",
    "walmsley_2020": "sedentary",
-   "rationale_source": "normaliser (Agent C left the rationale blank for this direct name match)",
+   "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true
   },
   {

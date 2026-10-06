@@ -44,7 +44,9 @@ extension ActivityDecoderConfig {
     }
 
     /// A short, filename-safe tag that differs whenever the heart-rate reference does, and (only when
-    /// Inertia-1 evidence is active) whenever its bundle or evidence config does.
+    /// Inertia-1 evidence is active) whenever its bundle or evidence config does. This is the config's view; a
+    /// caller keying a decoded track input uses `ActivityContextTrackBuilder.cacheTag(for:config:)`, which
+    /// drops the Inertia suffix when that input's windows are not from the config's bundle (or it has none).
     public var cacheTag: String {
         let base = "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
         guard let heads = motionHeads, heads.evidenceRefusal == nil else { return base }

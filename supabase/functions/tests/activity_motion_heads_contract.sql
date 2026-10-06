@@ -29,13 +29,22 @@ language sql as $$
     'preprocessing_version', 'inertia-prep-1', 'evidence_tier_max', p_tier, 'window_s', 30, 'hop_s', 5,
     'bundle', jsonb_build_object('heads', jsonb_build_object(), 'ood', jsonb_build_object('method','knn','threshold',1.2)))
 $$;
+-- Columnar windows (mh-col-1), what the worker writes: per head top-class index + percent, OOD flag, deltas.
+create function pg_temp.mh_col(p_n integer, p_value integer) returns jsonb language sql as $$
+  select coalesce(jsonb_agg(p_value order by i), '[]'::jsonb) from generate_series(0, p_n - 1) as g(i)
+$$;
 create function pg_temp.mh_windows(p_day date, p_n integer) returns jsonb language sql as $$
-  select coalesce(jsonb_agg(jsonb_build_object(
-    's', extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 5*i,
-    'e', extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint + 5*i + 30,
-    'p', jsonb_build_array(0.1,0.6,0.2,0.1), 'l', jsonb_build_array(0.8,0.1,0.02,0.02,0.02,0.02,0.01,0.01),
-    'a', null, 't', null, 'mi', 0.2, 'ood', 0.4, 'x', i % 4 = 0) order by i), '[]'::jsonb)
-  from generate_series(0, p_n - 1) as g(i)
+  select jsonb_build_object(
+    'format', 'mh-col-1', 'n', p_n, 'w', 30,
+    's0', case when p_n > 0 then extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint end,
+    'ds', coalesce((select jsonb_agg(case when i = 0 then 0 else 5 end order by i)
+                    from generate_series(0, p_n - 1) as g(i)), '[]'::jsonb),
+    'x', coalesce((select jsonb_agg(case when i % 4 = 0 then 1 else 0 end order by i)
+                   from generate_series(0, p_n - 1) as g(i)), '[]'::jsonb),
+    'mi', pg_temp.mh_col(p_n, 20),
+    'heads', jsonb_build_object(
+      'posture', jsonb_build_object('i', pg_temp.mh_col(p_n, 1), 'p', pg_temp.mh_col(p_n, 60)),
+      'locomotion', jsonb_build_object('i', pg_temp.mh_col(p_n, 0), 'p', pg_temp.mh_col(p_n, 80))))
 $$;
 create function pg_temp.mh_payload(p_day date, p_mode text default 'shadow', p_n integer default 8,
                                    p_bundle jsonb default null) returns jsonb language sql as $$
@@ -90,8 +99,9 @@ begin
   assert r.window_s=30 and r.hop_s=5 and r.n_windows=8 and r.n_ood=2 and r.n_dropped=0, 'counts must be mirrored';
   assert r.job_fingerprint=j.fingerprint and r.input_revision=j.input_revision
      and r.algorithm_version='hart-activity-1', 'row must record the job lineage';
-  assert jsonb_array_length(r.windows)=8 and r.candidate_document is null and r.withheld_reason is null,
-    'compact windows stored, no candidate in shadow mode';
+  assert (r.windows->>'n')::integer=8 and jsonb_array_length(r.windows->'ds')=8 and r.windows->>'format'='mh-col-1'
+     and r.candidate_document is null and r.withheld_reason is null,
+    'columnar windows stored, no candidate in shadow mode';
   assert r.result_revision=rev and r.computed_at is not null and r.created_at is not null, 'revision and stamps';
   assert (select lease_token=j.lease_token and completed_revision=0 from public.activity_context_jobs
     where user_id=u and device_id=dev and day=v_day), 'the shadow publish must not complete the job';
@@ -181,7 +191,19 @@ begin
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{summary,n_ood}','9'),'invalid_motion_heads_summary'), 'n_ood > n_windows';
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{summary,n_windows}','-1'),'invalid_motion_heads_summary'), 'negative count';
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{summary,n_windows}','7'),'invalid_motion_heads_windows'), 'count mismatch';
-  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows}','{}'),'invalid_motion_heads_windows'), 'windows type';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows}','{}'),'invalid_motion_heads_windows'), 'windows format';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows}','[]'),'invalid_motion_heads_windows'),
+    'the old per-window array form is refused';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows,format}','"mh-col-2"'),'invalid_motion_heads_windows'), 'format';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows,ds}','[0,5]'),'invalid_motion_heads_windows'), 'short column';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows,heads,posture,p}','[1]'),'invalid_motion_heads_windows'),
+    'short head column';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows,heads,gait}',
+    jsonb_build_object('i', pg_temp.mh_col(8, 0), 'p', pg_temp.mh_col(8, 0))),'invalid_motion_heads_windows'), 'unknown head';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows,w}','10'),'invalid_motion_heads_windows'),
+    'the window length must be the bundle''s';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{windows,mi}',
+    to_jsonb(repeat('x', 1100000))),'invalid_motion_heads_windows'), 'windows over 1 MiB';
   -- Candidate rules.
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{withheld_reason}','"x"'),'invalid_motion_heads_candidate'),
     'a shadow row never carries a withheld reason';
@@ -196,6 +218,12 @@ begin
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(jsonb_set(pg_temp.mh_payload(v_day,'candidate'),'{withheld_reason}','null'),
     '{candidate_document}', jsonb_build_object('versions','{}'::jsonb,'runs','[]'::jsonb)),
     'invalid_motion_heads_candidate'), 'a comparison document must name the Inertia evidence';
+  -- Only a real Inertia-1 candidate bundle may carry a comparison: never a stand-in, never a shadow-tier bundle.
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(jsonb_set(pg_temp.mh_payload(v_day,'candidate'),'{withheld_reason}','null'),
+    '{candidate_document}', doc), 'invalid_motion_heads_candidate'), 'a stand-in comparison document';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(jsonb_set(pg_temp.mh_payload(v_day,'candidate',8,
+    pg_temp.mh_bundle('inertia1','shadow')),'{withheld_reason}','null'), '{candidate_document}', doc),
+    'invalid_motion_heads_candidate'), 'a shadow-tier comparison document';
   assert not exists(select 1 from public.activity_motion_heads_days where user_id=u and device_id=dev and day=v_day),
     'no rejected payload may write a row';
   -- The live lease still accepts a good payload afterwards (each rejection rolled back only itself).
@@ -234,7 +262,72 @@ begin
     where user_id=u and device_id=dev and day=v_day and mode='candidate'), 'the comparison is stored verbatim';
   assert not exists(select 1 from public.activity_context_days where user_id=u and device_id=dev and day=v_day),
     'the comparison never reaches activity_context_days';
-  raise notice 'PASS 4 upsert, coexisting modes, verbatim comparison';
+  -- The table refuses a stand-in comparison even when something bypasses the RPC.
+  begin
+    update public.activity_motion_heads_days set encoder_kind='standin', checkpoint_sha256=null,
+      encoder_id='standin:handcrafted-stats-v1'
+      where user_id=u and device_id=dev and day=v_day and mode='candidate';
+    assert false, 'a stand-in row with a comparison document must violate the CHECK';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.activity_motion_heads_days set evidence_tier_max='shadow'
+      where user_id=u and device_id=dev and day=v_day and mode='candidate';
+    assert false, 'a shadow-tier row with a comparison document must violate the CHECK';
+  exception when check_violation then null;
+  end;
+  raise notice 'PASS 4 upsert, coexisting modes, verbatim comparison, inertia1-only comparison';
+end;
+$$;
+
+-- 4b. Retention: rows computed more than p_keep_days ago go, newer rows stay, batches are bounded, and
+-- nonsense arguments are refused.
+do $$
+declare
+  u uuid := 'b0000000-0000-4000-8000-000000000001';
+  dev uuid := 'b0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-11-07';
+  j record; n integer; total integer;
+begin
+  perform pg_temp.mh_enqueue(u, dev, v_day, '5');
+  select * into j from public.claim_activity_context_v2(300);
+  assert j.day = v_day, 'test must have claimed its own job';
+  assert public.publish_activity_motion_heads_day(j.lease_token, j.input_revision, pg_temp.mh_payload(v_day)) is not null,
+    'a row to prune';
+  select count(*) into total from public.activity_motion_heads_days;
+  n := public.prune_activity_motion_heads_days(30, 10000);
+  assert (select count(*) from public.activity_motion_heads_days) = total - n, 'the count deleted is returned';
+  assert exists(select 1 from public.activity_motion_heads_days where user_id=u and device_id=dev and day=v_day),
+    'a fresh row is kept';
+  update public.activity_motion_heads_days set computed_at = clock_timestamp() - interval '31 days'
+    where user_id=u and device_id=dev and day in ('2026-11-06', '2026-11-07');
+  assert (select count(*) from public.activity_motion_heads_days
+          where user_id=u and device_id=dev and day in ('2026-11-06', '2026-11-07')) = 3, 'three aged rows';
+  n := public.prune_activity_motion_heads_days(30, 2);
+  assert n = 2, 'at most p_max_rows per call';
+  n := public.prune_activity_motion_heads_days(30, 10000);
+  assert n >= 1, 'the rest go on the next call';
+  assert not exists(select 1 from public.activity_motion_heads_days
+                    where user_id=u and device_id=dev and day in ('2026-11-06', '2026-11-07')), 'aged rows are gone';
+  assert exists(select 1 from public.activity_motion_heads_days where user_id=u and device_id=dev and day='2026-11-04'),
+    'rows inside the window stay';
+  begin
+    perform public.prune_activity_motion_heads_days(0, 10);
+    assert false, 'keep_days 0 must be refused';
+  exception when others then assert sqlerrm = 'invalid_motion_heads_retention', sqlerrm;
+  end;
+  begin
+    perform public.prune_activity_motion_heads_days(30, 0);
+    assert false, 'max_rows 0 must be refused';
+  exception when others then assert sqlerrm = 'invalid_motion_heads_retention', sqlerrm;
+  end;
+  assert not has_function_privilege('anon', 'public.prune_activity_motion_heads_days(integer,integer)', 'execute'),
+    'anon cannot prune';
+  assert not has_function_privilege('authenticated', 'public.prune_activity_motion_heads_days(integer,integer)', 'execute'),
+    'authenticated cannot prune';
+  assert has_function_privilege('service_role', 'public.prune_activity_motion_heads_days(integer,integer)', 'execute'),
+    'the worker role can prune';
+  raise notice 'PASS 4b retention';
 end;
 $$;
 

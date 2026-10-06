@@ -33,7 +33,16 @@ Bundle file keys
     maha_global: ``mu``, ``sigma``, ``mean`` [D], ``precision``; knn: ``mu``, ``sigma``, ``reference`` float16
     [N,D] (L2-normalised z-scored embeddings); energy: no arrays.
 Extra files (``label_mappings.json``, ``split_manifest.json`` — required for candidate/production —,
-``encoder.json``, ``evaluation.json``/``.md``, ...) are listed in ``files`` and verified like the rest.
+``encoder.json``, ...) are listed in ``files`` and verified like the rest.
+``test_gate.json`` (``nara.inertia.test_gate/1``, written ONLY by :func:`seal_bundle` after the one-shot test
+    evaluation): per head/class ``val_status``, ``tau``, the pooled and per-dataset test gates,
+    ``final_status`` (= min of VAL status and every gate level; demotions only), ``reasons``; per head the
+    ``merge_into`` and ``decoder_evidence`` recomputed for the final statuses; ``evaluated_bundle_sha256``
+    (the pre-seal bundle hash the test evaluation was stamped with), ``test_sha256`` and the ledger entry.
+    Sealing adds it to ``files`` and adds ``manifest.seal`` {evaluated_bundle_sha256, test_gate_sha256,
+    test_sha256}; :func:`load_bundle` recomputes the pre-seal hash (manifest without ``seal`` and the gate
+    entry, canonical JSON) and refuses a gate that was not made for exactly that bundle or that promotes.
+    ``HeadBundle.wire_block`` serves the FINAL statuses/merges. Candidate/production bundles must be sealed.
 
 ``bundle_sha256`` = sha256 over, for each (name, sha256) in sorted(manifest.files): ``name 0x00 sha256
 0x0A``, then ``"manifest.json" 0x00`` followed by the exact manifest.json bytes.
@@ -55,13 +64,14 @@ from typing import Any, Dict, List, Mapping, Optional, Union
 
 import numpy as np
 
-from . import (CALIBRATION_SCHEMA, CLASSIFIER_HEADS, HEADS_SCHEMA, MULTILABEL_HEADS, OOD_SCHEMA)
+from . import (CALIBRATION_SCHEMA, CLASSIFIER_HEADS, HEADS_SCHEMA, MULTILABEL_HEADS, OOD_SCHEMA, SOFTMAX_HEADS,
+               TEST_GATE_SCHEMA)
 from . import bundle_math as bm
-from .bundle_schema import (REQUIRED_FILES, BundleError, supported_classes, validate_all,
-                            validate_manifest)
+from .bundle_schema import (REQUIRED_FILES, TEST_GATE_FILE, BundleError, supported_classes, validate_all,
+                            validate_manifest, validate_test_gate)
 from .contract import sha256_bytes
 
-_RESERVED = set(REQUIRED_FILES) | {"manifest.json"}
+_RESERVED = set(REQUIRED_FILES) | {"manifest.json", TEST_GATE_FILE}
 _ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 
 
@@ -198,6 +208,25 @@ class HeadBundle:
     heads_arrays: Dict[str, np.ndarray] = field(repr=False)
     ood_arrays: Dict[str, np.ndarray] = field(repr=False)
     bundle_sha256: str = ""
+    test_gate: Optional[Dict[str, Any]] = None      # parsed test_gate.json of a sealed bundle
+
+    @property
+    def sealed(self) -> bool:
+        return self.test_gate is not None
+
+    def effective_head(self, head: str) -> Dict[str, Any]:
+        """The head entry as served: FINAL statuses and merges of a sealed bundle (the VAL ones otherwise)."""
+        meta = dict(self.manifest["heads"][head])
+        g = (self.test_gate or {}).get("heads", {}).get(head)
+        if g is not None:
+            meta["status"] = {c: e["final_status"] for c, e in g["classes"].items()}
+            meta["merge_into"] = dict(g.get("merge_into", {}))
+            if "decoder_evidence" in g:
+                meta["decoder_evidence"] = g["decoder_evidence"]
+        if head in SOFTMAX_HEADS:
+            live = [c for c, st in meta["status"].items() if st in ("strong", "weak")]
+            meta["decoder_evidence"] = len(live) > 1
+        return meta
 
     @property
     def bundle_id(self) -> str:
@@ -229,11 +258,15 @@ class HeadBundle:
         """The ``bundle`` object of the motion-heads-1 infer response (INERTIA1.md §6)."""
         heads = {}
         for h in self.heads_present():
-            meta = self.manifest["heads"][h]
+            meta = self.effective_head(h)
             heads[h] = {"class_order": list(meta["class_order"]), "prior": dict(meta["prior"]),
                         "status": dict(meta["status"]), "tau": dict(meta["tau"]),
                         "merge_into": dict(meta.get("merge_into", {})),
                         "covers": {k: list(v) for k, v in meta.get("covers", {}).items()}}
+            if h in SOFTMAX_HEADS:
+                # false = <= 1 evidence group after merging/dropping abstained classes: the decoder's
+                # likelihood ratio is then identically 1 (inert head); carried so consumers can say so.
+                heads[h]["decoder_evidence"] = bool(meta["decoder_evidence"])
         return {"heads": heads, "ood": {"method": self.ood_meta["method"],
                                         "threshold": float(self.ood_meta["threshold"])}}
 
@@ -356,10 +389,96 @@ def load_bundle(bundle_dir: str) -> HeadBundle:
     validate_all(manifest, heads, cal, ood_meta, ood_arrays)
     if ood_meta.get("content_sha256") != sha256_bytes(blobs["ood_reference.npz"]):
         raise BundleError("checkpoint_mismatch", "ood_reference.json content_sha256 does not match the npz")
+    gate = None
+    if TEST_GATE_FILE in manifest["files"]:
+        gate = _parse_json(blobs[TEST_GATE_FILE], TEST_GATE_FILE)
+        if presealed_sha256(manifest) != manifest["seal"]["evaluated_bundle_sha256"]:
+            raise BundleError("checkpoint_mismatch", "manifest.seal.evaluated_bundle_sha256 is not the hash of this "
+                              "bundle before sealing (the gate was made for a different bundle)")
+        validate_test_gate(manifest, gate)
     return HeadBundle(path=os.path.abspath(bundle_dir), manifest=manifest, calibration=cal, ood_meta=ood_meta,
                       heads_arrays=heads, ood_arrays=ood_arrays,
-                      bundle_sha256=compute_bundle_sha256(manifest["files"], manifest_bytes))
+                      bundle_sha256=compute_bundle_sha256(manifest["files"], manifest_bytes), test_gate=gate)
 
 
-__all__ = ["write_bundle", "load_bundle", "HeadBundle", "HeadOutputs", "BundleError", "compute_bundle_sha256",
-           "encoder_block", "json_bytes", "npz_bytes"]
+def presealed_sha256(manifest: Mapping[str, Any]) -> str:
+    """bundle_sha256 of the bundle before :func:`seal_bundle` (manifest without ``seal``/gate entry)."""
+    m = copy.deepcopy(dict(manifest))
+    m.pop("seal", None)
+    m["files"] = {k: v for k, v in m["files"].items() if k != TEST_GATE_FILE}
+    return compute_bundle_sha256(m["files"], json_bytes(m))
+
+
+def gate_document(bundle: HeadBundle, evaluation: Mapping[str, Any]) -> Dict[str, Any]:
+    """test_gate.json content from an evaluate-once report (``evaluate_heads``); merges recomputed."""
+    from . import abstention as A
+    integ = evaluation.get("integrity") or {}
+    heads: Dict[str, Any] = {}
+    for h in bundle.heads_present():
+        meta = bundle.manifest["heads"][h]
+        if not isinstance(meta.get("status"), Mapping):
+            continue
+        rep = (evaluation.get("heads") or {}).get(h)
+        if rep is None:
+            raise BundleError("config_mismatch", f"evaluation has no report for head {h}; cannot seal")
+        src = rep["gate"] if h in SOFTMAX_HEADS else {e: v["gate"] for e, v in rep["per_event"].items() if v.get("supported")}
+        classes: Dict[str, Any] = {}
+        for c in supported_classes(meta):
+            g = src.get(c)
+            if g is None:
+                raise BundleError("config_mismatch", f"evaluation has no gate for {h}.{c}; cannot seal")
+            classes[c] = {"val_status": g["val_status"], "tau": meta["tau"][c], "pooled": g.get("test"),
+                          "per_dataset": g.get("per_dataset", {}), "final_status": g["final_status"],
+                          "reasons": list(g.get("reasons", []))}
+        final = {c: e["final_status"] for c, e in classes.items()}
+        entry: Dict[str, Any] = {"classes": classes}
+        if h in SOFTMAX_HEADS:
+            sym = (meta.get("selection") or {}).get("merge_confusion_val_sym")
+            entry["merge_into"] = A.merge_partners(final, list(meta["class_order"]), h, sym)
+            groups = A.evidence_groups(final, entry["merge_into"])
+            entry["evidence_groups"] = groups
+            entry["decoder_evidence"] = len(groups) > 1
+        else:
+            entry["merge_into"] = {}
+        heads[h] = entry
+    return {"schema": TEST_GATE_SCHEMA, "bundle_id": bundle.bundle_id, "experiment": evaluation.get("experiment"),
+            "evaluated_bundle_sha256": bundle.bundle_sha256, "test_sha256": integ.get("test_sha256"),
+            "ledger_entry": dict(integ), "heads": heads,
+            "rule": "final_status = min(VAL status, pooled test gate level, every wrist-dataset gate level with "
+                    "n_acc >= 30); levels: strong (precision >= .95 [+ CP95 >= .90, recall >= .05 pooled]), weak "
+                    "(precision >= .80 or n_acc < 30), else abstain. Demotions only; merges recomputed inside "
+                    "abstention.MERGE_COMPAT for the final statuses."}
+
+
+def seal_bundle(bundle_dir: str, evaluation: Mapping[str, Any]) -> HeadBundle:
+    """Bind the one-shot test gate to the served artifact (G-3): write ``test_gate.json``, list it in
+    ``files``, add ``manifest.seal`` and re-write the manifest; returns the re-loaded (verified) bundle.
+
+    Refuses an already-sealed bundle and an evaluation that was not stamped with this bundle's hash."""
+    b = load_bundle(bundle_dir)
+    if b.sealed:
+        raise BundleError("config_mismatch", f"{bundle_dir} is already sealed; retrain to evaluate again")
+    integ = evaluation.get("integrity") or {}
+    if evaluation.get("bundle_sha256") != b.bundle_sha256 or integ.get("bundle_sha256") != b.bundle_sha256:
+        raise BundleError("config_mismatch", "the evaluation was not stamped with this bundle's sha256; refusing to seal")
+    if not integ.get("test_sha256"):
+        raise BundleError("config_mismatch", "the evaluation carries no test_sha256 (not an evaluate-once report)")
+    gate = gate_document(b, evaluation)
+    gate_bytes = json_bytes(gate)
+    m = copy.deepcopy(b.manifest)
+    m["files"] = dict(m["files"], **{TEST_GATE_FILE: sha256_bytes(gate_bytes)})
+    m["seal"] = {"evaluated_bundle_sha256": b.bundle_sha256, "test_gate_sha256": m["files"][TEST_GATE_FILE],
+                 "test_sha256": gate["test_sha256"]}
+    validate_manifest(m)
+    validate_test_gate(m, gate)
+    with open(os.path.join(bundle_dir, TEST_GATE_FILE), "wb") as f:
+        f.write(gate_bytes)
+    tmp = os.path.join(bundle_dir, ".manifest.json.tmp")
+    with open(tmp, "wb") as f:
+        f.write(json_bytes(m))
+    os.replace(tmp, os.path.join(bundle_dir, "manifest.json"))
+    return load_bundle(bundle_dir)
+
+
+__all__ = ["write_bundle", "load_bundle", "seal_bundle", "gate_document", "presealed_sha256", "HeadBundle",
+           "HeadOutputs", "BundleError", "compute_bundle_sha256", "encoder_block", "json_bytes", "npz_bytes"]

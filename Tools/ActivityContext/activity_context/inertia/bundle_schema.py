@@ -13,16 +13,17 @@ from typing import Any, Dict, List, Mapping, Sequence
 
 import numpy as np
 
-from . import (ALL_HEADS, ALLOWED_HOP_S, ALLOWED_WINDOW_S, CALIBRATION_SCHEMA, CLASSIFIER_HEADS,
-               EVIDENCE_TIERS, HEAD_CLASS_ORDERS, HEADS_SCHEMA, INERTIA_AXES, INERTIA_RATE_HZ,
-               MULTILABEL_HEADS, OOD_SCHEMA, PREPROCESSING_VERSION, REAL_ENCODER_PREFIX, SOFTMAX_HEADS,
-               STANDIN_PREFIX)
+from . import (ALL_HEADS, ALLOWED_HOP_S, ALLOWED_WINDOW_S, BUNDLE_TIERS, CALIBRATION_SCHEMA, CLASSIFIER_HEADS,
+               HEAD_CLASS_ORDERS, HEADS_SCHEMA, INERTIA_AXES, INERTIA_RATE_HZ, MULTILABEL_HEADS, OOD_SCHEMA,
+               PREPROCESSING_VERSION, REAL_ENCODER_PREFIX, SOFTMAX_HEADS, STANDIN_PREFIX, TEST_GATE_SCHEMA)
 from .bundle_math import MULTILABEL_CALIBRATION_METHODS, OOD_METHODS, SOFTMAX_CALIBRATION_METHODS
 from .contract import is_sha256_hex
 
 REQUIRED_FILES = ("heads.npz", "calibration.json", "ood_reference.npz", "ood_reference.json")
-# Provenance a candidate/production bundle must carry (spec §20, §26.12).
+# Provenance a candidate/production bundle must carry (spec §20, §26.12), plus the one-shot test gate.
 PROVENANCE_FILES = ("label_mappings.json", "split_manifest.json")
+TEST_GATE_FILE = "test_gate.json"
+SEAL_KEYS = ("evaluated_bundle_sha256", "test_gate_sha256", "test_sha256")
 HEAD_ARCHS = ("linear", "mlp")
 CLASS_STATUSES = ("strong", "weak", "abstain")
 _ARCH_KEYS = {"linear": ("W", "b"), "mlp": ("ln_g", "ln_b", "W1", "b1", "W2", "b2")}
@@ -67,7 +68,7 @@ def validate_manifest(m: Mapping[str, Any]) -> None:
     _require(m.get("schema") == HEADS_SCHEMA, f"manifest.schema must be {HEADS_SCHEMA!r}")
     _require(isinstance(m.get("bundle_id"), str) and m["bundle_id"], "manifest.bundle_id must be a string")
     tier = m.get("evidence_tier_max")
-    _require(tier in EVIDENCE_TIERS, f"evidence_tier_max must be one of {EVIDENCE_TIERS}")
+    _require(tier in BUNDLE_TIERS, f"evidence_tier_max must be one of {BUNDLE_TIERS}")
     _validate_encoder_block(m.get("encoder"), tier)
     _validate_preprocessing(m.get("preprocessing"))
     heads = m.get("heads")
@@ -93,9 +94,18 @@ def validate_manifest(m: Mapping[str, Any]) -> None:
         _require(is_sha256_hex(digest), f"files[{name!r}] must be a sha256 hex digest")
     for name in REQUIRED_FILES:
         _require(name in files, f"bundle is missing required file {name}")
-    if tier != "shadow":
+    if tier in ("candidate", "production"):
         for name in PROVENANCE_FILES:
             _require(name in files, f"a {tier} bundle must carry {name}")
+        _require(TEST_GATE_FILE in files and isinstance(m.get("seal"), Mapping),
+                 f"a {tier} bundle must be sealed (test_gate.json from the one-shot test evaluation)")
+    seal = m.get("seal")
+    _require((seal is None) == (TEST_GATE_FILE not in files),
+             "manifest.seal and files['test_gate.json'] must be present together")
+    if seal is not None:
+        _require(isinstance(seal, Mapping) and set(seal) == set(SEAL_KEYS) and all(is_sha256_hex(seal[k]) for k in SEAL_KEYS)
+                 and seal["test_gate_sha256"] == files[TEST_GATE_FILE],
+                 f"manifest.seal must be {{{', '.join(SEAL_KEYS)}}} (sha256 hex) matching files['test_gate.json']")
 
 
 def _validate_encoder_block(enc: Any, tier: str) -> None:
@@ -108,7 +118,7 @@ def _validate_encoder_block(enc: Any, tier: str) -> None:
     for key in ("checkpoint_sha256", "config_sha256"):
         v = enc.get(key)
         _require(v is None or is_sha256_hex(v), f"manifest.encoder.{key} must be sha256 hex or null")
-    if tier != "shadow":
+    if tier in ("candidate", "production"):
         _require(eid.startswith(REAL_ENCODER_PREFIX) and enc.get("checkpoint_sha256") is not None,
                  f"a {tier} bundle needs a real inertia-1 encoder with a checkpoint sha256")
 
@@ -142,14 +152,27 @@ def _validate_classifier_head(name: str, meta: Any) -> None:
         _require(_finite(meta["prior"][c]) and 0.0 <= meta["prior"][c] <= 1.0, f"heads.{name}.prior[{c}] not in [0,1]")
         _require(_finite(meta["tau"][c]) and 0.0 <= meta["tau"][c] <= 1.0, f"heads.{name}.tau[{c}] not in [0,1]")
         _require(meta["status"][c] in CLASS_STATUSES, f"heads.{name}.status[{c}] must be one of {CLASS_STATUSES}")
-    merge = meta.get("merge_into", {})
-    _require(isinstance(merge, Mapping), f"heads.{name}.merge_into must be an object")
-    for src, dst in merge.items():
-        _require(src in sup_classes and meta["status"][src] == "abstain",
-                 f"heads.{name}.merge_into key {src!r} must be a supported abstained class")
-        _require(dst in sup_classes and dst != src and meta["status"][dst] != "abstain",
-                 f"heads.{name}.merge_into[{src!r}] must be a supported non-abstained class")
+    validate_merge(name, meta.get("merge_into", {}), meta["status"], sup_classes)
+    if "decoder_evidence" in meta:
+        live = [c for c in sup_classes if meta["status"][c] in ("strong", "weak")]
+        _require(meta["decoder_evidence"] is (len(live) > 1) if name in SOFTMAX_HEADS else isinstance(meta["decoder_evidence"], bool),
+                 f"heads.{name}.decoder_evidence must be true iff the head has > 1 strong/weak class")
     _validate_covers(name, meta.get("covers", {}), order, sup_classes)
+
+
+def validate_merge(name: str, merge: Any, status: Mapping[str, str], sup_classes: Sequence[str]) -> None:
+    """merge_into: abstained supported class -> strong/weak partner inside abstention.MERGE_COMPAT."""
+    from .abstention import MERGE_COMPAT
+    _require(isinstance(merge, Mapping), f"heads.{name}.merge_into must be an object")
+    compat = MERGE_COMPAT.get(name, {})
+    for src, dst in merge.items():
+        _require(src in sup_classes and status[src] == "abstain",
+                 f"heads.{name}.merge_into key {src!r} must be a supported abstained class")
+        _require(dst in sup_classes and dst != src and status[dst] in ("strong", "weak"),
+                 f"heads.{name}.merge_into[{src!r}] must be a supported strong/weak class")
+        _require(dst in compat.get(src, ()),
+                 f"heads.{name}.merge_into[{src!r}] = {dst!r} is outside the semantic-compatibility table "
+                 f"(allowed: {list(compat.get(src, ()))})")
 
 
 def _validate_covers(name: str, covers: Any, order: Sequence[str], sup_classes: Sequence[str]) -> None:
@@ -302,6 +325,51 @@ def validate_ood(manifest: Mapping[str, Any], meta: Mapping[str, Any], arrays: M
             _require(mood.get(key) == meta.get(key), f"manifest.ood.{key} differs from ood_reference.json")
 
 
+# ---------------------------------------------------------------------------
+# test_gate.json (the seal of the one-shot test evaluation)
+# ---------------------------------------------------------------------------
+
+def validate_test_gate(manifest: Mapping[str, Any], gate: Any) -> None:
+    """The gate file may only DEMOTE: per class val_status equals the manifest status, final_status <= it;
+    merges are recomputed for the final statuses (compatibility table, live partners)."""
+    from .abstention import STATUS_RANK
+    _require(isinstance(gate, Mapping) and gate.get("schema") == TEST_GATE_SCHEMA,
+             f"test_gate.schema must be {TEST_GATE_SCHEMA!r}")
+    seal = manifest["seal"]
+    for k in ("evaluated_bundle_sha256", "test_sha256"):
+        _require(gate.get(k) == seal[k], f"test_gate.{k} differs from manifest.seal.{k}")
+    _require(gate.get("bundle_id") == manifest["bundle_id"], "test_gate.bundle_id differs from the manifest")
+    heads = gate.get("heads")
+    _require(isinstance(heads, Mapping), "test_gate.heads must be an object")
+    for h, meta in manifest["heads"].items():
+        if h not in CLASSIFIER_HEADS or not isinstance(meta.get("status"), Mapping):
+            continue
+        g = heads.get(h)
+        _require(isinstance(g, Mapping) and isinstance(g.get("classes"), Mapping),
+                 f"test_gate.heads.{h} missing (every classifier head of a sealed bundle is gated)")
+        sup = supported_classes(meta)
+        _require(sorted(g["classes"]) == sorted(sup), f"test_gate.heads.{h}.classes must be exactly the supported classes")
+        final = {}
+        for c in sup:
+            e = g["classes"][c]
+            _require(isinstance(e, Mapping) and e.get("val_status") == meta["status"][c],
+                     f"test_gate.heads.{h}.{c}.val_status differs from the manifest (gate file not from this bundle)")
+            fs = e.get("final_status")
+            _require(fs in CLASS_STATUSES, f"test_gate.heads.{h}.{c}.final_status must be one of {CLASS_STATUSES}")
+            _require(STATUS_RANK[fs] <= STATUS_RANK[meta["status"][c]],
+                     f"test_gate.heads.{h}.{c}: final_status {fs!r} would PROMOTE val status "
+                     f"{meta['status'][c]!r}; the gate only demotes (refused)")
+            final[c] = fs
+        merge = g.get("merge_into", {})
+        if h in MULTILABEL_HEADS:
+            _require(merge == {}, f"test_gate.heads.{h}.merge_into must be empty for a multi-label head")
+        else:
+            validate_merge(h, merge, final, sup)
+            live = [c for c in sup if final[c] in ("strong", "weak")]
+            _require(g.get("decoder_evidence") is (len(live) > 1),
+                     f"test_gate.heads.{h}.decoder_evidence must be true iff > 1 strong/weak class after the gate")
+
+
 def validate_all(manifest: Mapping[str, Any], heads: Mapping[str, np.ndarray], cal: Mapping[str, Any],
                  ood_meta: Mapping[str, Any], ood_arrays: Mapping[str, np.ndarray]) -> None:
     validate_manifest(manifest)
@@ -310,6 +378,6 @@ def validate_all(manifest: Mapping[str, Any], heads: Mapping[str, np.ndarray], c
     validate_ood(manifest, ood_meta, ood_arrays)
 
 
-__all__ = ["BundleError", "REQUIRED_FILES", "PROVENANCE_FILES", "HEAD_ARCHS", "CLASS_STATUSES",
-           "supported_classes", "head_array_keys", "validate_manifest", "validate_heads_arrays",
-           "validate_calibration", "validate_ood", "validate_all"]
+__all__ = ["BundleError", "REQUIRED_FILES", "PROVENANCE_FILES", "TEST_GATE_FILE", "SEAL_KEYS", "HEAD_ARCHS",
+           "CLASS_STATUSES", "supported_classes", "head_array_keys", "validate_manifest", "validate_heads_arrays",
+           "validate_calibration", "validate_ood", "validate_merge", "validate_test_gate", "validate_all"]

@@ -3,11 +3,16 @@
 -- predictions, OOD counts and, in candidate mode, a second decode of the day with Inertia as decoder evidence
 -- (or why that was withheld).
 --
--- Additive only: a new table, a new sequence and ONE new fenced function. Nothing here changes the
--- activity job queue, activity_context_epochs, activity_context_days, their publish functions or the read
--- surface, and nothing reads this table for scoring or display: the published activity documents are
--- untouched whether the worker has Inertia enabled or not. Rollback = disable Inertia in the worker
--- (FRWHOOP_INERTIA_ENABLED unset); the table can stay.
+-- Additive only: a new table, a new sequence, ONE new fenced publish function and a retention function.
+-- Nothing here changes the activity job queue, activity_context_epochs, activity_context_days, their publish
+-- functions or the read surface, and nothing reads this table for scoring or display: the published activity
+-- documents are untouched whether the worker has Inertia enabled or not. Rollback = disable Inertia in the
+-- worker (FRWHOOP_INERTIA_ENABLED unset); the table can stay.
+--
+-- Size: the per-window predictions are stored columnar in small integers (`mh-col-1`: per head the top-class
+-- index and its probability in percent, an OOD flag, start deltas), about 0.5 MB per full day per bundle at a
+-- 5-s hop, at most 1 MiB; `prune_activity_motion_heads_days` deletes rows older than 30 days (the worker calls
+-- it every few hours while Inertia is on).
 begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '60s';
@@ -38,8 +43,9 @@ create table public.activity_motion_heads_days (
   n_dropped integer not null check (n_dropped >= 0),
   withheld_reason text check (withheld_reason is null or length(withheld_reason) between 1 and 240),
   summary jsonb not null check (jsonb_typeof(summary) = 'object'),
-  -- Compact per-window predictions (null when they were larger than the worker's cap; the summary says so).
-  windows jsonb check (windows is null or jsonb_typeof(windows) = 'array'),
+  -- Columnar per-window predictions (`mh-col-1`; null when they were larger than the worker's cap; the
+  -- summary says so).
+  windows jsonb check (windows is null or (jsonb_typeof(windows) = 'object' and windows ->> 'format' = 'mh-col-1')),
   -- Candidate mode only: the comparison ActivityContextDayDocument decoded with Inertia evidence. Never
   -- published, never copied into activity_context_days.
   candidate_document jsonb check (candidate_document is null or jsonb_typeof(candidate_document) = 'object'),
@@ -49,7 +55,11 @@ create table public.activity_motion_heads_days (
   primary key (user_id, device_id, day, bundle_id, mode),
   foreign key (user_id, device_id) references public.devices(user_id, id) on delete cascade,
   check (mode = 'candidate' or (candidate_document is null and withheld_reason is null)),
-  check (mode = 'shadow' or ((candidate_document is null) <> (withheld_reason is null)))
+  check (mode = 'shadow' or ((candidate_document is null) <> (withheld_reason is null))),
+  -- Only a real Inertia-1 encoder whose bundle reached the candidate tier can ever have shaped a comparison
+  -- document: a stand-in (which the decoder refuses as evidence) never stores one, whatever writes the row.
+  constraint activity_motion_heads_days_candidate_document_inertia1 check (candidate_document is null
+    or (encoder_kind = 'inertia1' and mode = 'candidate' and evidence_tier_max in ('candidate', 'production')))
 );
 create sequence if not exists public.activity_motion_heads_days_result_revision_seq;
 grant usage, select on sequence public.activity_motion_heads_days_result_revision_seq to service_role;
@@ -72,13 +82,16 @@ create policy activity_motion_heads_days_select_own on public.activity_motion_he
 -- Payload (written by Tools/CloudWorker ActivityMotionHeadsDays.payload):
 --   {"day": "YYYY-MM-DD", "mode": "shadow"|"candidate", "schema": "motion-heads-1",
 --    "bundle": {encoder_id, encoder_kind, encoder_version, checkpoint_sha256, heads_version, bundle_sha256,
---               preprocessing_version, evidence_tier_max, window_s, hop_s, bundle: {heads, ood}},
---    "summary": {n_windows, n_ood, n_dropped_nonfinite, ...}, "windows": [...]|null,
+--               preprocessing_version, evidence_tier_max, window_s, hop_s, bundle: {heads, ood[, fusion]}},
+--    "summary": {n_windows, n_ood, n_dropped_nonfinite, ..., track_report}, "windows": <mh-col-1>|null,
 --    "withheld_reason": text|null, "candidate_document": {...}|null}
+-- mh-col-1: {"format": "mh-col-1", "n": n_windows, "w": window_s, "s0": first start|null,
+--            "ds": [start deltas], "x": [0|1 OOD], "mi": [intensity %|-1],
+--            "heads": {head: {"i": [top-class index|-1], "p": [its probability %]}}}, every array n long.
 create function public.publish_activity_motion_heads_day(p_token uuid, p_revision bigint, p_payload jsonb)
 returns bigint language plpgsql security definer set search_path = '' as $$
 declare j public.activity_context_jobs; b jsonb; sm jsonb; w jsonb; cd jsonb; v_mode text; withheld text;
-  n_win integer; n_ood integer; n_drop integer; rev bigint; computed timestamptz; ck text;
+  n_win integer; n_ood integer; n_drop integer; rev bigint; computed timestamptz; ck text; col text; h record;
 begin
   select * into j from public.activity_context_jobs where lease_token = p_token for update;
   if not found or j.lease_until <= clock_timestamp() or j.input_revision <> p_revision then return null; end if;
@@ -147,12 +160,33 @@ begin
   n_drop := (sm ->> 'n_dropped_nonfinite')::integer;
   if n_ood > n_win then raise exception 'invalid_motion_heads_summary'; end if;
 
+  -- Columnar windows (mh-col-1): every column exactly n_windows long, at most 1 MiB.
   w := p_payload -> 'windows';
-  if coalesce(jsonb_typeof(w), 'null') not in ('array', 'null') then raise exception 'invalid_motion_heads_windows'; end if;
-  if jsonb_typeof(w) = 'array' then
-    if jsonb_array_length(w) <> n_win or octet_length(w::text) > 8 * 1024 * 1024 then
+  if coalesce(jsonb_typeof(w), 'null') not in ('object', 'null') then raise exception 'invalid_motion_heads_windows'; end if;
+  if jsonb_typeof(w) = 'object' then
+    if w ->> 'format' is distinct from 'mh-col-1'
+      or octet_length(w::text) > 1024 * 1024
+      or not internal.activity_day_num_ok(w -> 'n', 0, 100000, true)
+      or not internal.activity_day_num_ok(w -> 'w', 10, 30, true)
+      or jsonb_typeof(w -> 'heads') is distinct from 'object' then
       raise exception 'invalid_motion_heads_windows';
     end if;
+    if (w ->> 'n')::integer <> n_win or (w ->> 'w')::integer <> (b ->> 'window_s')::integer then
+      raise exception 'invalid_motion_heads_windows';
+    end if;
+    foreach col in array array['ds', 'x', 'mi'] loop
+      if jsonb_typeof(w -> col) is distinct from 'array' or jsonb_array_length(w -> col) <> n_win then
+        raise exception 'invalid_motion_heads_windows';
+      end if;
+    end loop;
+    for h in select key, value from jsonb_each(w -> 'heads') loop
+      if h.key not in ('posture', 'locomotion', 'arm_behavior', 'transition')
+        or jsonb_typeof(h.value) is distinct from 'object'
+        or jsonb_typeof(h.value -> 'i') is distinct from 'array' or jsonb_array_length(h.value -> 'i') <> n_win
+        or jsonb_typeof(h.value -> 'p') is distinct from 'array' or jsonb_array_length(h.value -> 'p') <> n_win then
+        raise exception 'invalid_motion_heads_windows';
+      end if;
+    end loop;
   else
     w := null;
   end if;
@@ -172,6 +206,11 @@ begin
   if cd is not null and (jsonb_typeof(cd -> 'versions') is distinct from 'object'
       or jsonb_typeof(cd -> 'versions' -> 'motion_heads') is distinct from 'string'
       or jsonb_typeof(cd -> 'runs') is distinct from 'array') then
+    raise exception 'invalid_motion_heads_candidate';
+  end if;
+  -- Only a real Inertia-1 candidate bundle can have shaped a comparison (the table CHECK says the same).
+  if cd is not null and ((b ->> 'encoder_kind') is distinct from 'inertia1'
+      or (b ->> 'evidence_tier_max') not in ('candidate', 'production')) then
     raise exception 'invalid_motion_heads_candidate';
   end if;
 
@@ -203,5 +242,32 @@ end $$;
 revoke all on function public.publish_activity_motion_heads_day(uuid, bigint, jsonb)
   from public, anon, authenticated;
 grant execute on function public.publish_activity_motion_heads_day(uuid, bigint, jsonb) to service_role;
+
+-- Retention. Deletes at most p_max_rows rows whose computed_at is older than p_keep_days days (oldest first)
+-- and returns how many it deleted. The worker calls it every few hours while Inertia is on
+-- (ActivityLane.pruneMotionHeadsIfDue); a deployment without Inertia can run it from cron instead:
+--   select public.prune_activity_motion_heads_days(30, 10000);
+create function public.prune_activity_motion_heads_days(p_keep_days integer default 30,
+                                                        p_max_rows integer default 10000)
+returns integer language plpgsql security definer set search_path = '' as $$
+declare n integer;
+begin
+  if p_keep_days is null or p_keep_days < 1 or p_keep_days > 3650
+    or p_max_rows is null or p_max_rows < 1 or p_max_rows > 1000000 then
+    raise exception 'invalid_motion_heads_retention';
+  end if;
+  with doomed as (
+    select ctid from public.activity_motion_heads_days
+    where computed_at < clock_timestamp() - make_interval(days => p_keep_days)
+    order by computed_at
+    limit p_max_rows
+  )
+  delete from public.activity_motion_heads_days d using doomed where d.ctid = doomed.ctid;
+  get diagnostics n = row_count;
+  return n;
+end $$;
+
+revoke all on function public.prune_activity_motion_heads_days(integer, integer) from public, anon, authenticated;
+grant execute on function public.prune_activity_motion_heads_days(integer, integer) to service_role;
 
 commit;

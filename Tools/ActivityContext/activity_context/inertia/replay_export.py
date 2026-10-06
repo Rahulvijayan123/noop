@@ -128,7 +128,7 @@ def wisdm_recordings(split: str, cache_dir: Optional[str] = None, subjects: Opti
     ``require_hart``: drop blocks with no HART window (e.g. 1638's H/O blocks have no gyro at all) so every
     arm is scored on the same seconds.
     """
-    cache_dir = cache_dir or os.path.join(rd.REPLAY_DIR, "cache", "wisdm")
+    cache_dir = cache_dir or os.path.join(rd.replay_root(), "cache", "wisdm")
     if subjects is None:
         subjects = rd.WISDM_TEST_SUBJECTS if split == "test" else rd.WISDM_VAL_SUBJECTS
     cw = rd.load_crosswalk("wisdm2019_watch", crosswalk_path)
@@ -175,7 +175,7 @@ def capture24_recordings(pids: Sequence[str], split: str, cache_dir: Optional[st
                          dyn_proxy: str = rd.DYN_PROXY_DEFAULT,
                          crosswalk_path: str = rd.CROSSWALK_PATH) -> List[Recording]:
     """One recording per Capture-24 participant (gaps stay gaps; the decoder's gapResetS handles them)."""
-    cache_dir = cache_dir or os.path.join(rd.REPLAY_DIR, "cache", "capture24")
+    cache_dir = cache_dir or os.path.join(rd.replay_root(), "cache", "capture24")
     cw = rd.load_crosswalk("capture24", crosswalk_path)
     out: List[Recording] = []
     for pid in pids:
@@ -396,16 +396,15 @@ def run_harness(in_path: str, out_path: str, package_dir: Optional[str] = None,
     """`swift test --filter ...` with ACTIVITY_REPLAY_IN / ACTIVITY_REPLAY_OUT; returns timing + log tail."""
     import subprocess
     import time
-    package_dir = package_dir or os.path.join(rd.ROOT, "nara-sleep-inbed", "Packages", "StrandAnalytics")
-    env = dict(os.environ)
-    env["ACTIVITY_REPLAY_IN"] = in_path
-    env["ACTIVITY_REPLAY_OUT"] = out_path
+    from .subproc import failure_lines, safe_env
+    package_dir = package_dir or rd.STRAND_PACKAGE_DIR
+    env = safe_env({"ACTIVITY_REPLAY_IN": in_path, "ACTIVITY_REPLAY_OUT": out_path})
     t = time.time()
     p = subprocess.run(["swift", "test", "--filter", test_filter], cwd=package_dir, env=env,
                        capture_output=True, text=True, timeout=timeout_s)
-    tail = (p.stdout + p.stderr)[-4000:]
+    tail = failure_lines(p.stdout + p.stderr)       # never log raw output (it may echo the environment)
     if p.returncode != 0 or not os.path.isfile(out_path):
-        raise RuntimeError(f"swift replay failed (rc={p.returncode}):\n{tail}")
+        raise RuntimeError(f"swift replay failed (rc={p.returncode}): {tail}")
     return {"returncode": p.returncode, "seconds": round(time.time() - t, 1), "tail": tail[-800:]}
 
 

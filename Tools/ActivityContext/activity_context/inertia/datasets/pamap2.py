@@ -17,11 +17,12 @@ from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import HAR_ROOT, DatasetError, Recording, ms2_to_g
+from ..paths import under
+from . import HAR_ROOT, DatasetError, Recording, ms2_to_g, resolve_root
 
 DATASET = "pamap2"
 LOADER_VERSION = "pamap2-loader-1+pamap2-fill-50ms"
-DEFAULT_ROOT = os.path.join(HAR_ROOT, "pamap2", "PAMAP2_Dataset")
+DEFAULT_ROOT = under(HAR_ROOT, "pamap2", "PAMAP2_Dataset")
 MAX_FILL = 5
 REST_LABELS = ("1", "2", "3")
 LEFT_HANDED = {"subject108"}
@@ -29,7 +30,7 @@ LABELS = ["0", "1", "10", "11", "12", "13", "16", "17", "18", "19", "2", "20", "
 
 
 def list_units(root: Optional[str] = None) -> List[str]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     subs = set()
     for part in ("Protocol", "Optional"):
         d = os.path.join(root, part)
@@ -54,7 +55,7 @@ def fill_short_dropouts(t: np.ndarray, xyz: np.ndarray, act: np.ndarray, max_fil
 
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     lut = {n: i for i, n in enumerate(LABELS)}
     for subj in (subjects or list_units(root)):
         for part in ("Protocol", "Optional"):

@@ -11,22 +11,23 @@ from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import HAR_ROOT, DatasetError, Recording, encode_labels, ms2_to_g
+from ..paths import under
+from . import HAR_ROOT, DatasetError, Recording, encode_labels, ms2_to_g, resolve_root
 
 DATASET = "mhealth"
 LOADER_VERSION = "mhealth-loader-1"
-DEFAULT_ROOT = os.path.join(HAR_ROOT, "mhealth", "MHEALTHDATASET")
+DEFAULT_ROOT = under(HAR_ROOT, "mhealth", "MHEALTHDATASET")
 FS = 50.0
 REST_LABELS = ("1", "2", "3")
 
 
 def list_units(root: Optional[str] = None) -> List[str]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     return sorted(f[len("mHealth_"):-4] for f in os.listdir(root) if f.startswith("mHealth_subject") and f.endswith(".log"))
 
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     for subj in (subjects or list_units(root)):
         path = os.path.join(root, f"mHealth_{subj}.log")
         if not os.path.isfile(path):

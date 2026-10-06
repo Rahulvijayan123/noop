@@ -324,4 +324,166 @@ final class MotionHeadsResponseTests: XCTestCase {
         XCTAssertFalse(String(decoding: cfg, as: UTF8.self).contains("motionHeads"))
         XCTAssertNil(try JSONDecoder().decode(ActivityDecoderConfig.self, from: cfg).motionHeads)
     }
+
+    // MARK: - Integer conversions never trap (G-1)
+
+    /// Every number that becomes an Int (duration_ms, n_dropped_nonfinite, window_s, hop_s, s, e) is refused,
+    /// never converted, when it is huge (a bare `Int(1e19)` traps), negative, non-integral or not a number.
+    func testHugeNegativeNonIntegralAndNonNumericIntegersAreRefusedNotTrapped() {
+        // duration_ms: informational, but still exactly the contract.
+        for bad in [1e19, 9.3e18, 1e300, 9e15] as [Double] {
+            assertRefused(.invalidValue("duration_ms")) { $0["duration_ms"] = bad }
+        }
+        assertRefused(.invalidValue("duration_ms")) { $0["duration_ms"] = -1 }
+        assertRefused(.invalidValue("duration_ms")) { $0["duration_ms"] = 12.5 }
+        assertRefused(.wrongType("duration_ms")) { $0["duration_ms"] = "NaN" }
+        assertRefused(.wrongType("duration_ms")) { $0["duration_ms"] = "12" }
+        assertRefused(.wrongType("duration_ms")) { $0["duration_ms"] = true }
+        // Other top-level integers.
+        assertRefused(.invalidValue("n_dropped_nonfinite")) { $0["n_dropped_nonfinite"] = 1e19 }
+        assertRefused(.invalidValue("window_s")) { $0["window_s"] = 1e19 }
+        assertRefused(.invalidValue("hop_s")) { $0["hop_s"] = -1e300 }
+        // Window times: huge, negative, non-integral, strings.
+        assertRefused(.invalidValue("windows[0].s"), mutateWindow(0) { w in w["s"] = 1e19; w["e"] = 1e19 + 10 })
+        assertRefused(.invalidValue("windows[0].s"), mutateWindow(0) { w in w["s"] = 1e300 })
+        assertRefused(.invalidValue("windows[0].e"), mutateWindow(0) { w in w["e"] = 9.3e18 })
+        assertRefused(.invalidValue("windows[0].s"), mutateWindow(0) { w in w["s"] = -1e19 })
+        assertRefused(.invalidWindowTiming(index: 0), mutateWindow(0) { w in w["s"] = -10; w["e"] = 0 })
+        assertRefused(.invalidValue("windows[0].s"), mutateWindow(0) { w in w["s"] = 1_758_000_000.5 })
+        assertRefused(.wrongType("windows[0].s"), mutateWindow(0) { w in w["s"] = "1758000000" })
+        assertRefused(.wrongType("windows[0].e"), mutateWindow(0) { w in w["e"] = "NaN" })
+        assertRefused(.wrongType("windows[0].s"), mutateWindow(0) { w in w["s"] = "Infinity" })
+        // A literal NaN / Infinity token is not JSON at all.
+        let bundle = MotionHeadsKit.bundle()
+        for token in ["NaN", "Infinity", "-Infinity"] {
+            var text = String(decoding: try! MotionHeadsKit.responseJSON(bundle, validWindows(bundle)), as: UTF8.self)
+            text = text.replacingOccurrences(of: "\"duration_ms\":3", with: "\"duration_ms\":\(token)")
+            XCTAssertThrowsError(try MotionHeadsResponse.decode(Data(text.utf8)), token) { error in
+                XCTAssertEqual(error as? MotionHeadsResponseError, .notJSON(nonfinite: true), token)
+            }
+        }
+        // The largest accepted value is exact and in range.
+        XCTAssertEqual(try decode { $0["duration_ms"] = 8_999_999_999_999_998.0 }.durationMs, 8_999_999_999_999_998)
+        XCTAssertNil(try decode { $0["duration_ms"] = NSNull() }.durationMs)
+    }
+
+    /// The Codable path of a window refuses the same huge / broken times instead of trapping.
+    func testTheWindowCodablePathRefusesWhatTheWireRefuses() throws {
+        func decodeWindow(_ text: String) throws -> MotionHeadsWindow {
+            try JSONDecoder().decode(MotionHeadsWindow.self, from: Data(text.utf8))
+        }
+        XCTAssertNoThrow(try decodeWindow(#"{"s":100,"e":110,"is_ood":false}"#))
+        for bad in [#"{"s":1e19,"e":1.0000000000000000001e19,"is_ood":false}"#,
+                    #"{"s":100.5,"e":110.5,"is_ood":false}"#,
+                    #"{"s":-10,"e":0,"is_ood":false}"#,
+                    #"{"s":100,"e":107,"is_ood":false}"#,                     // not an allowed window length
+                    #"{"s":"100","e":110,"is_ood":false}"#,
+                    #"{"s":100,"e":110}"#,                                    // is_ood is required
+                    #"{"s":100,"e":110,"is_ood":1}"#,                         // a number is not a boolean
+                    #"{"s":100,"e":110,"is_ood":false,"extra":1}"#,
+                    #"{"s":100,"e":110,"is_ood":false,"posture":{"kneeling":0.5}}"#,
+                    #"{"s":100,"e":110,"is_ood":false,"posture":{"recumbent":1.5}}"#,
+                    #"{"s":100,"e":110,"is_ood":false,"movement_intensity":2}"#] {
+            XCTAssertThrowsError(try decodeWindow(bad), bad) { XCTAssertTrue($0 is DecodingError, "\($0)") }
+        }
+        // The bundle-dependent checks are `validate(against:)`.
+        let bundle = MotionHeadsKit.bundle()
+        let ok = validWindows(bundle)[0]
+        XCTAssertNoThrow(try ok.validate(against: bundle))
+        var short = ok
+        short.locomotion?.removeValue(forKey: "stairs")
+        XCTAssertThrowsError(try short.validate(against: bundle)) {
+            XCTAssertEqual($0 as? MotionHeadsResponseError, .supportMismatch(head: "locomotion", window: 0))
+        }
+        var long = ok
+        long.endTs = long.startTs + 30
+        XCTAssertThrowsError(try long.validate(against: bundle)) {
+            XCTAssertEqual($0 as? MotionHeadsResponseError, .invalidWindowTiming(index: 0))
+        }
+    }
+
+    // MARK: - The Codable bundle path is the wire decoder (S-5)
+
+    func testTheBundleCodablePathRunsTheWireValidation() throws {
+        let good = try JSONEncoder().encode(MotionHeadsKit.bundle())
+        XCTAssertNoThrow(try JSONDecoder().decode(MotionHeadsBundleInfo.self, from: good))
+        func mutated(_ body: (inout [String: Any]) -> Void) throws -> Data {
+            var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: good) as? [String: Any])
+            body(&obj)
+            return try JSONSerialization.data(withJSONObject: obj)
+        }
+        let refused: [(String, (inout [String: Any]) -> Void)] = [
+            ("an inertia1 kind with a standin: id", { $0["encoder_id"] = "standin:handcrafted-stats-v1" }),
+            ("a standin kind with an inertia-1/ id", { $0["encoder_kind"] = "standin"; $0["checkpoint_sha256"] = NSNull() }),
+            ("an inertia1 kind without a checkpoint", { $0["checkpoint_sha256"] = NSNull() }),
+            ("a short digest", { $0["bundle_sha256"] = "abc" }),
+            ("another preprocessing", { $0["preprocessing_version"] = "inertia-prep-2" }),
+            ("a hop the contract does not allow", { $0["hop_s"] = 7 }),
+            ("a huge window", { $0["window_s"] = 1e19 }),
+            ("an unknown head", { obj in
+                var b = obj["bundle"] as! [String: Any]
+                var heads = b["heads"] as! [String: Any]
+                heads["gait"] = heads["posture"]
+                b["heads"] = heads
+                obj["bundle"] = b
+            }),
+            ("a prior that does not sum to 1", { obj in
+                var b = obj["bundle"] as! [String: Any]
+                var heads = b["heads"] as! [String: Any]
+                var p = heads["posture"] as! [String: Any]
+                var prior = p["prior"] as! [String: Any]
+                prior["recumbent"] = 0.9
+                p["prior"] = prior
+                heads["posture"] = p
+                b["heads"] = heads
+                obj["bundle"] = b
+            }),
+            ("a measured rho outside [0, 1]", { obj in
+                var b = obj["bundle"] as! [String: Any]
+                b["fusion"] = ["rho_hart": 1.5]
+                obj["bundle"] = b
+            }),
+        ]
+        for (label, body) in refused {
+            XCTAssertThrowsError(try JSONDecoder().decode(MotionHeadsBundleInfo.self, from: try mutated(body)), label) {
+                XCTAssertTrue($0 is DecodingError, "\(label): \($0)")
+            }
+        }
+        // The same refusal reaches every Codable consumer: a decoder config, a replay header.
+        var config = ActivityDecoderConfig()
+        config.motionHeads = MotionHeadsEvidenceConfig.candidate(bundle: MotionHeadsKit.bundle())
+        var cfgObj = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(config)) as? [String: Any])
+        var mh = try XCTUnwrap(cfgObj["motionHeads"] as? [String: Any])
+        var b = try XCTUnwrap(mh["bundle"] as? [String: Any])
+        b["encoder_id"] = "standin:handcrafted-stats-v1"
+        mh["bundle"] = b
+        cfgObj["motionHeads"] = mh
+        XCTAssertThrowsError(try JSONDecoder().decode(ActivityDecoderConfig.self,
+                                                      from: JSONSerialization.data(withJSONObject: cfgObj)))
+        let header = #"{"format":"nara-activity-replay-1","motion_heads":{"bundle":"#
+            + String(decoding: try mutated { $0["encoder_id"] = "standin:handcrafted-stats-v1" }, as: UTF8.self) + "}}"
+        XCTAssertThrowsError(try ActivityReplay.parse(Data(header.utf8)))
+    }
+
+    func testTheBundleMayCarryAMeasuredRho() throws {
+        var bundle = MotionHeadsKit.bundle()
+        bundle.fusion = MotionHeadsFusionInfo(rhoHart: 0.61)
+        let r = try MotionHeadsResponse.decode(MotionHeadsKit.responseJSON(bundle, validWindows(bundle)))
+        XCTAssertEqual(r.bundle.fusion?.rhoHart, 0.61)
+        XCTAssertEqual(try JSONDecoder().decode(MotionHeadsBundleInfo.self, from: JSONEncoder().encode(bundle)), bundle)
+        // Without it the encoded bundle is unchanged (no `fusion` key).
+        let plain = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(MotionHeadsKit.bundle()))
+                                  as? [String: Any])
+        XCTAssertNil((plain["bundle"] as? [String: Any])?["fusion"])
+        assertRefused(.wrongType("bundle.fusion")) { obj in
+            var b = obj["bundle"] as! [String: Any]
+            b["fusion"] = 0.61
+            obj["bundle"] = b
+        }
+        assertRefused(.invalidValue("bundle.fusion.rho_hart")) { obj in
+            var b = obj["bundle"] as! [String: Any]
+            b["fusion"] = ["rho_hart": -0.1]
+            obj["bundle"] = b
+        }
+    }
 }

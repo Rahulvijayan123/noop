@@ -71,9 +71,9 @@ def tiny_art(tmp_path, window_s=30, seed=0, name="tiny.ckpt", **kw):
 
 
 def env():
-    e = dict(os.environ)
-    e["PYTHONPATH"] = PKG + os.pathsep + e.get("PYTHONPATH", "")
-    return e
+    """Child environment for test subprocesses: an explicit allowlist, never the full os.environ."""
+    from activity_context.inertia.subproc import PYTHON_ENV_ALLOWLIST, safe_env
+    return safe_env({"PYTHONPATH": PKG + os.pathsep + os.environ.get("PYTHONPATH", "")}, PYTHON_ENV_ALLOWLIST)
 
 
 class Serve:

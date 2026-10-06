@@ -185,8 +185,10 @@ An optional second motion expert, Inertia-1 (`Tools/ActivityContext/INERTIA1.md`
 the worker. It is off by default and shadow-first: its head outputs are stored in their own table and,
 in candidate mode, compared against a second decode of the day, but the published documents never change.
 In the decoder its heads are separate, tempered channels (never an average with HART) that stay off unless
-`ActivityDecoderConfig.motionHeads` accepts a real Inertia-1 bundle; with them off the decoder's output is
-byte-identical to before.
+`ActivityDecoderConfig.motionHeads` accepts a real Inertia-1 bundle (the pinned one, when a digest is pinned)
+and the day's windows come from that bundle; with them off the decoder's output is byte-identical to before.
+Its pull on any mode is bounded per second by its budget, specialist modes included, and its posture term
+steps aside while the band says asleep or in bed.
 
 That decoding also leaves a durable record. Each run carries a canonical activity class (a closed
 vocabulary, with a confidence) beside the display wording. On the phone, each local day's runs are saved

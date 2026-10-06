@@ -9,6 +9,9 @@ Behaviour is fixed per process by argv, so the HART stub sharing the same RunReq
   --kind inertia1 | standin       (encoder_kind reported; default standin)
   --tier shadow | candidate | production   (evidence_tier_max; default shadow)
   --sleep N                       (seconds the timeout behaviour sleeps; default 30)
+  --bundle-sha HEX                (bundle_sha256 reported by ping and infer; default "ab" * 32)
+  --infer-bundle-sha HEX          (bundle_sha256 reported by infer only; default: --bundle-sha)
+Every other argument (--timeout, --expect-bundle-sha256, --allow-standin-shadow …) is accepted and ignored.
 
 ping answers model_available:false (model_status inertia_unavailable) for model_missing, true otherwise.
 infer emits 30-s windows on a 5-s grid fully inside [start_ts, end_ts).
@@ -35,7 +38,7 @@ def spec(classes, categorical=True):
             "tau": {c: 0.8 for c in classes}, "merge_into": {}, "covers": {}}
 
 
-def provenance(kind, tier):
+def provenance(kind, tier, sha):
     real = kind == "inertia1"
     return {
         "encoder_id": "inertia-1/ar_transformer-small/30s@20hz" if real else "standin:handcrafted-stats-v1",
@@ -43,7 +46,7 @@ def provenance(kind, tier):
         "encoder_version": "stub-1",
         "checkpoint_sha256": "cd" * 32 if real else None,
         "heads_version": "stub-bundle-1",
-        "bundle_sha256": "ab" * 32,
+        "bundle_sha256": sha,
         "preprocessing_version": "inertia-prep-1",
         "evidence_tier_max": tier,
     }
@@ -81,6 +84,8 @@ def main():
     ap.add_argument("--kind", default="standin")
     ap.add_argument("--tier", default="shadow")
     ap.add_argument("--sleep", type=float, default=30.0)
+    ap.add_argument("--bundle-sha", default="ab" * 32)
+    ap.add_argument("--infer-bundle-sha", default=None)
     args, _ = ap.parse_known_args()
     infers = 0
     for line in sys.stdin:
@@ -96,7 +101,7 @@ def main():
                     "model_status": "standin_shadow" if available else "inertia_unavailable",
                     "model_error": None if available else "FileNotFoundError: no checkpoint",
                     "package_version": "stub"}
-            resp.update(provenance(args.kind, args.tier))
+            resp.update(provenance(args.kind, args.tier, args.bundle_sha))
         elif op == "shutdown":
             sys.stdout.write(json.dumps({"id": rid, "ok": True}) + "\n")
             sys.stdout.flush()
@@ -121,7 +126,7 @@ def main():
                                    "ood": {"method": "knn", "threshold": 1.25}},
                         "windows": windows(int(run.get("start_ts", 0)), int(run.get("end_ts", 0))),
                         "n_dropped_nonfinite": 0, "duration_ms": 1}
-                resp.update(provenance(args.kind, args.tier))
+                resp.update(provenance(args.kind, args.tier, args.infer_bundle_sha or args.bundle_sha))
                 if b == "schema":
                     resp["schema"] = "motion-heads-0"
                 if b == "malformed" and resp["windows"]:

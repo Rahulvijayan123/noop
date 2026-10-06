@@ -143,6 +143,20 @@ struct ActivityLane {
         var inertiaCandidateDocuments = 0
         var inertiaCandidateWithheld = 0
         var lastInertiaWithheldReason: String?
+        /// Shadow rows the fenced RPC refused (NULL: the lease moved on or the revision is stale). Nothing written.
+        var inertiaShadowFenced = 0
+        /// Jobs (or chunks) refused because the served bundle is not the pinned FRWHOOP_INERTIA_BUNDLE_SHA256.
+        var inertiaBundleRefused = 0
+        /// How the stored windows met the day's observed seconds (`summary.track_report`, summed over jobs):
+        /// attached, dropped (no observed second, superseded, outside the day), and seconds whose posture term
+        /// the candidate decode omitted on the sleep / bed route.
+        var inertiaWindowsAttached = 0
+        var inertiaWindowsDropped = 0
+        var inertiaPostureOmitted = 0
+        /// Retention (`prune_activity_motion_heads_days`): rows deleted, and calls that failed.
+        var inertiaRowsPruned = 0
+        var inertiaPruneFailures = 0
+        var lastInertiaPruneError: String?
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -169,6 +183,9 @@ struct ActivityLane {
     /// alone for this long, without affecting the raw-IMU path.
     var streamBackoffUntil: Date?
     static let streamBackoffSeconds: TimeInterval = 60
+    /// Inertia retention runs on the lane's own cadence (like reconcile / stream enqueue), every few hours.
+    var lastMotionHeadsPruneAt: Date?
+    static let motionHeadsPruneIntervalSeconds: TimeInterval = 6 * 3600
 
     enum ActivityError: Error, CustomStringConvertible {
         /// A deterministic input violation: bounded retry through the fail
@@ -228,6 +245,28 @@ struct ActivityLane {
     mutating func drain(budget: Int) {
         if imuJobsEnabled { drainImuJobs(budget: budget) }
         if streamDaysEnabled { drainStreamDays(budget: streamDayBudget) }
+        pruneMotionHeadsIfDue()
+    }
+
+    /// Inertia retention: while the stage is configured, delete shadow / candidate rows older than
+    /// `ActivityMotionHeadsDays.retentionDays`, at most once per `motionHeadsPruneIntervalSeconds`. Best effort:
+    /// a failure (a database without the migration, say) is counted and logged once, never thrown.
+    mutating func pruneMotionHeadsIfDue(now: Date = Date()) {
+        guard inertia != nil else { return }
+        if let last = lastMotionHeadsPruneAt, now.timeIntervalSince(last) < Self.motionHeadsPruneIntervalSeconds { return }
+        lastMotionHeadsPruneAt = now
+        do {
+            stats.inertiaRowsPruned += try ActivityMotionHeadsDays.prune(db: db)
+            stats.lastInertiaPruneError = nil
+        } catch {
+            stats.inertiaPruneFailures += 1
+            let why = ActivityContextDays.safeReason(error)
+            if stats.lastInertiaPruneError != why {
+                FileHandle.standardError.write(
+                    ("frwhoop-worker: inertia retention prune failed (nothing else affected): \(why)\n").data(using: .utf8)!)
+            }
+            stats.lastInertiaPruneError = why
+        }
     }
 
     private mutating func drainImuJobs(budget: Int) {
@@ -653,9 +692,10 @@ struct ActivityLane {
     /// boundary.
     ///
     /// For each chunk: renew the lease, HART infer (a failure ends the job exactly as before), then — only when
-    /// an Inertia stage is configured and was ready at the start of the job — the Inertia infer for the same
-    /// chunk, whose every failure is absorbed and counted. The HART windows, versions and DB calls are the same
-    /// with or without Inertia.
+    /// an Inertia stage is configured and was ready at the start of the job — renew the lease again (a lost
+    /// lease ends the job exactly as it does before the HART call) and the Inertia infer for the same chunk,
+    /// whose every failure is absorbed and counted. The HART windows and versions are the same with or without
+    /// Inertia; with Inertia off the DB calls are too.
     static func inferChunks<Requests: Sequence>(
         _ requests: Requests, service: ActivityPythonService,
         inertia: InertiaStage?, versions start: (model: String, preprocessing: String),
@@ -666,7 +706,8 @@ struct ActivityLane {
         if let inertia {
             stats.inertiaJobs += 1
             if let down = inertia.begin() {
-                stats.inertiaUnavailable += 1
+                if down.kind == InertiaStage.bundleMismatchKind { stats.inertiaBundleRefused += 1 }
+                else { stats.inertiaUnavailable += 1 }
                 out.motionHeads.stopped = down.kind
                 noteInertiaFailure(&stats, kind: down.kind, message: down.message)
             } else {
@@ -693,8 +734,13 @@ struct ActivityLane {
             out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
             stats.windowsInferred += result.windows.count
 
-            // Inertia for the same chunk. Isolated: nothing below can throw.
+            // Inertia for the same chunk. Isolated: nothing it does can throw — but the lease is renewed first,
+            // fenced exactly like the HART call above, so a slow Inertia child can never outlive the lease.
             guard inertiaReady, let inertia, out.motionHeads.stopped == nil else { continue }
+            guard try renew() else {
+                throw PostgresClient.Error(message: "activity lease lost during inference",
+                                           sqlstate: "55000", kind: .stale)
+            }
             out.motionHeads.chunks += 1
             stats.inertiaChunks += 1
             switch inertia.infer(request) {
@@ -714,6 +760,7 @@ struct ActivityLane {
                 out.motionHeads.failureKinds[kind, default: 0] += 1
                 if stop { out.motionHeads.stopped = kind }
                 stats.inertiaFailures += 1
+                if kind == InertiaStage.bundleMismatchKind { stats.inertiaBundleRefused += 1 }
                 noteInertiaFailure(&stats, kind: kind, message: message)
             }
         }
@@ -734,20 +781,40 @@ struct ActivityLane {
     /// Inertia is off or produced nothing valid. Never throws: a failure here is counted and skipped.
     mutating func motionHeadsPayload(job: ActivityJob, collector: MotionHeadsCollector,
                                      context: ContextDayBuild) -> String? {
-        guard let inertia, let heads = collector.trackInput else { return nil }
+        guard let inertia else { return nil }
+        return Self.motionHeadsPayload(day: job.day, inertia: inertia, collector: collector, context: context,
+                                       stats: &stats)
+    }
+
+    /// `motionHeadsPayload` without the lane (no database involved), so the counters are testable.
+    static func motionHeadsPayload(day: String, inertia: InertiaStage, collector: MotionHeadsCollector,
+                                   context: ContextDayBuild, stats: inout Stats) -> String? {
+        guard let heads = collector.trackInput else { return nil }
         let candidate = ActivityMotionHeadsDays.candidate(mode: inertia.mode, heads: heads, input: context.input,
-                                                         generatedAt: context.generatedAt)
+                                                         generatedAt: context.generatedAt,
+                                                         expectedBundleSHA256: inertia.expectedBundleSHA256)
+        var report: MotionHeadsTrackReport?
         switch candidate {
         case .notRequested: break
         case .withheld(let why):
             stats.inertiaCandidateWithheld += 1
             stats.lastInertiaWithheldReason = why
-        case .document:
+        case .document(_, let r):
             stats.inertiaCandidateDocuments += 1
+            report = r
+        }
+        // Without a candidate decode, a dry-run attachment still says how the windows meet the observed seconds.
+        if report == nil, let input = context.input {
+            report = ActivityContextTrackBuilder.attachmentReport(for: input, windows: heads.windows)
+        }
+        if let report {
+            stats.inertiaWindowsAttached += report.attached
+            stats.inertiaWindowsDropped += report.dropped
+            stats.inertiaPostureOmitted += report.postureOmittedSleep
         }
         do {
-            return try ActivityMotionHeadsDays.payload(day: job.day, mode: inertia.mode, collector: collector,
-                                                      candidate: candidate)
+            return try ActivityMotionHeadsDays.payload(day: day, mode: inertia.mode, collector: collector,
+                                                      candidate: candidate, attachment: report)
         } catch {
             stats.inertiaShadowFailures += 1
             stats.lastInertiaShadowError = ActivityContextDays.safeReason(error)
@@ -793,7 +860,7 @@ struct ActivityLane {
                 case .stored:
                     motionHeadsStored = true
                 case .fenced:
-                    break
+                    stats.inertiaShadowFenced += 1
                 case .rejected(let why):
                     stats.inertiaShadowFailures += 1
                     if stats.lastInertiaShadowError != why {

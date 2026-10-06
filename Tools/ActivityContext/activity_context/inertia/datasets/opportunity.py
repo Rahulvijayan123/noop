@@ -18,11 +18,12 @@ from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import HAR_ROOT, DatasetError, Recording, mg_to_g
+from ..paths import under
+from . import HAR_ROOT, DatasetError, Recording, mg_to_g, resolve_root
 
 DATASET = "opportunity"
 LOADER_VERSION = "opportunity-loader-1"
-DEFAULT_ROOT = os.path.join(HAR_ROOT, "opportunity", "OpportunityUCIDataset", "dataset")
+DEFAULT_ROOT = under(HAR_ROOT, "opportunity", "OpportunityUCIDataset", "dataset")
 FS = 30.0
 MIN_FINITE = 0.95
 # 0-based column indices (column_names.txt is 1-based)
@@ -36,7 +37,7 @@ REST_LABELS = ("loc:4", "loc:5")
 
 
 def list_units(root: Optional[str] = None) -> List[str]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     return sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(root, "S*-*.dat")))
 
 
@@ -51,7 +52,7 @@ def choose_stream(stream_xyz):
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
     """``subjects`` here are session units like ``S1-ADL1`` (or subject ids ``S1`` = all its sessions)."""
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     units = list_units(root)
     if subjects:
         want = set(subjects)

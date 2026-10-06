@@ -15,6 +15,10 @@ NaN refused, at most 12 MiB per line (larger -> output_too_large).
 
 Run:  python -m activity_context.inertia.serve --bundle <dir> [--encoder-config encoder.json]
           [--checkpoint <path>|$INERTIA1_CKPT_PATH] [--allow-standin-shadow] [--timeout 60]
+          [--expect-bundle-sha256 <sha256>]
+
+``--expect-bundle-sha256``: the worker's pinned bundle hash. A loaded bundle with any other hash keeps the
+process alive but unavailable (ping ``model_available: false``, every infer ``kind: config_mismatch``).
 """
 
 from __future__ import annotations
@@ -111,10 +115,12 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="per-request timeout (s)")
     ap.add_argument("--threads", type=int, default=1, help="torch CPU threads (default 1)")
     ap.add_argument("--max-batch", type=int, default=DEFAULT_MAX_BATCH, help="encoder batch size")
+    ap.add_argument("--expect-bundle-sha256", default=None,
+                    help="refuse (model unavailable, config_mismatch) unless the loaded bundle has this sha256")
     args = ap.parse_args(argv)
     rt = build_runtime(args.bundle, encoder_config=args.encoder_config, checkpoint=args.checkpoint,
                        allow_standin_shadow=args.allow_standin_shadow, threads=args.threads,
-                       max_batch=args.max_batch)
+                       max_batch=args.max_batch, expect_bundle_sha256=args.expect_bundle_sha256)
     if rt.error is not None:
         print(f"[inertia.serve] model unavailable: {rt.error}", file=sys.stderr, flush=True)
     return serve_forever(rt, args.timeout)

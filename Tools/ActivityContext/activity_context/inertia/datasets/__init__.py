@@ -26,7 +26,17 @@ from typing import Any, Dict, Iterator, List, Optional, Sequence
 import numpy as np
 
 G = 9.80665
-HAR_ROOT = "/Volumes/External SSD/Nara Whoop App V2/research/har-datasets"
+from ..paths import har_root as _har_root
+
+# $INERTIA_HAR_ROOT or $INERTIA_DATA_ROOT/har-datasets; "" when unconfigured (loaders then refuse to run).
+HAR_ROOT = _har_root()
+
+
+def resolve_root(root, default: str, dataset: str) -> str:
+    """The loader's data directory: the explicit ``root`` or the env-derived default; never a guess."""
+    from ..paths import require_dir
+    return require_dir(root or default, f"{dataset} data directory (pass root= or set INERTIA_HAR_ROOT / "
+                                        f"INERTIA_DATA_ROOT{' / WISDM_DIR' if dataset == 'wisdm2019_watch' else ''})")
 LOADERS = {
     "capture24": "capture24", "wisdm2019_watch": "wisdm", "hhar_watch": "hhar", "pamap2": "pamap2",
     "mhealth": "mhealth", "opportunity": "opportunity", "daphnet_fog": "daphnet",

@@ -132,7 +132,8 @@ final class ActivityMotionHeadsDatabaseTests: XCTestCase {
         let built = try XCTUnwrap(try lane.buildContextDay(job: job, dayBounds: (dayStart, dayEnd), windows: s.windows,
                                                            versions: (model, preprocessing), asleep: [], exercise: []))
         let shadow = try XCTUnwrap(try ActivityMotionHeadsDays.payload(
-            day: job.day, mode: .shadow, collector: collector(start: dayStart + 12 * 3_600), candidate: .notRequested))
+            day: job.day, mode: .shadow, collector: collector(start: dayStart + 12 * 3_600), candidate: .notRequested,
+            attachment: MotionHeadsTrackReport()))
         let published = try lane.publishDay(job: job, payloadText: try v1Payload(job, windows: s.windows, dataThrough: s.ts),
                                             dayDocument: built, durationMS: 5, dayBounds: (dayStart, dayEnd),
                                             motionHeads: shadow)
@@ -145,7 +146,9 @@ final class ActivityMotionHeadsDatabaseTests: XCTestCase {
         XCTAssertGreaterThan(try count(f, "activity_context_epochs"), 0)
         let row = try XCTUnwrap(try f.db.query("""
             select mode, bundle_id, encoder_kind, n_windows::text, n_ood::text, input_revision::text,
-                   jsonb_array_length(windows)::text as w, (candidate_document is null)::text as no_doc
+                   jsonb_array_length(windows->'ds')::text as w, windows->>'format' as format,
+                   (candidate_document is null)::text as no_doc,
+                   (summary->'track_report' is not null)::text as has_report
             from public.activity_motion_heads_days where user_id=$1::uuid and device_id=$2::uuid
             """, [f.user, f.device]).first)
         XCTAssertEqual(row["mode"], "shadow")
@@ -154,7 +157,9 @@ final class ActivityMotionHeadsDatabaseTests: XCTestCase {
         XCTAssertEqual(row["n_windows"], "108")
         XCTAssertEqual(row["n_ood"], "9")
         XCTAssertEqual(row["w"], "108")
+        XCTAssertEqual(row["format"], "mh-col-1")
         XCTAssertEqual(row["no_doc"], "true")
+        XCTAssertEqual(row["has_report"], "true")
         XCTAssertEqual(row["input_revision"], String(job.inputRevision))
         // The stored v2 document is exactly the payload the lane built: the shadow row never touched it.
         let stored = try XCTUnwrap(try f.db.query("""
@@ -212,7 +217,8 @@ final class ActivityMotionHeadsDatabaseTests: XCTestCase {
                                                        versions: (model, preprocessing), asleep: [], exercise: [])
         let heads = try XCTUnwrap(collector(start: dayStart + 12 * 3_600).trackInput)
         let candidate = ActivityMotionHeadsDays.candidate(mode: .candidate, heads: heads, input: context.input,
-                                                         generatedAt: context.generatedAt)
+                                                         generatedAt: context.generatedAt,
+                                                         expectedBundleSHA256: String(repeating: "ab", count: 32))
         guard case .document = candidate else { return XCTFail("expected a comparison document, got \(candidate)") }
         let payload = try XCTUnwrap(try ActivityMotionHeadsDays.payload(
             day: job.day, mode: .candidate, collector: collector(start: dayStart + 12 * 3_600), candidate: candidate))
@@ -230,5 +236,103 @@ final class ActivityMotionHeadsDatabaseTests: XCTestCase {
             select count(*)::text as n from public.activity_context_days
             where user_id=$1::uuid and device_id=$2::uuid and document->'versions' ? 'motion_heads'
             """, [f.user, f.device]).first?["n"], "0", "the published document never carries Inertia evidence")
+    }
+
+    // MARK: - Audit fixes
+
+    /// W-7: a shadow row the fenced RPC refuses (the lease moved on) is counted, and nothing is written.
+    func testAFencedShadowRowIsCounted() throws {
+        let f = try makeFixture()
+        let s = sim()
+        var job = try claimJob(f, fingerprint: "e")
+        var lane = makeLane(f.db)
+        let shadow = try XCTUnwrap(try ActivityMotionHeadsDays.payload(
+            day: job.day, mode: .shadow, collector: collector(start: dayStart + 12 * 3_600), candidate: .notRequested))
+        job.leaseToken = UUID().uuidString.lowercased()          // a token the queue does not know: fenced
+        let published = try lane.publishDay(job: job, payloadText: try v1Payload(job, windows: s.windows, dataThrough: s.ts),
+                                            dayDocument: nil, durationMS: 5, dayBounds: (dayStart, dayEnd),
+                                            motionHeads: shadow)
+        XCTAssertFalse(published)
+        XCTAssertEqual(lane.stats.inertiaShadowFenced, 1)
+        XCTAssertEqual(lane.stats.inertiaShadowStored, 0)
+        XCTAssertEqual(lane.stats.inertiaShadowFailures, 0, "fenced is not a failure")
+        XCTAssertEqual(try count(f, "activity_motion_heads_days"), 0)
+    }
+
+    /// G-15: the table itself refuses a candidate document from anything but a real Inertia-1 candidate row.
+    func testACandidateDocumentNeedsARealInertiaEncoderAtTheTableLevel() throws {
+        let f = try makeFixture()
+        let job = try claimJob(f, fingerprint: "f")
+        // Through the RPC: a stand-in bundle with a comparison document is refused with a stable message.
+        let heads = try XCTUnwrap(collector(start: dayStart + 12 * 3_600).trackInput)
+        var standIn = heads.bundle
+        standIn.encoderKind = .standin
+        standIn.encoderId = "standin:handcrafted-stats-v1"
+        standIn.checkpointSha256 = nil
+        var c = MotionHeadsCollector()
+        c.responses = [MotionHeadsResponse(bundle: standIn, windows: heads.windows)]
+        let doc = ActivityContextDays.dayDocument(input: ActivityContextTrackInput(dayStart: dayStart, dayEnd: dayEnd),
+                                                  generatedAt: 1)
+        var stamped = doc
+        stamped.versions.motionHeads = "standin-test:abababababab:01234567"
+        let payload = try XCTUnwrap(try ActivityMotionHeadsDays.payload(day: job.day, mode: .candidate, collector: c,
+                                                                        candidate: .document(stamped, nil)))
+        let outcome = try ActivityMotionHeadsDays.publish(db: f.db, token: job.leaseToken, revision: job.inputRevision,
+                                                         payload: payload)
+        guard case .rejected(let why) = outcome else { return XCTFail("expected a rejection, got \(outcome)") }
+        XCTAssertTrue(why.contains("invalid_motion_heads_candidate"), why)
+        // Directly into the table (service role bypassing the RPC): the CHECK refuses it too.
+        XCTAssertThrowsError(try f.db.exec("""
+            insert into public.activity_motion_heads_days(user_id, device_id, day, bundle_id, mode, algorithm_version,
+              encoder_id, encoder_kind, encoder_version, checkpoint_sha256, bundle_sha256, preprocessing_version,
+              heads_schema, evidence_tier_max, job_fingerprint, input_revision, window_s, hop_s, n_windows, n_ood,
+              n_dropped, withheld_reason, summary, windows, candidate_document, result_revision, computed_at)
+            values ('\(f.user)', '\(f.device)', '\(day)', 'x', 'candidate', 'hart-activity-1',
+              'standin:handcrafted-stats-v1', 'standin', 'v', null, repeat('a', 64), 'inertia-prep-1',
+              'motion-heads-1', 'shadow', repeat('b', 64), 1, 30, 5, 0, 0, 0, null, '{}'::jsonb, null,
+              '{"versions": {"motion_heads": "x"}, "runs": []}'::jsonb, 1, now())
+            """)) { error in
+            XCTAssertTrue(String(describing: error).contains("check"), "\(error)")
+        }
+        XCTAssertEqual(try count(f, "activity_motion_heads_days"), 0)
+    }
+
+    /// W-6: retention. Rows computed more than 30 days ago are deleted (in bounded batches); newer rows stay;
+    /// the lane calls it on its own cadence while Inertia is on.
+    func testRetentionPrunesOnlyOldRowsOnTheLaneCadence() throws {
+        let f = try makeFixture()
+        let job = try claimJob(f, fingerprint: "9")
+        let payload = try XCTUnwrap(try ActivityMotionHeadsDays.payload(
+            day: job.day, mode: .shadow, collector: collector(start: dayStart + 12 * 3_600), candidate: .notRequested))
+        guard case .stored = try ActivityMotionHeadsDays.publish(db: f.db, token: job.leaseToken,
+                                                                 revision: job.inputRevision, payload: payload) else {
+            return XCTFail("the shadow row must publish")
+        }
+        XCTAssertEqual(try count(f, "activity_motion_heads_days"), 1)
+        // Fresh: kept.
+        _ = try ActivityMotionHeadsDays.prune(db: f.db)
+        XCTAssertEqual(try count(f, "activity_motion_heads_days"), 1)
+        // Age it past the retention window: the next prune removes it (and only this fixture's row is touched).
+        try f.db.exec("update public.activity_motion_heads_days set computed_at = now() - interval '31 days' "
+                      + "where user_id = '\(f.user)'")
+        var lane = makeLane(f.db)
+        lane.inertia = InertiaStage(service: ActivityPythonService(config: ActivityPythonService.Config(
+            pythonBin: "/usr/bin/python3", activityHome: FileManager.default.currentDirectoryPath, modelDir: nil,
+            serveArgs: [], requestTimeoutSeconds: 1, maxRequestBytes: 1_024, maxResponseLineBytes: 1_024,
+            restartCap: 1, restartCooldownSeconds: 1)), mode: .shadow)
+        let now = Date()
+        lane.pruneMotionHeadsIfDue(now: now)
+        XCTAssertEqual(lane.stats.inertiaPruneFailures, 0, lane.stats.lastInertiaPruneError ?? "")
+        XCTAssertGreaterThanOrEqual(lane.stats.inertiaRowsPruned, 1)
+        XCTAssertEqual(try count(f, "activity_motion_heads_days"), 0)
+        // Throttled: a second call inside the interval does not run.
+        lane.lastMotionHeadsPruneAt = now
+        let before = lane.stats.inertiaRowsPruned
+        lane.pruneMotionHeadsIfDue(now: now.addingTimeInterval(60))
+        XCTAssertEqual(lane.stats.inertiaRowsPruned, before)
+        XCTAssertEqual(lane.lastMotionHeadsPruneAt, now)
+        // Bad arguments are refused by the function, not interpreted.
+        XCTAssertThrowsError(try ActivityMotionHeadsDays.prune(db: f.db, keepDays: 0))
+        XCTAssertThrowsError(try ActivityMotionHeadsDays.prune(db: f.db, keepDays: 30, maxRows: 0))
     }
 }

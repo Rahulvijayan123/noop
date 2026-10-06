@@ -8,6 +8,15 @@ Stand-in encoders or stand-in bundles (anything whose wire ``encoder_kind`` is `
 real-architecture checkpoint that is not in ``PINNED_CHECKPOINTS``) are refused unless
 ``allow_standin_shadow`` is set; then they run as ``standin_shadow`` and the response is capped at
 ``evidence_tier_max = "shadow"``.
+
+Encoder resolution: an explicit ``encoder_config`` wins; otherwise the bundle's ``encoder.json`` is used as an
+encoder config only when it IS one (schema ``nara.inertia.encoder/1``, checkpoint-backed). Training bundles
+carry an encoder *card* there instead (the embedding-cache record); a stand-in is then built from its id by
+the registry and its ``config_sha256`` must equal the bundle's (and the card's) — never guessed.
+
+``expect_bundle_sha256`` (serve ``--expect-bundle-sha256``): a loaded bundle with any other hash is
+unavailable (``config_mismatch``). Bundles with ``evidence_tier_max = "offline"`` (built from a dirty tree)
+are refused unless ``allow_offline`` (offline replay tooling only; reported tier then ``shadow``).
 """
 
 from __future__ import annotations
@@ -22,7 +31,7 @@ import numpy as np
 from .. import __version__
 from ..preprocess import (MAX_HEAD_SECONDS, MAX_RUN_SECONDS, MAX_TAIL_SECONDS, PreprocessError,
                           decode_columns_b64, validate_request_units)
-from . import ALLOWED_HOP_S, PREPROCESSING_VERSION, STANDIN_PREFIX, WIRE_SCHEMA
+from . import ALLOWED_HOP_S, ENCODER_CONFIG_SCHEMA, PREPROCESSING_VERSION, STANDIN_PREFIX, WIRE_SCHEMA
 from .bundle import BundleError, HeadBundle, load_bundle
 from .contract import Encoder, EncoderInfo, InertiaUnavailable
 from .preprocess import stack_windows, windows_from_seconds
@@ -67,7 +76,9 @@ class InertiaRuntime:
     def evidence_tier_max(self) -> Optional[str]:
         if self.bundle is None:
             return None
-        return "shadow" if self.status == "standin_shadow" else self.bundle.evidence_tier_max
+        if self.status == "standin_shadow" or self.bundle.evidence_tier_max == "offline":
+            return "shadow"           # the wire vocabulary has no 'offline'; it is never above shadow
+        return self.bundle.evidence_tier_max
 
     @property
     def encoder_kind(self) -> Optional[str]:
@@ -91,24 +102,51 @@ def check_consistency(bundle: HeadBundle, info: EncoderInfo) -> None:
         raise InertiaUnavailable("config_mismatch", "; ".join(problems))
 
 
+def _bundle_encoder_json(bundle: HeadBundle) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """(path, None) when the bundle's encoder.json is an encoder config; (None, card) when it is a training
+    encoder card; (None, None) when the bundle has none. The file is hash-verified by load_bundle."""
+    import json
+    if "encoder.json" not in bundle.manifest["files"]:
+        return None, None
+    path = os.path.join(bundle.path, "encoder.json")
+    with open(path, "r", encoding="utf-8") as f:
+        doc = json.load(f)
+    if isinstance(doc, dict) and doc.get("schema") == ENCODER_CONFIG_SCHEMA:
+        return path, None
+    return None, doc if isinstance(doc, dict) else {}
+
+
 def _resolve_encoder(bundle: HeadBundle, encoder_config: Optional[str], checkpoint: Optional[str],
                      threads: Optional[int], max_batch: int) -> Encoder:
     from .registry import build_encoder
-    cfg = encoder_config
-    if cfg is None and "encoder.json" in bundle.manifest["files"]:
-        cfg = os.path.join(bundle.path, "encoder.json")
+    eid = bundle.encoder["encoder_id"]
     kw: Dict[str, Any] = {"window_s": bundle.preprocessing["window_s"], "threads": threads,
                           "ckpt_path": checkpoint, "max_batch": max_batch}
+    cfg, card = (encoder_config, None) if encoder_config is not None else _bundle_encoder_json(bundle)
     if cfg is not None:
         kw["encoder_config"] = cfg
         kw["expected_preprocessing"] = bundle.preprocessing
-    return build_encoder(bundle.encoder["encoder_id"], **kw)
+        return build_encoder(eid, **kw)
+    if not eid.startswith(STANDIN_PREFIX):
+        raise InertiaUnavailable("model_missing", f"{eid} needs its encoder.json (nara.inertia.encoder/1) and checkpoint")
+    enc = build_encoder(eid, **kw)                          # stand-in from its id (no config, no checkpoint)
+    want = bundle.encoder.get("config_sha256")
+    if want is None or enc.info.config_sha256 != want:
+        raise InertiaUnavailable("config_mismatch", f"stand-in {eid} built from its id has config_sha256 "
+                                 f"{enc.info.config_sha256[:12]}…, the bundle records {str(want)[:12]}…")
+    if card is not None:
+        for key in ("encoder_id", "config_sha256", "embedding_dim"):
+            if key in card and card[key] != getattr(enc.info, key):
+                raise InertiaUnavailable("config_mismatch", f"bundle encoder card {key} {card[key]!r} != the "
+                                         f"stand-in built from its id ({getattr(enc.info, key)!r})")
+    return enc
 
 
 def build_runtime(bundle_dir: Optional[str], *, encoder_config: Optional[str] = None,
                   checkpoint: Optional[str] = None, allow_standin_shadow: bool = False,
                   threads: Optional[int] = 1, max_batch: int = DEFAULT_MAX_BATCH,
-                  encoder: Optional[Encoder] = None) -> InertiaRuntime:
+                  encoder: Optional[Encoder] = None, expect_bundle_sha256: Optional[str] = None,
+                  allow_offline: bool = False) -> InertiaRuntime:
     """Load the bundle and its encoder once. ``encoder`` injects a pre-built encoder (tests)."""
     t0 = time.perf_counter()
     bundle: Optional[HeadBundle] = None
@@ -118,6 +156,12 @@ def build_runtime(bundle_dir: Optional[str], *, encoder_config: Optional[str] = 
             bundle = load_bundle(bundle_dir or "")
         except BundleError as exc:
             raise InertiaUnavailable(exc.kind, exc.message) from exc
+        if expect_bundle_sha256 is not None and bundle.bundle_sha256 != expect_bundle_sha256.strip().lower():
+            raise InertiaUnavailable("config_mismatch", f"bundle_sha256 {bundle.bundle_sha256[:16]}… differs from the "
+                                     f"expected {expect_bundle_sha256[:16]}… (--expect-bundle-sha256)")
+        if bundle.evidence_tier_max == "offline" and not allow_offline:
+            raise InertiaUnavailable("config_mismatch", "bundle evidence_tier_max is 'offline' (built from a dirty "
+                                     "source tree with --allow-dirty): offline research only, never served")
         enc = encoder if encoder is not None else _resolve_encoder(bundle, encoder_config, checkpoint, threads,
                                                                    max_batch)
         check_consistency(bundle, enc.info)

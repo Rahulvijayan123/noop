@@ -24,6 +24,15 @@ import Foundation
 // All body terms are added with `isEvidence: false`: they never reduce the missing-sensor unknown bonus.
 // rel = Σ_g q_g·γ_g with γ = 1 (strong), 0.5 (weak), 0 (abstained without a partner). An OOD window
 // contributes nothing at all. Classes are always iterated in the bundle's fixed class order.
+//
+// On a second the observation calls asleep or in bed the posture term is omitted (and counted): the decoder's
+// sleep / bed route already speaks there, and the wrist "recumbent" head is in practice a diary-sleep detector.
+//
+// Specialist gate (stairs / cycling / vehicle / other exercise have no cue of their own in the strap streams):
+// Inertia may name one only when that class is the window's argmax over its supported classes, its OWN
+// calibrated q (never a merge group's mass) is at least its τ, its status is `strong`, the window is not OOD
+// and the mode is candidate or production. Even then the opening is part of Inertia's budget: per second and
+// per mode, Inertia's whole pull (locomotion + posture + the opening) is at most T·bodyBudget·ln 10.
 
 /// One head of a bundle, prepared once per decoder: groups, prior, reliability and compatibility rows.
 struct PreparedMotionHead: Sendable {
@@ -45,6 +54,25 @@ struct PreparedMotionHead: Sendable {
     let dropped: [String]
     /// Compatibility row per target (body mode index, or arm-state index), over groups. nil = neutral (1).
     let compat: [[Double]?]
+    /// Every supported class in class order (abstained ones included): the window's own support, over which
+    /// the specialist gate takes its argmax.
+    var supported: [String] = []
+    /// Per supported class, its own status and τ (not its merge group's).
+    var classStatus: [String: MotionHeadClassStatus] = [:]
+    var classTau: [String: Double] = [:]
+
+    /// True when `cls` may name its specialist mode on this window: a `strong` class with a τ, the strict
+    /// argmax of the window over its supported classes, and its OWN calibrated probability at least τ (the
+    /// mass merged into it from abstained classes does not count).
+    func namesSpecialist(_ cls: String, in q: [String: Double]?) -> Bool {
+        guard let q, classStatus[cls] == .strong, let tau = classTau[cls], let own = q[cls], own >= tau else {
+            return false
+        }
+        for c in supported where c != cls {
+            if (q[c] ?? 0) >= own { return false }
+        }
+        return true
+    }
 
     static let epsilon = 0.02
     static let lrClip: ClosedRange<Double> = 0.1...10
@@ -127,15 +155,23 @@ struct PreparedMotionHead: Sendable {
             for (i, v) in row.enumerated() { grouped[groupOf[i]] += v }
             compat.append(grouped)
         }
-        return PreparedMotionHead(head: head, classes: kept, groupOf: groupOf, roots: roots, groupPrior: groupPrior,
-                                  gamma: gamma, rootStatus: rootStatus, rootTau: roots.map { spec.tau[$0] },
-                                  dropped: dropped, compat: compat)
+        var out = PreparedMotionHead(head: head, classes: kept, groupOf: groupOf, roots: roots, groupPrior: groupPrior,
+                                     gamma: gamma, rootStatus: rootStatus, rootTau: roots.map { spec.tau[$0] },
+                                     dropped: dropped, compat: compat)
+        out.supported = supported
+        for c in supported {
+            out.classStatus[c] = spec.status[c]
+            out.classTau[c] = spec.tau[c]
+        }
+        return out
     }
 }
 
 /// The Inertia channels of one decoder, prepared from an accepted `MotionHeadsEvidenceConfig`.
 struct PreparedMotionHeads: Sendable {
     let stamp: String
+    /// Candidate or production (a shadow config is never prepared).
+    let mode: MotionHeadsEvidenceConfig.Mode
     /// A window applies each second while its age (since the second it was attached to) is below this.
     let holdS: Int
     let locomotionWeight: Double
@@ -149,9 +185,11 @@ struct PreparedMotionHeads: Sendable {
     let posture: PreparedMotionHead?
     let arm: PreparedMotionHead?
 
-    /// Stationary and transition modes: the posture channel moves mass only among these.
+    /// The set S: stationary and transition modes, the only modes the posture channel moves mass among.
+    /// `.vehicle` belongs here: posture is genuinely labelled for driving / passenger windows (seated).
     static let postureSet: [BodyMode] = [.bedRest, .seated, .upright, .vehicle, .sitToStand, .standToSit,
                                          .lyingDown, .gettingUp]
+    static let postureSetIndices: Set<Int> = Set(postureSet.map(\.rawValue))
 
     /// Specialist modes Inertia may let through (with the locomotion class that names them).
     static let specialistClass: [(BodyMode, String)] = [(.stairs, "stairs"), (.cycling, "cycling"),
@@ -161,6 +199,7 @@ struct PreparedMotionHeads: Sendable {
     static func prepare(_ config: MotionHeadsEvidenceConfig?) -> (prepared: PreparedMotionHeads?, refusal: String?) {
         guard let config else { return (nil, nil) }
         if let why = config.evidenceRefusal { return (nil, why) }
+        guard config.mode != .shadow else { return (nil, "shadow_mode") }
         guard let stamp = config.provenanceStamp else { return (nil, "no_stamp") }
         let n = BodyMode.count
         let unknown: Set<Int> = [BodyMode.unknown.rawValue]
@@ -182,11 +221,11 @@ struct PreparedMotionHeads: Sendable {
             }
         }
         guard loco != nil || posture != nil || arm != nil else { return (nil, "bundle_has_no_usable_head") }
-        return (PreparedMotionHeads(stamp: stamp, holdS: max(1, config.bundle.hopS),
+        return (PreparedMotionHeads(stamp: stamp, mode: config.mode, holdS: max(1, config.bundle.hopS),
                                     locomotionWeight: config.locomotionWeight, postureWeight: config.postureWeight,
                                     armWeight: config.armWeight, transitionWeight: config.transitionWeight,
                                     bodyBudget: config.bodyBudget, armBudget: config.armBudget,
-                                    hartRedundancy: config.hartRedundancy,
+                                    hartRedundancy: config.effectiveHartRedundancy,
                                     locomotion: loco, posture: posture, arm: arm), nil)
     }
 
@@ -211,33 +250,63 @@ struct PreparedMotionHeads: Sendable {
         var posture: (L: [Double], weight: Double)?
         /// Arm likelihood per arm state and its exponent weight (w_a · rel, before `armTemperature`).
         var arm: (L: [Double], weight: Double)?
-        /// Specialist modes this window lets through (strong class, q ≥ τ, not OOD).
+        /// Specialist modes this window names (strong class, own q ≥ τ, the window's argmax, not OOD).
         var opens: Set<Int> = []
+        /// The posture term was dropped because the second is asleep / in bed (the sleep route speaks there).
+        var postureOmitted = false
+        /// Inertia's per-second, per-mode budget before temperature: bodyBudget · ln 10.
+        var bodyBudgetLog = 0.0
+
+        /// True when no term reaches the score this second.
+        var isEmpty: Bool { locomotion == nil && posture == nil && arm == nil }
+
+        /// |log| of Inertia's body terms on mode `m` before temperature (locomotion, plus posture inside S).
+        func bodyPull(_ m: Int) -> Double {
+            var x = 0.0
+            if let l = locomotion { x += l.weight * abs(log(max(l.L[m], 1e-6))) }
+            if let p = posture, PreparedMotionHeads.postureSetIndices.contains(m) {
+                x += p.weight * abs(log(max(p.L[m], 1e-6)))
+            }
+            return x
+        }
+
+        /// The specialist support Inertia alone may give mode `m` instead of `closed`: the gate opens only as far
+        /// as the budget the mode's other Inertia terms left (so the whole per-second Inertia pull on the mode
+        /// stays ≤ bodyBudget · ln 10 before temperature), and never beyond fully open (1).
+        func openedSupport(_ m: Int, closed: Double) -> Double {
+            let room = max(0, bodyBudgetLog - bodyPull(m))
+            return min(1, closed * exp(min(log(1 / closed), room)))
+        }
     }
 
-    func terms(for window: MotionHeadsWindow, hartSpeaks: Bool) -> Terms? {
+    /// The Inertia terms of one window at one second. `sleepRoute` is true when the observation says asleep or
+    /// in bed: the posture term is then omitted (`Terms.postureOmitted`). nil when nothing applies (OOD).
+    func terms(for window: MotionHeadsWindow, hartSpeaks: Bool, sleepRoute: Bool = false) -> Terms? {
         guard !window.isOOD else { return nil }
         let w = effectiveWeights(hartSpeaks: hartSpeaks)
         var t = Terms()
+        t.bodyBudgetLog = bodyBudget * log(10)
         if let head = locomotion, let e = head.evaluate(window.locomotion) {
             t.locomotion = (e.L, w.locomotion * e.rel)
-            if w.locomotion > 0 {
-                for (mode, cls) in Self.specialistClass {
-                    guard let g = head.roots.firstIndex(of: cls), head.rootStatus[g] == .strong,
-                          let tau = head.rootTau[g], e.groupMass[g] >= tau else { continue }
-                    t.opens.insert(mode.rawValue)
+            if w.locomotion > 0, mode != .shadow {
+                for (specialist, cls) in Self.specialistClass where head.namesSpecialist(cls, in: window.locomotion) {
+                    t.opens.insert(specialist.rawValue)
                 }
             }
         }
         if let head = posture, let e = head.evaluate(window.posture) {
-            var L = [Double](repeating: 1, count: BodyMode.count)
-            for m in Self.postureSet { L[m.rawValue] = e.L[m.rawValue] }
-            t.posture = (L, w.posture * e.rel)
+            if sleepRoute {
+                t.postureOmitted = true
+            } else {
+                var L = [Double](repeating: 1, count: BodyMode.count)
+                for m in Self.postureSet { L[m.rawValue] = e.L[m.rawValue] }
+                t.posture = (L, w.posture * e.rel)
+            }
         }
         if let head = arm, let e = head.evaluate(window.armBehavior) {
             t.arm = (e.L, w.arm * e.rel)
         }
-        if t.locomotion == nil, t.posture == nil, t.arm == nil { return nil }
+        if t.isEmpty && !t.postureOmitted { return nil }
         return t
     }
 }

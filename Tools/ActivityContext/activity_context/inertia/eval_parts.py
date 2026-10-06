@@ -47,10 +47,14 @@ def eval_transition(bundle, out, test, raw_logits) -> Dict[str, Any]:
                              for d in sorted(np.unique(ds[v]))}}
         vs = meta["status"][e]
         if vs in ("strong", "weak"):
-            g = A.check_gate(np.stack([1 - p, p], 1), np.stack([~y, y], 1), 1, float(meta["tau"][e]))
-            r["gate"] = {"val_status": vs, "test": g, "final_status": A.apply_gate(vs, g)}
+            P2, T2, tau = np.stack([1 - p, p], 1), np.stack([~y, y], 1), float(meta["tau"][e])
+            g = A.check_gate(P2, T2, 1, tau)
+            dv = ds[v]
+            per = {d: A.check_gate(P2[dv == d], T2[dv == d], 1, tau, dataset_level=True) for d in sorted(np.unique(dv))}
+            final, reasons = A.final_status(vs, g, per)
+            r["gate"] = {"val_status": vs, "test": g, "per_dataset": per, "final_status": final, "reasons": reasons}
         else:
-            r["gate"] = {"val_status": vs, "final_status": vs}
+            r["gate"] = {"val_status": vs, "test": None, "per_dataset": {}, "final_status": vs, "reasons": []}
         rep["per_event"][e] = r
     rep["event_level"] = _event_level(bundle, out, test, meta, order)
     rep["note"] = ("event-level timing only where ground truth supports it (Opportunity, PAMAP2, HHAR dense 2-s "

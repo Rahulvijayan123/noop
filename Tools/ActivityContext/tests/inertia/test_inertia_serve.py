@@ -65,7 +65,8 @@ def test_ping_and_infer_shapes_over_the_wire(serve, req):
     assert resp["bundle_sha256"] == ping["bundle_sha256"] and resp["heads_version"] == ping["heads_version"]
     assert set(resp["bundle"]) == {"heads", "ood"}
     for h, blk in resp["bundle"]["heads"].items():
-        assert set(blk) == {"class_order", "prior", "status", "tau", "merge_into", "covers"}
+        extra = {"decoder_evidence"} if h in ("posture", "locomotion", "arm_behavior") else set()
+        assert set(blk) == {"class_order", "prior", "status", "tau", "merge_into", "covers"} | extra
     assert [w["s"] - T0 for w in resp["windows"]] == [0, 5, 10, 15, 20, 25, 30]
     for w in resp["windows"]:
         assert isinstance(w["s"], int) and w["e"] - w["s"] == 30
@@ -237,3 +238,98 @@ def test_encoder_bundle_mismatch_is_config_mismatch(bundle_dir):
     fake = type("E", (), {"info": info, "embed": lambda self, b: np.zeros((b.shape[0], 72), np.float32)})()
     err = build_runtime(bundle_dir, allow_standin_shadow=True, encoder=fake).error   # same id, other config
     assert err.kind == "config_mismatch" and "config_sha256" in err.message
+
+
+# --- G-15: the worker pins the bundle hash ------------------------------------------------------------------
+
+def test_expect_bundle_sha256_refuses_a_different_bundle(bundle_dir, rt, req):
+    ok = build_runtime(bundle_dir, allow_standin_shadow=True, expect_bundle_sha256=rt.bundle.bundle_sha256)
+    assert ok.available
+    bad = build_runtime(bundle_dir, allow_standin_shadow=True, expect_bundle_sha256="0" * 64)
+    assert not bad.available and bad.error.kind == "config_mismatch"
+    ping = handle_request(bad, {"id": "p", "op": "ping"})
+    assert ping["model_available"] is False and "expect-bundle-sha256" in ping["model_error"]
+    out, _ = handle_line(bad, json.dumps(req))
+    assert json.loads(out)["kind"] == "config_mismatch"
+
+
+def test_serve_cli_expect_bundle_sha256(bundle_dir, rt):
+    s = Serve("--bundle", bundle_dir, "--allow-standin-shadow", "--expect-bundle-sha256", "f" * 64)
+    try:
+        ping = s.send({"id": "p", "op": "ping"})
+        assert ping["ok"] and ping["model_available"] is False and ping["model_status"] == "inertia_unavailable"
+        r = s.send(request_for(synth(40, seed=2)))
+        assert r["ok"] is False and r["kind"] == "config_mismatch"
+    finally:
+        s.close()
+    s = Serve("--bundle", bundle_dir, "--allow-standin-shadow", "--expect-bundle-sha256", rt.bundle.bundle_sha256)
+    try:
+        assert s.send({"id": "p", "op": "ping"})["model_available"] is True
+    finally:
+        s.close()
+
+
+# --- R's bug: random-init stand-in training bundles (encoder card, no checkpoint) must load ------------------
+
+def _card_bundle(out_dir, enc, **kw):
+    """A bundle shaped like the P2 training bundles: encoder.json is the embedding-cache encoder CARD
+    (EncoderInfo + config), not an nara.inertia.encoder/1 config, and there is no checkpoint."""
+    from activity_context.inertia.bundle import json_bytes
+    card = dict(enc.info.to_dict(), config=dict(enc.info.config))
+    return write_standin_bundle(out_dir, enc, extra_files={"encoder.json": json_bytes(card)}, **kw)
+
+
+@pytest.fixture(scope="module")
+def art_card_bundle(tmp_path_factory):
+    pytest.importorskip("torch")
+    enc = build_encoder("standin:inertia-arch-random-init/ar_transformer-tiny/seed0", window_s=30)
+    out = str(tmp_path_factory.mktemp("art") / "random-init-art")
+    _card_bundle(out, enc)
+    return out
+
+
+def test_random_init_standin_bundle_loads_from_its_id(art_card_bundle, req):
+    r = build_runtime(art_card_bundle, allow_standin_shadow=True)
+    assert r.error is None, r.error
+    assert r.status == "standin_shadow" and r.info.encoder_id.startswith("standin:inertia-arch-random-init/")
+    resp = handle_request(r, req)
+    assert resp["ok"] and resp["windows"] and resp["evidence_tier_max"] == "shadow"
+
+
+def test_serve_subprocess_loads_a_random_init_standin_bundle(art_card_bundle, req):
+    s = Serve("--bundle", art_card_bundle, "--allow-standin-shadow")
+    try:
+        ping = s.send({"id": "p", "op": "ping"})
+        assert ping["model_available"] is True, ping
+        assert ping["encoder_id"] == "standin:inertia-arch-random-init/ar_transformer-tiny/seed0"
+        resp = s.send(req)
+        assert resp["ok"] and len(resp["windows"]) == 7
+    finally:
+        s.close()
+
+
+def test_id_built_standin_must_match_the_bundle_config_sha(tmp_path, req):
+    pytest.importorskip("torch")
+    from activity_context.inertia.bundle import encoder_block, write_bundle, json_bytes
+    from activity_context.inertia.synthetic import synthetic_bundle_parts
+    from ._helpers import reference_embeddings
+    enc = build_encoder("standin:inertia-arch-random-init/ar_transformer-tiny/seed0", window_s=30)
+    blk = dict(encoder_block(enc.info), config_sha256="a" * 64)          # trained on a different config
+    parts = synthetic_bundle_parts(encoder=blk, reference=reference_embeddings(enc))
+    write_bundle(str(tmp_path / "b"), **parts)
+    r = build_runtime(str(tmp_path / "b"), allow_standin_shadow=True)
+    assert not r.available and r.error.kind == "config_mismatch"
+
+
+def test_offline_bundle_is_never_served(tmp_path, req):
+    from activity_context.inertia.bundle import encoder_block, write_bundle
+    from activity_context.inertia.synthetic import synthetic_bundle_parts
+    from ._helpers import reference_embeddings
+    enc = build_encoder("standin:handcrafted-stats-v1")
+    parts = synthetic_bundle_parts(encoder=encoder_block(enc.info), reference=reference_embeddings(enc))
+    parts["manifest"]["evidence_tier_max"] = "offline"
+    write_bundle(str(tmp_path / "off"), **parts)
+    r = build_runtime(str(tmp_path / "off"), allow_standin_shadow=True)
+    assert not r.available and r.error.kind == "config_mismatch" and "offline" in str(r.error)
+    r2 = build_runtime(str(tmp_path / "off"), allow_standin_shadow=True, allow_offline=True)
+    assert r2.available and r2.evidence_tier_max == "shadow"

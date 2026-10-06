@@ -1,11 +1,13 @@
 """Statistical-integrity guards (ported from Agent E; INERTIA1.md §9, spec §26).
 
 * :class:`SplitView` is how fitting code receives train/val data (name + content hash); it cannot wrap test.
-* :class:`TestVault` holds the test split and exposes no arrays. Its only operation is
-  :meth:`TestVault.evaluate_once` which hashes the frozen bundle, runs the evaluator, stamps the report with
-  ``(bundle_sha256, test_sha256)`` and appends to an append-only ledger. Evaluating the same experiment
-  again (any bundle) or an undeclared experiment refuses unless ``rerun_reason`` is given; every rerun is
-  recorded and surfaced (``n_test_evaluations``).
+* :class:`TestVault` owns the test split: it is constructed with a LOADER, not with arrays, and its only
+  operation :meth:`TestVault.evaluate_once` checks the ledger first, then materialises the test split
+  (inside the vault), hashes it, runs the caller's pre-checks (e.g. calibration provenance) and the
+  evaluator, stamps the report with ``(bundle_sha256, test_sha256)`` and appends to an append-only ledger.
+  Evaluating an undeclared experiment refuses; evaluating a declared experiment again (any bundle, any test
+  split) refuses unless ``rerun_reason`` is one of :data:`RERUN_REASONS` and ``rerun_detail`` explains it;
+  both are recorded in the ledger and surfaced in every report (``n_test_evaluations``).
 * :func:`assert_disjoint_subjects`, :func:`assert_calibration_provenance`, :func:`assert_head_inputs`.
 """
 
@@ -90,13 +92,41 @@ def assert_head_inputs(inputs: Sequence[str]) -> None:
         raise SplitLeakError(f"head inputs must be exactly {list(HEAD_INPUTS)}, got {list(inputs)} (forbidden: {bad})")
 
 
+# Enumerated rerun reasons (G-16). Free text goes into ``rerun_detail``; the code is what reports group on.
+RERUN_REASONS: Dict[str, str] = {
+    "artifact_lost_identical_rebuild": "the evaluated bundle was lost and rebuilt deterministically from identical "
+                                       "code, data and splits; no model, rule or threshold changed",
+    "post_audit_rule_change": "a training/selection/gate/metric rule changed after an audit that had seen test "
+                              "results; the new test numbers are NOT pristine",
+    "evaluator_bug_fix": "the evaluation code was wrong; the bundle is unchanged",
+    "provenance_rebuild": "rebuilt from a clean commit only to fix provenance; model-affecting code unchanged",
+}
+
+
+def check_rerun_reason(reason: Optional[str], detail: Optional[str]) -> None:
+    if reason is None:
+        if detail:
+            raise SplitLeakError("rerun_detail given without rerun_reason")
+        return
+    if reason not in RERUN_REASONS:
+        raise SplitLeakError(f"rerun_reason must be one of {sorted(RERUN_REASONS)}, got {reason!r}")
+    if not (detail or "").strip():
+        raise SplitLeakError("a rerun needs rerun_detail (free text: what happened and why)")
+
+
 class TestVault:
     __test__ = False      # not a pytest test class
 
-    def __init__(self, payload: Mapping[str, Any], identity: Sequence[np.ndarray], ledger_path: str):
-        self.__payload = dict(payload)
-        self.test_sha256 = array_sha256(*identity)
+    def __init__(self, loader: Callable[[], Mapping[str, Any]],
+                 identity: Callable[[Mapping[str, Any]], Sequence[np.ndarray]], ledger_path: str):
+        """``loader()`` materialises the test payload (only ever called inside :meth:`evaluate_once`);
+        ``identity(payload)`` returns the arrays whose hash is the test split identity (uids, subjects)."""
+        if not callable(loader) or not callable(identity):
+            raise SplitLeakError("TestVault takes a loader and an identity function, never test arrays")
+        self.__loader = loader
+        self.__identity = identity
         self._ledger = ledger_path
+        self.test_sha256: Optional[str] = None
 
     def entries(self):
         if not os.path.exists(self._ledger):
@@ -105,19 +135,28 @@ class TestVault:
             return [json.loads(line) for line in f if line.strip()]
 
     def evaluate_once(self, experiment: str, bundle_sha256: str, evaluator: Callable[[Mapping[str, Any]], Dict],
-                      declared: Sequence[str], rerun_reason: Optional[str] = None) -> Dict:
-        prior = [e for e in self.entries() if e["test_sha256"] == self.test_sha256]
-        same_exp = [e for e in prior if e["experiment"] == experiment]
-        if any(e["bundle_sha256"] == bundle_sha256 for e in same_exp) and not rerun_reason:
-            raise SplitLeakError(f"{experiment}: this bundle was already evaluated on this test split; reuse the report")
-        if experiment not in declared and not rerun_reason:
+                      declared: Sequence[str], rerun_reason: Optional[str] = None, rerun_detail: Optional[str] = None,
+                      before: Optional[Callable[[str], None]] = None) -> Dict:
+        check_rerun_reason(rerun_reason, rerun_detail)
+        if experiment not in declared:
             raise SplitLeakError(f"{experiment} is not a pre-registered experiment; refusing to open the test split")
+        same_exp = [e for e in self.entries() if e["experiment"] == experiment]
+        if any(e["bundle_sha256"] == bundle_sha256 for e in same_exp) and not rerun_reason:
+            raise SplitLeakError(f"{experiment}: this bundle was already evaluated on the test split; reuse the report")
         if same_exp and not rerun_reason:
             raise SplitLeakError(f"{experiment}: test split already evaluated with another bundle; changing a model "
-                                 "after seeing test requires rerun_reason (recorded in the report)")
-        report = evaluator(self.__payload)
+                                 "after seeing test requires an enumerated rerun_reason (recorded in the report)")
+        payload = self.__loader()                       # the test split is materialised only here
+        self.test_sha256 = array_sha256(*self.__identity(payload))
+        if before is not None:
+            before(self.test_sha256)
+        report = evaluator(payload)
+        prior = [e for e in self.entries() if e["test_sha256"] == self.test_sha256]
+        same = [e for e in prior if e["experiment"] == experiment]
         stamp = {"experiment": experiment, "bundle_sha256": bundle_sha256, "test_sha256": self.test_sha256,
-                 "time": int(time.time()), "rerun_reason": rerun_reason, "n_test_evaluations": len(same_exp) + 1,
+                 "time": int(time.time()), "rerun_reason": rerun_reason, "rerun_detail": rerun_detail,
+                 "rerun_reason_text": RERUN_REASONS.get(rerun_reason) if rerun_reason else None,
+                 "n_test_evaluations": len(same) + 1, "n_evaluations_of_experiment_any_split": len(same_exp) + 1,
                  "n_evaluations_on_this_test_split": len(prior) + 1}
         report = dict(report, integrity=stamp)
         os.makedirs(os.path.dirname(self._ledger) or ".", exist_ok=True)
@@ -127,4 +166,5 @@ class TestVault:
 
 
 __all__ = ["SplitView", "TestVault", "SplitLeakError", "require_split", "assert_disjoint_subjects",
-           "assert_calibration_provenance", "assert_head_inputs", "array_sha256", "FORBIDDEN_INPUTS"]
+           "assert_calibration_provenance", "assert_head_inputs", "array_sha256", "FORBIDDEN_INPUTS", "RERUN_REASONS",
+           "check_rerun_reason"]

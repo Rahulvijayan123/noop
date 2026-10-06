@@ -300,6 +300,7 @@ public struct ActivityContextDecoder: Sendable {
             }
             if score.motionHeadsApplied { motionHeadsReport!.evidenceSeconds += 1 }
             if score.specialistOpenedByMotionHeads { motionHeadsReport!.specialistOpenings += 1 }
+            if score.motionHeadsPostureOmitted { motionHeadsReport!.postureOmittedSleep += 1 }
         }
 
         let post = bodyPosterior()

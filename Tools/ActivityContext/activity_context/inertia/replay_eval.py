@@ -23,7 +23,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -31,15 +31,16 @@ from . import replay_data as rd
 from . import replay_export as rx
 from . import replay_score as rs
 
-XCTEST_BUNDLE = os.environ.get(
-    "NARA_REPLAY_XCTEST", os.path.join(rd.REPLAY_DIR, "swiftbuild", "release", "StrandAnalyticsPackageTests.xctest"))
+XCTEST_BUNDLE = os.environ.get("NARA_REPLAY_XCTEST") or rd._paths.under(rd.REPLAY_DIR, "swiftbuild", "release",
+                                                                        "StrandAnalyticsPackageTests.xctest")
 XCTEST_FILTER = "ActivityReplayTests/testReplayFromEnvironment"
 # Transient replay files (multi-GB for Capture-24) go to the internal disk: the external research volume
 # dropped off the bus twice during this work, and every in-flight read/write died with it.
 WORK_DIR = os.environ.get("NARA_REPLAY_WORK", os.path.expanduser("~/Library/Caches/nara-replay-R/work"))
 
 
-def wait_for_volume(path: str = rd.REPLAY_DIR, timeout_s: int = 1800) -> None:
+def wait_for_volume(path: Optional[str] = None, timeout_s: int = 1800) -> None:
+    path = path or rd.replay_root()
     t = time.time()
     while not os.path.isdir(path):
         if time.time() - t > timeout_s:
@@ -77,9 +78,8 @@ EVENT_TOLS = (5.0, 10.0, 30.0)
 # ---------------------------------------------------------------------------
 
 def run_xctest(in_path: str, out_path: str, bundle: str = XCTEST_BUNDLE, timeout_s: int = 7200) -> float:
-    env = dict(os.environ)
-    env["ACTIVITY_REPLAY_IN"] = in_path
-    env["ACTIVITY_REPLAY_OUT"] = out_path
+    from .subproc import safe_env
+    env = safe_env({"ACTIVITY_REPLAY_IN": in_path, "ACTIVITY_REPLAY_OUT": out_path})   # never the full environ
     t = time.time()
     p = subprocess.run(["xcrun", "xctest", "-XCTest", XCTEST_FILTER, bundle], env=env, capture_output=True,
                        text=True, timeout=timeout_s)
@@ -89,14 +89,10 @@ def run_xctest(in_path: str, out_path: str, bundle: str = XCTEST_BUNDLE, timeout
 
 
 def _xctest_error_lines(text: str, limit: int = 1500) -> str:
-    """Only the failure lines of an xctest run. XCTest can dump the whole process environment on a crash,
-    which may contain credentials: never log raw output."""
-    keep = [ln for ln in text.splitlines()
-            if any(k in ln for k in ("error:", "Fatal error", "failed", "XCTAssert", "Thrown", "caught", "signal",
-                                     "Restarting", "Swift/", "Killed"))
-            and "=" not in ln.split(":")[0]]
-    out = " | ".join(keep)
-    return out[:limit] if out else "(no failure lines; raw output withheld: it may contain the environment)"
+    """Only the failure lines of an xctest run, redacted. XCTest can dump the whole process environment on
+    a crash, which may contain credentials: never log raw output."""
+    from .subproc import failure_lines
+    return failure_lines(text, limit)
 
 
 @dataclass
@@ -622,7 +618,7 @@ def sweep_configs(rho_extra: Sequence[float] = ()) -> List[Dict[str, float]]:
 
 
 def heads_cache_path(bundle_id: str, dataset: str, split: str, hop: int) -> str:
-    return os.path.join(rd.REPLAY_DIR, "cache", "heads", bundle_id, f"{dataset}_{split}_hop{hop}.npz")
+    return os.path.join(rd.replay_root(), "cache", "heads", bundle_id, f"{dataset}_{split}_hop{hop}.npz")
 
 
 def get_heads(bundle_dir: str, dataset: str, split: str, recs: Sequence[rx.Recording], hop: Optional[int] = None,
@@ -691,14 +687,19 @@ def baseline_tables(dataset: str, split: str, recs, jobs: int = 4) -> Tuple[Dict
     (pickle) so the Inertia stages reuse exactly the same decode."""
     import pickle
     fp = xctest_fingerprint()
-    path = os.path.join(rd.REPLAY_DIR, "runs", "baseline", f"{dataset}_{split}.pkl")
+    path = os.path.join(rd.replay_root(), "runs", "baseline", f"{dataset}_{split}.pkl")
     if os.path.isfile(path):
+        class _Unpickler(pickle.Unpickler):   # caches written by `python -m ...replay_eval` name this module __main__
+            def find_class(self, module, name):
+                if module == "__main__" and name in globals():
+                    return globals()[name]
+                return super().find_class(module, name)
         with open(path, "rb") as f:
-            d = pickle.load(f)
+            d = _Unpickler(f).load()
         if d.get("xctest_sha256") == fp and d.get("n_recs") == len(recs):
             return d["tables"], d["info"]
     chunk = 40 if dataset == "wisdm" else 4
-    tables, dinfo = decode_and_table(dataset, recs, None, None, None, os.path.join(rd.REPLAY_DIR, "runs", "baseline", "work"),
+    tables, dinfo = decode_and_table(dataset, recs, None, None, None, os.path.join(rd.replay_root(), "runs", "baseline", "work"),
                                      "baseline", jobs, chunk)
     check_alignment(tables)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -712,23 +713,49 @@ def baseline_tables(dataset: str, split: str, recs, jobs: int = 4) -> Tuple[Dict
     return tables, dinfo
 
 
-def run_baseline(dataset: str, out_dir: str, jobs: int = 4, n_boot: int = 1000) -> Dict[str, Any]:
-    """Bundle-independent arms on VAL (operating points) and TEST (scored once): A0s, A0, (WISDM) A1."""
+REPLAY_LEDGER = "replay_test_ledger.jsonl"
+
+
+def replay_vault(load_test: Callable[[], Dict[str, Any]], ledger_dir: Optional[str] = None):
+    """TestVault for a replay TEST decode: the test recordings (and Inertia windows) are loaded only inside
+    ``evaluate_once``; identity = recording ids + subjects."""
+    from .experiments import EVAL_ROOT
+    from .integrity import TestVault
+    return TestVault(load_test, lambda p: [np.asarray([r.recording_id for r in p["recs"]]),
+                                           np.asarray([r.subject for r in p["recs"]])],
+                     os.path.join(ledger_dir or EVAL_ROOT, REPLAY_LEDGER))
+
+
+def run_baseline(dataset: str, out_dir: str, jobs: int = 4, n_boot: int = 1000, rerun_reason: Optional[str] = None,
+                 rerun_detail: Optional[str] = None, ledger_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Bundle-independent arms on VAL (operating points) and TEST (scored once, through a ledgered vault):
+    A0s, A0, (WISDM) A1."""
+    from .experiments import REPLAY_DECLARED
     t = time.time()
-    vrecs = rx.load_recordings(os.path.join(rd.REPLAY_DIR, f"recordings_{dataset}_val.npz"))
+    vrecs = rx.load_recordings(os.path.join(rd.replay_root(), f"recordings_{dataset}_val.npz"))
     vt, _ = baseline_tables(dataset, "val", vrecs, jobs)
     vops = {a: {h: val_operating_points(tb, h) for h in SCORED_HEADS} for a, tb in vt.items()}
-    trecs = rx.load_recordings(os.path.join(rd.REPLAY_DIR, f"recordings_{dataset}_test.npz"))
-    tt, tinfo = baseline_tables(dataset, "test", trecs, jobs)
-    res: Dict[str, Any] = {"split": "test", "dataset": dataset, "xctest_sha256": xctest_fingerprint(),
-                           "decode": tinfo, "arms": {}, "val_operating_points":
-                           _json_safe({a: {h: {SCORE_ORDERS[h][c]: v for c, v in d.items()} for h, d in ops.items()}
-                                       for a, ops in vops.items()})}
-    for a, tb in tt.items():
-        res["arms"][a] = _json_safe(score_arm(tb, trecs, vops.get(a), with_events=(dataset == "capture24")))
-    pairs = [("A0s", "A0")] + ([("A0", "A1"), ("A0s", "A1")] if dataset == "wisdm" else [])
-    res["paired_bootstrap"] = {f"{b}-{a}": _json_safe(paired_bootstrap(tt[a], tt[b], vops, n_boot=n_boot))
-                               for a, b in pairs}
+    fp = xctest_fingerprint()
+
+    def load_test():
+        return {"recs": rx.load_recordings(os.path.join(rd.replay_root(), f"recordings_{dataset}_test.npz"))}
+
+    def evaluator(payload):
+        trecs = payload["recs"]
+        tt, tinfo = baseline_tables(dataset, "test", trecs, jobs)
+        res: Dict[str, Any] = {"split": "test", "dataset": dataset, "xctest_sha256": fp,
+                               "decode": tinfo, "arms": {}, "val_operating_points":
+                               _json_safe({a: {h: {SCORE_ORDERS[h][c]: v for c, v in d.items()} for h, d in ops.items()}
+                                           for a, ops in vops.items()})}
+        for a, tb in tt.items():
+            res["arms"][a] = _json_safe(score_arm(tb, trecs, vops.get(a), with_events=(dataset == "capture24")))
+        pairs = [("A0s", "A0")] + ([("A0", "A1"), ("A0s", "A1")] if dataset == "wisdm" else [])
+        res["paired_bootstrap"] = {f"{b}-{a}": _json_safe(paired_bootstrap(tt[a], tt[b], vops, n_boot=n_boot))
+                                   for a, b in pairs}
+        return res
+
+    res = replay_vault(load_test, ledger_dir).evaluate_once(f"replay-baseline/{dataset}", fp, evaluator, REPLAY_DECLARED,
+                                                           rerun_reason, rerun_detail)
     res["seconds"] = round(time.time() - t, 1)
     os.makedirs(out_dir, exist_ok=True)
     with open(os.path.join(out_dir, f"baseline_{dataset}.json"), "w", encoding="utf-8") as f:
@@ -741,7 +768,7 @@ def run_sweep(bundle_dir: str, dataset: str, out_dir: str, jobs: int = 4, rho_ex
     from . import replay_inertia as ri
     t = time.time()
     os.makedirs(out_dir, exist_ok=True)
-    recs = rx.load_recordings(os.path.join(rd.REPLAY_DIR, f"recordings_{dataset}_val.npz"))
+    recs = rx.load_recordings(os.path.join(rd.replay_root(), f"recordings_{dataset}_val.npz"))
     heads, hmeta = get_heads(bundle_dir, dataset, "val", recs)
     info = hmeta["bundle"]
     chunk = 40 if dataset == "wisdm" else 4
@@ -829,14 +856,41 @@ def _ops_from_json(d: Mapping[str, Any]) -> Dict[str, Dict[int, Dict]]:
     return {h: {SCORE_ORDERS[h].index(c): v for c, v in per.items()} for h, per in d.items()}
 
 
-def run_final(bundle_dir: str, dataset: str, sweep_path: str, out_dir: str, jobs: int = 4, n_boot: int = 1000) -> Dict[str, Any]:
-    """TEST, opened once per (dataset, configuration): defaults (pre-specified) and the VAL-selected weights."""
+def run_final(bundle_dir: str, dataset: str, sweep_path: str, out_dir: str, jobs: int = 4, n_boot: int = 1000,
+              rerun_reason: Optional[str] = None, rerun_detail: Optional[str] = None,
+              ledger_dir: Optional[str] = None) -> Dict[str, Any]:
+    """TEST, opened once per (dataset, bundle) through a ledgered TestVault: defaults (pre-specified) and the
+    VAL-selected weights. A crash before the ledger stamp leaves resumable part files; a completed decode can
+    only be repeated with an enumerated rerun reason."""
+    from .bundle import load_bundle
+    from .experiments import REPLAY_DECLARED
     t = time.time()
     os.makedirs(out_dir, exist_ok=True)
     with open(sweep_path, "r", encoding="utf-8") as f:
         sweep = json.load(f)
-    recs = rx.load_recordings(os.path.join(rd.REPLAY_DIR, f"recordings_{dataset}_test.npz"))
-    heads, hmeta = get_heads(bundle_dir, dataset, "test", recs)
+    b = load_bundle(bundle_dir)
+    if b.bundle_sha256 != sweep["bundle"]["bundle_sha256"]:
+        raise RuntimeError("sweep was run with a different bundle")
+
+    def load_test():
+        recs = rx.load_recordings(os.path.join(rd.replay_root(), f"recordings_{dataset}_test.npz"))
+        heads, hmeta = get_heads(bundle_dir, dataset, "test", recs)
+        return {"recs": recs, "heads": heads, "hmeta": hmeta}
+
+    def evaluator(payload):
+        return _final_body(payload, bundle_dir, dataset, sweep, out_dir, jobs, n_boot, t)
+
+    res = replay_vault(load_test, ledger_dir).evaluate_once(f"replay-final/{dataset}/{b.bundle_id}", b.bundle_sha256,
+                                                           evaluator, REPLAY_DECLARED, rerun_reason, rerun_detail)
+    res["seconds"] = round(time.time() - t, 1)
+    with open(os.path.join(out_dir, f"final_{dataset}.json"), "w", encoding="utf-8") as f:
+        json.dump(_json_safe(res), f, indent=1)
+    return res
+
+
+def _final_body(payload, bundle_dir: str, dataset: str, sweep: Mapping[str, Any], out_dir: str, jobs: int, n_boot: int,
+                t: float) -> Dict[str, Any]:
+    recs, heads, hmeta = payload["recs"], payload["heads"], payload["hmeta"]
     info = hmeta["bundle"]
     if info["bundle_sha256"] != sweep["bundle"]["bundle_sha256"]:
         raise RuntimeError("sweep was run with a different bundle")
@@ -891,9 +945,6 @@ def run_final(bundle_dir: str, dataset: str, sweep_path: str, out_dir: str, jobs
                 json.dump(_json_safe({"bundle_sha256": info["bundle_sha256"], "config": sc}), f)
         retrying(_save, f"final {label}")
         print(json.dumps({"label": label, "seconds": round(time.time() - t, 1)}), flush=True)
-    res["seconds"] = round(time.time() - t, 1)
-    with open(os.path.join(out_dir, f"final_{dataset}.json"), "w", encoding="utf-8") as f:
-        json.dump(_json_safe(res), f, indent=1)
     return res
 
 
@@ -909,6 +960,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     s.add_argument("--out", required=True)
     s.add_argument("--jobs", type=int, default=4)
     s.add_argument("--rho-extra", type=float, nargs="*", default=())
+    from .integrity import RERUN_REASONS
     bl = sub.add_parser("baseline")
     bl.add_argument("--dataset", choices=("wisdm", "capture24"), required=True)
     bl.add_argument("--out", required=True)
@@ -921,16 +973,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     f.add_argument("--out", required=True)
     f.add_argument("--jobs", type=int, default=4)
     f.add_argument("--n-boot", type=int, default=1000)
+    for p_ in (bl, f):
+        p_.add_argument("--rerun-reason", choices=sorted(RERUN_REASONS))
+        p_.add_argument("--rerun-detail")
     a = ap.parse_args(argv)
     if a.cmd == "baseline":
-        r = run_baseline(a.dataset, a.out, a.jobs, a.n_boot)
+        r = run_baseline(a.dataset, a.out, a.jobs, a.n_boot, a.rerun_reason, a.rerun_detail)
         print(json.dumps({"seconds": r["seconds"]}))
         return 0
     if a.cmd == "sweep":
         r = run_sweep(a.bundle, a.dataset, a.out, a.jobs, a.rho_extra)
         print(json.dumps(_json_safe(r["selected"])))
     else:
-        r = run_final(a.bundle, a.dataset, a.sweep, a.out, a.jobs, a.n_boot)
+        r = run_final(a.bundle, a.dataset, a.sweep, a.out, a.jobs, a.n_boot, a.rerun_reason, a.rerun_detail)
         print(json.dumps({"seconds": r["seconds"]}))
     return 0
 

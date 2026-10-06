@@ -15,17 +15,18 @@ from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import HAR_ROOT, DatasetError, Recording
+from ..paths import under
+from . import HAR_ROOT, DatasetError, Recording, resolve_root
 
 DATASET = "capture24"
 LOADER_VERSION = "capture24-loader-1"
-DEFAULT_ROOT = os.path.join(HAR_ROOT, "capture24", "hf_mirror_nz00shuuuu")
+DEFAULT_ROOT = under(HAR_ROOT, "capture24", "hf_mirror_nz00shuuuu")
 NULL_LABEL = "<NA>"
 REST_LABELS = ("7030 sleeping;MET 0.95",)
 
 
 def list_units(root: Optional[str] = None) -> List[str]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     return sorted(os.path.basename(os.path.dirname(p)).split("=", 1)[1]
                   for p in glob.glob(os.path.join(root, "pid=P*", "data.parquet")))
 
@@ -49,7 +50,7 @@ def read_participant(path: str):
 
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     for pid in (subjects or list_units(root)):
         path = os.path.join(root, f"pid={pid}", "data.parquet")
         if not os.path.isfile(path):

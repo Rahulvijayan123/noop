@@ -149,13 +149,13 @@ def bench_serve(spec: str, quick: bool, max_batch: int = 64) -> Dict[str, Any]:
 
 
 def _sub(args: List[str]) -> Dict[str, Any]:
-    env = dict(os.environ)
+    from .subproc import PYTHON_ENV_ALLOWLIST, redact, safe_env
     pkg = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    env["PYTHONPATH"] = pkg + os.pathsep + env.get("PYTHONPATH", "")
+    env = safe_env({"PYTHONPATH": pkg + os.pathsep + os.environ.get("PYTHONPATH", "")}, PYTHON_ENV_ALLOWLIST)
     r = subprocess.run([sys.executable, "-m", "activity_context.inertia.bench", *args], capture_output=True,
                        text=True, env=env, timeout=3600)
     if r.returncode != 0:
-        raise RuntimeError(r.stderr[-2000:])
+        raise RuntimeError(redact(r.stderr, 2000))
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 

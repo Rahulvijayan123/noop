@@ -364,9 +364,9 @@ final class MotionHeadsDecoderTests: XCTestCase {
         var sim = ActivitySim(start: 1_760_000_000, seed: 31)
         sim.walk(180)
         func stairsShare(_ q: Double, status: MotionHeadClassStatus = .strong, ood: Bool = false,
-                         weight: Double = 0.5) -> (Double, Int) {
+                         weight: Double = 0.5, tau: Double = 0.8) -> (Double, Int) {
             var heads = MotionHeadsKit.bundle().heads
-            heads[.locomotion] = MotionHeadsKit.spec(.locomotion, status: ["stairs": status], tau: 0.8)
+            heads[.locomotion] = MotionHeadsKit.spec(.locomotion, status: ["stairs": status], tau: tau)
             let t = decode(MotionHeadsKit.attach(sim.observations) { e in
                 MotionHeadsKit.window(endingAt: e, locomotion: MotionHeadsKit.peaked(self.L, "stairs", q), ood: ood)
             }, MotionHeadsKit.config(MotionHeadsKit.bundle(heads: heads), locomotion: weight, posture: 0, arm: 0))
@@ -375,13 +375,132 @@ final class MotionHeadsDecoderTests: XCTestCase {
         }
         let base = mean(decode(sim.observations).states, from: sim.observations[0].ts + 60) { $0.locomotion[.stairs] }
         let open = stairsShare(0.9)
+        // The same window with τ out of reach: identical locomotion term, no opening. The difference is the gate.
+        let shut = stairsShare(0.9, tau: 0.95)
         XCTAssertGreaterThan(open.1, 0)
-        XCTAssertGreaterThan(open.0, base + 0.05, "a strong stairs reading above τ lets the stairs mode in")
+        XCTAssertEqual(shut.1, 0)
+        XCTAssertGreaterThan(open.0, shut.0, "a strong stairs reading above τ opens the gate a little")
+        XCTAssertGreaterThan(open.0, base)
+        // …but only within Inertia's budget: alone it cannot carry an unsupported specialist mode
+        // (the per-second bound is `testInertiaAloneStaysInsideItsBudgetThroughTheSpecialistGate`).
+        XCTAssertLessThan(open.0, base + 0.05, "Inertia alone opens the gate only as far as its budget allows")
         for (label, r) in [("below τ", stairsShare(0.7)), ("weak", stairsShare(0.9, status: .weak)),
                            ("OOD", stairsShare(0.9, ood: true)), ("zero weight", stairsShare(0.9, weight: 0))] {
             XCTAssertEqual(r.1, 0, label)
             XCTAssertLessThan(r.0, base + 0.03, label)
         }
+    }
+
+    // MARK: - Specialist gate: who may name it, and how far (G-6)
+
+    private func preparedHeads(_ loco: MotionHeadSpec, locomotion: Double = 0.25, posture: Double = 0.25,
+                               bodyBudget: Double = 0.5,
+                               mode: MotionHeadsEvidenceConfig.Mode = .candidate,
+                               tier: MotionHeadsEvidenceTier = .candidate) throws -> PreparedMotionHeads {
+        var heads = MotionHeadsKit.bundle().heads
+        heads[.locomotion] = loco
+        var c = MotionHeadsEvidenceConfig(mode: mode, bundle: MotionHeadsKit.bundle(tier: tier, heads: heads),
+                                          locomotionWeight: locomotion, postureWeight: posture, armWeight: 0)
+        c.bodyBudget = bodyBudget
+        let p = PreparedMotionHeads.prepare(c)
+        XCTAssertNil(p.refusal)
+        return try XCTUnwrap(p.prepared)
+    }
+
+    func testTheGateNeedsTheClassItselfToBeTheArgmaxAtOrAboveItsOwnTau() throws {
+        func dist(_ masses: [String: Double]) -> [String: Double] {
+            let rest = (1 - masses.values.reduce(0, +)) / Double(L.count - masses.count)
+            return Dictionary(uniqueKeysWithValues: L.map { ($0, masses[$0] ?? rest) })
+        }
+        func opens(_ mh: PreparedMotionHeads, _ q: [String: Double]) -> Set<Int> {
+            mh.terms(for: MotionHeadsKit.window(endingAt: 100, locomotion: q), hartSpeaks: false)?.opens ?? []
+        }
+        let stairs = BodyMode.stairs.rawValue
+        let strong = try preparedHeads(MotionHeadsKit.spec(.locomotion, tau: 0.4))
+        XCTAssertEqual(opens(strong, dist(["stairs": 0.85])), [stairs])
+        // Above τ but not the argmax: walking is the window's verdict.
+        XCTAssertEqual(opens(strong, dist(["stairs": 0.45, "walking": 0.5])), [])
+        // A tie is not an argmax either.
+        XCTAssertEqual(opens(strong, dist(["stairs": 0.45, "walking": 0.45])), [])
+        // Merged abstained mass never counts: `other` (abstained) is merged into stairs, the group holds 0.9 ≥ τ,
+        // but stairs' own calibrated q is 0.6 < τ = 0.8.
+        let merged = try preparedHeads(MotionHeadsKit.spec(.locomotion, status: ["other": .abstain], tau: 0.8,
+                                                           mergeInto: ["other": "stairs"]))
+        XCTAssertEqual(opens(merged, dist(["stairs": 0.6, "other": 0.3])), [])
+        XCTAssertEqual(opens(merged, dist(["stairs": 0.85, "other": 0.1])), [stairs], "its own q above τ still opens")
+        // The abstained class itself never names its mode, whatever its mass.
+        let otherExercise = BodyMode.otherExercise.rawValue
+        XCTAssertFalse(opens(merged, dist(["other": 0.95])).contains(otherExercise))
+        // Weak, OOD: never.
+        let weak = try preparedHeads(MotionHeadsKit.spec(.locomotion, status: ["stairs": .weak], tau: 0.4))
+        XCTAssertEqual(opens(weak, dist(["stairs": 0.95])), [])
+        XCTAssertNil(strong.terms(for: MotionHeadsKit.window(endingAt: 100, locomotion: dist(["stairs": 0.95]), ood: true),
+                                  hartSpeaks: false))
+        // Production mode (with a production bundle) may open it too; a shadow config is never prepared.
+        let production = try preparedHeads(MotionHeadsKit.spec(.locomotion, tau: 0.4), mode: .production, tier: .production)
+        XCTAssertEqual(opens(production, dist(["stairs": 0.85])), [stairs])
+        var shadow = MotionHeadsEvidenceConfig(mode: .shadow, bundle: MotionHeadsKit.bundle())
+        shadow.allowStandInEvidenceForTesting = true
+        XCTAssertNil(PreparedMotionHeads.prepare(shadow).prepared)
+    }
+
+    /// The required bound: with a STRONG stairs class (and a strong vehicle class with a posture reading, the
+    /// one specialist inside S), Inertia's whole per-second pull on any mode — locomotion term + posture term
+    /// + the specialist gate it opened — is at most T · bodyBudget · ln 10. Before, the gate alone added
+    /// T · ln 25 at weight 1 (≈ 1.13 at T = 0.35, ~2.8× the whole budget).
+    func testInertiaAloneStaysInsideItsBudgetThroughTheSpecialistGate() throws {
+        let T = 0.35
+        var walk = ActivitySim(start: 1_760_000_000, seed: 12)
+        var o = ActivitySim.Options()
+        o.encoder = SimEncoder.coarse("walking")
+        walk.walk(60, opt: o)
+        var still = ActivitySim(start: 1_760_000_000, seed: 3)
+        var so = ActivitySim.Options()
+        so.sleep = .awake
+        still.still(60, opt: so)
+        var noHart = ActivitySim(start: 1_760_000_000, seed: 9)
+        var no = ActivitySim.Options()
+        no.steps = false
+        noHart.walk(60, opt: no)
+
+        let cases: [(String, [String: Double], [String: Double]?, BodyMode)] = [
+            ("stairs", MotionHeadsKit.peaked(L, "stairs", 0.99), nil, .stairs),
+            ("cycling", MotionHeadsKit.peaked(L, "cycling", 0.99), nil, .cycling),
+            ("vehicle + seated posture", MotionHeadsKit.peaked(L, "vehicle_motion", 0.99),
+             MotionHeadsKit.peaked(P, "seated_likely", 0.99), .vehicle),
+        ]
+        let weightings: [(Double, Double, Double)] = [(0.25, 0.25, 0.5), (0.5, 0, 0.5), (0.8, 0.8, 0.5), (0.8, 0.8, 0.8)]
+        var checked = 0
+        for sim in [walk, still, noHart] {
+            var window = ActivityFeatureWindow()
+            var lastF: ActivityFeatures?
+            for obs in sim.observations { lastF = window.push(obs, restingHR: 60, maxHR: 190, motionHeadsHoldS: 5) }
+            var f = try XCTUnwrap(lastF)
+            XCTAssertEqual(f.encoder?.classProbs["stairs"] ?? 0, 0, "no other evidence names the specialist")
+            XCTAssertFalse(f.loggedWorkout)
+            for (label, loco, posture, mode) in cases {
+                for (wl, wp, budget) in weightings {
+                    let mh = try preparedHeads(MotionHeadsKit.spec(.locomotion, tau: 0.8),
+                                               locomotion: wl, posture: wp, bodyBudget: budget)
+                    f.motionHeads = MotionHeadsKit.window(endingAt: f.ts, posture: posture, locomotion: loco)
+                    let base = ActivityContextModel.score(f, temperature: T)
+                    let with = ActivityContextModel.score(f, temperature: T, motionHeads: mh)
+                    XCTAssertTrue(with.specialistOpenedByMotionHeads, label)
+                    let bound = T * budget * log(10) + 1e-12
+                    for m in 0..<BodyMode.count {
+                        let pull = (with.logL[m] - base.logL[m]) + (with.postureShift?[m] ?? 0)
+                        XCTAssertLessThanOrEqual(abs(pull), bound,
+                                                 "\(label), weights \(wl)/\(wp), budget \(budget): mode \(BodyMode(rawValue: m)!)")
+                    }
+                    let gain = with.logL[mode.rawValue] - base.logL[mode.rawValue]
+                    XCTAssertGreaterThan(gain, 0, "\(label): Inertia still argues for the mode")
+                    // The gate alone at weight 1 would have added T · ln 25 — far outside the budget.
+                    XCTAssertLessThan(gain, T * log(25), label)
+                    checked += 1
+                }
+            }
+        }
+        XCTAssertEqual(checked, 36)
     }
 
     // MARK: - Refusals
@@ -442,7 +561,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         XCTAssertNoThrow(try MotionHeadsEvidenceConfig.candidate(bundle: b).validate())
         let d = MotionHeadsEvidenceConfig.candidate(bundle: b)
         XCTAssertEqual([d.locomotionWeight, d.postureWeight, d.armWeight, d.transitionWeight, d.bodyBudget, d.armBudget,
-                        d.hartRedundancy], [0.25, 0.25, 0.25, 0, 0.5, 0.5, 0.5])
+                        d.hartRedundancy], [0.25, 0.25, 0.25, 0, 0.5, 0.5, 0.65])
     }
 
     // MARK: - Provenance, cache tag, restore, determinism
@@ -557,5 +676,151 @@ final class MotionHeadsDecoderTests: XCTestCase {
         var off = ActivityFeatureWindow()
         XCTAssertNil(off.push(obs, restingHR: 60, maxHR: 190).motionHeads)
         XCTAssertNil(off.motionHeads)
+    }
+
+    // MARK: - The posture term steps aside on the sleep / bed route (G-2)
+
+    func testThePostureTermIsOmittedAndCountedWhileAsleepOrInBed() throws {
+        let config = MotionHeadsKit.config(locomotion: 0, posture: 0.5, arm: 0)
+        let mh = try XCTUnwrap(PreparedMotionHeads.prepare(config.motionHeads).prepared)
+        let w = MotionHeadsKit.window(endingAt: 100, posture: MotionHeadsKit.peaked(P, "recumbent", 0.95),
+                                      locomotion: MotionHeadsKit.peaked(L, "stationary", 0.9))
+        let awake = try XCTUnwrap(mh.terms(for: w, hartSpeaks: false))
+        XCTAssertNotNil(awake.posture)
+        XCTAssertFalse(awake.postureOmitted)
+        let asleep = try XCTUnwrap(mh.terms(for: w, hartSpeaks: false, sleepRoute: true))
+        XCTAssertNil(asleep.posture, "the sleep route already carries what the wrist posture head would add")
+        XCTAssertTrue(asleep.postureOmitted)
+        XCTAssertNotNil(asleep.locomotion, "only the posture term steps aside")
+
+        func recumbentWindows(_ obs: [ActivityObservation]) -> [ActivityObservation] {
+            MotionHeadsKit.attach(obs) { e in
+                MotionHeadsKit.window(endingAt: e, posture: MotionHeadsKit.peaked(self.P, "recumbent", 0.95))
+            }
+        }
+        // Asleep: the posture-only windows change nothing and every such second is counted.
+        var sleeper = ActivitySim(start: 1_760_000_000, seed: 6)
+        sleeper.sleeping(240)
+        let offSleep = decode(sleeper.observations)
+        let onSleep = decode(recumbentWindows(sleeper.observations), config)
+        XCTAssertEqual(try MotionHeadsKit.statesWithoutProvenance(onSleep.states),
+                       try MotionHeadsKit.statesWithoutProvenance(offSleep.states))
+        XCTAssertEqual(onSleep.snapshot.body, offSleep.snapshot.body)
+        XCTAssertGreaterThan(onSleep.motionHeads?.postureOmittedSleep ?? 0, 200)
+        XCTAssertEqual(onSleep.motionHeads?.evidenceSeconds, 0, "nothing else spoke")
+        // In bed but awake: the same.
+        let inBedObs = quietWrist(240).observations.map { o -> ActivityObservation in var o = o; o.inBed = true; return o }
+        let offBed = decode(inBedObs)
+        let onBed = decode(recumbentWindows(inBedObs), config)
+        XCTAssertEqual(try MotionHeadsKit.statesWithoutProvenance(onBed.states),
+                       try MotionHeadsKit.statesWithoutProvenance(offBed.states))
+        XCTAssertGreaterThan(onBed.motionHeads?.postureOmittedSleep ?? 0, 200)
+        // Awake and out of bed the same windows do move posture (the channel is alive).
+        let awakeObs = quietWrist(240).observations
+        let onAwake = decode(recumbentWindows(awakeObs), config)
+        XCTAssertNotEqual(onAwake.snapshot.body, decode(awakeObs).snapshot.body)
+        XCTAssertEqual(onAwake.motionHeads?.postureOmittedSleep, 0)
+    }
+
+    // MARK: - HART redundancy floor and the bundle's measured ρ̂ (G-10)
+
+    func testTheRedundancyDefaultIsNotBelowTheMeasuredRhoAndTheBundleCanRaiseIt() throws {
+        XCTAssertGreaterThanOrEqual(MotionHeadsEvidenceConfig.defaultHartRedundancy, 0.61, "measured ρ̂ (WISDM VAL)")
+        let plain = MotionHeadsEvidenceConfig.candidate(bundle: MotionHeadsKit.bundle())
+        XCTAssertEqual(plain.effectiveHartRedundancy, 0.65)
+        func withRho(_ rho: Double?) -> MotionHeadsEvidenceConfig {
+            var b = MotionHeadsKit.bundle()
+            b.fusion = MotionHeadsFusionInfo(rhoHart: rho)
+            return MotionHeadsEvidenceConfig.candidate(bundle: b)
+        }
+        XCTAssertEqual(withRho(0.72).effectiveHartRedundancy, 0.72, "a larger measured overlap raises the discount")
+        XCTAssertEqual(withRho(0.30).effectiveHartRedundancy, 0.65, "a bundle can never lower it below the default")
+        XCTAssertEqual(withRho(nil).effectiveHartRedundancy, 0.65)
+        let mh = try XCTUnwrap(PreparedMotionHeads.prepare(withRho(0.72)).prepared)
+        XCTAssertEqual(mh.effectiveWeights(hartSpeaks: true).locomotion, 0.25 * (1 - 0.72), accuracy: 1e-12)
+        XCTAssertEqual(mh.effectiveWeights(hartSpeaks: false).locomotion, 0.25, accuracy: 1e-12)
+        XCTAssertNotEqual(withRho(0.72).configTag, plain.configTag, "the applied discount is part of the config tag")
+        XCTAssertEqual(withRho(0.30).configTag, plain.configTag)
+    }
+
+    // MARK: - Bundle pin (G-15)
+
+    func testAPinnedConfigRefusesAnyOtherBundle() throws {
+        let pinned = MotionHeadsEvidenceConfig.candidate(bundle: MotionHeadsKit.bundle(),
+                                                         expectedBundleSHA256: MotionHeadsKit.bundleSha)
+        XCTAssertNil(pinned.evidenceRefusal)
+        let other = MotionHeadsEvidenceConfig.candidate(bundle: MotionHeadsKit.bundle(),
+                                                        expectedBundleSHA256: String(repeating: "01", count: 32))
+        XCTAssertEqual(other.evidenceRefusal, "bundle_sha256_mismatch")
+        XCTAssertNil(other.provenanceStamp)
+        var overridden = other
+        overridden.allowStandInEvidenceForTesting = true
+        XCTAssertEqual(overridden.evidenceRefusal, "bundle_sha256_mismatch", "the test override does not lift a pin")
+        // A refused pin decodes exactly like Inertia off.
+        let sim = quietWrist(120)
+        let heads = MotionHeadsKit.attach(sim.observations) { e in
+            MotionHeadsKit.window(endingAt: e, posture: MotionHeadsKit.peaked(self.P, "upright_stationary", 0.95))
+        }
+        var config = ActivityDecoderConfig()
+        config.motionHeads = other
+        let refused = decode(heads, config)
+        XCTAssertEqual(try encoded(refused), try encoded(decode(sim.observations)))
+        XCTAssertEqual(refused.motionHeads?.refusal, "bundle_sha256_mismatch")
+        XCTAssertEqual(config.cacheTag, ActivityDecoderConfig().cacheTag)
+        // The pin survives a Codable round trip (and is absent from an unpinned config's encoding).
+        let back = try JSONDecoder().decode(MotionHeadsEvidenceConfig.self, from: JSONEncoder().encode(pinned))
+        XCTAssertEqual(back, pinned)
+        let unpinned = String(decoding: try JSONEncoder().encode(MotionHeadsEvidenceConfig.candidate(bundle: MotionHeadsKit.bundle())),
+                              as: UTF8.self)
+        XCTAssertFalse(unpinned.contains("expectedBundleSHA256"))
+    }
+
+    // MARK: - Provenance only when the track's own windows are accepted (S-7)
+
+    func testTheStampAndCacheTagSuffixNeedEvidenceAcceptedForThisTrack() throws {
+        var sim = ActivitySim(start: 1_760_000_000, seed: 5)
+        sim.desk(120)
+        let input = sim.trackInput()
+        let config = MotionHeadsKit.config()
+        let windows = stride(from: input.dayStart + 10, to: input.dayEnd, by: 5).map {
+            MotionHeadsKit.window(endingAt: $0, posture: MotionHeadsKit.peaked(P, "upright_stationary", 0.9))
+        }
+        let e = JSONEncoder()
+        e.outputFormatting = [.sortedKeys]
+        let off = ActivityContextTrackBuilder.build(input)
+
+        // Accepted: the stamp and the suffix.
+        var accepted = input
+        accepted.motionHeads = MotionHeadsTrackInput(bundle: MotionHeadsKit.bundle(), windows: windows)
+        XCTAssertTrue(ActivityContextTrackBuilder.acceptsMotionHeads(for: accepted, config: config))
+        let on = ActivityContextTrackBuilder.build(accepted, config: config)
+        let stamp = try XCTUnwrap(config.motionHeads?.provenanceStamp)
+        XCTAssertEqual(on.motionHeads?.stamp, stamp)
+        XCTAssertEqual(on.snapshot.versions.motionHeads, stamp)
+        XCTAssertEqual(ActivityContextTrackBuilder.cacheTag(for: accepted, config: config), config.cacheTag)
+        XCTAssertTrue(config.cacheTag.contains("-ih"))
+
+        // Windows from another bundle, or no windows at all: no stamp anywhere, no suffix, Inertia-off output.
+        var foreign = input
+        foreign.motionHeads = MotionHeadsTrackInput(bundle: MotionHeadsKit.bundle(sha: String(repeating: "01", count: 32)),
+                                                    windows: windows)
+        for (label, variant, refusal) in [("another bundle", foreign, "bundle_mismatch"),
+                                          ("no windows", input, "no_motion_heads_input")] {
+            XCTAssertFalse(ActivityContextTrackBuilder.acceptsMotionHeads(for: variant, config: config), label)
+            let t = ActivityContextTrackBuilder.build(variant, config: config)
+            XCTAssertNil(t.motionHeads?.stamp, label)
+            XCTAssertEqual(t.motionHeads?.refusal, refusal, label)
+            XCTAssertNil(t.snapshot.versions.motionHeads, label)
+            XCTAssertTrue(t.states.allSatisfy { $0.versions.motionHeads == nil }, label)
+            XCTAssertEqual(try e.encode(t.states), try e.encode(off.states), label)
+            XCTAssertEqual(try e.encode(t.snapshot), try e.encode(off.snapshot), label)
+            XCTAssertEqual(ActivityContextTrackBuilder.cacheTag(for: variant, config: config), ActivityDecoderConfig().cacheTag,
+                           label)
+            // The persisted day document follows the same rule.
+            let doc = ActivityContextDayBuilder.update(cached: nil, input: variant, now: input.dayEnd, config: config).document
+            XCTAssertNil(doc.versions.motionHeads, label)
+        }
+        let doc = ActivityContextDayBuilder.update(cached: nil, input: accepted, now: input.dayEnd, config: config).document
+        XCTAssertEqual(doc.versions.motionHeads, stamp)
     }
 }

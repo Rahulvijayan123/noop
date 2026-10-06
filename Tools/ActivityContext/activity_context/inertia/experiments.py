@@ -23,7 +23,10 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, Optional, Tuple
 
-BUNDLES_ROOT = os.environ.get("INERTIA_BUNDLES_DIR", "/Volumes/External SSD/Nara Whoop App V2/research/inertia-bundles")
+from .paths import bundles_root as _bundles_root
+
+# $INERTIA_BUNDLES_DIR or $INERTIA_DATA_ROOT/inertia-bundles; "" when unconfigured (entry points refuse "").
+BUNDLES_ROOT = _bundles_root()
 EVAL_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "eval", "inertia")
 
 HC = "standin:handcrafted-stats-v1"
@@ -100,5 +103,12 @@ def get_experiment(name: str) -> Experiment:
 
 DECLARED = tuple(sorted(EXPERIMENTS))
 
-__all__ = ["Experiment", "EXPERIMENTS", "DECLARED", "get_experiment", "BUNDLES_ROOT", "EVAL_ROOT", "HC", "NF", "ART",
-           "REAL", "WRIST", "SHORT"]
+# Decoder-replay TEST decodes (replay_eval final / baseline), pre-registered like the head experiments; each
+# is opened through a TestVault with its own ledger (eval/inertia/replay_test_ledger.jsonl).
+REPLAY_DATASETS = ("wisdm", "capture24")
+REPLAY_DECLARED = tuple(sorted([f"replay-baseline/{d}" for d in REPLAY_DATASETS] +
+                               [f"replay-final/{d}/{e.bundle_id}" for d in REPLAY_DATASETS
+                                for e in EXPERIMENTS.values() if e.role == "primary"]))
+
+__all__ = ["Experiment", "EXPERIMENTS", "DECLARED", "REPLAY_DECLARED", "get_experiment", "BUNDLES_ROOT", "EVAL_ROOT",
+           "HC", "NF", "ART", "REAL", "WRIST", "SHORT"]

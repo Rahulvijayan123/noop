@@ -13,22 +13,23 @@ from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import HAR_ROOT, Recording, encode_labels, mg_to_g
+from ..paths import under
+from . import HAR_ROOT, Recording, encode_labels, mg_to_g, resolve_root
 
 DATASET = "daphnet_fog"
 LOADER_VERSION = "daphnet-loader-1"
-DEFAULT_ROOT = os.path.join(HAR_ROOT, "daphnet_fog", "dataset_fog_release", "dataset")
+DEFAULT_ROOT = under(HAR_ROOT, "daphnet_fog", "dataset_fog_release", "dataset")
 FS = 64.0
 REST_LABELS = ("1",)
 
 
 def list_units(root: Optional[str] = None) -> List[str]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     return sorted(os.path.basename(p)[:-4] for p in glob.glob(os.path.join(root, "S*R*.txt")))
 
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     units = list_units(root)
     if subjects:
         want = set(subjects)

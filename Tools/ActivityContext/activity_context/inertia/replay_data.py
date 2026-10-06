@@ -38,19 +38,29 @@ import numpy as np
 from ..preprocess import Run, Window, resample_poly_nd, windows_from_run, HOP_SAMPLES, TARGET_HZ
 
 # ---------------------------------------------------------------------------
-# Paths (overridable by environment; nothing here is required at import time)
+# Paths: environment only (activity_context/inertia/paths.py); "" = not configured. Nothing here is required
+# at import time. Ground truth always comes from the repo's audited crosswalk (label_mappings.json next to
+# mappings.py) — never from an untracked copy.
 # ---------------------------------------------------------------------------
 
-ROOT = os.environ.get("NARA_ROOT", "/Volumes/External SSD/Nara Whoop App V2")
-WISDM_DIR = os.environ.get(
-    "WISDM_DIR", os.path.join(ROOT, "nara-activity-research/scratch/wisdm-data/unpacked/data/wisdm-dataset"))
-HART_OUT_DIR = os.environ.get("HART_OUT_DIR", os.path.join(ROOT, "nara-activity-research/scratch/activity-train/out"))
-CAPTURE24_DIR = os.environ.get(
-    "CAPTURE24_DIR", os.path.join(ROOT, "research/har-datasets/capture24/hf_mirror_nz00shuuuu"))
-CROSSWALK_PATH = os.environ.get(
-    "NARA_CROSSWALK", os.path.join(ROOT, "research/inertia-work/agentC/label_mappings.json"))
-SPLITS_PATH = os.environ.get("NARA_SPLITS", os.path.join(ROOT, "research/inertia-work/agentC/split_manifests.json"))
-REPLAY_DIR = os.environ.get("NARA_REPLAY_DIR", os.path.join(ROOT, "research/inertia-replay"))
+from . import paths as _paths
+from .mappings import MAPPINGS_PATH
+
+WISDM_DIR = _paths.wisdm_dir()
+HART_OUT_DIR = os.environ.get("HART_OUT_DIR", "")
+CAPTURE24_DIR = _paths.capture24_dir()
+CROSSWALK_PATH = MAPPINGS_PATH
+REPLAY_DIR = _paths.replay_dir()
+
+
+def replay_root() -> str:
+    """The configured replay work tree (refuses when NARA_REPLAY_DIR / INERTIA_DATA_ROOT is unset)."""
+    return _paths.require_dir(REPLAY_DIR, "NARA_REPLAY_DIR / INERTIA_DATA_ROOT (replay work tree)")
+
+
+# The StrandAnalytics package of THIS checkout (Tools/ActivityContext/../../Packages/StrandAnalytics).
+STRAND_PACKAGE_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "..",
+                                                   "Packages", "StrandAnalytics"))
 
 STANDIN_BANNER = "STAND-IN, NOT INERTIA-1"
 
@@ -560,9 +570,10 @@ def capture24_participant(pid: str, c24_dir: str = CAPTURE24_DIR) -> Dict[str, A
     }
 
 
-def load_splits(path: str = SPLITS_PATH) -> Dict[str, Dict[str, List]]:
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_splits(datasets: Sequence[str] = ("capture24", "wisdm2019_watch")) -> Dict[str, Dict[str, Any]]:
+    """The repo's frozen subject splits (Tools/ActivityContext/splits/<dataset>.json, sha256-verified)."""
+    from .splits import load_splits as _load
+    return _load(list(datasets))
 
 
 # ---------------------------------------------------------------------------
@@ -675,16 +686,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("wisdm-hart", help="HART windows + 1 Hz proxies per WISDM subject")
     w.add_argument("--subjects", type=int, nargs="+", default=list(WISDM_TEST_SUBJECTS + WISDM_VAL_SUBJECTS))
-    w.add_argument("--manifest", default=os.path.join(HART_OUT_DIR, "manifest.json"))
-    w.add_argument("--checkpoint", default=HART_OUT_DIR)
-    w.add_argument("--wisdm", default=WISDM_DIR)
-    w.add_argument("--out", default=os.path.join(REPLAY_DIR, "cache", "wisdm"))
+    def opt(default):            # configured env path -> default; otherwise the flag is required
+        return {"default": default} if default else {"required": True}
+    w.add_argument("--manifest", **opt(os.path.join(HART_OUT_DIR, "manifest.json") if HART_OUT_DIR else ""))
+    w.add_argument("--checkpoint", **opt(HART_OUT_DIR))
+    w.add_argument("--wisdm", **opt(WISDM_DIR))
+    w.add_argument("--out", **opt(os.path.join(REPLAY_DIR, "cache", "wisdm") if REPLAY_DIR else ""))
     w.add_argument("--jobs", type=int, default=8)
     w.add_argument("--gyro-mode", choices=("real", "zero"), default="real")
     c = sub.add_parser("capture24", help="1 Hz proxies + accel-only imu-feat-1 per Capture-24 participant")
     c.add_argument("--pids", nargs="+", required=True)
-    c.add_argument("--c24", default=CAPTURE24_DIR)
-    c.add_argument("--out", default=os.path.join(REPLAY_DIR, "cache", "capture24"))
+    c.add_argument("--c24", **opt(CAPTURE24_DIR))
+    c.add_argument("--out", **opt(os.path.join(REPLAY_DIR, "cache", "capture24") if REPLAY_DIR else ""))
     c.add_argument("--jobs", type=int, default=8)
     args = ap.parse_args(argv)
 

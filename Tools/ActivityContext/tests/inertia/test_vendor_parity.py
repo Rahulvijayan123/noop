@@ -1,6 +1,6 @@
 """Vendored encoders == upstream Inertia-1 encode(), bit for bit, on the same random state_dict.
 
-Runs only when the upstream clone is present (``$INERTIA1_UPSTREAM_DIR``, default the research checkout)
+Runs only when the upstream clone is present (``$INERTIA1_UPSTREAM_DIR``, or ``$INERTIA_DATA_ROOT/inertia1-upstream``)
 and pytorch_lightning is importable (upstream modules subclass LightningModule). The vendored code itself
 never imports Lightning. The required max |diff| is exactly 0: both sides run the same torch ops on the
 same weights in the same process, so any nonzero difference means the vendored code diverged.
@@ -15,9 +15,10 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-UPSTREAM = os.environ.get("INERTIA1_UPSTREAM_DIR",
-                          "/Volumes/External SSD/Nara Whoop App V2/research/inertia1-upstream")
-if not os.path.isfile(os.path.join(UPSTREAM, "inertia1", "methods", "ar_transformer_module.py")):
+from activity_context.inertia.paths import upstream_dir  # noqa: E402
+
+UPSTREAM = upstream_dir()
+if not UPSTREAM or not os.path.isfile(os.path.join(UPSTREAM, "inertia1", "methods", "ar_transformer_module.py")):
     pytest.skip(f"Inertia-1 upstream clone not found at {UPSTREAM}", allow_module_level=True)
 pytest.importorskip("pytorch_lightning")
 
@@ -56,7 +57,9 @@ def test_upstream_clone_is_the_pinned_commit():
     if not os.path.isfile(head):
         pytest.skip("upstream clone has no .git metadata")
     import subprocess
-    sha = subprocess.run(["git", "-C", UPSTREAM, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+    from activity_context.inertia.subproc import safe_env
+    sha = subprocess.run(["git", "-C", UPSTREAM, "rev-parse", "HEAD"], capture_output=True, text=True,
+                         env=safe_env()).stdout.strip()
     assert sha == UPSTREAM_COMMIT
 
 

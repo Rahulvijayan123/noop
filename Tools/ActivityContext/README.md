@@ -178,6 +178,14 @@ uv pip install --python .venv/bin/python -e ".[dev,inertia]"      # + ".[inertia
 .venv/bin/python -m activity_context.inertia.bench                 # eval/inertia/perf.json
 ```
 
+The offline training pipeline (`pipeline_cli windows | embed | train | evaluate | summary`) finds its data
+through environment variables only (`INERTIA_DATA_ROOT`, or `INERTIA_CACHE_DIR` / `INERTIA_BUNDLES_DIR` /
+`INERTIA_HAR_ROOT` / `WISDM_DIR`; see `activity_context/inertia/paths.py`). `train` refuses a dirty source
+tree (anything uncommitted under `Tools/ActivityContext`) unless `--allow-dirty` (bundle capped at tier
+`offline`); `evaluate` opens the test split once and seals
+the gate into the bundle (`test_gate.json`); a re-evaluation needs `--rerun-reason <code> --rerun-detail
+<text>`. Serve can pin a bundle with `--expect-bundle-sha256`.
+
 ## Licenses / attribution
 
 - **HART** (EdgeIntelligenceLab/HART) — MIT, pinned commit
@@ -190,6 +198,9 @@ uv pip install --python .venv/bin/python -e ".[dev,inertia]"      # + ".[inertia
 - **Inertia-1** (yang-ai-lab/Inertia-1) — MIT, pinned commit
   `afcd725314c95f4afefce118821349df7d61e7e8`; encoder code narrowly vendored under
   `activity_context/inertia/vendor/` (see NOTICE.md). No upstream weights are used or committed.
+- **Inertia head datasets** (CAPTURE-24, HHAR, PAMAP2, MHEALTH, OPPORTUNITY, Daphnet; UCI HAPT / HARTH /
+  HAR70+ as label-vocabulary references) — all CC BY 4.0; creators, DOIs and changes made are in NOTICE.md.
+  No raw data is committed or redistributed.
 - The package's own code is part of NOOP, licensed under the repo's PolyForm
   Noncommercial 1.0.0 (see repo LICENSE). granite-tsfm / torch / transformers
   keep their own licenses (Apache-2.0 / BSD-style) and are runtime-only deps.

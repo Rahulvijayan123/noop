@@ -48,6 +48,23 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   none is used or committed; the lane runs only against an explicitly supplied, hash-verified checkpoint,
   and the stand-ins and fixtures (including a small seeded random-init test checkpoint) are not Inertia-1.
   Contract: `Tools/ActivityContext/INERTIA1.md`.
+- **Public activity datasets (all CC BY 4.0)** used offline to train and evaluate the stand-in heads —
+  never committed or redistributed; only aggregate metrics and label vocabularies are recorded. Full
+  creator lists, titles, DOIs, introductory papers and the changes made (unit conversion to g, 10 Hz
+  low-pass, resampling to 20 Hz, windowing, frozen subject splits, label mapping to Nara classes) are in
+  `Tools/ActivityContext/NOTICE.md`:
+  - **CAPTURE-24** — Chan Chang, Walmsley, Gershuny, Harms, Thomas, Milton, Kelly, Foster, Wong, Gray,
+    Haque, Hollowell & Doherty (2021), University of Oxford, doi:10.5287/bodleian:NGx0JOMP5.
+  - **HHAR** — Blunck, Bhattacharya, Prentow, Kjærgaard & Dey (2015), UCI, doi:10.24432/C5689X.
+  - **PAMAP2** — Reiss (2012), UCI, doi:10.24432/C5NW2H.
+  - **MHEALTH** — Banos, Garcia & Saez (2014), UCI, doi:10.24432/C5TW22.
+  - **OPPORTUNITY** — Roggen, Calatroni, Nguyen-Dinh, Chavarriaga & Sagha (2010), UCI, doi:10.24432/C5M027.
+  - **Daphnet Freezing of Gait** (out-of-distribution probe only) — Roggen, Plotnik & Hausdorff (2010), UCI,
+    doi:10.24432/C56K78.
+  - **WISDM-2019** (also used by the HART path above) — Weiss (2019), UCI, doi:10.24432/C5HK59.
+  - Reference only (label vocabularies audited, no samples used): **UCI HAPT** (Reyes-Ortiz, Anguita, Oneto &
+    Parra, doi:10.24432/C54G7M), **HARTH** (Logacjov, Kongsvold, Bach, Bårdstu & Mork, doi:10.24432/C5NC90),
+    **HAR70+** (Logacjov & Ustad, doi:10.24432/C5CW3D).
 
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device

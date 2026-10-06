@@ -102,13 +102,19 @@ def train_class_head(h: str, tr: Assembled, va: Assembled, z_tr: np.ndarray, z_v
     ops = {c: A.select_operating_point(pp, tt, ss, k, bool(sup.supported[k])) for k, c in enumerate(order)}
     sup_c = [c for k, c in enumerate(order) if sup.supported[k]]
     status = {c: ops[c]["status"] for c in sup_c}
-    merge = A.merge_partners(pp, tt, status, order)
+    sym = A.merge_confusion(pp, tt, order)
+    merge = A.merge_partners(status, order, h, sym)
+    groups = A.evidence_groups(status, merge)
     raw = _probs_full(lg, {"method": "temperature", "T": 1.0}, sup.supported)
     entry = {"arch": arch, "class_order": order, "supported": [bool(s) for s in sup.supported],
              "prior": {c: float(cal["class_prior"][c]) for c in sup_c}, "status": status,
              "tau": {c: float(ops[c]["tau"]) for c in sup_c}, "merge_into": merge, "covers": sup.covers,
+             "decoder_evidence": len(groups) > 1, "evidence_groups": groups,
              "support_counts": sup.counts, "selection": {"arch": {k: v for k, v in decision.items() if k != "per_fold"},
-                                                       "grid": grids, "best_epoch": fr.best_epoch}}
+                                                       "grid": grids, "best_epoch": fr.best_epoch,
+                                                       "merge_confusion_val_sym": sym,
+                                                       "merge_rule": "abstained class -> most-confused strong/weak "
+                                                                     "partner inside abstention.MERGE_COMPAT, else none"}}
     evidence = {"support": sup.to_dict(), "class_weights": dict(zip(order, cw.tolist())), "decision": decision,
                 "operating_points": ops, "operating_point_set": "wrist-only val" if wrist_ok else "pooled val (flagged)",
                 "val_raw": _brief(M.head_report(raw, truth, order, sup.supported, null_reps=50)),

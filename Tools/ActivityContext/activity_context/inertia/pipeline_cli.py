@@ -2,8 +2,8 @@
 
     python -m activity_context.inertia.pipeline_cli windows  --datasets capture24,wisdm2019_watch --specs w30,w30t,w10
     python -m activity_context.inertia.pipeline_cli embed    --encoder standin:handcrafted-stats-v1 --specs w30,w30t
-    python -m activity_context.inertia.pipeline_cli train    --experiment primary-hc
-    python -m activity_context.inertia.pipeline_cli evaluate --experiment primary-hc
+    python -m activity_context.inertia.pipeline_cli train    --experiment primary-hc          [--allow-dirty]
+    python -m activity_context.inertia.pipeline_cli evaluate --experiment primary-hc          (evaluate once + seal)
     python -m activity_context.inertia.pipeline_cli summary
     python -m activity_context.inertia.pipeline_cli smoke    --out /tmp/inertia-smoke     # synthetic end-to-end
 
@@ -81,9 +81,9 @@ def cmd_train(a) -> int:
     from .build_bundle import run_experiment
     for name in _csv(a.experiment, ()):
         exp = get_experiment(name)
-        out = run_experiment(exp, cache_root=a.cache, bundles_root=a.bundles, force=a.force)
-        print(json.dumps({"experiment": name, "bundle_dir": out["bundle_dir"], "bundle_sha256": out["bundle_sha256"]}),
-              flush=True)
+        out = run_experiment(exp, cache_root=a.cache, bundles_root=a.bundles, force=a.force, allow_dirty=a.allow_dirty)
+        print(json.dumps({"experiment": name, "bundle_dir": out["bundle_dir"], "bundle_sha256": out["bundle_sha256"],
+                          "evidence_tier_max": out.get("evidence_tier_max")}), flush=True)
     return 0
 
 
@@ -92,8 +92,9 @@ def cmd_evaluate(a) -> int:
     from .experiments import get_experiment
     for name in _csv(a.experiment, ()):
         rep = evaluate_experiment(get_experiment(name), cache_root=a.cache, bundles_root=a.bundles,
-                                  eval_root=a.eval_dir, rerun_reason=a.rerun_reason)
-        print(json.dumps({"experiment": name, "report": rep.get("report_path")}), flush=True)
+                                  eval_root=a.eval_dir, rerun_reason=a.rerun_reason, rerun_detail=a.rerun_detail)
+        print(json.dumps({"experiment": name, "report": rep.get("report_path"),
+                          "sealed_bundle_sha256": rep["seal"]["sealed_bundle_sha256"]}), flush=True)
     return 0
 
 
@@ -114,9 +115,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # numpy 2.x + macOS Accelerate emits spurious FP warnings from matmul on finite inputs/outputs
     warnings.filterwarnings("ignore", message=r".*encountered in matmul", category=RuntimeWarning)
     from .experiments import BUNDLES_ROOT, EVAL_ROOT
-    ap = argparse.ArgumentParser(prog="python -m activity_context.inertia.pipeline_cli")
-    ap.add_argument("--cache", default=CACHE_ROOT)
-    ap.add_argument("--bundles", default=BUNDLES_ROOT)
+    from .integrity import RERUN_REASONS
+    ap = argparse.ArgumentParser(prog="python -m activity_context.inertia.pipeline_cli",
+                                 epilog="Data paths come from the environment (INERTIA_DATA_ROOT, INERTIA_CACHE_DIR, "
+                                        "INERTIA_BUNDLES_DIR, INERTIA_HAR_ROOT, WISDM_DIR; see paths.py) or the flags.")
+    ap.add_argument("--cache", default=CACHE_ROOT, help="window/embedding cache (default $INERTIA_CACHE_DIR)")
+    ap.add_argument("--bundles", default=BUNDLES_ROOT, help="bundle directory (default $INERTIA_BUNDLES_DIR)")
     ap.add_argument("--eval-dir", default=EVAL_ROOT)
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("windows")
@@ -135,9 +139,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     t = sub.add_parser("train")
     t.add_argument("--experiment", required=True)
     t.add_argument("--force", action="store_true")
+    t.add_argument("--allow-dirty", action="store_true",
+                   help="build from uncommitted sources anyway; the bundle is capped at evidence_tier_max 'offline'")
     v = sub.add_parser("evaluate")
     v.add_argument("--experiment", required=True)
-    v.add_argument("--rerun-reason")
+    v.add_argument("--rerun-reason", choices=sorted(RERUN_REASONS))
+    v.add_argument("--rerun-detail", help="free text (required with --rerun-reason)")
     sub.add_parser("summary")
     s = sub.add_parser("smoke")
     s.add_argument("--out", required=True)

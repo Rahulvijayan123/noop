@@ -40,16 +40,24 @@ import FoundationNetworking
 //   FRWHOOP_ACTIVITY_STREAM_BUDGET    stream-day jobs per wake (default 4)
 //   FRWHOOP_ACTIVITY_IMU         "0" skips the raw-IMU jobs (no Python child, no model) and runs only the stream
 //                                days; for a host that has neither (default ON)
-//   FRWHOOP_INERTIA_ENABLED      "1" also asks a SECOND Python child (`activity_context.inertia.serve`) for
-//                                Inertia-1 motion heads on every raw-IMU chunk (default OFF). Never gates
-//                                claiming; any failure is counted and the HART path continues
+//   FRWHOOP_INERTIA_ENABLED      1/true/yes/on also asks a SECOND Python child (`activity_context.inertia.serve`)
+//                                for Inertia-1 motion heads on every raw-IMU chunk (default OFF; an unrecognised
+//                                value keeps it off and is logged). Never gates claiming; any failure is counted
+//                                and the HART path continues
 //   FRWHOOP_INERTIA_MODE         shadow (default: store the heads in activity_motion_heads_days) | candidate
 //                                (also store a second, Inertia-evidence decode of the day beside them; never
 //                                published)
 //   FRWHOOP_INERTIA_BUNDLE_DIR   head bundle directory (required when enabled)
+//   FRWHOOP_INERTIA_BUNDLE_SHA256 the pinned bundle_sha256 (required in candidate mode; enforced in shadow mode
+//                                when set): a child serving any other bundle is refused for the job, and it is
+//                                passed to the child as --expect-bundle-sha256
 //   FRWHOOP_INERTIA_CHECKPOINT   encoder checkpoint, passed as --checkpoint and INERTIA1_CKPT_PATH (optional)
 //   FRWHOOP_INERTIA_PYTHON       interpreter for the Inertia child (default: FRWHOOP_ACTIVITY_PYTHON)
-//   FRWHOOP_INERTIA_TIMEOUT_SECONDS per-request timeout of the Inertia child (default 60)
+//   FRWHOOP_INERTIA_TIMEOUT_SECONDS per-request timeout of the Inertia child (default 60, clamped to a third of
+//                                FRWHOOP_ACTIVITY_LEASE_SECONDS); the child gets --timeout 5 s below it
+//   FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW 1/true/yes/on passes --allow-standin-shadow (default OFF; shadow mode
+//                                only): exercises the shadow lane on real data with a stand-in encoder, whose
+//                                rows are stored as encoder_kind standin and never feed the decoder
 //   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity);
 //                                "series" keeps scoring but stops building and writing the dense intraday series
 //   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
@@ -165,7 +173,8 @@ struct WorkerConfig {
         self.activityImu = (environment["FRWHOOP_ACTIVITY_IMU"] ?? "1") != "0"
         self.activityStreams = (environment["FRWHOOP_ACTIVITY_STREAMS"] ?? "1") != "0"
         self.activityStreamBudget = max(1, Int(environment["FRWHOOP_ACTIVITY_STREAM_BUDGET"] ?? "4") ?? 4)
-        self.inertia = InertiaSettings.fromEnvironment(environment, activityPython: self.activityPython)
+        self.inertia = InertiaSettings.fromEnvironment(environment, activityPython: self.activityPython,
+                                                       leaseSeconds: self.activityLeaseSeconds)
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -409,14 +418,19 @@ var activity = ActivityLane(
     streamDaysEnabled: config.activityStreams,
     streamDayBudget: config.activityStreamBudget,
     inertia: config.inertia.serviceConfig(activityHome: config.activityHome).map {
-        InertiaStage(service: ActivityPythonService(config: $0), mode: config.inertia.mode)
+        InertiaStage(service: ActivityPythonService(config: $0), mode: config.inertia.mode,
+                     expectedBundleSHA256: config.inertia.bundleSHA256)
     })
+for warning in config.inertia.warnings {
+    FileHandle.standardError.write("frwhoop-worker: inertia: \(warning)\n".data(using: .utf8)!)
+}
 if let why = config.inertia.configurationError {
     FileHandle.standardError.write("frwhoop-worker: inertia stays off: \(why)\n".data(using: .utf8)!)
 } else if config.inertia.enabled {
     FileHandle.standardError.write(
-        "frwhoop-worker: inertia \(config.inertia.mode.rawValue) enabled (bundle \(config.inertia.bundleDir ?? "-"))\n"
-            .data(using: .utf8)!)
+        ("frwhoop-worker: inertia \(config.inertia.mode.rawValue) enabled (bundle \(config.inertia.bundleDir ?? "-"), "
+            + "pinned \(config.inertia.bundleSHA256 ?? "no")\(config.inertia.allowStandInShadow ? ", stand-in shadow" : ""), "
+            + "timeout \(config.inertia.timeoutSeconds) s)\n").data(using: .utf8)!)
 }
 
 // MARK: - Candidate (shadow/active) inference lane wiring
@@ -605,6 +619,13 @@ if activityState.read().enabled {
                     $0.counters["inertia_shadow_failures"] = activity.stats.inertiaShadowFailures
                     $0.counters["inertia_candidate_documents"] = activity.stats.inertiaCandidateDocuments
                     $0.counters["inertia_candidate_withheld"] = activity.stats.inertiaCandidateWithheld
+                    $0.counters["inertia_shadow_fenced"] = activity.stats.inertiaShadowFenced
+                    $0.counters["inertia_bundle_refused"] = activity.stats.inertiaBundleRefused
+                    $0.counters["inertia_windows_attached"] = activity.stats.inertiaWindowsAttached
+                    $0.counters["inertia_windows_dropped"] = activity.stats.inertiaWindowsDropped
+                    $0.counters["inertia_posture_omitted"] = activity.stats.inertiaPostureOmitted
+                    $0.counters["inertia_rows_pruned"] = activity.stats.inertiaRowsPruned
+                    $0.counters["inertia_prune_failures"] = activity.stats.inertiaPruneFailures
                 }
                 $0.lastError = activity.stats.lastError
                 $0.lastErrorKind = activity.stats.lastErrorKind

@@ -123,6 +123,37 @@ final class ActivityReplayTests: XCTestCase {
         XCTAssertThrowsError(try ActivityReplay.parse(Data(unordered.utf8)))
     }
 
+    /// The replay path refuses what the wire decoder refuses: the header bundle goes through `parseBundle`, every
+    /// window through the structural checks and then `validate(against:)` the header's bundle.
+    func testReplayRecordsGetTheWireValidation() throws {
+        let h = header()
+        let good = try ActivityReplay.encode(header: h, sequences: [("d", Array(sampleDay().prefix(40)))])
+        XCTAssertNoThrow(try ActivityReplay.parse(good))
+        var lines = String(decoding: good, as: UTF8.self).split(separator: "\n").map(String.init)
+        let withWindow = try XCTUnwrap(lines.indices.dropFirst().first { lines[$0].contains("\"motion_heads\":{") })
+        func refused(_ mutate: (inout [String: Any]) -> Void, file: StaticString = #filePath, line: UInt = #line) throws {
+            var copy = lines
+            var rec = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(copy[withWindow].utf8)) as? [String: Any])
+            var obs = try XCTUnwrap(rec["obs"] as? [String: Any])
+            var w = try XCTUnwrap(obs["motion_heads"] as? [String: Any])
+            mutate(&w)
+            obs["motion_heads"] = w
+            rec["obs"] = obs
+            copy[withWindow] = String(decoding: try JSONSerialization.data(withJSONObject: rec), as: UTF8.self)
+            XCTAssertThrowsError(try ActivityReplay.parse(Data(copy.joined(separator: "\n").utf8)), file: file, line: line)
+        }
+        try refused { w in var p = w["posture"] as! [String: Any]; p.removeValue(forKey: "recumbent"); w["posture"] = p }
+        try refused { w in var p = w["locomotion"] as! [String: Any]; p["stationary"] = 0.9; w["locomotion"] = p }
+        try refused { w in w["e"] = (w["s"] as! Int) + 30 }        // the bundle's windows are 10 s
+        try refused { w in w["s"] = 1e19 }
+        try refused { w in w["kneeling"] = 1 }
+        // A window without a bundle in the header is refused too.
+        var bare = h
+        bare.motionHeads = nil
+        lines[0] = String(decoding: try JSONEncoder().encode(bare), as: UTF8.self)
+        XCTAssertThrowsError(try ActivityReplay.parse(Data(lines.joined(separator: "\n").utf8)))
+    }
+
     func testTheNaiveAverageFoldsInertiaOntoTheV1Labels() {
         let v1 = ActivityReplay.v1Labels(["stationary": 0.1, "walking": 0.2, "brisk_walking": 0.1, "stairs": 0.1,
                                           "running": 0.3, "cycling": 0.1, "vehicle_motion": 0.05, "other": 0.05])

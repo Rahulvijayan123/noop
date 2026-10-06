@@ -12,6 +12,7 @@
           "other"
         ],
         "covers": {},
+        "decoder_evidence": true,
         "merge_into": {},
         "prior": {
           "active_gesturing": 0.2,
@@ -52,6 +53,7 @@
             "brisk_walking"
           ]
         },
+        "decoder_evidence": true,
         "merge_into": {},
         "prior": {
           "cycling": 0.2,
@@ -83,6 +85,7 @@
           "postural_transition"
         ],
         "covers": {},
+        "decoder_evidence": true,
         "merge_into": {
           "postural_transition": "upright_stationary"
         },

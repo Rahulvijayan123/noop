@@ -14,8 +14,11 @@ import Foundation
 //      "motion_heads": {                                                          optional; needed by the Inertia arms
 //        "bundle": <a motion-heads-1 infer response without "windows" (encoder_id … hop_s, "bundle": {heads, ood})>,
 //        "config": {"locomotion": 0.25, "posture": 0.25, "arm": 0.25, "body_budget": 0.5,
-//                   "arm_budget": 0.5, "hart_redundancy": 0.5},                   optional, candidate defaults
+//                   "arm_budget": 0.5, "hart_redundancy": 0.65},                  optional, candidate defaults
 //        "allow_standin_evidence_for_testing": false}}                           a stand-in bundle needs true
+//   The bundle goes through exactly the wire decoder's validation (`MotionHeadsBundleInfo` decodes through
+//   `MotionHeadsResponse.parseBundle`), and so does every `motion_heads` window (structure on decode, then
+//   `validate(against:)` the header's bundle): a record the serve path would have refused is refused here.
 //   every further line, one observation:
 //     {"seq": "<sequence id>", "obs": <ActivityObservationRecord>}
 //
@@ -209,6 +212,14 @@ enum ActivityReplay {
             let record: ActivityReplayLine
             do { record = try decoder.decode(ActivityReplayLine.self, from: Data(line.utf8)) }
             catch { throw Failure.line(i + 2, "\(error)") }
+            if let w = record.obs.motionHeads {
+                // The same bundle checks as the wire decoder (window length, supported heads and classes, sums).
+                guard let bundle = header.motionHeads?.bundle else {
+                    throw Failure.line(i + 2, "motion_heads window without a header motion_heads.bundle")
+                }
+                do { try w.validate(against: bundle, index: i) }
+                catch { throw Failure.line(i + 2, "\(error)") }
+            }
             if bySeq[record.seq] == nil { order.append(record.seq); bySeq[record.seq] = [] }
             if let last = bySeq[record.seq]!.last, record.obs.ts <= last.ts {
                 throw Failure.unordered(seq: record.seq, ts: record.obs.ts)

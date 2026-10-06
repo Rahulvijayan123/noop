@@ -171,6 +171,14 @@ enum ActivityContextDays {
     /// document and the Inertia candidate comparison (`ActivityMotionHeadsDays`), which differ only in config.
     static func dayDocument(input: ActivityContextTrackInput, generatedAt: Int,
                             config: ActivityDecoderConfig = ActivityDecoderConfig()) -> ActivityContextDayDocument {
+        dayDocumentAndReport(input: input, generatedAt: generatedAt, config: config).document
+    }
+
+    /// `dayDocument` plus the decode's motion-heads report (nil without a motion-heads config): how the Inertia
+    /// windows were attached, dropped and used.
+    static func dayDocumentAndReport(input: ActivityContextTrackInput, generatedAt: Int,
+                                     config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (document: ActivityContextDayDocument, report: MotionHeadsTrackReport?) {
         let track = ActivityContextTrackBuilder.build(input, config: config)
         var document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
                                                   config: config, includeSnapshot: false)
@@ -183,7 +191,7 @@ enum ActivityContextDays {
             return clipped.end > clipped.start ? clipped : nil
         }
         document.summary = ActivityContextDaySummary(runs: document.runs)
-        return document
+        return (document, track.motionHeads)
     }
 
     // MARK: - Stream days

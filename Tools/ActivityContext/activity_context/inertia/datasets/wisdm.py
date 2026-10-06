@@ -18,12 +18,13 @@ from typing import Iterator, List, Optional, Sequence
 
 import numpy as np
 
-from . import DatasetError, Recording, encode_labels, ms2_to_g
+from . import DatasetError, Recording, encode_labels, ms2_to_g, resolve_root
 
 DATASET = "wisdm2019_watch"
 LOADER_VERSION = "wisdm-loader-1"
-DEFAULT_ROOT = ("/Volumes/External SSD/Nara Whoop App V2/nara-activity-research/scratch/wisdm-data/"
-                "unpacked/data/wisdm-dataset")
+from ..paths import wisdm_dir
+
+DEFAULT_ROOT = wisdm_dir()          # $WISDM_DIR (the unpacked ``wisdm-dataset`` directory); "" if unconfigured
 NOMINAL_RATES = (20.0, 50.0)
 RATE_TOL = 0.05
 MIN_BLOCK_S = 12.0
@@ -37,7 +38,7 @@ def _path(root: str, subject: str) -> str:
 
 
 def list_units(root: Optional[str] = None) -> List[str]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     return sorted(re.findall(r"data_(\d+)_accel_watch", os.path.basename(p))[0]
                   for p in glob.glob(_path(root, "*")))
 
@@ -62,7 +63,7 @@ def parse_file(path: str):
 
 
 def iter_recordings(root: Optional[str] = None, subjects: Optional[Sequence[str]] = None) -> Iterator[Recording]:
-    root = root or DEFAULT_ROOT
+    root = resolve_root(root, DEFAULT_ROOT, DATASET)
     for subj in (subjects or list_units(root)):
         path = _path(root, str(subj))
         if not os.path.isfile(path):

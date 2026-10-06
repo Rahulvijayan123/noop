@@ -31,9 +31,10 @@ ROUND = 6
 
 
 def load_runtime(bundle_dir: str, threads: int = 1):
-    """P1's InertiaRuntime for a stand-in bundle (refused by every production path; offline only)."""
+    """P1's InertiaRuntime for a stand-in bundle (refused by every production path; offline only). Stand-in
+    encoders are built by the runtime from their id and checked against the bundle's config sha256."""
     from .runtime import build_runtime
-    rt = build_runtime(bundle_dir, allow_standin_shadow=True, threads=threads)
+    rt = build_runtime(bundle_dir, allow_standin_shadow=True, threads=threads, allow_offline=True)
     if not rt.available:
         raise RuntimeError(f"Inertia runtime unavailable: {rt.error}")
     return rt
@@ -86,8 +87,9 @@ def _embed_apply(rt, X: np.ndarray) -> List[Dict[str, Any]]:
 # Capture-24: inertia-prep-1 on the integer-second 100 Hz runs
 # ---------------------------------------------------------------------------
 
-def capture24_heads(rec: Recording, rt, hop_s: int, c24_dir: str = rd.CAPTURE24_DIR) -> Tuple[HeadsWindows, Dict]:
+def capture24_heads(rec: Recording, rt, hop_s: int, c24_dir: Optional[str] = None) -> Tuple[HeadsWindows, Dict]:
     import pyarrow.parquet as pq
+    c24_dir = rd._paths.require_dir(c24_dir or rd.CAPTURE24_DIR, "CAPTURE24_DIR / INERTIA_HAR_ROOT / INERTIA_DATA_ROOT")
     from ..preprocess import Run
     from .preprocess import windows_from_run, stack_windows
 
@@ -142,7 +144,8 @@ def wisdm_heads(subject: int, recs: Sequence[Recording], rt, hop_s: int) -> Tupl
     stats = {"recordings": 0, "windows": 0, "nonfinite": 0, "unmatched_blocks": 0, "t0_mismatch": 0}
     t0_ns = {int(r.meta["block_index"]): None for r in by_index.values()}
     # the block's first accel timestamp is stored in the WISDM cache; recompute from the raw file
-    acts, ts_ns, _xyz = rd.parse_wisdm_raw(os.path.join(rd.WISDM_DIR, "raw", "watch", "accel",
+    wisdm_dir = rd._paths.require_dir(rd.WISDM_DIR, "WISDM_DIR (the unpacked wisdm-dataset directory)")
+    acts, ts_ns, _xyz = rd.parse_wisdm_raw(os.path.join(wisdm_dir, "raw", "watch", "accel",
                                                         f"data_{subject}_accel_watch.txt"))
     for bi, (a, _b) in enumerate(rd.split_recordings(acts, ts_ns)):
         if bi in t0_ns:
@@ -241,7 +244,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ap.add_argument("--jobs", type=int, default=6)
     a = ap.parse_args(argv)
     t = time.time()
-    recs = rx.load_recordings(os.path.join(rd.REPLAY_DIR, f"recordings_{a.dataset}_{a.split}.npz"))
+    recs = rx.load_recordings(os.path.join(rd.replay_root(), f"recordings_{a.dataset}_{a.split}.npz"))
     rt = load_runtime(a.bundle)
     hop = int(a.hop if a.hop is not None else rt.bundle.preprocessing["hop_s"])
     heads: Dict[str, HeadsWindows] = {}

@@ -16,7 +16,7 @@ Conventions
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -113,11 +113,39 @@ def balanced_accuracy(cm: np.ndarray) -> float:
 
 
 def macro_f1(cm: np.ndarray, classes: Optional[Sequence[int]] = None) -> float:
+    """Macro-F1 over ``classes``; default = the union of true and predicted labels (sklearn's
+    ``f1_score(average="macro")`` without ``labels=``): a class predicted while absent scores F1 0."""
     prf = per_class_prf(cm)
     if classes is None:
-        classes = np.where((prf["support"] > 0) | (prf["predicted"] > 0))[0]
+        classes = union_classes(cm)
     classes = list(classes)
     return float(np.mean(prf["f1"][classes])) if classes else float("nan")
+
+
+def union_classes(cm: np.ndarray) -> List[int]:
+    prf = per_class_prf(cm)
+    return [int(k) for k in np.where((prf["support"] > 0) | (prf["predicted"] > 0))[0]]
+
+
+def single_label_prf(probs: np.ndarray, truth: np.ndarray, class_order: List[str],
+                     support_mask: np.ndarray) -> Dict[str, Any]:
+    """Per-class P/R/F1 on windows whose truth is ONE class (set-target windows excluded), next to the
+    set-aware scoring of :func:`head_report` (where a set window counts as correct for any member)."""
+    single = truth.sum(axis=1) == 1
+    out: Dict[str, Any] = {"n_single_label": int(single.sum()), "n_set_target": int((truth.sum(axis=1) > 1).sum()),
+                           "per_class": {}}
+    if not single.any():
+        return out
+    y = truth[single].argmax(axis=1)
+    cm = confusion(y, probs[single].argmax(axis=1), len(class_order))
+    prf = per_class_prf(cm)
+    for k, c in enumerate(class_order):
+        if support_mask[k]:
+            out["per_class"][c] = {"precision": float(prf["precision"][k]), "recall": float(prf["recall"][k]),
+                                   "f1": float(prf["f1"][k]), "support": int(prf["support"][k]),
+                                   "predicted": int(prf["predicted"][k])}
+    out["macro_f1"] = macro_f1(cm)
+    return out
 
 
 def head_report(probs: np.ndarray, truth: np.ndarray, class_order: List[str], support_mask: np.ndarray,
@@ -136,6 +164,7 @@ def head_report(probs: np.ndarray, truth: np.ndarray, class_order: List[str], su
     conf = probs.max(axis=1)
     sup_idx = [k for k in range(K) if support_mask[k]]
     present = [k for k in sup_idx if prf["support"][k] > 0]
+    union = union_classes(cm)
     unsup = unsupported_truth_counts or {}
     return {
         "n": int(len(probs)), "n_dropped_empty_truth": int((~keep).sum()),
@@ -145,7 +174,12 @@ def head_report(probs: np.ndarray, truth: np.ndarray, class_order: List[str], su
         "ece_top_equal_width_15_null": ece_null_reference(conf, n_bins, "equal_width", n_rep=null_reps),
         "ece_top_equal_mass_15": ece_top(probs, truth, n_bins, "equal_mass"),
         "classwise_ece_equal_width_15": cw_mean,
-        "balanced_accuracy": balanced_accuracy(cm), "macro_f1_present_supported": macro_f1(cm, present),
+        "balanced_accuracy": balanced_accuracy(cm),
+        # headline: sklearn convention (union of true and predicted labels; predicted-but-absent classes = F1 0)
+        "macro_f1": macro_f1(cm, union), "macro_f1_classes": [class_order[k] for k in union],
+        "predicted_absent_classes": [class_order[k] for k in union if prf["support"][k] == 0],
+        # legacy number, clearly labelled: only classes WITH test support (ignores false alarms of absent classes)
+        "macro_f1_present_supported": macro_f1(cm, present),
         "per_class": {class_order[k]: {
             "precision": float(prf["precision"][k]), "recall": float(prf["recall"][k]), "f1": float(prf["f1"][k]),
             "support": int(prf["support"][k]), "predicted": int(prf["predicted"][k]),
@@ -179,5 +213,6 @@ def average_precision(score_neg: np.ndarray, score_pos: np.ndarray) -> float:
 
 
 __all__ = ["attributed_truth", "nll", "brier", "ece_top", "ece_binary", "classwise_ece", "ece_null_reference",
-           "confusion", "per_class_prf", "balanced_accuracy", "macro_f1", "head_report", "binary_auc",
+           "confusion", "per_class_prf", "balanced_accuracy", "macro_f1", "union_classes", "single_label_prf",
+           "head_report", "binary_auc",
            "average_precision", "reliability_bins"]

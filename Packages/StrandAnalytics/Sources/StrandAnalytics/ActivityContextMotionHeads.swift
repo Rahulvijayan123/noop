@@ -124,6 +124,43 @@ public struct MotionHeadsWindow: Codable, Equatable, Sendable {
         case isOOD = "is_ood"
     }
 
+    /// Strict decode: the same structural checks as `MotionHeadsResponse.decode` applies to a window (known
+    /// keys only, integral times, a known window length, known class keys, finite probabilities in [0, 1],
+    /// `is_ood` present). The checks that need the bundle (supported classes, sums, `e − s == window_s`) are
+    /// `validate(against:index:)`. A replay record or a snapshot can therefore never carry a window the wire
+    /// decoder would have refused.
+    public init(from decoder: Decoder) throws {
+        let json = try MotionHeadsJSON(from: decoder)
+        do {
+            self = try MotionHeadsResponse.parseWindowStructure(json, index: 0)
+        } catch let e as MotionHeadsResponseError {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: e.description))
+        }
+    }
+
+    /// The checks of `MotionHeadsResponse.decode` that need the bundle: the window length, and for every head
+    /// the window carries, that the bundle supports it, that it covers exactly the supported classes and (for
+    /// a categorical head) that it sums to 1.
+    public func validate(against bundle: MotionHeadsBundleInfo, index i: Int = 0) throws {
+        typealias E = MotionHeadsResponseError
+        guard endTs - startTs == bundle.windowS else { throw E.invalidWindowTiming(index: i) }
+        for head in MotionHead.allCases {
+            guard let dict = probabilities(head) else { continue }
+            guard let spec = bundle.heads[head], !spec.prior.isEmpty else {
+                // A window may only carry heads the bundle supports.
+                throw E.supportMismatch(head: head.rawValue, window: i)
+            }
+            guard Set(dict.keys) == Set(spec.prior.keys) else { throw E.supportMismatch(head: head.rawValue, window: i) }
+            if head.isCategorical {
+                // Summed in class order so the check does not depend on dictionary order.
+                let sum = head.classOrder.reduce(0.0) { $0 + (dict[$1] ?? 0) }
+                guard abs(sum - 1) <= MotionHeadsWire.probabilitySumTolerance else {
+                    throw E.probabilitiesDoNotSumToOne(head: head.rawValue, window: i, sum: sum)
+                }
+            }
+        }
+    }
+
     /// The probabilities of one head (nil when the window does not carry it).
     public func probabilities(_ head: MotionHead) -> [String: Double]? {
         switch head {
@@ -194,6 +231,18 @@ public struct MotionHeadsOODInfo: Codable, Equatable, Sendable {
     }
 }
 
+/// Fusion measurements the bundle carries (`bundle.fusion` in the response; optional).
+public struct MotionHeadsFusionInfo: Codable, Equatable, Sendable {
+    /// ρ̂: the correlation of HART's and this bundle's locomotion residual log-likelihood ratios, measured on
+    /// replay (validation split). The decoder never discounts the locomotion channel by LESS than this
+    /// (`MotionHeadsEvidenceConfig.effectiveHartRedundancy`).
+    public var rhoHart: Double?
+
+    public init(rhoHart: Double?) { self.rhoHart = rhoHart }
+
+    enum CodingKeys: String, CodingKey { case rhoHart = "rho_hart" }
+}
+
 /// Provenance and calibration of the head bundle that produced a response (everything in a `motion-heads-1`
 /// response except the windows). Its Codable form is the response's own layout, so a replay record can carry
 /// a response verbatim minus `windows`.
@@ -211,17 +260,20 @@ public struct MotionHeadsBundleInfo: Codable, Equatable, Sendable {
     public var hopS: Int
     public var heads: [MotionHead: MotionHeadSpec]
     public var ood: MotionHeadsOODInfo
+    /// Optional fusion measurements (`bundle.fusion`); nil when the bundle carries none.
+    public var fusion: MotionHeadsFusionInfo?
 
     public init(encoderId: String, encoderKind: MotionHeadsEncoderKind, encoderVersion: String,
                 checkpointSha256: String?, headsVersion: String, bundleSha256: String,
                 preprocessingVersion: String = MotionHeadsWire.preprocessingVersion,
                 evidenceTierMax: MotionHeadsEvidenceTier, windowS: Int, hopS: Int,
-                heads: [MotionHead: MotionHeadSpec], ood: MotionHeadsOODInfo) {
+                heads: [MotionHead: MotionHeadSpec], ood: MotionHeadsOODInfo,
+                fusion: MotionHeadsFusionInfo? = nil) {
         self.encoderId = encoderId; self.encoderKind = encoderKind; self.encoderVersion = encoderVersion
         self.checkpointSha256 = checkpointSha256; self.headsVersion = headsVersion
         self.bundleSha256 = bundleSha256; self.preprocessingVersion = preprocessingVersion
         self.evidenceTierMax = evidenceTierMax; self.windowS = windowS; self.hopS = hopS
-        self.heads = heads; self.ood = ood
+        self.heads = heads; self.ood = ood; self.fusion = fusion
     }
 
     enum CodingKeys: String, CodingKey {
@@ -232,31 +284,23 @@ public struct MotionHeadsBundleInfo: Codable, Equatable, Sendable {
         case bundle
     }
 
-    enum BundleKeys: String, CodingKey { case heads, ood }
+    enum BundleKeys: String, CodingKey { case heads, ood, fusion }
 
+    /// Strict decode: exactly the validation `MotionHeadsResponse.decode` applies to the response's provenance
+    /// and bundle block (`parseBundle`), so a replay header, a stored config or any other Codable path refuses
+    /// what the wire decoder refuses (an `inertia1` kind with a `standin:` id, an unknown head or class, a
+    /// broken merge chain, a prior that does not sum to 1 …).
     public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        encoderId = try c.decode(String.self, forKey: .encoderId)
-        encoderKind = try c.decode(MotionHeadsEncoderKind.self, forKey: .encoderKind)
-        encoderVersion = try c.decode(String.self, forKey: .encoderVersion)
-        checkpointSha256 = try c.decodeIfPresent(String.self, forKey: .checkpointSha256)
-        headsVersion = try c.decode(String.self, forKey: .headsVersion)
-        bundleSha256 = try c.decode(String.self, forKey: .bundleSha256)
-        preprocessingVersion = try c.decode(String.self, forKey: .preprocessingVersion)
-        evidenceTierMax = try c.decode(MotionHeadsEvidenceTier.self, forKey: .evidenceTierMax)
-        windowS = try c.decode(Int.self, forKey: .windowS)
-        hopS = try c.decode(Int.self, forKey: .hopS)
-        let b = try c.nestedContainer(keyedBy: BundleKeys.self, forKey: .bundle)
-        let raw = try b.decode([String: MotionHeadSpec].self, forKey: .heads)
-        var heads: [MotionHead: MotionHeadSpec] = [:]
-        for (key, spec) in raw {
-            guard let head = MotionHead(rawValue: key) else {
-                throw DecodingError.dataCorruptedError(forKey: .heads, in: b, debugDescription: "unknown head \(key)")
-            }
-            heads[head] = spec
+        let json = try MotionHeadsJSON(from: decoder)
+        guard case .object(let obj) = json else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                    debugDescription: MotionHeadsResponseError.notAnObject.description))
         }
-        self.heads = heads
-        ood = try b.decode(MotionHeadsOODInfo.self, forKey: .ood)
+        do {
+            self = try MotionHeadsResponse.parseBundle(obj)
+        } catch let e as MotionHeadsResponseError {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: e.description))
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -277,6 +321,7 @@ public struct MotionHeadsBundleInfo: Codable, Equatable, Sendable {
         for (head, spec) in heads { raw[head.rawValue] = spec }
         try b.encode(raw, forKey: .heads)
         try b.encode(ood, forKey: .ood)
+        if let fusion { try b.encode(fusion, forKey: .fusion) }
     }
 
     /// First 12 hex characters of the bundle digest, used in provenance stamps and cache tags.
@@ -431,9 +476,13 @@ extension MotionHeadsResponse {
             dropped = try integer(raw, "n_dropped_nonfinite")
             guard dropped >= 0 else { throw E.invalidValue("n_dropped_nonfinite") }
         }
+        // Every number that becomes an Int goes through `integer` (integral, |x| < 9e15, `Int(exactly:)`): a bare
+        // `Int(d)` traps for d ≥ 2^63, and a service bug must cost a refused response, never the worker.
         var duration: Int?
-        if let raw = obj["duration_ms"], raw != .null, case .number(let d) = raw, d.isFinite, d >= 0 {
-            duration = Int(d)
+        if let raw = obj["duration_ms"], raw != .null {
+            let d = try integer(raw, "duration_ms")
+            guard d >= 0 else { throw E.invalidValue("duration_ms") }
+            duration = d
         }
         return MotionHeadsResponse(bundle: bundle, windows: windows, droppedNonfinite: dropped, durationMs: duration)
     }
@@ -452,9 +501,11 @@ extension MotionHeadsResponse {
         return d
     }
 
+    /// The only Double → Int conversion on the motion-heads path. Refuses a non-integral value and anything at
+    /// or beyond 9e15 (below 2^53, so every accepted value is exact; far below 2^63, so nothing can trap).
     static func integer(_ v: MotionHeadsJSON, _ field: String) throws -> Int {
         let d = try number(v, field)
-        guard d == d.rounded(), abs(d) < 9e15, let i = Int(exactly: d) else {
+        guard abs(d) < 9e15, d == d.rounded(), let i = Int(exactly: d) else {
             throw MotionHeadsResponseError.invalidValue(field)
         }
         return i
@@ -522,11 +573,25 @@ extension MotionHeadsResponse {
         let method = try string(rawOOD, "method")
         var threshold: Double?
         if let t = rawOOD["threshold"], t != .null { threshold = try number(t, "bundle.ood.threshold") }
+        // Optional fusion measurements. ρ̂ is a correlation used as a discount, so only [0, 1] makes sense.
+        var fusion: MotionHeadsFusionInfo?
+        switch b["fusion"] {
+        case .none, .some(.null): fusion = nil
+        case .some(.object(let f)):
+            var rho: Double?
+            if let r = f["rho_hart"], r != .null {
+                let x = try number(r, "bundle.fusion.rho_hart")
+                guard (0...1).contains(x) else { throw E.invalidValue("bundle.fusion.rho_hart") }
+                rho = x
+            }
+            fusion = MotionHeadsFusionInfo(rhoHart: rho)
+        default: throw E.wrongType("bundle.fusion")
+        }
         return MotionHeadsBundleInfo(encoderId: encoderId, encoderKind: kind, encoderVersion: encoderVersion,
                                      checkpointSha256: checkpoint, headsVersion: headsVersion, bundleSha256: bundleSha,
                                      preprocessingVersion: preprocessing, evidenceTierMax: tier,
                                      windowS: windowS, hopS: hopS, heads: heads,
-                                     ood: MotionHeadsOODInfo(method: method, threshold: threshold))
+                                     ood: MotionHeadsOODInfo(method: method, threshold: threshold), fusion: fusion)
     }
 
     static func stringMap(_ v: MotionHeadsJSON?, _ field: String) throws -> [String: MotionHeadsJSON] {
@@ -630,12 +695,22 @@ extension MotionHeadsResponse {
                                           "movement_intensity", "ood_score", "is_ood"]
 
     static func parseWindow(_ raw: MotionHeadsJSON, index i: Int, bundle: MotionHeadsBundleInfo) throws -> MotionHeadsWindow {
+        let w = try parseWindowStructure(raw, index: i)
+        try w.validate(against: bundle, index: i)
+        return w
+    }
+
+    /// Everything about one window that does not need the bundle (shared with `MotionHeadsWindow`'s Codable
+    /// path): an object with known keys only, integral `s`/`e` (`integer`, so no conversion can trap) with
+    /// `s ≥ 0` and an allowed window length, a boolean `is_ood`, known class keys, finite probabilities in
+    /// [0, 1], an intensity in [0, 1] and a finite OOD score.
+    static func parseWindowStructure(_ raw: MotionHeadsJSON, index i: Int) throws -> MotionHeadsWindow {
         typealias E = MotionHeadsResponseError
         guard case .object(let w) = raw else { throw E.wrongType("windows[\(i)]") }
         for key in w.keys.sorted() where !windowKeys.contains(key) { throw E.unknownField("windows[\(i)].\(key)") }
         guard let rs = w["s"], let re = w["e"] else { throw E.missingField("windows[\(i)].s/e") }
         let s = try integer(rs, "windows[\(i)].s"), e = try integer(re, "windows[\(i)].e")
-        guard s >= 0, e - s == bundle.windowS else { throw E.invalidWindowTiming(index: i) }
+        guard s >= 0, MotionHeadsWire.allowedWindowS.contains(e - s) else { throw E.invalidWindowTiming(index: i) }
         guard case .bool(let isOOD)? = w["is_ood"] else {
             throw w["is_ood"] == nil ? E.missingField("windows[\(i)].is_ood") : E.wrongType("windows[\(i)].is_ood")
         }
@@ -644,10 +719,6 @@ extension MotionHeadsResponse {
             let field = "windows[\(i)].\(head.rawValue)"
             guard let value = w[head.rawValue], value != .null else { continue }
             guard case .object(let probs) = value else { throw E.wrongType(field) }
-            guard let spec = bundle.heads[head], !spec.prior.isEmpty else {
-                // A window may only carry heads the bundle supports.
-                throw E.supportMismatch(head: head.rawValue, window: i)
-            }
             let known = Set(head.classOrder)
             var dict: [String: Double] = [:]
             for (cls, v) in probs.sorted(by: { $0.key < $1.key }) {
@@ -655,14 +726,6 @@ extension MotionHeadsResponse {
                 let p = try number(v, "\(field).\(cls)")
                 guard p >= 0, p <= 1 + 1e-9 else { throw E.probabilityOutOfRange("\(field).\(cls)") }
                 dict[cls] = min(1, p)
-            }
-            guard Set(dict.keys) == Set(spec.prior.keys) else { throw E.supportMismatch(head: head.rawValue, window: i) }
-            if head.isCategorical {
-                // Summed in class order so the check does not depend on dictionary order.
-                let sum = head.classOrder.reduce(0.0) { $0 + (dict[$1] ?? 0) }
-                guard abs(sum - 1) <= MotionHeadsWire.probabilitySumTolerance else {
-                    throw E.probabilitiesDoNotSumToOne(head: head.rawValue, window: i, sum: sum)
-                }
             }
             out.setProbabilities(head, dict)
         }
@@ -722,6 +785,10 @@ public struct MotionHeadsTrackReport: Codable, Equatable, Sendable {
     public var oodWindows: Int = 0
     public var evidenceSeconds: Int = 0
     public var specialistOpenings: Int = 0
+    /// Seconds whose Inertia posture term was omitted because the observation said asleep or in bed: the
+    /// decoder's own sleep / bed route already speaks there, and the wrist posture head is in practice a
+    /// sleep detector, so counting it again would double the same evidence.
+    public var postureOmittedSleep: Int = 0
 
     public init(stamp: String? = nil, refusal: String? = nil) {
         self.stamp = stamp; self.refusal = refusal
@@ -733,8 +800,11 @@ public struct MotionHeadsTrackReport: Codable, Equatable, Sendable {
         case droppedNoObservation = "dropped_no_observation", droppedSuperseded = "dropped_superseded"
         case droppedOutOfRange = "dropped_out_of_range", windowsIngested = "windows_ingested"
         case oodWindows = "ood_windows", evidenceSeconds = "evidence_seconds"
-        case specialistOpenings = "specialist_openings"
+        case specialistOpenings = "specialist_openings", postureOmittedSleep = "posture_omitted_sleep"
     }
+
+    /// Windows that reached the track input but never an observed second.
+    public var dropped: Int { droppedNoObservation + droppedSuperseded + droppedOutOfRange }
 
     /// Two consecutive decodes of one stream (a resumed track): counts add, provenance must agree.
     func merged(with next: MotionHeadsTrackReport) -> MotionHeadsTrackReport {
@@ -746,6 +816,7 @@ public struct MotionHeadsTrackReport: Codable, Equatable, Sendable {
         out.droppedOutOfRange += next.droppedOutOfRange; out.windowsIngested += next.windowsIngested
         out.oodWindows += next.oodWindows; out.evidenceSeconds += next.evidenceSeconds
         out.specialistOpenings += next.specialistOpenings
+        out.postureOmittedSleep += next.postureOmittedSleep
         return out
     }
 }
@@ -780,12 +851,16 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
     public var transitionWeight: Double
     public var bodyBudget: Double
     public var armBudget: Double
-    /// Locomotion weight is multiplied by `1 − hartRedundancy` on seconds where the HART encoder channel also
-    /// speaks (residual log-LR correlation measured on replay; 0.5 until measured).
+    /// Locomotion weight is multiplied by `1 − effectiveHartRedundancy` on seconds where the HART encoder
+    /// channel also speaks. This is the floor the config asks for; the bundle may raise it with a measured ρ̂
+    /// (`bundle.fusion.rho_hart`), never lower it.
     public var hartRedundancy: Double
     /// TEST-ONLY. Lets a stand-in (`encoder_kind == "standin"`) or shadow-tier bundle be used as evidence so
     /// unit tests and the offline replay can exercise the channels. Never set by the worker or the app.
     public var allowStandInEvidenceForTesting: Bool
+    /// The bundle digest the deployment pinned (`FRWHOOP_INERTIA_BUNDLE_SHA256`). When set, a bundle with any
+    /// other `bundle_sha256` is refused (`bundle_sha256_mismatch`). nil = not pinned.
+    public var expectedBundleSHA256: String?
 
     /// No weight or budget may exceed this.
     public static let hardCeiling = 0.8
@@ -794,7 +869,9 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
     public static let defaultArmWeight = 0.25
     public static let defaultBodyBudget = 0.5
     public static let defaultArmBudget = 0.5
-    public static let defaultHartRedundancy = 0.5
+    /// Not below the measured ρ̂ = 0.61 (WISDM validation, residual log-LR correlation between HART and the
+    /// Inertia locomotion head): a discount smaller than the measured overlap would count shared evidence twice.
+    public static let defaultHartRedundancy = 0.65
 
     public init(mode: Mode, bundle: MotionHeadsBundleInfo,
                 locomotionWeight: Double = MotionHeadsEvidenceConfig.defaultLocomotionWeight,
@@ -804,17 +881,26 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
                 bodyBudget: Double = MotionHeadsEvidenceConfig.defaultBodyBudget,
                 armBudget: Double = MotionHeadsEvidenceConfig.defaultArmBudget,
                 hartRedundancy: Double = MotionHeadsEvidenceConfig.defaultHartRedundancy,
-                allowStandInEvidenceForTesting: Bool = false) {
+                allowStandInEvidenceForTesting: Bool = false,
+                expectedBundleSHA256: String? = nil) {
         self.mode = mode; self.bundle = bundle
         self.locomotionWeight = locomotionWeight; self.postureWeight = postureWeight
         self.armWeight = armWeight; self.transitionWeight = transitionWeight
         self.bodyBudget = bodyBudget; self.armBudget = armBudget; self.hartRedundancy = hartRedundancy
         self.allowStandInEvidenceForTesting = allowStandInEvidenceForTesting
+        self.expectedBundleSHA256 = expectedBundleSHA256
     }
 
     /// The candidate defaults (INERTIA1.md §7).
-    public static func candidate(bundle: MotionHeadsBundleInfo) -> MotionHeadsEvidenceConfig {
-        MotionHeadsEvidenceConfig(mode: .candidate, bundle: bundle)
+    public static func candidate(bundle: MotionHeadsBundleInfo,
+                                 expectedBundleSHA256: String? = nil) -> MotionHeadsEvidenceConfig {
+        MotionHeadsEvidenceConfig(mode: .candidate, bundle: bundle, expectedBundleSHA256: expectedBundleSHA256)
+    }
+
+    /// The HART redundancy discount actually applied: the larger of the config's and the bundle's measured ρ̂.
+    public var effectiveHartRedundancy: Double {
+        guard let rho = bundle.fusion?.rhoHart, rho.isFinite, (0...1).contains(rho) else { return hartRedundancy }
+        return max(hartRedundancy, rho)
     }
 
     public enum ValidationError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -855,6 +941,8 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
     public var evidenceRefusal: String? {
         do { try validate() } catch { return "invalid_config: \(error)" }
         if mode == .shadow { return "shadow_mode" }
+        // A pinned deployment uses exactly the bundle it pinned (the test override does not lift this).
+        if let expected = expectedBundleSHA256, expected != bundle.bundleSha256 { return "bundle_sha256_mismatch" }
         let required: MotionHeadsEvidenceTier = mode == .production ? .production : .candidate
         if !allowStandInEvidenceForTesting {
             if bundle.encoderKind != .inertia1 { return "encoder_kind_\(bundle.encoderKind.rawValue)" }
@@ -869,7 +957,7 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
     /// carried beside it).
     public var configTag: String {
         let text = "m=\(mode.rawValue);l=\(locomotionWeight);p=\(postureWeight);a=\(armWeight);t=\(transitionWeight)"
-            + ";bb=\(bodyBudget);ab=\(armBudget);rho=\(hartRedundancy);si=\(allowStandInEvidenceForTesting ? 1 : 0)"
+            + ";bb=\(bodyBudget);ab=\(armBudget);rho=\(effectiveHartRedundancy);si=\(allowStandInEvidenceForTesting ? 1 : 0)"
             + ";h=\(bundle.hopS);w=\(bundle.windowS)"
         var h: UInt64 = 0xcbf29ce484222325
         for b in text.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }
