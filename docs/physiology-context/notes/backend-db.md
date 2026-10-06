@@ -4,7 +4,7 @@ Branch `pc/backend-db`, based on the contract commit `71dce34a`. Workstream file
 
 | File | What |
 | --- | --- |
-| `supabase/migrations/20261005120000_physiology_context.sql` | Tables, RLS, RPCs, triggers (additive, re-runnable) |
+| `supabase/migrations/20261006050000_physiology_context.sql` | Tables, RLS, RPCs, triggers (additive, re-runnable) |
 | `supabase/functions/_shared/serverScores.ts` | Four new route predicates in `handleScoresRequest`; existing routes unchanged |
 | `supabase/functions/_shared/physiologyContext.ts` | Query parsers, exposure validator, `submitExposureEvents` (new file) |
 | `supabase/functions/tests/physiology_context_routes_test.ts` | Routes against in-memory doubles (18 tests) |
@@ -334,7 +334,7 @@ Environment: Docker pipeline `supabase/tests/e2e/pipeline_db.sh` (image `supabas
 ```sh
 export NARA_PIPELINE_DB_PORT=55461 NARA_PIPELINE_REST_PORT=55462 NARA_PIPELINE_AUTH_PORT=55463 \
   NARA_PIPELINE_DIR="$HOME/.cache/pc-backend-db-pipeline"
-supabase/tests/e2e/pipeline_db.sh up          # applies the full chain incl. 20261005120000
+supabase/tests/e2e/pipeline_db.sh up          # applies the full chain incl. 20261006050000
 set -a; source "$NARA_PIPELINE_DIR/pipeline.env"; set +a
 cd supabase/functions
 EDGE_TEST_ARTIFACTS=/tmp/pcbd-edgeart deno test -A --no-lock tests/physiology_context_sql_test.ts
@@ -374,8 +374,8 @@ Not run, and why:
 ## 7. Deploy order and rollback
 
 1. Apply the migration by hand (`psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f
-   supabase/migrations/20261005120000_physiology_context.sql`, then `supabase migration repair --status applied
-   20261005120000`). It is additive and safe to re-run.
+   supabase/migrations/20261006050000_physiology_context.sql`, then `supabase migration repair --status applied
+   20261006050000`). It is additive and safe to re-run.
 2. Deploy the `scores` function. Before step 1 the new routes answer 404/500 (RPC missing); old routes are unaffected.
 3. Enable the worker lane (`FRWHOOP_CONTEXT_ENABLED=1`) after both.
 

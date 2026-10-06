@@ -1,7 +1,7 @@
 # Physiology context — worker lane
 
 Owner: worker. Branch `pc/worker`. Contract: [contracts.md](../contracts.md) §2, §3, §6, §6.1, §7. Migration read:
-`supabase/migrations/20261005120000_physiology_context.sql` (backend-db, final at e5aca26a: envelope tables). Lead
+`supabase/migrations/20261006050000_physiology_context.sql` (backend-db, final at e5aca26a: envelope tables). Lead
 branch merged through 2cfdaf4a (stored form; systems A, B, C, D, E, G real; F — references and change detection —
 still a skeleton when these numbers were taken).
 

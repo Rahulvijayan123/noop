@@ -213,7 +213,7 @@ See §5.
 
 ## 6. Persistence
 
-Migration owner: backend-db. One migration file `supabase/migrations/20261005120000_physiology_context.sql` (and,
+Migration owner: backend-db. One migration file `supabase/migrations/20261006050000_physiology_context.sql` (and,
 if needed, `20261005121000_exposure_events.sql`), additive only, in the house style (header, `begin; set local
 lock_timeout='5s'; set local statement_timeout='60s'; … commit;`, RLS + explicit revokes, `security definer set
 search_path = ''`, function EXECUTE revoked from `public, anon, authenticated`). Every user-owned table has

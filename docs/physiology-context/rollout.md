@@ -10,7 +10,7 @@ branch is not merged to `main`.
 | Piece | Where | Default state |
 | --- | --- | --- |
 | Core engine (Systems A–G) | `Packages/StrandAnalytics/Sources/StrandAnalytics/PhysiologyContext/` | Linked by the app and the worker; runs only when called |
-| Migration | `supabase/migrations/20261005120000_physiology_context.sql` (additive, re-runnable) | Not applied anywhere but local scratch databases |
+| Migration | `supabase/migrations/20261006050000_physiology_context.sql` (additive, re-runnable) | Not applied anywhere but local scratch databases |
 | Edge routes | `supabase/functions/_shared/serverScores.ts` + `_shared/physiologyContext.ts` (`GET /scores/context`, `GET /scores/context/history`, `POST`/`GET /scores/exposures`) | Not deployed |
 | Worker lane | `Tools/CloudWorker/Sources/frwhoop-worker/Context*.swift`, wiring in `main.swift` | **Off** unless `FRWHOOP_CONTEXT_ENABLED=1` |
 | App | context card on the HRV and resting-HR pages, detail sheet, history, recorded-events list and editor, exposure sync | Card shows only when the server returns context; otherwise hidden (local mode) or an explicit "unavailable" state |
@@ -49,8 +49,8 @@ with `psql -1`.
 
 1. **Migration.** By hand, never `supabase db push` (AGENTS.md, BACKEND.md):
    ```bash
-   psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261005120000_physiology_context.sql
-   supabase migration repair --status applied 20261005120000
+   psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261006050000_physiology_context.sql
+   supabase migration repair --status applied 20261006050000
    ```
    Then run `supabase/tests/client-privileges.sql` read-only against the target and confirm the only failure is the
    pre-existing `compute_family_policy` item, and that every new function is service-role only (the ten new RPCs are in

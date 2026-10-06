@@ -42,7 +42,7 @@ import FoundationNetworking
 //                                days; for a host that has neither (default ON)
 //   FRWHOOP_CONTEXT_ENABLED      "1" runs the physiology-context lane (default OFF; exactly "1", and the lane
 //                                only runs when enabled AND "context" is not in DISABLE_LANES). Needs
-//                                20261005120000_physiology_context.sql; without it the lane idles and
+//                                20261006050000_physiology_context.sql; without it the lane idles and
 //                                reports context_tables_missing
 //   FRWHOOP_CONTEXT_BUDGET       context jobs per wake (default 2)
 //   FRWHOOP_CONTEXT_LEASE_SECONDS     context job lease length (default 300)

@@ -172,7 +172,7 @@ const SERVICE_ONLY_FUNCTIONS = [
   "scoring_claim_one",
   "recover_noop_account_from_enrollment",
   "upsert_activity_stretch_feedback",
-  // Physiology context (20261005120000_physiology_context.sql): the worker's queue and the scores route's reads.
+  // Physiology context (20261006050000_physiology_context.sql): the worker's queue and the scores route's reads.
   "enqueue_physiology_context_days_v1",
   "invalidate_physiology_context_span_v1",
   "claim_physiology_context_v1",
