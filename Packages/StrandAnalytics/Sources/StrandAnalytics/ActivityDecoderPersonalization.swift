@@ -47,9 +47,16 @@ extension ActivityDecoderConfig {
     /// Inertia-1 evidence is active) whenever its bundle or evidence config does. This is the config's view; a
     /// caller keying a decoded track input uses `ActivityContextTrackBuilder.cacheTag(for:config:)`, which
     /// drops the Inertia suffix when that input's windows are not from the config's bundle (or it has none).
+    ///
+    /// ElderNet adds its own suffix (`-eg<weights12><cfgtag>`) only while its evidence is active, after Inertia's.
     public var cacheTag: String {
-        let base = "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
-        guard let heads = motionHeads, heads.evidenceRefusal == nil else { return base }
-        return base + "-ih\(heads.bundle.bundle12)\(heads.configTag)"
+        var tag = "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
+        if let heads = motionHeads, heads.evidenceRefusal == nil {
+            tag += "-ih\(heads.bundle.bundle12)\(heads.configTag)"
+        }
+        if let gait = gaitQuality, gait.evidenceRefusal == nil {
+            tag += "-eg\(gait.model.weights12)\(gait.configTag)"
+        }
+        return tag
     }
 }
