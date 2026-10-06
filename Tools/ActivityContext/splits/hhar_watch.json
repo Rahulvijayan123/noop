@@ -1,0 +1,179 @@
+{
+  "dataset": "hhar_watch",
+  "loso_folds": [
+    {
+      "test": [
+        "d"
+      ],
+      "train": [
+        "b",
+        "c",
+        "e",
+        "f",
+        "g",
+        "h",
+        "i"
+      ],
+      "val": [
+        "a"
+      ]
+    },
+    {
+      "test": [
+        "a"
+      ],
+      "train": [
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "g",
+        "i"
+      ],
+      "val": [
+        "h"
+      ]
+    },
+    {
+      "test": [
+        "h"
+      ],
+      "train": [
+        "a",
+        "b",
+        "d",
+        "e",
+        "f",
+        "g",
+        "i"
+      ],
+      "val": [
+        "c"
+      ]
+    },
+    {
+      "test": [
+        "c"
+      ],
+      "train": [
+        "a",
+        "b",
+        "d",
+        "f",
+        "g",
+        "h",
+        "i"
+      ],
+      "val": [
+        "e"
+      ]
+    },
+    {
+      "test": [
+        "e"
+      ],
+      "train": [
+        "a",
+        "b",
+        "c",
+        "d",
+        "f",
+        "h",
+        "i"
+      ],
+      "val": [
+        "g"
+      ]
+    },
+    {
+      "test": [
+        "g"
+      ],
+      "train": [
+        "a",
+        "c",
+        "d",
+        "e",
+        "f",
+        "h",
+        "i"
+      ],
+      "val": [
+        "b"
+      ]
+    },
+    {
+      "test": [
+        "b"
+      ],
+      "train": [
+        "a",
+        "c",
+        "d",
+        "e",
+        "g",
+        "h",
+        "i"
+      ],
+      "val": [
+        "f"
+      ]
+    },
+    {
+      "test": [
+        "f"
+      ],
+      "train": [
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "g",
+        "h"
+      ],
+      "val": [
+        "i"
+      ]
+    },
+    {
+      "test": [
+        "i"
+      ],
+      "train": [
+        "a",
+        "b",
+        "c",
+        "e",
+        "f",
+        "g",
+        "h"
+      ],
+      "val": [
+        "d"
+      ]
+    }
+  ],
+  "method": "seeded subject permutation (Agent C)",
+  "note": "too few subjects for a meaningful 3-way split: report LOSO; fixed split only for the frozen model",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "3e4c143046e562eb233e785b7bc3f6d459a455a0e76638269acae9537f3537af",
+  "source": "Agent C split_manifests.json (hhar_watch)",
+  "test_subjects": [
+    "a",
+    "d"
+  ],
+  "train_subjects": [
+    "b",
+    "c",
+    "e",
+    "f",
+    "g",
+    "i"
+  ],
+  "val_subjects": [
+    "h"
+  ]
+}

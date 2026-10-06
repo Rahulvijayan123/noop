@@ -1,0 +1,207 @@
+{
+  "dataset": "mhealth",
+  "loso_folds": [
+    {
+      "test": [
+        "subject6"
+      ],
+      "train": [
+        "subject1",
+        "subject10",
+        "subject2",
+        "subject3",
+        "subject4",
+        "subject5",
+        "subject8",
+        "subject9"
+      ],
+      "val": [
+        "subject7"
+      ]
+    },
+    {
+      "test": [
+        "subject7"
+      ],
+      "train": [
+        "subject10",
+        "subject2",
+        "subject3",
+        "subject4",
+        "subject5",
+        "subject6",
+        "subject8",
+        "subject9"
+      ],
+      "val": [
+        "subject1"
+      ]
+    },
+    {
+      "test": [
+        "subject1"
+      ],
+      "train": [
+        "subject10",
+        "subject2",
+        "subject3",
+        "subject4",
+        "subject5",
+        "subject6",
+        "subject7",
+        "subject9"
+      ],
+      "val": [
+        "subject8"
+      ]
+    },
+    {
+      "test": [
+        "subject8"
+      ],
+      "train": [
+        "subject1",
+        "subject10",
+        "subject2",
+        "subject3",
+        "subject5",
+        "subject6",
+        "subject7",
+        "subject9"
+      ],
+      "val": [
+        "subject4"
+      ]
+    },
+    {
+      "test": [
+        "subject4"
+      ],
+      "train": [
+        "subject1",
+        "subject10",
+        "subject2",
+        "subject5",
+        "subject6",
+        "subject7",
+        "subject8",
+        "subject9"
+      ],
+      "val": [
+        "subject3"
+      ]
+    },
+    {
+      "test": [
+        "subject3"
+      ],
+      "train": [
+        "subject1",
+        "subject10",
+        "subject2",
+        "subject4",
+        "subject6",
+        "subject7",
+        "subject8",
+        "subject9"
+      ],
+      "val": [
+        "subject5"
+      ]
+    },
+    {
+      "test": [
+        "subject5"
+      ],
+      "train": [
+        "subject1",
+        "subject2",
+        "subject3",
+        "subject4",
+        "subject6",
+        "subject7",
+        "subject8",
+        "subject9"
+      ],
+      "val": [
+        "subject10"
+      ]
+    },
+    {
+      "test": [
+        "subject10"
+      ],
+      "train": [
+        "subject1",
+        "subject3",
+        "subject4",
+        "subject5",
+        "subject6",
+        "subject7",
+        "subject8",
+        "subject9"
+      ],
+      "val": [
+        "subject2"
+      ]
+    },
+    {
+      "test": [
+        "subject2"
+      ],
+      "train": [
+        "subject1",
+        "subject10",
+        "subject3",
+        "subject4",
+        "subject5",
+        "subject6",
+        "subject7",
+        "subject8"
+      ],
+      "val": [
+        "subject9"
+      ]
+    },
+    {
+      "test": [
+        "subject9"
+      ],
+      "train": [
+        "subject1",
+        "subject10",
+        "subject2",
+        "subject3",
+        "subject4",
+        "subject5",
+        "subject7",
+        "subject8"
+      ],
+      "val": [
+        "subject6"
+      ]
+    }
+  ],
+  "method": "seeded subject permutation (Agent C)",
+  "note": "too few subjects for a meaningful 3-way split: report LOSO; fixed split only for the frozen model",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "cc95780c0706c08f92e61f7267335b366fa761cd29fa35e3dd7d8d36a29f394b",
+  "source": "Agent C split_manifests.json (mhealth)",
+  "test_subjects": [
+    "subject6",
+    "subject7"
+  ],
+  "train_subjects": [
+    "subject10",
+    "subject2",
+    "subject3",
+    "subject4",
+    "subject5",
+    "subject9"
+  ],
+  "val_subjects": [
+    "subject1",
+    "subject8"
+  ]
+}

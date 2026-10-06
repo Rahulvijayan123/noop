@@ -1,0 +1,33 @@
+{
+  "dataset": "har70plus",
+  "method": "seeded subject permutation (Agent C)",
+  "note": "",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "d3bad4b37129a589ec077fc22324bc0d4738a36e9c6728312eeeab7430d45cb6",
+  "source": "Agent C split_manifests.json (har70plus)",
+  "test_subjects": [
+    "507",
+    "513",
+    "517",
+    "518"
+  ],
+  "train_subjects": [
+    "501",
+    "502",
+    "503",
+    "505",
+    "506",
+    "509",
+    "512",
+    "514",
+    "515",
+    "516"
+  ],
+  "val_subjects": [
+    "504",
+    "508",
+    "510",
+    "511"
+  ]
+}
