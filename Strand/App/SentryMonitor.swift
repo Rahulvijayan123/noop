@@ -33,8 +33,12 @@ enum SentryMonitor {
             options.enableCrashHandler = true
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = hangThreshold
-            // Report hangs that only delay some frames, not just full stalls, and app kills by the watchdog.
+            // Report hangs that only delay some frames, not just full stalls, and app kills by the
+            // watchdog. iOS-only: the pinned Sentry 9.30.0 binary framework exposes this option on
+            // iOS but not on macOS, so an unconditional set breaks the macOS build.
+            #if os(iOS)
             options.enableReportNonFullyBlockingAppHangs = true
+            #endif
             options.enableWatchdogTerminationTracking = true
             options.enableAutoSessionTracking = true
 
