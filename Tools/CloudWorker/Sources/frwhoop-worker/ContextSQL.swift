@@ -282,8 +282,28 @@ enum ContextSQL {
          order by b.day, b.start_ts, b.bout_id collate "C"
         """
 
+    /// Telemetry for a causal job (reviews P5 / RC-18): how many history rows of the read ranges are NOT read
+    /// because their current publication is after the cutoff (`$6`, unix seconds): daily values `[$4, $5]`, bouts
+    /// `[$7, $5]`. History tables keep only the current version of a day, so after a later republish a replay
+    /// cannot see the version the live decision saw; this counts what it lost (or what did not exist yet — the two
+    /// cannot be told apart). Never in the document: it describes rows the decision could not have had.
+    static let historyAfterCutoff = """
+        select ((select count(*) from public.physiology_context_daily_values v
+                  where v.user_id = $1::uuid and v.device_id = $2::uuid and v.mode = $3::text
+                    and v.day >= $4::date and v.day <= $5::date
+                    and not exists (select 1 from public.physiology_context_days d
+                                     where d.context_revision = v.context_revision
+                                       and d.published_at <= to_timestamp($6::bigint)))
+              + (select count(*) from public.physiology_context_bouts b
+                  where b.user_id = $1::uuid and b.device_id = $2::uuid and b.mode = $3::text
+                    and b.day >= $7::date and b.day <= $5::date
+                    and not exists (select 1 from public.physiology_context_days d
+                                     where d.context_revision = b.context_revision
+                                       and d.published_at <= to_timestamp($6::bigint))))::text as n
+        """
+
     /// Every frozen reference registered for the device (`FrozenReference` JSON); `$3` as `$6` above, against
-    /// the registration time.
+    /// the registration time. A retrospective job passes "" and so reads every registered reference.
     static let frozenReferences = """
         select f.payload::text as reference
           from public.physiology_context_frozen_references f

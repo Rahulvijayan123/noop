@@ -84,7 +84,7 @@ enum ContextInputs {
         var read: PC.Interval
         /// Exposure occurrences: `[start of D−4, end of D+1)`.
         var exposure: PC.Interval
-        var historyFrom: String   // D−90
+        var historyFrom: String   // D−160 (`historyDays`)
         var boutsFrom: String     // D−3
         var priorSleepFrom: String // D−14
         var previousDay: String   // D−1
@@ -96,13 +96,32 @@ enum ContextInputs {
 
     static let lookbackS = 30 * 3_600
     static let lookaheadS = 6 * 3_600
-    static let historyDays = 90
+    /// Days of daily-value history the change detector needs for a full burn-in (review R-F2), `historyDays(for:)`
+    /// of the default policy: 160.
+    static let historyDays = ContextInputs.historyDays(for: .default)
     static let boutHistoryDays = 3
     static let priorSleepNights = 14
     static let exposureLookbackDays = 4
     static let exposureLookaheadDays = 1
 
-    static func windows(day: String, timezoneId: String) -> Windows? {
+    /// Daily-value history for one document (review R-F2). `ChangeDetection.episodes` scores the trailing
+    /// `windowDays` (90) and every scored day needs its own lookback: the rolling reference
+    /// (`rollingWindowDays`, 28) and the lag-1 autocorrelation (`autocorrelationWindowDays`, 56, before an
+    /// `autocorrelationGuardDays`, 14, guard). With only 90 days the first ~34 scored days had no φ̂ and ran the
+    /// CUSUM unadjusted, which is not the evaluated detector. 90 + max(28, 14 + 56) = 160 days (D−160 … D−1) gives
+    /// the oldest scored day (D−90) its full lookback. Derived from the policy so a tuning change moves the load
+    /// with it.
+    static func historyDays(for policy: PC.Policy) -> Int {
+        let change = policy.change
+        let lookback = change.cusumAutocorrelationAdjustment
+            ? max(policy.reference.rollingWindowDays,
+                  change.autocorrelationGuardDays + change.autocorrelationWindowDays)
+            : policy.reference.rollingWindowDays
+        return max(1, change.windowDays) + max(0, lookback)
+    }
+
+    static func windows(day: String, timezoneId: String,
+                        historyDays: Int = ContextInputs.historyDays) -> Windows? {
         guard let tz = TimeZone(identifier: timezoneId), let start = DayScorer.dayStartUnix(day, tz: tz) else {
             return nil
         }
@@ -209,6 +228,9 @@ enum ContextInputs {
         var unavailable: [String] = []
         /// Stored rows that did not decode into the contract types (skipped, counted).
         var skippedRows = 0
+        /// Causal jobs: history rows in the read ranges whose current publication is after the cutoff (not read;
+        /// telemetry only, `ContextSQL.historyAfterCutoff`).
+        var historyAfterCutoff = 0
 
         /// Every collection in one total order over its content. The SQL already orders by identity; this makes
         /// `assemble` independent of how the rows arrived (and is linear on already-sorted input).
@@ -225,8 +247,11 @@ enum ContextInputs {
             l.workouts.sort { ($0.interval, $0.id) < ($1.interval, $1.id) }
             l.epochs.sort { ($0.epoch.startTs, $0.revision, $0.epoch.endTs) < ($1.epoch.startTs, $1.revision, $1.epoch.endTs) }
             l.intervals.sort { ($0.interval, $0.revision, $0.activityClass) < ($1.interval, $1.revision, $1.activityClass) }
-            l.placements.sort { ($0.start, $0.end ?? Int.max, $0.revision, $0.recordedAt ?? -1, $0.placement, $0.source) <
-                                ($1.start, $1.end ?? Int.max, $1.revision, $1.recordedAt ?? -1, $1.placement, $1.source) }
+            l.placements.sort { a, b in
+                let ka = (a.start, a.end ?? Int.max, a.revision, a.recordedAt ?? -1, a.placement, a.source)
+                let kb = (b.start, b.end ?? Int.max, b.revision, b.recordedAt ?? -1, b.placement, b.source)
+                return ka != kb ? ka < kb : (a.scope ?? "") < (b.scope ?? "")
+            }
             l.exposures.sort { ($0.eventId, $0.revision) < ($1.eventId, $1.revision) }
             l.otherSnapshots.sort { ($0.day, $0.resultRevision) < ($1.day, $1.resultRevision) }
             return l
@@ -363,8 +388,7 @@ enum ContextInputs {
             }
         } ?? []
         let mode = job.mode.rawValue
-        // A causal decision reads only history published by its cutoff; a retrospective one reads it all.
-        let historyCutoff = job.mode == .causalLive ? String(job.cutoff) : ""
+        let historyCutoff = historyCutoffParameter(job)
         out.historyValues = optional("history_daily_values_unavailable") {
             try db.query(ContextSQL.historyDailyValues,
                          scope + [mode, w.historyFrom, w.previousDay, historyCutoff]).compactMap {
@@ -388,9 +412,25 @@ enum ContextInputs {
                 return v
             }
         } ?? []
+        if !historyCutoff.isEmpty {
+            // Telemetry only: a failure leaves the count at 0 and marks no input unavailable.
+            let n = try? db.isolatingFailures {
+                try db.query(ContextSQL.historyAfterCutoff,
+                             scope + [mode, w.historyFrom, w.previousDay, historyCutoff, w.boutsFrom]).first?["n"]
+            }
+            out.historyAfterCutoff = n.flatMap { Int($0) } ?? 0
+        }
         out.skippedRows += skipped
         out.unavailable.sort()
         return out
+    }
+
+    /// The publication cutoff of the history reads (`$6` of the daily-value and bout queries, `$3` of the frozen
+    /// references): a causal decision reads only history published (references: registered) by its cutoff; a
+    /// retrospective one reads it all — every frozen reference registered for the device included, so the engine
+    /// scores against the registered reference and a back-filled day never registers a second one. "" = no cutoff.
+    static func historyCutoffParameter(_ job: Job) -> String {
+        job.mode == .causalLive ? String(job.cutoff) : ""
     }
 
     static func nonEmpty(_ s: String?) -> String? {
@@ -432,13 +472,20 @@ enum ContextInputs {
                                         availableAt: Int(r["at"] ?? ""))
     }
 
+    /// Scope of a placement record (review RC-17): `device` when the row names the device, `account` for the
+    /// owner's device-less (user-level) declaration. The engine lets a device record win where the two overlap,
+    /// as the app's `PlacementStore` does; revision order only decides within one scope.
+    static let devicePlacementScope = "device"
+    static let accountPlacementScope = "account"
+
     static func parsePlacement(_ r: [String: String]) -> PC.PlacementInput? {
         guard let s = Int(r["s"] ?? ""), let placement = nonEmpty(r["placement"]),
               let revision = Int(r["revision"] ?? "") else { return nil }
         let end = Int(r["e"] ?? "")
         if let end, end <= s { return nil }
+        let scope = r["user_level"] == "true" ? accountPlacementScope : devicePlacementScope
         return PC.PlacementInput(start: s, end: end, placement: placement, source: nonEmpty(r["source"]) ?? "user",
-                                 revision: revision, recordedAt: Int(r["at"] ?? ""))
+                                 revision: revision, recordedAt: Int(r["at"] ?? ""), scope: scope)
     }
 
     static func parseExposure(_ r: [String: String]) -> PC.ExposureEventRevision? {
@@ -567,17 +614,49 @@ enum ContextInputs {
         }
     }
 
-    /// Nightly snapshot fields, their metric and units. `resting_hr_bpm` is taken from the scorer's primary
-    /// (longest) session; the others pool every session the day owns (`AnalyticsEngine` in-bed weighting /
-    /// median), so their support is the hull of the day's sessions.
-    static let nightlyFields: [(field: String, metric: PC.MetricKind, name: String, units: String, primaryOnly: Bool)] = [
-        ("hrv_rmssd_ms", .hrvRmssd, "hrv_rmssd", "ms", false),
-        ("hrv_sdnn_ms", .hrvSdnn, "hrv_sdnn", "ms", false),
-        ("resting_hr_bpm", .restingHeartRate, "resting_hr", "bpm", true),
-        ("resp_rate_bpm", .respiratoryRate, "resp_rate", "breaths_per_min", false),
-        ("skin_temp_c", .skinTemperature, "skin_temp", "degC", false),
-        ("spo2_candidate_pct", .spo2Candidate, "spo2_candidate", "percent", false),
+    /// Which of the day's sessions a nightly field's support covers (review RC-03).
+    enum NightlySupport: Equatable {
+        /// The scorer's primary session (longest, first on ties): the session `AnalyticsEngine` takes the daily
+        /// resting HR from.
+        case primarySession
+        /// The main-sleep group: the day's main night as the scorer's own rule picks it
+        /// (`SleepStageTotals.mainNightGroupIndices`), every fragment of a split night included.
+        case mainSleep
+    }
+
+    /// Nightly snapshot fields, their metric, units and support (exact sessions: notes/worker.md §5).
+    ///
+    /// `resting_hr_bpm` comes from the primary session only. The others are canonical day aggregates over EVERY
+    /// session the day owns (`AnalyticsEngine.analyzeDay`: HRV in-bed-weighted mean of per-session RMSSD, SDNN index
+    /// over the in-session R-R, median of per-session respiration, worn-gated skin mean, SpO2 in-band mean), naps
+    /// included. Their support is nevertheless the main-sleep group: the hull of all sessions spans the awake
+    /// hours before a nap, is not "a measurement taken during sleep" for System C, and so dropped every nap day
+    /// out of the nightly references. When the canonical aggregate also pools sessions outside that support, the
+    /// measurement's source key says so (`aggregatePoolsOutsideSupport`), so the value is never presented as a
+    /// main-night-only value without a trace.
+    static let nightlyFields: [(field: String, metric: PC.MetricKind, name: String, units: String,
+                                support: NightlySupport)] = [
+        ("hrv_rmssd_ms", .hrvRmssd, "hrv_rmssd", "ms", .mainSleep),
+        ("hrv_sdnn_ms", .hrvSdnn, "hrv_sdnn", "ms", .mainSleep),
+        ("resting_hr_bpm", .restingHeartRate, "resting_hr", "bpm", .primarySession),
+        ("resp_rate_bpm", .respiratoryRate, "resp_rate", "breaths_per_min", .mainSleep),
+        ("skin_temp_c", .skinTemperature, "skin_temp", "degC", .mainSleep),
+        ("spo2_candidate_pct", .spo2Candidate, "spo2_candidate", "percent", .mainSleep),
     ]
+
+    /// Notes appended to a nightly measurement's source key (`daily.<field>#<note>;<note>`), sorted.
+    /// The canonical aggregate's definition pools `n` of the day's sessions that lie outside the support (naps,
+    /// fragments not bridged into the main night). Whether each contributed a value is not published (a session
+    /// without beats, the HRV over-count gate, the skin wear gate, motion-backed sessions preferred over HR-only).
+    static let aggregatePoolsOutsideSupport = "aggregate_pools_sessions_outside_support"
+    /// A split main night: the support is the hull of its fragments and includes this many seconds between them
+    /// that no fragment (and so no aggregate) measured.
+    static let supportSpansSplitGap = "support_spans_split_sleep_gap_s"
+    /// Every session of the day carried the scorer's `is_nap: true`, so the main-night rule ran over all of them.
+    static let mainSleepFromNapFlagged = "main_sleep_from_nap_flagged_sessions"
+    /// Resting HR's primary session (the longest) is not part of the main-night group (e.g. a long daytime sleep
+    /// that lost to a shorter overnight one on the timing score).
+    static let primaryOutsideMainSleep = "primary_session_outside_main_sleep"
 
     /// The scorer's primary session: the longest, the first on ties (`DayScorer.mainSleepSession`).
     static func primarySession(_ sessions: [Snapshot.Session]) -> Snapshot.Session? {
@@ -586,22 +665,86 @@ enum ContextInputs {
         return best
     }
 
+    /// The day's sessions as the nightly fields' supports split them.
+    struct NightlySessions: Equatable {
+        /// Resting HR's session.
+        var primary: Snapshot.Session
+        var primaryInMain: Bool
+        /// The main-night group, in time order.
+        var main: [Snapshot.Session]
+        /// How many of the day's sessions are outside the main group.
+        var outsideCount: Int
+        /// `[first main start, last main end)`.
+        var mainSupport: PC.Interval
+        /// Seconds of `mainSupport` that no main fragment covers (the gaps of a split night).
+        var splitGapS: Int
+        var mainFromNapFlagged: Bool
+    }
+
+    /// The main-night group exactly as the scorer derives it (`AnalyticsEngine.analyzeDay`): its
+    /// `SleepStageTotals.mainNightGroupIndices` over the day's sessions (the snapshot's `sleep` array is that
+    /// list), at the zone offset of the day's start and with no learned habitual midsleep (the server scorer passes
+    /// none). A session the scorer flagged `is_nap: true` is never main sleep unless every session is flagged.
+    static func nightlySessions(_ sessions: [Snapshot.Session], offsetSec: Int) -> NightlySessions? {
+        guard let primary = primarySession(sessions) else { return nil }
+        let unflagged = sessions.indices.filter { sessions[$0].isNap != true }
+        let pool = unflagged.isEmpty ? Array(sessions.indices) : unflagged
+        let blocks = pool.map { SleepStageTotals.NightBlock(start: sessions[$0].start, end: sessions[$0].end) }
+        var mainIdx = Set((SleepStageTotals.mainNightGroupIndices(blocks, offsetSec: offsetSec,
+                                                                  habitualMidsleepSec: nil) ?? []).map { pool[$0] })
+        if mainIdx.isEmpty, let p = sessions.firstIndex(of: primary) { mainIdx = [p] }
+        let main = mainIdx.map { sessions[$0] }.sorted { ($0.start, $0.end, $0.id) < ($1.start, $1.end, $1.id) }
+        let support = PC.Interval(main.map(\.start).min()!, main.map(\.end).max()!)
+        var covered = 0, reach = Int.min
+        for f in main where f.end > max(reach, f.start) {
+            covered += f.end - max(reach, f.start)
+            reach = f.end
+        }
+        let primaryIndex = sessions.firstIndex(of: primary)
+        return NightlySessions(primary: primary, primaryInMain: primaryIndex.map(mainIdx.contains) ?? false,
+                               main: main, outsideCount: sessions.count - mainIdx.count, mainSupport: support,
+                               splitGapS: max(0, support.duration - covered),
+                               mainFromNapFlagged: unflagged.isEmpty && sessions.contains { $0.isNap == true })
+    }
+
+    /// The zone offset the scorer used for the main-night rule: the snapshot's zone (the scoring job's) at the
+    /// start of the snapshot's day (`DayScorer`: `tz.secondsFromGMT(for: dayStart)`), else the context job's zone.
+    static func scorerOffsetSeconds(_ s: Snapshot, fallbackTimezoneId: String) -> Int {
+        let tz = s.timezone.flatMap(TimeZone.init(identifier:)) ?? TimeZone(identifier: fallbackTimezoneId)
+            ?? TimeZone(identifier: "UTC")!
+        let start = DayScorer.dayStartUnix(s.day, tz: tz) ?? s.sessions.first?.start ?? 0
+        return tz.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(start)))
+    }
+
     /// `snapshot.<metric>.night` measurements from the day's snapshot. A session aggregate's nominal window is
-    /// its support length (`MethodRef.windowS` contract).
-    static func snapshotMeasurements(_ s: Snapshot) -> [PC.MeasurementInput] {
-        guard let primary = primarySession(s.sessions) else { return [] }
-        let hull = PC.Interval(s.sessions.map(\.start).min()!, s.sessions.map(\.end).max()!)
+    /// its support length (`MethodRef.windowS` contract; System A keys sessions by aggregation class, not length).
+    static func snapshotMeasurements(_ s: Snapshot, offsetSec: Int) -> [PC.MeasurementInput] {
+        guard let nights = nightlySessions(s.sessions, offsetSec: offsetSec) else { return [] }
         var out: [PC.MeasurementInput] = []
         for f in nightlyFields {
             guard let value = s.values[f.field] else { continue }
-            let support = f.primaryOnly ? PC.Interval(primary.start, primary.end) : hull
-            let sessionId = (f.primaryOnly || s.sessions.count == 1) ? primary.id : nil
+            let support: PC.Interval
+            let sessionId: String?
+            var notes: [String] = []
+            switch f.support {
+            case .primarySession:
+                support = PC.Interval(nights.primary.start, nights.primary.end)
+                sessionId = nights.primary.id
+                if !nights.primaryInMain { notes.append(primaryOutsideMainSleep) }
+            case .mainSleep:
+                support = nights.mainSupport
+                sessionId = nights.main.count == 1 ? nights.main[0].id : nil
+                if nights.outsideCount > 0 { notes.append("\(aggregatePoolsOutsideSupport)=\(nights.outsideCount)") }
+                if nights.splitGapS > 0 { notes.append("\(supportSpansSplitGap)=\(nights.splitGapS)") }
+                if nights.mainFromNapFlagged { notes.append(mainSleepFromNapFlagged) }
+            }
+            let key = "daily.\(f.field)" + (notes.isEmpty ? "" : "#" + notes.sorted().joined(separator: ";"))
             let method = PC.MethodRef(id: "snapshot.\(f.name).night", algorithmVersion: scoringAlgorithmVersion,
                                       aggregation: .session, windowS: support.duration, units: f.units)
             let samples = f.field == "spo2_candidate_pct" ? s.values["spo2_candidate_samples"].map { Int($0) } : nil
             out.append(PC.MeasurementInput(
                 metric: f.metric, method: method,
-                source: PC.SourceRef(product: .scoringSnapshot, key: "daily.\(f.field)",
+                source: PC.SourceRef(product: .scoringSnapshot, key: key,
                                      inputRevision: Int(s.inputRevision), resultRevision: Int(s.resultRevision)),
                 value: value, support: support, sampleCount: samples, availableAt: s.availableAt,
                 sessionId: sessionId))
@@ -665,12 +808,7 @@ enum ContextInputs {
                                                                                    anchorRaw: anchor)),
                                           availableAt: $0.availableAt)
         }
-        let regime = PC.DeviceRegimeInput(
-            vendor: (loaded.device?.sourceKind ?? "").lowercased().contains("oura") ? "oura" : "whoop",
-            deviceFamily: loaded.device?.family, sourceKind: loaded.device?.sourceKind,
-            firmware: loaded.device?.firmware, decoderVersion: nil,
-            scoringAlgorithmVersion: scoringAlgorithmVersion,
-            seriesAlgorithmVersion: IntradaySeries.algorithmVersion)
+        let regime = deviceRegime(loaded.device)
         let identity = PC.DayIdentity(deviceScope: job.deviceId, day: job.day, timezoneId: w.timezoneId,
                                       dayWindow: w.dayWindow)
 
@@ -700,7 +838,10 @@ enum ContextInputs {
             hr: view.heartRate, beats: beats, motion: view.motion, steps: view.steps, dayWindow: day,
             profile: userProfile(loaded.profile, dayStart: day.start), restingHR: snapshot?.restingHRInt,
             snapshot: snapshot, availability: available)
-        if let snapshot { measurements += snapshotMeasurements(snapshot) }
+        if let snapshot {
+            measurements += snapshotMeasurements(
+                snapshot, offsetSec: scorerOffsetSeconds(snapshot, fallbackTimezoneId: w.timezoneId))
+        }
         measurements.sort { ($0.support, $0.method.id) < ($1.support, $1.method.id) }
 
         var input = view
@@ -718,6 +859,28 @@ enum ContextInputs {
             priorSleep: priorSleep)
         return Assembled(input: input, history: history, causalExcluded: excluded, rowCount: loaded.rowCount,
                          measurementCount: measurements.count)
+    }
+
+    /// The device attributes stamped on a day's measurement regime (review RC-13). Only attributes that cannot
+    /// change for a device row are used, because the lane reads the CURRENT `devices` row while it rebuilds days
+    /// up to 120 days old (placement corrections, the 28-day `history_changed` cascade, retrospective reruns):
+    ///  - `source_kind` (and the vendor derived from it) is fixed: it is part of the row's conflict key
+    ///    `(user_id, source_kind, external_device_id)` and no write path updates it.
+    ///  - `firmware` is NOT used: every upsert sets `firmware = coalesce(excluded.firmware, devices.firmware)` and
+    ///    no firmware history exists, so today's value would be stamped on every rebuilt day and the regime
+    ///    boundary would land at the rebuild horizon instead of at the real change. nil = unknown for every day
+    ///    until an effective-dated firmware source exists.
+    ///  - `device_family` is NOT used either: the same upserts fill or relabel it
+    ///    (`coalesce(excluded.device_family, devices.device_family)`; labels such as "WHOOP", "WHOOP 5.0 / MG" and
+    ///    "WHOOP 5B…" name the same strap). The device id is already the history scope, so leaving the family out
+    ///    pools nothing across devices. (The skin-temperature conversion still reads the current family, exactly as
+    ///    the scorer does.)
+    static func deviceRegime(_ device: DeviceRow?) -> PC.DeviceRegimeInput {
+        PC.DeviceRegimeInput(
+            vendor: (device?.sourceKind ?? "").lowercased().contains("oura") ? "oura" : "whoop",
+            deviceFamily: nil, sourceKind: device?.sourceKind, firmware: nil, decoderVersion: nil,
+            scoringAlgorithmVersion: scoringAlgorithmVersion,
+            seriesAlgorithmVersion: IntradaySeries.algorithmVersion)
     }
 
     /// The sessions the day's input carries: every session of the newest D−1, D and D+1 snapshots, each with the
