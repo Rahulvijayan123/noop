@@ -411,9 +411,14 @@ extension PhysiologyContext {
         public var source: String
         public var revision: Int
         public var recordedAt: Int?
-        public init(start: Int, end: Int?, placement: String, source: String, revision: Int, recordedAt: Int? = nil) {
+        /// `device` (the record names this device) or `account` (a user-level record with no device). nil = device.
+        /// A device-scoped record wins over an account-level one where they overlap (the app's rule,
+        /// `Placement.swift`).
+        public var scope: String?
+        public init(start: Int, end: Int?, placement: String, source: String, revision: Int, recordedAt: Int? = nil,
+                    scope: String? = nil) {
             self.start = start; self.end = end; self.placement = placement; self.source = source
-            self.revision = revision; self.recordedAt = recordedAt
+            self.revision = revision; self.recordedAt = recordedAt; self.scope = scope
         }
     }
 

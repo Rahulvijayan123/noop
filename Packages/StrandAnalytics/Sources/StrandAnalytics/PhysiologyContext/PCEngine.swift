@@ -22,7 +22,6 @@ extension PhysiologyContext {
 
         // MARK: Reason codes
         public static let historyFromFutureDropped: ReasonCode = "history_from_future_dropped"
-        public static let measurementAfterCutoff: ReasonCode = "measurement_after_cutoff"
         public static let noMeasurements: ReasonCode = "no_measurements"
         public static let noObservations: ReasonCode = "no_observations"
         public static let activityUnavailable: ReasonCode = "activity_evidence_unavailable"
@@ -33,7 +32,7 @@ extension PhysiologyContext {
         public static let sharedOpticalSensor: ReasonCode = "shared_optical_sensor"
 
         public static let reasonCodes: [ReasonCode] = [
-            historyFromFutureDropped, measurementAfterCutoff, noMeasurements, noObservations, activityUnavailable,
+            historyFromFutureDropped, noMeasurements, noObservations, activityUnavailable,
             sleepUnavailable, sharedBeatIntervals, labelsReadHeartRate, motionSharedAcrossSystems,
             sharedOpticalSensor,
         ]
@@ -61,7 +60,8 @@ extension PhysiologyContext {
             var statusReasons: [ReasonCode] = []
 
             // History strictly before the day (spec §12.1: score before incorporating).
-            let history = strictlyEarlier(rawHistory, than: identity.day, dayStart: identity.dayWindow.start)
+            let history = strictlyEarlier(rawHistory, than: identity.day, dayStart: identity.dayWindow.start,
+                                          mode: mode)
             if history.dropped > 0 { statusReasons.append(historyFromFutureDropped) }
 
             // 1-2. Input contract and causal availability.
@@ -97,15 +97,14 @@ extension PhysiologyContext {
             // 4-5. Envelopes over each measurement's whole support interval.
             var measurements = input.measurements
             measurements += heartRateWindows(observations.heartRate, dayWindow: identity.dayWindow)
-            var droppedAfterCutoff = 0
+            // A measurement not available at the cutoff is left out without a trace: recording that it exists would
+            // itself be information the live decision did not have (the same rule as `causalView`).
             measurements = measurements.filter { m in
                 guard causal else { return true }
                 let available = m.availableAt.map { $0 <= cutoff } ?? true
-                if m.support.end > cutoff || !available { droppedAfterCutoff += 1; return false }
-                return true
+                return m.support.end <= cutoff && available
             }
-            if droppedAfterCutoff > 0 { statusReasons.append(measurementAfterCutoff) }
-            measurements.sort { ($0.support, $0.method.id) < ($1.support, $1.method.id) }
+            measurements.sort { ($0.support, $0.method.id, $0.metric.rawValue) < ($1.support, $1.method.id, $1.metric.rawValue) }
 
             var registry: [String: MeasurementRegime] = [:]
             var envelopes: [MeasurementEnvelope] = []
@@ -158,7 +157,7 @@ extension PhysiologyContext {
             let functional = Functional.daySummary(identity: identity, bouts: bouts, hart: hart, strap: strap,
                                                    observations: observations, sleep: sleep, mode: mode,
                                                    cutoff: input.availabilityCutoff, config: policy.functional)
-            let deviceRegimeKey = registry.keys.sorted().first ?? "unknown"
+            let deviceRegimeKey = deviceRegimeKey(input.regime, timeline: timeline, dayWindow: identity.dayWindow)
 
             // Daily context-conditioned values: envelopes, bouts, functional, and the engine's coverage series.
             var dailyValues = ContextReferences.dailyValues(envelopes: envelopes, identity: identity, mode: mode,
@@ -284,11 +283,19 @@ extension PhysiologyContext {
         }
 
         /// Drop any history element from the day itself or later (it could not be prior history).
-        static func strictlyEarlier(_ h: HistoryInput, than day: String,
-                                    dayStart: Int) -> (value: HistoryInput, dropped: Int) {
+        ///
+        /// Frozen references are the exception in retrospective mode: every registered reference is passed on, so a
+        /// back-filled earlier day never registers a second "version 1" for a (series, regime) that already has one
+        /// (the registered reference is the authority and is never replaced). References use a frozen reference only
+        /// for days after its selection window. Causal mode keeps only references whose window ended and that were
+        /// created before the day (the worker also passes only references registered by the cutoff).
+        static func strictlyEarlier(_ h: HistoryInput, than day: String, dayStart: Int,
+                                    mode: ProcessingMode) -> (value: HistoryInput, dropped: Int) {
             let values = h.dailyValues.filter { $0.day < day }
             let bouts = h.bouts.filter { $0.day < day && $0.interval.end <= dayStart }
-            let frozen = h.frozenReferences.filter { $0.toDay < day }
+            let frozen = mode == .retrospective
+                ? h.frozenReferences
+                : h.frozenReferences.filter { $0.toDay < day && $0.createdForDay < day }
             let sleep = h.priorSleep.filter { $0.interval.end <= dayStart || ($0.sourceDay.map { $0 < day } ?? false) }
             let dropped = (h.dailyValues.count - values.count) + (h.bouts.count - bouts.count)
                 + (h.frozenReferences.count - frozen.count) + (h.priorSleep.count - sleep.count)
@@ -307,12 +314,13 @@ extension PhysiologyContext {
             IntervalAlgebra.overlapping(track.spans, interval).reduce(0) { $0 + $1.interval.overlapSeconds(with: interval) }
         }
 
-        /// 5-minute heart-rate means on the local-midnight grid (the series grid), from samples in 30...220 bpm.
-        /// Windows with no sample produce no measurement (missing is not zero).
+        /// 5-minute heart-rate means on the local-midnight grid (the series grid), from every sample the input
+        /// contract accepted (System A rejects contract failures; an extreme but contract-valid value is kept and
+        /// judged by the validity assessment, never dropped here). Windows with no sample produce no measurement.
         static func heartRateWindows(_ hr: [HeartRateObservation], dayWindow: Interval) -> [MeasurementInput] {
             let width = heartRateWindowMethod.windowS
             var sums: [Int: (sum: Int, n: Int)] = [:]
-            for s in hr where dayWindow.contains(s.ts) && (30...220).contains(s.bpm) {
+            for s in hr where dayWindow.contains(s.ts) {
                 let b = dayWindow.start + ((s.ts - dayWindow.start) / width) * width
                 let cur = sums[b] ?? (0, 0)
                 sums[b] = (cur.sum + s.bpm, cur.n + 1)
@@ -371,17 +379,35 @@ extension PhysiologyContext {
                 ? .final : .provisional
         }
 
-        /// Copy each comparison onto the envelopes its daily value was aggregated from.
+        /// Copy each comparison onto the envelope whose value it compares. Only a daily value made of exactly one
+        /// envelope (a nightly product) is that envelope's own value; an aggregate (the median of many 5-minute
+        /// windows) is never shown as one window's difference — it stays a document-level comparison.
         static func attach(_ comparisons: [ReferenceComparison], to envelopes: inout [MeasurementEnvelope],
                            values: [DailyValue]) {
             guard !comparisons.isEmpty else { return }
             var index: [String: Int] = [:]
             for (i, e) in envelopes.enumerated() { index[e.id] = i }
-            for v in values {
+            for v in values where v.sourceIds.count == 1 {
                 let cs = comparisons.filter { $0.seriesKey == v.seriesKey && $0.regimeKey == v.regimeKey }
-                guard !cs.isEmpty else { continue }
-                for id in v.sourceIds { if let i = index[id] { envelopes[i].comparisons += cs } }
+                guard !cs.isEmpty, let i = index[v.sourceIds[0]] else { continue }
+                envelopes[i].comparisons += cs
             }
+        }
+
+        /// Regime of products that belong to the device rather than to one measurement method (bout responses,
+        /// functional features): vendor, family, source kind, firmware and the placement that covered most of the
+        /// day. Stable for a device whatever measurement families happen to exist that day.
+        static func deviceRegimeKey(_ device: DeviceRegimeInput, timeline: RegimeTimeline,
+                                    dayWindow: Interval) -> String {
+            var byPlacement: [String: Int] = [:]
+            for seg in timeline.placements {
+                byPlacement[seg.placement, default: 0] += seg.interval.overlapSeconds(with: dayWindow)
+            }
+            let placement = byPlacement.filter { $0.value > 0 }
+                .max { ($0.value, $1.key) < ($1.value, $0.key) }?.key ?? "unknown"
+            let text = ["device", device.vendor, device.deviceFamily ?? "", device.sourceKind ?? "",
+                        device.firmware ?? "", placement].joined(separator: "|")
+            return "dev-" + PhysiologyContext.fnv1a(text)
         }
 
         /// Dependence between derived signals and labels (spec §9 last bullet, §12.3, V13).
@@ -408,62 +434,58 @@ extension PhysiologyContext {
             return notes.sorted { ($0.group, $0.note) < ($1.group, $1.note) }
         }
 
-        /// FNV-1a over the inputs actually used (after sanitizing and the causal cutoff), so appending data that was
-        /// not available at the cutoff does not change the fingerprint.
+        /// FNV-1a over every input the engine read (after sanitizing and the causal cutoff), so appending data that
+        /// was not available at the cutoff does not change the fingerprint and any change to a used input does. The
+        /// high-volume raw streams are hashed field by field; every record list and the history go through the
+        /// canonical encoder, so a new field on any input type is covered without editing this function.
         static func inputFingerprint(_ input: DayInput, observations o: SanitizedObservations,
                                      measurements: [MeasurementInput], history: HistoryInput,
                                      cutoff: Int, finality: Finality) -> String {
             var h = FNV()
-            h.add(input.identity.deviceScope); h.add(input.identity.day); h.add(input.identity.timezoneId)
             h.add(input.mode.rawValue); h.add(input.mode == .causalLive ? input.availabilityCutoff : 0)
             // A retrospective document's cutoff matters only through its finality (provisional → final once the
             // day is 30 h closed); without it the finality rebuild would publish "unchanged" forever.
             h.add(finality.rawValue)
             for s in o.heartRate { h.add(s.ts); h.add(s.bpm) }
             h.add("|rr")
-            for b in o.beatIntervals { h.add(b.ts); h.add(b.rrMs); h.add(b.seq) }
+            for b in o.beatIntervals { h.add(b.ts); h.add(b.rrMs); h.add(b.seq); h.add(b.ord ?? -1); h.add(b.channel ?? -1) }
             h.add("|mo")
-            for m in o.motion { h.add(m.ts); h.add(m.dynAccelG ?? -1) }
+            for m in o.motion { h.add(m.ts); h.add(m.dynAccelG ?? -1); h.add(m.x ?? -9); h.add(m.y ?? -9); h.add(m.z ?? -9) }
             h.add("|st")
             for s in o.steps { h.add(s.ts); h.add(s.counter); h.add(s.activityClass ?? -1) }
             h.add("|sk")
             for s in o.skinTemperature { h.add(s.ts); h.add(s.celsius ?? -999) }
             h.add("|we")
-            for w in o.wearEvents { h.add(w.ts); h.add(w.state.rawValue) }
+            for w in o.wearEvents { h.add(w.ts); h.add(w.state.rawValue); h.add(w.kind) }
             h.add("|bs")
             for b in o.bandSleepStates { h.add(b.ts); h.add(b.state) }
-            h.add("|me")
-            for m in measurements { h.add(m.method.id); h.add(m.support.start); h.add(m.support.end); h.add(m.value ?? -999) }
-            h.add("|sl")
-            for s in input.sleepSessions where s.availableAt.map({ $0 <= cutoff }) ?? true {
-                h.add(s.id); h.add(s.interval.start); h.add(s.interval.end); h.add(s.isNap == true ? 1 : 0)
+            h.add("|br")
+            for b in o.breaks { h.add(b.start); h.add(b.end) }
+            struct Records: Encodable {
+                let identity: DayIdentity
+                let measurements: [MeasurementInput]
+                let sleepSessions: [SleepSessionInput]
+                let workouts: [WorkoutInput]
+                let activityEpochs: [ActivityEpochInput]
+                let activityIntervals: [ActivityIntervalInput]
+                let placements: [PlacementInput]
+                let regime: DeviceRegimeInput
+                let exposures: [ExposureEventRevision]
+                let inputRevisions: [InputRevision]
+                let history: HistoryInput
             }
-            h.add("|wo")
-            for w in input.workouts { h.add(w.id); h.add(w.interval.start); h.add(w.interval.end) }
-            h.add("|ep")
-            for e in input.activityEpochs where e.availableAt.map({ $0 <= cutoff }) ?? true {
-                h.add(e.revision); h.add(e.epoch.startTs); h.add(e.epoch.motion.rawValue); h.add(e.epoch.validS)
+            let records = Records(identity: input.identity, measurements: measurements,
+                                  sleepSessions: input.sleepSessions, workouts: input.workouts,
+                                  activityEpochs: input.activityEpochs, activityIntervals: input.activityIntervals,
+                                  placements: input.placements, regime: input.regime, exposures: input.exposures,
+                                  inputRevisions: input.inputRevisions.sorted { ($0.input, $0.revision) < ($1.input, $1.revision) },
+                                  history: history)
+            h.add("|rec")
+            if let data = try? PhysiologyContext.encoder().encode(records) {
+                for byte in data { h.addByte(byte) }
+            } else {
+                h.add("unencodable")
             }
-            h.add("|ai")
-            for a in input.activityIntervals where a.availableAt.map({ $0 <= cutoff }) ?? true {
-                h.add(a.revision); h.add(a.interval.start); h.add(a.interval.end); h.add(a.activityClass)
-            }
-            h.add("|pl")
-            for p in input.placements { h.add(p.start); h.add(p.end ?? -1); h.add(p.placement); h.add(p.revision) }
-            h.add("|ex")
-            for r in input.exposures where r.availableAt <= cutoff {
-                h.add(r.eventId); h.add(r.revision); h.add(r.confirmation.rawValue)
-                h.add(r.occurred.start); h.add(r.occurred.end)
-            }
-            h.add("|hi")
-            for v in history.dailyValues { h.add(v.day); h.add(v.seriesKey); h.add(v.regimeKey); h.add(v.value) }
-            for b in history.bouts { h.add(b.id); h.add(b.interval.start); h.add(b.interval.end) }
-            for f in history.frozenReferences { h.add(f.id); h.add(f.version) }
-            for s in history.priorSleep { h.add(s.id); h.add(s.interval.start); h.add(s.interval.end) }
-            h.add("|rg")
-            h.add(input.regime.vendor); h.add(input.regime.deviceFamily ?? ""); h.add(input.regime.firmware ?? "")
-            h.add(input.regime.sourceKind ?? ""); h.add(input.regime.scoringAlgorithmVersion)
-            h.add(input.regime.seriesAlgorithmVersion ?? ""); h.add(input.regime.decoderVersion ?? "")
             return h.hex
         }
     }
@@ -480,6 +502,7 @@ extension PhysiologyContext {
             for _ in 0..<8 { state = (state ^ (v & 0xff)) &* 0x100000001b3; v >>= 8 }
         }
         mutating func add(_ d: Double) { add(Int(truncatingIfNeeded: Int64(bitPattern: d.bitPattern))) }
+        mutating func addByte(_ b: UInt8) { state = (state ^ UInt64(b)) &* 0x100000001b3 }
         var hex: String {
             let s = String(state, radix: 16)
             return String(repeating: "0", count: max(0, 16 - s.count)) + s

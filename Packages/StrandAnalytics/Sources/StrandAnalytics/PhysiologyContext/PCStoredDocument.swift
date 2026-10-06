@@ -47,6 +47,8 @@ extension PhysiologyContext {
             public var wake: Int
             /// Override when `secondsSinceWake != support.start - wakeAt`.
             public var wakeSecondsOverride: Int?
+            /// True when the envelope had a `wakeAt` but no `secondsSinceWake` (an explicit flag, not a sentinel).
+            public var wakeSecondsCleared: Bool?
             public var recentBouts: Int
             /// Override when any `secondsBeforeMeasurement != support.start - endedAt`.
             public var boutSecondsOverride: [Int]?
@@ -106,17 +108,29 @@ extension PhysiologyContext {
         public static func join(summary: DayDocument, tables: [EnvelopeTable]) -> DayDocument {
             var doc = summary
             var envelopes: [MeasurementEnvelope] = []
-            for t in tables { envelopes += decode(t) }
-            envelopes.sort { ($0.support, $0.method.id) < ($1.support, $1.method.id) }
+            var dropped = 0
+            for t in tables {
+                let decoded = decode(t)
+                dropped += t.rows.count - decoded.count
+                envelopes += decoded
+            }
+            envelopes.sort(by: documentOrder)
             doc.envelopes = envelopes
+            // The index is cleared only when every table came back AND every row decoded; a short rebuild keeps it,
+            // so a reader never mistakes a partial document for a complete one.
             let complete = Set(tables.map(\.metric)) == Set((summary.envelopeIndex ?? []).map(\.metric))
-            if complete { doc.envelopeIndex = nil }
+            if complete && dropped == 0 { doc.envelopeIndex = nil }
             return doc
         }
 
         /// The envelopes held by `tables`, in document order (for readers that decode the summary leniently).
         public static func envelopes(_ tables: [EnvelopeTable]) -> [MeasurementEnvelope] {
-            tables.flatMap(decode).sorted { ($0.support, $0.method.id) < ($1.support, $1.method.id) }
+            tables.flatMap(decode).sorted(by: documentOrder)
+        }
+
+        /// The engine's envelope order: support, method id, then metric.
+        static func documentOrder(_ a: MeasurementEnvelope, _ b: MeasurementEnvelope) -> Bool {
+            (a.support, a.method.id, a.metric.rawValue) < (b.support, b.method.id, b.metric.rawValue)
         }
 
         // MARK: Encode
@@ -134,17 +148,18 @@ extension PhysiologyContext {
                 let anchor = e.support.start
                 var w = e.history.wake
                 var wakeOverride: Int? = nil
-                if let at = w.wakeAt, w.secondsSinceWake == anchor - at {
+                var wakeCleared: Bool? = nil
+                if let at = w.wakeAt, let since = w.secondsSinceWake, since == derived(anchor, at) {
                     w.secondsSinceWake = nil
-                } else if w.wakeAt == nil && w.secondsSinceWake == nil {
-                    // nothing to derive
-                } else {
-                    wakeOverride = w.secondsSinceWake.map { $0 } ?? Int.min
+                } else if w.wakeAt != nil && w.secondsSinceWake == nil {
+                    wakeCleared = true
+                } else if let since = w.secondsSinceWake {
+                    wakeOverride = since
                     w.secondsSinceWake = nil
                 }
                 var refs = e.history.recentBouts
                 var boutOverride: [Int]? = nil
-                if refs.contains(where: { $0.secondsBeforeMeasurement != anchor - $0.endedAt }) {
+                if refs.contains(where: { $0.secondsBeforeMeasurement != derived(anchor, $0.endedAt) }) {
                     boutOverride = refs.map(\.secondsBeforeMeasurement)
                 }
                 for i in refs.indices { refs[i].secondsBeforeMeasurement = 0 }
@@ -156,6 +171,7 @@ extension PhysiologyContext {
                     decoderActivity: e.decoderActivity.map { activity.index(shifted($0, by: -anchor)) },
                     preceding: preceding.index(shifted(e.preceding, by: -anchor)),
                     sleepWear: sleepWear.index(e.sleepWear), wake: wake.index(w), wakeSecondsOverride: wakeOverride,
+                    wakeSecondsCleared: wakeCleared,
                     recentBouts: bouts.index(refs), boutSecondsOverride: boutOverride,
                     exertion: exertion.index(e.history.exertion.map { shifted($0, by: -anchor) }),
                     exposures: exposures.index(e.history.exposures.map {
@@ -192,14 +208,16 @@ extension PhysiologyContext {
                 let method = t.methods[r.method]
                 var wake = t.wake[r.wake]
                 if let o = r.wakeSecondsOverride {
-                    wake.secondsSinceWake = o == Int.min ? nil : o
+                    wake.secondsSinceWake = o
+                } else if r.wakeSecondsCleared == true {
+                    wake.secondsSinceWake = nil
                 } else if let at = wake.wakeAt {
-                    wake.secondsSinceWake = anchor - at
+                    wake.secondsSinceWake = derived(anchor, at)
                 }
                 var refs = t.recentBouts[r.recentBouts]
                 for i in refs.indices {
                     refs[i].secondsBeforeMeasurement = r.boutSecondsOverride.flatMap { i < $0.count ? $0[i] : nil }
-                        ?? (anchor - refs[i].endedAt)
+                        ?? derived(anchor, refs[i].endedAt)
                 }
                 let history = HistoryContext(
                     wake: wake, recentBouts: refs,
@@ -225,24 +243,29 @@ extension PhysiologyContext {
         /// references (0 s) are stored as they are.
         static func absoluteExposure(_ r: ExposureRef, anchor: Int) -> ExposureRef {
             var r = r
-            if r.relation == Exposures.relationPrecedes { r.secondsSinceOccurrence = anchor - r.secondsSinceOccurrence }
+            if r.relation == Exposures.relationPrecedes { r.secondsSinceOccurrence = anchor &- r.secondsSinceOccurrence }
             return r
         }
         static func relativeExposure(_ r: ExposureRef, anchor: Int) -> ExposureRef {
             var r = r
-            if r.relation == Exposures.relationPrecedes { r.secondsSinceOccurrence = anchor - r.secondsSinceOccurrence }
+            if r.relation == Exposures.relationPrecedes { r.secondsSinceOccurrence = anchor &- r.secondsSinceOccurrence }
             return r
         }
 
+        // Shifts wrap (two's complement), so storing times relative to the row and adding the anchor back is exactly
+        // invertible for any value, including adversarial extremes.
         static func shifted(_ c: ActivityComposition, by d: Int) -> ActivityComposition {
-            var c = c; c.interval = Interval(c.interval.start + d, c.interval.end + d); return c
+            var c = c; c.interval = Interval(c.interval.start &+ d, c.interval.end &+ d); return c
         }
         static func shifted(_ p: PrecedingHistory, by d: Int) -> PrecedingHistory {
-            var p = p; p.lookback = Interval(p.lookback.start + d, p.lookback.end + d); return p
+            var p = p; p.lookback = Interval(p.lookback.start &+ d, p.lookback.end &+ d); return p
         }
         static func shifted(_ w: ExertionWindowSummary, by d: Int) -> ExertionWindowSummary {
-            var w = w; w.interval = Interval(w.interval.start + d, w.interval.end + d); return w
+            var w = w; w.interval = Interval(w.interval.start &+ d, w.interval.end &+ d); return w
         }
+        /// `anchor - at`, wrapping; equal to the plain difference whenever that does not overflow, and the encoder
+        /// only derives when it reproduces the stored value exactly.
+        static func derived(_ anchor: Int, _ at: Int) -> Int { anchor &- at }
 
         /// Interning pool keyed by value equality (deterministic first-occurrence order). Lossless by construction:
         /// a row's index points at a value equal to its own.

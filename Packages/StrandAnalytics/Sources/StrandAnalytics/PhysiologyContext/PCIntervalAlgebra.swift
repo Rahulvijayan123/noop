@@ -317,7 +317,8 @@ extension PhysiologyContext {
                                    label: unknown ? nil : e.epoch.motion.rawValue,
                                    unknownFraction: unknown ? 1 : e.epoch.unknownFraction,
                                    revision: e.revision, availableAt: e.availableAt,
-                                   tieBreak: "epoch:\(e.revision):\(e.epoch.startTs)")
+                                   tieBreak: "epoch:\(e.revision):\(e.epoch.startTs):\(e.epoch.endTs):"
+                                       + "\(e.epoch.motion.rawValue):\(e.epoch.observedS):\(e.epoch.validS)")
             }
         }
 
@@ -328,7 +329,8 @@ extension PhysiologyContext {
                 return LabelRecord(interval: r.interval, label: unknown ? nil : r.activityClass,
                                    unknownFraction: unknown ? 1 : 0, revision: r.revision,
                                    availableAt: r.availableAt,
-                                   tieBreak: "interval:\(r.revision):\(r.interval.start)")
+                                   tieBreak: "interval:\(r.revision):\(r.interval.start):\(r.interval.end):"
+                                       + "\(r.activityClass):\(r.confidence)")
             }
         }
 
