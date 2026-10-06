@@ -96,3 +96,18 @@ def test_fit_on_val_then_test_once(tmp_path, monkeypatch):
     with open(os.path.join(out, "test_ledger.jsonl")) as f:
         assert len(f.read().strip().splitlines()) == 1
     json.load(open(os.path.join(out, "VALIDATION_TEST.json")))
+
+
+def test_oxwalk_window_steps_and_truth_rule():
+    from activity_context.eldernet.oxwalk import GAIT_MIN_STEPS, recording_columns
+
+    from ._helpers import FakeHeads
+    acc = np.concatenate([synth_g(30, "still"), synth_g(30, "walk", 3)])
+    ann = np.zeros(len(acc), np.int8)
+    ann[3000::50] = 1                                   # 2 steps/s from t = 30 s
+    ann[1200] = 1                                       # one isolated step at t = 12 s
+    c = recording_columns(acc, ann, FakeHeads())
+    assert c["s"].tolist() == [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0]
+    assert c["steps_true"].tolist() == [0, 1, 1, 0, 0, 10, 20, 20, 20, 20, 20]     # t = 12 s is in [5, 15), [10, 20)
+    assert c["truth"].tolist() == [NON_GAIT, MASK, MASK, NON_GAIT, NON_GAIT, GAIT, GAIT, GAIT, GAIT, GAIT, GAIT]
+    assert GAIT_MIN_STEPS == 6
