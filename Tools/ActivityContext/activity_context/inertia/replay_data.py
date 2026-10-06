@@ -11,6 +11,10 @@ What it produces, per recording (a WISDM (subject, activity block) or a Capture-
   repo's polyphase resampler (``preprocess.resample_poly_nd``); samples are taken as uniform at the detected
   nominal rate (see REGRID_TIMESTAMPS). Gyro (its own rate, e.g. 25 Hz beside 50 Hz accel) is resampled on
   its own and linearly aligned onto the accel's 30 Hz grid via the two streams' first timestamps.
+  Known limitation (found by agent HF): a block's rate is ONE nominal rate from its median interval, but
+  ~20 WISDM blocks switch between 20 Hz and ~100 Hz mid-block (test: 1605-I, 1607-L, 1617-P, 371 of
+  12,493 windows; val: 1620-Q, 1624-Q, 182 windows); their off-rate stretches are time-scaled by 5x.
+  Kept as is so existing replay outputs stay comparable; ``activity_context.wisdm`` segments per rate.
   Capture-24: 100 Hz accel through the exact production resampler (``resample_3_10``); gyro absent.
 * **HART windows** exactly as ``serve.classify_windows`` would emit them (4 s / 2 s grid anchored at the
   recording start, 1 s FIR-transient margin at both edges, ``HARTModel.predict_window``, probabilities
@@ -435,10 +439,10 @@ def run_wisdm_subject(subject: int, manifest_path: str, checkpoint_dir: str,
     """HART windows + 1 Hz proxies + per-block metadata for one WISDM subject (needs the [model] extra).
 
     ``gyro_mode="real"`` (default, production-faithful: WHOOP always streams gyro) feeds the aligned gyro.
-    ``gyro_mode="zero"`` is a DIAGNOSTIC that reproduces what ``activity_context.train`` actually trained and
-    evaluated on: its accel/gyro merge ``np.searchsorted``-es an unsorted gyro timestamp array (WISDM
-    timestamps jump at activity changes), so ~82 % of HART's train windows and ~83 % of its eval windows
-    carry all-zero gyro.
+    ``gyro_mode="zero"`` is a DIAGNOSTIC that reproduces what ``activity_context.train`` trained and evaluated
+    hart-wisdm-v0 on: its old accel/gyro merge ``np.searchsorted``-ed an unsorted gyro timestamp array (WISDM
+    timestamps jump at activity changes), so ~82 % of v0's train windows and ~83 % of its eval windows
+    carry all-zero gyro. train.py now loads through ``activity_context.wisdm`` (no fill; hart-wisdm-v1).
     """
     if gyro_mode not in ("real", "zero"):
         raise ValueError("gyro_mode must be 'real' or 'zero'")
