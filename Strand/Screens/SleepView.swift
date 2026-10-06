@@ -462,6 +462,32 @@ struct SleepView: View {
         return AnalyticsEngine.Rest.composite(daily: daily)
     }
 
+    /// The hosted `daily.sleep_features` document + its matched night for the CURRENT night,
+    /// read directly from the server-score cache (the same path as the Activity Context line:
+    /// `CloudPushRuntime.scoreRepository()` → `cachedDay` → `hostedResult` → typed document;
+    /// spec-25 §7.3 "Existing raw snapshot caching provides offline persistence").
+    ///
+    /// The document is used only when it exists AND carries a night matching this night's bed
+    /// window. Every failure mode (cloud scoring off, no cached day, no `sleep_features` key, a
+    /// malformed/future-schema document, no matching night) is nil → the Sleep page renders the
+    /// night-detail section exactly as a feature-off build, like the Activity Context line.
+    private var sleepFeaturesForCurrentNight: (document: SleepFeatureDocument, night: SleepFeatureNight)? {
+        guard let repository = CloudPushRuntime.shared.scoreRepository(),
+              let model,
+              CloudPushIdentityStore.current() != nil else { return nil }
+        let night = heroNight(model).session
+        let day = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(night.endTs)))
+        // The strap's own device first, then the installation's — the same candidates the app
+        // model syncs under (AppModel.hostedReadCandidates).
+        let deviceIds = CloudStrapSerialStore.shared.readCandidates(forLocalId: repo.deviceId)
+        guard let cached = repository.cachedDay(day: day, deviceIds: deviceIds),
+              let hosted = cached.hostedResult,
+              let document = hosted.sleepFeatures,
+              let matched = document.night(matchingStart: night.effectiveStartTs, end: night.endTs)
+        else { return nil }
+        return (document, matched)
+    }
+
     /// Dispatch a reorderable Sleep section to its card. Naps rides with `.stages` (drawn inside the stages
     /// hero); the Rest hero is pinned outside this list. Mirrors the Android SleepScreen `when(section)`.
     @ViewBuilder
@@ -470,7 +496,14 @@ struct SleepView: View {
         case .sleepMarks:      SleepMarkCard()
         case .stages:          hero(model)
         case .bodyClock:       bodyClockDial(model)
-        case .nightDetail:     NightDetailCard(model: model)
+        case .nightDetail:
+            NightDetailCard(model: model)
+            // Sleep details (spec 7.5): rendered only when a hosted sleep-features document exists
+            // for the current night. With no payload this renders nothing, so feature-off builds
+            // are byte-identical to before.
+            if let feature = sleepFeaturesForCurrentNight {
+                SleepFeatureCards(document: feature.document, night: feature.night)
+            }
         case .sleepDebt:       SleepDebtLedgerCard(model: model)
         case .stagesVsTypical: StagesVsTypicalCard(model: model)
         case .asleepDuration:  durationTrend(model)

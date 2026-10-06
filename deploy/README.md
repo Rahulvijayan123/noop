@@ -211,6 +211,38 @@ Inference never runs inside a scoring transaction: the candidate stage executes
 after the canonical snapshot transaction has committed, calls the sidecar with no
 transaction open, and writes its result in a fresh committed transaction.
 
+### Sleep-phenotype enrichment lane (feature/sleep-phenotypes)
+
+The SAME sidecar process serves a second, dedicated endpoint for the descriptive
+sleep-phenotype enrichment: `POST /v1/sleep-features` (loopback-only, its own
+typed request/response; see `docs/SLEEP_FEATURES_CONTRACT.md`). It is NOT an
+inference request and NOT a candidate provider — a bundle of descriptive
+features is neither a scalar result nor stage segments, so it never touches the
+candidate lane's promotion semantics.
+
+- Trigger: the Swift worker's scoring pass attaches it to the snapshot payload
+  under `daily.sleep_features` BEFORE `publish_scoring_snapshot_v2` (a plain
+  loopback JSON call, no waveform download / model inference; the repeatable-read
+  transaction is bounded by the 3500 ms transport budget around the sidecar's
+  own 3000 ms compute budget, and a timeout publishes the core snapshot with
+  `sleep_features.status = "timeout"` — core scores never depend on it).
+- Rollback / off switch: unset `FRWHOOP_INFERENCE_URL` (or stop the sidecar).
+  Snapshots then publish without `daily.sleep_features`, byte-identical in every
+  core field; old clients and the scores route are unaffected either way. NO
+  database migration is involved (`publish_scoring_snapshot_v2` stores `daily`
+  verbatim as jsonb, and the scores edge route passes `daily` through).
+- One new pinned dependency: `yasa==0.8.0` in `Tools/InferenceWorker/pyproject.toml`
+  (hypnogram analysis only — YASA's PSG classifiers are never applied to WHOOP
+  signals). `uv.lock` is committed; deploy-prep resolves it from the lock like
+  every other sidecar dependency.
+- Deploy step (additive, after the normal sidecar provision): sync
+  `Tools/InferenceWorker` to `/opt/frwhoop-inference`, `uv sync --frozen` in its
+  venv, then `systemctl restart frwhoop-inference`. Verify with
+  `curl -s http://127.0.0.1:8787/healthz` and one loopback smoke POST.
+- Phone: no migration, no new route — the Sleep page reads the typed document
+  from the cached hosted snapshot (`HostedDayResult.sleepFeatures`), decoded
+  non-fatally.
+
 ## Sidecar provision (run once per host)
 
 ```bash
