@@ -83,10 +83,13 @@ they are not environment-configurable.
 
 ## 5. Reprocessing
 
-- **Data changes** reprocess automatically: scoring completions (fingerprint over D−1..D+1), activity day documents,
-  placement changes (trigger on `placement_intervals`, from the effective start through today), exposure revisions
-  (`[min start − 24 h, max end + 72 h]`), and the `history_changed` cascade D+1..min(today − 1, D+28) when a
-  retrospective day's daily values change.
+- **Data changes** reprocess automatically: scoring completions (fingerprint over D−1..D+1), decoder day documents
+  (trigger on `activity_context_days`, the local days the UTC day overlaps), placement changes (trigger on
+  `placement_intervals`, from the effective start through today), exposure revisions
+  (`[min start − 24 h, max end + 72 h]`), and the `history_changed` cascade when a published retrospective day
+  changes what later days read: daily values → D+1..min(today − 1, D+28) plus the newest retrospective day (whose
+  90-day episode window may still reach D); sleep episodes only → D+1..D+14 (prior-night sleep); bouts only →
+  D+1..D+3. Every job-touching path takes row locks in (user, device, day, mode) order.
 - **Policy changes** do not: the dependency fingerprint does not include the worker's policy fingerprint. After
   deploying a worker whose `Policy.fingerprint` changed (any tunable, any system version), re-dirty history
   explicitly, newest window first and in budget-sized batches:
@@ -97,6 +100,11 @@ they are not environment-configurable.
   Documents record `policy_fingerprint` and `versions`, so a mixed-policy history is detectable
   (`select policy_fingerprint, count(*) from physiology_context_days where superseded_by is null group by 1`).
   Frozen references are never rewritten by a policy change; a new regime or version registers a new one.
+- **Regime keys of earlier builds.** Development builds before the worker review repairs stamped the device row's
+  current family and firmware on every day; they are now unknown on every day (no effective-dated history exists).
+  Every series' regime key therefore changed once, and the change detector reads a key change as a regime boundary.
+  Production has no stored context, so nothing is needed there; any test database that ran an earlier build should
+  be cleared or re-dirtied over its whole 120-day range (the query above) before its documents are compared.
 - **Finality.** A retrospective document becomes `final` once its cutoff is ≥ day end + 30 h; the enqueue schedules
   that rebuild (`finality_due`), and the input fingerprint includes finality so the rebuild stores a new revision.
 
