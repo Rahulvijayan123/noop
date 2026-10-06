@@ -292,14 +292,27 @@ struct ActivityTimelineView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
             } else {
-                HStack(spacing: 1) {
-                    ForEach(Array(segs.enumerated()), id: \.offset) { _, seg in
-                        RoundedRectangle(cornerRadius: 1, style: .continuous)
-                            .fill(segColor(seg))
-                            .frame(maxWidth: .infinity)
+                // Drawn on a Canvas so the ribbon always fits the width it is given. A day is 2,880
+                // buckets; one view per bucket plus spacing has a fixed minimum width far wider than any
+                // screen and stretches the whole page.
+                Canvas { context, size in
+                    guard !segs.isEmpty, size.width > 0 else { return }
+                    let step = size.width / CGFloat(segs.count)
+                    var index = 0
+                    while index < segs.count {
+                        var end = index + 1
+                        while end < segs.count, segs[end] == segs[index] { end += 1 }
+                        if case .epoch(let motion) = segs[index] {
+                            let rect = CGRect(x: CGFloat(index) * step, y: 0,
+                                              width: CGFloat(end - index) * step, height: size.height)
+                            context.fill(Path(rect), with: .color(ActivityRibbon.color(for: motion)))
+                        }
+                        index = end
                     }
                 }
+                .frame(maxWidth: .infinity)
                 .frame(height: 8)
+                .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel(ribbonAccessibilityLabel(segs))
             }
@@ -308,13 +321,6 @@ struct ActivityTimelineView: View {
             Text(ActivityContextWording.unavailable)
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textTertiary)
-        }
-    }
-
-    private func segColor(_ seg: ActivityRibbon.Segment) -> Color {
-        switch seg {
-        case .epoch(let motion): return ActivityRibbon.color(for: motion)
-        case .gap: return Color.clear
         }
     }
 
