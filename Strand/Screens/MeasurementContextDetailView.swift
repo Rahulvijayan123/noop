@@ -78,13 +78,13 @@ struct MeasurementContextDetailModel: Equatable {
         }
         let zone = W.zone(e.localTime.timezoneId, offsetS: e.localTime.utcOffsetS)
         let sections: [ContextDetailSection?] = [
-            measurementSection(e, zone: zone, locale: locale),
+            measurementSection(e, ownerDay: document.header?.identity.day ?? day.day, zone: zone, locale: locale),
             signalSection(e, locale: locale),
             activitySection(e, locale: locale),
             precedingSection(e, locale: locale),
             sleepWearSection(e),
             eligibilitySection(e),
-            referenceSection(e, locale: locale),
+            referenceSection(e, document: document, locale: locale),
             exertionSection(e, zone: zone, locale: locale),
             exposureSection(e, document: document, zone: zone, locale: locale),
             availabilitySection(document),
@@ -103,14 +103,20 @@ struct MeasurementContextDetailModel: Equatable {
 
     // MARK: Sections
 
-    private static func measurementSection(_ e: PhysiologyContext.MeasurementEnvelope, zone: TimeZone,
-                                           locale: Locale) -> ContextDetailSection {
+    /// `ownerDay` is the local day that owns the document (a night belongs to the day it ends on), not the date
+    /// the measurement started.
+    private static func measurementSection(_ e: PhysiologyContext.MeasurementEnvelope, ownerDay: String,
+                                           zone: TimeZone, locale: Locale) -> ContextDetailSection {
         typealias W = PhysiologyContextWording
+        let start = W.dayAndTime(e.support.start, zone: zone, locale: locale)
+        let end = W.dayAndTime(e.support.end, zone: zone, locale: locale)
+        let spansDates = W.date(e.support.start, zone: zone, locale: locale) != W.date(e.support.end, zone: zone, locale: locale)
         var rows = [
             ContextDetailRow("metric", String(localized: "Measurement"), W.metric(e.metric)),
             ContextDetailRow("time", String(localized: "Measured"), W.timeRange(e.support, zone: zone, locale: locale),
                              note: W.zoneLabel(zone, at: e.support.start, utcOffsetS: e.localTime.utcOffsetS)),
-            ContextDetailRow("day", String(localized: "Local day"), W.day(e.localTime.localDay, locale: locale)),
+            ContextDetailRow("day", String(localized: "Local day"), W.day(ownerDay, locale: locale),
+                             note: spansDates ? String(localized: "From \(start) to \(end)") : nil),
             ContextDetailRow("length", String(localized: "Length"), W.duration(e.support.duration)),
         ]
         if let bucket = e.displayBucket, bucket != e.support {
@@ -163,9 +169,10 @@ struct MeasurementContextDetailModel: Equatable {
                                          note: a.mixed ? String(localized: "Activity was mixed during the measurement.") : nil))
         }
         if let decoder = e.decoderActivity {
+            // A likelihood only ("Likely standing"): posture from arm orientation is never confirmed.
             rows.append(ContextDetailRow("decoder", String(localized: "Second estimate"),
-                                         decoder.dominantLabel.map(W.activityLabel) ?? String(localized: "Mixed or unknown"),
-                                         note: String(localized: "This estimate reads heart rate, so it is shown for reference only and never used to qualify the measurement.")))
+                                         decoder.dominantLabel.map(W.likelyActivity) ?? String(localized: "Mixed or unknown"),
+                                         note: String(localized: "A likely activity or posture, not a confirmed one. This estimate reads heart rate, so it is shown for reference only and never used to qualify the measurement.")))
         }
         var notes: [String] = []
         if let reasons = W.reasonList(a.reasons) { notes.append(reasons) }
@@ -239,33 +246,39 @@ struct MeasurementContextDetailModel: Equatable {
     }
 
     private static func referenceSection(_ e: PhysiologyContext.MeasurementEnvelope,
+                                         document: PhysiologyContextDocument,
                                          locale: Locale) -> ContextDetailSection {
         typealias W = PhysiologyContextWording
         let units = e.method.units
-        let rows: [ContextDetailRow] = e.comparisons.isEmpty
-            ? [ContextDetailRow("none", String(localized: "References"), String(localized: "None for this measurement yet"))]
-            : e.comparisons.enumerated().map { index, c in
-                var notes: [String] = []
-                if c.signedDifference != nil, c.status != .ready { notes.append(W.referenceStatus(c.status)) }
-                notes.append(c.supportDays == 1 ? String(localized: "Based on 1 day")
-                                                : String(localized: "Based on \(c.supportDays) days"))
-                if let from = c.fromDay, let to = c.toDay {
-                    notes.append("\(W.day(from, locale: locale))\u{2013}\(W.day(to, locale: locale))")
-                }
-                if let center = c.center {
-                    var text = String(localized: "Reference \(W.value(center, units: units, locale: locale))")
-                    if let u = c.centerUncertainty { text += " \u{00B1} " + W.value(u, units: units, locale: locale) }
-                    notes.append(text)
-                }
-                if c.pooledContribution > 0 {
-                    notes.append(String(localized: "\(W.percent(c.pooledContribution, locale: locale)) from related contexts"))
-                }
-                if let r = W.reasonList(c.reasons) { notes.append(r) }
-                let value = c.signedDifference.map { W.signedDifference($0, units: units, locale: locale) }
-                    ?? W.referenceStatus(c.status)
-                return ContextDetailRow("reference-\(index)", W.referenceTitle(c.view), value,
-                                        note: notes.joined(separator: " \u{00B7} "))
+        func row(_ id: String, _ c: PhysiologyContext.ReferenceComparison, lead: String?) -> ContextDetailRow {
+            var notes: [String] = lead.map { [$0] } ?? []
+            if c.signedDifference != nil, c.status != .ready { notes.append(W.referenceStatus(c.status)) }
+            notes.append(c.supportDays == 1 ? String(localized: "Based on 1 day")
+                                            : String(localized: "Based on \(c.supportDays) days"))
+            if let from = c.fromDay, let to = c.toDay {
+                notes.append("\(W.day(from, locale: locale))\u{2013}\(W.day(to, locale: locale))")
             }
+            if let center = W.referenceCenter(c, units: units, locale: locale) { notes.append(center) }
+            if c.pooledContribution > 0 {
+                notes.append(String(localized: "\(W.percent(c.pooledContribution, locale: locale)) from related contexts"))
+            }
+            if let r = W.reasonList(c.reasons) { notes.append(r) }
+            let value = c.signedDifference.map { W.signedDifference($0, units: units, locale: locale) }
+                ?? W.referenceStatus(c.status)
+            return ContextDetailRow(id, W.referenceTitle(c.view), value, note: notes.joined(separator: " \u{00B7} "))
+        }
+        var rows = e.comparisons.enumerated().map { row("reference-\($0.offset)", $0.element, lead: nil) }
+        if rows.isEmpty {
+            // A window that fed today's stable-awake median: the day's comparisons, labelled as the median's.
+            let day = MeasurementContextSelection.dayStableAwakeComparisons(for: e, in: document.comparisons)
+            rows = day.enumerated().map {
+                row("day-reference-\($0.offset)", $0.element,
+                    lead: String(localized: "Today's stable awake median, not this window alone"))
+            }
+        }
+        if rows.isEmpty {
+            rows = [ContextDetailRow("none", String(localized: "References"), String(localized: "None for this measurement yet"))]
+        }
         return ContextDetailSection(id: "references", title: String(localized: "References"), rows: rows,
                                     footnote: String(localized: "A historical reference is a past period of your own data, not a healthy range."))
     }
@@ -319,17 +332,23 @@ struct MeasurementContextDetailModel: Equatable {
                                          label.isEmpty ? W.exposureKind(event.kind) : label,
                                          W.exposureKind(event.kind), note: notes.joined(separator: " \u{00B7} ")))
         }
-        let statuses = e.history.exposureCoverage.isEmpty ? (document.exposures?.categoryStatus ?? [])
-                                                           : e.history.exposureCoverage
+        let ownWindow = !e.history.exposureCoverage.isEmpty
+        let statuses = ownWindow ? e.history.exposureCoverage : (document.exposures?.categoryStatus ?? [])
         for status in statuses {
             rows.append(ContextDetailRow("exposure-status-\(status.kind.rawValue)", W.exposureKind(status.kind),
-                                         W.exposureCategoryStatus(status.status)))
+                                         W.exposureCategoryStatus(status),
+                                         note: W.exposureCategoryNote(status, locale: locale)))
         }
         if rows.isEmpty {
             rows.append(ContextDetailRow("none", String(localized: "Recorded"), String(localized: "Nothing recorded")))
         }
+        var footnote = String(localized: "\u{201C}Not recorded\u{201D} is not the same as none. Times are when they happened, not when they were entered.")
+        if !statuses.isEmpty {
+            footnote += " " + (ownWindow ? String(localized: "Recording status covers the days before this measurement.")
+                                         : String(localized: "Recording status covers this day."))
+        }
         return ContextDetailSection(id: "exposures", title: String(localized: "Recorded exposures"), rows: rows,
-                                    footnote: String(localized: "\u{201C}Not recorded\u{201D} is not the same as none. Times are when they happened, not when they were entered."))
+                                    footnote: footnote)
     }
 
     private static func availabilitySection(_ document: PhysiologyContextDocument) -> ContextDetailSection? {
@@ -366,6 +385,9 @@ struct MeasurementContextDetailModel: Equatable {
         }
         if day.job?.pending == true {
             rows.append(ContextDetailRow("job", String(localized: "Update"), String(localized: "A newer version is being prepared")))
+        } else if day.job?.deadLetter == true {
+            rows.append(ContextDetailRow("job", String(localized: "Update"),
+                                         String(localized: "Couldn't be updated with the latest data")))
         }
         if rows.isEmpty { rows.append(ContextDetailRow("mode", String(localized: "Processing"), String(localized: "Not reported"))) }
         return ContextDetailSection(id: "processing", title: String(localized: "How final this is"), rows: rows,
@@ -390,7 +412,13 @@ struct MeasurementContextDetailModel: Equatable {
             rows.append(ContextDetailRow("d-pairing", "Pairing", "not reported"))
         }
         if let job = day.job {
-            rows.append(ContextDetailRow("d-job", "Job", job.pending ? "pending" : "idle", note: job.dirtyAt))
+            let state = job.deadLetter ? "dead_letter" : (job.pending ? "pending" : "idle")
+            let leased = job.leased.map { $0 ? " leased" : "" } ?? ""
+            var note: [String] = ["dirty \(job.dirtyAt ?? "-")"]
+            note.append("input \(job.inputRevision ?? "-")")
+            note.append("completed \(job.completedRevision ?? "-")")
+            if !job.reasons.isEmpty { note.append(job.reasons.joined(separator: " ")) }
+            rows.append(ContextDetailRow("d-job", "Job", state + leased, note: note.joined(separator: " / ")))
         }
         if let h = day.document?.header {
             rows.append(ContextDetailRow("d-contract", "Contract", "\(h.contractVersion) (schema \(h.schemaVersion))"))
@@ -422,7 +450,14 @@ struct MeasurementContextDetailModel: Equatable {
             rows.append(ContextDetailRow("d-confidence", "Validity confidence",
                                          e.validity.confidence.kind.rawValue
                                             + (e.validity.confidence.value.map { " \($0)" } ?? "")))
-            let codes = (e.validity.reasons + e.eligibility.flatMap(\.reasons) + e.activity.reasons).map(\.rawValue)
+            var all: [PhysiologyContext.ReasonCode] = e.validity.reasons
+            all += e.eligibility.flatMap(\.reasons)
+            all += e.activity.reasons
+            all += e.sleepWear.reasons
+            all += e.history.wake.reasons
+            all += e.comparisons.flatMap(\.reasons)
+            all += day.document?.statusReasons ?? []
+            let codes = all.map(\.rawValue)
             if !codes.isEmpty {
                 rows.append(ContextDetailRow("d-codes", "Reason codes", Array(Set(codes)).sorted().joined(separator: " ")))
             }

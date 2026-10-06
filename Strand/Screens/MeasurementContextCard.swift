@@ -48,11 +48,25 @@ struct MeasurementContextSummary: Equatable {
                 note: nil)
         }
         let kind = MeasurementContextSelection.selectedComparison(for: e)
-        let reference = MeasurementContextSelection.headlineReference(e.comparisons)
+        // The measurement's own comparison when it has one. A 5-minute window that fed today's stable-awake
+        // median has none (the engine attaches a comparison only to the envelope that is its value); the day's
+        // comparison is then shown as the median's, never as the window's own difference.
+        let own = MeasurementContextSelection.headlineReference(e.comparisons)
+        let dayMedian = own == nil
+            ? MeasurementContextSelection.headlineReference(
+                MeasurementContextSelection.dayStableAwakeComparisons(for: e, in: document.comparisons))
+            : nil
+        let reference = own ?? dayMedian
         let episode = MeasurementContextSelection.episode(for: e, reference: reference, episodes: document.episodes)
-        let referenceText = reference.map {
-            PhysiologyContextWording.referenceLine($0, units: e.method.units, locale: locale)
-        } ?? String(localized: "No reference comparison for this measurement yet")
+        let referenceText: String
+        if let own {
+            referenceText = PhysiologyContextWording.referenceLine(own, units: e.method.units, locale: locale)
+        } else if let dayMedian {
+            referenceText = PhysiologyContextWording.stableAwakeMedianLine(dayMedian, units: e.method.units,
+                                                                           locale: locale)
+        } else {
+            referenceText = String(localized: "No reference comparison for this measurement yet")
+        }
         let unverified = e.validity.state == .unverified
         return MeasurementContextSummary(
             envelopeId: e.id,
@@ -61,19 +75,21 @@ struct MeasurementContextSummary: Equatable {
             eligibilityText: PhysiologyContextWording.eligibilityLine(e.verdict(kind), kind: kind),
             coverageText: PhysiologyContextWording.coverageLine(e, locale: locale),
             referenceText: referenceText,
-            episodeText: episode.map { PhysiologyContextWording.episodeState($0.state) },
+            episodeText: episode.map { PhysiologyContextWording.episodeState($0) },
             episodeBadges: episode.map(PhysiologyContextWording.episodeBadges) ?? [],
             badges: PhysiologyContextWording.processingBadges(mode: day.effectiveMode,
                                                               finality: e.finality, unverified: unverified),
             note: nil)
     }
 
-    /// Context built from an earlier scoring result. Nothing from it is paired with the value on the page.
-    static func stale() -> MeasurementContextSummary {
+    /// Context built from an earlier scoring result. Nothing from it is paired with the value on the page. After
+    /// the card's last re-read it says to check back later instead of promising the update.
+    static func stale(checkBackLater: Bool = false) -> MeasurementContextSummary {
         MeasurementContextSummary(
             envelopeId: nil, statePhrase: String(localized: "Context updating"), supportText: nil,
             eligibilityText: nil, coverageText: nil, referenceText: nil, episodeText: nil, episodeBadges: [],
-            badges: [], note: MeasurementContextCopy.staleNote)
+            badges: [], note: checkBackLater ? MeasurementContextCopy.staleCheckBackLaterNote
+                                             : MeasurementContextCopy.staleNote)
     }
 }
 
@@ -84,6 +100,10 @@ enum MeasurementContextCopy {
     static var staleNote: String {
         String(localized: "This day's results changed after its context was built. Updated context is on its way.")
     }
+    static var staleCheckBackLaterNote: String {
+        String(localized: "This day's results changed after its context was built. The update is taking longer than usual. Check back later.")
+    }
+    static var checkBackLater: String { String(localized: "Check back later.") }
     static var refreshFailedNote: String { String(localized: "Couldn't refresh. Showing saved context.") }
     static var failed: String { String(localized: "Couldn't load measurement context.") }
 
@@ -95,23 +115,30 @@ enum MeasurementContextCopy {
             return String(localized: "Measurement context appears once your account finishes connecting.")
         case .unsupportedServer: return String(localized: "Measurement context isn't available from the server yet.")
         case .noData: return String(localized: "No measurement context for this day yet.")
+        case .processingFailed: return String(localized: "Context unavailable for this day.")
         }
     }
 
-    static func pending(_ reason: PhysiologyContextStore.PendingReason) -> String {
+    /// Pending copy; after the card's last re-read it adds "Check back later." rather than implying it is still
+    /// watching.
+    static func pending(_ reason: PhysiologyContextStore.PendingReason, checkBackLater: Bool = false) -> String {
+        let text: String
         switch reason {
-        case .computing: return String(localized: "Measurement context for this day is being prepared.")
+        case .computing: text = String(localized: "Measurement context for this day is being prepared.")
         case .deviceRegistration:
-            return String(localized: "Measurement context appears once this strap's data reaches your account.")
+            text = String(localized: "Measurement context appears once this strap's data reaches your account.")
         }
+        return checkBackLater ? text + " " + Self.checkBackLater : text
     }
 
     /// Every fixed string above (for the copy checks).
     static var allFixedText: [String] {
-        [title, loading, staleNote, refreshFailedNote, failed]
-            + [PhysiologyContextStore.UnavailableReason.signedOut, .accountNotReady, .unsupportedServer, .noData]
-                .compactMap(unavailable)
-            + [PhysiologyContextStore.PendingReason.computing, .deviceRegistration].map(pending)
+        [title, loading, staleNote, staleCheckBackLaterNote, checkBackLater, refreshFailedNote, failed]
+            + [PhysiologyContextStore.UnavailableReason.signedOut, .accountNotReady, .unsupportedServer, .noData,
+               .processingFailed].compactMap(unavailable)
+            + [PhysiologyContextStore.PendingReason.computing, .deviceRegistration].flatMap {
+                [pending($0), pending($0, checkBackLater: true)]
+            }
     }
 }
 
@@ -130,10 +157,8 @@ struct MeasurementContextCard: View {
     @ObservedObject private var store = PhysiologyContextStore.shared
     @State private var detailDay: PhysiologyContextDay?
     @State private var detailIsStale = false
-
-    /// How often a pending or updating context is re-read while the card is on screen, and how many times.
-    private static let pollSeconds: UInt64 = 30
-    private static let maxPolls = 10
+    /// Set after the last scheduled re-read found the context still pending or updating.
+    @State private var checkBackLater = false
 
     private var key: PhysiologyContextStore.Key { .init(day: day, metric: metric) }
 
@@ -150,15 +175,19 @@ struct MeasurementContextCard: View {
         }
     }
 
+    /// Load, then re-read pending or updating context on a bounded backoff (`PhysiologyContextStore.pollDelaysS`,
+    /// about 15 minutes) while the card is on screen; `.task` cancels it when the card disappears. When the
+    /// schedule runs out and the context is still not current, the card says to check back later.
     private func run() async {
+        checkBackLater = false
         await store.load(key)
-        var polls = 0
-        while !Task.isCancelled, polls < Self.maxPolls, store.state(for: key)?.wantsPolling == true {
-            try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
+        for delay in PhysiologyContextStore.pollDelaysS {
+            guard !Task.isCancelled, store.state(for: key)?.wantsPolling == true else { return }
+            try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
             guard !Task.isCancelled else { return }
             await store.load(key)
-            polls += 1
         }
+        if !Task.isCancelled, store.state(for: key)?.wantsPolling == true { checkBackLater = true }
     }
 
     @ViewBuilder
@@ -175,16 +204,16 @@ struct MeasurementContextCard: View {
             if let text = MeasurementContextCopy.unavailable(reason) {
                 shell(badges: []) {
                     message(text)
-                    if reason == .noData { actions(day: nil, stale: false) }
+                    if reason == .noData || reason == .processingFailed { actions(day: nil, stale: false) }
                 }
             }
         case .pending(let shown, let reason)?:
             shell(badges: []) {
-                message(MeasurementContextCopy.pending(reason))
+                message(MeasurementContextCopy.pending(reason, checkBackLater: checkBackLater))
                 if let shown { actions(day: shown, stale: true) }
             }
         case .stale(let shown)?:
-            summaryCard(MeasurementContextSummary.stale(), day: shown, stale: true)
+            summaryCard(MeasurementContextSummary.stale(checkBackLater: checkBackLater), day: shown, stale: true)
         case .available(let shown)?:
             summaryCard(MeasurementContextSummary.build(day: shown, metric: metric), day: shown, stale: false)
         case .failed(let cached, _)?:

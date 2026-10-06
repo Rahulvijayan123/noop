@@ -12,7 +12,8 @@ import StrandAnalytics
 //
 // The outer envelope is read with JSONSerialization (unknown members are ignored, absent ones tolerated) and the
 // document / arrays with `PhysiologyContext.decoder()` into the shared Swift types. A server that predates the
-// routes answers 405, which is "context unavailable", never an error banner. Results are cached per owner on
+// routes answers 405, and a new edge function whose database migration is missing answers 404 (the read RPC does
+// not exist yet); both are "context unavailable", never an error banner. Results are cached per owner on
 // disk (owner-checked, atomic, pruned), exactly like `ServerScoreRepository.intradaySeries`.
 
 // MARK: - Values
@@ -44,6 +45,19 @@ public struct PhysiologyContextDay: Sendable, Equatable {
     public struct Job: Sendable, Equatable {
         public let pending: Bool
         public let dirtyAt: String?
+        /// The worker gave up on the day's latest input (`dead_letter`): no update is on its way.
+        public let deadLetter: Bool
+        /// A worker holds the job right now.
+        public let leased: Bool?
+        public let inputRevision: String?
+        public let completedRevision: String?
+        public let reasons: [String]
+
+        public init(pending: Bool, dirtyAt: String?, deadLetter: Bool = false, leased: Bool? = nil,
+                    inputRevision: String? = nil, completedRevision: String? = nil, reasons: [String] = []) {
+            self.pending = pending; self.dirtyAt = dirtyAt; self.deadLetter = deadLetter; self.leased = leased
+            self.inputRevision = inputRevision; self.completedRevision = completedRevision; self.reasons = reasons
+        }
     }
 
     public let day: String
@@ -142,7 +156,8 @@ public struct PhysiologyContextHistory: Sendable, Equatable {
 /// The answer of one context read. Failures that asking again can fix are thrown instead.
 public enum PhysiologyContextRead<Value: Sendable & Equatable>: Sendable, Equatable {
     case loaded(Value)
-    /// The server predates the context routes (405). "Context unavailable", not an error.
+    /// The server predates the context routes (405), or its database does not have them yet (404).
+    /// "Context unavailable", not an error.
     case unsupportedServer
     /// The account holds no such device yet (409 `device_registration_pending`).
     case deviceRegistrationPending
@@ -202,8 +217,8 @@ public actor PhysiologyContextRepository {
     // MARK: Day context
 
     /// The day's context from the first of `deviceIds` that has one: an available document wins, then a
-    /// pending one, then a "none" answer. A 405 from any candidate means the server has no context routes at
-    /// all, so it ends the walk. Only when no candidate answered is the last failure thrown.
+    /// pending one, then a "none" answer. A 405 or 404 from any candidate means the server has no context
+    /// routes (or no context database) at all, so it ends the walk. Only when no candidate answered is the last failure thrown.
     public func dayContext(day: String, deviceIds: [String], metric: PhysiologyContext.MetricKind? = nil,
                            mode: PhysiologyContext.ProcessingMode? = nil)
         async throws -> PhysiologyContextRead<PhysiologyContextDay> {
@@ -380,10 +395,12 @@ public actor PhysiologyContextRepository {
         return object
     }
 
-    /// The two HTTP answers that are states, not failures.
+    /// The HTTP answers that are states, not failures. 405: the edge function predates the routes. 404: the
+    /// edge function is new but the database migration is missing, so the read RPC does not exist (the edge
+    /// passes the RPC's 404 through). Both are server-wide.
     private static func mapped<V: Sendable & Equatable>(_ error: ReadError) -> PhysiologyContextRead<V>? {
         guard case .http(let status, let body) = error else { return nil }
-        if status == 405 { return .unsupportedServer }
+        if status == 405 || status == 404 { return .unsupportedServer }
         if ServerScoreRepository.isUnregisteredDevice(status: status, body: body) { return .deviceRegistrationPending }
         return nil
     }
@@ -418,7 +435,12 @@ public actor PhysiologyContextRepository {
         }
         let job = (context["job"] as? [String: Any]).map { j in
             PhysiologyContextDay.Job(pending: (j["pending"] as? Bool) ?? false,
-                                     dirtyAt: revisionString(j["dirty_at"]))
+                                     dirtyAt: revisionString(j["dirty_at"]),
+                                     deadLetter: (j["dead_letter"] as? Bool) ?? false,
+                                     leased: j["leased"] as? Bool,
+                                     inputRevision: revisionString(j["input_revision"]),
+                                     completedRevision: revisionString(j["completed_revision"]),
+                                     reasons: (j["reasons"] as? [Any])?.compactMap { $0 as? String } ?? [])
         }
         return PhysiologyContextDay(
             day: day, deviceId: deviceId, metric: metric, status: status,
