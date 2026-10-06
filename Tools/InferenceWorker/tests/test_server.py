@@ -43,8 +43,11 @@ def test_healthz_reports_readiness_per_provider(live_server):
     assert status == 200
     assert body["contract_version"]
     providers = body["providers"]
+    # The sensor-biomarker providers are additive and ready without model bytes
+    # (the rhythm shadow lane is disabled by default: no artifacts needed).
     assert set(providers) == {"production.runs.v1", "neurokit2.shadow.v1",
-                              "hypnospy.hr-boundary.v1", "sleepecg.wrn-gru-mesa.v1"}
+                              "hypnospy.hr-boundary.v1", "sleepecg.wrn-gru-mesa.v1",
+                              "sensor.biomarkers.v1", "sensor.biomarkers.rhythm.v1"}
     for pid in ("production.runs.v1", "neurokit2.shadow.v1", "hypnospy.hr-boundary.v1"):
         assert providers[pid]["ready"] is True, providers[pid]
         assert providers[pid]["version"]
@@ -86,7 +89,8 @@ def test_providers_lists_capabilities_and_recorded_models(live_server):
     assert body["contract_version"]
     by_id = {p["provider_id"]: p for p in body["providers"]}
     assert set(by_id) == {"production.runs.v1", "neurokit2.shadow.v1",
-                          "hypnospy.hr-boundary.v1", "sleepecg.wrn-gru-mesa.v1"}
+                          "hypnospy.hr-boundary.v1", "sleepecg.wrn-gru-mesa.v1",
+                          "sensor.biomarkers.v1", "sensor.biomarkers.rhythm.v1"}
     production = by_id["production.runs.v1"]
     assert production["metric"] == "hrv"
     assert production["mode"] == "retrospective"

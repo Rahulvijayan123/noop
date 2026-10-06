@@ -156,7 +156,16 @@ def test_register_into_appends_without_disturbing_hrv():
     after = [p.provider_id for p in registry.all()]
     assert after[:len(before)] == before
     assert set(after) - set(before) == {BOUNDARY_ID, STAGE_ID}
-    # default_providers() already includes them, so registering again is idempotent by id
+    # default_providers() already includes them, so registering again is idempotent by id.
+    # The additive sensor-biomarker providers (docs/sensor-biomarkers/CONTRACTS.md)
+    # extend the default registry WITHOUT disturbing the original order above.
     full = ProviderRegistry(default_providers())
     register_into(full)
-    assert len(full.all()) == 4
+    ids = {p.provider_id for p in full.all()}
+    assert {"production.runs.v1", "neurokit2.shadow.v1",
+            "hypnospy.hr-boundary.v1", "sleepecg.wrn-gru-mesa.v1",
+            BOUNDARY_ID, STAGE_ID} <= ids
+    assert {"sensor.biomarkers.v1", "sensor.biomarkers.rhythm.v1"} <= ids
+    n = len(full.all())
+    register_into(full)
+    assert len(full.all()) == n  # idempotent by id

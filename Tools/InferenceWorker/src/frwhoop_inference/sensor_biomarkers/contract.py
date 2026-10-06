@@ -7,6 +7,7 @@ every family module so the stored JSONB shape cannot drift between families.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -49,3 +50,39 @@ def family_document(
     if extra:
         doc.update(extra)
     return doc
+
+def measurement(
+    value: float | None,
+    unit: str,
+    *,
+    denominator: str | None = None,
+    count: int | None = None,
+    method: str | None = None,
+    native_resolution: str | None = None,
+    configuration: str | None = None,
+) -> dict[str, Any]:
+    """One measurement entry (CONTRACTS.md section 3 / spec section 8).
+
+    Every actual measurement carries a finite value or null, a unit, the
+    denominator where relevant, the sample/window/pulse count, the method and
+    the native resolution where relevant. ``value`` may be null ONLY for a
+    structurally valid measurement whose quantity is genuinely undefined (e.g.
+    a median over zero windows); a withheld family carries no measurements at
+    all instead of zero-valued ones.
+    """
+    if value is not None:
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"measurement value must be finite, got {value!r}")
+    entry: dict[str, Any] = {"value": value, "unit": unit}
+    if denominator is not None:
+        entry["denominator"] = denominator
+    if count is not None:
+        entry["count"] = int(count)
+    if method is not None:
+        entry["method"] = method
+    if native_resolution is not None:
+        entry["native_resolution"] = native_resolution
+    if configuration is not None:
+        entry["configuration"] = configuration
+    return entry
