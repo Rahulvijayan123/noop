@@ -241,10 +241,12 @@ FRWHOOP_CONTEXT_PROFILE=1 FRWHOOP_TEST_DB_URL=... swift test -c release -Xswiftc
 | --- | --- | --- |
 | `ContextLaneTests` (config default-off / exact `1` / `DISABLE_LANES`, queue-age composition, claim parsing and cutoff per mode, windows incl. DST, series supports and clipping, method ids, series → measurement source/availability, snapshot parsing and nightly supports, neighbouring/prior sleep stamps, row parsers, transport selection, causal assembly, V10 replay byte identity, prior sleep cutoff, shuffle determinism, payload shape and verbatim document, null revisions, day-owned rows, publish/fail result parsing, error sanitizing, size cap, SQL write audit) | 30 | pass |
 | `ContextLaneFixtureTests` | 1 | pass |
-| `ContextLaneDatabaseTests` (scratch DB, final migration e5aca26a) | 8 + 1 opt-in | pass |
+| `ContextLaneReviewRepairTests` (review repairs: RC-03 supports ×4, R-F2 length, RC-13 device attributes, RC-17 scope, frozen references per mode, R1 optional-read failures; review-worker-repairs.md) | 9 | pass |
+| `ContextLaneDatabaseTests` (scratch DB; + R-F2 history load/plan, frozen references per mode, placement scope, R1 transient failure → retry) | 12 + 1 opt-in | pass |
 | `ContextLaneProfileTests` | 2 opt-in | pass (numbers below) |
 | Whole worker suite, no DB URL (early, before the backend merge) | 446, 31 skipped | 0 failures |
 | Whole worker suite with the scratch DB (after every merge) | 455, 4 skipped (the 3 opt-in profiles and the pre-existing `PushBatchTests.testEmbeddedFixturesMatchOnDiskCorpus`) | 0 failures |
+| Whole worker suite with the scratch DB (`pc/fix-worker`, after the review repairs) | 468, 4 skipped (same) | 0 failures |
 
 DB tests (each creates its own owners/devices and deletes them):
 

@@ -60,17 +60,16 @@ D−159 … D−104 (`autocorrelationWindowDays` 56 before the 14-day guard). 16
 `physiology_context_daily_values` filtered by `(user_id, device_id, mode)` and a `day` range, served by the primary
 key `(user_id, device_id, mode, day, series_key, regime_key)`; causal jobs add the per-row `EXISTS` on
 `physiology_context_days`' primary key. Measured on the scratch database (`testRF2_…`, 160 days × 40 series = 6,400 rows read of 6,840 stored per
-mode, median of 5; the development machine ran at a load average above 100 throughout, so absolute times are
-pessimistic):
+mode, median of 5 loads; debug build):
 
 | Mode | History query | Plan (sequential scans priced out) | Whole `ContextInputs.load` (owner with no raw streams) |
 | --- | --- | --- | --- |
-| retrospective | 26 ms | Index Scan on `physiology_context_daily_values_pkey` | 3,550 ms |
-| causal | 363 ms | Bitmap Heap Scan over the table's index + the per-row `EXISTS` on `physiology_context_days_pkey` | 2,372 ms |
+| retrospective | 13 ms | Index Scan on `physiology_context_daily_values_pkey` | 83 ms |
+| causal | 12 ms | Index Scan on `physiology_context_daily_values_pkey` + the per-row `EXISTS` on `physiology_context_days_pkey` | 91 ms |
 
-The history read is a small share of the load; the whole-load figure is dominated by the round trips of the other
-reads on the loaded machine (the earlier quiet-machine profile measured a full stored day's load at 677 ms,
-worker.md §10).
+An earlier run while the machine sat at a load average above 100 gave 26 / 363 ms for the query (causal as a
+bitmap heap scan over the same index) and 3.6 / 2.4 s for the whole load; the history read stays a small share of a
+job's load either way (a full stored day's load was 677 ms, worker.md §10).
 
 The in-memory profile (`ContextLaneProfileTests`) now builds with 160 days of history; it was not re-run in release
 for this change.
@@ -128,4 +127,29 @@ publication time and select the latest version published at or before C.
 
 ## Test runs
 
-TEST_RUNS
+Debug build, `Tools/CloudWorker`, scratch database from `supabase/tests/e2e/pipeline_db.sh` (every migration):
+
+| Command | Result |
+| --- | --- |
+| `swift build` | clean |
+| `swift test --filter ContextLane` (no DB URL) | 0 failures; DB and profile tests skip |
+| Context suites in the final DB run | `ContextLaneTests` 30, `ContextLaneReviewRepairTests` 9, `ContextLaneFixtureTests` 1, `ContextLaneDatabaseTests` 13 (1 opt-in skipped), `ContextLaneProfileTests` 2 (opt-in, skipped): 0 failures |
+| `FRWHOOP_TEST_DB_URL=… swift test` (whole worker suite) | **468 tests, 4 skipped** (the 3 opt-in profiles and the pre-existing `PushBatchTests.testEmbeddedFixturesMatchOnDiskCorpus`), **0 failures**, 218 s |
+
+The first whole-suite run failed one test, `testACausalReplayIsUnchangedByDataThatArrivedAfterItsCutoff` (the V10
+input-revision defect above); repaired and re-run. The R1 DB test was also run against the old behaviour (every
+error swallowed): it fails 8 assertions there (published with `activity_epochs_unavailable`, job done), so it pins
+the repair. The scratch database ran on ports 55511–55513, not 55501–55503: after the colima VM restarted, a stale
+lima ssh forwarder kept 55501/55503 bound to the dead VM. Not re-run: the release-build profiles
+(`ContextLaneProfileTests`, opt-in).
+
+## For the lead
+
+1. `contracts.md` §7.2 still says history "daily values D-90..D-1" and "nightly snapshot values with the sleep session
+   span": now D−160 … D−1 (`historyDays(for: policy)`) and the main-sleep group (resting HR: the primary session).
+2. Split nights with an inter-fragment gap ≥ 10 % of the hull still have no `*.sleep_night` value: needs
+   multi-interval support or a System C rule for a split group's own gap (RC-03, above).
+3. Regime keys change once with RC-13 (family / firmware unknown): enable on an empty context store or invalidate the
+   stored range when deploying.
+4. RC-18 / P5 need storage changes (backend-db): `end_recorded_at` or insert-only placement corrections, and
+   versioned daily values / bouts.
