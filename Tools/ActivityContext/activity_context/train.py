@@ -2,16 +2,26 @@
 
 Builds the training/eval contract exactly as spec s7 requires:
 
-  * WISDM-19 WATCH streams only (subjects 1600..1650; accel+gyro merged by
-    timestamp within 100 ms; 20 Hz -> 30 Hz via anti-alias polyphase 3/2).
+  * WISDM-19 WATCH streams only (subjects 1600..1650), loaded by
+    activity_context.wisdm (wisdm-watch-loader-2): per (subject, activity)
+    stream sorted by timestamp, each sensor's own native rate detected per
+    constant-rate segment and resampled from its MEASURED rate to 30 Hz with
+    the repo polyphase design, accel/gyro aligned on one 30 Hz time base by
+    timestamp, nothing zero-filled (windows lacking either stream are never
+    built; recordings without gyro are excluded and reported). The v0 loader
+    searchsorted-ed into the unsorted per-subject gyro array and zero-filled
+    the misses (82 % of v0 train windows had all-zero gyro), and resampled
+    every block 3/2 although subjects 1637-1640 are ~50 Hz accel / ~25 Hz gyro.
   * Subject/session split BEFORE windowing (test subjects held out; train
     subjects' sessions split train/val) — upstream's random_split-over-
     windows is explicitly NOT used (hart-repro s9.2).
   * Units converted to the canonical training contract: accel m/s^2 -> g
     (/9.80665), gyro rad/s -> deg/s (x180/pi) — recorded in the manifest so
     inference needs no unit conversion (C10).
-  * Windows 120 @ 30 Hz, hop 60 (2 s), per session; label = majority WISDM
-    letter; C10 label mapping letter -> ontology.
+  * Windows 120 @ 30 Hz, hop 60 (2 s), per aligned piece, exactly as serve.py
+    windows a run (2 s grid anchored at the piece start, 1 s FIR-transient
+    margin at both ends); label = the piece's WISDM letter; C10 label mapping
+    letter -> ontology.
   * StandardScaler fit on train windows ONLY; saved (mean/scale + sha256) in
     the manifest.
   * Optional --train finetunes the HART classification head with the frozen
@@ -31,139 +41,120 @@ import json
 import math
 import os
 import sys
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
 from .manifest import (SCHEMA_VERSION, WISDM_LABEL_MAPPING, Manifest,
                        ManifestError, scaler_sha256)
 from .preprocess import (CHANNEL_ORDER, COLUMNS_PER_SECOND, HOP_SAMPLES,
-                         N_CHANNELS, TARGET_HZ, WINDOW_SAMPLES,
-                         resample_poly_nd)
+                         N_CHANNELS, TARGET_HZ, WINDOW_SAMPLES)
 from . import PREPROCESSING_VERSION
+from . import wisdm as wisdm_loader
+from .wisdm import M_S2_TO_G, RAD_S_TO_DEG_S, MARGIN_SAMPLES
 
-# Unit conversions (C10).
-M_S2_TO_G = 1.0 / 9.80665
-RAD_S_TO_DEG_S = 180.0 / math.pi
-
-ASOF_MAX_DT_NS = 100_000_000       # 100 ms merge tolerance (WHAR asof)
-SESSION_GAP_NS = 1_000_000_000     # >1 s gap splits a session
-WISDM_HZ = 20
+SESSION_GAP_NS = 1_000_000_000     # >1 s gap splits a recording (wisdm.RECORDING_GAP_S)
+SYNTH_HZ = 20                      # synthetic smoke data rate (the real loader detects rates)
+PRETRAINED_SHA256 = "88b8d1790a43cb5c96c5bba5da60c81ae08657024f9747cbe52d45c2acfd2e6d"
 
 
 @dataclass
 class Block:
-    """One contiguous same-activity WISDM session block."""
+    """One aligned, contiguous 6-channel 30 Hz piece of a WISDM recording."""
     subject: int
     activity: str
-    samples: np.ndarray            # (T, 6) float64, 20 Hz, canonical units
+    samples: np.ndarray            # (T, 6) float64, 30 Hz, canonical units (g, deg/s)
     duration_s: float
+    session: str = ""              # recording key "subject-activity-recording" (pieces share it)
+    t0_ns: int = 0
+    meta: Dict[str, Any] = field(default_factory=dict)
 
 
-def parse_raw_file(path: str) -> np.ndarray:
-    """Parse a WISDM raw file (subject,activity,ts_ns,x,y,z;) -> structured."""
-    rows = []
-    with open(path, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
-            line = line.strip().rstrip(";").strip()
-            if not line:
-                continue
-            parts = line.split(",")
-            if len(parts) != 6:
-                continue
-            try:
-                subj = int(parts[0])
-                ts = int(parts[2])
-                xyz = [float(p) for p in parts[3:6]]
-            except ValueError:
-                continue
-            rows.append((subj, parts[1], ts, xyz[0], xyz[1], xyz[2]))
-    if not rows:
-        raise ValueError(f"no parseable rows in {path}")
-    return np.array(rows, dtype=object)
+def _piece_to_block(p: "wisdm_loader.Piece") -> Block:
+    return Block(subject=p.subject, activity=p.activity, samples=p.samples,
+                 duration_s=p.duration_s,
+                 session=f"{p.subject}-{p.activity}-{p.recording}", t0_ns=p.t0_ns,
+                 meta={"acc_rate_hz": round(p.acc_rate_hz, 4), "acc_nominal_hz": p.acc_nominal_hz,
+                       "acc_ratio": list(p.acc_ratio), "gyr_nominal_hz": p.gyr_nominal_hz,
+                       "gyr_ratio": list(p.gyr_ratio), "offset_ms": round(p.offset_s * 1e3, 3),
+                       "time_error_ms": round(p.time_error_s * 1e3, 3),
+                       "wander_ms": round(p.wander_s * 1e3, 3), "n_repaired": p.n_repaired})
 
 
-def blocks_for_subject(accel_path: str, gyro_path: str) -> List[Block]:
-    """Merge accel+gyro rows asof (<=100 ms) and split into activity blocks."""
-    acc = parse_raw_file(accel_path)
-    gyr = parse_raw_file(gyro_path)
-    # Group rows by contiguous (subject, activity) with ts gaps <= 1 s.
-    blocks: List[Block] = []
-    cur_activity = None
-    cur_ts: List[int] = []
-    cur_xyz: List[Tuple[float, float, float]] = []
-    for row in acc:
-        subj, act, ts = int(row[0]), str(row[1]), int(row[2])
-        xyz = (float(row[3]), float(row[4]), float(row[5]))
-        if cur_activity is not None and act == cur_activity and cur_ts \
-                and ts - cur_ts[-1] <= SESSION_GAP_NS:
-            cur_ts.append(ts)
-            cur_xyz.append(xyz)
-            continue
-        if cur_activity is not None and cur_ts:
-            blocks.append(_finish_block(subj, cur_activity, cur_ts, cur_xyz, gyr))
-        cur_activity, cur_ts, cur_xyz = act, [ts], [xyz]
-    if cur_activity is not None and cur_ts:
-        blocks.append(_finish_block(subj, cur_activity, cur_ts, cur_xyz, gyr))
-    return blocks
-
-
-def _finish_block(subject: int, activity: str, ts_list: List[int],
-                  xyz_list: List[Tuple[float, float, float]],
-                  gyr: np.ndarray) -> Block:
-    ts_arr = np.asarray(ts_list, dtype=np.int64)
-    xyz_arr = np.asarray(xyz_list, dtype=np.float64)
-    # gyro ts/xyz columns: index 2 = ts, 3..5 = xyz
-    g_ts = np.asarray([int(r[2]) for r in gyr], dtype=np.int64)
-    g_xyz = np.asarray([[float(r[3]), float(r[4]), float(r[5])] for r in gyr],
-                       dtype=np.float64)
-    idx = np.searchsorted(g_ts, ts_arr)
-    idx = np.clip(idx, 0, len(g_ts) - 1)
-    near = np.abs(g_ts[idx] - ts_arr) <= ASOF_MAX_DT_NS
-    g_aligned = g_xyz[idx]
-    g_aligned[~near] = 0.0  # unmatched gyro -> zero rotation (documented)
-    samples = np.concatenate([xyz_arr * M_S2_TO_G, g_aligned * RAD_S_TO_DEG_S], axis=1)
-    return Block(subject=subject, activity=activity, samples=samples,
-                 duration_s=len(ts_arr) / WISDM_HZ)
-
-
-def resample_block(block: Block) -> Block:
-    """20 -> 30 Hz per block (anti-alias polyphase 3/2), keeping metadata."""
-    out = resample_poly_nd(block.samples, 3, 2, axis=0)
-    return Block(subject=block.subject, activity=block.activity, samples=out,
-                 duration_s=len(out) / TARGET_HZ)
-
-
-def window_block(block: Block, window: int = WINDOW_SAMPLES,
-                 hop: int = HOP_SAMPLES) -> List[Tuple[np.ndarray, str, int, int]]:
-    """(data (window,6), activity letter, subject, session_idx) windows."""
+def window_block(block: Block, window: int = WINDOW_SAMPLES, hop: int = HOP_SAMPLES,
+                 margin: int = MARGIN_SAMPLES) -> List[Tuple[np.ndarray, str, int, int]]:
+    """(data (window,6), activity letter, subject, start index) windows, serve.py semantics."""
     s = block.samples
-    out = []
-    k = 0
-    while k + window <= len(s):
-        out.append((np.ascontiguousarray(s[k:k + window]), block.activity,
-                    block.subject, k))
-        k += hop
-    return out
+    return [(np.ascontiguousarray(s[k:k + window]), block.activity, block.subject, k)
+            for k in wisdm_loader.window_starts(len(s), window, hop, margin)]
 
 
-def load_all_blocks(wisdm_dir: str, subjects: Sequence[int]) -> List[Block]:
+def _load_subject(args: Tuple[str, int]) -> Tuple[List[Block], Dict[str, Any]]:
+    wisdm_dir, subj = args
+    sd = wisdm_loader.load_subject(wisdm_dir, subj)
+    return [_piece_to_block(p) for p in sd.pieces], sd.report()
+
+
+def load_all_blocks(wisdm_dir: str, subjects: Sequence[int], jobs: int = 1,
+                    report: Optional[Dict[str, Any]] = None) -> List[Block]:
+    """Aligned 30 Hz pieces of every subject with both watch files (wisdm-watch-loader-2).
+
+    ``report`` (when given) receives the per-subject loader reports: duplicates, conflicting rows,
+    repaired single dropouts, segment breaks, slips, and every recording excluded for lack of gyro.
+    """
+    subs = wisdm_loader.available_subjects(wisdm_dir, subjects)
+    work = [(wisdm_dir, s) for s in subs]
+    if jobs > 1 and len(work) > 1:
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(max_workers=jobs) as ex:
+            results = list(ex.map(_load_subject, work))
+    else:
+        results = [_load_subject(w) for w in work]
     blocks: List[Block] = []
-    for subj in subjects:
-        ap = os.path.join(wisdm_dir, "raw", "watch", "accel",
-                          f"data_{subj}_accel_watch.txt")
-        gp = os.path.join(wisdm_dir, "raw", "watch", "gyro",
-                          f"data_{subj}_gyro_watch.txt")
-        if not (os.path.isfile(ap) and os.path.isfile(gp)):
-            continue
-        blocks.extend(blocks_for_subject(ap, gp))
+    per_subject = []
+    for bl, rep in results:
+        blocks.extend(bl)
+        per_subject.append(rep)
+    if report is not None:
+        report.update(summarize_loader_reports(per_subject))
+        report["subjects"] = per_subject
     return blocks
+
+
+def summarize_loader_reports(per_subject: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Totals over the per-subject loader reports (what was dropped, repaired, excluded)."""
+    tot: Dict[str, Any] = {"loader": wisdm_loader.LOADER_VERSION, "n_subjects": len(per_subject)}
+    for sensor in ("accel", "gyro", "alignment"):
+        agg: Dict[str, int] = {}
+        for r in per_subject:
+            for k, v in r[sensor].items():
+                agg[k] = agg.get(k, 0) + int(v)
+        tot[sensor] = agg
+    recs = [rec for r in per_subject for rec in r["recordings"]]
+    tot["n_recordings"] = len(recs)
+    tot["n_recordings_with_windows"] = sum(1 for rec in recs if rec["n_windows"] > 0)
+    tot["excluded_no_gyro"] = [f"{rec['subject']}-{rec['activity']}-{rec['recording']}"
+                               for rec in recs if rec["reason"] == "no_gyro"]
+    tot["excluded_no_overlap"] = [f"{rec['subject']}-{rec['activity']}-{rec['recording']}"
+                                  for rec in recs if rec["reason"] == "no_overlap"]
+    tot["n_windows"] = int(sum(r["n_windows"] for r in per_subject))
+    tot["n_unparsed_rows"] = int(sum(r["n_unparsed_rows"] for r in per_subject))
+    tot["n_wrong_subject_rows"] = int(sum(r["n_wrong_subject_rows"] for r in per_subject))
+    tot["max_abs_offset_ms"] = max([r["max_abs_offset_ms"] for r in per_subject], default=0.0)
+    tot["max_time_error_ms"] = max([r["max_time_error_ms"] for r in per_subject], default=0.0)
+    tot["max_wander_ms"] = max([r["max_wander_ms"] for r in per_subject], default=0.0)
+    rates: Dict[str, int] = {}
+    for rec in recs:
+        key = f"acc{rec['acc_nominal_hz']}/gyr{rec['gyr_nominal_hz']}"
+        rates[key] = rates.get(key, 0) + 1
+    tot["recordings_by_nominal_rates"] = rates
+    return tot
 
 
 def split_blocks(blocks: List[Block], test_fraction: float, val_fraction: float,
-                 seed: int) -> Tuple[List[Block], List[Block], List[Block],
-                                     Dict[str, Any]]:
+                 seed: int, subjects: Optional[Sequence[int]] = None,
+                 ) -> Tuple[List[Block], List[Block], List[Block], Dict[str, Any]]:
     """SUBJECT-HELD-OUT 3-way split BEFORE windowing (spec s7, C10).
 
     Subjects are shuffled with a fixed seed and partitioned into disjoint
@@ -172,9 +163,15 @@ def split_blocks(blocks: List[Block], test_fraction: float, val_fraction: float,
     splits and the early-stop val set is subject-held-out (not a window-level
     random_split like upstream's validation). Returns the three block lists
     plus a split-manifest dict for the model manifest.
+
+    ``subjects`` is the split universe (default: the subjects present in
+    ``blocks``). main() passes every subject with both watch files, so the
+    split does not depend on which recordings survive loading (v0's 51
+    subjects -> train 35 / val 8 / test 8 at seed 42).
     """
     rng = np.random.default_rng(seed)
-    subjects = sorted({b.subject for b in blocks})
+    subjects = sorted({int(s) for s in subjects} if subjects is not None
+                      else {b.subject for b in blocks})
     rng.shuffle(subjects)
     n_test = max(1, int(round(len(subjects) * test_fraction)))
     n_val = max(1, int(round(len(subjects) * val_fraction)))
@@ -208,6 +205,11 @@ def split_blocks(blocks: List[Block], test_fraction: float, val_fraction: float,
         "val_subjects": val_subjects,
         "test_subjects": test_subjects,
         "sessions": {
+            "train": len({(b.subject, b.session) for b in train_blocks}),
+            "val": len({(b.subject, b.session) for b in val_blocks}),
+            "test": len({(b.subject, b.session) for b in test_blocks}),
+        },
+        "pieces": {
             "train": len(train_blocks),
             "val": len(val_blocks),
             "test": len(test_blocks),
@@ -216,9 +218,23 @@ def split_blocks(blocks: List[Block], test_fraction: float, val_fraction: float,
     return train_blocks, val_blocks, test_blocks, split
 
 
+SPLIT_KEYS = ("seed", "train_subjects", "val_subjects", "test_subjects")
+
+
+def assert_same_split(split: Dict[str, Any], expected_path: str) -> None:
+    """Refuse to continue unless the subject split equals a saved split_manifest.json."""
+    with open(expected_path, "r", encoding="utf-8") as f:
+        exp = json.load(f)
+    for k in SPLIT_KEYS:
+        if split.get(k) != exp.get(k):
+            raise SystemExit(f"split mismatch on {k}: {split.get(k)} != {exp.get(k)} "
+                             f"(expected {expected_path})")
+
+
 def windows_from_blocks(blocks: Sequence[Block], window: int, hop: int,
                         ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """Stack windowed data; label = majority letter per window."""
+    """Stack windowed data; label = the piece's letter. ``sessions`` = piece index
+    (each piece is one contiguous run; evaluate.py resets its policy on a change)."""
     xs: List[np.ndarray] = []
     ys: List[str] = []
     subs: List[int] = []
@@ -248,7 +264,7 @@ def fit_scaler(x_train: np.ndarray) -> Tuple[List[float], List[float]]:
 # ---------------------------------------------------------------------------
 
 def _synth_seconds(activity: str, fs: int, seconds: float, seed: int) -> np.ndarray:
-    """(N, 6) 20 Hz canonical-unit samples for one activity."""
+    """(N, 6) canonical-unit samples at ``fs`` Hz for one activity."""
     rng = np.random.default_rng(seed)
     n = int(fs * seconds)
     t = np.arange(n) / fs
@@ -297,7 +313,7 @@ def write_synthetic_wisdm(out_dir: str, seed: int = 0) -> str:
         acc_lines, gyr_lines = [], []
         ts = ts_base + subj * 10**12
         for act, dur in acts:
-            s = _synth_seconds(act, WISDM_HZ, dur, seed * 1000 + subj)
+            s = _synth_seconds(act, SYNTH_HZ, dur, seed * 1000 + subj)
             step_ns = 50_000_000
             for i in range(s.shape[0]):
                 t = ts + i * step_ns
@@ -305,7 +321,7 @@ def write_synthetic_wisdm(out_dir: str, seed: int = 0) -> str:
                 g = s[i, 3:6] * RAD_S_TO_DEG_S     # rad/s
                 acc_lines.append(f"{subj},{act},{t},{a[0]:.6f},{a[1]:.6f},{a[2]:.6f};")
                 gyr_lines.append(f"{subj},{act},{t},{g[0]:.6f},{g[1]:.6f},{g[2]:.6f};")
-            ts += int(dur * step_ns) + 2_000_000_000   # >1 s gap between blocks
+            ts += int(dur * 1e9) + 2_000_000_000   # >1 s gap between blocks
         with open(os.path.join(acc_dir, f"data_{subj}_accel_watch.txt"), "w") as f:
             f.write("\n".join(acc_lines) + "\n")
         with open(os.path.join(gyr_dir, f"data_{subj}_gyro_watch.txt"), "w") as f:
@@ -376,9 +392,18 @@ def train_head(checkpoint_dir: str, out_dir: str, manifest: Manifest,
 
     Early-stops on the subject-held-out val macro-F1 (spec s7) and restores
     the best checkpoint before saving.
-    """
-    from .model import apply_freeze_policy, _load_model_and_verify
 
+    Deterministic on CPU: torch is seeded BEFORE the checkpoint load, so the
+    newly initialized classification head is reproducible (v0 seeded only
+    after from_pretrained had already drawn the head weights), and the batch
+    order comes from numpy default_rng(seed).
+    """
+    import time
+
+    from .model import _import_torch, apply_freeze_policy, _load_model_and_verify
+
+    _torch = _import_torch()
+    _torch.manual_seed(seed)
     model, torch = _load_model_and_verify(checkpoint_dir, len(manifest.class_map),
                                           manifest.seed, manifest=manifest)
     counts = apply_freeze_policy(model, torch)
@@ -415,14 +440,15 @@ def train_head(checkpoint_dir: str, out_dir: str, manifest: Manifest,
                 return getattr(out, attr)
         raise RuntimeError("model returned no logits")
 
-    history = {"train_loss": [], "val_loss": [], "val_macro_f1": [],
+    history = {"train_loss": [], "val_loss": [], "val_macro_f1": [], "epoch_seconds": [],
                "best_epoch": None, "best_val_macro_f1": None,
-               "stopped_epoch": None}
+               "stopped_epoch": None, "threads": int(torch.get_num_threads())}
     best_state = None
     best_f1 = -1.0
     best_ep = 0
     stall = 0
     for ep in range(epochs):
+        t_ep = time.time()
         model.train()
         total, n = 0.0, 0
         for xb, yb in _batches(x_train, y_ids):
@@ -450,8 +476,10 @@ def train_head(checkpoint_dir: str, out_dir: str, manifest: Manifest,
         history["train_loss"].append(round(tl, 6))
         history["val_loss"].append(round(vl, 6))
         history["val_macro_f1"].append(round(f1, 4))
+        history["epoch_seconds"].append(round(time.time() - t_ep, 1))
         print(f"  epoch {ep + 1}/{epochs}: train_loss={tl:.4f} "
-              f"val_loss={vl:.4f} val_macro_f1={f1:.4f}", flush=True)
+              f"val_loss={vl:.4f} val_macro_f1={f1:.4f} "
+              f"({history['epoch_seconds'][-1]:.0f} s)", flush=True)
         if f1 > best_f1:
             best_f1 = f1
             best_ep = ep
@@ -504,6 +532,13 @@ def build_manifest(model_version: str, class_map: List[str], mean: List[float],
     return m
 
 
+def zero_gyro_fraction(x: np.ndarray) -> float:
+    """Fraction of windows whose gyro channels are all exactly zero (v0's zero-fill signature)."""
+    if len(x) == 0:
+        return 0.0
+    return float(np.mean(np.all(x[:, :, 3:6] == 0.0, axis=(1, 2))))
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Nara WISDM-19 watch adaptation pipeline")
     ap.add_argument("--wisdm", default=None, help="unpacked WISDM dir (raw/watch/...)")
@@ -517,27 +552,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--patience", type=int, default=2,
+                    help="early-stop patience on val macro-F1 (v0 used 2)")
+    ap.add_argument("--model-version", default=None,
+                    help="manifest model_version (default hart-wisdm-v1 / hart-wisdm-smoke-v1)")
+    ap.add_argument("--expect-split", default=None,
+                    help="split_manifest.json the subject split must equal (refuse otherwise)")
+    ap.add_argument("--jobs", type=int, default=1, help="loader processes (subjects in parallel)")
     args = ap.parse_args(argv)
 
+    os.makedirs(args.out, exist_ok=True)
     if args.smoke:
         wisdm_dir = write_synthetic_wisdm(args.out, args.seed)
     elif args.wisdm:
         wisdm_dir = args.wisdm
     else:
         ap.error("need --smoke or --wisdm <dir>")
+    model_version = args.model_version or ("hart-wisdm-smoke-v1" if args.smoke else "hart-wisdm-v1")
 
-    subjects = list(range(1600, 1651))
-    blocks = load_all_blocks(wisdm_dir, subjects)
+    subjects = wisdm_loader.available_subjects(wisdm_dir, list(range(1600, 1651)))
+    loader_report: Dict[str, Any] = {}
+    blocks = load_all_blocks(wisdm_dir, subjects, jobs=args.jobs, report=loader_report)
     if not blocks:
         raise SystemExit("no WISDM watch blocks found (check --wisdm layout)")
 
-    blocks = [resample_block(b) for b in blocks]
     train_b, val_b, test_b, split = split_blocks(blocks, args.test_fraction,
-                                                 args.val_fraction, args.seed)
+                                                 args.val_fraction, args.seed,
+                                                 subjects=subjects)
+    if args.expect_split:
+        assert_same_split(split, args.expect_split)
     x_train, y_train, _, _ = windows_from_blocks(train_b, WINDOW_SAMPLES, HOP_SAMPLES)
-    x_val, y_val, _, _ = windows_from_blocks(val_b, WINDOW_SAMPLES, HOP_SAMPLES)
+    x_val, y_val, subj_val, sess_val = windows_from_blocks(val_b, WINDOW_SAMPLES, HOP_SAMPLES)
     x_test, y_test, subj_test, sess_test = windows_from_blocks(
         test_b, WINDOW_SAMPLES, HOP_SAMPLES)
+    zero_gyro = {"train": zero_gyro_fraction(x_train), "val": zero_gyro_fraction(x_val),
+                 "test": zero_gyro_fraction(x_test)}
+    if any(v > 0 for v in zero_gyro.values()):
+        raise SystemExit(f"windows with all-zero gyro found {zero_gyro}: the loader must never fill")
 
     # Head classes = WISDM letters present in TRAIN+VAL only (a class the
     # model never sees must not be a trainable head output). Test-only letters
@@ -563,20 +614,43 @@ def main(argv: Optional[List[str]] = None) -> int:
                                "url": ("https://github.com/EdgeIntelligenceLab/HART/raw/"
                                        "122b4a8b07758deedfcf3b1e87f03eed5ad55967/"
                                        "finetuning_HART/pretrained_checkpoint/model.safetensors"),
-                               "sha256": ("88b8d1790a43cb5c96c5bba5da60c81ae08657024f9747"
-                                          "cbe52d45c2acfd2e6d"),
+                               "sha256": PRETRAINED_SHA256,
                                "size": 856744}}}
-
-        os.makedirs(args.out, exist_ok=True)
     trained = False
     train_history = None
+
+    window_counts = {"train": int(len(x_train)), "val": int(len(x_val)), "test": int(len(x_test))}
+    preprocessing = {
+        "loader": wisdm_loader.LOADER_VERSION,
+        "streams": "per (subject, activity) sensor stream sorted by timestamp; exact duplicate rows "
+                   "collapsed, conflicting duplicates dropped; recordings split at gaps > 1 s",
+        "rate": "constant-rate segments per stream (rolling-median nominal 20/25/50/100 Hz; breaks at "
+                "rate changes and at intervals < 0.5 or > 2.5 periods; one missing sample repaired by "
+                "linear interpolation of its neighbours); least-squares clock fit per segment",
+        "resample": "repo polyphase design (Kaiser beta=5, 20*max(up,down)+1 taps) from the MEASURED "
+                    "accel rate: up/down = simplest fraction of 30/rate with <= 2 ms accumulated "
+                    "time error over the piece; gyro ratio = accel ratio * (accel/gyro nominal ratio) "
+                    "on the shared clock",
+        "align": "gyro located on the accel sample index via timestamps; pieces split at sustained "
+                 "(>= 2 s) one-sample slips; common start within 10 ms; both streams on one 30 Hz "
+                 "time base (output m of both at t0 + m/30 s)",
+        "fill": "none: time covered by only one stream yields no samples; recordings without gyro "
+                "are excluded (data_report.json)",
+        "windows": "serve.py semantics: 120 @ 30 Hz, hop 60, grid anchored at the piece start, "
+                   "1 s FIR-transient margin at both ends",
+        "units": "accel m/s^2 -> g (/9.80665), gyro rad/s -> deg/s (x180/pi), before resampling",
+        "scaler": "StandardScaler mean/std over every sample of the TRAIN-subject windows only",
+        "windows_per_split": window_counts,
+        "zero_gyro_window_fraction": zero_gyro,
+        "excluded_recordings_no_gyro": loader_report.get("excluded_no_gyro", []),
+    }
 
     # Training-data identifiers (spec s7 manifest; WISDM-19 = UCI 507, CC BY 4.0).
     if args.smoke:
         data_info = {"name": "synthetic WISDM-format CI smoke (deterministic)",
                      "license": "generated in-test", "source": "activity_context.train.write_synthetic_wisdm",
                      "subjects": len(split["train_subjects"]) + len(split["val_subjects"]) + len(split["test_subjects"]),
-                     "archive_sha256": None}
+                     "archive_sha256": None, "preprocessing": preprocessing}
     else:
         data_info = {
             "name": "WISDM Smartphone and Smartwatch Activity and Biometrics Dataset (UCI 507, DOI 10.24432/C5HK59)",
@@ -587,10 +661,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "subjects": len(split["train_subjects"]) + len(split["val_subjects"]) + len(split["test_subjects"]),
             "watch_only": True,
             "sensors": ["accel m/s^2 -> g (/9.80665)", "gyro rad/s -> deg/s (x180/pi)"],
-            "sample_rate": {"source_hz": 20, "target_hz": TARGET_HZ,
-                            "resample": "anti-alias polyphase 3/2 (upsampling; bandwidth preserved)"},
+            "sample_rate": {"source_hz": "detected per segment (20/25/50/100 nominal; measured rate used)",
+                            "target_hz": TARGET_HZ,
+                            "resample": "anti-alias polyphase from the measured rate (rational up/down)"},
             "window": {"samples": WINDOW_SAMPLES, "hop": HOP_SAMPLES, "seconds": WINDOW_SAMPLES / TARGET_HZ},
             "label_mapping": WISDM_LABEL_MAPPING,
+            "preprocessing": preprocessing,
         }
 
     if args.train and args.checkpoint and os.path.isdir(args.checkpoint):
@@ -600,11 +676,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Scaler/class-map manifest used only to drive the training loop.
         train_history = train_head(
             args.checkpoint, args.out,
-            build_manifest("hart-wisdm-smoke-v0" if args.smoke else "hart-wisdm-v0",
-                           class_map, mean, scale, args.seed, True, checkpoint_info,
-                           split=split, data=data_info),
+            build_manifest(model_version, class_map, mean, scale, args.seed, True,
+                           checkpoint_info, split=split, data=data_info),
             x_train, y_train_ids, x_val, y_val_ids,
-            args.epochs, args.batch_size, args.lr, args.seed)
+            args.epochs, args.batch_size, args.lr, args.seed, patience=args.patience)
         trained = True
         # The deployed artifact is the FINE-TUNED model: record its digest in
         # the manifest so serve's verify-on-load matches what it actually loads.
@@ -616,10 +691,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         checkpoint_info["files"]["model.safetensors"]["url"] = (
             f"local:{fine_path} "
             f"(fine-tuned from {checkpoint_info['commit'][:12]})")
+        checkpoint_info["finetuned_from_sha256"] = PRETRAINED_SHA256
+        data_info["training"] = {k: train_history[k] for k in
+                                 ("epochs", "batch_size", "lr", "patience", "param_counts")}
+        data_info["training"]["history"] = train_history["history"]
 
     manifest = build_manifest(
-        "hart-wisdm-smoke-v0" if args.smoke else "hart-wisdm-v0",
-        class_map, mean, scale, args.seed, trained, checkpoint_info,
+        model_version, class_map, mean, scale, args.seed, trained, checkpoint_info,
         split=split, data=data_info)
     with open(os.path.join(args.out, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(manifest.to_dict(), f, indent=2, sort_keys=True)
@@ -628,13 +706,18 @@ def main(argv: Optional[List[str]] = None) -> int:
               encoding="utf-8") as f:
         json.dump(split, f, indent=2, sort_keys=True)
         f.write("\n")
+    with open(os.path.join(args.out, "data_report.json"), "w", encoding="utf-8") as f:
+        json.dump(loader_report, f, indent=1, sort_keys=True)
+        f.write("\n")
 
     np.savez_compressed(os.path.join(args.out, "train_data.npz"),
                         X=x_train, y=y_train_ids,
                         letters=np.asarray(letters))
+    y_val_onto = np.asarray([WISDM_LABEL_MAPPING.get(c, "other_movement") for c in y_val])
     np.savez_compressed(os.path.join(args.out, "val_data.npz"),
-                        X=x_val, y=y_val_ids,
-                        letters=np.asarray(letters))
+                        X=x_val, y=y_val_ids, letters=np.asarray(letters),
+                        y_ontology=y_val_onto, window_letters=y_val,
+                        subjects=subj_val, sessions=sess_val)
     y_test_onto = np.asarray([WISDM_LABEL_MAPPING.get(c, "other_movement")
                               for c in y_test])
     y_test_ids = np.asarray([letter_to_id.get(c, -1) for c in y_test],
@@ -647,11 +730,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         "ok": True,
         "smoke": args.smoke,
         "trained": trained,
+        "model_version": model_version,
         "train_history": train_history,
-        "blocks": len(blocks),
-        "windows": {"train": len(x_train), "val": len(x_val), "test": len(x_test)},
+        "pieces": len(blocks),
+        "windows": window_counts,
+        "zero_gyro_window_fraction": zero_gyro,
+        "excluded_recordings_no_gyro": loader_report.get("excluded_no_gyro", []),
         "class_map": class_map,
         "scaler_sha256": manifest.scaler.get("sha256"),
+        "split": {k: split[k] for k in ("train_subjects", "val_subjects", "test_subjects")},
         "out": args.out,
     }, indent=2))
     return 0
