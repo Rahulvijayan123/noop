@@ -52,6 +52,11 @@ from .contract import (
     parse_request,
     utc_day,
 )
+from .features import BUDGET_MS as FEATURES_BUDGET_MS
+from .features import SCHEMA_VERSION as FEATURES_SCHEMA_VERSION
+from .features import ALGORITHM_VERSION as FEATURES_ALGORITHM_VERSION
+from .features.compute import compute as features_compute
+from .features.contract import parse_request as features_parse_request
 from .providers import Provider, ProviderRegistry, default_providers
 
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
@@ -395,6 +400,79 @@ def _render(request: InferRequest, provider: Provider, result: ProviderResult,
 
 
 # --------------------------------------------------------------------------
+# Sleep-features degraded documents (budget overrun / module failure)
+# --------------------------------------------------------------------------
+
+
+def degraded_timeout_doc(request: Any) -> dict[str, Any]:
+    """The budget-overrun document: status "timeout", every block withheld.
+
+    The worker publishes core results with feature status withheld/timeout
+    and retries on the ordinary next eligible scoring pass (spec 7.4)."""
+    return {
+        "schema_version": FEATURES_SCHEMA_VERSION,
+        "algorithm_version": FEATURES_ALGORITHM_VERSION,
+        "status": "timeout",
+        "status_reasons": ["enrichment_budget_exceeded"],
+        "nights": [
+            {
+                "night_id": n.night_id,
+                "start_utc": _fmt_features_utc(n.start),
+                "end_utc": _fmt_features_utc(n.end),
+                "is_nap": n.is_nap,
+                "user_edited": n.user_edited,
+                "stage_source": "sleep-v2",
+                "stage_algorithm_version": "sleep-stager-v2",
+                "continuity": {"status": "withheld", "reasons": ["enrichment_budget_exceeded"]},
+                "architecture": {"status": "withheld", "reasons": ["enrichment_budget_exceeded"]},
+                "stage_physiology": {"status": "withheld", "reasons": ["enrichment_budget_exceeded"]},
+                "settling": {"status": "withheld", "reasons": ["enrichment_budget_exceeded"]},
+                "thermal": {"status": "withheld", "reasons": ["enrichment_budget_exceeded"]},
+                "respiratory_variability": {"status": "withheld",
+                                            "reasons": ["enrichment_budget_exceeded"]},
+                "metric_status": {"night_gate": {"status": "withheld",
+                                                 "reasons": ["enrichment_budget_exceeded"]},
+                                  "module_errors": []},
+                "coverage": {},
+            }
+            for n in request.nights
+        ],
+        "regularity": {"status": "withheld", "reasons": ["enrichment_budget_exceeded"]},
+        "dependencies": {"config_version": "sleep-features-defaults-1"},
+        "capabilities": {
+            "oxygen_events": {"ready": False, "reason": "unverified_sparse_oxygen"},
+            "waveform_staging": {"ready": False, "reason": "continuous_ppg_not_delivered"},
+        },
+        "budget_ms": FEATURES_BUDGET_MS,
+        "duration_ms": FEATURES_BUDGET_MS,
+    }
+
+
+def degraded_error_doc(request: Any, error: str) -> dict[str, Any]:
+    """The module-failure document: status "error", blocks withheld with the
+    reason; one broken feature never erases the rest of the response shape."""
+    doc = degraded_timeout_doc(request)
+    doc["status"] = "error"
+    doc["status_reasons"] = ["enrichment_error"]
+    doc["error"] = error[:512]
+    for night in doc["nights"]:
+        for key in ("continuity", "architecture", "stage_physiology", "settling", "thermal",
+                    "respiratory_variability"):
+            night[key] = {"status": "withheld", "reasons": ["enrichment_error"]}
+        night["metric_status"]["night_gate"] = {"status": "withheld",
+                                                "reasons": ["enrichment_error"]}
+    doc["regularity"] = {"status": "withheld", "reasons": ["enrichment_error"]}
+    doc.pop("budget_ms", None)
+    return doc
+
+
+def _fmt_features_utc(ts: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# --------------------------------------------------------------------------
 # HTTP plumbing
 # --------------------------------------------------------------------------
 
@@ -507,6 +585,9 @@ class InferenceHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path == "/v1/sleep-features":
+            self._handle_sleep_features()
+            return
         if path != "/v1/infer":
             try:
                 self._read_body()
@@ -539,6 +620,74 @@ class InferenceHandler(BaseHTTPRequestHandler):
             self._send_error_json(500, "server_error", f"{type(exc).__name__}: {exc}")
             return
         self._send_json(200, payload)
+
+    def _handle_sleep_features(self) -> None:
+        """POST /v1/sleep-features: the deterministic sleep-phenotype enrichment.
+
+        Not an inference request and NOT a candidate provider (spec 7.1): a
+        bundle of descriptive features must not be disguised as a scalar
+        result or stuffed into stage arrays, so this is its own typed
+        request/response on the same loopback server, with its own bounded
+        budget (features.BUDGET_MS, 3000 ms). A budget overrun publishes a
+        DEGRADED document (status "timeout", HTTP 200) rather than an error,
+        so the worker's core score never waits on the enrichment.
+        """
+        try:
+            raw = self._read_body()
+        except ContractError as exc:
+            self._send_error_json(exc.http_status, exc.code, exc.message, exc.field)
+            return
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else None
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._send_error_json(400, "malformed_json", f"request body is not valid JSON: {exc}")
+            return
+        try:
+            request = features_parse_request(body)
+        except ContractError as exc:
+            self._send_error_json(exc.http_status, exc.code, exc.message, exc.field)
+            return
+        except Exception as exc:  # pragma: no cover - defensive
+            self._send_error_json(400, "invalid_request", f"{type(exc).__name__}: {exc}")
+            return
+        started = time.monotonic()
+        payload, timed_out = self._run_sleep_features(request)
+        if timed_out:
+            with self.app._lock:
+                self.app.withheld_count += 1
+        # The document's own wall-clock duration (spec section 10: measured
+        # fixture runtime), including this route's watchdog overhead.
+        if isinstance(payload, dict):
+            payload["duration_ms"] = int(round((time.monotonic() - started) * 1000.0))
+        self._send_json(200, payload)
+
+    def _run_sleep_features(self, request: Any) -> tuple[dict[str, Any], bool]:
+        """Run the enrichment under a wall-clock budget (spec 7.4).
+
+        Same watchdog pattern as ``run_inference``'s ``_run_with_budget``: the
+        computation runs on a daemon thread and the handler never waits past
+        ``features.BUDGET_MS``. On timeout the abandoned thread's partial result
+        is discarded and a degraded document is returned, so one slow night can
+        never pin the scoring lane.
+        """
+        box: dict[str, Any] = {}
+
+        def target() -> None:
+            try:
+                box["doc"] = features_compute(request, budget_ms=FEATURES_BUDGET_MS)
+            except Exception as exc:  # noqa: BLE001 - degraded, never fatal
+                box["error"] = f"{type(exc).__name__}: {exc}"
+
+        thread = threading.Thread(target=target, name="sleep-features", daemon=True)
+        thread.start()
+        thread.join(max(0.001, FEATURES_BUDGET_MS / 1000.0))
+        if thread.is_alive():
+            doc = degraded_timeout_doc(request)
+            return doc, True
+        if "error" in box:
+            doc = degraded_error_doc(request, box["error"])
+            return doc, False
+        return box.get("doc") or degraded_error_doc(request, "empty_result"), False
 
 
 class InferenceServer(ThreadingHTTPServer):

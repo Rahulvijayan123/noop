@@ -359,6 +359,34 @@ Backfill is operator-driven and bounded per call: `dry_run` writes nothing, `app
 the existing canonical recompute through `enqueue_scoring_v2`, `rollback` does the same and
 additionally fences in-flight candidate writes. No job mutates a selection table.
 
+### Sleep-phenotype enrichment (`daily.sleep_features`, feature/sleep-phenotypes)
+
+Descriptive sleep phenotypes (continuity, architecture dynamics, regularity/timing
+variability, stage-conditioned physiology, settling curves, temperature transitions, RSA
+respiratory variability) are computed by the SAME loopback sidecar on a dedicated
+`POST /v1/sleep-features` endpoint (typed request/response; `docs/SLEEP_FEATURES_CONTRACT.md`)
+and attached to the scoring snapshot under `daily.sleep_features`. They are an enrichment,
+not a candidate: V2 stays canonical, nothing is promoted, no composite score is introduced.
+
+- **No migration**: `publish_scoring_snapshot_v2` stores `daily` verbatim, the scores edge
+  route passes `daily` through, and the phone decodes the key non-fatally
+  (`HostedDayResult.sleepFeatures`, shared typed document in StrandAnalytics). The offline
+  cache is the existing raw-snapshot cache.
+- **Dormant default**: unset `FRWHOOP_INFERENCE_URL` = no enrichment, snapshots byte-identical.
+  The worker attaches one bounded request per claimed day (3500 ms transport budget around the
+  sidecar's 3000 ms compute budget; timeout → `sleep_features.status = "timeout"`, core
+  results unaffected, retried on the next eligible scoring pass).
+- **Inputs**: the same rows the canonical pass scored (V2-staged sessions, night-window
+  HR/R-R/skin-temp, the production `SleepStager.respBreathTrack` export) plus one bounded
+  31-day published-snapshot history for the regularity block. Freshness: a republished day in
+  the window changes the `history_revision_digest` and invalidates the rolling SRI.
+- **Honesty gates**: SRI validity is staged-spans-only in this wave (minutes outside staged
+  sessions cannot be classified awake-vs-off-wrist from the published snapshot, so they are
+  excluded, and an SRI window that then fails its ≥5 valid-days / ≥96 paired-hour gate is
+  withheld with machine-readable reasons); oxygen analysis and waveform staging report
+  `ready: false` with the verified blockers (`unverified_sparse_oxygen`,
+  `continuous_ppg_not_delivered`) and are never zero-filled.
+
 ## The VPS worker
 
 [deploy/README.md](../deploy/README.md) covers provisioning, building and releasing the worker.

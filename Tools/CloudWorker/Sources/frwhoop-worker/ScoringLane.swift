@@ -39,7 +39,10 @@ import Foundation
 /// `renew_scoring_v2` + `fail_scoring_v2` pair (there is no bare release RPC).
 struct ScoringLane {
     let db: PostgresClient
-    let scorer: DayScorer
+    /// `var` so `main.swift` can attach the sleep-feature enrichment sidecar
+    /// after the shared `InferenceClient` is built (same post-init wiring the
+    /// candidate stage uses; see `scoring.candidate` in main.swift).
+    var scorer: DayScorer
     let ingestSecret: String
     var leaseSeconds: Int = 300
     var maxFailures: Int = 8

@@ -430,6 +430,11 @@ if let inferenceClient {
     scoring.candidate = CandidateStage(client: inferenceClient,
                                        store: PostgresCandidateStore(db: dbScoring))
     scoring.candidateBudget = config.inferenceBudget
+    // Sleep-phenotype enrichment lane: the SAME sidecar, its own dedicated
+    // /v1/sleep-features endpoint, with its own bounded budget. A candidate
+    // lane failure never disables the enrichment and vice versa: the client is
+    // shared, the lanes are independent (spec 7.4 "isolation").
+    scoring.scorer.featureEnrichmentClient = inferenceClient
     FileHandle.standardOutput.write(
         ("frwhoop-worker: candidate inference lane enabled url=\(inferenceClient.baseURL.absoluteString) "
          + "timeout_ms=\(inferenceClient.timeoutMS) budget=\(config.inferenceBudget)\n")
