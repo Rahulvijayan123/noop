@@ -50,7 +50,9 @@ create table public.activity_gait_windows_days (
   summary jsonb not null check (jsonb_typeof(summary) = 'object'),
   -- Columnar per-window outputs (`gait-windows-1`; null when they were larger than the worker's cap; the summary
   -- says so).
-  windows jsonb check (windows is null or (jsonb_typeof(windows) = 'object' and windows ->> 'format' = 'gait-windows-1')),
+  -- `is not distinct from`, so a missing or null `format` is false, never NULL (a NULL check passes).
+  windows jsonb check (windows is null or (jsonb_typeof(windows) = 'object'
+                                           and (windows ->> 'format') is not distinct from 'gait-windows-1')),
   -- Candidate mode only: the comparison ActivityContextDayDocument decoded with the gait channel. Never published,
   -- never copied into activity_context_days.
   candidate_document jsonb check (candidate_document is null or jsonb_typeof(candidate_document) = 'object'),

@@ -43,6 +43,23 @@ public enum GaitQualityWire {
     public static let thresholdTolerance = 1e-6
     /// Prefix of the canonical text whose SHA-256 is the weights digest (`GaitQualityModelInfo.weightsDigest`).
     public static let weightsDigestPrefix = "eldernet-weights-1\n"
+    /// Every top-level key an `ok: true` infer response may carry (§4): the framing (`id`, `op`, `ok`, `schema`),
+    /// the model's provenance and calibration, the windows and the two counts. Any other key refuses the response
+    /// (`unknownField`). This is stricter than `motion-heads-1`, whose decoder ignores unknown top-level keys: a
+    /// new field here is a contract change, made in ELDERNET.md §4 and in this set together.
+    public static let responseKeys: Set<String> = [
+        "id", "op", "ok", "schema", "model_id", "model_version", "weights", "upstream_commit", "preprocessing_version",
+        "window_s", "hop_s", "calibration", "gait_threshold", "windows", "n_dropped_nonfinite", "duration_ms",
+    ]
+    /// The keys a stored or replayed model (`GaitQualityModelInfo`'s Codable form: "a response without `windows`")
+    /// may carry: `responseKeys` without `windows`. The framing keys are tolerated there; `schema` and `ok`, when
+    /// present, must still say `gait-quality-1` and `true`.
+    public static let modelInfoKeys: Set<String> = responseKeys.subtracting(["windows"])
+    /// Calibration parameters with a meaning the decoder checks: a temperature `T` must be finite and > 0 (and is
+    /// required by `method: temperature`); a `threshold` must lie in [0, 1]. Other numeric parameters of other
+    /// methods are carried as they are (finite numbers only).
+    public static let temperatureParameter = "T"
+    public static let thresholdParameter = "threshold"
 }
 
 // MARK: - Window
@@ -184,7 +201,8 @@ public struct GaitQualityModelInfo: Codable, Equatable, Sendable {
     }
 
     /// Strict decode: exactly the validation the response decoder applies to the response's provenance
-    /// (`parseModel`), so a replay header or a stored config refuses what the wire decoder refuses.
+    /// (`parseModel`, behind the `GaitQualityWire.modelInfoKeys` whitelist), so a replay header or a stored config
+    /// refuses what the wire decoder refuses.
     public init(from decoder: Decoder) throws {
         let json = try MotionHeadsJSON(from: decoder)
         guard case .object(let obj) = json else {
@@ -192,7 +210,7 @@ public struct GaitQualityModelInfo: Codable, Equatable, Sendable {
                                                     debugDescription: GaitQualityResponseError.notAnObject.description))
         }
         do {
-            self = try GaitQualityResponse.parseModel(obj)
+            self = try GaitQualityResponse.parseModelInfo(obj)
         } catch let e as GaitQualityResponseError {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: e.description))
         }
@@ -312,9 +330,10 @@ public enum GaitQualityResponseError: Error, Equatable, Sendable, CustomStringCo
 extension GaitQualityResponse {
 
     /// Strict decode of one `gait-quality-1` infer response. Throws `GaitQualityResponseError` (as is) for anything
-    /// that is not exactly the contract: an unknown schema, model id, weight name or window key, a nonfinite or
-    /// out-of-range number, a non-integral time, metrics on a non-gait window, an `is_gait` flag that disagrees with
-    /// the threshold, windows out of order, or a service error (`ok: false`).
+    /// that is not exactly the contract: an unknown schema, top-level key (`GaitQualityWire.responseKeys`), model id,
+    /// weight name or window key, a nonfinite or out-of-range number (calibration parameters included), a
+    /// non-integral time, metrics on a non-gait window, an `is_gait` flag that disagrees with the threshold, windows
+    /// out of order, or a service error (`ok: false`).
     public init(from decoder: Decoder) throws {
         let root = try MotionHeadsJSON(from: decoder)
         guard case .object(let obj) = root else { throw GaitQualityResponseError.notAnObject }
@@ -330,11 +349,8 @@ extension GaitQualityResponse {
             throw E.serviceError(kind: kind, message: message)
         }
         guard case .bool(true)? = obj["ok"] else { throw E.missingField("ok") }
-        guard case .string(let schema)? = obj["schema"] else {
-            if obj["schema"] == nil { throw E.unknownSchema(nil) }
-            throw E.wrongType("schema")
-        }
-        guard schema == GaitQualityWire.schema else { throw E.unknownSchema(schema) }
+        try checkSchema(obj, required: true)
+        try checkKeys(obj, allowed: GaitQualityWire.responseKeys)
 
         let model = try parseModel(obj)
         guard case .array(let rawWindows)? = obj["windows"] else {
@@ -403,7 +419,36 @@ extension GaitQualityResponse {
         return bytes.allSatisfy { alnum($0) || $0 == 46 || $0 == 95 || $0 == 58 || $0 == 43 || $0 == 45 }
     }
 
+    /// `schema` must be the string `gait-quality-1` (absent is refused only when `required`).
+    static func checkSchema(_ obj: [String: MotionHeadsJSON], required: Bool) throws {
+        typealias E = GaitQualityResponseError
+        switch obj["schema"] {
+        case .none: if required { throw E.unknownSchema(nil) }
+        case .some(.string(let schema)): guard schema == GaitQualityWire.schema else { throw E.unknownSchema(schema) }
+        case .some: throw E.wrongType("schema")
+        }
+    }
+
+    /// Refuse any key outside `allowed` (the first in sorted order is named).
+    static func checkKeys(_ obj: [String: MotionHeadsJSON], allowed: Set<String>) throws {
+        for key in obj.keys.sorted() where !allowed.contains(key) { throw GaitQualityResponseError.unknownField(key) }
+    }
+
     // MARK: Model
+
+    /// The model-info Codable path (a replay header, a stored config): a response without `windows`, whose keys
+    /// are `GaitQualityWire.modelInfoKeys`; `schema` / `ok`, when present, must say `gait-quality-1` / `true`.
+    static func parseModelInfo(_ obj: [String: MotionHeadsJSON]) throws -> GaitQualityModelInfo {
+        typealias E = GaitQualityResponseError
+        try checkKeys(obj, allowed: GaitQualityWire.modelInfoKeys)
+        try checkSchema(obj, required: false)
+        switch obj["ok"] {
+        case .none, .some(.bool(true)): break
+        case .some(.bool(false)): throw E.invalidValue("ok")
+        case .some: throw E.wrongType("ok")
+        }
+        return try parseModel(obj)
+    }
 
     static func parseModel(_ obj: [String: MotionHeadsJSON]) throws -> GaitQualityModelInfo {
         typealias E = GaitQualityResponseError
@@ -450,7 +495,15 @@ extension GaitQualityResponse {
                 var parameters: [String: Double] = [:]
                 for key in entry.keys.sorted() where key != "method" && key != "fit" {
                     // Every other key is a numeric parameter of the method (`T`, …); nothing else is understood.
-                    parameters[key] = try number(entry[key]!, "calibration.\(name).\(key)")
+                    let field = "calibration.\(name).\(key)"
+                    let x = try number(entry[key]!, field)
+                    // The parameters with a meaning are range-checked: a temperature is > 0, a threshold in [0, 1].
+                    if key == GaitQualityWire.temperatureParameter, !(x > 0) { throw E.outOfRange(field) }
+                    if key == GaitQualityWire.thresholdParameter, !(0...1).contains(x) { throw E.outOfRange(field) }
+                    parameters[key] = x
+                }
+                if method == "temperature", parameters[GaitQualityWire.temperatureParameter] == nil {
+                    throw E.missingField("calibration.\(name).\(GaitQualityWire.temperatureParameter)")
                 }
                 out[name] = GaitQualityCalibrationEntry(method: method, fit: fit, parameters: parameters)
             }
@@ -615,10 +668,11 @@ public struct GaitQualityTrackReport: Codable, Equatable, Sendable {
 ///
 /// Weights are per-second channel weights in the same units as the decoder's other channels (HART's encoder
 /// channel is 0.8) and are tempered by `evidenceTemperature` like every channel. The gait term is discounted for
-/// redundancy with HART and with Inertia's locomotion head (all three read the same wrist accelerometer) and,
-/// with the walk-vs-brisk split, shares one per-second, per-mode accelerometer budget with every Inertia term. No
-/// weight or budget may exceed `hardCeiling`. A config outside its bounds is refused (`validate()` throws, and a
-/// decoder given one runs exactly as with the channel off).
+/// redundancy with HART and with Inertia's locomotion head (all three read the same wrist accelerometer;
+/// `effectiveHartRedundancy` / `effectiveInertiaRedundancy`) and, with the walk-vs-brisk split, shares one
+/// per-second, per-mode budget with the Inertia terms (`ActivityContextGaitQualityFusion.swift` says exactly
+/// what that budget bounds and what it does not). No weight or budget may exceed `hardCeiling`. A config outside
+/// its bounds is refused (`validate()` throws, and a decoder given one runs exactly as with the channel off).
 public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
 
     public enum Mode: String, Codable, Sendable {
@@ -638,8 +692,12 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
     public var mode: Mode
     /// The model the windows come from (provenance, threshold, hop, calibration).
     public var model: GaitQualityModelInfo
-    /// π: gait prevalence of the set the deployment's `gait_prob` calibration was fit on (VAL subjects). The
-    /// likelihood ratio is q/π for gait and (1 − q)/(1 − π) for non-gait, so a window that says q = π is neutral.
+    /// π: the reference the window's `gait_prob` q is divided by. The likelihood ratio is q/π for gait and
+    /// (1 − q)/(1 − π) for non-gait, so a window that says q = π is exactly neutral, and the channel is neutral ON
+    /// AVERAGE (E[q/π] = 1, E[(1 − q)/(1 − π)] = 1) only when π is the mean served `gait_prob` over the windows the
+    /// decoder actually sees, pre-filtered windows (q = 0) included. That mean, measured on VAL subjects with the
+    /// deployment's served model and calibration, is the right π; the labelled gait share is not (on Capture-24
+    /// VAL it is lower, so q/π would lean towards gait on average). `defaultGaitPrior`.
     public var gaitPrior: Double
     public var gaitWeight: Double
     /// The walk-vs-brisk split. 0 (the default) = computed and logged, never applied, until validation supports it.
@@ -649,9 +707,11 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
     public var briskCadenceSpm: Double
     /// … or this speed (1.34 m/s ≈ 3 mph) when `briskRule == .speed`.
     public var briskSpeedMps: Double
-    /// Gait weight × (1 − ρ) on seconds where HART's encoder channel also speaks.
+    /// The config's ρ_HART: gait weight × (1 − ρ) on seconds where HART's encoder channel also speaks. The ρ
+    /// actually applied is `effectiveHartRedundancy` (never below a measured ρ̂).
     public var hartRedundancy: Double
-    /// Gait (and brisk) weight × (1 − ρ) on seconds where an Inertia locomotion term is active.
+    /// The config's ρ_Inertia: gait (and brisk) weight × (1 − ρ) on seconds where an Inertia locomotion term is
+    /// active. The ρ actually applied is `effectiveInertiaRedundancy` (never below a measured ρ̂).
     public var inertiaRedundancy: Double
     /// Shared accelerometer budget (weight units): per second and per mode, the gait and brisk terms get only
     /// the room left under `accelerometerBudget · ln 10` after every Inertia term (locomotion, posture, gate).
@@ -666,17 +726,38 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
     public static let defaultGaitWeight = 0.25
     public static let defaultBriskCadenceSpm = 100.0
     public static let defaultBriskSpeedMps = 1.34
-    /// Not measured for ElderNet yet: the Inertia locomotion default (itself above the measured HART ρ̂ = 0.61),
-    /// as the conservative placeholder until the replay measures ElderNet's own overlap.
+    /// π when a config does not say otherwise: the mean served `gait_prob` over all windows the decoder sees
+    /// (Capture-24 VAL, hop 5, pre-filtered windows counted as q = 0; served defaults: no calibration, threshold
+    /// 0.5): 0.0849, 95 % CI 0.076–0.095, here rounded to 0.085. That makes the channel mean-neutral (E[q/π] ≈ 1,
+    /// see `gaitPrior`); the labelled gait share of the same windows (0.065, what the 2026-10-06 replay used) is not.
+    /// Re-derive it whenever the served model, its calibration or the hop changes.
+    public static let defaultGaitPrior = 0.085
+    /// The config defaults of ρ_HART and ρ_Inertia: cautious floors at or above ElderNet's measured overlap
+    /// (`measuredHartRedundancy`, `measuredInertiaRedundancy` below). ρ_HART stays 0.65, well above the measured
+    /// 0.332, because that measurement pairs ElderNet with HART v1 only, on 8 WISDM VAL subjects; ρ_Inertia is
+    /// 0.66, just above the measured 0.652. A config (the worker's candidate decode, a stored config, a replay
+    /// header's `config`) may set either higher; never below the measured ρ̂ (`effective…Redundancy`).
     public static let defaultHartRedundancy = 0.65
-    public static let defaultInertiaRedundancy = 0.65
+    public static let defaultInertiaRedundancy = 0.66
+    /// ElderNet's measured ρ̂: the residual log-likelihood-ratio correlation between ElderNet's gait term and the
+    /// other expert's evidence on the same windows, VAL subjects only (2026-10-06 replay):
+    ///   • vs HART v1's encoder channel, WISDM VAL: ρ̂ = 0.332 (13,138 windows);
+    ///   • vs Inertia's locomotion head (the stand-in encoder), Capture-24 VAL: ρ̂ = 0.652 (357,688 windows;
+    ///     WISDM VAL 0.614).
+    /// The ρ applied is max(config ρ, ρ̂) (`effectiveHartRedundancy`, `effectiveInertiaRedundancy`): like Inertia's
+    /// `bundle.fusion.rho_hart`, a measurement can raise the discount and never lower it. Re-measure (and update
+    /// these, and the defaults above if a ρ̂ exceeds them) when HART, the Inertia encoder or ElderNet's served model
+    /// changes. Each must be within [0, 1] (tested).
+    public static let measuredHartRedundancy = 0.332
+    public static let measuredInertiaRedundancy = 0.652
     /// The same as Inertia's body budget (`MotionHeadsEvidenceConfig.defaultBodyBudget`).
     public static let defaultAccelerometerBudget = 0.5
     public static let gaitPriorBounds: ClosedRange<Double> = 0.01...0.99
     public static let briskCadenceBounds: ClosedRange<Double> = 60...150
     public static let briskSpeedBounds: ClosedRange<Double> = 0.5...2
 
-    public init(mode: Mode, model: GaitQualityModelInfo, gaitPrior: Double,
+    public init(mode: Mode, model: GaitQualityModelInfo,
+                gaitPrior: Double = GaitQualityEvidenceConfig.defaultGaitPrior,
                 gaitWeight: Double = GaitQualityEvidenceConfig.defaultGaitWeight,
                 briskWeight: Double = 0, briskRule: BriskRule = .cadence,
                 briskCadenceSpm: Double = GaitQualityEvidenceConfig.defaultBriskCadenceSpm,
@@ -691,6 +772,22 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
         self.hartRedundancy = hartRedundancy; self.inertiaRedundancy = inertiaRedundancy
         self.accelerometerBudget = accelerometerBudget
         self.expectedModelVersion = expectedModelVersion; self.expectedWeightsDigest = expectedWeightsDigest
+    }
+
+    /// max(config ρ, measured ρ̂), or the config ρ alone while unmeasured (or when ρ̂ is not a valid number).
+    static func effectiveRedundancy(config: Double, measured: Double?) -> Double {
+        guard let measured, measured.isFinite, (0...1).contains(measured) else { return config }
+        return max(config, measured)
+    }
+
+    /// The HART redundancy discount actually applied: the larger of the config's and the measured ρ̂.
+    public var effectiveHartRedundancy: Double {
+        Self.effectiveRedundancy(config: hartRedundancy, measured: Self.measuredHartRedundancy)
+    }
+
+    /// The Inertia redundancy discount actually applied: the larger of the config's and the measured ρ̂.
+    public var effectiveInertiaRedundancy: Double {
+        Self.effectiveRedundancy(config: inertiaRedundancy, measured: Self.measuredInertiaRedundancy)
     }
 
     public enum ValidationError: Error, Equatable, Sendable, CustomStringConvertible {
@@ -749,7 +846,8 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
     }
 
     /// Short digest of everything in the config that changes decoder output (the weights digest excluded: it is
-    /// carried beside it). The model version, threshold, hop and calibration are part of it.
+    /// carried beside it). The model version, threshold, hop and calibration are part of it, and the ρ actually
+    /// applied (`effective…Redundancy`), so a measured ρ̂ that raises a discount changes the tag.
     public var configTag: String {
         var calibrationText = "none"
         if let calibration = model.calibration {
@@ -760,8 +858,8 @@ public struct GaitQualityEvidenceConfig: Codable, Equatable, Sendable {
             }.joined(separator: "|")
         }
         let text = "m=\(mode.rawValue);g=\(gaitWeight);b=\(briskWeight);br=\(briskRule.rawValue)"
-            + ";bc=\(briskCadenceSpm);bs=\(briskSpeedMps);pi=\(gaitPrior);rh=\(hartRedundancy)"
-            + ";ri=\(inertiaRedundancy);ab=\(accelerometerBudget);h=\(model.hopS);w=\(model.windowS)"
+            + ";bc=\(briskCadenceSpm);bs=\(briskSpeedMps);pi=\(gaitPrior);rh=\(effectiveHartRedundancy)"
+            + ";ri=\(effectiveInertiaRedundancy);ab=\(accelerometerBudget);h=\(model.hopS);w=\(model.windowS)"
             + ";thr=\(model.gaitThreshold);mv=\(model.modelVersion);cal=\(calibrationText)"
         var h: UInt64 = 0xcbf29ce484222325
         for b in text.utf8 { h = (h ^ UInt64(b)) &* 0x100000001b3 }

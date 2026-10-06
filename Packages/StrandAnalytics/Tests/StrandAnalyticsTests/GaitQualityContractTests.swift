@@ -48,8 +48,8 @@ final class GaitQualityContractTests: XCTestCase {
         config.gaitQuality = GaitQualityEvidenceConfig(mode: .candidate, model: r.model, gaitPrior: 0.2,
                                                        expectedModelVersion: r.model.modelVersion,
                                                        expectedWeightsDigest: r.model.weightsDigest)
-        let a = ActivityContextTrackBuilder.build(input, config: config)
-        let b = ActivityContextTrackBuilder.build(input, config: config)
+        let a = TrackKit.builtTrack(input, config: config)
+        let b = TrackKit.builtTrack(input, config: config)
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
         XCTAssertEqual(try e.encode(a.states), try e.encode(b.states))
@@ -62,9 +62,9 @@ final class GaitQualityContractTests: XCTestCase {
         // Pinned to another digest, the same windows are refused and the decode is the ElderNet-free one.
         var other = config
         other.gaitQuality?.expectedWeightsDigest = String(repeating: "0", count: 64)
-        let refused = ActivityContextTrackBuilder.build(input, config: other)
+        let refused = TrackKit.builtTrack(input, config: other)
         XCTAssertEqual(refused.gaitQuality?.refusal, "weights_digest_mismatch")
-        XCTAssertEqual(try e.encode(refused.states), try e.encode(ActivityContextTrackBuilder.build(sim.trackInput()).states))
+        XCTAssertEqual(try e.encode(refused.states), try e.encode(TrackKit.builtTrack(sim.trackInput()).states))
     }
 
     func testTheGoldenResponseThePythonServiceWritesDecodes() throws {

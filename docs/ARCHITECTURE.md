@@ -193,9 +193,11 @@ steps aside while the band says asleep or in bed.
 A third optional expert, ElderNet gait quality (`Tools/ActivityContext/ELDERNET.md`: a public, fine-tuned wrist
 model for gait detection, speed, cadence, stride length, regularity and steps), runs the same way: off by default,
 shadow-first, its own table, never part of the published documents. In the decoder its gait probability is one
-more distinct, tempered channel (a likelihood ratio against the calibration-set prevalence, so an uninformative
-window changes nothing), discounted where HART and Inertia's locomotion head already speak (all three read the
-same wrist accelerometer) and sharing one per-second accelerometer budget with every Inertia term; it stays off
+more distinct, tempered channel (a likelihood ratio against π, the mean served gait probability, so an
+uninformative window changes nothing and the channel is neutral on average), discounted where HART and Inertia's
+locomotion head already speak (all three read the same wrist accelerometer; the discounts are floors at or above
+the measured overlap) and sharing one per-second, per-mode budget with the Inertia terms (HART's encoder channel
+and the strap channels are outside that budget, and two modes' log-odds can move by up to twice it); it stays off
 unless `ActivityDecoderConfig.gaitQuality` accepts the windows' model, and off it is byte-identical. The quality
 metrics are reported, not evidence: a published state, its runs and the intervals built from them carry an
 optional `gait` block only while the posterior is on walking and ElderNet detects gait.

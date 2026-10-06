@@ -256,7 +256,7 @@ extension ActivityGoldenScenarios {
                 throw NSError(domain: "golden", code: 2,
                               userInfo: [NSLocalizedDescriptionKey: "update was \(second.how)"])
             }
-            let track = ActivityContextTrackBuilder.build(input, config: config)
+            let track = TrackKit.builtTrack(input, config: config)
             return try ActivityGoldenOutput(states: track.states, snapshot: track.snapshot, events: track.events,
                                             cacheTag: config.cacheTag, document: second.document)
         }

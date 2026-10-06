@@ -140,6 +140,52 @@ final class GaitQualityResponseTests: XCTestCase {
         refuses(try good { $0["calibration"] = [1, 2] }, .wrongType("calibration"))
     }
 
+    /// The parameters with a meaning are range-checked: a temperature must be > 0 (and is required by
+    /// `method: temperature`), a threshold must lie in [0, 1]. Other methods' parameters stay open.
+    func testCalibrationParametersAreRangeChecked() throws {
+        func calibrated(_ entry: [String: Any]) throws -> Data { try good { $0["calibration"] = ["gait_prob": entry] } }
+        for t in [0.0, -1.0] {
+            refuses(try calibrated(["method": "temperature", "fit": "val", "T": t]), .outOfRange("calibration.gait_prob.T"))
+        }
+        refuses(try calibrated(["method": "temperature", "fit": "val"]), .missingField("calibration.gait_prob.T"))
+        for thr in [-0.01, 1.01] {
+            refuses(try calibrated(["method": "temperature", "fit": "val", "T": 1.0, "threshold": thr]),
+                    .outOfRange("calibration.gait_prob.threshold"))
+        }
+        for thr in [0.0, 0.93, 1.0] {
+            XCTAssertNoThrow(try GaitKit.decode(try calibrated(["method": "temperature", "fit": "val", "T": 1.047,
+                                                                "threshold": thr])))
+        }
+        XCTAssertEqual(try GaitKit.decode(try calibrated(["method": "temperature", "fit": "val", "T": 1.047]))
+            .model.calibration?["gait_prob"]?.parameters, ["T": 1.047])
+        XCTAssertNoThrow(try GaitKit.decode(try calibrated(["method": "platt", "fit": "val", "a": -2.0, "b": 0.3])),
+                         "another method's parameters are carried as they are")
+        // A Codable model (a stored config, a replay header) refuses the same.
+        var obj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(GaitKit.model())) as! [String: Any]
+        obj["calibration"] = ["gait_prob": ["method": "temperature", "fit": "val", "T": 0.0]]
+        XCTAssertThrowsError(try JSONDecoder().decode(GaitQualityModelInfo.self,
+                                                      from: JSONSerialization.data(withJSONObject: obj)))
+    }
+
+    /// Exactly the §4 top-level keys: anything else refuses the response (stricter than motion-heads-1, which
+    /// ignores unknown top-level keys). The framing keys (`id`, `op`) are optional.
+    func testUnknownTopLevelKeysAreRefused() throws {
+        refuses(try good { $0["fusion"] = ["rho_hart": 0.7] }, .unknownField("fusion"))
+        refuses(try good { $0["package_version"] = "1.0" }, .unknownField("package_version"))
+        refuses(try good { $0["Windows"] = [Any]() }, .unknownField("Windows"))
+        XCTAssertNoThrow(try GaitKit.decode(try good { $0.removeValue(forKey: "id"); $0.removeValue(forKey: "op") }))
+        XCTAssertNoThrow(try GaitKit.decode(try good { $0.removeValue(forKey: "duration_ms") }))
+        // A wrong schema is still reported as such (it is checked before the keys), and a service error passes
+        // through with its own keys.
+        refuses(try good { $0["schema"] = "gait-quality-2"; $0["extra"] = 1 }, .unknownSchema("gait-quality-2"))
+        XCTAssertEqual(try GaitKit.decode(try good()).windows.count, 3)
+        XCTAssertEqual(GaitQualityWire.responseKeys.count, 16)
+        XCTAssertEqual(GaitQualityWire.modelInfoKeys, GaitQualityWire.responseKeys.subtracting(["windows"]))
+        // The fixture the package's own tests decode uses exactly the contract's keys.
+        let fixture = try JSONSerialization.jsonObject(with: GaitKit.syntheticFixture()) as! [String: Any]
+        XCTAssertEqual(Set(fixture.keys), GaitQualityWire.responseKeys)
+    }
+
     func testUnknownWindowKeysAreRefused() throws {
         refuses(try window { $0["mood"] = 1 }, .unknownField("windows[2].mood"))
     }
@@ -270,6 +316,10 @@ final class GaitQualityResponseTests: XCTestCase {
         try refused { $0["hop_s"] = 30 }
         try refused { $0["weights"] = ["gait_speed": String(repeating: "a", count: 64)] }
         try refused { $0["preprocessing_version"] = "inertia-prep-1" }
+        try refused { $0["fusion"] = ["rho_hart": 0.7] }               // not a model key
+        try refused { $0["windows"] = [Any]() }                         // a model is a response WITHOUT windows
+        try refused { $0["schema"] = "gait-quality-2" }
+        try refused { $0["ok"] = false }
         obj["calibration"] = ["gait_prob": ["method": "platt", "fit": "val", "a": 1.2, "b": -0.3]]
         let m = try JSONDecoder().decode(GaitQualityModelInfo.self, from: JSONSerialization.data(withJSONObject: obj))
         XCTAssertEqual(m.calibration?["gait_prob"]?.parameters, ["a": 1.2, "b": -0.3])

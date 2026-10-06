@@ -66,8 +66,8 @@ final class MotionHeadsContractTests: XCTestCase {
         var config = ActivityDecoderConfig()
         config.motionHeads = MotionHeadsEvidenceConfig.candidate(bundle: r.bundle)
         config.motionHeads?.allowStandInEvidenceForTesting = true
-        let a = ActivityContextTrackBuilder.build(input, config: config)
-        let b = ActivityContextTrackBuilder.build(input, config: config)
+        let a = TrackKit.builtTrack(input, config: config)
+        let b = TrackKit.builtTrack(input, config: config)
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
         XCTAssertEqual(try e.encode(a.states), try e.encode(b.states))
@@ -84,8 +84,8 @@ final class MotionHeadsContractTests: XCTestCase {
         // Without the override the stand-in is refused and the decode is the Inertia-free one, byte for byte.
         var refused = ActivityDecoderConfig()
         refused.motionHeads = MotionHeadsEvidenceConfig.candidate(bundle: r.bundle)
-        let plain = ActivityContextTrackBuilder.build(sim.trackInput())
-        let ignored = ActivityContextTrackBuilder.build(input, config: refused)
+        let plain = TrackKit.builtTrack(sim.trackInput())
+        let ignored = TrackKit.builtTrack(input, config: refused)
         if r.bundle.encoderKind == .standin {
             XCTAssertEqual(ignored.motionHeads?.refusal, "encoder_kind_standin")
             XCTAssertEqual(try e.encode(ignored.states), try e.encode(plain.states))

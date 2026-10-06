@@ -5,10 +5,12 @@ Line-delimited JSON over stdin/stdout in the motion-heads-1 shape (Tools/Activit
 Behaviour is fixed per process by argv, so the HART stub sharing the same RunRequest is never affected:
 
   --behaviour ok | model_missing | timeout | crash | malformed | schema | nan | bad_sum
+              | output_too_large | internal   (a structured ok:false answer of that kind to every infer)
               | ok_then_crash    (first infer ok, every later one crashes)
   --kind inertia1 | standin       (encoder_kind reported; default standin)
   --tier shadow | candidate | production   (evidence_tier_max; default shadow)
   --sleep N                       (seconds the timeout behaviour sleeps; default 30)
+  --delay N                       (seconds every infer takes before it answers; default 0)
   --bundle-sha HEX                (bundle_sha256 reported by ping and infer; default "ab" * 32)
   --infer-bundle-sha HEX          (bundle_sha256 reported by infer only; default: --bundle-sha)
 Every other argument (--timeout, --expect-bundle-sha256, --allow-standin-shadow …) is accepted and ignored.
@@ -84,6 +86,7 @@ def main():
     ap.add_argument("--kind", default="standin")
     ap.add_argument("--tier", default="shadow")
     ap.add_argument("--sleep", type=float, default=30.0)
+    ap.add_argument("--delay", type=float, default=0.0)
     ap.add_argument("--bundle-sha", default="ab" * 32)
     ap.add_argument("--infer-bundle-sha", default=None)
     args, _ = ap.parse_known_args()
@@ -116,8 +119,12 @@ def main():
                 sys.exit(3)
             if b == "timeout":
                 time.sleep(args.sleep)
+            if args.delay > 0:
+                time.sleep(args.delay)
             if b == "model_missing":
                 resp = {"id": rid, "ok": False, "kind": "model_missing", "error": "no checkpoint"}
+            elif b in ("output_too_large", "internal"):
+                resp = {"id": rid, "ok": False, "kind": b, "error": "stub " + b}
             else:
                 resp = {"id": rid, "op": "infer", "ok": True, "schema": "motion-heads-1",
                         "window_s": 30, "hop_s": 5,

@@ -4,9 +4,10 @@ import Foundation
 // the decoder reports (ELDERNET.md §5).
 //
 // Evidence (one channel, distinct from HART's encoder channel and from every Inertia channel, never averaged
-// with either): the window's calibrated gait probability q is turned into a likelihood RATIO against the
-// calibration-set prevalence π, r(gait) = q/π and r(non-gait) = (1 − q)/(1 − π), so a window that says q = π
-// is exactly neutral. A fixed compat maps the two outcomes onto the body modes:
+// with either): the window's calibrated gait probability q is turned into a likelihood RATIO against π, r(gait) =
+// q/π and r(non-gait) = (1 − q)/(1 − π), so a window that says q = π is exactly neutral (and the channel is
+// neutral on average when π is the mean served q over the windows the decoder sees: `gaitPrior`). A fixed
+// compat maps the two outcomes onto the body modes:
 //   gait     = walk, briskWalk, stairs
 //   non-gait = bedRest, seated, upright, vehicle, cycling
 //   run, otherExercise, the four transition modes and `unknown` are neutral (L = 1)
@@ -14,11 +15,25 @@ import Foundation
 // is tempered like every channel and added with `isEvidence: false` (it never reduces the missing-sensor unknown
 // bonus). ElderNet cannot name stairs: the stairs mode stays behind its specialist gate.
 //
+// `run` is neutral on purpose, and the data agree: ElderNet was fine-tuned on walking, and on VAL its served
+// gait_prob on running / jogging windows averages 0.096 (3.4 % of them ≥ 0.5; cycling 0.061, vehicle 0.091), about
+// π, so running reads as neither gait nor non-gait and putting run on either outcome would be wrong. With run
+// neutral, a high q lifts walk / briskWalk / stairs against run and a low q lifts the non-gait modes against it
+// (`testRunStaysNeutralAsMeasured` pins this). Revisit only on a new measurement.
+//
 // Redundancy: the weight is × (1 − ρ_HART) on seconds where HART's encoder channel speaks and × (1 − ρ_Inertia)
-// on seconds where an Inertia locomotion term is active (the same wrist accelerometer), and the gait term then
-// gets, per mode, only the room left under the shared accelerometer budget after Inertia's whole pull on that
-// mode (locomotion + posture inside its set + any specialist opening): per second and per mode every
-// accelerometer-derived term together stays ≤ T · max(B_acc, B_Inertia) · ln 10.
+// on seconds where an Inertia locomotion term is active (the same wrist accelerometer; both ρ are the effective
+// ones, max(config, measured ρ̂)), and the gait term then gets, per mode, only the room left under the shared
+// budget after Inertia's whole pull on that mode (locomotion + posture inside its set + any specialist gate it
+// opened); the brisk split gets what the gait term left.
+//
+// What the shared budget bounds, exactly: per second and per mode, |Inertia locomotion| + |Inertia posture (in
+// S)| + Inertia's gate opening + |ElderNet gait| + |ElderNet brisk| ≤ T · max(B_acc, B_Inertia) · ln 10, each
+// term counted in absolute value (no cancellation between them). It does NOT bound the other channels that also
+// read the wrist: HART's encoder channel (weight 0.8), movement intensity, the gait-presence / cadence channel
+// (step counter or IMU rhythm) and the gravity-orientation (posture) channel are outside it and add on top. And
+// it is a per-mode bound: between two modes the log-odds can move by up to twice it (one mode pulled up by the
+// full bound, the other down by the full bound).
 //
 // Walk vs brisk walk: on a gait window carrying the metric, a soft cadence (or speed) rule gives a ratio between
 // the two modes only, renormalised inside {walk, briskWalk} against the current belief (it never changes
@@ -45,6 +60,7 @@ struct PreparedGaitQuality: Sendable {
     let budget: Double
 
     static let gaitModes: [BodyMode] = [.walk, .briskWalk, .stairs]
+    /// `run` is in neither set (neutral): its measured gait_prob is about π (see above).
     static let nonGaitModes: [BodyMode] = [.bedRest, .seated, .upright, .vehicle, .cycling]
     /// The only modes the walk-vs-brisk split moves mass between.
     static let briskPair: [BodyMode] = [.walk, .briskWalk]
@@ -70,7 +86,8 @@ struct PreparedGaitQuality: Sendable {
                                     gaitWeight: config.gaitWeight, briskWeight: config.briskWeight,
                                     briskRule: config.briskRule, briskCadenceSpm: config.briskCadenceSpm,
                                     briskSpeedMps: config.briskSpeedMps, prior: config.gaitPrior,
-                                    hartRedundancy: config.hartRedundancy, inertiaRedundancy: config.inertiaRedundancy,
+                                    hartRedundancy: config.effectiveHartRedundancy,
+                                    inertiaRedundancy: config.effectiveInertiaRedundancy,
                                     budget: config.accelerometerBudget), nil)
     }
 

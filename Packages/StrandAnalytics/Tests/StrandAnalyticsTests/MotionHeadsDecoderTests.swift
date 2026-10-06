@@ -19,7 +19,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         return xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count)
     }
 
-    private func encoded(_ track: ActivityContextTrack) throws -> String {
+    private func trackJSON(_ track: ActivityContextTrack) throws -> String {
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
         return String(decoding: try e.encode(track.states), as: UTF8.self)
@@ -550,7 +550,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         let config = MotionHeadsKit.config(MotionHeadsKit.bundle(kind: .standin))
         let refused = decode(heads, config)
         let off = decode(sim.observations)
-        XCTAssertEqual(try encoded(refused), try encoded(off))
+        XCTAssertEqual(try trackJSON(refused), try trackJSON(off))
         XCTAssertEqual(refused.motionHeads?.refusal, "encoder_kind_standin")
         XCTAssertNil(refused.motionHeads?.stamp)
         XCTAssertEqual(config.cacheTag, ActivityDecoderConfig().cacheTag)
@@ -559,7 +559,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         XCTAssertNil(decoder.motionHeadsStamp)
         // With the override the same windows are evidence.
         let admitted = decode(heads, MotionHeadsKit.config(MotionHeadsKit.bundle(kind: .standin), standInOverride: true))
-        XCTAssertNotEqual(try encoded(admitted), try encoded(off))
+        XCTAssertNotEqual(try trackJSON(admitted), try trackJSON(off))
     }
 
     func testConfigBoundsAreValidated() throws {
@@ -636,7 +636,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         sim.desk(120); sim.walk(120, opt: o); sim.run(60); sim.still(60)
         let obs = MotionHeadsKit.attach(sim.observations) { ActivityContextGoldenTests.loudWindow($0) }
         let config = MotionHeadsKit.config(locomotion: 0.3, posture: 0.2, arm: 0.4)
-        XCTAssertEqual(try encoded(decode(obs, config)), try encoded(decode(obs, config)))
+        XCTAssertEqual(try trackJSON(decode(obs, config)), try trackJSON(decode(obs, config)))
     }
 
     // MARK: - Track builder
@@ -666,7 +666,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         XCTAssertEqual(report?.droppedNoObservation, 1)
         XCTAssertEqual(report?.droppedOutOfRange, 1)
         XCTAssertEqual(report?.windowsIn, 5)
-        let track = ActivityContextTrackBuilder.build(withHeads, config: config)
+        let track = TrackKit.builtTrack(withHeads, config: config)
         XCTAssertEqual(track.observedSeconds, plain.count)
         XCTAssertEqual(track.motionHeads?.attached, 3)
         XCTAssertEqual(track.motionHeads?.windowsIngested, 3)
@@ -785,7 +785,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         var config = ActivityDecoderConfig()
         config.motionHeads = other
         let refused = decode(heads, config)
-        XCTAssertEqual(try encoded(refused), try encoded(decode(sim.observations)))
+        XCTAssertEqual(try trackJSON(refused), try trackJSON(decode(sim.observations)))
         XCTAssertEqual(refused.motionHeads?.refusal, "bundle_sha256_mismatch")
         XCTAssertEqual(config.cacheTag, ActivityDecoderConfig().cacheTag)
         // The pin survives a Codable round trip (and is absent from an unpinned config's encoding).
@@ -808,13 +808,13 @@ final class MotionHeadsDecoderTests: XCTestCase {
         }
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
-        let off = ActivityContextTrackBuilder.build(input)
+        let off = TrackKit.builtTrack(input)
 
         // Accepted: the stamp and the suffix.
         var accepted = input
         accepted.motionHeads = MotionHeadsTrackInput(bundle: MotionHeadsKit.bundle(), windows: windows)
         XCTAssertTrue(ActivityContextTrackBuilder.acceptsMotionHeads(for: accepted, config: config))
-        let on = ActivityContextTrackBuilder.build(accepted, config: config)
+        let on = TrackKit.builtTrack(accepted, config: config)
         let stamp = try XCTUnwrap(config.motionHeads?.provenanceStamp)
         XCTAssertEqual(on.motionHeads?.stamp, stamp)
         XCTAssertEqual(on.snapshot.versions.motionHeads, stamp)
@@ -828,7 +828,7 @@ final class MotionHeadsDecoderTests: XCTestCase {
         for (label, variant, refusal) in [("another bundle", foreign, "bundle_mismatch"),
                                           ("no windows", input, "no_motion_heads_input")] {
             XCTAssertFalse(ActivityContextTrackBuilder.acceptsMotionHeads(for: variant, config: config), label)
-            let t = ActivityContextTrackBuilder.build(variant, config: config)
+            let t = TrackKit.builtTrack(variant, config: config)
             XCTAssertNil(t.motionHeads?.stamp, label)
             XCTAssertEqual(t.motionHeads?.refusal, refusal, label)
             XCTAssertNil(t.snapshot.versions.motionHeads, label)

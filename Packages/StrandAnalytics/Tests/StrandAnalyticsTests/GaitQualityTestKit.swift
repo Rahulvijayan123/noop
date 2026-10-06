@@ -54,7 +54,8 @@ enum GaitKit {
     static func config(_ model: GaitQualityModelInfo = model(), base: ActivityDecoderConfig = ActivityDecoderConfig(),
                        mode: GaitQualityEvidenceConfig.Mode = .candidate, prior: Double = 0.2,
                        gait: Double = 0.25, brisk: Double = 0, rule: GaitQualityEvidenceConfig.BriskRule = .cadence,
-                       hartRedundancy: Double = 0.65, inertiaRedundancy: Double = 0.65, budget: Double = 0.5,
+                       hartRedundancy: Double = GaitQualityEvidenceConfig.defaultHartRedundancy,
+                       inertiaRedundancy: Double = GaitQualityEvidenceConfig.defaultInertiaRedundancy, budget: Double = 0.5,
                        pinVersion: String? = nil, pinDigest: String? = nil) -> ActivityDecoderConfig {
         var c = base
         c.gaitQuality = GaitQualityEvidenceConfig(mode: mode, model: model, gaitPrior: prior, gaitWeight: gait,
@@ -112,5 +113,15 @@ enum GaitKit {
         let url = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
             .appendingPathComponent("Goldens/ElderNet/synthetic_gait_quality_response.json")
         return try Data(contentsOf: url)
+    }
+}
+
+/// One test-kit entry point to `ActivityContextTrackBuilder.build` for the decoder-channel tests (ElderNet,
+/// Inertia, the channel goldens): the same call, with the same defaults, so those suites do not each add a
+/// test-only callsite of the public builder to the parity ledger.
+enum TrackKit {
+    static func builtTrack(_ input: ActivityContextTrackInput,
+                           config: ActivityDecoderConfig = ActivityDecoderConfig()) -> ActivityContextTrack {
+        ActivityContextTrackBuilder.build(input, config: config)
     }
 }

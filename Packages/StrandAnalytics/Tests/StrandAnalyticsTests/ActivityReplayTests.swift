@@ -165,6 +165,13 @@ final class ActivityReplayTests: XCTestCase {
         XCTAssertEqual(try e.encode(replayed.states), try e.encode(direct.states))
         XCTAssertEqual(try e.encode(replayed.snapshot), try e.encode(direct.snapshot))
         XCTAssertEqual(config.gaitQuality?.gaitWeight, 0.4)
+        XCTAssertEqual(config.gaitQuality?.gaitPrior, 0.2)
+        // A header without `gait_prior` decodes with the default π (the mean served gait probability).
+        var noPrior = h
+        noPrior.gaitQuality?.gaitPrior = nil
+        let parsed = try ActivityReplay.parse(ActivityReplay.encode(header: noPrior, sequences: [("d", day)]))
+        XCTAssertEqual(ActivityReplay.gaitConfig(parsed.header, base: ActivityReplay.baseConfig(parsed.header))?
+            .gaitQuality?.gaitPrior, GaitQualityEvidenceConfig.defaultGaitPrior)
     }
 
     /// The replay refuses what the wire decoder refuses for ElderNet too.
@@ -197,11 +204,26 @@ final class ActivityReplayTests: XCTestCase {
         XCTAssertThrowsError(try ActivityReplay.parse(Data(lines.joined(separator: "\n").utf8)))
         var header = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(h)) as? [String: Any])
         var gq = try XCTUnwrap(header["gait_quality"] as? [String: Any])
-        var model = try XCTUnwrap(gq["model"] as? [String: Any])
+        let goodModel = try XCTUnwrap(gq["model"] as? [String: Any])
+        var model = goodModel
         model["hop_s"] = 30
         gq["model"] = model
         header["gait_quality"] = gq
         XCTAssertThrowsError(try ActivityReplay.parse(JSONSerialization.data(withJSONObject: header)))
+        // The header model is "a response without windows": its framing keys are tolerated, anything else is not.
+        model = goodModel
+        model["schema"] = "gait-quality-1"; model["ok"] = true; model["id"] = "req-1"; model["duration_ms"] = 3
+        gq["model"] = model
+        header["gait_quality"] = gq
+        XCTAssertNoThrow(try ActivityReplay.parse(JSONSerialization.data(withJSONObject: header)))
+        for (key, value) in [("fusion", ["rho_hart": 0.7] as Any), ("schema", "gait-quality-2"), ("ok", false),
+                             ("windows", [Any]())] {
+            var bad = goodModel
+            bad[key] = value
+            gq["model"] = bad
+            header["gait_quality"] = gq
+            XCTAssertThrowsError(try ActivityReplay.parse(JSONSerialization.data(withJSONObject: header)), key)
+        }
     }
 
     func testAStandInBundleNeedsTheTestOverride() throws {

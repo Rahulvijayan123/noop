@@ -425,6 +425,22 @@ enum ActivityContextModel {
         var gaitBudgetLimited = false
         /// The brisk rule's verdict on the held window (logged at any weight); nil when it had nothing to say.
         var gaitFavoursBrisk: Bool? = nil
+        /// The terms the shared accelerometer budget bounds, one by one. Only filled while the gait channel is
+        /// active (a held ElderNet window under an accepted config); nil otherwise.
+        var accelerometerTerms: AccelerometerTerms? = nil
+    }
+
+    /// Every term the shared accelerometer budget bounds at one second, term by term, as the tempered, signed log
+    /// factor it put on each body mode (0 where it did not speak): Inertia's locomotion term, its posture term
+    /// (inside S; applied by the decoder, = `Score.postureShift`), the specialist-gate opening Inertia caused,
+    /// the ElderNet gait term and the brisk split (= `Score.briskShift`). The budget holds when, per mode, the SUM
+    /// OF THEIR ABSOLUTE VALUES is ≤ T · max(B_acc, B_Inertia) · ln 10 (`ActivityContextGaitQualityFusion.swift`).
+    struct AccelerometerTerms {
+        var inertiaLocomotion: [Double]
+        var inertiaPosture: [Double]
+        var inertiaGate: [Double]
+        var gait: [Double]
+        var brisk: [Double]
     }
 
     /// Instantaneous soft arm-behaviour likelihoods (not normalized) from movement-pattern features.
@@ -702,6 +718,7 @@ enum ActivityContextModel {
         var briskShift: [Double]? = nil
         var gaitApplied = false, gaitLimited = false
         var favoursBrisk: Bool? = nil
+        var accelerometerTerms: AccelerometerTerms? = nil
         if let gaitQuality, let window = f.gaitQuality {
             let inertiaLocomotion = (inertia?.locomotion?.weight ?? 0) > 0
             let t = gaitQuality.gaitTerms(for: window, hartSpeaks: f.encoder != nil,
@@ -712,6 +729,16 @@ enum ActivityContextModel {
             if let it = inertia {
                 for m in 0..<n { room[m] = max(0, budgetLog - it.bodyPull(m) - inertiaGatePull[m]) }
             }
+            // The bounded terms one by one, as applied (tempered): what the budget's tests check term by term.
+            let zeros = [Double](repeating: 0, count: n)
+            var terms = AccelerometerTerms(inertiaLocomotion: zeros, inertiaPosture: postureShift ?? zeros,
+                                           inertiaGate: inertiaGatePull.map { temperature * $0 }, gait: zeros,
+                                           brisk: zeros)
+            if let loco = inertia?.locomotion {
+                for m in 0..<n where m != unknownIdx {
+                    terms.inertiaLocomotion[m] = temperature * loco.weight * log(max(loco.L[m], 1e-6))
+                }
+            }
             if let g = t.gait, g.weight > 0 {
                 var v = [Double](repeating: 1, count: n)
                 for m in 0..<n where m != unknownIdx {
@@ -719,6 +746,7 @@ enum ActivityContextModel {
                     let c = min(room[m], max(-room[m], raw))
                     if c != raw { gaitLimited = true; v[m] = exp(c / g.weight) } else { v[m] = g.L[m] }
                     room[m] = max(0, room[m] - abs(c))
+                    terms.gait[m] = temperature * c
                 }
                 add(v, unknownValue: 1.0, weight: g.weight, isEvidence: false)
                 gaitApplied = true
@@ -733,6 +761,7 @@ enum ActivityContextModel {
                     if c != raw { gaitLimited = true }
                     L[m] = exp(c / b.weight)
                     shift[m] = temperature * c
+                    terms.brisk[m] = temperature * c
                 }
                 // Counted in the agreement measure like the Inertia posture term, applied by the decoder.
                 weightSum += b.weight
@@ -741,6 +770,7 @@ enum ActivityContextModel {
                 dis[unknownIdx] += b.weight * min(0, log(1 / best))
                 briskShift = shift
             }
+            accelerometerTerms = terms
         }
 
         // A missing primary movement channel is itself information: nothing can be claimed about
@@ -754,7 +784,8 @@ enum ActivityContextModel {
                      postureShift: postureShift, arm: armTerm, motionHeadsApplied: inertia != nil,
                      specialistOpenedByMotionHeads: specialistOpenedByMotionHeads,
                      motionHeadsPostureOmitted: postureOmitted, briskShift: briskShift,
-                     gaitQualityApplied: gaitApplied, gaitBudgetLimited: gaitLimited, gaitFavoursBrisk: favoursBrisk)
+                     gaitQualityApplied: gaitApplied, gaitBudgetLimited: gaitLimited, gaitFavoursBrisk: favoursBrisk,
+                     accelerometerTerms: accelerometerTerms)
     }
 
     /// Arm-chain emission context: how plausible each arm class is given the body posterior.

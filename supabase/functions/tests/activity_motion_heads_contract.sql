@@ -276,7 +276,38 @@ begin
     assert false, 'a shadow-tier row with a comparison document must violate the CHECK';
   exception when check_violation then null;
   end;
-  raise notice 'PASS 4 upsert, coexisting modes, verbatim comparison, inertia1-only comparison';
+  -- The windows CHECK has no NULL hole: a `format` that is missing, JSON null or another value is refused even
+  -- when something bypasses the RPC (`->> 'format'` is NULL then, and a NULL check would pass).
+  assert (select windows ->> 'format' = 'mh-col-1' from public.activity_motion_heads_days
+    where user_id=u and device_id=dev and day=v_day and mode='shadow'), 'the stored shadow row carries columnar windows';
+  begin
+    update public.activity_motion_heads_days set windows = windows - 'format'
+      where user_id=u and device_id=dev and day=v_day and mode='shadow';
+    assert false, 'windows without a format key must violate the CHECK';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.activity_motion_heads_days set windows = jsonb_set(windows, '{format}', 'null'::jsonb)
+      where user_id=u and device_id=dev and day=v_day and mode='shadow';
+    assert false, 'windows with a null format must violate the CHECK';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.activity_motion_heads_days set windows = jsonb_set(windows, '{format}', '"gait-windows-1"'::jsonb)
+      where user_id=u and device_id=dev and day=v_day and mode='shadow';
+    assert false, 'windows in another format must violate the CHECK';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.activity_motion_heads_days set windows = '{}'::jsonb
+      where user_id=u and device_id=dev and day=v_day and mode='shadow';
+    assert false, 'an empty windows object must violate the CHECK';
+  exception when check_violation then null;
+  end;
+  update public.activity_motion_heads_days set windows = null
+    where user_id=u and device_id=dev and day=v_day and mode='shadow';
+  assert found, 'omitted windows (null) stay allowed';
+  raise notice 'PASS 4 upsert, coexisting modes, verbatim comparison, inertia1-only comparison, windows format CHECK';
 end;
 $$;
 

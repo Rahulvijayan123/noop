@@ -4,14 +4,17 @@ import StrandAnalytics
 // ActivityGaitQuality.swift — ElderNet gait quality on the server, SHADOW FIRST (Tools/ActivityContext/ELDERNET.md
 // §6).
 //
-// A third, separate Python process (`python -m activity_context.eldernet.serve --weights-dir <dir>`, its own
-// timeout, restart cap and response cap) is asked for `gait-quality-1` windows for the same IMU chunks the HART
+// A third, separate Python process (`python -m activity_context.eldernet.serve --weights-dir <dir> --upstream-dir
+// <dir>`, its own timeout, restart cap and response cap) is asked for `gait-quality-1` windows for the same IMU chunks the HART
 // service just inferred. It is never part of the lane's readiness gate and nothing it does can fail a job:
 //
 //   • every ElderNet failure (model missing, a weights or pin mismatch, timeout, crash, malformed or invalid output,
 //     NaN) is classified, counted and logged once per distinct reason, and the HART path continues untouched;
-//   • a transport failure (timeout, crash, launch failure, restart cooldown), `model_missing`, `weights_mismatch` or
-//     a pin refusal stops ElderNet for the rest of that job, so a broken model costs at most one timeout per job;
+//   • a transport failure (timeout, crash, launch failure, restart cooldown), `model_missing`, `weights_mismatch`, a
+//     pin refusal or a failure that would repeat on every chunk (an unknown schema, a malformed response, invalid
+//     values, an output too large) stops ElderNet for the rest of that job, so a broken model costs at most one
+//     timeout per job; only a NaN line costs a single chunk. ElderNet also has a per-job time budget
+//     (FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS): once its calls in a job have used it, it is stopped for that job;
 //   • the shadow output (provenance + compact per-window gait outputs + counts) is written to its OWN table
 //     (`activity_gait_windows_days`) through its own fenced RPC under a savepoint, so a rejection or a missing
 //     migration never reaches the v1 / v2 publishes in the same transaction;
@@ -21,7 +24,8 @@ import StrandAnalytics
 //     `activity_context_days` / `activity_context_epochs`: the published HART documents are byte-identical whether
 //     ElderNet is enabled or not.
 
-/// FRWHOOP_ELDERNET_* settings. Off unless `FRWHOOP_ELDERNET_ENABLED` is on and a weights directory is configured.
+/// FRWHOOP_ELDERNET_* settings. Off unless `FRWHOOP_ELDERNET_ENABLED` is on and both the weights directory and the
+/// upstream source directory are configured.
 struct ElderNetSettings: Equatable {
     enum Mode: String, Equatable {
         case shadow, candidate
@@ -30,6 +34,10 @@ struct ElderNetSettings: Equatable {
     var enabled: Bool
     var mode: Mode
     var weightsDir: String?
+    /// The sha-verified upstream ElderNet source checkout (FRWHOOP_ELDERNET_UPSTREAM_DIR, passed as
+    /// `--upstream-dir`; fetched by an operator with `python -m activity_context.eldernet.upstream fetch --dest DIR`).
+    /// The serve process imports upstream's own modules from it; without it the child reports `model_missing`.
+    var upstreamDir: String? = nil
     var python: String
     /// Worker-side per-request timeout, already clamped to at most a third of the job lease.
     var timeoutSeconds: Double
@@ -37,20 +45,29 @@ struct ElderNetSettings: Equatable {
     var modelVersion: String? = nil
     /// The weights digest the deployment pins (FRWHOOP_ELDERNET_WEIGHTS_SHA256; `GaitQualityModelInfo.weightsDigest`).
     var weightsSHA256: String? = nil
-    /// π for the candidate decode (FRWHOOP_ELDERNET_GAIT_PRIOR): gait prevalence of the calibration set.
+    /// π for the candidate decode (FRWHOOP_ELDERNET_GAIT_PRIOR): the mean served `gait_prob` over all windows the
+    /// decoder sees (ELDERNET.md §5; 0.0849 on Capture-24 VAL at hop 5 with the served defaults).
     var gaitPrior: Double? = nil
     /// Why ElderNet stays off although it was asked for (a missing weights dir, an unknown mode or value …).
     var configurationError: String?
     /// Settings that were adjusted rather than refused (a clamped timeout); logged once at start-up.
     var warnings: [String] = []
+    /// Wall-clock seconds ElderNet may spend in one job (its readiness check and every chunk call together)
+    /// before it is stopped for the rest of that job (`job_time_budget`). FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS.
+    var jobBudgetSeconds: Double = ElderNetSettings.defaultJobBudgetSeconds
 
     static let serveModule = ["-m", "activity_context.eldernet.serve"]
     static let defaultTimeoutSeconds = 60.0
+    /// Ten request timeouts: about three times a normal full day at hop 5 (≈ 1.9 ms per window per head), far
+    /// below a day of slow-but-not-failing chunks.
+    static let defaultJobBudgetSeconds = 600.0
 
     /// FRWHOOP_ELDERNET_ENABLED (1/true/yes/on, default off; anything unrecognised is a configuration error),
-    /// FRWHOOP_ELDERNET_MODE (shadow | candidate, default shadow), FRWHOOP_ELDERNET_WEIGHTS_DIR (required when on),
+    /// FRWHOOP_ELDERNET_MODE (shadow | candidate, default shadow), FRWHOOP_ELDERNET_WEIGHTS_DIR and
+    /// FRWHOOP_ELDERNET_UPSTREAM_DIR (both required when on),
     /// FRWHOOP_ELDERNET_PYTHON (default: the activity python), FRWHOOP_ELDERNET_TIMEOUT_SECONDS (default 60, clamped
-    /// to at most `leaseSeconds / 3`), FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 (the pins;
+    /// to at most `leaseSeconds / 3`), FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS (default 600),
+    /// FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 (the pins;
     /// required in candidate mode, enforced in shadow mode when set), FRWHOOP_ELDERNET_GAIT_PRIOR (π in [0.01, 0.99];
     /// required in candidate mode). A setting that cannot be honoured switches ElderNet off with a reason; it never
     /// stops the worker.
@@ -68,8 +85,13 @@ struct ElderNetSettings: Equatable {
         var warnings: [String] = []
         var timeout = defaultTimeoutSeconds
         if let raw = value("FRWHOOP_ELDERNET_TIMEOUT_SECONDS") {
-            if let t = Double(raw), t.isFinite, t > 0 { timeout = t }
+            if let t = InertiaSettings.parseSeconds(raw) { timeout = t }
             else { errors.append("invalid FRWHOOP_ELDERNET_TIMEOUT_SECONDS \(raw)") }
+        }
+        var jobBudget = ElderNetSettings.defaultJobBudgetSeconds
+        if let raw = value("FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS") {
+            if let t = InertiaSettings.parseSeconds(raw) { jobBudget = t }
+            else { errors.append("invalid FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS \(raw)") }
         }
         // A request may never outlive a third of the job lease: the lease is renewed before each ElderNet call,
         // and one stuck child must not be able to let it expire.
@@ -80,8 +102,9 @@ struct ElderNetSettings: Equatable {
         }
         var settings = ElderNetSettings(
             enabled: asked, mode: .shadow, weightsDir: value("FRWHOOP_ELDERNET_WEIGHTS_DIR"),
+            upstreamDir: value("FRWHOOP_ELDERNET_UPSTREAM_DIR"),
             python: value("FRWHOOP_ELDERNET_PYTHON") ?? activityPython, timeoutSeconds: timeout,
-            configurationError: nil, warnings: warnings)
+            configurationError: nil, warnings: warnings, jobBudgetSeconds: jobBudget)
         if let raw = value("FRWHOOP_ELDERNET_MODE") {
             if let mode = Mode(rawValue: raw.lowercased()) { settings.mode = mode }
             else { errors.append("unknown FRWHOOP_ELDERNET_MODE \(raw)") }
@@ -102,6 +125,8 @@ struct ElderNetSettings: Equatable {
         if asked, errors.isEmpty {
             if settings.weightsDir == nil {
                 errors.append("FRWHOOP_ELDERNET_WEIGHTS_DIR is required")
+            } else if settings.upstreamDir == nil {
+                errors.append("FRWHOOP_ELDERNET_UPSTREAM_DIR is required (the sha-verified upstream source checkout)")
             } else if settings.mode == .candidate, settings.modelVersion == nil || settings.weightsSHA256 == nil {
                 errors.append("FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 are required in candidate mode")
             } else if settings.mode == .candidate, settings.gaitPrior == nil {
@@ -122,18 +147,18 @@ struct ElderNetSettings: Equatable {
         return bytes.allSatisfy { alnum($0) || $0 == 46 || $0 == 95 || $0 == 58 || $0 == 43 || $0 == 45 }
     }
 
-    static func serveArgs(weightsDir: String, timeoutSeconds: Double? = nil) -> [String] {
-        var args = serveModule + ["--weights-dir", weightsDir]
+    static func serveArgs(weightsDir: String, upstreamDir: String, timeoutSeconds: Double? = nil) -> [String] {
+        var args = serveModule + ["--weights-dir", weightsDir, "--upstream-dir", upstreamDir]
         if let timeoutSeconds { args += ["--timeout", InertiaSettings.formatSeconds(timeoutSeconds)] }
         return args
     }
 
     /// The service config of the ElderNet child. Its own process, timeout, restart cap and response cap.
     func serviceConfig(activityHome: String) -> ActivityPythonService.Config? {
-        guard enabled, let weightsDir else { return nil }
+        guard enabled, let weightsDir, let upstreamDir else { return nil }
         return ActivityPythonService.Config(
             pythonBin: python, activityHome: activityHome, modelDir: nil,
-            serveArgs: Self.serveArgs(weightsDir: weightsDir,
+            serveArgs: Self.serveArgs(weightsDir: weightsDir, upstreamDir: upstreamDir,
                                       timeoutSeconds: InertiaSettings.serveTimeoutSeconds(workerTimeout: timeoutSeconds)),
             requestTimeoutSeconds: timeoutSeconds,
             maxRequestBytes: 64 * 1024 * 1024,
@@ -169,6 +194,8 @@ struct ElderNetStage {
     var expectedWeightsDigest: String? = nil
     /// π for the candidate decode (FRWHOOP_ELDERNET_GAIT_PRIOR).
     var gaitPrior: Double? = nil
+    /// Wall-clock seconds this stage may spend per job (`ElderNetSettings.jobBudgetSeconds`).
+    var jobBudgetSeconds: Double = ElderNetSettings.defaultJobBudgetSeconds
 
     enum Outcome: Equatable {
         case ok(GaitQualityResponse)
@@ -252,9 +279,10 @@ struct ElderNetStage {
             }
             return .ok(response)
         } catch let e as GaitQualityResponseError {
-            let stop: Bool
-            if case .serviceError(let kind, _) = e { stop = Self.stoppingServiceKinds.contains(kind) } else { stop = false }
-            return .failed(kind: e.kind, message: String(String(describing: e).prefix(240)), stop: stop)
+            // A service error stops by its kind; a response the decoder refused stops unless only this chunk's
+            // numbers were bad (`nonfinite`, `malformed_json`: a NaN token): the rest would repeat on every chunk.
+            return .failed(kind: e.kind, message: String(String(describing: e).prefix(240)),
+                           stop: Self.stoppingServiceKinds.contains(e.kind))
         } catch {
             let c = InertiaStage.classify(error)
             // A line that named the request but did not parse (a NaN token) came from a healthy child: only that
@@ -267,8 +295,13 @@ struct ElderNetStage {
         }
     }
 
-    /// Service error kinds that will not clear within a job: ask no more chunks.
-    static let stoppingServiceKinds: Set<String> = ["model_missing", "weights_mismatch", "timeout", pinMismatchKind]
+    /// Failure kinds that will not clear within a job: ask no more chunks. The service's own kinds
+    /// (`model_missing`, `weights_mismatch`, `timeout`, `malformed`: the request itself, `output_too_large`: the
+    /// same chunk sizes all day), a pin refusal, and the decoder's refusals that would repeat on every chunk
+    /// (`schema`, `malformed`, `invalid_values`). Not `nonfinite` / `malformed_json` (a NaN line costs one chunk)
+    /// nor `internal`.
+    static let stoppingServiceKinds: Set<String> = ["model_missing", "weights_mismatch", "timeout", pinMismatchKind,
+                                                    "malformed", "output_too_large", "schema", "invalid_values"]
 }
 
 /// The shadow row (and candidate comparison) for one job.
