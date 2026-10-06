@@ -48,7 +48,8 @@ trustworthy. Running windows (not in P/R): called gait in 4.1 % (Capture-24), 7.
 1791310368, bundle `eldernet-437a38b+cal:16191350862fb8de`, test_sha256 `677165e7…`). The machine report and the
 ledger file were lost when the external SSD disconnected uncleanly about two minutes after the run. They have
 **not** been regenerated: doing so needs a recorded rerun (`rerun_reason=artifact_lost_identical_rebuild`), which
-is left to the owner. `test_ledger.jsonl` therefore currently holds only the GOTOV entry.
+is left to the owner. `test_ledger.jsonl` therefore currently holds only the external-set entries (GOTOV,
+OxWalk).
 
 Reading: on lab protocols and older adults (GOTOV, below) detection is near-perfect; in free-living Capture-24
 precision is 0.88 but recall 0.52. Capture-24's camera-annotated "walking" episodes include standing pauses and
