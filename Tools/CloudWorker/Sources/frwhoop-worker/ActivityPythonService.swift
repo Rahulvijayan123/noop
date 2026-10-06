@@ -118,6 +118,9 @@ final class ActivityPythonService {
         /// Other string fields of the ping (the Inertia service reports encoder_id, encoder_kind,
         /// heads_version, bundle_sha256, evidence_tier_max …), for logs and the heartbeat.
         var details: [String: String] = [:]
+        /// Object fields of the ping whose values are all strings (the ElderNet service reports its
+        /// `weights` {head: sha256} map this way).
+        var objects: [String: [String: String]] = [:]
     }
 
     struct WindowPrediction {
@@ -221,6 +224,12 @@ final class ActivityPythonService {
     var lastPingDetails: [String: String] {
         lock.lock(); defer { lock.unlock() }
         return lastPingStatus?.details ?? [:]
+    }
+
+    /// The all-string object fields of the last ping (the ElderNet service reports its `weights` there).
+    var lastPingObjects: [String: [String: String]] {
+        lock.lock(); defer { lock.unlock() }
+        return lastPingStatus?.objects ?? [:]
     }
 
     var restartCountValue: Int {
@@ -632,7 +641,7 @@ final class ActivityPythonService {
     /// model was up, claimed jobs and failed every one of them.) An explicit `model_available: false` also
     /// counts as unavailable, and neither signal can override the other into "available".
     static let unavailableModelStatuses: Set<String> = ["model_missing", "missing", "hart_unavailable",
-                                                        "inertia_unavailable"]
+                                                        "inertia_unavailable", "eldernet_unavailable"]
 
     static func parsePing(_ obj: [String: Any]) -> PingStatus {
         let ok = (obj["ok"] as? Bool) ?? false
@@ -646,8 +655,14 @@ final class ActivityPythonService {
             modelAvailable = false
         }
         var details: [String: String] = [:]
+        var objects: [String: [String: String]] = [:]
         for (k, v) in obj {
             if let s = v as? String, k != "id", k != "op" { details[k] = s }
+            if let d = v as? [String: Any] {
+                var strings: [String: String] = [:]
+                for (key, value) in d { if let s = value as? String { strings[key] = s } }
+                if strings.count == d.count { objects[k] = strings }
+            }
         }
         return PingStatus(
             ok: ok,
@@ -656,7 +671,7 @@ final class ActivityPythonService {
             modelVersion: obj["model_version"] as? String,
             preprocessingVersion: obj["preprocessing_version"] as? String,
             error: (obj["error"] as? String) ?? (obj["model_error"] as? String),
-            details: details)
+            details: details, objects: objects)
     }
 
     /// Window times outside this magnitude are dropped: the lane converts them with `Int(_:)`, which traps for

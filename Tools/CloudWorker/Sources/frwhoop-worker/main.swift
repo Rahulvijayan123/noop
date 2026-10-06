@@ -58,6 +58,21 @@ import FoundationNetworking
 //   FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW 1/true/yes/on passes --allow-standin-shadow (default OFF; shadow mode
 //                                only): exercises the shadow lane on real data with a stand-in encoder, whose
 //                                rows are stored as encoder_kind standin and never feed the decoder
+//   FRWHOOP_ELDERNET_ENABLED     1/true/yes/on also asks a THIRD Python child (`activity_context.eldernet.serve`)
+//                                for ElderNet gait quality on every raw-IMU chunk (default OFF; an unrecognised
+//                                value keeps it off and is logged). Never gates claiming; any failure is counted
+//                                and the HART path continues (Tools/ActivityContext/ELDERNET.md §6)
+//   FRWHOOP_ELDERNET_MODE        shadow (default: store the gait windows in activity_gait_windows_days) |
+//                                candidate (also store a second decode of the day with the gait channel beside
+//                                them; never published)
+//   FRWHOOP_ELDERNET_WEIGHTS_DIR fetched ElderNet weights, passed as --weights-dir (required when enabled)
+//   FRWHOOP_ELDERNET_MODEL_VERSION / FRWHOOP_ELDERNET_WEIGHTS_SHA256 the pinned model_version and weights digest
+//                                (required in candidate mode; enforced in shadow mode when set): a child serving
+//                                any other model is refused for the job
+//   FRWHOOP_ELDERNET_GAIT_PRIOR  π, gait prevalence of the calibration set (required in candidate mode)
+//   FRWHOOP_ELDERNET_PYTHON      interpreter for the ElderNet child (default: FRWHOOP_ACTIVITY_PYTHON)
+//   FRWHOOP_ELDERNET_TIMEOUT_SECONDS per-request timeout of the ElderNet child (default 60, clamped to a third of
+//                                FRWHOOP_ACTIVITY_LEASE_SECONDS); the child gets --timeout 5 s below it
 //   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity);
 //                                "series" keeps scoring but stops building and writing the dense intraday series
 //   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
@@ -121,6 +136,7 @@ struct WorkerConfig {
     let activityStreamBudget: Int
     let activityCacheDir: String
     let inertia: InertiaSettings
+    let eldernet: ElderNetSettings
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -179,6 +195,8 @@ struct WorkerConfig {
         self.activityCacheDir = environment["FRWHOOP_ACTIVITY_CACHE_DIR"] ?? "/var/lib/frwhoop/activity-cache"
         self.inertia = InertiaSettings.fromEnvironment(environment, activityPython: self.activityPython,
                                                        leaseSeconds: self.activityLeaseSeconds)
+        self.eldernet = ElderNetSettings.fromEnvironment(environment, activityPython: self.activityPython,
+                                                         leaseSeconds: self.activityLeaseSeconds)
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -425,6 +443,11 @@ var activity = ActivityLane(
         InertiaStage(service: ActivityPythonService(config: $0), mode: config.inertia.mode,
                      expectedBundleSHA256: config.inertia.bundleSHA256)
     },
+    eldernet: config.eldernet.serviceConfig(activityHome: config.activityHome).map {
+        ElderNetStage(service: ActivityPythonService(config: $0), mode: config.eldernet.mode,
+                      expectedModelVersion: config.eldernet.modelVersion,
+                      expectedWeightsDigest: config.eldernet.weightsSHA256, gaitPrior: config.eldernet.gaitPrior)
+    },
     cache: config.activityEnabled && config.activityImu ? ActivityLocalCache(path: config.activityCacheDir) : nil)
 for warning in config.inertia.warnings {
     FileHandle.standardError.write("frwhoop-worker: inertia: \(warning)\n".data(using: .utf8)!)
@@ -436,6 +459,17 @@ if let why = config.inertia.configurationError {
         ("frwhoop-worker: inertia \(config.inertia.mode.rawValue) enabled (bundle \(config.inertia.bundleDir ?? "-"), "
             + "pinned \(config.inertia.bundleSHA256 ?? "no")\(config.inertia.allowStandInShadow ? ", stand-in shadow" : ""), "
             + "timeout \(config.inertia.timeoutSeconds) s)\n").data(using: .utf8)!)
+}
+for warning in config.eldernet.warnings {
+    FileHandle.standardError.write("frwhoop-worker: eldernet: \(warning)\n".data(using: .utf8)!)
+}
+if let why = config.eldernet.configurationError {
+    FileHandle.standardError.write("frwhoop-worker: eldernet stays off: \(why)\n".data(using: .utf8)!)
+} else if config.eldernet.enabled {
+    FileHandle.standardError.write(
+        ("frwhoop-worker: eldernet \(config.eldernet.mode.rawValue) enabled (weights \(config.eldernet.weightsDir ?? "-"), "
+            + "pinned \(config.eldernet.modelVersion ?? "no") / \(config.eldernet.weightsSHA256 ?? "no"), "
+            + "timeout \(config.eldernet.timeoutSeconds) s)\n").data(using: .utf8)!)
 }
 
 // MARK: - Candidate (shadow/active) inference lane wiring
@@ -635,6 +669,24 @@ if activityState.read().enabled {
                     $0.counters["inertia_posture_omitted"] = activity.stats.inertiaPostureOmitted
                     $0.counters["inertia_rows_pruned"] = activity.stats.inertiaRowsPruned
                     $0.counters["inertia_prune_failures"] = activity.stats.inertiaPruneFailures
+                }
+                // Only with ElderNet on, likewise.
+                if activity.eldernet != nil {
+                    $0.counters["eldernet_jobs"] = activity.stats.eldernetJobs
+                    $0.counters["eldernet_chunks"] = activity.stats.eldernetChunks
+                    $0.counters["eldernet_windows"] = activity.stats.eldernetWindows
+                    $0.counters["eldernet_failures"] = activity.stats.eldernetFailures
+                    $0.counters["eldernet_unavailable"] = activity.stats.eldernetUnavailable
+                    $0.counters["eldernet_pin_refused"] = activity.stats.eldernetPinRefused
+                    $0.counters["eldernet_shadow_stored"] = activity.stats.eldernetShadowStored
+                    $0.counters["eldernet_shadow_failures"] = activity.stats.eldernetShadowFailures
+                    $0.counters["eldernet_shadow_fenced"] = activity.stats.eldernetShadowFenced
+                    $0.counters["eldernet_candidate_documents"] = activity.stats.eldernetCandidateDocuments
+                    $0.counters["eldernet_candidate_withheld"] = activity.stats.eldernetCandidateWithheld
+                    $0.counters["eldernet_windows_attached"] = activity.stats.eldernetWindowsAttached
+                    $0.counters["eldernet_windows_dropped"] = activity.stats.eldernetWindowsDropped
+                    $0.counters["eldernet_rows_pruned"] = activity.stats.eldernetRowsPruned
+                    $0.counters["eldernet_prune_failures"] = activity.stats.eldernetPruneFailures
                 }
                 $0.lastError = activity.stats.lastError
                 $0.lastErrorKind = activity.stats.lastErrorKind

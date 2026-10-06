@@ -74,8 +74,11 @@ struct ActivityLane {
     /// Inertia-1 motion heads (shadow / candidate), or nil when off (`FRWHOOP_INERTIA_ENABLED`). Never part of
     /// the readiness gate; its failures never fail a job (`ActivityMotionHeads.swift`).
     var inertia: InertiaStage? = nil
+    /// ElderNet gait quality (shadow / candidate), or nil when off (`FRWHOOP_ELDERNET_ENABLED`). Never part of the
+    /// readiness gate; its failures never fail a job (`ActivityGaitQuality.swift`).
+    var eldernet: ElderNetStage? = nil
     /// Downloaded objects and serve answers kept on this host (see `ActivityLocalCache`); nil turns it off.
-    /// Only HART answers are cached: Inertia is asked for every chunk, cached HART or not.
+    /// Only HART answers are cached: Inertia and ElderNet are asked for every chunk, cached HART or not.
     var cache: ActivityLocalCache? = nil
     /// How often the cache is pruned.
     static let cachePruneIntervalSeconds: TimeInterval = 6 * 3600
@@ -170,6 +173,33 @@ struct ActivityLane {
         var inertiaRowsPruned = 0
         var inertiaPruneFailures = 0
         var lastInertiaPruneError: String?
+        /// ElderNet (only moves when the stage is configured). Failures are counted per chunk or per job start and
+        /// never reach the HART path.
+        var eldernetJobs = 0
+        var eldernetChunks = 0
+        var eldernetWindows = 0
+        var eldernetFailures = 0
+        /// Jobs where the ElderNet model was not available (ping said so, or the child would not start).
+        var eldernetUnavailable = 0
+        /// Jobs (or chunks) refused because the served model is not the pinned version / weights digest.
+        var eldernetPinRefused = 0
+        var lastElderNetError: String?
+        var lastElderNetErrorKind: String?
+        var eldernetShadowStored = 0
+        var eldernetShadowFailures = 0
+        /// Shadow rows the fenced RPC refused (NULL: the lease moved on or the revision is stale). Nothing written.
+        var eldernetShadowFenced = 0
+        var lastElderNetShadowError: String?
+        var eldernetCandidateDocuments = 0
+        var eldernetCandidateWithheld = 0
+        var lastElderNetWithheldReason: String?
+        /// How the stored windows met the day's observed seconds (`summary.track_report`, summed over jobs).
+        var eldernetWindowsAttached = 0
+        var eldernetWindowsDropped = 0
+        /// Retention (`prune_activity_gait_windows_days`): rows deleted, and calls that failed.
+        var eldernetRowsPruned = 0
+        var eldernetPruneFailures = 0
+        var lastElderNetPruneError: String?
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -200,6 +230,9 @@ struct ActivityLane {
     /// Inertia retention runs on the lane's own cadence (like reconcile / stream enqueue), every few hours.
     var lastMotionHeadsPruneAt: Date?
     static let motionHeadsPruneIntervalSeconds: TimeInterval = 6 * 3600
+    /// ElderNet retention, on the same cadence.
+    var lastGaitWindowsPruneAt: Date?
+    static let gaitWindowsPruneIntervalSeconds: TimeInterval = 6 * 3600
 
     enum ActivityError: Error, CustomStringConvertible {
         /// A deterministic input violation: bounded retry through the fail
@@ -261,6 +294,7 @@ struct ActivityLane {
         if streamDaysEnabled { drainStreamDays(budget: streamDayBudget) }
         pruneCacheIfDue()
         pruneMotionHeadsIfDue()
+        pruneGaitWindowsIfDue()
     }
 
     private mutating func pruneCacheIfDue(now: Date = Date()) {
@@ -288,6 +322,27 @@ struct ActivityLane {
                     ("frwhoop-worker: inertia retention prune failed (nothing else affected): \(why)\n").data(using: .utf8)!)
             }
             stats.lastInertiaPruneError = why
+        }
+    }
+
+    /// ElderNet retention: while the stage is configured, delete shadow / candidate rows older than
+    /// `ActivityGaitWindowsDays.retentionDays`, at most once per `gaitWindowsPruneIntervalSeconds`. Best effort: a
+    /// failure (a database without the migration, say) is counted and logged once, never thrown.
+    mutating func pruneGaitWindowsIfDue(now: Date = Date()) {
+        guard eldernet != nil else { return }
+        if let last = lastGaitWindowsPruneAt, now.timeIntervalSince(last) < Self.gaitWindowsPruneIntervalSeconds { return }
+        lastGaitWindowsPruneAt = now
+        do {
+            stats.eldernetRowsPruned += try ActivityGaitWindowsDays.prune(db: db)
+            stats.lastElderNetPruneError = nil
+        } catch {
+            stats.eldernetPruneFailures += 1
+            let why = ActivityContextDays.safeReason(error)
+            if stats.lastElderNetPruneError != why {
+                FileHandle.standardError.write(
+                    ("frwhoop-worker: eldernet retention prune failed (nothing else affected): \(why)\n").data(using: .utf8)!)
+            }
+            stats.lastElderNetPruneError = why
         }
     }
 
@@ -659,7 +714,7 @@ struct ActivityLane {
         let requests = runs.lazy.flatMap { Self.runRequests(timeline: timeline, run: $0) }
         let db = self.db, token = job.leaseToken, lease = leaseSeconds
         let inferred = try Self.inferChunks(
-            requests, service: service, inertia: inertia,
+            requests, service: service, inertia: inertia, eldernet: eldernet,
             versions: Self.resolvedVersions(reportedModel: service.reportedModelVersion,
                                             reportedPreprocessing: service.reportedPreprocessingVersion),
             cache: cache,
@@ -704,19 +759,23 @@ struct ActivityLane {
 
         // 6d. Inertia shadow row (and candidate comparison): built from what 6b decoded, never changing it.
         let motionHeads = motionHeadsPayload(job: job, collector: inferred.motionHeads, context: context)
+        // 6e. ElderNet shadow row (and candidate comparison), the same way.
+        let gaitWindows = gaitWindowsPayload(job: job, collector: inferred.gaitQuality, context: context)
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
         return try publishDay(job: job, payloadText: payloadText, dayDocument: context.built,
                               durationMS: durationMS, dayBounds: dayBounds, windowsPayload: windowsPayload,
-                              motionHeads: motionHeads)
+                              motionHeads: motionHeads, gaitWindows: gaitWindows)
     }
 
-    /// What step 5 produced: the HART windows and versions exactly as before, plus the Inertia collector.
+    /// What step 5 produced: the HART windows and versions exactly as before, plus the Inertia and ElderNet
+    /// collectors.
     struct ChunkInference {
         var windows: [ActivityPythonService.WindowPrediction] = []
         var versions: (model: String, preprocessing: String)
         var motionHeads = MotionHeadsCollector()
+        var gaitQuality = GaitQualityCollector()
     }
 
     /// Step 5 for a job's chunks. One request per bounded body chunk (audit P1-2): a contiguous run longer
@@ -734,9 +793,13 @@ struct ActivityLane {
     /// whose HART answer came from the cache is still asked of Inertia, so a day's shadow row is never partial
     /// because HART was cached. The HART windows and versions are the same with or without Inertia; with Inertia
     /// off the DB calls are too.
+    ///
+    /// ElderNet (`eldernet`) follows the same rule after Inertia: ready-checked once at the start of the job, the
+    /// lease renewed before each of its calls, every failure absorbed and counted, never cached, asked for a chunk
+    /// whose HART answer came from the cache too.
     static func inferChunks<Requests: Sequence>(
         _ requests: Requests, service: ActivityPythonService,
-        inertia: InertiaStage?, versions start: (model: String, preprocessing: String),
+        inertia: InertiaStage?, eldernet: ElderNetStage? = nil, versions start: (model: String, preprocessing: String),
         cache: ActivityLocalCache? = nil,
         stats: inout Stats, renew: () throws -> Bool) throws -> ChunkInference
         where Requests.Element == ActivityPythonService.RunRequest {
@@ -754,6 +817,18 @@ struct ActivityLane {
                 noteInertiaFailure(&stats, kind: down.kind, message: down.message)
             } else {
                 inertiaReady = true
+            }
+        }
+        var eldernetReady = false
+        if let eldernet {
+            stats.eldernetJobs += 1
+            if let down = eldernet.begin() {
+                if down.kind == ElderNetStage.pinMismatchKind { stats.eldernetPinRefused += 1 }
+                else { stats.eldernetUnavailable += 1 }
+                out.gaitQuality.stopped = down.kind
+                noteElderNetFailure(&stats, kind: down.kind, message: down.message)
+            } else {
+                eldernetReady = true
             }
         }
         for request in requests {
@@ -792,35 +867,123 @@ struct ActivityLane {
 
             // Inertia for the same chunk (whether HART came from the cache or not). Isolated: nothing it does can throw — but the lease is renewed first,
             // fenced exactly like the HART call above, so a slow Inertia child can never outlive the lease.
-            guard inertiaReady, let inertia, out.motionHeads.stopped == nil else { continue }
-            guard try renew() else {
-                throw PostgresClient.Error(message: "activity lease lost during inference",
-                                           sqlstate: "55000", kind: .stale)
-            }
-            out.motionHeads.chunks += 1
-            stats.inertiaChunks += 1
-            switch inertia.infer(request) {
-            case .ok(let response):
-                if let first = out.motionHeads.responses.first, first.bundle != response.bundle {
-                    out.motionHeads.failedChunks += 1
-                    out.motionHeads.failureKinds["bundle_changed", default: 0] += 1
-                    out.motionHeads.stopped = "bundle_changed"
-                    stats.inertiaFailures += 1
-                    noteInertiaFailure(&stats, kind: "bundle_changed", message: "the bundle changed during a job")
-                    continue
+            if inertiaReady, let inertia, out.motionHeads.stopped == nil {
+                guard try renew() else {
+                    throw PostgresClient.Error(message: "activity lease lost during inference",
+                                               sqlstate: "55000", kind: .stale)
                 }
-                out.motionHeads.responses.append(response)
-                stats.inertiaWindows += response.windows.count
-            case .failed(let kind, let message, let stop):
-                out.motionHeads.failedChunks += 1
-                out.motionHeads.failureKinds[kind, default: 0] += 1
-                if stop { out.motionHeads.stopped = kind }
-                stats.inertiaFailures += 1
-                if kind == InertiaStage.bundleMismatchKind { stats.inertiaBundleRefused += 1 }
-                noteInertiaFailure(&stats, kind: kind, message: message)
+                out.motionHeads.chunks += 1
+                stats.inertiaChunks += 1
+                switch inertia.infer(request) {
+                case .ok(let response):
+                    if let first = out.motionHeads.responses.first, first.bundle != response.bundle {
+                        out.motionHeads.failedChunks += 1
+                        out.motionHeads.failureKinds["bundle_changed", default: 0] += 1
+                        out.motionHeads.stopped = "bundle_changed"
+                        stats.inertiaFailures += 1
+                        noteInertiaFailure(&stats, kind: "bundle_changed", message: "the bundle changed during a job")
+                    } else {
+                        out.motionHeads.responses.append(response)
+                        stats.inertiaWindows += response.windows.count
+                    }
+                case .failed(let kind, let message, let stop):
+                    out.motionHeads.failedChunks += 1
+                    out.motionHeads.failureKinds[kind, default: 0] += 1
+                    if stop { out.motionHeads.stopped = kind }
+                    stats.inertiaFailures += 1
+                    if kind == InertiaStage.bundleMismatchKind { stats.inertiaBundleRefused += 1 }
+                    noteInertiaFailure(&stats, kind: kind, message: message)
+                }
+            }
+
+            // ElderNet for the same chunk, the same way (its own lease renewal, nothing it does can throw).
+            if eldernetReady, let eldernet, out.gaitQuality.stopped == nil {
+                guard try renew() else {
+                    throw PostgresClient.Error(message: "activity lease lost during inference",
+                                               sqlstate: "55000", kind: .stale)
+                }
+                out.gaitQuality.chunks += 1
+                stats.eldernetChunks += 1
+                switch eldernet.infer(request) {
+                case .ok(let response):
+                    if let first = out.gaitQuality.responses.first, first.model != response.model {
+                        out.gaitQuality.failedChunks += 1
+                        out.gaitQuality.failureKinds["model_changed", default: 0] += 1
+                        out.gaitQuality.stopped = "model_changed"
+                        stats.eldernetFailures += 1
+                        noteElderNetFailure(&stats, kind: "model_changed", message: "the model changed during a job")
+                    } else {
+                        out.gaitQuality.responses.append(response)
+                        stats.eldernetWindows += response.windows.count
+                    }
+                case .failed(let kind, let message, let stop):
+                    out.gaitQuality.failedChunks += 1
+                    out.gaitQuality.failureKinds[kind, default: 0] += 1
+                    if stop { out.gaitQuality.stopped = kind }
+                    stats.eldernetFailures += 1
+                    if kind == ElderNetStage.pinMismatchKind { stats.eldernetPinRefused += 1 }
+                    noteElderNetFailure(&stats, kind: kind, message: message)
+                }
             }
         }
         return out
+    }
+
+    /// Record an ElderNet failure and say why on stderr, once per distinct kind in a row.
+    static func noteElderNetFailure(_ stats: inout Stats, kind: String, message: String) {
+        if stats.lastElderNetErrorKind != kind {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: eldernet \(kind) (HART path unaffected): \(message)\n").data(using: .utf8)!)
+        }
+        stats.lastElderNetErrorKind = kind
+        stats.lastElderNetError = String("\(kind): \(message)".prefix(240))
+    }
+
+    /// The ElderNet shadow payload for this job (and, in candidate mode, the comparison decode), or nil when ElderNet
+    /// is off or produced nothing valid. Never throws: a failure here is counted and skipped.
+    mutating func gaitWindowsPayload(job: ActivityJob, collector: GaitQualityCollector,
+                                     context: ContextDayBuild) -> String? {
+        guard let eldernet else { return nil }
+        return Self.gaitWindowsPayload(day: job.day, eldernet: eldernet, collector: collector, context: context,
+                                       stats: &stats)
+    }
+
+    /// `gaitWindowsPayload` without the lane (no database involved), so the counters are testable.
+    static func gaitWindowsPayload(day: String, eldernet: ElderNetStage, collector: GaitQualityCollector,
+                                   context: ContextDayBuild, stats: inout Stats) -> String? {
+        guard let gait = collector.trackInput else { return nil }
+        let candidate = ActivityGaitWindowsDays.candidate(mode: eldernet.mode, gait: gait, input: context.input,
+                                                          generatedAt: context.generatedAt,
+                                                          expectedModelVersion: eldernet.expectedModelVersion,
+                                                          expectedWeightsDigest: eldernet.expectedWeightsDigest,
+                                                          gaitPrior: eldernet.gaitPrior)
+        var report: GaitQualityTrackReport?
+        switch candidate {
+        case .notRequested: break
+        case .withheld(let why):
+            stats.eldernetCandidateWithheld += 1
+            stats.lastElderNetWithheldReason = why
+        case .document(_, let r):
+            stats.eldernetCandidateDocuments += 1
+            report = r
+        }
+        // Without a candidate decode, a dry-run attachment still says how the windows meet the observed seconds.
+        if report == nil, let input = context.input {
+            report = ActivityGaitWindowsDays.dryRunAttachment(input: input, gait: gait)
+        }
+        if let report {
+            stats.eldernetWindowsAttached += report.attached
+            stats.eldernetWindowsDropped += report.dropped
+        }
+        do {
+            return try ActivityGaitWindowsDays.payload(day: day, mode: eldernet.mode, collector: collector,
+                                                       candidate: candidate, attachment: report,
+                                                       gaitPrior: eldernet.gaitPrior)
+        } catch {
+            stats.eldernetShadowFailures += 1
+            stats.lastElderNetShadowError = ActivityContextDays.safeReason(error)
+            return nil
+        }
     }
 
     /// Record an Inertia failure and say why on stderr, once per distinct kind in a row.
@@ -892,10 +1055,13 @@ struct ActivityLane {
     /// v2 document. `motionHeads` (the Inertia shadow row) is written after the v2 document and before the v1
     /// publish, under its own savepoint and its own fenced RPC: it needs the live lease (the v1 publish releases
     /// it), it commits only with the v1 epochs, and a rejection of it never reaches any publish.
+    ///
+    /// `gaitWindows` (the ElderNet shadow row) follows the Inertia row the same way: its own savepoint and fenced
+    /// RPC, before the v1 publish, never able to block it.
     mutating func publishDay(job: ActivityJob, payloadText: String,
                              dayDocument: ActivityContextDays.Built?, durationMS: Int,
                              dayBounds: (start: Int, end: Int), windowsPayload: String? = nil,
-                             motionHeads: String? = nil) throws -> Bool {
+                             motionHeads: String? = nil, gaitWindows: String? = nil) throws -> Bool {
         try db.beginTransaction(.readCommitted)
         do {
             var windowsStored = false
@@ -941,6 +1107,24 @@ struct ActivityLane {
                     stats.lastInertiaShadowError = why
                 }
             }
+            var gaitStored = false
+            if let gaitWindows {
+                switch try ActivityGaitWindowsDays.publish(
+                    db: db, token: job.leaseToken, revision: job.inputRevision, payload: gaitWindows) {
+                case .stored:
+                    gaitStored = true
+                case .fenced:
+                    stats.eldernetShadowFenced += 1
+                case .rejected(let why):
+                    stats.eldernetShadowFailures += 1
+                    if stats.lastElderNetShadowError != why {
+                        FileHandle.standardError.write(
+                            ("frwhoop-worker: eldernet shadow row skipped (publishes unaffected): \(why)\n")
+                                .data(using: .utf8)!)
+                    }
+                    stats.lastElderNetShadowError = why
+                }
+            }
             let publishJSON = try db.callFunctionForJSONRaw(
                 "SELECT public.publish_activity_context_v2($1::uuid,$2::bigint,$3::jsonb,$4::bigint)::text",
                 [job.leaseToken, String(job.inputRevision), payloadText, String(durationMS)])
@@ -950,6 +1134,7 @@ struct ActivityLane {
                 if dayStored { stats.contextDaysPublished += 1 }
                 if windowsStored { stats.windowSetsPublished += 1 }
                 if motionHeadsStored { stats.inertiaShadowStored += 1 }
+                if gaitStored { stats.eldernetShadowStored += 1 }
                 _ = try? db.callFunctionForJSON(
                     "SELECT public.scoring_dirty_span($1::uuid,$2::uuid,$3::bigint,$4::bigint)::text",
                     [job.userId, job.deviceId, String(dayBounds.start), String(dayBounds.end)])
