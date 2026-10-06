@@ -288,6 +288,8 @@ extension PhysiologyContext {
         public var kind: String
         public var status: BoutStatus
         public var durationS: Int
+        /// The status reason first — `bout_ongoing`, the censoring cause (`recovery.censoring.first`) or
+        /// `insufficient_follow_up_samples` — then the other reasons in code order.
         public var reasons: [ReasonCode]
         /// `provisional` in causal mode, while ongoing or cutoff-censored, and before the day can be final.
         public var finality: Finality = .provisional
@@ -825,9 +827,12 @@ extension PhysiologyContext {
             let ongoing = g.clippedWorkout || iv.end + config.maxPauseS > cutoff
             var status: BoutStatus
             var recovery: BoutRecovery?
+            // The reason for the bout's status (ongoing, or the cause that censored its follow-up) is listed first
+            // (RC-06: the history row shows `reasons.first`); the rest follow in code order.
+            var statusReason: ReasonCode?
             if ongoing {
                 status = .ongoing
-                reasons.append(boutOngoing)
+                statusReason = boutOngoing
             } else {
                 let r = boutRecovery(i, groups: groups, evidence: evidence, heart: heart, breaks: breaks,
                                      endHr: response.endHrBpm, reference: pre.hrReferenceBpm, cutoff: cutoff,
@@ -835,8 +840,8 @@ extension PhysiologyContext {
                 recovery = r
                 let allObserved = r.observations.allSatisfy { $0.state == .observed }
                 status = r.censoring.isEmpty && allObserved ? .complete : .censored
-                if let first = r.censoring.first { reasons.append(first) }
-                if r.censoring.isEmpty && !allObserved { reasons.append(insufficientFollowUpSamples) }
+                if let first = r.censoring.first { statusReason = first }
+                if r.censoring.isEmpty && !allObserved { statusReason = insufficientFollowUpSamples }
                 let probe = Interval(iv.end, min(iv.end + config.maxPauseS, cutoff))
                 if probe.isValid, probe.duration - evidence.coveredSeconds(in: probe) > config.maxUncoveredInPauseS {
                     reasons.append(endedAtEvidenceGap)
@@ -846,10 +851,11 @@ extension PhysiologyContext {
             let provisional = mode == .causalLive || status == .ongoing
                 || (recovery?.censoring.contains(censorCutoffReached) ?? false)
                 || cutoff < identity.dayWindow.end + config.finalAfterDayEndS
+            let rest = Set(reasons).subtracting(statusReason.map { [$0] } ?? []).sorted()
             var bout = ExertionBout(id: boutId(deviceScope: identity.deviceScope, start: iv.start), interval: iv,
                                     day: localTime(at: iv.start, timezoneId: identity.timezoneId).localDay,
                                     kind: kind, status: status, durationS: iv.duration,
-                                    reasons: Array(Set(reasons)).sorted())
+                                    reasons: (statusReason.map { [$0] } ?? []) + rest)
             bout.finality = provisional ? .provisional : .final
             bout.locomotionS = Int(locomotion.rounded())
             bout.composition = composition
@@ -1317,6 +1323,16 @@ extension PhysiologyContext {
 
         func coveredSeconds(in w: Interval) -> Int {
             overlapping(w).reduce(0) { $0 + $1.interval.overlapSeconds(with: w) }
+        }
+
+        /// Seconds of `w` with a known activity label (stationary, locomotion or other movement), weighted by the
+        /// label's non-abstained share — the seconds in which locomotion could have been seen. Strap-motion seconds
+        /// count only when `strap` is true (the strap labels locomotion only from a step counter).
+        func observedSeconds(in w: Interval, strap: Bool = true) -> Double {
+            overlapping(w).reduce(0) { acc, s in
+                guard isStationary(s) || isMovement(s), strap || s.source != .strapMotion else { return acc }
+                return acc + Double(s.interval.overlapSeconds(with: w)) * (1 - s.unknownFraction)
+            }
         }
 
         func locomotionSeconds(in w: Interval) -> Double {

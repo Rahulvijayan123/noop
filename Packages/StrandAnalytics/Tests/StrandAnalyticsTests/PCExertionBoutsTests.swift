@@ -156,7 +156,9 @@ final class PCExertionBoutsTests: XCTestCase {
         XCTAssertTrue(rec.observations.dropFirst().allSatisfy { $0.hrBpm == nil && $0.reasons == ["disconnect"] })
         XCTAssertNil(rec.timeToReturnS)                                    // 95 is 25 above the reference
         XCTAssertEqual(bouts[0].status, .censored)
-        XCTAssertTrue(bouts[0].reasons.contains(PC.ExertionBouts.censorDisconnect))
+        // RC-06: the censoring cause is the first reason (the history row shows `reasons.first`).
+        XCTAssertEqual(bouts[0].reasons.first, PC.ExertionBouts.censorDisconnect)
+        XCTAssertEqual(Array(bouts[0].reasons.dropFirst()), bouts[0].reasons.dropFirst().sorted())
         // The response is kept although recovery is censored.
         XCTAssertEqual(bouts[0].response?.hrRiseBpm, 40)
     }
@@ -239,7 +241,7 @@ final class PCExertionBoutsTests: XCTestCase {
         XCTAssertEqual(b.interval, .init(t0, cutoff))
         XCTAssertNil(b.recovery)
         XCTAssertEqual(b.finality, .provisional)
-        XCTAssertTrue(b.reasons.contains(PC.ExertionBouts.boutOngoing))
+        XCTAssertEqual(b.reasons.first, PC.ExertionBouts.boutOngoing, "the status reason leads")
         XCTAssertEqual(b.response?.hrRiseBpm, 40)
         // An unfinished bout contributes no matched response value and no recovery value.
         XCTAssertEqual(PC.ExertionBouts.dailyValues(bouts, identity: Self.identity, regimeKey: "r",

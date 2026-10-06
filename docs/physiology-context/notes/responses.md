@@ -70,6 +70,10 @@ custom `init(from:)` so JSON written before the additions still decodes), plus n
   `return_undetermined_earlier_offset_unobserved`, `rise_too_small_for_return` or `pre_bout_reference_unavailable`.
 - Status: `complete` (no censoring, all readings observed), `censored`, or `ongoing`. Response fields are kept
   whatever the recovery status.
+- **Reason order (RC-06).** `ExertionBout.reasons` starts with the status reason — `bout_ongoing`, the censoring cause
+  (`recovery.censoring.first`) or `insufficient_follow_up_samples` — and lists the others in code order after it, so
+  the history row's `reasons.first` names why follow-up is incomplete (before: alphabetical, e.g.
+  `ended_at_evidence_gap` ahead of `next_bout`).
 - Readings where the motion evidence of `[end, window end)` has > 10 uncovered seconds carry
   `follow_up_motion_unobserved` (continued movement cannot be excluded there).
 - Framing: free-living recovery has no standardized peak, posture or cool-down; it is not clinical HRR and its
@@ -107,9 +111,26 @@ custom `init(from:)` so JSON written before the additions still decodes), plus n
   when neither HR nor wear events exist (then `observedWearS = nil`, `wear_evidence_unavailable`). HR presence is
   heart-derived; acceptable for a wear denominator (it never enters a physiological value) and declared
   (`wear_denominator_uses_heart_signal_presence`). Quiet motion alone never establishes wear.
-- **totalsComparable** = wear known, worn waking ≥ 70 % of waking time, and the day complete. Wear-normalized values
-  need ≥ 4 worn waking hours (`ratesSupported`). Below 70 %: `insufficient_wear_coverage`,
-  `wear_missingness_may_be_informative` — a lower captured total is missingness, never decline (V14).
+- **Motion-observed worn waking time (RC-11, `pc-functional-2`).** A missing activity interval is not sedentary time
+  (spec §6.1). `motionObservedWornWakingS` = worn waking seconds that carry a known HR-independent label (stationary,
+  locomotion or other movement), weighted by the label's non-abstained share: the seconds in which locomotion could
+  have been seen. HART labels count always; strap-motion labels count only when a step counter reported that day
+  (or the strap track has locomotion labels), because without one (WHOOP 4.0) the strap never labels locomotion.
+  `motionObservedShare` = that / worn waking time.
+- **Same minutes (RC-20).** Locomotion seconds and transitions are counted over the worn waking pieces only, and
+  `bouts_per_worn_hour` counts bouts overlapping them; both rates divide by motion-observed worn waking hours. A
+  "walk" in an off-wrist period (strap in a bag) is in neither numerator nor denominator; it is still a bout of the
+  day (`boutCount`). Locomotion still makes an otherwise unobserved minute worn (a limitation: a strap carried, not
+  worn, without an off-wrist event counts).
+- **totalsComparable** = wear known, worn waking ≥ 70 % of waking time, motion-observed worn waking ≥ 70 % of waking
+  time (`minMotionObservedShareForTotals`), and the day complete. Below the wear floor: `insufficient_wear_coverage`,
+  `wear_missingness_may_be_informative` — a lower captured total is missingness, never decline (V14). Wear enough but
+  motion not: `insufficient_motion_coverage`.
+- **ratesSupported** = ≥ 4 worn waking hours and ≥ 4 motion-observed worn waking hours. Otherwise the rates are nil
+  (never 0) and no rate daily value is published, with `insufficient_worn_time_for_rates`, `motion_evidence_unavailable`
+  (no motion-observed second over the worn time), `locomotion_unobservable_without_step_counter` (strap labels but no
+  step counter and no HART) or `insufficient_motion_observed_time_for_rates`. The rate daily values' `supportS` is the
+  motion-observed worn waking time. The feature registry names the same blockers in `missing`.
 - **Features**: bout count, duration median / p90 / max, bout seconds; locomotion seconds of the waking evidence
   (bouts and shorter walks) and per worn waking hour; bouts per worn hour; pauses (count, median, per bout hour);
   cadence (minute-weighted mean of bouts' counter cadence, median within-bout CV); stationary↔locomotion transitions
@@ -162,7 +183,9 @@ custom `init(from:)` so JSON written before the additions still decodes), plus n
 `day_not_started_at_cutoff`, `day_incomplete_at_cutoff`, `wear_evidence_unavailable`, `insufficient_wear_coverage`,
 `insufficient_worn_time_for_rates`, `wear_missingness_may_be_informative`, `sleep_not_excluded_from_waking_time`,
 `no_waking_time`, `activity_evidence_unavailable`, `no_bouts`, `wear_denominator_uses_heart_signal_presence`,
-`rest_after_bout_right_censored`, `transition_denominator_too_small`, `observed_behaviour_not_diagnosis`. Registry:
+`rest_after_bout_right_censored`, `transition_denominator_too_small`, `observed_behaviour_not_diagnosis`,
+`motion_evidence_unavailable`, `locomotion_unobservable_without_step_counter`,
+`insufficient_motion_observed_time_for_rates`, `insufficient_motion_coverage`. Registry:
 `no_validated_definition`, `missing_sensor:*`, `missing_placement:*`, `missing_label:*`,
 `missing_reference_assessment:*`.
 
@@ -183,6 +206,8 @@ custom `init(from:)` so JSON written before the additions still decodes), plus n
 | Cadence (wrap-aware counter) | `testCadenceFromTheStepCounter` |
 | 24/48/72 h windows with partial / unknown coverage | `testTrailingWindowsReportPartialAndUnknownCoverage`, `testFullyObservedWindowWithoutMotionSaysSo` |
 | V14 reduced activity with reduced wear | `testV14ReducedActivityWithReducedWearIsMissingnessNotDecline`, `testTotalsAreUnavailableUnderReducedWearWhileRatesAreComputed` |
+| RC-11 / RC-20 missing motion is not zero activity; same minutes | `testNoMotionEvidenceGivesNoRatesAndNoZeroValues`, `testRatesDivideByMotionObservedWornTime`, `testStrapMotionWithoutAStepCounterCannotShowLocomotion`, `testLocomotionOutsideWornTimeIsInNeitherNumeratorNorDenominator`, `PCReviewContractRegressionTests.testRC11_…` |
+| RC-06 censoring cause first | `testV07RecoveryInterruptedByDisconnectIsCensoredWithoutTimeToReturn`, `testBoutReachingTheCutoffIsOngoingWithResponseButNoRecovery`, `PCReviewContractRegressionTests.testRC06_…` |
 | Wear / sleep denominators, partial day | `testFullWearDayFeatures`, `testNoWearEvidenceGivesNoDenominatorAndNoValues`, `testCausalPartialDayIsNeverATotal`, `testUnknownSleepIsNotSilentlyExcluded`, `testPausesAndCadenceAggregateFromBouts` |
 | Registry: specialized unavailable with missing evidence | `testRegistryDeclaresRequirementsAndValidationStatus`, `testSpecializedFeaturesAreUnavailableWithTheMissingEvidenceNamed` |
 | JSON round trip, old JSON decodes | `testBoutsRoundTripThroughTheCanonicalCodersAndOldJSONDecodes`, `testSummaryRoundTripsAndOldJSONDecodes`, `testBoutFlowsThroughTheDocument` |
@@ -209,3 +234,9 @@ Run in `Packages/StrandAnalytics`:
    if the document's finality should override, the engine can overwrite `bout.finality`.
 3. Consolidate the reason codes above into `contracts.md` §12, and the series keys `hr_response.<match key>`,
    `hr_recovery_60s.<activityKind>` and the `functional.*` list into §5.
+4. **Functional method version in the regime (fix-signal).** `pc-functional-2` changes the rate denominators
+   (motion-observed worn time instead of worn time). `Engine.deviceRegimeKey` holds no product method or version, so
+   `functional.*` history published under `pc-functional-1` pools with `pc-functional-2` values. They differ only on
+   days whose worn time was partly without motion evidence (the old value was too low there). Either add the
+   product's method version to the key for `functional.*` (and `ExertionBouts.version` for `hr_response.*` /
+   `hr_recovery_60s.*`), as RC-02 suggested, or accept the one-off mix and say so in `methods.md`.

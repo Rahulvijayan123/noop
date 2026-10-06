@@ -146,6 +146,99 @@ final class PCFunctionalTests: XCTestCase {
         XCTAssertFalse(keys.contains(PC.Functional.seriesBoutCount))
     }
 
+    // MARK: RC-11 / RC-20 — a missing activity interval is not sedentary time
+
+    static func values(_ s: PC.FunctionalDaySummary) -> [PC.DailyValue] {
+        PC.Functional.dailyValues(s, regimeKey: "r", mode: .retrospective, finality: .final, config: .init())
+    }
+
+    func testNoMotionEvidenceGivesNoRatesAndNoZeroValues() {
+        // Worn all day (heart signal), but no strap motion, step counter or HART label at all.
+        let s = Self.summary(Self.make(strap: .empty(.strapMotion), hr: Self.heart(Self.h(0), Self.h(24))))
+        XCTAssertEqual(s.wornWakingS, 61200)
+        XCTAssertEqual(s.motionObservedWornWakingS, 0)
+        XCTAssertFalse(s.ratesSupported)
+        XCTAssertFalse(s.totalsComparable)
+        XCTAssertNil(s.locomotionSecondsPerWornHour, "unavailable, not 0 s per worn hour")
+        XCTAssertNil(s.boutsPerWornHour)
+        XCTAssertTrue(s.reasons.contains(PC.Functional.motionEvidenceUnavailable))
+        XCTAssertTrue(s.reasons.contains(PC.Functional.activityEvidenceUnavailable))
+        XCTAssertTrue(s.reasons.contains(PC.Functional.insufficientMotionCoverage), "wear alone would allow totals")
+        XCTAssertFalse(s.reasons.contains(PC.Functional.insufficientWornTimeForRates), "17 worn hours")
+        XCTAssertEqual(Self.values(s), [])
+        let evals = PC.FeatureRegistry.evaluate(functional: s, regimes: .empty, availability: [])
+        XCTAssertTrue(evals.allSatisfy { $0.state == PC.FeatureRegistry.stateUnavailable })
+        let byId = Dictionary(uniqueKeysWithValues: evals.map { ($0.featureId, $0) })
+        XCTAssertEqual(byId[PC.Functional.seriesLocomotionPerWornHour]?.missing, [PC.Functional.motionEvidenceUnavailable])
+        XCTAssertTrue(byId[PC.Functional.seriesLocomotionTotal]?.missing.contains(PC.Functional.insufficientMotionCoverage) ?? false)
+    }
+
+    func testRatesDivideByMotionObservedWornTime() throws {
+        // Worn all day; strap motion covers only 07:00–13:00 with one 30-minute walk at 10:00. The rate is per
+        // motion-observed worn hour (6 h), not per worn hour (17 h): the 11 unobserved hours are not sedentary.
+        let s = Self.summary(Self.make(strap: Self.track([(Self.h(7), Self.h(10), "still"),
+                                                          (Self.h(10), Self.h(10.5), "stepping"),
+                                                          (Self.h(10.5), Self.h(13), "still")]),
+                                       hr: Self.heart(Self.h(0), Self.h(24))))
+        XCTAssertEqual(s.wornWakingS, 61200)
+        XCTAssertEqual(s.motionObservedWornWakingS, 21600)
+        XCTAssertEqual(try XCTUnwrap(s.motionObservedShare), 21600.0 / 61200, accuracy: 1e-12)
+        XCTAssertTrue(s.ratesSupported)
+        XCTAssertEqual(try XCTUnwrap(s.locomotionSecondsPerWornHour), 1800.0 / 6, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(s.boutsPerWornHour), 1.0 / 6, accuracy: 1e-12)
+        // Wear alone would allow a total, but only 6 of 17 waking hours were observed: no comparable total.
+        XCTAssertFalse(s.totalsComparable)
+        XCTAssertTrue(s.reasons.contains(PC.Functional.insufficientMotionCoverage))
+        let byKey = Dictionary(uniqueKeysWithValues: Self.values(s).map { ($0.seriesKey, $0) })
+        XCTAssertEqual(byKey[PC.Functional.seriesLocomotionPerWornHour]?.supportS, 21600)
+        XCTAssertNil(byKey[PC.Functional.seriesLocomotionTotal])
+        // Below 4 motion-observed hours the rates are unavailable with a reason, even with 17 worn hours.
+        let short = Self.summary(Self.make(strap: Self.track([(Self.h(7), Self.h(9), "still"),
+                                                              (Self.h(9), Self.h(9) + 600, "stepping")]),
+                                           hr: Self.heart(Self.h(0), Self.h(24))))
+        XCTAssertEqual(short.motionObservedWornWakingS, 7800)
+        XCTAssertFalse(short.ratesSupported)
+        XCTAssertNil(short.locomotionSecondsPerWornHour)
+        XCTAssertTrue(short.reasons.contains(PC.Functional.insufficientMotionObservedTimeForRates))
+        XCTAssertEqual(Self.values(short), [])
+    }
+
+    func testStrapMotionWithoutAStepCounterCannotShowLocomotion() throws {
+        // WHOOP 4.0: still / movement labels but no step counter and no HART: locomotion is unobservable.
+        let strap = Self.track([(Self.h(7), Self.h(10), "still"), (Self.h(10), Self.h(10.5), "other_movement"),
+                                (Self.h(10.5), Self.h(24), "still")])
+        let hr = Self.heart(Self.h(0), Self.h(24))
+        let without = Self.summary(Day(strap: strap, observations: .init(heartRate: hr), bouts: []))
+        XCTAssertEqual(without.motionObservedWornWakingS, 0)
+        XCTAssertFalse(without.ratesSupported)
+        XCTAssertTrue(without.reasons.contains(PC.Functional.locomotionUnobservableWithoutStepCounter))
+        XCTAssertFalse(without.reasons.contains(PC.Functional.motionEvidenceUnavailable))
+        XCTAssertEqual(Self.values(without), [])
+        // The same labels with a reporting step counter that never counts: an observed zero.
+        let steps = stride(from: Self.h(7), to: Self.h(24), by: 5).map { PC.StepObservation(ts: $0, counter: 7) }
+        let with = Self.summary(Day(strap: strap, observations: .init(heartRate: hr, steps: steps), bouts: []))
+        XCTAssertEqual(with.motionObservedWornWakingS, 61200)
+        XCTAssertTrue(with.ratesSupported)
+        XCTAssertEqual(with.locomotionSecondsPerWornHour, 0)
+    }
+
+    func testLocomotionOutsideWornTimeIsInNeitherNumeratorNorDenominator() throws {
+        // RC-20: worn 07:00–13:00, then an off-wrist event; the strap later counts a 30-minute "walk" (in a bag).
+        let d = Self.make(strap: Self.track([(Self.h(7), Self.h(10), "still"), (Self.h(10), Self.h(10.5), "stepping"),
+                                             (Self.h(10.5), Self.h(15), "still"), (Self.h(15), Self.h(15.5), "stepping"),
+                                             (Self.h(15.5), Self.h(24), "still")]),
+                          hr: Self.heart(Self.h(7), Self.h(13)),
+                          wear: [.init(ts: Self.h(7), state: .onWrist, kind: "WRIST_ON"),
+                                 .init(ts: Self.h(13), state: .offWrist, kind: "WRIST_OFF")])
+        let s = Self.summary(d)
+        XCTAssertEqual(s.boutCount, 2, "behaviour is still described")
+        XCTAssertEqual(s.wornWakingS, 21600)
+        XCTAssertEqual(s.motionObservedWornWakingS, 21600)
+        XCTAssertEqual(s.locomotionS, 1800, "the off-wrist walk is not worn time")
+        XCTAssertEqual(try XCTUnwrap(s.locomotionSecondsPerWornHour), 1800.0 / 6, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(s.boutsPerWornHour), 1.0 / 6, accuracy: 1e-12)
+    }
+
     func testNoWearEvidenceGivesNoDenominatorAndNoValues() {
         let d = Self.make(strap: Self.track([(Self.h(7), Self.h(10), "still"), (Self.h(10), Self.h(10.5), "stepping"),
                                              (Self.h(10.5), Self.h(24), "still")]), hr: [])

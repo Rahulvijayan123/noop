@@ -199,6 +199,129 @@ final class PCEligibilityTests: XCTestCase {
         XCTAssertEqual(Set(v.dependsOn), [B.sleepDetectorUsesHeartRate, B.wearFromHeartRateSignal])
     }
 
+    // MARK: RC-05 — deciding reasons first, notes after them
+
+    func testDecidingReasonsComeFirstAndNotesAreSeparated() throws {
+        let degraded = PC.SignalValidity(state: .degraded, reasons: [PC.SignalValidityEngine.partialBeatCoverage])
+        // A walking window: ineligible for stable awake rest; the degraded signal is only a note.
+        let walking = F.track([(F.t0 - 1800, F.t0 + 600, "walking")])
+        let walk = verdict(track: walking, validity: degraded)
+        XCTAssertEqual(walk.state, .ineligible)
+        XCTAssertEqual(walk.reasons.first, B.movementInSupport)
+        XCTAssertEqual(walk.notes, [B.signalDegraded])
+        XCTAssertEqual(walk.reasons.last, B.signalDegraded, "the note is kept, after the deciding reasons")
+        XCTAssertFalse(walk.decidingReasons.contains(B.signalDegraded))
+        // Unknown: the undetermined check leads; a fail never hides behind a note.
+        let gap = F.track([(F.t0 - 1800, F.t0 - 210, "still"), (F.t0 - 200, F.t0 + 600, "still")])
+        let unknown = verdict(track: gap, validity: degraded)
+        XCTAssertEqual(unknown.state, .unknown)
+        XCTAssertEqual(unknown.reasons.first, B.precedingStillnessUnobserved)
+        XCTAssertTrue(unknown.notes.contains(B.signalDegraded))
+        XCTAssertTrue(unknown.notes.contains(B.recentLocomotionUnobserved))
+        // Eligible: the positive reason leads, also for activity response (where it used to follow the notes).
+        let inside = verdict(.activityResponse, track: walking, validity: degraded)
+        XCTAssertEqual(inside.state, .eligible)
+        XCTAssertEqual(inside.reasons, [B.insideLocomotion, B.signalDegraded])
+        XCTAssertEqual(inside.notes, [B.signalDegraded])
+        // Asleep while walking: the positive check is demoted to a note behind the deciding fail.
+        var asleep = F.awakeWorn
+        asleep.sleepState = .asleep
+        let sleeping = verdict(.activityResponse, track: walking, sleepWear: asleep)
+        XCTAssertEqual(sleeping.reasons, [B.asleep, B.insideLocomotion])
+        XCTAssertEqual(sleeping.notes, [B.insideLocomotion])
+        // Notes survive the canonical coders; a verdict written before `notes` existed decodes with none.
+        let data = try PC.encoder().encode(walk)
+        XCTAssertEqual(try PC.decoder().decode(PC.EligibilityVerdict.self, from: data), walk)
+        let plain = verdict(track: quiet)
+        XCTAssertTrue(plain.notes.isEmpty)
+        XCTAssertFalse(String(decoding: try PC.encoder().encode(plain), as: UTF8.self).contains("notes"),
+                       "empty notes are not written")
+        let old = #"{"comparison":"stable_awake_rest","state":"unknown","reasons":["awake_evidence_unknown"],"evidence":[],"target_dependent_gates":["signal_invalid"],"depends_on":[],"policy_version":"pc-eligibility-1"}"#
+        let decoded = try PC.decoder().decode(PC.EligibilityVerdict.self, from: Data(old.utf8))
+        XCTAssertEqual(decoded.notes, [])
+        XCTAssertEqual(decoded.decidingReasons, [B.awakeEvidenceUnknown])
+    }
+
+    // MARK: P1 / RC-21 — target-dependent gates are declared per verdict
+
+    func testTargetDependentGatesAreDeclaredWhenTheyApply() {
+        // HRV validity that rejected out-of-kernel-range and ectopic beats of this measurement's own input.
+        let screened = PC.SignalValidity(state: .degraded, reasons: [PC.SignalValidityEngine.elevatedRejectedBeats],
+                                         diagnostics: [.init("out_of_range_beats", 12), .init("ectopic_rejected", 3)])
+        XCTAssertEqual(verdict(track: quiet, validity: screened).targetDependentGates,
+                       [B.signalInvalid, B.gateRrKernelRange, B.gateEctopicRejection])
+        // Sleep / wake from the HR-confirmed detector and wear from HR presence, for an optical-pulse metric.
+        let heart = PC.SleepWearContext(sleepState: .asleep, sleepEvidence: ["detected_sleep_session"],
+                                        sleepDependsOnHeartSignals: true, wearState: .worn,
+                                        wearEvidence: ["heart_rate_signal_present"], reasons: [],
+                                        wearDependsOnHeartSignals: true)
+        let night = PC.Interval(F.t0, F.t0 + 6 * 3600)
+        let sleep = verdict(.sleepMeasurement, track: .empty(.strapMotion), sleepWear: heart, support: night)
+        XCTAssertEqual(sleep.state, .eligible)
+        XCTAssertEqual(sleep.targetDependentGates,
+                       [B.signalInvalid, B.gateSleepDetectorHrConfirmation, B.gateWearFromHeartRatePresence])
+        // Activity response does not require wear, so HR-presence wear is not one of its gates.
+        var awake = heart
+        awake.sleepState = .awake
+        awake.sleepEvidence = ["outside_detected_sleep"]
+        XCTAssertEqual(verdict(.activityResponse, track: quiet, sleepWear: awake).targetDependentGates,
+                       [B.signalInvalid, B.gateSleepDetectorHrConfirmation])
+        // Skin temperature is not read by the detector or by HR presence: dependence recorded, no gate declared.
+        let skin = B.evaluate(.sleepMeasurement, metric: .skinTemperature, support: night, validity: F.validSignal,
+                              activity: PC.IntervalAlgebra.composition(over: night, track: .empty(.strapMotion)),
+                              preceding: PC.IntervalAlgebra.precedingHistory(before: night.start,
+                                                                             track: .empty(.strapMotion),
+                                                                             lookbackS: 1800),
+                              sleepWear: heart, exertion: [], recentBouts: [], config: .init())
+        XCTAssertEqual(skin.targetDependentGates, [B.signalInvalid])
+        XCTAssertTrue(skin.dependsOn.contains(B.sleepDetectorUsesHeartRate))
+        // No HR-derived evidence: only the validity gate.
+        XCTAssertEqual(verdict(track: quiet).targetDependentGates, [B.signalInvalid])
+    }
+
+    func testSustainedHighHeartRateBeatsDeclareTheKernelRangeGate() {
+        // 230 bpm (261 ms beats, inside the 50–30000 ms contract, outside the 300–2000 ms kernel): validity rejects
+        // them as a measurement limit, and the verdict declares that the gate read the target's own beats.
+        var beats: [PC.BeatIntervalObservation] = []
+        for s in 0..<300 {
+            for k in 0..<4 { beats.append(.init(ts: F.t0 + s, rrMs: 261, seq: k, ord: k)) }
+        }
+        let (o, _) = F.sanitize(F.input(beats: beats))
+        let validity = PC.SignalValidityEngine.assess(F.measurement(.hrvRmssd, support), observations: o,
+                                                      motion: quiet, config: .init())
+        XCTAssertTrue(validity.reasons.contains(PC.SignalValidityEngine.beatsOutsideKernelRange))
+        XCTAssertGreaterThan(validity.diagnostic("out_of_range_beats") ?? 0, 0)
+        let v = verdict(track: quiet, validity: validity)
+        XCTAssertTrue(v.targetDependentGates.contains(B.gateRrKernelRange), "\(v.targetDependentGates)")
+        XCTAssertEqual(v.targetDependentGates.first, B.signalInvalid)
+    }
+
+    func testEngineDeclaresTheSleepDetectorGateOnNightlyHeartDerivedVerdicts() throws {
+        let s = F.dayStart
+        let night = PC.SleepSessionInput(id: "n", interval: .init(s, s + 6 * 3600), availableAt: s + 7 * 3600,
+                                         sourceDay: F.day, detector: "frwhoop-server-1")
+        let span = (s - 3600)..<(s + 8 * 3600)
+        var input = F.input(heartRate: span.map { .init(ts: $0, bpm: 55) },
+                            beats: span.map { .init(ts: $0, rrMs: $0 % 2 == 0 ? 1080 : 1100) },
+                            measurements: [
+                                PC.MeasurementInput(metric: .hrvRmssd,
+                                                    method: F.method("snapshot.hrv_rmssd.night", aggregation: .session,
+                                                                     windowS: 6 * 3600),
+                                                    source: .init(product: .scoringSnapshot, key: "daily.hrv"),
+                                                    value: 50, support: night.interval, availableAt: s + 7 * 3600),
+                            ])
+        input.sleepSessions = [night]
+        let doc = PC.Engine.buildDay(input, history: .empty)
+        let e = try XCTUnwrap(doc.envelopes.first { $0.method.id == "snapshot.hrv_rmssd.night" })
+        let v = try XCTUnwrap(e.verdict(.sleepMeasurement))
+        XCTAssertTrue(v.targetDependentGates.contains(B.gateSleepDetectorHrConfirmation), "\(v)")
+        let row = doc.availability.first { $0.assessment == "sleep_measurement_eligibility" }
+        XCTAssertTrue(row?.reasons.contains(PC.SignalValidityEngine.gateSleepDetectorHrConfirmation) ?? false)
+        let hrvRow = doc.availability.first { $0.assessment == "hrv_signal_validity" }
+        XCTAssertTrue(hrvRow?.reasons.contains(PC.SignalValidityEngine.gateRrKernelRange) ?? false)
+        XCTAssertTrue(hrvRow?.reasons.contains(PC.SignalValidityEngine.gateEctopicRejection) ?? false)
+    }
+
     // MARK: Sleep measurement and activity response
 
     func testSleepMeasurementNeedsASupportedSleepEpisodeNotStaging() {
@@ -256,7 +379,8 @@ final class PCEligibilityTests: XCTestCase {
         let excluded = PC.EligibilityVerdict(comparison: .stableAwakeRest, state: .ineligible,
                                              reasons: [B.recentLocomotion], policyVersion: "p")
         let unknown = PC.EligibilityVerdict(comparison: .stableAwakeRest, state: .unknown,
-                                            reasons: [B.awakeEvidenceUnknown, B.recentLocomotionUnobserved], policyVersion: "p")
+                                            reasons: [B.awakeEvidenceUnknown, B.recentLocomotionUnobserved],
+                                            policyVersion: "p", notes: [B.recentLocomotionUnobserved])
         let envelopes = [envelope(.init(t, t + 300), eligible), envelope(.init(t + 150, t + 450), eligible),
                          envelope(.init(t + 300, t + 600), excluded), envelope(.init(t + 600, t + 900), unknown)]
         // HR observed every second of [t, t+600) and every other second of [t+600, t+900): 600 + 150 seconds.
@@ -271,10 +395,53 @@ final class PCEligibilityTests: XCTestCase {
         XCTAssertEqual(s[0].eligibleSupportS, 450, "overlapping eligible supports count once")
         XCTAssertEqual(s[0].observedS, 750)
         XCTAssertEqual(s[0].eligibleObservedS, 450)
-        XCTAssertEqual(s[0].representedShare!, 450.0 / 750.0, accuracy: 1e-12)
-        XCTAssertEqual(s[0].exclusionReasons.map(\.reason),
-                       [B.awakeEvidenceUnknown, B.recentLocomotion, B.recentLocomotionUnobserved])
+        XCTAssertEqual(s[0].eligibleShare!, 450.0 / 750.0, accuracy: 1e-12)
+        // The two eligible windows overlap (one independent window < the 3 System F needs): nothing entered a
+        // reference value, so the represented share is 0 although 60 % of the observed time is eligible.
+        XCTAssertEqual(s[0].enteredCount, 0)
+        XCTAssertEqual(s[0].enteredObservedS, 0)
+        XCTAssertEqual(s[0].representedShare!, 0, accuracy: 1e-12)
+        // Only deciding reasons are exclusions; the `recent_locomotion_unobserved` note is not counted.
+        XCTAssertEqual(s[0].exclusionReasons.map(\.reason), [B.awakeEvidenceUnknown, B.recentLocomotion])
         XCTAssertTrue(s[0].exclusionReasons.allSatisfy { $0.count == 1 })
+    }
+
+    func testSelectionCountsWhatEnteredTheDailyValues() {
+        // Five eligible 5-minute HR windows: three valid ones enter `heart_rate.stable_awake_5min`; a degraded one
+        // and a 10-minute one are eligible (System B) but System F leaves them out.
+        let t = F.t0
+        let eligible = PC.EligibilityVerdict(comparison: .stableAwakeRest, state: .eligible,
+                                             reasons: [B.stableAwakeLowMovement], policyVersion: "p")
+        var envelopes = (0..<4).map { k in envelope(.init(t + k * 300, t + (k + 1) * 300), eligible) }
+        envelopes[3].validity = PC.SignalValidity(state: .degraded, reasons: [])
+        var long = envelope(.init(t + 1200, t + 1800), eligible)
+        long.method = PC.MethodRef(id: "context.heart_rate.10min_mean", algorithmVersion: "x", aggregation: .mean,
+                                   windowS: 600, units: "bpm")
+        long.id = PC.MeasurementEnvelope.makeId(method: long.method, support: long.support)
+        envelopes.append(long)
+        let hr = (0..<1800).map { PC.HeartRateObservation(ts: t + $0, bpm: 60) }
+        let (o, _) = F.sanitize(F.input(heartRate: hr))
+        let s = B.selection(envelopes: envelopes, observations: o, dayWindow: F.identity.dayWindow)
+        XCTAssertEqual(s.count, 1)
+        XCTAssertEqual(s[0].eligible, 5)
+        XCTAssertEqual(s[0].eligibleObservedS, 1800)
+        XCTAssertEqual(s[0].eligibleShare!, 1, accuracy: 1e-12)
+        XCTAssertEqual(s[0].enteredCount, 3)
+        XCTAssertEqual(s[0].enteredSupportS, 900)
+        XCTAssertEqual(s[0].enteredObservedS, 900)
+        XCTAssertEqual(s[0].representedShare!, 0.5, accuracy: 1e-12)
+        // The same accounting from supplied daily values (the engine's), and none for activity response.
+        let values = PC.ContextReferences.dailyValues(envelopes: envelopes, identity: F.identity, mode: .retrospective,
+                                                      finality: .final, config: .init())
+        XCTAssertEqual(B.selection(envelopes: envelopes, observations: o, dayWindow: F.identity.dayWindow,
+                                   dailyValues: values), s)
+        let response = PC.EligibilityVerdict(comparison: .activityResponse, state: .eligible,
+                                             reasons: [B.insideLocomotion], policyVersion: "p")
+        let r = B.selection(envelopes: [envelope(.init(t, t + 300), response)], observations: o,
+                            dayWindow: F.identity.dayWindow)
+        XCTAssertNil(r[0].representedShare, "activity-response series are built from bouts, not envelopes")
+        XCTAssertNil(r[0].enteredCount)
+        XCTAssertEqual(r[0].eligibleShare!, 300.0 / 1800, accuracy: 1e-12)
     }
 
     // MARK: Policy sensitivity (spec §8: recheck before changing defaults)

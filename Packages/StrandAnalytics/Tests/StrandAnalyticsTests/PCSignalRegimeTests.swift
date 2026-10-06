@@ -85,6 +85,41 @@ final class PCSignalRegimeTests: XCTestCase {
         XCTAssertEqual(gap?.reasons, [E.placementRecordGap])
     }
 
+    /// RC-17: the worker reads device-scoped and account-level (`device_id is null`) placement rows together. A
+    /// device-scoped record wins where they overlap, whatever the revisions (the app's `PlacementStore` rule);
+    /// the account-level record applies only where the device has no record; one scope resolves by revision.
+    func testDeviceScopedPlacementWinsOverAnAccountLevelOneWhereTheyOverlap() {
+        let placements = [
+            // An account-level declaration with a high revision, covering 02:00 onwards.
+            PC.PlacementInput(start: d0 + 2 * 3600, end: nil, placement: "bicep", source: "user", revision: 9,
+                              scope: "account"),
+            // Device-scoped records (nil scope = device), older revisions, overlapping it 06:00–12:00.
+            PC.PlacementInput(start: d0 + 6 * 3600, end: d0 + 12 * 3600, placement: "wrist", source: "user",
+                              revision: 1),
+            PC.PlacementInput(start: d0 + 8 * 3600, end: d0 + 10 * 3600, placement: "other", source: "device",
+                              revision: 2, scope: "device"),
+        ]
+        let timeline = E.regimeTimeline(F.input(placements: placements), config: .init())
+        let end = E.readWindow(F.identity).end
+        XCTAssertEqual(timeline.placements.filter { $0.placement != "unknown" }.map { "\($0.placement)|\($0.scope ?? "-")" },
+                       ["bicep|account", "wrist|-", "other|-", "wrist|-", "bicep|account"])
+        XCTAssertEqual(timeline.placements.filter { $0.placement != "unknown" }.map(\.interval), [
+            .init(d0 + 2 * 3600, d0 + 6 * 3600), .init(d0 + 6 * 3600, d0 + 8 * 3600),
+            .init(d0 + 8 * 3600, d0 + 10 * 3600), .init(d0 + 10 * 3600, d0 + 12 * 3600), .init(d0 + 12 * 3600, end),
+        ])
+        XCTAssertEqual(regimeAt(d0 + 7 * 3600, timeline).placement, "wrist", "device record beats revision 9")
+        XCTAssertEqual(regimeAt(d0 + 9 * 3600, timeline).placement, "other", "same scope: higher revision wins")
+        XCTAssertEqual(regimeAt(d0 + 3 * 3600, timeline).placement, "bicep", "account record fills the device's gap")
+        XCTAssertEqual(regimeAt(d0 + 14 * 3600, timeline).placement, "bicep")
+        XCTAssertEqual(regimeAt(d0 + 3600, timeline).placement, "unknown", "never back-filled before any record")
+        // Input order does not matter, and an all-device input resolves exactly as before (scope nil == device).
+        XCTAssertEqual(E.regimeTimeline(F.input(placements: placements.reversed()), config: .init()), timeline)
+        let deviceOnly = placements.map { p -> PC.PlacementInput in var q = p; q.scope = nil; return q }
+        let legacy = E.regimeTimeline(F.input(placements: deviceOnly), config: .init())
+        XCTAssertEqual(regimeAt(d0 + 7 * 3600, legacy).placement, "bicep", "one scope: revision 9 wins")
+        XCTAssertTrue(legacy.placements.allSatisfy { $0.scope == nil })
+    }
+
     // MARK: Device and method
 
     func testFirmwareVendorAndUnknownAttributesAreIncompatible() {
