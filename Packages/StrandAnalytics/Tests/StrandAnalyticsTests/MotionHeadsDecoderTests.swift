@@ -444,6 +444,27 @@ final class MotionHeadsDecoderTests: XCTestCase {
         XCTAssertNil(PreparedMotionHeads.prepare(shadow).prepared)
     }
 
+    /// A head left with one evidence group (every other class abstained with no partner) has r ≡ 1, so it is
+    /// inert — and its lone strong class must not open the specialist gate just by always being the argmax.
+    /// A bundle that declares `decoder_evidence: false` is inert the same way.
+    func testAHeadWithOneGroupOrNoDecoderEvidenceIsInertForTheGateToo() throws {
+        let stairs = BodyMode.stairs.rawValue
+        var status: [String: MotionHeadClassStatus] = [:]
+        for c in L where c != "stairs" { status[c] = .abstain }
+        let lone = try preparedHeads(MotionHeadsKit.spec(.locomotion, status: status, tau: 0.4))
+        let q = Dictionary(uniqueKeysWithValues: L.map { ($0, $0 == "stairs" ? 0.65 : 0.05) })
+        let window = MotionHeadsKit.window(endingAt: 100, locomotion: q)
+        XCTAssertFalse(lone.terms(for: window, hartSpeaks: false)?.opens.contains(stairs) ?? false)
+
+        var declared = MotionHeadsKit.spec(.locomotion, tau: 0.4)
+        declared.decoderEvidence = false
+        let inert = try preparedHeads(declared)
+        XCTAssertFalse(inert.terms(for: window, hartSpeaks: false)?.opens.contains(stairs) ?? false)
+        // The same head without the declaration opens it (control).
+        let open = try preparedHeads(MotionHeadsKit.spec(.locomotion, tau: 0.4))
+        XCTAssertEqual(open.terms(for: window, hartSpeaks: false)?.opens, [stairs])
+    }
+
     /// The required bound: with a STRONG stairs class (and a strong vehicle class with a posture reading, the
     /// one specialist inside S), Inertia's whole per-second pull on any mode — locomotion term + posture term
     /// + the specialist gate it opened — is at most T · bodyBudget · ln 10. Before, the gate alone added

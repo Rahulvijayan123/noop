@@ -486,4 +486,32 @@ final class MotionHeadsResponseTests: XCTestCase {
             obj["bundle"] = b
         }
     }
+
+    /// `decoder_evidence` (per head) is read when present, must be a boolean, and leaves the encoded bundle
+    /// unchanged when absent.
+    func testDecoderEvidenceIsParsedWhenPresent() throws {
+        func withFlag(_ value: Any) -> (inout [String: Any]) -> Void {
+            { obj in
+                var b = obj["bundle"] as! [String: Any]
+                var heads = b["heads"] as! [String: Any]
+                var loco = heads["locomotion"] as! [String: Any]
+                loco["decoder_evidence"] = value
+                heads["locomotion"] = loco
+                b["heads"] = heads
+                obj["bundle"] = b
+            }
+        }
+        let bundle = MotionHeadsKit.bundle()
+        var obj = try XCTUnwrap(JSONSerialization.jsonObject(with: MotionHeadsKit.responseJSON(bundle, validWindows(bundle)))
+                                as? [String: Any])
+        withFlag(false)(&obj)
+        let r = try MotionHeadsResponse.decode(JSONSerialization.data(withJSONObject: obj))
+        XCTAssertEqual(r.bundle.heads[.locomotion]?.decoderEvidence, false)
+        XCTAssertNil(r.bundle.heads[.posture]?.decoderEvidence)
+        assertRefused(.wrongType("locomotion.decoder_evidence"), withFlag("no"))
+        let plain = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(MotionHeadsKit.bundle()))
+                                  as? [String: Any])
+        let heads = (plain["bundle"] as? [String: Any])?["heads"] as? [String: Any]
+        XCTAssertNil((heads?["locomotion"] as? [String: Any])?["decoder_evidence"])
+    }
 }

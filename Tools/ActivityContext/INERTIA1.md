@@ -336,6 +336,8 @@ config_mismatch | timeout | internal | output_too_large`. Response line ≤ 12 M
   and per mode, Inertia's whole pull — locomotion term + posture term (inside S) + the gate it opened — is at
   most T · bodyBudget · ln 10 (the support rises from 0.04 only by the room the other two terms left). An
   encoder or workout that names the mode still opens it fully, as before.
+* A head whose classes prepare to a single evidence group (r ≡ 1), or that the bundle marks
+  `decoder_evidence: false`, is inert: no likelihood term and no specialist gate.
 * Provenance: optional `ActivityStateVersions` field naming `inertia-1:<bundle12>:<cfgtag>` only when
   Inertia evidence is actually accepted for the track (the config accepts its bundle AND the track input
   carries windows from that same bundle); snapshot restore rejects a mismatch. Otherwise the track is decoded

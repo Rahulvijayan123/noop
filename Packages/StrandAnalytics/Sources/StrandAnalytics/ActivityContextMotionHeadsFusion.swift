@@ -103,7 +103,8 @@ struct PreparedMotionHead: Sendable {
     static func prepare(_ spec: MotionHeadSpec, head: MotionHead, targets: Int,
                         neutralTargets: Set<Int>, rowSource: (Int, String) -> Double) -> PreparedMotionHead? {
         let supported = spec.supportedClasses
-        guard !supported.isEmpty else { return nil }
+        // A head the bundle declares evidence-free carries nothing: no likelihood term and no specialist gate.
+        guard !supported.isEmpty, spec.decoderEvidence != false else { return nil }
         func root(_ c: String) -> String {
             var cur = c
             var hops = 0
@@ -123,6 +124,9 @@ struct PreparedMotionHead: Sendable {
             let r = root(c)
             if let g = roots.firstIndex(of: r) { groupOf.append(g) } else { roots.append(r); groupOf.append(roots.count - 1) }
         }
+        // One group means r ≡ 1 everywhere: the head is inert, and it must not open the specialist gate either
+        // (a lone strong class would otherwise always be the argmax).
+        guard roots.count > 1 else { return nil }
         var keptPrior = 0.0
         for c in kept { keptPrior += spec.prior[c] ?? 0 }
         guard keptPrior > 0 else { return nil }

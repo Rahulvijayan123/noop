@@ -196,16 +196,23 @@ public struct MotionHeadSpec: Codable, Equatable, Sendable {
     public var mergeInto: [String: String]
     /// A supported class that absorbed unsupported ones through set targets lists them (itself included).
     public var covers: [String: [String]]
+    /// `false` when the bundle declares the head carries no decoder evidence (its classes collapse to at most
+    /// one group after abstention). nil (absent) means the bundle does not say; the decoder still treats a
+    /// head that prepares to a single group as inert.
+    public var decoderEvidence: Bool?
 
     public init(classOrder: [String], prior: [String: Double], status: [String: MotionHeadClassStatus],
-                tau: [String: Double] = [:], mergeInto: [String: String] = [:], covers: [String: [String]] = [:]) {
+                tau: [String: Double] = [:], mergeInto: [String: String] = [:], covers: [String: [String]] = [:],
+                decoderEvidence: Bool? = nil) {
         self.classOrder = classOrder; self.prior = prior; self.status = status
         self.tau = tau; self.mergeInto = mergeInto; self.covers = covers
+        self.decoderEvidence = decoderEvidence
     }
 
     enum CodingKeys: String, CodingKey {
         case classOrder = "class_order", prior, status, tau
         case mergeInto = "merge_into", covers
+        case decoderEvidence = "decoder_evidence"
     }
 
     public init(from decoder: Decoder) throws {
@@ -216,6 +223,7 @@ public struct MotionHeadSpec: Codable, Equatable, Sendable {
         tau = try c.decodeIfPresent([String: Double].self, forKey: .tau) ?? [:]
         mergeInto = try c.decodeIfPresent([String: String].self, forKey: .mergeInto) ?? [:]
         covers = try c.decodeIfPresent([String: [String]].self, forKey: .covers) ?? [:]
+        decoderEvidence = try c.decodeIfPresent(Bool.self, forKey: .decoderEvidence)
     }
 
     /// Supported classes in the fixed class order (never dictionary order).
@@ -686,7 +694,14 @@ extension MotionHeadsResponse {
             }
             covers[cls] = list
         }
-        return MotionHeadSpec(classOrder: order, prior: prior, status: status, tau: tau, mergeInto: merge, covers: covers)
+        var decoderEvidence: Bool?
+        switch spec["decoder_evidence"] {
+        case nil, .null?: decoderEvidence = nil
+        case .bool(let b)?: decoderEvidence = b
+        default: throw E.wrongType("\(h).decoder_evidence")
+        }
+        return MotionHeadSpec(classOrder: order, prior: prior, status: status, tau: tau, mergeInto: merge, covers: covers,
+                              decoderEvidence: decoderEvidence)
     }
 
     // MARK: Window
