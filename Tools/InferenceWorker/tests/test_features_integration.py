@@ -305,6 +305,41 @@ def test_committed_fixture_pair_round_trips_over_real_http():
     assert set(doc["nights"][0]) == set(committed["nights"][0])
 
 
+def test_sleep_features_route_admits_bodies_past_the_infer_cap_but_not_past_its_own():
+    """Real nights with 31 days of history exceed the /v1/infer 8 MiB cap (a live 17.6 MB request was
+    refused 413); the route has its own, larger cap and still refuses beyond it."""
+    import http.client
+    import json
+    import threading
+
+    from frwhoop_inference.contract import MAX_BODY_BYTES as INFER_MAX
+    from frwhoop_inference.features.contract import MAX_BODY_BYTES as FEATURES_MAX
+    from frwhoop_inference.server import Application, InferenceServer
+
+    size = 9 * 1024 * 1024
+    assert INFER_MAX < size < FEATURES_MAX
+    srv = InferenceServer(("127.0.0.1", 0), Application.build(registry=None))
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.request("POST", "/v1/sleep-features", body=json.dumps({"pad": "x" * size}),
+                     headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        reply = json.loads(resp.read())
+        # past the size gate: the parser (not the cap) is what refuses a body with no samples
+        assert resp.status != 413 and reply["error"]["code"] != "payload_too_large", reply
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+        conn.putrequest("POST", "/v1/sleep-features")
+        conn.putheader("Content-Length", str(FEATURES_MAX + 1))
+        conn.endheaders()
+        resp = conn.getresponse()
+        assert resp.status == 413
+    finally:
+        srv.shutdown()
+
+
 def _same(a, b) -> bool:
     if isinstance(a, dict) and isinstance(b, dict):
         return a.keys() == b.keys() and all(_same(a[k], b[k]) for k in a)

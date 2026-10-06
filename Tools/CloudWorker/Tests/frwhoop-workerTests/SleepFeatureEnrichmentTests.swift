@@ -57,6 +57,26 @@ final class SleepFeatureEnrichmentTests: XCTestCase {
         XCTAssertNil(request["history"])  // nil history -> no key, not an empty one
     }
 
+    func testRequestForwardsOnlySamplesAroundTheNights() throws {
+        // The scoring pass loads 84 h per claim; only [start - lead-in, end + tail) may be sent
+        // (real data sent whole was a 17.6 MB body the sidecar refused).
+        let n0 = 1789000000
+        let lead = SleepFeatureEnrichment.leadInSeconds
+        let tail = SleepFeatureEnrichment.tailSeconds
+        let stamps = [n0 - 24 * 3600, n0 - lead - 1, n0 - lead, n0 + 10, n0 + 3600 + tail - 1,
+                      n0 + 3600 + tail, n0 + 30 * 3600]
+        let request = SleepFeatureEnrichment.buildRequest(makeInput(
+            nights: [makeNight(start: n0, end: n0 + 3600)],
+            hr: stamps.map { HRSample(ts: $0, bpm: 60) },
+            temp: stamps.map { ($0, 31.0) },
+            beats: stamps.map { RRInterval(ts: $0, rrMs: 1000, srcChannel: nil, ord: nil, seq: 0) }))
+        let kept = [n0 - lead, n0 + 10, n0 + 3600 + tail - 1]
+        for key in ["hr_samples", "skin_temp_samples", "rr_beats"] {
+            let rows = try XCTUnwrap(request[key] as? [[String: Any]], key)
+            XCTAssertEqual(rows.compactMap { $0["ts"] as? Int }, kept, key)
+        }
+    }
+
     func testRequestCarriesHistoryAndDigest() throws {
         let n0 = 1789000000
         let history = SleepFeatureHistory(

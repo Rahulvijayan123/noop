@@ -56,6 +56,7 @@ from .features import BUDGET_MS as FEATURES_BUDGET_MS
 from .features import SCHEMA_VERSION as FEATURES_SCHEMA_VERSION
 from .features import ALGORITHM_VERSION as FEATURES_ALGORITHM_VERSION
 from .features.compute import compute as features_compute
+from .features.contract import MAX_BODY_BYTES as FEATURES_MAX_BODY_BYTES
 from .features.contract import parse_request as features_parse_request
 from .providers import Provider, ProviderRegistry, default_providers
 
@@ -552,7 +553,7 @@ class InferenceHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         return ContractError(code, message, http_status=http_status)
 
-    def _read_body(self) -> bytes:
+    def _read_body(self, limit: int = MAX_BODY_BYTES) -> bytes:
         length_header = self.headers.get("Content-Length")
         if length_header is None:
             return b""
@@ -562,9 +563,9 @@ class InferenceHandler(BaseHTTPRequestHandler):
             raise self._refuse_body("invalid_request", "Content-Length is not an integer") from exc
         if length < 0:
             raise self._refuse_body("invalid_request", "Content-Length is negative")
-        if length > MAX_BODY_BYTES:
+        if length > limit:
             raise self._refuse_body("payload_too_large",
-                                    f"body exceeds {MAX_BODY_BYTES} bytes", http_status=413,
+                                    f"body exceeds {limit} bytes", http_status=413,
                                     length=length)
         return self.rfile.read(length)
 
@@ -633,7 +634,7 @@ class InferenceHandler(BaseHTTPRequestHandler):
         so the worker's core score never waits on the enrichment.
         """
         try:
-            raw = self._read_body()
+            raw = self._read_body(FEATURES_MAX_BODY_BYTES)
         except ContractError as exc:
             self._send_error_json(exc.http_status, exc.code, exc.message, exc.field)
             return

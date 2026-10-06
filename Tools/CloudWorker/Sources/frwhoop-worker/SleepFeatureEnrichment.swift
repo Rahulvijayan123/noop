@@ -82,8 +82,27 @@ enum SleepFeatureEnrichment {
         let history: SleepFeatureHistory?
     }
 
+    /// What the sidecar reads around a night: the thermal baseline starts 90 min
+    /// before sleep onset (settling reads 30 min), and the final-wake window runs
+    /// 2 min past the end. Everything outside these spans is never read.
+    static let leadInSeconds = 90 * 60
+    static let tailSeconds = 3 * 60
+
     /// Build the wire request object. Pure: no I/O, no clock.
+    ///
+    /// The scoring pass loads an 84 h window per claim (hr/rr/skin temp for
+    /// `dayStart-30h ..< dayStart+54h`); sent whole that was a 17.6 MB body on real data,
+    /// refused 413. Only the samples inside a night's span are forwarded.
     static func buildRequest(_ input: AssemblyInput) -> [String: Any] {
+        let spans = input.nights.map { (from: $0.start - leadInSeconds, to: $0.end + tailSeconds) }
+        func inNight(_ ts: Int) -> Bool { spans.contains { $0.from <= ts && ts < $0.to } }
+        let hr = input.hr.filter { inNight($0.ts) }
+        let temp = input.tempCelsius.filter { inNight($0.ts) }
+        let beats = input.beats.filter { inNight($0.ts) }
+        let breathIntervals = input.breathTrack.intervals.filter { inNight($0.ts) }
+        let breathRuns = input.breathTrack.runs.filter { run in
+            spans.contains { run.start < $0.to && $0.from < run.end }
+        }
         var nights: [[String: Any]] = []
         nights.reserveCapacity(input.nights.count)
         for n in input.nights {
@@ -112,9 +131,9 @@ enum SleepFeatureEnrichment {
                 "stage_algorithm_version": input.stageAlgorithmVersion,
             ],
             "nights": nights,
-            "hr_samples": input.hr.map { ["ts": $0.ts, "bpm": Double($0.bpm)] },
-            "skin_temp_samples": input.tempCelsius.map { ["ts": $0.ts, "celsius": $0.celsius] },
-            "rr_beats": input.beats.map { [
+            "hr_samples": hr.map { ["ts": $0.ts, "bpm": Double($0.bpm)] },
+            "skin_temp_samples": temp.map { ["ts": $0.ts, "celsius": $0.celsius] },
+            "rr_beats": beats.map { [
                 "ts": $0.ts,
                 "rr_ms": Double($0.rrMs),
                 "seq": $0.seq,
@@ -122,8 +141,8 @@ enum SleepFeatureEnrichment {
                 "src_channel": $0.srcChannel?.rawValue ?? NSNull(),
             ] as [String: Any] },
             "resp_breaths": [
-                "intervals": input.breathTrack.intervals.map { ["ts": $0.ts, "seconds": $0.seconds] },
-                "runs": input.breathTrack.runs.map { ["start": $0.start, "end": $0.end] },
+                "intervals": breathIntervals.map { ["ts": $0.ts, "seconds": $0.seconds] },
+                "runs": breathRuns.map { ["start": $0.start, "end": $0.end] },
             ] as [String: Any],
         ]
         if let history = input.history, !history.dayRevisions.isEmpty {
