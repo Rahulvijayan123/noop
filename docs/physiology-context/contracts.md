@@ -191,7 +191,10 @@ See §5.
 | `skin_temp.sleep_night` | F | Nightly snapshot skin temperature (relative use only) |
 | `hrv_rmssd.stable_awake_5min` | F | Median of stable-awake-eligible 5-minute RMSSD windows (≥ configured windows) |
 | `heart_rate.stable_awake_5min` | F | Median of stable-awake-eligible 5-minute HR means |
+| `heart_rate.sleep_night`, `hrv_sdnn_index.sleep_night` | F | Nightly snapshot HR / SDNN index (whole-session SDNN is excluded: length-dependent) |
+| `hrv_sdnn.stable_awake_5min`, `<stable-awake series>.band_HH_HH` | F | 5-minute SDNN windows; local-time band strata (conditioned view only) |
 | `hr_response.<match key>` | D | Median HR response of matched bouts |
+| `hr_recovery_60s.<kind>` | D | Median post-effort HR decline at +60 s from uncensored readings |
 | `functional.*` | G | Functional features (wear-normalized) |
 | `coverage.motion_observed_s` | engine | Observed motion seconds of the day |
 
@@ -349,36 +352,72 @@ files.
 
 ## 12. Reason codes
 
-Each system's `reasonCodes` array is the registry for its codes; `notes/<workstream>.md` describes them and the lead
-consolidates them here at integration. Join and engine codes:
+Each system declares its codes as static constants plus a `reasonCodes` array; the table below is generated from those
+declarations (333 distinct codes). Meanings are in the owning workstream note (`notes/<workstream>.md`, reason-code
+section). The app maps every registered code either to a plain-language phrase or to "diagnostics only"
+(`PhysiologyContextWordingCoverageTests` fails on any unmapped code). Ordering rule: in an `EligibilityVerdict` the
+deciding (gating) reasons come first and non-gating observations are also listed in `notes`; in an `ExertionBout` the
+first reason is the censoring / ongoing cause.
 
-| Code | Meaning |
+| System | Codes |
 | --- | --- |
-| `invalid_interval` | Support interval is empty or inverted |
-| `no_activity_records` | No activity record covers any of the interval |
-| `uncovered_time` / `mostly_uncovered` | Some / at least half of the interval has no activity record |
-| `unknown_label_time` | Part of the interval is covered by abstained / unknown records |
-| `mixed_states` | Two supported labels each hold ≥ 10 % of the interval |
-| `overlapping_records_resolved` | Overlapping records were resolved by revision order inside the interval |
-| `heart_rate_dependent_source` | The composition came from a source that reads heart rate |
-| `gap` / `movement` / `unknown_label` / `lookback_limit` | Why the preceding still run ended |
-| `history_from_future_dropped` | A history element from the same day or later was ignored |
-| `measurement_after_cutoff` | A measurement not available at the causal cutoff was left out |
-| `no_measurements` / `no_observations` | Nothing to contextualize / no raw observations |
-| `activity_evidence_unavailable` / `sleep_evidence_unavailable` | No HR-independent activity track / no sleep episode |
-| `shared_beat_intervals` / `labels_read_heart_rate` / `motion_shared_across_systems` | Dependence notes |
+| Join (lead) (`PCIntervalAlgebra.swift`, 12) | `gap`, `heart_rate_dependent_source`, `invalid_interval`, `lookback_limit`, `mixed_states`, `mostly_uncovered`, `movement`, `no_activity_records`, `overlapping_records_resolved`, `uncovered_time`, `unknown_label`, `unknown_label_time` |
+| Engine (lead) (`PCEngine.swift`, 9) | `activity_evidence_unavailable`, `history_from_future_dropped`, `labels_read_heart_rate`, `motion_shared_across_systems`, `no_measurements`, `no_observations`, `shared_beat_intervals`, `shared_optical_sensor`, `sleep_evidence_unavailable` |
+| A — validity / regime (`PCSignalValidity.swift`, 91) | `aggregation_differs`, `algorithm_version_differs`, `availability_basis_sensor_time`, `awake_evidence_unavailable`, `beat_values_untrustworthy`, `beats_outside_kernel_range`, `clock_reset_detected`, `conflicting_duplicates_rejected`, `contains_break`, `device_clock_ahead`, `device_family_differs`, `device_family_unknown`, `disconnection`, `display_only`, `ectopic_rejection`, `elevated_rejected_beats`, `equal_value_beats_kept`, `exact_duplicates_collapsed`, `excess_rejected_beats`, `excluded_from_comparisons`, `firmware_differs`, `firmware_unknown`, `flatline`, `flatline_run`, `future_timestamp`, `heart_rate_dependent_motion_ignored`, `heart_rate_independent_source`, `hr_plausible_band`, `insufficient_beat_coverage`, `insufficient_beats`, `insufficient_breath_intervals`, `insufficient_clean_beats`, `insufficient_coverage`, `insufficient_in_band_samples`, `insufficient_run_coverage`, `insufficient_valid_pairs`, `invalid_interval`, `method_differs`, `method_version_changed`, `mostly_out_of_band`, `motion_contaminated`, `motion_present`, `motion_unobserved`, `no_beat_intervals`, `no_core_temperature_sensor`, `no_gravity_vector`, `no_heart_rate_samples`, `no_in_band_samples`, `no_qualified_waveform`, `no_skin_temperature_samples`, `no_source_records`, `non_monotonic_timestamps`, `out_of_band_samples`, `out_of_contract_units`, `outside_read_window`, `overlapping_timelines_suspected`, `partial_beat_coverage`, `partial_coverage`, `partial_in_band`, `partial_run_coverage`, `partial_window_coverage`, `placement_changed`, `placement_differs`, `placement_history_starts`, `placement_mixed`, `placement_record_gap`, `placement_unknown`, `regime_key_differs`, `rr_coverage_unmeasurable`, `rr_kernel_range`, `rr_over_count_cross_second`, `rr_over_count_same_second`, `rr_under_covered`, `rsa_only_estimate`, `skin_not_core_temperature`, `sleep_detector_hr_confirmation`, `sleep_detector_uses_heart_rate`, `sleep_evidence_unavailable`, `source_change`, `source_kind_differs`, `source_kind_unknown`, `step_counter_present`, `timestamp_spike`, `units_differs`, `unverified_strap_estimate`, `vendor_differs`, `wear_evidence_unavailable`, `wear_from_heart_rate_signal`, `window_differs`, `window_length_dependent`, `wrist_orientation_likelihood_only` |
+| A — motion evidence (`PCMotionEvidence.swift`, 5) | `motion_basis_dynamic_acceleration`, `motion_basis_gravity_delta`, `motion_magnitude_unavailable`, `no_motion_samples`, `step_counter_stepping` |
+| B — eligibility (`PCEligibility.swift`, 31) | `after_exertion_bout`, `asleep`, `awake_evidence_unknown`, `exertion_history_exceeds_limit`, `heart_rate_dependent_activity_ignored`, `inside_locomotion`, `inside_supported_sleep`, `insufficient_activity_coverage`, `insufficient_preceding_stillness`, `insufficient_stationary`, `invalid_interval`, `movement_in_support`, `no_supported_exertion`, `not_asleep`, `not_worn`, `preceding_stillness_unobserved`, `recent_exertion_bout`, `recent_locomotion`, `recent_locomotion_unobserved`, `signal_degraded`, `signal_invalid`, `signal_unsupported`, `signal_unverified`, `signal_validity_missing`, `sleep_detector_hr_confirmation`, `sleep_evidence_unknown`, `sleep_wake_mixed`, `stable_awake_low_movement`, `wear_evidence_unknown`, `wear_from_heart_rate_presence`, `wear_mixed` |
+| C — sleep / rhythm (`PCSleepRhythm.swift`, 51) | `band_state_inputs_undocumented`, `classification_provisional`, `detector_input_missing`, `detector_lag_window`, `detector_may_extend`, `detector_owner_days_unread`, `endogenous_phase_unmeasured`, `hr_only_session`, `inside_sleep_episode`, `inside_split_sleep_gap`, `invalid_support`, `labels_read_heart_rate`, `main_night_rule_applied`, `main_sleep_incomplete`, `nap_after_main_wake`, `no_completed_sleep_before`, `no_detector_output`, `no_main_sleep`, `no_main_sleep_reference`, `no_sleep_episodes`, `no_wear_evidence`, `overlapping_session_superseded`, `overlaps_incomplete_episode`, `owner_day_provisional`, `partially_in_detected_sleep`, `prior_nights_insufficient`, `prior_zone_assumed_same`, `reference_beyond_lookback`, `reference_time_after_cutoff`, `rhythm_proxy_only`, `rhythm_proxy_reads_heart_rate`, `rhythm_samples_insufficient`, `scorer_nap_flag`, `session_availability_basis_end`, `session_end_clipped_to_cutoff`, `session_reaches_cutoff`, `session_revision_resolved`, `sleep_evidence_insufficient`, `sleep_in_progress`, `sleep_labels_read_heart_signals`, `sleep_sources_disagree`, `source_day_differs_from_owner_day`, `split_sleep`, `stages_unavailable`, `stages_unverified`, `timezone_history_unknown`, `utc_offset_changed_in_window`, `wake_may_be_revised`, `wear_evidence_insufficient`, `wear_from_heart_signal`, `wear_sources_disagree` |
+| D — exertion (`PCExertionBouts.swift`, 41) | `ambient_unavailable`, `bout_ongoing`, `cadence_unavailable`, `continued_movement`, `coverage_unknown_for_part_of_window`, `cutoff_reached`, `disconnect`, `end_hr_unavailable`, `ended_at_evidence_gap`, `external_load_unavailable`, `follow_up_motion_unobserved`, `grade_unavailable`, `hr_insufficient_coverage_during_bout`, `hrv_recovery_window_unsupported`, `insufficient_cadence_minutes`, `insufficient_follow_up_samples`, `insufficient_samples_at_offset`, `merged_hart_and_strap_evidence`, `next_bout`, `no_follow_up`, `no_motion_observed_in_window`, `no_supported_post_bout_respiratory_estimator`, `not_returned_by_last_observed_offset`, `observed_prorated_partial_day`, `optical_hr_during_movement_unvalidated`, `overlaps_hr_detected_workout`, `post_effort_hr_decline_not_clinical_hrr`, `pre_bout_hr_insufficient_coverage`, `pre_bout_reference_unavailable`, `pre_bout_window_in_prior_recovery`, `pre_bout_window_overlaps_prior_bout`, `preceding_state_unknown`, `respiration_unavailable_during_movement`, `rise_too_small_for_fraction`, `rise_too_small_for_return`, `speed_unavailable`, `step_counter_unclassed_legacy`, `uncalibrated_step_counter`, `workout_clipped_at_cutoff`, `workout_without_locomotion_evidence`, `wrist_cadence_not_gait_speed` |
+| E — exposures (`PCExposures.swift`, 15) | `aligned_events_limited`, `association_only`, `behavior_change`, `behavior_unobserved`, `candidate_not_confirmed`, `concurrent_events`, `insufficient_measurements`, `invalid_dose_dropped`, `invalid_revisions_ignored`, `late_entries_included`, `no_exposure_records`, `pharmacology_not_modelled`, `regime_change`, `time_uncertain`, `window_partially_searched` |
+| F — references (`PCReferences.swift`, 38) | `center_uncertainty_approximate`, `constant_history`, `context_unsupported_parent_only`, `degraded_validity_included`, `duplicate_history_day_resolved`, `frozen_created_after_day_ignored`, `frozen_not_registered`, `frozen_reference_is_historical_not_healthy`, `frozen_registered_this_run`, `frozen_registers_in_other_mode`, `frozen_scale_floored_by_current_policy`, `frozen_window_not_complete_for_day`, `future_history_ignored`, `history_in_other_regime_only`, `history_values_excluded`, `insufficient_history`, `log_transform`, `multiple_nightly_values_longest_kept`, `nightly_snapshot`, `no_history`, `no_population_prior`, `non_positive_value_for_log`, `other_regime_history_not_pooled`, `overlapping_windows_not_counted`, `parent_insufficient_child_only`, `partial_day_composition`, `pooled_toward_parent`, `provisional_support`, `relative_use_only`, `scale_floor_default`, `scale_floored`, `scale_from_recent_window`, `scale_from_rolling_view`, `small_sample_scale_correction`, `stable_awake_windows`, `stale_history`, `time_band_stratum`, `winsorized_mean_estimator` |
+| F — change (`PCChangeDetection.swift`, 30) | `alternative_detector_agrees`, `alternative_detector_silent`, `autocorrelation_assumed_conservative`, `coincides_with_regime_boundary`, `descriptive_not_diagnostic`, `detector_burn_in`, `detector_cusum`, `detector_persistence`, `distinct_groups_not_proven_independent`, `frozen_and_rolling_agree`, `frozen_and_rolling_disagree`, `frozen_reference_deviation`, `frozen_unavailable`, `gap_reset`, `gradual_drift`, `isolated_excursion`, `no_declared_dependence`, `no_deviating_series`, `no_recent_support`, `no_reference`, `partial_day_value_excluded`, `recurring_within_window`, `returned_toward_reference`, `rolling_adapted_frozen_deviation_persists`, `rolling_adapted_not_proof_of_recovery`, `selection_reads_heart_rate`, `shared_inputs_not_independent`, `split_at_regime_boundary`, `starts_at_window_start`, `too_few_supported_days` |
+| G — functional / registry (`PCFunctional.swift`, 17) | `activity_evidence_unavailable`, `day_incomplete_at_cutoff`, `day_not_started_at_cutoff`, `insufficient_motion_coverage`, `insufficient_wear_coverage`, `insufficient_worn_time_for_rates`, `motion_evidence_unavailable`, `no_bouts`, `no_validated_definition`, `no_waking_time`, `observed_behaviour_not_diagnosis`, `rest_after_bout_right_censored`, `sleep_not_excluded_from_waking_time`, `transition_denominator_too_small`, `wear_denominator_uses_heart_signal_presence`, `wear_evidence_unavailable`, `wear_missingness_may_be_informative` |
 
 ## 13. Versions
+
+Every version is part of `Policy.fingerprint`, so a bump changes every reprocessing key (rollout.md §5).
 
 | Component | Version |
 | --- | --- |
 | Contract | `pc-contract-1` (schema 1) |
+| Stored form | `pc-wire-1` |
 | Join | `pc-join-1` |
 | Engine | `pc-engine-1` |
-| Validity / motion / eligibility | `pc-validity-1` / `pc-motion-1` / `pc-eligibility-1` |
+| Validity / motion / eligibility | `pc-validity-2` / `pc-motion-1` / `pc-eligibility-2` |
 | Sleep | `pc-sleep-1` |
 | Exertion | `pc-exertion-1` |
 | Exposure | `pc-exposure-1` |
-| Reference / change | `pc-reference-1` / `pc-change-1` |
-| Functional / features | `pc-functional-1` / `pc-features-1` |
+| Reference / change | `pc-reference-2` / `pc-change-2` |
+| Functional / features | `pc-functional-2` / `pc-features-1` |
 | Derived HR windows | `pc-hr-window-1` |
+
+## 14. Changes since the first contract draft
+
+Made during integration and the independent reviews (each with a regression test):
+
+- **Device regime key.** Device-level daily values (`hr_response.*`, `hr_recovery_*`, `functional.*`) use
+  `dev-<fnv>` over vendor, family, source kind, firmware, the placement covering most of the day, and the product
+  version (`pc-exertion-*` / `pc-functional-*`), so the key is stable whatever measurement families exist that day and
+  values from different definitions never pool.
+- **`PlacementInput.scope`** (`device` | `account`, nil = device); a device-scoped record wins where they overlap.
+- **`SleepSessionInput.dataThrough` / `timezoneId`.** Causal sessions are known only once published (unknown
+  publication = at the session end).
+- **`DayDocument.envelopeIndex`** and the stored form (§6.1).
+- **Comparisons** are attached to an envelope only when its daily value is that envelope's own value; aggregate
+  comparisons (e.g. the stable-awake median) stay document-level.
+- **`EligibilityVerdict.notes`**; `SelectionSummary.representedShare` now means "entered a daily value", with
+  `eligibleShare`, `enteredCount`, `enteredSupportS` and `enteredObservedS` beside it; `targetDependentGates` is set
+  per verdict (`signal_invalid`, `hr_plausible_band`, `rr_kernel_range`, `ectopic_rejection`,
+  `sleep_detector_hr_confirmation`, `wear_from_heart_rate_presence`).
+- **Frozen references.** Retrospective runs see every registered reference; a registered one is the authority, a day
+  inside its window gets `frozen_window_not_complete_for_day`; causal runs ignore references created on or after the
+  day. Publish reports `frozen_references_conflicting`.
+- **Change detection** burns in until a series' history covers its 28-day rolling window; φ̂ is gap-aware with a
+  conservative φ = 0.5 when it cannot be estimated; causal partial-day stable-awake and functional values carry no
+  distance (`partial_day_composition`). `ChangeEpisode.detectionDelayDays` was renamed `alarmAfterStartDays`.
+- **Input fingerprint** covers every input (records and history through the canonical encoder) and, for
+  retrospective documents, finality.
+- **Worker** loads 160 days of daily values (90-day episode window + 14-day guard + 56-day φ̂ window).
+- **Invalidation** also cascades 14 days on a sleep-episode change and 3 days on a bout-only change, always refreshes
+  the device's newest retrospective day after a values change, applies queue updates in (user, device, day, mode)
+  order, invalidates on decoder day documents, and clears a replay cutoff on new inputs.

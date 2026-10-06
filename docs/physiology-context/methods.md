@@ -81,10 +81,14 @@ Full tables: [notes/signal.md §6–§7](notes/signal.md).
   recent bout < 600 s as exclusions. Unknown awake or wear evidence gives `unknown`, never `eligible` (V02).
 - **Sleep measurement**: inside a supported sleep episode and worn; staging never required.
 - **Activity response**: locomotion ≥ 50 % of the support, or within 900 s after a bout (engineering choice).
-- **Target dependence.** The only gate that reads the target's own signal is signal validity; it is declared in
-  `targetDependentGates`. Awake evidence comes from the HR-confirmed sleep detector and wear from HR presence; both
-  are declared in `dependsOn` (`sleep_detector_uses_heart_rate`, `wear_from_heart_rate_signal`). This is a
-  selection-bias channel: a still person with low HR is more likely labelled asleep and so excluded from awake rest.
+- **Target dependence.** No behavioural gate reads the measurement's value. Gates that read the target's own
+  signal or a heart-derived label are declared per verdict in `targetDependentGates`: `signal_invalid`,
+  `hr_plausible_band`, `rr_kernel_range` (300–2000 ms), `ectopic_rejection`, `sleep_detector_hr_confirmation`
+  (the server confirms sleep only when HR is low enough) and `wear_from_heart_rate_presence`; the availability
+  matrix declares the same gates. These are selection-bias channels: a still person with low HR is more likely
+  labelled asleep (and excluded from awake rest), a night is a "sleep measurement" only if the detector's HR test
+  passed, and sustained HR above 200 or below 30 bpm puts beats outside the HRV kernel. They are declared, not yet
+  evaluated: checking whether exclusion tracks HR level, symptoms or disease state needs real labelled days.
 - **Selection accounting** (`SelectionSummary`): eligible / ineligible / unknown counts, the share of observed time
   that eligible supports represent, and the top exclusion reasons, per comparison and metric (spec §14 last bullet).
 
@@ -155,10 +159,12 @@ Full detail and tables: [notes/statistics.md](notes/statistics.md).
 | Rolling | 28 days, median, `1.4826 · MAD · b_n` with small-sample factor, floored; ready at ≥ 14 days | Rousseeuw & Croux 1993 (literature) |
 | Frozen | First 14 supported days within 42 days, registered once per (series, regime, version), never replaced, labelled historical not healthy | Engineering choice |
 | Conditioned | Time-band strata shrunk toward the all-day reference with `w = n/(n+7)`; no population prior | Engineering choice (spec §12.2 partial pooling) |
-| Scale floors | ln HRV 0.05; HR 1 bpm (integer resolution); resp 0.3 /min; skin 0.1 °C | Engineering choices (HR floor tested 0.5 / 1 / 2) |
+| Scale floors | ln HRV 0.05; HR, `hr_response.*`, `hr_recovery_*` 1 bpm (integer resolution); resp 0.3 /min; skin 0.1 °C; `functional.*` by units (e.g. 0.25 bouts/h, 15 s/h locomotion, 1 count); unlisted series max(2 %·\|center\|, 1 unit) with `scale_floor_default` | Engineering choices (HR floor tested 0.5 / 1 / 2) |
 | Center uncertainty | `1.2533 · scale / √n`, labelled approximate (understates under autocorrelation) | Asymptotic median SE |
 | Robust z | Distance in robust-scale units, never a probability | Research note 1 |
-| Detector | Two-sided CUSUM on daily robust z (never on rolling means), k = 0.25, h = 7, clamp ±2, input divided by the AR(1) long-run factor from φ̂ on days d−69…d−14 | Page 1954 / NIST (literature); parameters from the evaluation below |
+| Detector | Two-sided CUSUM on daily robust z (never on rolling means), k = 0.25, h = 7, clamp ±2, input divided by the AR(1) long-run factor from a gap-aware φ̂ (pairs up to 7 days apart, days d−69…d−14); φ = 0.5 assumed when φ̂ cannot be estimated (`autocorrelation_assumed_conservative`) | Page 1954 / NIST (literature); parameters from the evaluation below |
+| Burn-in | A day feeds the detectors only once its series' loaded history covers its whole 28-day rolling window (`detector_burn_in`); the worker loads 160 days so a document equals the evaluated full-lookback path | Review R-F2 |
+| Causal partial days | Causal stable-awake and functional values from an unfinished day keep their reference but carry no distance (`partial_day_composition`) and stay out of that day's episodes — their time-of-day composition differs from whole-day history; time-band strata remain the like-for-like view | Review P2 |
 | States | usual variation, transient deviation, recurring episode, persistent shift, insufficient evidence; frozen persistence keeps a fixed-reference deviation visible after the rolling view adapts | Spec §12.3 |
 
 ## 8. System G — functional features
@@ -166,9 +172,11 @@ Full detail and tables: [notes/statistics.md](notes/statistics.md).
 Full detail: [notes/responses.md §G](notes/responses.md).
 
 - Wear per minute from wear events, HR presence (declared heart-derived; used only as a denominator) and locomotion
-  evidence. Day totals are comparable only at ≥ 70 % worn waking time on a complete day; per-worn-hour rates need
-  ≥ 4 worn waking hours (engineering choices). Below that: `insufficient_wear_coverage`,
-  `wear_missingness_may_be_informative` — missingness, never decline (V14).
+  evidence. Rates divide by worn waking time that ALSO has a motion label (numerator and denominator over the same
+  minutes); strap labels count only when a step counter reported that day (a WHOOP 4.0 cannot label walking). With
+  no motion evidence, or under 4 h of it, rates are unavailable with an explicit reason — never 0. Day totals need
+  ≥ 70 % worn and motion-observed waking time on a complete day (engineering choices). Below that:
+  `insufficient_wear_coverage`, `wear_missingness_may_be_informative` — missingness, never decline (V14).
 - Features: bouts, durations, locomotion per worn hour, pauses, cadence (uncalibrated counter ticks; not gait speed
   or stride length), transitions, fragmentation, rest after activity.
 - Registry `pc-features-1`: 11 general definitions (`technical_verification_only`) and 6 specialized ones (gait
@@ -186,6 +194,10 @@ Full detail: [notes/responses.md §G](notes/responses.md).
 | `heart_rate` | HR, resting HR, sleep detector, v2 decoder | The sleep detector confirms sleep with HR; the decoder reads HR reserve |
 | `sleep_detector` | sleep/wake, stages, HR, HRV, respiratory rate | Sleep labels read heart signals; not independent corroboration |
 | `strap_motion` | eligibility stillness, bouts, functional features | One motion stream feeds all three |
+| `exertion_bouts` | `hr_response.*`, `hr_recovery_*` | Bout-derived HR series share bouts and the HR stream |
+| `sleep_wake`, `wear_state` | stable-awake and functional series | Their denominators/selection read the HR-confirmed sleep detector and HR-presence wear |
+
+Every emitted series key must map to at least one declared group (a test fails otherwise).
 
 ## 10. Missingness
 
@@ -200,8 +212,8 @@ Full detail: [notes/responses.md §G](notes/responses.md).
 | Reference history | `insufficient` / `provisional` status with support counts |
 | Inputs that do not exist (PPG waveform, core temperature, labels) | `unsupported` / `unavailable` rows with the missing evidence named |
 
-Missingness was evaluated only as random in the synthetic harness; informative missingness (e.g. less wear when
-unwell) is a known untested case (statistics §8).
+Missingness was evaluated only as random in the synthetic harness (0–70 % of days); informative missingness (e.g.
+less wear when unwell) is a known untested case (statistics §8). Sparse series lose detection sensitivity (above).
 
 ## 11. Evaluation design (spec §14)
 
@@ -227,20 +239,26 @@ separate questions; this layer only addresses arithmetic/integration and a descr
 
 ### 12.1 Change detection (AR(1) synthetic series; statistics §6; seed 20261005, 400 replicates per cell)
 
+Re-run after the review repairs (burn-in, gap-aware φ̂, conservative fallback); no default changed.
+
 | Check | Default detector | Comparison |
 | --- | --- | --- |
-| False persistent episodes per series-week, φ = 0 / 0.3 / 0.5 | 0.030 / 0.030 / 0.022 | Classic CUSUM k = 0.5 h = 4: 0.175 at φ = 0.3; unadjusted k = 0.25 h = 7: 0.103 |
-| Series with ≥ 1 false persistent episode in 90 days | 31–38 % | — |
-| 2-SD step missed within 28 days, φ = 0 / 0.3 / 0.5 | 0 % / 5 % / 20 % | Persistence rule 3-of-5: 54 % / 48 % / 39 % |
-| 2-SD step median delay | 5 / 7 / 8 days | — |
-| 1-SD step missed | 26–62 % | — |
+| False persistent episodes per series-week, dense, φ = 0 / 0.3 / 0.5 | 0.029 / 0.029 / 0.021 | Classic CUSUM k = 0.5 h = 4: 0.175 at φ = 0.3; unadjusted k = 0.25 h = 7: 0.103 |
+| Same, 50 % of days missing | 0.010 / 0.013 / 0.011 | Before the repair 0.050 at φ = 0.5 (no φ̂, no adjustment) |
+| Same, counted from day 0 (start-up included) | 0.027 / 0.027 / 0.019 | The start-up adds no false episodes |
+| Documents with ≥ 1 false persistent episode (one 90-day window, worker's 160-day load) | 31 % / 30 % / 20 % | Identical to the evaluated full-lookback path |
+| 2-SD step missed within 28 days, dense φ = 0 / 0.3 / 0.5 | 0 % / 5 % / 21 % | Persistence rule 3-of-5: 54 % / 48 % / 39 % |
+| 2-SD step missed, φ = 0.3 with 30 % / 50 % missing | 18 % / 47 % | Sparse series lose sensitivity, not specificity; at 70 % missing the CUSUM is effectively silent |
+| 2-SD step median delay, dense | 5 / 7 / 8 days | — |
+| 1-SD step missed, dense | 26–63 % | — |
 | 3-SD gradual drift, median z last 7 days | frozen ≈ −3.0, rolling ≈ −0.7 | Frozen deviation stays visible as the rolling view adapts (V11) |
-| +8 SD single-day artifact | 91–92 % transient only; reference center moves ≤ 0.12 SD; alarm rate 6 % with vs 5–6 % without | Raw value preserved |
+| +8 SD single-day artifact | 91–92 % transient only; reference center moves ≤ 0.12 SD | At φ = 0 CUSUM alarms within 14 days rise slightly (7.4 vs 6.2 %, 2000 replicates); raw value preserved |
 | CUSUM arithmetic vs research note 8 | ARL0 163 / 54.0 / 33.9 days | ≈ 170 / 54 / 35 expected |
 | Small-sample MAD factor, mean of 1.4826·MAD at n = 3…28 | 0.993–1.001 | raw 0.669–0.972 |
 
-Reading: about one in three series shows a false persistent episode within any 90 days at the chosen threshold. The
-episode summary is descriptive and must not be used as an alert; alerting is out of scope (spec §12.3).
+Reading: about one in three dense series shows a false persistent episode within any 90 days at the chosen threshold,
+and a sparse series misses about half of 2-SD shifts. The episode summary is descriptive and must not be used as an
+alert; alerting is out of scope (spec §12.3).
 
 ### 12.2 Eligibility policy sensitivity (synthetic waking day; signal §7)
 

@@ -301,7 +301,7 @@ extension PhysiologyContext {
 
     public enum ContextReferences {
 
-        public static let version = "pc-reference-1"
+        public static let version = "pc-reference-2"
 
         // MARK: Reason codes
         // Daily values.
