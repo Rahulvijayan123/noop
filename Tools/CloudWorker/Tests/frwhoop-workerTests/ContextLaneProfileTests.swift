@@ -35,9 +35,10 @@ final class ContextLaneProfileTests: XCTestCase {
                           claimedAt: mode == .causalLive ? dayStart + 20 * 3_600 : dayStart + 56 * 3_600)
     }
 
-    /// 90 days of history (12 series a day), 3 days of bouts, 10 frozen references, 14 prior nights.
+    /// `ContextInputs.historyDays` (160) days of history (12 series a day), 3 days of bouts, 10 frozen references,
+    /// 14 prior nights.
     private func addHistory(_ l: inout ContextInputs.Loaded, mode: PC.ProcessingMode) {
-        for d in 1...90 {
+        for d in 1...ContextInputs.historyDays {
             let key = ContextInputs.shiftDay("2026-10-03", by: -d)!
             for s in 0..<12 {
                 l.historyValues.append(PC.DailyValue(day: key, seriesKey: "series.\(s)", regimeKey: "r\(s % 3)",

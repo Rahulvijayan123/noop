@@ -86,24 +86,31 @@ so the arrival order of rows can never change a document (tested by shuffling). 
 | Workouts | `sessions` kind `workout` (source `detected`) / `manual_workout` (`manual`), availability = last write | read window | `WorkoutInput` |
 | HART epochs (v1) | `activity_context_epochs`, every revision, `revision = result_revision`, availability = `computed_at` | read window | `ActivityEpochInput` |
 | Decoder runs (v2) | `activity_context_runs` from the best document of each UTC day (`source_rank`) | read window | `ActivityIntervalInput` (class, confidence, sleep, wear) |
-| Placement | `placement_intervals`, the device's rows and the owner's device-less rows overlapping the window | read window | `PlacementInput` (recordedAt = `recorded_at`) |
-| Device | `devices` (family, firmware, source kind) | — | `DeviceRegimeInput` (vendor `whoop`, `oura` when the source kind says so; scoring `frwhoop-server-1`, series `frwhoop-series-2`; decoder version nil) |
+| Placement | `placement_intervals`, the device's rows and the owner's device-less rows overlapping the window | read window | `PlacementInput` (recordedAt = `recorded_at`; `scope` = `device` for the device's rows, `account` for device-less rows — the engine lets a device record win where they overlap, review RC-17) |
+| Device | `devices` (family, firmware, source kind) | — | `DeviceRegimeInput`: vendor `whoop` (`oura` when the source kind says so), source kind; **family and firmware nil** (review RC-13: they are mutable columns of the current row and there is no history of them, so they are never stamped on a rebuilt day; the family still drives the skin conversion, as in the scorer); scoring `frwhoop-server-1`, series `frwhoop-series-2`; decoder version nil |
 | Profile | `profiles` (same defaults as `DayScorer.loadProfile`, age at day start) | — | series inputs only (steps/calories) |
 | Exposures | `exposure_event_revisions` of the owner, every revision whose occurrence overlaps `[start of D−4, end of D+1)`; availability = `received_at` | — | `ExposureEventRevision` |
-| History values | `physiology_context_daily_values.payload`, same device and mode, D−90..D−1 | — | `DailyValue` |
+| History values | `physiology_context_daily_values.payload`, same device and mode, D−160..D−1 (`ContextInputs.historyDays(for: policy)` = `windowDays` 90 + `autocorrelationGuardDays` 14 + `autocorrelationWindowDays` 56: the oldest scored episode day gets its full lookback, review R-F2) | — | `DailyValue` |
 | History bouts | `physiology_context_bouts.payload`, same device and mode, D−3..D−1 | — | `ExertionBout` |
-| Frozen references | `physiology_context_frozen_references.payload`, the device | — | `FrozenReference` |
+| Frozen references | `physiology_context_frozen_references.payload`, the device: retrospective every registered reference; causal those registered by the cutoff | — | `FrozenReference` |
 
-Optional products (epochs, runs, placement, exposures, history) are read under a savepoint: a missing table or a
-failing read empties that input, adds `<input>_unavailable` to `inputRevisions` and counts `inputs_unavailable`.
-Raw streams, snapshots, device, profile and workouts are required (a failure ends the job and is retried).
+Optional products (epochs, runs, placement, exposures, history) are read under a savepoint: a schema object that
+does not exist (SQLSTATE 42P01 / 42883 / 42703 — the worker deployed before the migration) empties that input, adds
+`<input>_unavailable` to `inputRevisions` and counts `inputs_unavailable`. Any other failure of an optional read (lock
+or statement timeout, serialization failure, lost connection) ends the job like a required read, so it is settled
+through `fail_physiology_context_v1` and retried with backoff instead of publishing a degraded document as complete
+(lead review R1). Raw streams, snapshots, device, profile and workouts are required (a failure ends the job and is
+retried).
 
 **Causal mode.** `assemble` builds the full `DayInput`, calls `Engine.causalView` once (its exclusion counts go to
 telemetry only: `causal_excluded_observations|records|exposure_revisions`, never into the document), and then
 selects R-R transports and recomputes the series from the VISIBLE rows only, so a late upload can neither change
 the transport chosen for an hour nor a series value. History is filtered by publication: daily values and bouts
 whose publishing revision's `published_at` is after the cutoff, and frozen references registered after it, are
-not read. Prior sleep published after the cutoff is dropped.
+not read (how many history rows that left out goes to telemetry, `causal_history_after_cutoff`; never into the
+document). Prior sleep published after the cutoff is dropped. A retrospective job reads every daily value and bout
+of the range and every frozen reference registered for the device (the engine scores a back-filled day against the
+registered reference, so it never registers a second "version 1").
 
 **Sleep sessions** (lead update, sleep notes §9.5): the input carries every session of the newest D−1, D and D+1
 snapshots with `sourceDay`, `availableAt` = snapshot `computed_at`, `dataThrough` (snapshot `dataThrough`, unix s)
@@ -113,7 +120,9 @@ the snapshot says `true` (the scorer writes a constant `false`). Duplicate ids k
 `inputRevisions` (header, content-derived only, sorted): `scoring_snapshot` (result revision), `scoring_input`,
 `metric_series` (`frwhoop-series-2`), `activity_epochs` / `activity_days` (max revision), `placement`
 (`count:max revision`), `exposures` (`count:max availability`), `other_day_snapshots`, `history_daily_values`,
-`history_bouts`, `frozen_references` (counts), plus `<input>_unavailable`.
+`history_bouts`, `frozen_references` (counts), plus `<input>_unavailable`. In causal mode the epoch, decoder-run,
+placement and exposure entries are computed over the causal view (what was available at the cutoff); a count over
+the stored rows would put a later upload into the live document (V10).
 
 ## 5. Measurements and their supports (exact)
 
@@ -133,20 +142,45 @@ day's snapshot (the series is published with that pass). `availableAt` = the lat
 rate, beat and motion rows inside the support (per-minute index). `sampleCount`/`coverage` are the point's.
 
 Nightly snapshot values → `snapshot.<name>.night`, algorithm `frwhoop-server-1`, aggregation `session`, windowS =
-support length (contract text), source `scoring_snapshot` key `daily.<field>` with the snapshot's input/result
-revision, `availableAt` = snapshot `computed_at`:
+support length (contract text; System A keys session aggregates by class, not length), source `scoring_snapshot`
+key `daily.<field>` (plus notes, below) with the snapshot's input/result revision, `availableAt` = snapshot
+`computed_at`.
 
-| Field | Metric | Units | Support |
-| --- | --- | --- | --- |
-| `resting_hr_bpm` | `resting_heart_rate` | bpm | the scorer's primary session (longest, first on ties) — the session `AnalyticsEngine` takes it from |
-| `hrv_rmssd_ms` | `hrv_rmssd` | ms | hull of the day's sessions (in-bed weighted pool) |
-| `hrv_sdnn_ms` | `hrv_sdnn` | ms | hull |
-| `resp_rate_bpm` | `respiratory_rate` | breaths_per_min | hull (median over sessions) |
-| `skin_temp_c` | `skin_temperature` | degC | hull |
-| `spo2_candidate_pct` | `spo2_candidate` | percent | hull; `sampleCount` = `spo2_candidate_samples` |
+"The day's sessions" = the snapshot's `sleep` array, which is exactly the scorer's `matched` list (every session
+whose end falls on the local day). The **main-sleep group** is the scorer's own main-night rule over them:
+`SleepStageTotals.mainNightGroupIndices` (two-tier bridge: gaps < 60 min, or < 90 min with an overnight onset;
+learned-timing score) at the zone offset of the snapshot day's start (the snapshot's `timezone`, else the job's),
+with no habitual midsleep (the server scorer passes none). Sessions flagged `is_nap: true` are excluded unless all
+are. Support of the group = `[first fragment start, last fragment end)`.
 
-`sessionId` is set when the support is one session (resting HR always; the others when the day has one session).
-`skin_temp_dev_c` is a deviation, not a measurement, and is not mapped. With one session the hull is the session.
+| Field | Metric | Units | Canonical aggregate (AnalyticsEngine.analyzeDay) | Support |
+| --- | --- | --- | --- | --- |
+| `resting_hr_bpm` | `resting_heart_rate` | bpm | gated lowest 5-min bin of the primary session (the longest motion-backed session; HR-only only when the day has no other kind; a device-provided value for that session wins) | the primary session: longest snapshot session, first on ties |
+| `hrv_rmssd_ms` | `hrv_rmssd` | ms | in-bed-weighted mean of per-session RMSSD over all the day's sessions (motion-backed preferred), naps included; only the main group when the over-count gate refused a main-group session | main-sleep group |
+| `hrv_sdnn_ms` | `hrv_sdnn` | ms | 5-min SDNN index of the R-R inside all the day's sessions (motion-backed preferred) | main-sleep group |
+| `resp_rate_bpm` | `respiratory_rate` | breaths_per_min | median of per-session RSA estimates over all the day's sessions (a vendor rate over all sessions wins) | main-sleep group |
+| `skin_temp_c` | `skin_temperature` | degC | worn-gated mean over all the day's sessions | main-sleep group |
+| `spo2_candidate_pct` | `spo2_candidate` | percent | mean of in-band (70–100) readings inside any of the day's sessions; `sampleCount` = `spo2_candidate_samples` | main-sleep group |
+
+Source-key notes (`daily.<field>#<note>;<note>`, sorted; the key is plain when none applies — every one-session
+day):
+
+| Note | Fields | Meaning |
+| --- | --- | --- |
+| `aggregate_pools_sessions_outside_support=<n>` | pooled five | The aggregate's definition pools `n` of the day's sessions outside the support (naps, fragments not bridged into the main night). Whether each contributed is not published (beats, the over-count gate, the skin wear gate). |
+| `support_spans_split_sleep_gap_s=<s>` | pooled five | Split main night: the support includes `s` seconds between fragments that no fragment measured. |
+| `main_sleep_from_nap_flagged_sessions` | pooled five | Every session was flagged `is_nap: true`, so the rule ran over all of them. |
+| `primary_session_outside_main_sleep` | resting HR | The longest session is not in the main group (a long daytime sleep that lost to a shorter overnight one on timing). |
+
+`sessionId` is set when the support is exactly one session (resting HR always; the pooled fields when the main group
+has one fragment). `skin_temp_dev_c` is a deviation, not a measurement, and is not mapped.
+
+Known divergences from the scorer, both rare: the snapshot does not publish `hrOnly`, so the worker's primary
+session is the longest of ALL sessions (the scorer prefers a motion-backed one when the day has both kinds); and the
+engine's own main/nap classification (System C) uses a learned habitual midsleep, the scorer's (and so the worker's
+support) does not. Remaining limit (engine-side, see review-worker-repairs.md): a split night whose inter-fragment
+gap is ≥ 10 % of the hull is still judged `unknown` over the single-interval support and has no `*.sleep_night`
+value.
 
 ## 6. Publish payload (stored form, contracts §6.1)
 
@@ -179,7 +213,7 @@ build_ms_max, build_ms_mean, load_ms_total, load_ms_max, doc_bytes_total, doc_by
 summary_bytes_total, summary_bytes_max, summary_bytes_mean, table_bytes_total, table_bytes_max, table_bytes_mean
 (per job, all tables together; `doc_bytes_*` = summary + tables), inputs_rows_max, measurements_max,
 causal_excluded_observations, causal_excluded_records,
-causal_excluded_exposure_revisions, inputs_unavailable, rows_skipped, products_out_of_day, day_window_mismatch,
+causal_excluded_exposure_revisions, causal_history_after_cutoff, inputs_unavailable, rows_skipped, products_out_of_day, day_window_mismatch,
 documents_too_large`. `budgets.context` is added to the heartbeat; the queue-age entry `context` is added only
 while the lane runs and the table exists.
 
@@ -207,10 +241,12 @@ FRWHOOP_CONTEXT_PROFILE=1 FRWHOOP_TEST_DB_URL=... swift test -c release -Xswiftc
 | --- | --- | --- |
 | `ContextLaneTests` (config default-off / exact `1` / `DISABLE_LANES`, queue-age composition, claim parsing and cutoff per mode, windows incl. DST, series supports and clipping, method ids, series → measurement source/availability, snapshot parsing and nightly supports, neighbouring/prior sleep stamps, row parsers, transport selection, causal assembly, V10 replay byte identity, prior sleep cutoff, shuffle determinism, payload shape and verbatim document, null revisions, day-owned rows, publish/fail result parsing, error sanitizing, size cap, SQL write audit) | 30 | pass |
 | `ContextLaneFixtureTests` | 1 | pass |
-| `ContextLaneDatabaseTests` (scratch DB, final migration e5aca26a) | 8 + 1 opt-in | pass |
+| `ContextLaneReviewRepairTests` (review repairs: RC-03 supports ×4, R-F2 length, RC-13 device attributes, RC-17 scope, frozen references per mode, R1 optional-read failures; review-worker-repairs.md) | 9 | pass |
+| `ContextLaneDatabaseTests` (scratch DB; + R-F2 history load/plan, frozen references per mode, placement scope, R1 transient failure → retry) | 12 + 1 opt-in | pass |
 | `ContextLaneProfileTests` | 2 opt-in | pass (numbers below) |
 | Whole worker suite, no DB URL (early, before the backend merge) | 446, 31 skipped | 0 failures |
 | Whole worker suite with the scratch DB (after every merge) | 455, 4 skipped (the 3 opt-in profiles and the pre-existing `PushBatchTests.testEmbeddedFixturesMatchOnDiskCorpus`) | 0 failures |
+| Whole worker suite with the scratch DB (`pc/fix-worker`, after the review repairs) | 468, 4 skipped (same) | 0 failures |
 
 DB tests (each creates its own owners/devices and deletes them):
 
@@ -273,10 +309,11 @@ cascade failed and their queued stream days were claimed by the activity test. T
 3. **Session aggregate windowS.** Following the contract text, nightly methods carry `windowS` = session length.
    If System A keys regimes on `windowS`, every night is its own regime and nightly references never pool; System
    A/F should ignore `windowS` for `aggregation = session`, or the contract should say `windowS = 0` for sessions.
-4. **Placement scope.** `PlacementInput` has no device-vs-owner scope; the lane passes both the device's and the
-   owner's device-less records, sorted by content. A scope field would let System A prefer the device record.
-5. **Replay history.** History tables keep only current values; a replay at an old cutoff drops values published
-   after it (never leaks) but cannot recover the values the original live run saw.
+4. **Placement scope** (resolved, RC-17). The lane passes every record with `scope` (`device` / `account`); the
+   engine resolves device over account.
+5. **Replay history** (documented, P5 / RC-18). History tables keep only current values, and placement corrections
+   edit rows in place; a replay at an old cutoff loses (never leaks) what the original live run saw. Exact cases and
+   the storage fix: review-worker-repairs.md. Telemetry: `causal_history_after_cutoff`.
 6. **Availability basis.** `ingested_at` is the upload transaction's start; a row committed after the claim with an
    earlier `ingested_at` can be visible to a later replay at the same cutoff (bounded by the upload transaction's
    duration, seconds).

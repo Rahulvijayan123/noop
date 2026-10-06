@@ -84,6 +84,9 @@ struct ContextLane {
         var causalExcludedObservations = 0
         var causalExcludedRecords = 0
         var causalExcludedExposures = 0
+        /// Causal jobs: history rows (daily values, bouts) whose current publication is after the cutoff, so not
+        /// read (reviews P5 / RC-18; telemetry only).
+        var causalHistoryAfterCutoff = 0
         /// Optional inputs that could not be read, summed over jobs.
         var inputsUnavailable = 0
         var rowsSkipped = 0
@@ -119,6 +122,7 @@ struct ContextLane {
                 "causal_excluded_observations": causalExcludedObservations,
                 "causal_excluded_records": causalExcludedRecords,
                 "causal_excluded_exposure_revisions": causalExcludedExposures,
+                "causal_history_after_cutoff": causalHistoryAfterCutoff,
                 "inputs_unavailable": inputsUnavailable, "rows_skipped": rowsSkipped,
                 "products_out_of_day": productsOutOfDay, "day_window_mismatch": dayWindowMismatch,
                 "documents_too_large": documentsTooLarge,
@@ -281,7 +285,8 @@ struct ContextLane {
 
     /// Load, build and publish one claimed job. Internal so a scratch database can drive it directly.
     mutating func process(_ job: ContextInputs.Job) throws -> Outcome {
-        guard let windows = ContextInputs.windows(day: job.day, timezoneId: job.timezoneId) else {
+        guard let windows = ContextInputs.windows(day: job.day, timezoneId: job.timezoneId,
+                                                  historyDays: ContextInputs.historyDays(for: policy)) else {
             throw ContextError.deterministic("invalid_job_day")
         }
         if let queue = job.queueDayWindow, queue != windows.dayWindow { stats.dayWindowMismatch += 1 }
@@ -522,6 +527,7 @@ struct ContextLane {
             default: break
             }
         }
+        stats.causalHistoryAfterCutoff += loaded.historyAfterCutoff
         stats.inputsUnavailable += loaded.unavailable.count
         stats.rowsSkipped += loaded.skippedRows
         stats.productsOutOfDay += built.outOfDay

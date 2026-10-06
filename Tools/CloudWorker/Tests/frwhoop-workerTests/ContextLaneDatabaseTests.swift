@@ -35,7 +35,8 @@ final class ContextLaneDatabaseTests: XCTestCase {
         return try PostgresClient(options: PostgresOptions(
             connectionString: url, sslMode: "disable", sslRootCert: nil,
             applicationName: "frwhoop-worker-context-tests", allowInsecure: true,
-            connectTimeoutSeconds: 5, reconnectDeadlineSeconds: 5,
+            // Generous: a scratch database behind a loaded VM's port forward can take seconds to accept.
+            connectTimeoutSeconds: 30, reconnectDeadlineSeconds: 30,
             statementTimeoutMS: 120_000, idleTransactionTimeoutMS: 120_000))
     }
 
@@ -602,6 +603,242 @@ final class ContextLaneDatabaseTests: XCTestCase {
         let after = try db.query("select count(*)::text as n from public.scoring_snapshots_v2 where user_id = $1::uuid",
                                  [o.user]).first?["n"]
         XCTAssertGreaterThan(Int(after ?? "") ?? 0, Int(before ?? "") ?? 0)
+    }
+
+    // MARK: - Review repairs (notes/review-worker-repairs.md)
+
+    /// A published day row the test's history rows point at (`context_revision`), published at `publishedAt`.
+    func insertContextDay(_ o: Owner, day: String, mode: String, publishedAt: Int) throws -> String {
+        try XCTUnwrap(try db.query("""
+            insert into public.physiology_context_days(user_id, device_id, day, mode, job_revision, finality, status,
+              availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint,
+              input_fingerprint, document, document_bytes, published_at)
+            values ($1::uuid, $2::uuid, $3::date, $4, 1, 'final', 'available', $5::bigint, $5::bigint,
+                    'pc-contract-1', 1, 'repair-test', 'repair-test', '{}'::jsonb, 2, to_timestamp($5::bigint))
+            returning context_revision::text as rev
+            """, [o.user, o.device, day, mode, String(publishedAt)]).first?["rev"])
+    }
+
+    func contextJob(_ o: Owner, mode: PC.ProcessingMode, claimedAt: Int) -> ContextInputs.Job {
+        ContextInputs.Job(userId: o.user, deviceId: o.device, day: day, mode: mode, inputRevision: 1,
+                          leaseToken: UUID().uuidString.lowercased(), timezoneId: "UTC", cutoffOverride: nil,
+                          claimedAt: claimedAt)
+    }
+
+    /// R-F2: 160 days of daily values (D-160 … D-1) are read — the change detector's full burn-in — and nothing
+    /// outside; the read stays on an index; the load time is measured (`context-history-load:` line).
+    func testRF2_historyLoadReadsTheFullBurnInWindowBoundedAndIndexed() throws {
+        let o = try makeOwner()
+        let now = Int(Date().timeIntervalSince1970)
+        let publishedAt = now - 86_400
+        let seriesPerDay = 40
+        let windows = try XCTUnwrap(ContextInputs.windows(day: day, timezoneId: "UTC"))
+        XCTAssertEqual(ContextInputs.shiftDay(windows.historyFrom, by: ContextInputs.historyDays), day)
+        for mode in [PC.ProcessingMode.retrospective, .causalLive] {
+            let revision = try insertContextDay(o, day: ContextInputs.shiftDay(day, by: -1)!, mode: mode.rawValue,
+                                                publishedAt: publishedAt)
+            var rows: [[Any]] = []
+            // D-170 … D: ten days before the window and the day itself must not be read.
+            for d in 0...170 {
+                let key = ContextInputs.shiftDay(day, by: -d)!
+                for s in 0..<seriesPerDay {
+                    let v = PC.DailyValue(day: key, seriesKey: "series.\(s)", regimeKey: "r\(s % 3)", metric: .hrvRmssd,
+                                          value: 40 + Double(s), units: "ms", supportCount: 3, supportUnit: "windows",
+                                          supportS: 900, mode: mode, finality: .final)
+                    rows.append([key, v.seriesKey, v.regimeKey, String(decoding: try PC.encoder().encode(v), as: UTF8.self)])
+                }
+            }
+            var i = 0
+            while i < rows.count {
+                _ = try db.query("""
+                    insert into public.physiology_context_daily_values(user_id, device_id, mode, day, series_key,
+                      regime_key, metric, value, units, support_count, support_unit, support_s, finality,
+                      context_revision, payload)
+                    select $1::uuid, $2::uuid, $3, (r->>0)::date, r->>1, r->>2, 'hrv_rmssd', 45, 'ms', 3, 'windows',
+                           900, 'final', $4::bigint, (r->>3)::jsonb
+                      from jsonb_array_elements($5::jsonb) r
+                    """, [o.user, o.device, mode.rawValue, revision,
+                          try jsonText(Array(rows[i..<min(rows.count, i + 2_000)]))])
+                i += 2_000
+            }
+        }
+        let expected = ContextInputs.historyDays * seriesPerDay
+
+        var timings: [String] = []
+        for (name, j) in [("retrospective", contextJob(o, mode: .retrospective, claimedAt: now)),
+                          ("causal", contextJob(o, mode: .causalLive, claimedAt: now))] {
+            var loaded = ContextInputs.Loaded()
+            var loadMS: [Double] = []
+            for _ in 0..<5 {
+                let t = Date()
+                loaded = try ContextInputs.load(db: db, job: j, windows: windows)
+                loadMS.append(Date().timeIntervalSince(t) * 1000)
+            }
+            XCTAssertEqual(loaded.historyValues.count, expected, name)
+            XCTAssertEqual(Set(loaded.historyValues.map(\.day)).count, ContextInputs.historyDays, name)
+            XCTAssertEqual(loaded.historyValues.map(\.day).min(), windows.historyFrom, name)
+            XCTAssertEqual(loaded.historyValues.map(\.day).max(), windows.previousDay, name)
+            XCTAssertEqual(loaded.historyAfterCutoff, 0, name)
+            XCTAssertTrue(loaded.unavailable.isEmpty, "\(name): \(loaded.unavailable)")
+            let params = [o.user, o.device, j.mode.rawValue, windows.historyFrom, windows.previousDay,
+                          ContextInputs.historyCutoffParameter(j)]
+            var queryMS: [Double] = []
+            for _ in 0..<5 {
+                let t = Date()
+                XCTAssertEqual(try db.query(ContextSQL.historyDailyValues, params).count, expected)
+                queryMS.append(Date().timeIntervalSince(t) * 1000)
+            }
+            // Bounded and indexed: with sequential scans priced out the planner still finds an index path.
+            let plan = try db.withTransaction { () -> String in
+                try db.exec("set local enable_seqscan = off")
+                return try db.query("explain (format json) " + ContextSQL.historyDailyValues, params)
+                    .first?["QUERY PLAN"] ?? ""
+            }
+            let nodes = Self.planNodes(plan).filter { $0["Relation Name"] as? String == "physiology_context_daily_values" }
+            XCTAssertFalse(nodes.isEmpty, plan)
+            for n in nodes { XCTAssertNotEqual(n["Node Type"] as? String, "Seq Scan", plan) }
+            func median(_ v: [Double]) -> Int { Int(v.sorted()[v.count / 2].rounded()) }
+            timings.append("\(name)_load_ms=\(median(loadMS)) \(name)_history_query_ms=\(median(queryMS)) "
+                           + "\(name)_plan=\(nodes.compactMap { $0["Node Type"] as? String }.joined(separator: "+"))"
+                           + "(\(nodes.compactMap { $0["Index Name"] as? String }.joined(separator: ",")))")
+        }
+        // A causal replay before the history was published reads none of it and counts what it could not see.
+        let early = try ContextInputs.load(db: db, job: contextJob(o, mode: .causalLive, claimedAt: publishedAt - 60),
+                                           windows: windows)
+        XCTAssertTrue(early.historyValues.isEmpty)
+        XCTAssertEqual(early.historyAfterCutoff, expected, "telemetry for the replay limit (P5)")
+        print("context-history-load: days=\(ContextInputs.historyDays) series_per_day=\(seriesPerDay) "
+              + "rows=\(expected) " + timings.joined(separator: " "))
+    }
+
+    static func planNodes(_ json: String) -> [[String: Any]] {
+        guard let top = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [[String: Any]] else { return [] }
+        var out: [[String: Any]] = []
+        func walk(_ node: [String: Any]) {
+            out.append(node)
+            for child in (node["Plans"] as? [[String: Any]]) ?? [] { walk(child) }
+        }
+        for entry in top { if let plan = entry["Plan"] as? [String: Any] { walk(plan) } }
+        return out
+    }
+
+    /// Frozen references: a retrospective job reads every reference registered for the device (so the engine
+    /// scores a back-filled day against the registered one); a causal job only those registered by its cutoff.
+    /// Another device's references are never read.
+    func testRetrospectiveJobsReadEveryRegisteredFrozenReferenceCausalOnlyByTheCutoff() throws {
+        let o = try makeOwner()
+        let other = Owner(user: o.user, device: UUID().uuidString.lowercased())
+        try addDevice(user: o.user, device: other.device)
+        let now = Int(Date().timeIntervalSince1970)
+        let windows = try XCTUnwrap(ContextInputs.windows(day: day, timezoneId: "UTC"))
+        let revision = try insertContextDay(o, day: day, mode: "retrospective", publishedAt: now - 7_200)
+        func register(_ owner: Owner, id: String, version: Int, registeredAt: Int, createdFor: String) throws {
+            let f = PC.FrozenReference(id: id, seriesKey: "hrv_rmssd.sleep_night", regimeKey: "r1", version: version,
+                                       fromDay: "2026-01-01", toDay: "2026-01-14", supportDays: 14, center: 45,
+                                       scale: 6, transform: "ln", selectionRule: "first_14", createdForDay: createdFor,
+                                       policyFingerprint: "x")
+            _ = try db.query("""
+                insert into public.physiology_context_frozen_references(user_id, device_id, reference_id, series_key,
+                  regime_key, version, from_day, to_day, support_days, center, scale, transform, selection_rule,
+                  created_for_day, policy_fingerprint, context_revision, registered_at, payload)
+                values ($1::uuid, $2::uuid, $3, 'hrv_rmssd.sleep_night', 'r1', $4::integer, '2026-01-01', '2026-01-14',
+                        14, 45, 6, 'ln', 'first_14', $5::date, 'x', $6::bigint, to_timestamp($7::bigint), $8::jsonb)
+                """, [owner.user, owner.device, id, String(version), createdFor, revision, String(registeredAt),
+                      String(decoding: try PC.encoder().encode(f), as: UTF8.self)])
+        }
+        let later = ContextInputs.shiftDay(day, by: 1)!
+        try register(o, id: "frz-early", version: 1, registeredAt: now - 3_600, createdFor: day)
+        try register(o, id: "frz-late", version: 2, registeredAt: now - 600, createdFor: later)
+        try register(other, id: "frz-other-device", version: 1, registeredAt: now - 3_600, createdFor: day)
+
+        let retro = try ContextInputs.load(db: db, job: contextJob(o, mode: .retrospective, claimedAt: now - 1_800),
+                                           windows: windows)
+        XCTAssertEqual(retro.frozen.map(\.id), ["frz-early", "frz-late"],
+                       "retrospective: every reference registered for the device, whatever its registration time")
+        let causal = try ContextInputs.load(db: db, job: contextJob(o, mode: .causalLive, claimedAt: now - 1_800),
+                                            windows: windows)
+        XCTAssertEqual(causal.frozen.map(\.id), ["frz-early"], "causal: registered by the cutoff only")
+        let before = try ContextInputs.load(db: db, job: contextJob(o, mode: .causalLive, claimedAt: now - 7_200),
+                                            windows: windows)
+        XCTAssertTrue(before.frozen.isEmpty)
+        // And the retrospective set reaches the engine as loaded.
+        let a = ContextInputs.assemble(retro, job: contextJob(o, mode: .retrospective, claimedAt: now - 1_800), windows: windows)
+        XCTAssertEqual(a.history.frozenReferences.map(\.id), ["frz-early", "frz-late"])
+    }
+
+    /// RC-17: the device's placement rows arrive as `device`, the owner's device-less rows as `account`; another
+    /// device's rows are never read.
+    func testPlacementRowsArriveWithTheirScope() throws {
+        let o = try makeOwner()
+        let other = Owner(user: o.user, device: UUID().uuidString.lowercased())
+        try addDevice(user: o.user, device: other.device)
+        let windows = try XCTUnwrap(ContextInputs.windows(day: day, timezoneId: "UTC"))
+        func place(_ device: String?, _ placement: String, start: Int, revision: Int) throws {
+            _ = try db.query("""
+                insert into public.placement_intervals(owner, device_id, placement, effective_start, source, revision)
+                values ($1::uuid, nullif($2, '')::uuid, $3, to_timestamp($4::bigint), 'user', $5::bigint)
+                """, [o.user, device ?? "", placement, String(start), String(revision)])
+        }
+        try place(nil, "bicep", start: dayStart - 2 * 86_400, revision: 1)
+        try place(o.device, "wrist", start: dayStart + 3_600, revision: 2)
+        try place(other.device, "other", start: dayStart, revision: 3)
+        let loaded = try ContextInputs.load(db: db, job: contextJob(o, mode: .retrospective,
+                                                             claimedAt: Int(Date().timeIntervalSince1970)),
+                                            windows: windows)
+        XCTAssertEqual(loaded.placements.map(\.placement), ["bicep", "wrist"])
+        XCTAssertEqual(loaded.placements.map(\.scope), ["account", "device"])
+    }
+
+    /// R1 (lead addendum): a transient failure of an optional read (here a lock timeout on the HART epochs, which
+    /// the publish never writes, so only the read can fail) ends the job instead of publishing a document that says
+    /// the input is "unavailable"; the queue keeps the job, and the retry after the lock is gone publishes it with
+    /// every input.
+    func testR1_aTransientOptionalReadFailureFailsTheJobAndTheRetryPublishes() throws {
+        let o = try makeOwner()
+        _ = try db.query("""
+            insert into public.physiology_context_jobs (user_id, device_id, day, mode, reasons)
+            values ($1::uuid, $2::uuid, $3::date, 'retrospective', array['r1-test'])
+            on conflict (user_id, device_id, day, mode) do update set
+              input_revision = public.physiology_context_jobs.input_revision + 1,
+              dirty_at = clock_timestamp(), not_before = clock_timestamp()
+            """, [o.user, o.device, day])
+        // Another session holds the table; the lane's reads give up after 2 s (55P03 lock_not_available).
+        try scoringDB.beginTransaction()
+        var locked = true
+        defer { if locked { scoringDB.rollbackTransaction() } }
+        try scoringDB.exec("lock table public.activity_context_epochs in access exclusive mode")
+        try db.exec("set lock_timeout = '2s'")
+        defer { try? db.exec("reset lock_timeout") }
+
+        var lane = contextLane()
+        lane.enqueueIntervalSeconds = 3_600
+        lane.lastEnqueueAt = Date()  // no new jobs; the claim's owner fairness may hand out other due work too
+        lane.drain(budget: 4)
+        XCTAssertGreaterThanOrEqual(lane.stats.failed, 1, lane.stats.lastError ?? "")
+        XCTAssertEqual(lane.stats.inputsUnavailable, 0, "a lock timeout is not a missing input")
+        XCTAssertTrue(try contextDays(o).isEmpty, "no degraded revision was published")
+        let failed = try job(o)
+        XCTAssertEqual(failed["failures"], "1", "\(failed)")
+        XCTAssertNotEqual(failed["done"], failed["rev"], "the job is still owed: \(failed)")
+        XCTAssertFalse(failed["dead"] == "true")
+        XCTAssertTrue((failed["error"] ?? "").contains("55P03") || (failed["error"] ?? "").contains("lock"),
+                      "\(failed)")
+
+        // The lock goes away; the retry (backoff lifted for the test) publishes with every input read.
+        scoringDB.rollbackTransaction()
+        locked = false
+        _ = try db.query("update public.physiology_context_jobs set not_before = clock_timestamp() where user_id = $1::uuid",
+                         [o.user])
+        let publishedBefore = lane.stats.published
+        lane.drain(budget: 4)
+        XCTAssertGreaterThan(lane.stats.published, publishedBefore, lane.stats.lastError ?? "")
+        let days = try contextDays(o)
+        XCTAssertEqual(days.count, 1)
+        let (doc, _) = try storedDocument(revision: try XCTUnwrap(days.last?["rev"]))
+        XCTAssertFalse(doc.header.inputRevisions.contains { $0.revision == "unavailable" },
+                       "\(doc.header.inputRevisions)")
+        let done = try job(o)
+        XCTAssertEqual(done["done"], done["rev"], "\(done)")
     }
 
     // MARK: - Profile against the scoring lane (opt-in: FRWHOOP_CONTEXT_PROFILE=1)

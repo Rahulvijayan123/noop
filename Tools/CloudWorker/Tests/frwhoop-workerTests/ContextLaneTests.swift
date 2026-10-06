@@ -91,7 +91,7 @@ final class ContextLaneTests: XCTestCase {
         let keys = Set(ContextLane.Stats().counters.keys)
         for k in ["claimed", "published", "unchanged", "failed", "cascaded", "build_ms_total", "build_ms_max",
                   "build_ms_mean", "doc_bytes_total", "doc_bytes_max", "doc_bytes_mean", "inputs_rows_max",
-                  "context_tables_missing"] {
+                  "context_tables_missing", "causal_history_after_cutoff"] {
             XCTAssertTrue(keys.contains(k), k)
         }
     }
@@ -132,7 +132,7 @@ final class ContextLaneTests: XCTestCase {
         XCTAssertEqual(w.dayWindow, PC.Interval(dayStart, dayEnd))
         XCTAssertEqual(w.read, PC.Interval(dayStart - 30 * 3_600, dayEnd + 6 * 3_600))
         XCTAssertEqual(w.exposure, PC.Interval(dayStart - 4 * 86_400, dayEnd + 86_400))
-        XCTAssertEqual(w.historyFrom, "2026-07-05")
+        XCTAssertEqual(w.historyFrom, "2026-04-26", "D-160: the change detector's full burn-in (R-F2)")
         XCTAssertEqual(w.boutsFrom, "2026-09-30")
         XCTAssertEqual(w.priorSleepFrom, "2026-09-19")
         XCTAssertEqual(w.previousDay, "2026-10-02")
@@ -235,7 +235,7 @@ final class ContextLaneTests: XCTestCase {
         XCTAssertEqual(s.sessions.map(\.start), [night.start, nap.start], "sorted by time")
         XCTAssertEqual(s.sessions.first?.stages.count, 2)
         XCTAssertEqual(s.restingHRInt, 53)
-        let ms = ContextInputs.snapshotMeasurements(s)
+        let ms = ContextInputs.snapshotMeasurements(s, offsetSec: 0)
         XCTAssertEqual(Set(ms.map(\.method.id)), [
             "snapshot.hrv_rmssd.night", "snapshot.hrv_sdnn.night", "snapshot.resting_hr.night",
             "snapshot.resp_rate.night", "snapshot.skin_temp.night", "snapshot.spo2_candidate.night"])
@@ -248,8 +248,11 @@ final class ContextLaneTests: XCTestCase {
                                                  inputRevision: 9, resultRevision: 41))
         XCTAssertEqual(rest.availableAt, dayStart + 8 * 3_600)
         let hrv = try XCTUnwrap(ms.first { $0.metric == .hrvRmssd })
-        XCTAssertEqual(hrv.support, PC.Interval(night.start, nap.end), "pooled metrics: hull of the day's sessions")
-        XCTAssertNil(hrv.sessionId)
+        XCTAssertEqual(hrv.support, PC.Interval(night.start, night.end),
+                       "pooled metrics: the main-sleep group, never a hull spanning the awake hours before the nap")
+        XCTAssertEqual(hrv.sessionId, "sleep-dev-\(night.start)")
+        XCTAssertEqual(hrv.source.key, "daily.hrv_rmssd_ms#aggregate_pools_sessions_outside_support=1",
+                       "the canonical aggregate also pooled the nap: recorded on the source")
         XCTAssertEqual(ms.first { $0.metric == .spo2Candidate }?.sampleCount, 240)
         XCTAssertNil(ms.first { $0.method.id.contains("dev") }, "a deviation is not a measurement")
 
@@ -263,7 +266,7 @@ final class ContextLaneTests: XCTestCase {
     func testSnapshotWithoutSessionsOrValuesYieldsNoMeasurement() throws {
         let empty = try XCTUnwrap(ContextInputs.parseSnapshot(day: "d", payloadText: "{\"sleep\":[],\"daily\":{}}",
                                                               resultRevision: 1, inputRevision: 1, availableAt: 0))
-        XCTAssertTrue(ContextInputs.snapshotMeasurements(empty).isEmpty)
+        XCTAssertTrue(ContextInputs.snapshotMeasurements(empty, offsetSec: 0).isEmpty)
         XCTAssertNil(ContextInputs.parseSnapshot(day: "d", payloadText: "[1]", resultRevision: 1, inputRevision: 1,
                                                  availableAt: 0))
         // A missing value stays missing (never zero); a NaN-free payload is required by JSON anyway.
@@ -271,7 +274,7 @@ final class ContextLaneTests: XCTestCase {
                                                     daily: ["resting_hr_bpm": 50])
         let s = try XCTUnwrap(ContextInputs.parseSnapshot(day: "d", payloadText: partial, resultRevision: 1,
                                                           inputRevision: 1, availableAt: 0))
-        XCTAssertEqual(ContextInputs.snapshotMeasurements(s).map(\.metric), [.restingHeartRate])
+        XCTAssertEqual(ContextInputs.snapshotMeasurements(s, offsetSec: 0).map(\.metric), [.restingHeartRate])
     }
 
     // MARK: - Row parsers
@@ -281,7 +284,7 @@ final class ContextLaneTests: XCTestCase {
         let open = ContextInputs.parsePlacement(["s": "100", "e": "", "placement": "bicep", "source": "user",
                                                  "revision": "2", "at": "50"])
         XCTAssertEqual(open, PC.PlacementInput(start: 100, end: nil, placement: "bicep", source: "user", revision: 2,
-                                               recordedAt: 50))
+                                               recordedAt: 50, scope: "device"))
         XCTAssertNil(ContextInputs.parseRun(["s": "10", "e": "5", "revision": "1"]))
         XCTAssertEqual(ContextInputs.parseRun(["s": "10", "e": "20", "class": "walking", "confidence": "1.7",
                                                "revision": "4", "at": "30"])?.confidence, 1)
@@ -369,9 +372,30 @@ final class ContextLaneTests: XCTestCase {
                                                                     availableAt: cutoff + 10) }
         after.heartRate.sort { $0.ts < $1.ts }
         after.wearEvents.append(.init(ts: dayStart + 3_600, state: .offWrist, kind: "WRIST_OFF", availableAt: cutoff + 1))
+        // Records stored after the cutoff: an exposure entered late, a placement declared later, a later HART
+        // revision and decoder run. Neither their content nor their count may reach the replayed document (the
+        // input revisions included).
+        after.exposures.append(PC.ExposureEventRevision(
+            eventId: "late", revision: 1, kind: .caffeine, label: "coffee",
+            occurred: PC.Interval(dayStart + 7 * 3_600, dayStart + 7 * 3_600 + 1), timePrecision: .exact,
+            recordedAt: dayStart + 7 * 3_600, receivedAt: cutoff + 30, source: .userEntered, confirmation: .confirmed))
+        after.placements.append(PC.PlacementInput(start: dayStart + 6 * 3_600, end: nil, placement: "bicep",
+                                                  source: "user", revision: 9, recordedAt: cutoff + 40,
+                                                  scope: "device"))
+        after.epochs.append(PC.ActivityEpochInput(
+            epoch: ActivityEpoch(startTs: dayStart + 9 * 3_600, endTs: dayStart + 9 * 3_600 + 30, motion: .walking,
+                                 posture: .unknown, exercise: .unknown, sleepState: .unknown, exertion: .unknown,
+                                 wear: .unknown, confidence: 0.9, observedS: 30, validS: 30),
+            revision: 7, availableAt: cutoff + 50))
+        after.intervals.append(PC.ActivityIntervalInput(interval: PC.Interval(dayStart + 9 * 3_600, dayStart + 10 * 3_600),
+                                                        activityClass: "walking", confidence: 0.8, sleep: nil, wear: nil,
+                                                        revision: 4, availableAt: cutoff + 60))
         let w = try windows()
-        let a = PC.Engine.buildDay(ContextInputs.assemble(before, job: replay, windows: w).input, history: .empty)
-        let b = PC.Engine.buildDay(ContextInputs.assemble(after, job: replay, windows: w).input, history: .empty)
+        let ia = ContextInputs.assemble(before, job: replay, windows: w).input
+        let ib = ContextInputs.assemble(after, job: replay, windows: w).input
+        XCTAssertEqual(ia.inputRevisions, ib.inputRevisions, "revisions count only what was available at the cutoff")
+        let a = PC.Engine.buildDay(ia, history: .empty)
+        let b = PC.Engine.buildDay(ib, history: .empty)
         XCTAssertEqual(a.header.inputFingerprint, b.header.inputFingerprint)
         XCTAssertEqual(try PC.encoder().encode(a), try PC.encoder().encode(b), "byte-identical at the cutoff")
         XCTAssertEqual(a.header.interpretation.availabilityCutoff, cutoff)
@@ -446,7 +470,9 @@ final class ContextLaneTests: XCTestCase {
         XCTAssertEqual(a.input.identity, PC.DayIdentity(deviceScope: "d", day: "2026-10-03", timezoneId: "UTC",
                                                          dayWindow: PC.Interval(dayStart, dayEnd)))
         XCTAssertEqual(a.input.regime.vendor, "whoop")
-        XCTAssertEqual(a.input.regime.deviceFamily, "WHOOP 5.0 / MG")
+        XCTAssertNil(a.input.regime.deviceFamily, "a mutable devices column is never stamped on a day (RC-13)")
+        XCTAssertNil(a.input.regime.firmware, "no firmware history: unknown for every day (RC-13)")
+        XCTAssertEqual(a.input.regime.sourceKind, "noop_push")
         XCTAssertEqual(a.input.regime.scoringAlgorithmVersion, "frwhoop-server-1")
         XCTAssertEqual(a.input.regime.seriesAlgorithmVersion, IntradaySeries.algorithmVersion)
         XCTAssertEqual(a.input.sleepSessions.count, 1)
@@ -607,7 +633,8 @@ final class ContextLaneTests: XCTestCase {
                           ContextSQL.bandSleepState, ContextSQL.latestSnapshot, ContextSQL.snapshotSleepRange,
                           ContextSQL.workouts, ContextSQL.activityEpochs, ContextSQL.activityRuns,
                           ContextSQL.placements, ContextSQL.device, ContextSQL.profile, ContextSQL.exposureRevisions,
-                          ContextSQL.historyDailyValues, ContextSQL.historyBouts, ContextSQL.frozenReferences]
+                          ContextSQL.historyDailyValues, ContextSQL.historyBouts, ContextSQL.frozenReferences,
+                          ContextSQL.historyAfterCutoff]
         for sql in statements {
             let lower = sql.lowercased()
             for forbidden in ["insert ", "update ", "delete ", "scoring_dirty_span", "enqueue_scoring_v2",
