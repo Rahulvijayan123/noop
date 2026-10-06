@@ -82,6 +82,8 @@ def test_fit_on_val_then_test_once(tmp_path, monkeypatch):
         _write_parts(work, "toyds", split, ss, rng, shift=1.0)
     monkeypatch.setattr(V, "DATASETS", ("toyds",))
     monkeypatch.setattr(V, "FREE_LIVING", ("toyds",))
+    # The vault mechanics of a fresh experiment; the real one is spent (test_eldernet_spent.py).
+    monkeypatch.setattr("activity_context.eldernet.integrity_ext.SPENT_EXPERIMENTS", {})
     monkeypatch.setattr("activity_context.eldernet.extract.split_subjects", lambda d, s: subj[s])
     monkeypatch.setattr(V, "load_split", lambda w, s, datasets=("toyds",): {
         "toyds": __import__("activity_context.eldernet.extract", fromlist=["x"]).load_split_parts(w, "toyds", s, subj[s])})
@@ -111,3 +113,35 @@ def test_oxwalk_window_steps_and_truth_rule():
     assert c["steps_true"].tolist() == [0, 1, 1, 0, 0, 10, 20, 20, 20, 20, 20]     # t = 12 s is in [5, 15), [10, 20)
     assert c["truth"].tolist() == [NON_GAIT, MASK, MASK, NON_GAIT, NON_GAIT, GAIT, GAIT, GAIT, GAIT, GAIT, GAIT]
     assert GAIT_MIN_STEPS == 6
+
+
+def _val_cols(labels, truth, q, pre=None, subject="capture24:P1"):
+    n = len(labels)
+    pre = np.zeros(n, bool) if pre is None else np.asarray(pre, bool)
+    return {"label": np.array(labels), "truth": np.array(truth, np.int8), "gait_prob": np.array(q, float),
+            "prefiltered": pre, "finite": np.ones(n, bool), "subject": np.array([subject] * n)}
+
+
+def test_decoder_prior_is_the_mean_over_every_window():
+    from activity_context.eldernet.validate import decoder_prior
+    c = _val_cols(["walk", "<NA>", "<NA>", "sit", "mixed"], [GAIT, MASK, MASK, NON_GAIT, MASK],
+                  [0.9, 0.2, 0.0, 0.0, 0.4], pre=[0, 0, 1, 1, 0])
+    rep = decoder_prior({"capture24": c})
+    assert rep["mean_gait_prob_all_windows"] == pytest.approx(1.5 / 5)
+    assert rep["labelled_gait_prevalence"] == 0.5 and rep["split"] == "val"
+    assert rep["groups"]["unlabelled"]["n"] == 2 and rep["groups"]["prefiltered"]["mean_gait_prob"] == 0.0
+    assert rep["groups"]["labelled_masked"]["n"] == 1
+
+
+def test_other_motion_groups_by_crosswalk_class():
+    from activity_context.eldernet.validate import other_motion
+    bike = "transportation;private transportation;1010 bicycling;MET 4.0"
+    car = "vehicle;MET 1.3"
+    c24 = _val_cols([bike, bike, car, "<NA>"], [NON_GAIT, NON_GAIT, NON_GAIT, MASK], [0.1, 0.3, 0.05, 0.9])
+    wisdm = _val_cols(["B", "B", "A"], [RUNNING, RUNNING, GAIT], [0.02, 0.6, 0.95], subject="wisdm2019_watch:1600")
+    rep = other_motion({"capture24": c24, "wisdm2019_watch": wisdm}, pi=0.1)
+    assert rep["datasets"]["capture24"]["cycling"]["n"] == 2 and rep["datasets"]["capture24"]["vehicle"]["n"] == 1
+    run = rep["pooled"]["running"]
+    assert run["n"] == 2 and run["frac_is_gait_0.5"] == 0.5 and run["mean"] == pytest.approx(0.31)
+    assert rep["datasets"]["wisdm2019_watch"]["running_by_label"]["B"]["n"] == 2
+    assert rep["pooled"]["walking_gait_reference"]["n"] == 1

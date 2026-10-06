@@ -23,8 +23,12 @@ variance head ``regressor.var.{weight,bias}`` (a training-time output the releas
 ``torch.load(weights_only=True)`` only (no pickled code). Inference: eval mode, ``torch.inference_mode``, CPU
 float32, a fixed thread count (default 1), every batch padded to ``max_batch`` rows so a window's output never
 depends on how many other windows share its request (verified bit-identical in tests/eldernet). NNPACK is
-disabled during inference: torch dispatches the depthwise ``Downsample`` conv (groups = channels) to NNPACK one
-group at a time, ~15x slower on CPU (27 vs 1.8 ms/window, torch 2.8, 1 thread); outputs differ by ~1e-8.
+disabled during inference: torch otherwise dispatches the depthwise ``Downsample`` conv (groups = channels) to
+NNPACK one group at a time. Measured 2026-10-06 (``bench --nnpack``: 640 non-pre-filtered hop-5 windows of a
+public Capture-24 hour, torch 2.8.0, 1 thread, batch 64, host under load): NNPACK on 71-74 ms/window per head,
+off 1.7-1.9 ms (39-44x); outputs differ by at most 7.6e-6 in the detection logits (audit sample: 3.9e-6),
+3.8e-5 steps/min cadence (audit: 2.3e-5), 4.1e-5 steps per window, <= 2.7e-6 for speed / stride / regularity
+(eval/eldernet/VALIDATION.json bench.nnpack_check). The served numbers are the NNPACK-off ones.
 """
 
 from __future__ import annotations

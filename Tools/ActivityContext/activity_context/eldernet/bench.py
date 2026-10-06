@@ -1,6 +1,7 @@
 """Latency / RAM of the ElderNet serve process for 1-hour WHOOP requests (ELDERNET.md §7).
 
-    python -m activity_context.eldernet.bench [--weights-dir DIR] [--npy hour.npy ...] [--out perf.json]
+    python -m activity_context.eldernet.bench [--weights-dir DIR] [--upstream-dir DIR] [--npy hour.npy ...]
+        [--out perf.json] [--nnpack]
 
 Spawns ``python -m activity_context.eldernet.serve`` (1 torch thread, batch 64), waits for ``ping``, sends
 1-hour NPB1 requests at hop 5 (served default) and hop 1 (upstream stride), and reports wall latency per
@@ -8,6 +9,10 @@ request, the serve's ``duration_ms``, window / gait-window counts, response byte
 (``wait4`` ru_maxrss). Inputs: a deterministic synthetic worst case (60 min of 1.8 Hz arm-swing gait, every
 window classified and quality-scored), a synthetic rest hour (every window pre-filtered) and any
 ``--npy`` [360000, 3] g arrays at 100 Hz (e.g. a public Capture-24 hour).
+
+``--nnpack`` instead measures, in this process, what disabling NNPACK (``model.no_nnpack``, as served) changes on
+the non-pre-filtered hop-5 windows of the first ``--npy`` hour (or the synthetic walk hour): max |Δ| of the
+detection logits and of every regression head, and ms per window with NNPACK on vs off (1 thread, batch 64).
 """
 
 from __future__ import annotations
@@ -52,14 +57,55 @@ def hour_request(acc: np.ndarray, hop_s: int, req_id: str) -> Dict:
             "columns_b64": [encode_columns_b64(c) for c in cols], "hop_s": hop_s}}
 
 
+def nnpack_check(weights_dir: Optional[str], upstream_dir: Optional[str], acc: np.ndarray, repeats: int = 3) -> Dict:
+    """NNPACK on vs off on the served heads (module docstring). Same windows, same batch shape, same thread."""
+    import torch
+    from . import HEAD_NAMES
+    from .gait import prefilter_mask
+    from .model import load_heads, no_nnpack
+    from .preprocess import stack_windows, windows_from_array
+    from .weights import resolve
+    heads = load_heads(resolve(weights_dir), threads=1, max_batch=64, upstream_dir=upstream_dir)
+    b = stack_windows(windows_from_array(np.asarray(acc, np.float64)[:360000], 100.0, hop_s=5))
+    b = b[~prefilter_mask(b)]
+    n = (len(b) // 64) * 64
+    x = torch.from_numpy(np.ascontiguousarray(np.swapaxes(b[:n], 1, 2), dtype=np.float32))
+    out: Dict = {"n_windows": int(n), "torch": torch.__version__, "threads": torch.get_num_threads(),
+                 "nnpack_available": bool(getattr(torch.backends, "nnpack", None) and torch.backends.nnpack.is_available()),
+                 "heads": {}}
+
+    def run(model, off):
+        res, best = [], float("inf")
+        for _ in range(repeats):
+            t0 = time.perf_counter()
+            with torch.inference_mode():
+                if off:
+                    with no_nnpack():
+                        res = [model(x[i:i + 64]).double().numpy() for i in range(0, n, 64)]
+                else:
+                    res = [model(x[i:i + 64]).double().numpy() for i in range(0, n, 64)]
+            best = min(best, time.perf_counter() - t0)
+        return np.concatenate(res), 1000.0 * best / n
+    for name in HEAD_NAMES:
+        on, ms_on = run(heads.models[name], False)
+        off, ms_off = run(heads.models[name], True)
+        out["heads"][name] = {"max_abs_diff": float(np.abs(on - off).max()), "ms_per_window_nnpack_on": round(ms_on, 3),
+                              "ms_per_window_nnpack_off": round(ms_off, 3), "speedup_off": round(ms_on / ms_off, 1)}
+    out["load_avg_1m"] = round(os.getloadavg()[0], 1)
+    return out
+
+
 def bench(weights_dir: Optional[str], inputs: Dict[str, np.ndarray], hops: Sequence[int] = (5, 1),
-          repeats: int = 2) -> Dict:
+          repeats: int = 2, upstream_dir: Optional[str] = None) -> Dict:
     pkg = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
     from ..inertia.subproc import PYTHON_ENV_ALLOWLIST, safe_env
+    from .upstream import upstream_dir as _upstream_dir
     env = safe_env({"PYTHONPATH": pkg, "OMP_NUM_THREADS": "1"}, PYTHON_ENV_ALLOWLIST)
     args = [sys.executable, "-m", "activity_context.eldernet.serve", "--timeout", "600"]
     if weights_dir:
         args += ["--weights-dir", weights_dir]
+    if _upstream_dir(upstream_dir):                      # the child's environment is an allowlist: pass it
+        args += ["--upstream-dir", _upstream_dir(upstream_dir)]
     t0 = time.perf_counter()
     proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                             text=True, bufsize=1)
@@ -106,14 +152,20 @@ def bench(weights_dir: Optional[str], inputs: Dict[str, np.ndarray], hops: Seque
 def main(argv: Optional[Sequence[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="ElderNet serve latency / RAM for 1-hour WHOOP requests")
     ap.add_argument("--weights-dir", default=None)
+    ap.add_argument("--upstream-dir", default=None, help="upstream source (default $ELDERNET_UPSTREAM_DIR)")
     ap.add_argument("--npy", nargs="*", default=[], help="[>=360000, 3] g arrays at 100 Hz (public data)")
     ap.add_argument("--out", default=None)
     ap.add_argument("--repeats", type=int, default=2)
+    ap.add_argument("--nnpack", action="store_true", help="measure NNPACK on vs off in-process instead")
     args = ap.parse_args(argv)
     inputs = {"synthetic_walk_hour": synth_hour("walk"), "synthetic_rest_hour": synth_hour("rest")}
     for p in args.npy:
         inputs[os.path.basename(p)[:-4]] = np.load(p)[:360000]
-    res = bench(args.weights_dir, inputs, repeats=args.repeats)
+    if args.nnpack:
+        acc = np.load(args.npy[0]) if args.npy else inputs["synthetic_walk_hour"]
+        res = nnpack_check(args.weights_dir, args.upstream_dir, acc, repeats=max(1, args.repeats))
+    else:
+        res = bench(args.weights_dir, inputs, repeats=args.repeats, upstream_dir=args.upstream_dir)
     text = json.dumps(res, indent=2)
     if args.out:
         with open(args.out, "w") as f:
