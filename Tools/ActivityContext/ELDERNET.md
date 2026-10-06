@@ -115,6 +115,9 @@ upstream `pipelines.general` on whole recordings; latency/RAM. Splits are the fr
   agreement 1.000, quality within 3.6e-5).
 * Served defaults: no calibration, `gait_threshold` 0.5 (upstream argmax). VAL fit (`eval/eldernet/calibration.json`,
   `--calibration`): T = 1.047 (free-living; ≈ upstream already calibrated), high-precision threshold 0.93.
+* Detection (served defaults): Capture-24 TEST P 0.88 / R 0.52 (free-living, AUROC 0.967); GOTOV older adults P 0.97 /
+  R 1.00; OxWalk P 0.98 / R 0.87. Steps per 10 s window on OxWalk: MAE 1.0 (bias −0.3). GOTOV speed / cadence
+  ordered slow < normal < fast in 19 / 21 and 20 / 21 participants.
 * Decoder π: **0.065** (Capture-24 VAL, gait share of labelled 10 s windows at hop 5; 0.125 if pre-filtered windows
   are excluded).
 * Serve: ~650 MB RSS, ~1.9 ms per window per head on one thread; keep hop 5 and <= 1 h requests under the 60 s
