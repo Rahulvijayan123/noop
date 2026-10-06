@@ -92,6 +92,8 @@ struct ActivityLane {
     /// Chunks of 3600 s keep every request far below the cap while the serve
     /// protocol bounds head/tail to 3 s each.
     static let maxRequestBodySeconds = 3600
+    /// The kind an expert (Inertia, ElderNet) is stopped under once its calls used up its per-job time budget.
+    static let jobTimeBudgetKind = "job_time_budget"
     /// Model/preprocessing versions serve reports when no HART manifest is
     /// configured (baseline classifier: `default_manifest(model_version:
     /// "baseline-v0")`, `preprocessing_version` = package "1.0.0"). These are
@@ -163,6 +165,8 @@ struct ActivityLane {
         var inertiaShadowFenced = 0
         /// Jobs (or chunks) refused because the served bundle is not the pinned FRWHOOP_INERTIA_BUNDLE_SHA256.
         var inertiaBundleRefused = 0
+        /// Jobs where Inertia was stopped because its calls used up the per-job time budget.
+        var inertiaBudgetExhausted = 0
         /// How the stored windows met the day's observed seconds (`summary.track_report`, summed over jobs):
         /// attached, dropped (no observed second, superseded, outside the day), and seconds whose posture term
         /// the candidate decode omitted on the sleep / bed route.
@@ -183,6 +187,8 @@ struct ActivityLane {
         var eldernetUnavailable = 0
         /// Jobs (or chunks) refused because the served model is not the pinned version / weights digest.
         var eldernetPinRefused = 0
+        /// Jobs where ElderNet was stopped because its calls used up the per-job time budget.
+        var eldernetBudgetExhausted = 0
         var lastElderNetError: String?
         var lastElderNetErrorKind: String?
         var eldernetShadowStored = 0
@@ -797,6 +803,14 @@ struct ActivityLane {
     /// ElderNet (`eldernet`) follows the same rule after Inertia: ready-checked once at the start of the job, the
     /// lease renewed before each of its calls, every failure absorbed and counted, never cached, asked for a chunk
     /// whose HART answer came from the cache too.
+    ///
+    /// Each expert's job-start readiness check (`begin()`: start the child, ping it) is a call like any other: the
+    /// lease is renewed right before it (a start-up plus a ping may take up to a request timeout, a third of the
+    /// lease), and a lost lease ends the job as it does before HART. With an expert off, nothing changes: no
+    /// renewal, no call. Each expert also has a per-job time budget (`jobBudgetSeconds`): the wall time of its
+    /// readiness check and of its chunk calls is summed, and once the sum reaches the budget the expert is stopped
+    /// for the rest of the job (`job_time_budget`, counted, logged once), so a slow but healthy child cannot hold a
+    /// job for a day's worth of request timeouts.
     static func inferChunks<Requests: Sequence>(
         _ requests: Requests, service: ActivityPythonService,
         inertia: InertiaStage?, eldernet: ElderNetStage? = nil, versions start: (model: String, preprocessing: String),
@@ -808,9 +822,17 @@ struct ActivityLane {
         // there is nothing to key them by.
         let cacheable = !(service.reportedModelVersion ?? "").isEmpty
         var inertiaReady = false
+        var inertiaSpent = 0.0, eldernetSpent = 0.0
         if let inertia {
             stats.inertiaJobs += 1
-            if let down = inertia.begin() {
+            guard try renew() else {
+                throw PostgresClient.Error(message: "activity lease lost during inference",
+                                           sqlstate: "55000", kind: .stale)
+            }
+            let started = Date()
+            let down = inertia.begin()
+            inertiaSpent += Date().timeIntervalSince(started)
+            if let down {
                 if down.kind == InertiaStage.bundleMismatchKind { stats.inertiaBundleRefused += 1 }
                 else { stats.inertiaUnavailable += 1 }
                 out.motionHeads.stopped = down.kind
@@ -822,7 +844,14 @@ struct ActivityLane {
         var eldernetReady = false
         if let eldernet {
             stats.eldernetJobs += 1
-            if let down = eldernet.begin() {
+            guard try renew() else {
+                throw PostgresClient.Error(message: "activity lease lost during inference",
+                                           sqlstate: "55000", kind: .stale)
+            }
+            let started = Date()
+            let down = eldernet.begin()
+            eldernetSpent += Date().timeIntervalSince(started)
+            if let down {
                 if down.kind == ElderNetStage.pinMismatchKind { stats.eldernetPinRefused += 1 }
                 else { stats.eldernetUnavailable += 1 }
                 out.gaitQuality.stopped = down.kind
@@ -867,6 +896,13 @@ struct ActivityLane {
 
             // Inertia for the same chunk (whether HART came from the cache or not). Isolated: nothing it does can throw — but the lease is renewed first,
             // fenced exactly like the HART call above, so a slow Inertia child can never outlive the lease.
+            if inertiaReady, let inertia, out.motionHeads.stopped == nil, inertiaSpent >= inertia.jobBudgetSeconds {
+                out.motionHeads.stopped = Self.jobTimeBudgetKind
+                stats.inertiaBudgetExhausted += 1
+                noteInertiaFailure(&stats, kind: Self.jobTimeBudgetKind,
+                                   message: "\(String(format: "%.1f", inertiaSpent)) s used of the "
+                                       + "\(String(format: "%.1f", inertia.jobBudgetSeconds)) s per-job budget")
+            }
             if inertiaReady, let inertia, out.motionHeads.stopped == nil {
                 guard try renew() else {
                     throw PostgresClient.Error(message: "activity lease lost during inference",
@@ -874,7 +910,10 @@ struct ActivityLane {
                 }
                 out.motionHeads.chunks += 1
                 stats.inertiaChunks += 1
-                switch inertia.infer(request) {
+                let started = Date()
+                let outcome = inertia.infer(request)
+                inertiaSpent += Date().timeIntervalSince(started)
+                switch outcome {
                 case .ok(let response):
                     if let first = out.motionHeads.responses.first, first.bundle != response.bundle {
                         out.motionHeads.failedChunks += 1
@@ -897,6 +936,13 @@ struct ActivityLane {
             }
 
             // ElderNet for the same chunk, the same way (its own lease renewal, nothing it does can throw).
+            if eldernetReady, let eldernet, out.gaitQuality.stopped == nil, eldernetSpent >= eldernet.jobBudgetSeconds {
+                out.gaitQuality.stopped = Self.jobTimeBudgetKind
+                stats.eldernetBudgetExhausted += 1
+                noteElderNetFailure(&stats, kind: Self.jobTimeBudgetKind,
+                                    message: "\(String(format: "%.1f", eldernetSpent)) s used of the "
+                                        + "\(String(format: "%.1f", eldernet.jobBudgetSeconds)) s per-job budget")
+            }
             if eldernetReady, let eldernet, out.gaitQuality.stopped == nil {
                 guard try renew() else {
                     throw PostgresClient.Error(message: "activity lease lost during inference",
@@ -904,7 +950,10 @@ struct ActivityLane {
                 }
                 out.gaitQuality.chunks += 1
                 stats.eldernetChunks += 1
-                switch eldernet.infer(request) {
+                let started = Date()
+                let outcome = eldernet.infer(request)
+                eldernetSpent += Date().timeIntervalSince(started)
+                switch outcome {
                 case .ok(let response):
                     if let first = out.gaitQuality.responses.first, first.model != response.model {
                         out.gaitQuality.failedChunks += 1

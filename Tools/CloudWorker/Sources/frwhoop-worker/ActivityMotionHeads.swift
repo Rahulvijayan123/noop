@@ -10,8 +10,11 @@ import StrandAnalytics
 //
 //   • every Inertia failure (model missing, timeout, crash, malformed or invalid output, NaN) is classified,
 //     counted and logged once per distinct reason, and the HART path continues untouched;
-//   • a transport failure (timeout, crash, launch failure, restart cooldown) or `model_missing` stops Inertia
-//     for the rest of that job, so a broken model costs at most one timeout per job;
+//   • a transport failure (timeout, crash, launch failure, restart cooldown), `model_missing`, a pin refusal or a
+//     failure that would repeat on every chunk (an unknown schema, a malformed response, invalid probabilities, an
+//     output too large) stops Inertia for the rest of that job, so a broken model costs at most one timeout per job;
+//     only a NaN line costs a single chunk. Inertia also has a per-job time budget
+//     (FRWHOOP_INERTIA_JOB_BUDGET_SECONDS): once its calls in a job have used it, it is stopped for that job;
 //   • the shadow output (provenance + compact per-window predictions + OOD counts) is written to its OWN table
 //     (`activity_motion_heads_days`) through its own fenced RPC under a savepoint, so a rejection or a missing
 //     migration never reaches the v1 / v2 publishes in the same transaction;
@@ -44,9 +47,20 @@ struct InertiaSettings: Equatable {
     var configurationError: String?
     /// Settings that were adjusted rather than refused (a clamped timeout); logged once at start-up.
     var warnings: [String] = []
+    /// Wall-clock seconds Inertia may spend in one job (its readiness check and every chunk call together)
+    /// before it is stopped for the rest of that job (`job_time_budget`). FRWHOOP_INERTIA_JOB_BUDGET_SECONDS.
+    var jobBudgetSeconds: Double = InertiaSettings.defaultJobBudgetSeconds
 
     static let serveModule = ["-m", "activity_context.inertia.serve"]
     static let defaultTimeoutSeconds = 60.0
+    /// Ten request timeouts: well above a normal day's chunks, far below a day of slow-but-not-failing ones.
+    static let defaultJobBudgetSeconds = 600.0
+
+    /// A positive, finite number of seconds from `raw`, or nil.
+    static func parseSeconds(_ raw: String) -> Double? {
+        guard let t = Double(raw), t.isFinite, t > 0 else { return nil }
+        return t
+    }
 
     /// "1", "true", "yes", "on" (any case) → true; "0", "false", "no", "off" → false; anything else nil.
     static func parseBool(_ raw: String) -> Bool? {
@@ -70,8 +84,8 @@ struct InertiaSettings: Equatable {
     /// shadow), FRWHOOP_INERTIA_BUNDLE_DIR (required when on), FRWHOOP_INERTIA_BUNDLE_SHA256 (the pinned
     /// bundle digest; required in candidate mode), FRWHOOP_INERTIA_CHECKPOINT (passed as --checkpoint and
     /// INERTIA1_CKPT_PATH), FRWHOOP_INERTIA_PYTHON (default: the activity python), FRWHOOP_INERTIA_TIMEOUT_SECONDS
-    /// (default 60, clamped to at most `leaseSeconds / 3`), FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW (1/true/yes/on,
-    /// default off; shadow mode only). A setting that cannot be honoured switches Inertia off with a reason; it
+    /// (default 60, clamped to at most `leaseSeconds / 3`), FRWHOOP_INERTIA_JOB_BUDGET_SECONDS (default 600),
+    /// FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW (1/true/yes/on, default off; shadow mode only). A setting that cannot be honoured switches Inertia off with a reason; it
     /// never stops the worker. An unrecognised boolean is a configuration error, never silently "off".
     static func fromEnvironment(_ env: [String: String], activityPython: String = "python3",
                                 leaseSeconds: Int = 300) -> InertiaSettings {
@@ -92,8 +106,13 @@ struct InertiaSettings: Equatable {
         var warnings: [String] = []
         var timeout = InertiaSettings.defaultTimeoutSeconds
         if let raw = value("FRWHOOP_INERTIA_TIMEOUT_SECONDS") {
-            if let t = Double(raw), t.isFinite, t > 0 { timeout = t }
+            if let t = parseSeconds(raw) { timeout = t }
             else { errors.append("invalid FRWHOOP_INERTIA_TIMEOUT_SECONDS \(raw)") }
+        }
+        var jobBudget = InertiaSettings.defaultJobBudgetSeconds
+        if let raw = value("FRWHOOP_INERTIA_JOB_BUDGET_SECONDS") {
+            if let t = parseSeconds(raw) { jobBudget = t }
+            else { errors.append("invalid FRWHOOP_INERTIA_JOB_BUDGET_SECONDS \(raw)") }
         }
         // A request may never outlive a third of the job lease: the lease is renewed before each Inertia call,
         // and one stuck child must not be able to let it expire.
@@ -108,7 +127,7 @@ struct InertiaSettings: Equatable {
             python: value("FRWHOOP_INERTIA_PYTHON") ?? activityPython,
             timeoutSeconds: timeout,
             allowStandInShadow: allowStandIn,
-            configurationError: nil, warnings: warnings)
+            configurationError: nil, warnings: warnings, jobBudgetSeconds: jobBudget)
         if let raw = value("FRWHOOP_INERTIA_MODE") {
             if let mode = Mode(rawValue: raw.lowercased()) { settings.mode = mode }
             else { errors.append("unknown FRWHOOP_INERTIA_MODE \(raw)") }
@@ -193,6 +212,8 @@ struct InertiaStage {
     let mode: InertiaSettings.Mode
     /// The pinned bundle digest (FRWHOOP_INERTIA_BUNDLE_SHA256), or nil when not pinned (shadow only).
     var expectedBundleSHA256: String? = nil
+    /// Wall-clock seconds this stage may spend per job (`InertiaSettings.jobBudgetSeconds`).
+    var jobBudgetSeconds: Double = InertiaSettings.defaultJobBudgetSeconds
 
     enum Outcome: Equatable {
         case ok(MotionHeadsResponse)
@@ -250,9 +271,10 @@ struct InertiaStage {
             }
             return .ok(response)
         } catch let e as MotionHeadsResponseError {
-            let stop: Bool
-            if case .serviceError(let kind, _) = e { stop = Self.stoppingServiceKinds.contains(kind) } else { stop = false }
-            return .failed(kind: e.kind, message: String(String(describing: e).prefix(240)), stop: stop)
+            // A service error stops by its kind; a response the decoder refused stops unless only this chunk's
+            // numbers were bad (`nonfinite`, `malformed_json`: a NaN token): the rest would repeat on every chunk.
+            return .failed(kind: e.kind, message: String(String(describing: e).prefix(240)),
+                           stop: Self.stoppingServiceKinds.contains(e.kind))
         } catch {
             let c = Self.classify(error)
             // A line that named the request but did not parse (a NaN token) came from a healthy child: only that
@@ -266,9 +288,13 @@ struct InertiaStage {
         }
     }
 
-    /// Service error kinds that will not clear within a job: ask no more chunks.
+    /// Failure kinds that will not clear within a job: ask no more chunks. The service's own kinds
+    /// (`model_missing`, `timeout`, the mismatches, `malformed`: the request itself, `output_too_large`: the same
+    /// chunk sizes all day) and the decoder's refusals that would repeat on every chunk (`schema`, `malformed`,
+    /// `invalid_probabilities`). Not `nonfinite` / `malformed_json` (a NaN line costs one chunk) nor `internal`.
     static let stoppingServiceKinds: Set<String> = ["model_missing", "timeout", "checkpoint_mismatch", "config_mismatch",
-                                                    "bundle_mismatch"]
+                                                    "bundle_mismatch", "malformed", "output_too_large", "schema",
+                                                    "invalid_probabilities"]
 
     static func classify(_ error: Error) -> (kind: String, message: String) {
         let message = String(String(describing: error).prefix(240))

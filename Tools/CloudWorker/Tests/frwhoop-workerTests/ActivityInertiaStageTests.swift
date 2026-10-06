@@ -40,7 +40,8 @@ final class ActivityInertiaStageTests: XCTestCase {
 
     private func inertia(_ behaviour: String = "ok", kind: String = "standin", tier: String = "shadow",
                          mode: InertiaSettings.Mode = .shadow, timeout: Double = 5,
-                         pin: String?? = .none, extraArgs: [String] = []) throws -> InertiaStage {
+                         pin: String?? = .none, extraArgs: [String] = [],
+                         jobBudget: Double = InertiaSettings.defaultJobBudgetSeconds) throws -> InertiaStage {
         guard let path = stub("stub_inertia_service.py") else { throw XCTSkip("stub_inertia_service.py not found") }
         var settings = InertiaSettings.fromEnvironment([
             "FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/opt/bundle",
@@ -52,7 +53,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         services.append(s)
         // Candidate mode is always pinned (the settings refuse it otherwise); shadow only when asked.
         let expected: String? = pin ?? (mode == .candidate ? stubSha : nil)
-        return InertiaStage(service: s, mode: mode, expectedBundleSHA256: expected)
+        return InertiaStage(service: s, mode: mode, expectedBundleSHA256: expected, jobBudgetSeconds: jobBudget)
     }
 
     /// Three 2-minute chunks inside the day (column payloads are not inspected by the stubs).
@@ -127,6 +128,18 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertEqual(on.mode, .shadow, "shadow is the default")
         XCTAssertEqual(on.python, "/usr/bin/python3")
         XCTAssertEqual(on.timeoutSeconds, 60)
+        XCTAssertEqual(on.jobBudgetSeconds, InertiaSettings.defaultJobBudgetSeconds)
+        XCTAssertEqual(InertiaSettings.defaultJobBudgetSeconds, 600)
+        let budget = InertiaSettings.fromEnvironment(["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b",
+                                                      "FRWHOOP_INERTIA_JOB_BUDGET_SECONDS": "90"])
+        XCTAssertTrue(budget.enabled)
+        XCTAssertEqual(budget.jobBudgetSeconds, 90)
+        for junk in ["0", "-5", "nan", "soon"] {
+            let bad = InertiaSettings.fromEnvironment(["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b",
+                                                       "FRWHOOP_INERTIA_JOB_BUDGET_SECONDS": junk])
+            XCTAssertFalse(bad.enabled, junk)
+            XCTAssertEqual(bad.configurationError, "invalid FRWHOOP_INERTIA_JOB_BUDGET_SECONDS \(junk)")
+        }
     }
 
     func testTheInertiaChildIsItsOwnProcessWithTheCheckpointPassedBothWays() throws {
@@ -240,15 +253,54 @@ final class ActivityInertiaStageTests: XCTestCase {
         try assertIsolated("crash", kind: "crash", chunks: 1, failed: 1)
     }
 
-    func testMalformedInertiaOutputIsRefusedChunkByChunk() throws {
-        try assertIsolated("malformed", kind: "malformed", chunks: 3, failed: 3)
-        try assertIsolated("schema", kind: "schema", chunks: 3, failed: 3)
+    /// A refusal that would repeat on every chunk (malformed output, an unknown schema, invalid probabilities, a
+    /// structured `output_too_large`) costs one chunk and stops Inertia for the job.
+    func testANonTransientInertiaFailureStopsInertiaForTheJob() throws {
+        try assertIsolated("malformed", kind: "malformed", chunks: 1, failed: 1)
+        try assertIsolated("schema", kind: "schema", chunks: 1, failed: 1)
+        try assertIsolated("bad_sum", kind: "invalid_probabilities", chunks: 1, failed: 1)
+        try assertIsolated("output_too_large", kind: "output_too_large", chunks: 1, failed: 1)
+        XCTAssertTrue(InertiaStage.stoppingServiceKinds.isSuperset(of: ["malformed", "schema", "invalid_probabilities",
+                                                                        "output_too_large"]))
     }
 
-    func testNaNAndInvalidProbabilitiesAreRefused() throws {
+    /// Only a NaN line (this chunk's numbers) or a structured `internal` answer costs a single chunk.
+    func testNaNAndAnInternalErrorCostOneChunkEach() throws {
         // A NaN token makes the line unparseable; it names the request, so it fails at once, not at the timeout.
         try assertIsolated("nan", kind: "malformed_json", chunks: 3, failed: 3)
-        try assertIsolated("bad_sum", kind: "invalid_probabilities", chunks: 3, failed: 3)
+        try assertIsolated("internal", kind: "internal", chunks: 3, failed: 3)
+        XCTAssertTrue(InertiaStage.stoppingServiceKinds.isDisjoint(with: ["nonfinite", "malformed_json", "internal"]))
+    }
+
+    /// Inertia's calls in one job (its readiness check included) share a wall-clock budget: once it is used, Inertia
+    /// is stopped for the rest of the job (counted, logged once), the chunks it already answered are kept, and the
+    /// HART path is untouched.
+    func testInertiaStopsForTheJobOnceItsTimeBudgetIsUsed() throws {
+        let reference = try baseline()
+        // A budget already used by the readiness check: no chunk is asked.
+        var none = ActivityLane.Stats()
+        let skipped = try infer(try inertia("ok", jobBudget: 1e-9), stats: &none)
+        XCTAssertEqual(skipped.motionHeads.chunks, 0)
+        XCTAssertEqual(skipped.motionHeads.stopped, ActivityLane.jobTimeBudgetKind)
+        XCTAssertEqual(none.inertiaBudgetExhausted, 1)
+        XCTAssertEqual(none.inertiaFailures, 0, "a used budget is not a chunk failure")
+        XCTAssertEqual(none.lastInertiaErrorKind, ActivityLane.jobTimeBudgetKind)
+        XCTAssertEqual(try hartPayloads(skipped).v1, reference.v1)
+        XCTAssertEqual(try hartPayloads(skipped).v2, reference.v2)
+        // A slow child (1 s per chunk) against a 1.5 s budget: one or two chunks, never all three.
+        var slow = ActivityLane.Stats()
+        let partial = try infer(try inertia("ok", extraArgs: ["--delay", "1"], jobBudget: 1.5), stats: &slow)
+        XCTAssertTrue((1...2).contains(partial.motionHeads.chunks), "\(partial.motionHeads.chunks) chunks")
+        XCTAssertEqual(partial.motionHeads.responses.count, partial.motionHeads.chunks, "answered chunks are kept")
+        XCTAssertEqual(partial.motionHeads.stopped, ActivityLane.jobTimeBudgetKind)
+        XCTAssertEqual(slow.inertiaBudgetExhausted, 1)
+        XCTAssertEqual(try hartPayloads(partial).v1, reference.v1)
+        // The default budget never binds on a normal job.
+        var normal = ActivityLane.Stats()
+        let full = try infer(try inertia("ok"), stats: &normal)
+        XCTAssertEqual(full.motionHeads.chunks, 3)
+        XCTAssertNil(full.motionHeads.stopped)
+        XCTAssertEqual(normal.inertiaBudgetExhausted, 0)
     }
 
     func testACrashAfterAGoodChunkKeepsTheGoodChunk() throws {
@@ -459,15 +511,25 @@ final class ActivityInertiaStageTests: XCTestCase {
         var calls = 0
         var stats = ActivityLane.Stats()
         _ = try infer(try inertia("ok"), stats: &stats, renew: { calls += 1; return true })
-        XCTAssertEqual(calls, 6, "one renewal before each HART call and one before each Inertia call")
+        XCTAssertEqual(calls, 7, "one renewal before Inertia's readiness check, each HART call and each Inertia call")
         calls = 0
         var off = ActivityLane.Stats()
         _ = try infer(nil, stats: &off, renew: { calls += 1; return true })
         XCTAssertEqual(calls, 3, "Inertia off: the lane renews exactly as before")
+        // The renewal before the readiness check fails: the job ends before Inertia (or HART) is asked anything.
+        calls = 0
+        var early = ActivityLane.Stats()
+        XCTAssertThrowsError(try infer(try inertia("ok"), stats: &early, renew: { calls += 1; return false })) { error in
+            XCTAssertEqual((error as? PostgresClient.Error)?.kind, .stale)
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(early.inertiaChunks, 0)
+        XCTAssertEqual(early.inertiaUnavailable, 0, "the readiness check never ran")
+        XCTAssertEqual(early.windowsInferred, 0)
         // The renewal before the first Inertia call fails: the job ends exactly as a lost lease before HART does.
         calls = 0
         var lost = ActivityLane.Stats()
-        XCTAssertThrowsError(try infer(try inertia("ok"), stats: &lost, renew: { calls += 1; return calls < 2 })) { error in
+        XCTAssertThrowsError(try infer(try inertia("ok"), stats: &lost, renew: { calls += 1; return calls < 3 })) { error in
             let pg = error as? PostgresClient.Error
             XCTAssertEqual(pg?.kind, .stale)
             XCTAssertEqual(pg?.sqlstate, "55000")
@@ -480,7 +542,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         var thrown = ActivityLane.Stats()
         XCTAssertThrowsError(try infer(try inertia("ok"), stats: &thrown, renew: {
             calls += 1
-            if calls == 2 { throw Boom() }
+            if calls == 3 { throw Boom() }
             return true
         })) { XCTAssertTrue($0 is Boom) }
     }
@@ -686,7 +748,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertEqual(second.inertiaChunks, 3, "Inertia still runs on every cached chunk")
         XCTAssertEqual(cached.motionHeads.responses.count, 3)
         XCTAssertEqual(cached.motionHeads.trackInput?.windows.count, 3 * 19, "the shadow row is complete")
-        XCTAssertEqual(renewals, 3, "one renewal before each Inertia call, none for the cached HART answers")
+        XCTAssertEqual(renewals, 4, "one renewal before the readiness check and each Inertia call, none for the cached HART answers")
         let a = try hartPayloads(filled), b = try hartPayloads(cached)
         XCTAssertEqual(a.v1, b.v1, "the cached HART windows publish exactly what the inferred ones did")
         XCTAssertEqual(a.v2, b.v2)

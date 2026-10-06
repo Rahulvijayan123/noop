@@ -63,10 +63,12 @@ final class ActivityElderNetStageTests: XCTestCase {
 
     private func eldernet(_ behaviour: String = "ok", mode: ElderNetSettings.Mode = .shadow, timeout: Double = 5,
                           pinVersion: String?? = .none, pinDigest: String?? = .none, prior: Double? = 0.2,
-                          extraArgs: [String] = []) throws -> ElderNetStage {
+                          extraArgs: [String] = [],
+                          jobBudget: Double = ElderNetSettings.defaultJobBudgetSeconds) throws -> ElderNetStage {
         guard let path = stub("stub_eldernet_service.py") else { throw XCTSkip("stub_eldernet_service.py not found") }
         let settings = ElderNetSettings.fromEnvironment([
             "FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/opt/eldernet",
+            "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
             "FRWHOOP_ELDERNET_TIMEOUT_SECONDS": String(timeout)], activityPython: "/usr/bin/python3")
         var config = try XCTUnwrap(settings.serviceConfig(activityHome: FileManager.default.currentDirectoryPath))
         config.serveArgs = [path, "--behaviour", behaviour, "--sleep", "30"] + extraArgs
@@ -75,7 +77,8 @@ final class ActivityElderNetStageTests: XCTestCase {
         // Candidate mode is always pinned (the settings refuse it otherwise); shadow only when asked.
         let v: String? = pinVersion ?? (mode == .candidate ? version : nil)
         let d: String? = try pinDigest ?? (mode == .candidate ? digest() : nil)
-        return ElderNetStage(service: s, mode: mode, expectedModelVersion: v, expectedWeightsDigest: d, gaitPrior: prior)
+        return ElderNetStage(service: s, mode: mode, expectedModelVersion: v, expectedWeightsDigest: d, gaitPrior: prior,
+                             jobBudgetSeconds: jobBudget)
     }
 
     private func inertia() throws -> InertiaStage {
@@ -158,11 +161,20 @@ final class ActivityElderNetStageTests: XCTestCase {
         let noDir = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1"])
         XCTAssertFalse(noDir.enabled)
         XCTAssertEqual(noDir.configurationError, "FRWHOOP_ELDERNET_WEIGHTS_DIR is required")
+        // The serve process imports upstream's own modules from a sha-verified source checkout: required too.
+        let noUpstream = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1",
+                                                           "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w"])
+        XCTAssertFalse(noUpstream.enabled)
+        XCTAssertEqual(noUpstream.configurationError,
+                       "FRWHOOP_ELDERNET_UPSTREAM_DIR is required (the sha-verified upstream source checkout)")
+        XCTAssertNil(noUpstream.serviceConfig(activityHome: "/x"))
         let badMode = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                        "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
                                                         "FRWHOOP_ELDERNET_MODE": "production"])
         XCTAssertFalse(badMode.enabled, "production evidence needs a code and config change, not an env flag")
         XCTAssertEqual(badMode.configurationError, "unknown FRWHOOP_ELDERNET_MODE production")
-        let on = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w"],
+        let on = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                   "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u"],
                                                   activityPython: "/usr/bin/python3")
         XCTAssertTrue(on.enabled)
         XCTAssertEqual(on.mode, .shadow, "shadow is the default")
@@ -170,10 +182,24 @@ final class ActivityElderNetStageTests: XCTestCase {
         XCTAssertEqual(on.timeoutSeconds, 60)
         XCTAssertNil(on.modelVersion)
         XCTAssertNil(on.weightsSHA256)
+        XCTAssertEqual(on.jobBudgetSeconds, ElderNetSettings.defaultJobBudgetSeconds)
+        XCTAssertEqual(ElderNetSettings.defaultJobBudgetSeconds, 600)
+        let budget = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                       "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
+                                                       "FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS": "120"])
+        XCTAssertTrue(budget.enabled)
+        XCTAssertEqual(budget.jobBudgetSeconds, 120)
+        for junk in ["0", "-1", "inf", "later"] {
+            let bad = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                        "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
+                                                        "FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS": junk])
+            XCTAssertFalse(bad.enabled, junk)
+            XCTAssertEqual(bad.configurationError, "invalid FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS \(junk)")
+        }
     }
 
     func testTheEnabledFlagIsStrictlyParsed() {
-        let base = ["FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w"]
+        let base = ["FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w", "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u"]
         for v in ["1", "true", "TRUE", "yes", "On", " on "] {
             let s = ElderNetSettings.fromEnvironment(base.merging(["FRWHOOP_ELDERNET_ENABLED": v]) { $1 })
             XCTAssertTrue(s.enabled, v)
@@ -193,7 +219,8 @@ final class ActivityElderNetStageTests: XCTestCase {
     }
 
     func testCandidateModeNeedsBothPinsAndTheGaitPrior() throws {
-        let env = ["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w", "FRWHOOP_ELDERNET_MODE": "candidate"]
+        let env = ["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                   "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u", "FRWHOOP_ELDERNET_MODE": "candidate"]
         let sha = String(repeating: "ab", count: 32)
         let unpinned = ElderNetSettings.fromEnvironment(env)
         XCTAssertFalse(unpinned.enabled)
@@ -217,6 +244,7 @@ final class ActivityElderNetStageTests: XCTestCase {
             ("FRWHOOP_ELDERNET_TIMEOUT_SECONDS", "soon", "invalid FRWHOOP_ELDERNET_TIMEOUT_SECONDS soon"),
         ] {
             let s = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                      "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
                                                       key: value])
             XCTAssertFalse(s.enabled, key)
             XCTAssertEqual(s.configurationError, message)
@@ -224,6 +252,7 @@ final class ActivityElderNetStageTests: XCTestCase {
         // Shadow: the pins are optional, and enforced when set.
         let shadowPinned = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1",
                                                              "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                             "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
                                                              "FRWHOOP_ELDERNET_MODEL_VERSION": version])
         XCTAssertTrue(shadowPinned.enabled)
         XCTAssertEqual(shadowPinned.modelVersion, version)
@@ -232,10 +261,11 @@ final class ActivityElderNetStageTests: XCTestCase {
     func testTheElderNetChildIsItsOwnProcessAndItsTimeoutFitsTheLease() throws {
         let s = ElderNetSettings.fromEnvironment([
             "FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/opt/eldernet/weights",
+            "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/opt/eldernet/upstream",
             "FRWHOOP_ELDERNET_PYTHON": "/opt/venv/bin/python", "FRWHOOP_ELDERNET_TIMEOUT_SECONDS": "45"])
         let c = try XCTUnwrap(s.serviceConfig(activityHome: "/srv/Tools/ActivityContext"))
         XCTAssertEqual(c.serveArgs, ["-m", "activity_context.eldernet.serve", "--weights-dir", "/opt/eldernet/weights",
-                                     "--timeout", "40"])
+                                     "--upstream-dir", "/opt/eldernet/upstream", "--timeout", "40"])
         XCTAssertEqual(c.pythonBin, "/opt/venv/bin/python")
         XCTAssertEqual(c.requestTimeoutSeconds, 45)
         XCTAssertTrue(c.keepsRawLines)
@@ -243,6 +273,7 @@ final class ActivityElderNetStageTests: XCTestCase {
         XCTAssertLessThanOrEqual(c.maxResponseLineBytes, 16 * 1024 * 1024)
         // A short lease clamps the timeout to a third, with a warning; the child still answers first.
         let clamped = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                                                        "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
                                                         "FRWHOOP_ELDERNET_TIMEOUT_SECONDS": "90"], leaseSeconds: 120)
         XCTAssertEqual(clamped.timeoutSeconds, 40)
         XCTAssertEqual(clamped.warnings.count, 1)
@@ -257,6 +288,14 @@ final class ActivityElderNetStageTests: XCTestCase {
                                                     "model_version": version, "weights": ["gait_detection": "ab"]])
         XCTAssertTrue(ping.modelAvailable)
         XCTAssertEqual(ping.objects["weights"], ["gait_detection": "ab"])
+        // The newer serve's extra ping keys are tolerated (a string digest, an object with non-string values).
+        let newer = ActivityPythonService.parsePing(["ok": true, "model_available": true, "model_status": "eldernet_loaded",
+                                                     "model_version": version, "weights": ["gait_detection": "ab"],
+                                                     "weights_digest": String(repeating: "c", count: 64),
+                                                     "upstream_source": ["commit": "437a38b", "verified": true]])
+        XCTAssertTrue(newer.modelAvailable)
+        XCTAssertEqual(newer.objects["weights"], ["gait_detection": "ab"])
+        XCTAssertEqual(newer.details["weights_digest"], String(repeating: "c", count: 64))
         XCTAssertFalse(ActivityPythonService.parsePing(["ok": true, "model_status": "eldernet_unavailable"]).modelAvailable)
     }
 
@@ -327,15 +366,54 @@ final class ActivityElderNetStageTests: XCTestCase {
         try assertIsolated("crash", kind: "crash", chunks: 1, failed: 1)
     }
 
-    func testMalformedAndInvalidOutputIsRefusedChunkByChunk() throws {
-        try assertIsolated("malformed", kind: "malformed", chunks: 3, failed: 3)
-        try assertIsolated("schema", kind: "schema", chunks: 3, failed: 3)
-        try assertIsolated("out_of_range", kind: "invalid_values", chunks: 3, failed: 3)
-        try assertIsolated("metrics_on_non_gait", kind: "invalid_values", chunks: 3, failed: 3)
+    /// A refusal that would repeat on every chunk (malformed output, an unknown schema, invalid values, a
+    /// structured `output_too_large`) costs one chunk and stops ElderNet for the job, like `model_missing`.
+    func testANonTransientFailureStopsElderNetForTheJob() throws {
+        try assertIsolated("malformed", kind: "malformed", chunks: 1, failed: 1)
+        try assertIsolated("schema", kind: "schema", chunks: 1, failed: 1)
+        try assertIsolated("out_of_range", kind: "invalid_values", chunks: 1, failed: 1)
+        try assertIsolated("metrics_on_non_gait", kind: "invalid_values", chunks: 1, failed: 1)
+        try assertIsolated("output_too_large", kind: "output_too_large", chunks: 1, failed: 1)
+        XCTAssertTrue(ElderNetStage.stoppingServiceKinds.isSuperset(of: ["malformed", "schema", "invalid_values",
+                                                                         "output_too_large"]))
     }
 
-    func testNaNIsRefusedAtOnceNotAtTheTimeout() throws {
+    /// Only a NaN line (this chunk's numbers; refused at once, not at the timeout) or a structured `internal`
+    /// answer costs a single chunk.
+    func testNaNAndAnInternalErrorCostOneChunkEach() throws {
         try assertIsolated("nan", kind: "malformed_json", chunks: 3, failed: 3)
+        try assertIsolated("internal", kind: "internal", chunks: 3, failed: 3)
+        XCTAssertTrue(ElderNetStage.stoppingServiceKinds.isDisjoint(with: ["nonfinite", "malformed_json", "internal"]))
+    }
+
+    /// ElderNet's calls in one job (its readiness check included) share a wall-clock budget: once it is used,
+    /// ElderNet is stopped for the rest of the job (counted, logged once), the chunks it already answered are kept
+    /// and stored, and the HART path is untouched.
+    func testElderNetStopsForTheJobOnceItsTimeBudgetIsUsed() throws {
+        let reference = try baseline()
+        var none = ActivityLane.Stats()
+        let skipped = try infer(try eldernet("ok", jobBudget: 1e-9), stats: &none)
+        XCTAssertEqual(skipped.gaitQuality.chunks, 0, "the readiness check alone used the budget")
+        XCTAssertEqual(skipped.gaitQuality.stopped, ActivityLane.jobTimeBudgetKind)
+        XCTAssertEqual(none.eldernetBudgetExhausted, 1)
+        XCTAssertEqual(none.eldernetFailures, 0, "a used budget is not a chunk failure")
+        XCTAssertEqual(none.lastElderNetErrorKind, ActivityLane.jobTimeBudgetKind)
+        XCTAssertEqual(try hartPayloads(skipped).v1, reference.v1)
+        XCTAssertEqual(try hartPayloads(skipped).v2, reference.v2)
+        // A slow child (1 s per chunk) against a 1.5 s budget: one or two chunks, never all three.
+        var slow = ActivityLane.Stats()
+        let partial = try infer(try eldernet("ok", extraArgs: ["--delay", "1"], jobBudget: 1.5), stats: &slow)
+        XCTAssertTrue((1...2).contains(partial.gaitQuality.chunks), "\(partial.gaitQuality.chunks) chunks")
+        XCTAssertEqual(partial.gaitQuality.responses.count, partial.gaitQuality.chunks, "answered chunks are kept")
+        XCTAssertEqual(partial.gaitQuality.stopped, ActivityLane.jobTimeBudgetKind)
+        XCTAssertEqual(slow.eldernetBudgetExhausted, 1)
+        XCTAssertNotNil(partial.gaitQuality.trackInput, "what it answered is still stored")
+        XCTAssertEqual(try hartPayloads(partial).v1, reference.v1)
+        var normal = ActivityLane.Stats()
+        let full = try infer(try eldernet("ok"), stats: &normal)
+        XCTAssertEqual(full.gaitQuality.chunks, 3, "the default budget never binds on a normal job")
+        XCTAssertNil(full.gaitQuality.stopped)
+        XCTAssertEqual(normal.eldernetBudgetExhausted, 0)
     }
 
     func testAChildServingAnotherModelThanThePinnedOneIsRefusedAndCounted() throws {
@@ -376,15 +454,26 @@ final class ActivityElderNetStageTests: XCTestCase {
         var calls = 0
         var stats = ActivityLane.Stats()
         let both = try infer(try eldernet("ok"), inertia: try inertia(), stats: &stats, renew: { calls += 1; return true })
-        XCTAssertEqual(calls, 9, "one renewal before each HART, each Inertia and each ElderNet call")
+        XCTAssertEqual(calls, 11, "one renewal before each readiness check (Inertia, ElderNet) and before each HART, "
+                       + "each Inertia and each ElderNet call")
         XCTAssertEqual(both.motionHeads.responses.count, 3, "Inertia unaffected by ElderNet beside it")
         XCTAssertEqual(both.gaitQuality.responses.count, 3)
         XCTAssertEqual(stats.eldernetChunks, 3)
         XCTAssertEqual(stats.inertiaChunks, 3)
+        // The renewal before ElderNet's readiness check (start + ping, up to a request timeout) fails: the job ends
+        // before ElderNet or HART is asked anything.
+        calls = 0
+        var early = ActivityLane.Stats()
+        XCTAssertThrowsError(try infer(try eldernet("ok"), stats: &early, renew: { calls += 1; return false })) { error in
+            XCTAssertEqual((error as? PostgresClient.Error)?.kind, .stale)
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(early.eldernetUnavailable, 0, "the readiness check never ran")
+        XCTAssertEqual(early.windowsInferred, 0)
         calls = 0
         var lost = ActivityLane.Stats()
-        // HART (1), ElderNet (2: refused): the job ends exactly as a lost lease before HART does.
-        XCTAssertThrowsError(try infer(try eldernet("ok"), stats: &lost, renew: { calls += 1; return calls < 2 })) { error in
+        // Readiness (1), HART (2), ElderNet (3: refused): the job ends exactly as a lost lease before HART does.
+        XCTAssertThrowsError(try infer(try eldernet("ok"), stats: &lost, renew: { calls += 1; return calls < 3 })) { error in
             let pg = error as? PostgresClient.Error
             XCTAssertEqual(pg?.kind, .stale)
             XCTAssertEqual(pg?.message, "activity lease lost during inference")
@@ -415,7 +504,7 @@ final class ActivityElderNetStageTests: XCTestCase {
         XCTAssertEqual(second.windowsReused, 3)
         XCTAssertEqual(second.eldernetChunks, 3, "ElderNet still runs on every cached chunk")
         XCTAssertEqual(cached.gaitQuality.trackInput?.windows.count, 3 * 23, "the shadow row is complete")
-        XCTAssertEqual(renewals, 3, "one renewal before each ElderNet call, none for the cached HART answers")
+        XCTAssertEqual(renewals, 4, "one before the readiness check and each ElderNet call, none for the cached HART answers")
         XCTAssertEqual(try hartPayloads(filled).v1, try hartPayloads(cached).v1)
         XCTAssertEqual(try hartPayloads(filled).v2, try hartPayloads(cached).v2)
     }

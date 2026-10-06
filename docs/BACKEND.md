@@ -716,10 +716,14 @@ activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (
 
 - **Never gates, never fails a job.** Inertia is not part of the readiness gate. A missing model (ping
   `model_available: false`), timeout, crash, malformed or invalid output is counted (`inertia_failures`,
-  `inertia_unavailable`), logged once per distinct kind, and the HART path continues. A timeout, crash or
-  `model_missing` stops Inertia for the rest of that job, so a broken child costs at most one timeout. The
-  one exception is the lease: it is renewed before every Inertia call exactly as before every HART call, and a
-  lost lease ends the job the same way.
+  `inertia_unavailable`), logged once per distinct kind, and the HART path continues. Anything that would repeat
+  on every chunk (a timeout, crash, `model_missing`, a bundle mismatch, an unknown schema, a malformed response,
+  invalid probabilities, `output_too_large`) stops Inertia for the rest of that job, so a broken child costs at most
+  one timeout; only a NaN line or a service `internal` error costs a single chunk. A per-job time budget
+  (`FRWHOOP_INERTIA_JOB_BUDGET_SECONDS`, default 600 s) caps the wall time of Inertia's calls in one job; once used,
+  Inertia is stopped for that job (`inertia_budget_exhausted`). The one exception is the lease: it is renewed
+  before Inertia's job-start readiness check (child start + ping) and before every Inertia call, exactly as before
+  every HART call, and a lost lease ends the job the same way.
 - **Timeouts.** `FRWHOOP_INERTIA_TIMEOUT_SECONDS` (default 60) is clamped to a third of
   `FRWHOOP_ACTIVITY_LEASE_SECONDS` (logged at start-up when it is); the child's own `--timeout` is set strictly
   below it (worker − 5 s, at least 5 s while that is still below), so the child's structured `timeout` answer
@@ -774,9 +778,9 @@ activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (
 
 A third, optional expert beside HART and Inertia (contract: `Tools/ActivityContext/ELDERNET.md` §6). With
 `FRWHOOP_ELDERNET_ENABLED` on (`1`/`true`/`yes`/`on`; any other value keeps it off and is logged) and
-`FRWHOOP_ELDERNET_WEIGHTS_DIR` set, the activity lane starts a THIRD Python child (`python -m
-activity_context.eldernet.serve --weights-dir <dir> --timeout <s>`, its own timeout, restart cap and response
-cap) and, after each HART chunk (and after Inertia, when that is on), renews the job lease and asks it for
+`FRWHOOP_ELDERNET_WEIGHTS_DIR` and `FRWHOOP_ELDERNET_UPSTREAM_DIR` set, the activity lane starts a THIRD Python
+child (`python -m activity_context.eldernet.serve --weights-dir <dir> --upstream-dir <dir> --timeout <s>`, its own
+timeout, restart cap and response cap) and, after each HART chunk (and after Inertia, when that is on), renews the job lease and asks it for
 `gait-quality-1` windows (10-s windows: gait probability, gait flag, pre-filter flag and, on gait windows,
 speed, cadence, stride length, regularity and steps) for the same chunk.
 
@@ -794,19 +798,30 @@ activity job: HART chunk infer (unchanged) [-> Inertia (isolated)] -> ElderNet i
 - **Never gates, never fails a job.** ElderNet is not part of the readiness gate. A missing model or bad weights
   (ping `model_available: false`), a pin mismatch, timeout, crash, malformed or invalid output is counted
   (`eldernet_failures`, `eldernet_unavailable`, `eldernet_pin_refused`), logged once per distinct kind, and the
-  HART path continues. A timeout, crash, `model_missing`, `weights_mismatch` or pin refusal stops ElderNet for
-  the rest of that job. The lease is renewed before every ElderNet call, and a lost lease ends the job exactly as
-  before a HART call. Only HART answers are cached on the host: a chunk whose HART answer comes from the cache is
+  HART path continues. Anything that would repeat on every chunk (a timeout, crash, `model_missing`,
+  `weights_mismatch`, a pin refusal, an unknown schema, a malformed response, invalid values, `output_too_large`)
+  stops ElderNet for the rest of that job; only a NaN line or a service `internal` error costs a single chunk. A
+  per-job time budget (`FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS`, default 600 s) caps the wall time of ElderNet's calls
+  in one job (readiness check included); once used, ElderNet is stopped for that job (`eldernet_budget_exhausted`)
+  and the chunks it answered are still stored. The lease is renewed before ElderNet's job-start readiness check
+  (child start + ping, which can take up to a request timeout) and before every ElderNet infer call, and a lost
+  lease ends the job exactly as before a HART call. Only HART answers are cached on the host: a chunk whose HART answer comes from the cache is
   still sent to ElderNet.
 - **Timeouts.** `FRWHOOP_ELDERNET_TIMEOUT_SECONDS` (default 60) is clamped to a third of
   `FRWHOOP_ACTIVITY_LEASE_SECONDS`; the child's `--timeout` is set strictly below it, as for Inertia.
+- **Upstream source.** The serve process imports upstream ElderNet's own modules from a sha-verified upstream source
+  checkout, fetched by an operator with `python -m activity_context.eldernet.upstream fetch --dest DIR` and named by
+  `FRWHOOP_ELDERNET_UPSTREAM_DIR` (passed as `--upstream-dir`). It is required when ElderNet is on (a configuration
+  error otherwise, ElderNet stays off); a child without it reports `model_missing`. The ping's extra
+  `weights_digest` and `upstream_source` keys are tolerated.
 - **Pins.** `FRWHOOP_ELDERNET_MODEL_VERSION` (the served `model_version`) and `FRWHOOP_ELDERNET_WEIGHTS_SHA256`
   (the weights digest: sha256 of `eldernet-weights-1\n` followed by `name=sha256\n` for every served head in name
   order, the same value the decoder and the table compute) are required in candidate mode and enforced in shadow
   mode when set: checked against the ping (its `model_version` and `weights`) and every response. A different
   model turns ElderNet off for that job (`eldernet_pin_refused`); the decoder refuses it too
-  (`model_version_mismatch`, `weights_digest_mismatch`). `FRWHOOP_ELDERNET_GAIT_PRIOR` (π in [0.01, 0.99], the
-  gait prevalence of the set the calibration was fit on) is required in candidate mode.
+  (`model_version_mismatch`, `weights_digest_mismatch`). `FRWHOOP_ELDERNET_GAIT_PRIOR` (π in [0.01, 0.99]: the mean
+  served `gait_prob` over the VAL windows the decoder sees, which makes the channel neutral on average; 0.085 for
+  the served defaults, ELDERNET.md §5) is required in candidate mode.
 - **The published documents are untouched.** v1 epochs and the `activity_context_days` document are byte-identical
   with ElderNet on or off; the candidate comparison is stored only in `activity_gait_windows_days.candidate_document`.
   `FRWHOOP_ELDERNET_MODE` accepts only `shadow` (default) and `candidate`; production evidence needs a code and
@@ -821,7 +836,8 @@ activity job: HART chunk infer (unchanged) [-> Inertia (isolated)] -> ElderNet i
   regularity %, steps × 10, -1 where absent; about 0.45 MB per full day at a 5-s hop, omitted above 512 KiB,
   refused above 1 MiB). `summary` carries the counts, ElderNet's own gait metrics over its gait windows and
   `track_report` (how the windows met the day's observed seconds). A `candidate_document` must carry its
-  `versions.gait_quality` stamp (table CHECK and RPC). Contract:
+  `versions.gait_quality` stamp (table CHECK and RPC), and stored `windows` must say `format: gait-windows-1` (the
+  CHECK uses `is not distinct from`, so a missing key is refused too). Contract:
   `supabase/functions/tests/activity_gait_windows_contract.sql`.
 - **Retention.** `prune_activity_gait_windows_days(keep_days default 30, max_rows default 10000)` (service role
   only); the lane calls it every 6 h while ElderNet is on (`eldernet_rows_pruned`, `eldernet_prune_failures`).

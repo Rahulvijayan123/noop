@@ -6,11 +6,16 @@ Behaviour is fixed per process by argv, so the HART and Inertia stubs sharing th
 
   --behaviour ok | model_missing | weights_mismatch | timeout | crash | malformed | schema | nan
               | out_of_range | metrics_on_non_gait | ok_then_crash   (first infer ok, every later one crashes)
+              | output_too_large | internal   (a structured ok:false answer of that kind to every infer)
   --sleep N                       (seconds the timeout behaviour sleeps; default 30)
+  --delay N                       (seconds every infer takes before it answers; default 0)
   --model-version V               (model_version reported by ping and infer; default eldernet-437a38b)
   --infer-model-version V         (model_version reported by infer only; default: --model-version)
   --weights-seed S                (seeds the made-up per-head sha256 digests; default "stub")
-Every other argument (--weights-dir, --timeout …) is accepted and ignored.
+Every other argument (--weights-dir, --upstream-dir, --timeout …) is accepted and ignored.
+
+ping also carries the newer serve's extra keys (`weights_digest`, `upstream_source` with non-string values), which
+the worker must tolerate.
 
 ping answers model_available:false (model_status eldernet_unavailable) for model_missing and weights_mismatch, true
 otherwise. infer emits 10-s windows on a 5-s grid fully inside [start_ts, end_ts): every window starting on a
@@ -55,6 +60,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--behaviour", default="ok")
     ap.add_argument("--sleep", type=float, default=30.0)
+    ap.add_argument("--delay", type=float, default=0.0)
     ap.add_argument("--model-version", default="eldernet-437a38b")
     ap.add_argument("--infer-model-version", default=None)
     ap.add_argument("--weights-seed", default="stub")
@@ -73,8 +79,11 @@ def main():
                     "model_status": "eldernet_unavailable" if unavailable else "eldernet_loaded",
                     "model_error": ("weights_mismatch: gait_detection sha256 differs" if args.behaviour == "weights_mismatch"
                                     else "FileNotFoundError: no weights") if unavailable else None,
-                    "package_version": "stub"}
+                    "package_version": "stub",
+                    "upstream_source": {"commit": COMMIT, "verified": True, "files": 12}}
             resp.update(provenance(args.model_version, args.weights_seed))
+            canonical = "eldernet-weights-1\n" + "".join("%s=%s\n" % (k, v) for k, v in sorted(resp["weights"].items()))
+            resp["weights_digest"] = hashlib.sha256(canonical.encode()).hexdigest()
         elif op == "shutdown":
             sys.stdout.write(json.dumps({"id": rid, "ok": True}) + "\n")
             sys.stdout.flush()
@@ -89,8 +98,12 @@ def main():
                 sys.exit(3)
             if b == "timeout":
                 time.sleep(args.sleep)
+            if args.delay > 0:
+                time.sleep(args.delay)
             if unavailable:
                 resp = {"id": rid, "ok": False, "kind": b, "error": "no usable weights"}
+            elif b in ("output_too_large", "internal"):
+                resp = {"id": rid, "ok": False, "kind": b, "error": "stub " + b}
             else:
                 resp = {"id": rid, "op": "infer", "ok": True, "schema": "gait-quality-1", "window_s": 10, "hop_s": 5,
                         "calibration": {"gait_prob": {"method": "temperature", "T": 1.0, "fit": "val"}},
