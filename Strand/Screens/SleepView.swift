@@ -137,7 +137,7 @@ struct SleepView: View {
     /// The analytical cards to render, in saved order minus the hidden set.
     private var sleepVisibleSections: [SleepSection] {
         SleepLayoutPrefs.visibleOrder(orderRaw: sleepSectionOrderRaw, hiddenRaw: sleepHiddenSectionsRaw)
-            .filter { $0 != .sleepMarks }
+            .filter { $0 != .sleepMarks && $0 != .bodyClock }
     }
 
     var body: some View {
