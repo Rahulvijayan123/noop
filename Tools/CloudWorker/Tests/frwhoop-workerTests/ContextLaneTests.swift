@@ -372,9 +372,30 @@ final class ContextLaneTests: XCTestCase {
                                                                     availableAt: cutoff + 10) }
         after.heartRate.sort { $0.ts < $1.ts }
         after.wearEvents.append(.init(ts: dayStart + 3_600, state: .offWrist, kind: "WRIST_OFF", availableAt: cutoff + 1))
+        // Records stored after the cutoff: an exposure entered late, a placement declared later, a later HART
+        // revision and decoder run. Neither their content nor their count may reach the replayed document (the
+        // input revisions included).
+        after.exposures.append(PC.ExposureEventRevision(
+            eventId: "late", revision: 1, kind: .caffeine, label: "coffee",
+            occurred: PC.Interval(dayStart + 7 * 3_600, dayStart + 7 * 3_600 + 1), timePrecision: .exact,
+            recordedAt: dayStart + 7 * 3_600, receivedAt: cutoff + 30, source: .userEntered, confirmation: .confirmed))
+        after.placements.append(PC.PlacementInput(start: dayStart + 6 * 3_600, end: nil, placement: "bicep",
+                                                  source: "user", revision: 9, recordedAt: cutoff + 40,
+                                                  scope: "device"))
+        after.epochs.append(PC.ActivityEpochInput(
+            epoch: ActivityEpoch(startTs: dayStart + 9 * 3_600, endTs: dayStart + 9 * 3_600 + 30, motion: .walking,
+                                 posture: .unknown, exercise: .unknown, sleepState: .unknown, exertion: .unknown,
+                                 wear: .unknown, confidence: 0.9, observedS: 30, validS: 30),
+            revision: 7, availableAt: cutoff + 50))
+        after.intervals.append(PC.ActivityIntervalInput(interval: PC.Interval(dayStart + 9 * 3_600, dayStart + 10 * 3_600),
+                                                        activityClass: "walking", confidence: 0.8, sleep: nil, wear: nil,
+                                                        revision: 4, availableAt: cutoff + 60))
         let w = try windows()
-        let a = PC.Engine.buildDay(ContextInputs.assemble(before, job: replay, windows: w).input, history: .empty)
-        let b = PC.Engine.buildDay(ContextInputs.assemble(after, job: replay, windows: w).input, history: .empty)
+        let ia = ContextInputs.assemble(before, job: replay, windows: w).input
+        let ib = ContextInputs.assemble(after, job: replay, windows: w).input
+        XCTAssertEqual(ia.inputRevisions, ib.inputRevisions, "revisions count only what was available at the cutoff")
+        let a = PC.Engine.buildDay(ia, history: .empty)
+        let b = PC.Engine.buildDay(ib, history: .empty)
         XCTAssertEqual(a.header.inputFingerprint, b.header.inputFingerprint)
         XCTAssertEqual(try PC.encoder().encode(a), try PC.encoder().encode(b), "byte-identical at the cutoff")
         XCTAssertEqual(a.header.interpretation.availabilityCutoff, cutoff)

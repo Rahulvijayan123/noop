@@ -16,6 +16,7 @@ No package, migration or app change.
 | RC-17 (L) placement scope | `parsePlacement` sets `scope: "device"` when `device_id` is set, `"account"` when null (the query's `user_level`); scope is the last sort key. | `testRC17_placementRecordsCarryTheirScope`; DB `testPlacementRowsArriveWithTheirScope`. | Passed through; the device-over-account resolution is the engine's (signal repair). |
 | Frozen references per mode | Unchanged SQL, now explicit (`historyCutoffParameter`): retrospective reads every reference registered for the device, causal only those registered by the cutoff. | `testFrozenReferencesRetrospectiveReadsEveryRegisteredOneCausalOnlyByTheCutoff`; DB `testRetrospectiveJobsReadEveryRegisteredFrozenReferenceCausalOnlyByTheCutoff` (2 / 1 / 0 by mode and cutoff, another device's never). | Verified. |
 | R1 (lead addendum, HIGH) optional reads swallowed every error | `ContextInputs.optionalRead`: only SQLSTATE 42P01 / 42883 / 42703 (the object is not installed) makes an optional input `*_unavailable`; every other error (lock / statement timeout, serialization, lost connection, privilege) is rethrown, so the job is settled by `fail_physiology_context_v1` and retried with backoff. | `testR1_onlyAMissingSchemaObjectMakesAnOptionalInputUnavailable` (classification and rethrow per SQLSTATE); DB `testR1_aTransientOptionalReadFailureFailsTheJobAndTheRetryPublishes` (a lock on `activity_context_epochs` + `lock_timeout` 2 s → job failed, no revision, failures = 1; after the lock, the retry publishes with no `*_unavailable`). | Repaired. |
+| V10 (found by the DB suite) input revisions counted rows stored after the cutoff | `assemble` computes the `activity_epochs`, `activity_days`, `placement` and `exposures` input revisions over the causal view, not over every stored row. Latent before 204ea2c3 (the fingerprint ignored `inputRevisions`, so the replay was `unchanged` while its revisions already differed); the lead's RC-04 fingerprint made `testACausalReplayIsUnchangedByDataThatArrivedAfterItsCutoff` publish a new revision for a late exposure. | `testRowsAppendedAfterTheCutoffDoNotChangeAReplay` now also appends a late exposure, placement, HART revision and decoder run (equal input revisions, fingerprint and bytes); DB V10 test passes again. | Repaired. |
 | RC-18 / P5 (L) replay limits | Documented exactly (below); not reconstructable from stored columns. Telemetry `causal_history_after_cutoff` counts history rows a causal job could not read. | DB R-F2 test (a replay before publication reads none and counts 6,400). | Documented; storage fix belongs to backend-db. |
 
 ## RC-03: which sessions each nightly support covers
@@ -58,7 +59,18 @@ The first scored episode day is D−90; its rolling reference needs D−118 … 
 D−159 … D−104 (`autocorrelationWindowDays` 56 before the 14-day guard). 160 days covers both. The query is unchanged:
 `physiology_context_daily_values` filtered by `(user_id, device_id, mode)` and a `day` range, served by the primary
 key `(user_id, device_id, mode, day, series_key, regime_key)`; causal jobs add the per-row `EXISTS` on
-`physiology_context_days`' primary key. Measured on the scratch database (see the numbers below): LOAD_TIMES.
+`physiology_context_days`' primary key. Measured on the scratch database (`testRF2_…`, 160 days × 40 series = 6,400 rows read of 6,840 stored per
+mode, median of 5; the development machine ran at a load average above 100 throughout, so absolute times are
+pessimistic):
+
+| Mode | History query | Plan (sequential scans priced out) | Whole `ContextInputs.load` (owner with no raw streams) |
+| --- | --- | --- | --- |
+| retrospective | 26 ms | Index Scan on `physiology_context_daily_values_pkey` | 3,550 ms |
+| causal | 363 ms | Bitmap Heap Scan over the table's index + the per-row `EXISTS` on `physiology_context_days_pkey` | 2,372 ms |
+
+The history read is a small share of the load; the whole-load figure is dominated by the round trips of the other
+reads on the loaded machine (the earlier quiet-machine profile measured a full stored day's load at 677 ms,
+worker.md §10).
 
 The in-memory profile (`ContextLaneProfileTests`) now builds with 160 days of history; it was not re-run in release
 for this change.

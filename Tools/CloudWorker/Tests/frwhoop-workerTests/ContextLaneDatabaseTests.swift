@@ -35,7 +35,8 @@ final class ContextLaneDatabaseTests: XCTestCase {
         return try PostgresClient(options: PostgresOptions(
             connectionString: url, sslMode: "disable", sslRootCert: nil,
             applicationName: "frwhoop-worker-context-tests", allowInsecure: true,
-            connectTimeoutSeconds: 5, reconnectDeadlineSeconds: 5,
+            // Generous: a scratch database behind a loaded VM's port forward can take seconds to accept.
+            connectTimeoutSeconds: 30, reconnectDeadlineSeconds: 30,
             statementTimeoutMS: 120_000, idleTransactionTimeoutMS: 120_000))
     }
 
@@ -811,10 +812,9 @@ final class ContextLaneDatabaseTests: XCTestCase {
 
         var lane = contextLane()
         lane.enqueueIntervalSeconds = 3_600
-        lane.lastEnqueueAt = Date()  // only this job is due
-        lane.drain(budget: 1)
-        XCTAssertEqual(lane.stats.published, 0)
-        XCTAssertEqual(lane.stats.failed, 1, lane.stats.lastError ?? "")
+        lane.lastEnqueueAt = Date()  // no new jobs; the claim's owner fairness may hand out other due work too
+        lane.drain(budget: 4)
+        XCTAssertGreaterThanOrEqual(lane.stats.failed, 1, lane.stats.lastError ?? "")
         XCTAssertEqual(lane.stats.inputsUnavailable, 0, "a lock timeout is not a missing input")
         XCTAssertTrue(try contextDays(o).isEmpty, "no degraded revision was published")
         let failed = try job(o)
@@ -829,8 +829,9 @@ final class ContextLaneDatabaseTests: XCTestCase {
         locked = false
         _ = try db.query("update public.physiology_context_jobs set not_before = clock_timestamp() where user_id = $1::uuid",
                          [o.user])
-        lane.drain(budget: 1)
-        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        let publishedBefore = lane.stats.published
+        lane.drain(budget: 4)
+        XCTAssertGreaterThan(lane.stats.published, publishedBefore, lane.stats.lastError ?? "")
         let days = try contextDays(o)
         XCTAssertEqual(days.count, 1)
         let (doc, _) = try storedDocument(revision: try XCTUnwrap(days.last?["rev"]))

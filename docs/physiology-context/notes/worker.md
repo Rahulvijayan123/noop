@@ -120,7 +120,9 @@ the snapshot says `true` (the scorer writes a constant `false`). Duplicate ids k
 `inputRevisions` (header, content-derived only, sorted): `scoring_snapshot` (result revision), `scoring_input`,
 `metric_series` (`frwhoop-series-2`), `activity_epochs` / `activity_days` (max revision), `placement`
 (`count:max revision`), `exposures` (`count:max availability`), `other_day_snapshots`, `history_daily_values`,
-`history_bouts`, `frozen_references` (counts), plus `<input>_unavailable`.
+`history_bouts`, `frozen_references` (counts), plus `<input>_unavailable`. In causal mode the epoch, decoder-run,
+placement and exposure entries are computed over the causal view (what was available at the cutoff); a count over
+the stored rows would put a later upload into the live document (V10).
 
 ## 5. Measurements and their supports (exact)
 

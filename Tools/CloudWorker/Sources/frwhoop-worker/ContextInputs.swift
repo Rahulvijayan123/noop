@@ -871,7 +871,15 @@ enum ContextInputs {
         var input = view
         input.beatIntervals = beats
         input.measurements = measurements
-        input.inputRevisions = inputRevisions(loaded)
+        // Revisions describe what the decision could see: in causal mode the epochs, decoder runs, placement and
+        // exposure revisions available at the cutoff (the causal view), never rows stored after it — a count or a
+        // maximum over the stored rows would leak a later upload into the live document (V10).
+        var visible = loaded
+        visible.epochs = view.activityEpochs
+        visible.intervals = view.activityIntervals
+        visible.placements = view.placements
+        visible.exposures = view.exposures
+        input.inputRevisions = inputRevisions(visible)
 
         var priorSleep = dedupedSessions(loaded.otherSnapshots.filter { $0.day < w.previousDay }.flatMap(sleepInputs))
         if causal { priorSleep = priorSleep.filter { ($0.availableAt ?? Int.min) <= cutoff } }
@@ -1018,7 +1026,8 @@ enum ContextInputs {
     }
 
     /// Revisions of the inputs the document depends on (spec §6.3). Content-derived only (no job revision, no
-    /// clock), so a retry over the same stored inputs records the same list.
+    /// clock), so a retry over the same stored inputs records the same list. `assemble` passes the causally
+    /// visible collections; snapshots and history are already cut off at the cutoff by their queries.
     static func inputRevisions(_ l: Loaded) -> [PC.InputRevision] {
         func maxOf(_ values: [Int]) -> String { values.max().map(String.init) ?? "none" }
         var out: [PC.InputRevision] = [
