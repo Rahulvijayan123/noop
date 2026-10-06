@@ -87,6 +87,11 @@ packages:
   Supabase:
     url: https://github.com/supabase/supabase-swift.git
     exactVersion: 2.55.3
+  # Crash, error, slow-transaction and app-hang reporting. Pinned EXACT like the packages above.
+  # Inert unless a NOOP_SENTRY_DSN is baked in (see Strand/App/SentryMonitor.swift).
+  Sentry:
+    url: https://github.com/getsentry/sentry-cocoa.git
+    exactVersion: 9.30.0
 targets:
   Strand:
     type: application
@@ -149,6 +154,7 @@ targets:
         NOOPLegacyFleetToken: $(NOOP_LEGACY_FLEET_TOKEN)
         NOOPSourceRevision: $(NOOP_SOURCE_REVISION)
         NOOPFinalHostedCompute: $(NOOP_FINAL_HOSTED_COMPUTE)
+        NOOPSentryDSN: $(NOOP_SENTRY_DSN)
         # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
         # (noop://oura/callback) reaches OuraOAuthProvider instead of bouncing off the OS.
         CFBundleURLTypes:
@@ -190,6 +196,7 @@ targets:
       - package: NoopPush
       - package: Supabase
         product: Auth
+      - package: Sentry
   StrandTests:
     type: bundle.unit-test
     platform: macOS
@@ -387,6 +394,7 @@ targets:
         NOOPLegacyFleetToken: $(NOOP_LEGACY_FLEET_TOKEN)
         NOOPSourceRevision: $(NOOP_SOURCE_REVISION)
         NOOPFinalHostedCompute: $(NOOP_FINAL_HOSTED_COMPUTE)
+        NOOPSentryDSN: $(NOOP_SENTRY_DSN)
         # Registers the noop:// URL scheme so ASWebAuthenticationSession's OAuth redirect
         # (noop://oura/callback) reaches OuraOAuthProvider instead of bouncing off the OS.
         CFBundleURLTypes:
@@ -423,6 +431,7 @@ targets:
       - package: NoopPush
       - package: Supabase
         product: Auth
+      - package: Sentry
       - target: NOOPiOSWidgets
       # Embed the watchOS app so the iPhone app carries it (NOOP.app/Watch/NOOPWatch.app). A watch app
       # installs by riding inside its iOS companion; without this it would never reach a paired watch.
