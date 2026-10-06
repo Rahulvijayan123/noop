@@ -135,6 +135,9 @@ def assert_disjoint_windows(subjects: np.ndarray, split_names: np.ndarray) -> Di
 AGENTC_LARGE_SPLIT = ("Agent C split(): numpy default_rng(42).permutation of the sorted subject ids; first 20% test, "
                       "next 20% val, rest train")
 FROZEN_NOTES = {
+    # The GOTOV note's "22" is a counting error: outdoor walking/cycling exists for 21 participants (14 + 6 + 1). The
+    # note is part of the frozen manifest (and its sha256), so it is kept verbatim; the correction is documented in
+    # eval/inertia/SUMMARY.md (audit G2 D-7).
     "gotov": ("35 participants with a right-wrist GENEActiv file (frozen 2026-10-06 for the NC-SA licence decision); "
               "outdoor walking/cycling exists for 22 of them: 14 train, 6 val, 1 test (GOTOV07)"),
     "wear": "24 subjects sbj_0..23 (frozen 2026-10-06 for the NC-SA licence decision)",

@@ -8,33 +8,33 @@ Status: real Inertia-1 evaluation **BLOCKED** (no public checkpoint; `pipeline_c
 
 | experiment | role | encoder | window | training datasets | training data licences | bundle | evaluated sha256 | sealed sha256 | git commit | evaluated |
 |---|---|---|---|---|---|---|---|---|---|---|
-| ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-hc` | `811ef6e2a28314d4` | `1a5110336832634b` | `a424d207e1c4` | yes (n=3) |
-| ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-nf` | `bb828ffb3235147e` | `5916b911e7d06282` | `a424d207e1c4` | yes (n=3) |
-| ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-art` | `3784c9c5bdcc7085` | `9ff173b2a3eac8be` | `a424d207e1c4` | yes (n=3) |
-| primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-hc` | `f03f85acf7e06e9b` | `3fb1ae3e75c8b993` | `a424d207e1c4` | yes (n=3) |
-| primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-nf` | `e8a34e919d5d19b5` | `736eb93e440fa5da` | `a424d207e1c4` | yes (n=3) |
-| primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-art` | `c0eb1a045f749df3` | `1b8fadcc1521709a` | `a424d207e1c4` | yes (n=2) |
-| linear-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-hc` | `6dac0eddb1f9875c` | `55ec82170e80c93c` | `a424d207e1c4` | yes (n=3) |
-| mlp-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-mlp-hc` | `97115d4109c57015` | `30e84df65b21ab31` | `a424d207e1c4` | yes (n=3) |
-| linear-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-art` | `f0a839da6c42f169` | `20fe1b0a40e86883` | `a424d207e1c4` | yes (n=2) |
-| mlp-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-mlp-art` | `8df3f9f10866715e` | `813cf70ad14be481` | `a424d207e1c4` | yes (n=2) |
-| linear-nf | arch | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-nf` | `ac609c4fd7435a28` | `1f001e014c71bb3c` | `a424d207e1c4` | yes (n=3) |
-| w10-hc | window | hc | w10 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-w10-hc` | `1cd36c60fda273ab` | `e57e9f8a7c661bf2` | `a424d207e1c4` | yes (n=3) |
-| lodo-noc24-hc | lodo | hc | w30 | wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-lodo-noc24-hc` | `62b9566ced026d1e` | `af46646f8e6721dc` | `a424d207e1c4` | yes (n=3) |
-| lodo-c24only-hc | lodo | hc | w30 | capture24 | CC BY 4.0 | `shadow-lodo-c24only-hc` | `0af9f28cbb271e4e` | `59970578b019ff8e` | `a424d207e1c4` | yes (n=3) |
-| lodo-nohhar-hc | lodo | hc | w30 | capture24, wisdm2019_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-lodo-nohhar-hc` | `cb2cd3200eaace91` | `2bfa1d9f339a156a` | `a424d207e1c4` | yes (n=3) |
-| seed1-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-seed1-hc` | `1141f03851e3f4e0` | `f91941703727b82d` | `a424d207e1c4` | yes (n=3) |
-| seed2-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-seed2-hc` | `796029c9cb29261c` | `9128922bb4810dd7` | `a424d207e1c4` | yes (n=3) |
+| ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-hc` | `f109c1627eb27949` | `6fa95fa6c7933033` | `744e33a76ae5` | yes (n=4) |
+| ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-nf` | `3d62fb720458df68` | `35499089d126df43` | `744e33a76ae5` | yes (n=4) |
+| ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ood-art` | `91e4a4c1b32ceb11` | `ddf151404710b3ec` | `744e33a76ae5` | yes (n=4) |
+| primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-hc` | `5cf29c716d0ff4a8` | `9a69bda3e3a46400` | `744e33a76ae5` | yes (n=4) |
+| primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-nf` | `8fb6cfeab131d1f2` | `efe44c375da389cc` | `744e33a76ae5` | yes (n=4) |
+| primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-art` | `649715fe69031563` | `617ae04a7795d339` | `744e33a76ae5` | yes (n=3) |
+| linear-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-hc` | `f7b8049c48f3b759` | `9671d48f9d2eecd4` | `744e33a76ae5` | yes (n=4) |
+| mlp-hc | arch | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-mlp-hc` | `daea9827594d158b` | `5a39db56e4173e4d` | `744e33a76ae5` | yes (n=4) |
+| linear-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-art` | `18c96037e6d43c0e` | `0edd1ca1790a0388` | `744e33a76ae5` | yes (n=3) |
+| mlp-art | arch | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-mlp-art` | `885c8abdcbd432dd` | `9e92482d60c2a4bf` | `744e33a76ae5` | yes (n=3) |
+| linear-nf | arch | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-linear-nf` | `a2a100db350f932f` | `eee807c8a64d60ef` | `744e33a76ae5` | yes (n=4) |
+| w10-hc | window | hc | w10 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-w10-hc` | `0fda6959fae37218` | `3bee7d986611c0d9` | `744e33a76ae5` | yes (n=4) |
+| lodo-noc24-hc | lodo | hc | w30 | wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-lodo-noc24-hc` | `7f9ac2b5ed02806f` | `2d76f787dd3d8fe9` | `744e33a76ae5` | yes (n=4) |
+| lodo-c24only-hc | lodo | hc | w30 | capture24 | CC BY 4.0 | `shadow-lodo-c24only-hc` | `79278a60edaaecab` | `f3f30e698bd34ef9` | `744e33a76ae5` | yes (n=4) |
+| lodo-nohhar-hc | lodo | hc | w30 | capture24, wisdm2019_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-lodo-nohhar-hc` | `4111efd5219be0b5` | `b3a4d4913b18f1a1` | `744e33a76ae5` | yes (n=4) |
+| seed1-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-seed1-hc` | `7910cdd036522b10` | `5f39f5e393e215c2` | `744e33a76ae5` | yes (n=4) |
+| seed2-hc | seed | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-seed2-hc` | `90db595571292013` | `2ff6a7bcdd2a6592` | `744e33a76ae5` | yes (n=4) |
 | primary-inertia1 | primary | inertia1 | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-primary-inertia1` | `` | `–` | `–` | blocked |
-| ncsa-ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-hc` | `8f1faee3ae086939` | `8fe56b2c8875caad` | `bed5973b5533` | yes (n=1) |
-| ncsa-ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-nf` | `d23ca68b7a8c621f` | `b41cab54d203f51d` | `bed5973b5533` | yes (n=1) |
-| ncsa-ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-art` | `ed3a9c821ded3dbc` | `0c06a002ff50006f` | `bed5973b5533` | yes (n=1) |
-| ncsa-primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-hc` | `ee9681ebd651a82f` | `45f0709c20f6df3c` | `bed5973b5533` | yes (n=1) |
-| ncsa-primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-nf` | `35be0bc2e82a0e88` | `d56a50d98ea3b46c` | `bed5973b5533` | yes (n=1) |
-| ncsa-primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-art` | `5b83956e960d14c6` | `a3f0cb0974d84e4c` | `bed5973b5533` | yes (n=1) |
-| ncsa-lodo-nonc-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ncsa-lodo-nonc-hc` | `f311783e3ad39b79` | `a1ff1b8ff0188040` | `bed5973b5533` | yes (n=1) |
-| ncsa-lodo-nogotov-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-lodo-nogotov-hc` | `761e347000c7ccea` | `09c4fd0c64b2ae5e` | `bed5973b5533` | yes (n=1) |
-| ncsa-lodo-nowear-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-lodo-nowear-hc` | `0ae6762ef47e5e49` | `ae4238c6a36fedd8` | `bed5973b5533` | yes (n=1) |
+| ncsa-ood-hc | ood_bench | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-hc` | `d1c51571af30e6b7` | `a674411c675794ea` | `744e33a76ae5` | yes (n=2) |
+| ncsa-ood-nf | ood_bench | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-nf` | `fa626b136de0b7b2` | `07603e091a9d1b1a` | `744e33a76ae5` | yes (n=2) |
+| ncsa-ood-art | ood_bench | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-ood-art` | `581580d7f98aa638` | `053d19043c9f59b4` | `744e33a76ae5` | yes (n=2) |
+| ncsa-primary-hc | primary | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-hc` | `e80ec473385d5987` | `898d9810f6ac84fa` | `744e33a76ae5` | yes (n=2) |
+| ncsa-primary-nf | primary | nf | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-nf` | `e64cd4bbeaf7bfc2` | `ab2f49d5cea90ca7` | `744e33a76ae5` | yes (n=2) |
+| ncsa-primary-art | primary | art | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-primary-art` | `c0933b253dc38ca0` | `6982c9befb4fc419` | `744e33a76ae5` | yes (n=2) |
+| ncsa-lodo-nonc-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity | CC BY 4.0 | `shadow-ncsa-lodo-nonc-hc` | `4b3f0a7422105a60` | `ba24dd31e9907fa0` | `744e33a76ae5` | yes (n=2) |
+| ncsa-lodo-nogotov-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, wear | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-lodo-nogotov-hc` | `4087c956ba25dece` | `52b0ec5d37f102e2` | `744e33a76ae5` | yes (n=2) |
+| ncsa-lodo-nowear-hc | lodo | hc | w30 | capture24, wisdm2019_watch, hhar_watch, pamap2, mhealth, opportunity, gotov | CC BY 4.0, CC BY-NC-SA 4.0 | `shadow-ncsa-lodo-nowear-hc` | `f04796f38f3c9f10` | `166f0c0071584d4e` | `744e33a76ae5` | yes (n=2) |
 
 Every evaluated bundle is SEALED: `test_gate.json` (per class val status, pooled + per-dataset test gates, final status, recomputed merges) is listed in the bundle's manifest, so the served artifact carries the one-shot gate; `load_bundle` refuses a gate that promotes or was made for another bundle.
 
@@ -74,7 +74,7 @@ macro-F1 = sklearn convention (union of true and predicted classes); 'present-on
 
 ## Per-class test F1 (precision/recall) — primary bundles
 
-Final status = min(VAL status, pooled test gate, every wrist dataset with >= 30 accepted windows): strong needs precision >= .95 (pooled also CP95 >= .90, recall >= .05), weak needs precision >= .80; demotions only. P single-label = precision on windows whose truth is exactly one class.
+Final status = min(VAL status, pooled test gate, every wrist dataset with >= 30 accepted windows): strong needs precision >= .95 (pooled also CP95 >= .90, recall >= .05), weak needs precision >= .80; demotions only. Statuses, tau and gates of set members use single-label evidence (`set-family-1`); the P/R/F1 cells use set-target scoring. P single-label = precision on windows whose truth is exactly one class.
 
 #### posture
 
@@ -83,7 +83,7 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 | class | primary-hc F1 (P/R) | primary-nf F1 (P/R) | primary-art F1 (P/R) | linear-hc F1 (P/R) | mlp-hc F1 (P/R) | primary-hc P single-label (n) | test support | status val→final (primary-hc) | demotion reasons |
 |---|---|---|---|---|---|---|---|---|---|
 | recumbent (mostly sleep-period lying in training data) | 0.91 (0.91/0.92) | 0.89 (0.85/0.94) | 0.75 (0.72/0.77) | 0.91 (0.89/0.93) | 0.91 (0.91/0.92) | 0.90 (35,939) | 38,480 | weak→weak | – |
-| seated_likely | 0.84 (0.81/0.87) | 0.80 (0.81/0.79) | 0.63 (0.61/0.65) | 0.83 (0.81/0.85) | 0.84 (0.81/0.87) | 0.77 (25,686) | 31,775 | weak→abstain | pamap2 test: precision 0.629 at n_acc 89 -> abstain |
+| seated_likely | 0.84 (0.81/0.87) | 0.80 (0.81/0.79) | 0.63 (0.61/0.65) | 0.83 (0.81/0.85) | 0.84 (0.81/0.87) | 0.77 (25,686) | 31,775 | weak→abstain | pooled test: precision 0.774 at n_acc 28075 -> abstain |
 | upright_stationary | 0.22 (0.47/0.14) | 0.10 (0.33/0.06) | 0.00 (0.00/0.00) | 0.11 (0.29/0.07) | 0.22 (0.47/0.14) | 0.53 (4,220) | 4,220 | abstain→abstain | – |
 | postural_transition | unsupported | unsupported | unsupported | unsupported | unsupported | – | 0 | unsupported→– | – |
 
@@ -121,8 +121,8 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38401) · gate 0.91@39065→weak | 0.00/0.00/0.00 (0) · gate 0.00@26→weak | 0.44/1.00/0.62 (4) · gate 0.44@9→weak | 0.00/0.00/0.00 (0) | 0.89/0.84/0.86 (75) · gate 0.89@71→weak | 0.00/0.00/0.00 (0) · gate 0.00@25→weak | weak→weak |
-| seated_likely | 0.81/0.87/0.84 (31548) · gate 0.81@33775→weak | 0.86/0.81/0.83 (37) · gate 0.86@35→weak | 0.14/0.17/0.15 (6) · gate 0.14@7→weak | 0.86/1.00/0.92 (30) · gate 0.86@35→weak | 0.63/0.76/0.69 (74) · gate 0.63@89→abstain | 0.67/0.74/0.70 (80) · gate 0.67@88→abstain | weak→abstain |
+| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38401) · gate 0.90@36571→weak | 0.00/0.00/0.00 (0) · gate 0.00@26→weak | 0.44/1.00/0.62 (4) · gate 0.44@9→weak | 0.00/0.00/0.00 (0) | 0.89/0.84/0.86 (75) · gate 0.70@27→weak | 0.00/0.00/0.00 (0) · gate 0.00@25→weak | weak→weak |
+| seated_likely | 0.81/0.87/0.84 (31548) · gate 0.78@27831→abstain | 0.86/0.81/0.83 (37) · gate 0.86@35→weak | 0.14/0.17/0.15 (6) · gate 0.14@7→weak | 0.86/1.00/0.92 (30) · gate 0.86@35→weak | 0.63/0.76/0.69 (74) · gate 0.58@79→abstain | 0.67/0.74/0.70 (80) · gate 0.67@88→abstain | weak→abstain |
 | upright_stationary | 0.43/0.12/0.19 (4036) | 0.92/0.32/0.48 (37) | 0.00/0.00/0.00 (6) | 1.00/0.29/0.44 (7) | 0.77/0.62/0.69 (55) | 1.00/0.58/0.74 (79) | abstain→abstain |
 
 | dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
@@ -133,8 +133,8 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| stationary | 0.91/0.97/0.94 (71942) · gate 0.98@63194→strong | 0.97/1.00/0.99 (74) · gate 1.00@70→strong | 1.00/0.84/0.91 (19) · gate 1.00@16→weak | 1.00/0.92/0.96 (37) · gate 1.00@19→weak | 0.85/0.88/0.86 (187) · gate 0.96@136→strong | 1.00/0.98/0.99 (937) · gate 1.00@778→strong | strong→strong |
-| walking | 0.80/0.55/0.65 (8375) · gate 0.99@2499→strong | 0.92/1.00/0.96 (35) · gate 1.00@30→strong | 0.57/1.00/0.73 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.71/0.98/0.82 (43) · gate 1.00@22→weak | 0.79/0.96/0.86 (70) · gate 1.00@57→strong | strong→strong |
+| stationary | 0.91/0.97/0.94 (71942) · gate 0.98@63137→strong | 0.97/1.00/0.99 (74) · gate 1.00@70→strong | 1.00/0.84/0.91 (19) · gate 1.00@16→weak | 1.00/0.92/0.96 (37) · gate 1.00@19→weak | 0.85/0.88/0.86 (187) · gate 0.96@136→strong | 1.00/0.98/0.99 (937) · gate 1.00@778→strong | strong→strong |
+| walking | 0.80/0.55/0.65 (8375) · gate 0.99@2402→strong | 0.92/1.00/0.96 (35) · gate 1.00@30→strong | 0.57/1.00/0.73 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.71/0.98/0.82 (43) · gate 1.00@22→weak | 0.79/0.96/0.86 (70) · gate 1.00@57→strong | strong→strong |
 | running | 0.82/0.74/0.78 (103) · gate 0.87@68→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 1.00/0.96/0.98 (80) · gate 1.00@64→strong | strong→weak |
 | stairs | 0.02/0.12/0.04 (8) · gate 0.00@17→weak | 1.00/0.97/0.98 (32) · gate 1.00@27→weak | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.90/0.62/0.73 (29) · gate 1.00@16→weak | 1.00/0.78/0.87 (80) · gate 1.00@52→strong | weak→weak |
 | cycling | 0.69/0.60/0.65 (743) · gate 0.70@645→abstain | 1.00/0.88/0.94 (33) · gate 1.00@29→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 1.00/0.89/0.94 (28) · gate 1.00@25→weak | 0.00/0.00/0.00 (0) | weak→abstain |
@@ -161,8 +161,8 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | 0.85/0.94/0.89 (39388) · gate 0.97@20520→strong | 0.00/0.00/0.00 (0) · gate 0.00@29→weak | 0.25/1.00/0.40 (4) · gate 0.00@1→weak | 0.00/0.00/0.00 (0) | 0.78/0.80/0.79 (71) · gate 0.96@28→weak | 0.00/0.00/0.00 (0) · gate 0.00@8→weak | strong→strong |
-| seated_likely | 0.81/0.79/0.80 (30561) · gate 0.81@29535→weak | 0.40/0.05/0.10 (37) · gate 0.40@5→weak | 0.00/0.00/0.00 (6) | 0.81/1.00/0.90 (30) · gate 0.81@37→weak | 0.52/0.85/0.64 (78) · gate 0.52@128→abstain | 0.47/0.55/0.51 (80) · gate 0.47@93→abstain | weak→abstain |
+| recumbent (mostly sleep-period lying in training data) | 0.85/0.94/0.89 (39388) · gate 0.97@19196→strong | 0.00/0.00/0.00 (0) · gate 0.00@24→weak | 0.25/1.00/0.40 (4) | 0.00/0.00/0.00 (0) | 0.78/0.80/0.79 (71) · gate 0.83@6→weak | 0.00/0.00/0.00 (0) · gate 0.00@7→weak | strong→strong |
+| seated_likely | 0.81/0.79/0.80 (30561) · gate 0.78@24525→abstain | 0.40/0.05/0.10 (37) · gate 0.40@5→weak | 0.00/0.00/0.00 (6) | 0.81/1.00/0.90 (30) · gate 0.81@37→weak | 0.52/0.85/0.64 (78) · gate 0.46@114→abstain | 0.47/0.55/0.51 (80) · gate 0.47@93→abstain | weak→abstain |
 | upright_stationary | 0.33/0.06/0.11 (4036) | 0.00/0.00/0.00 (37) | 0.00/0.00/0.00 (6) | 0.00/0.00/0.00 (7) | 0.33/0.02/0.03 (55) | 0.00/0.00/0.00 (79) | abstain→abstain |
 
 | dataset | capture24 | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
@@ -173,8 +173,8 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| stationary | 0.86/0.98/0.92 (71976) · gate 0.97@55806→strong | 0.84/1.00/0.91 (74) · gate 1.00@73→strong | 0.84/0.84/0.84 (19) · gate 1.00@16→weak | 1.00/0.95/0.97 (37) · gate 1.00@12→weak | 0.79/0.90/0.84 (187) · gate 0.98@116→strong | 1.00/0.89/0.94 (937) · gate 1.00@507→strong | strong→strong |
-| walking | 0.74/0.47/0.57 (8341) · gate 0.91@3173→weak | 0.55/1.00/0.71 (35) · gate 0.58@60→abstain | 0.40/1.00/0.57 (4) · gate 0.57@7→weak | 0.00/0.00/0.00 (0) | 0.38/0.91/0.53 (43) · gate 0.26@31→abstain | 0.40/0.86/0.54 (70) · gate 0.39@64→abstain | weak→abstain |
+| stationary | 0.86/0.98/0.92 (71976) · gate 0.97@55763→strong | 0.84/1.00/0.91 (74) · gate 1.00@73→strong | 0.84/0.84/0.84 (19) · gate 1.00@16→weak | 1.00/0.95/0.97 (37) · gate 1.00@12→weak | 0.79/0.90/0.84 (187) · gate 0.98@116→strong | 1.00/0.89/0.94 (937) · gate 1.00@507→strong | strong→strong |
+| walking | 0.74/0.47/0.57 (8341) · gate 0.90@3014→weak | 0.55/1.00/0.71 (35) · gate 0.58@60→abstain | 0.40/1.00/0.57 (4) · gate 0.57@7→weak | 0.00/0.00/0.00 (0) | 0.38/0.91/0.53 (43) · gate 0.26@31→abstain | 0.40/0.86/0.54 (70) · gate 0.39@61→abstain | weak→abstain |
 | running | 0.53/0.93/0.67 (103) · gate 0.67@132→abstain | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 0.91/1.00/0.95 (10) · gate 1.00@10→weak | 1.00/0.96/0.98 (80) · gate 1.00@68→strong | weak→abstain |
 | stairs | 0.00/0.00/0.00 (8) | 0.00/0.00/0.00 (32) | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 0.00/0.00/0.00 (80) | abstain→abstain |
 | cycling | 0.49/0.41/0.45 (743) · gate 0.58@414→abstain | 1.00/0.58/0.73 (33) · gate 1.00@17→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) · gate 0.00@1→weak | 1.00/0.71/0.83 (28) · gate 1.00@19→weak | 0.00/0.00/0.00 (0) · gate 0.00@28→weak | weak→abstain |
@@ -201,7 +201,7 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | 0.73/0.77/0.75 (40277) · gate 0.81@20174→weak | 0.00/0.00/0.00 (0) | 0.40/0.50/0.44 (4) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) · gate 0.00@27→weak | 0.31/0.91/0.46 (44) · gate 0.16@90→abstain | 0.00/0.00/0.00 (0) · gate 0.00@11→weak | weak→abstain |
+| recumbent (mostly sleep-period lying in training data) | 0.73/0.77/0.75 (40277) · gate 0.80@16682→abstain | 0.00/0.00/0.00 (0) | 0.40/0.50/0.44 (4) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) · gate 0.00@23→weak | 0.31/0.91/0.46 (44) · gate 0.15@84→abstain | 0.00/0.00/0.00 (0) · gate 0.00@5→weak | weak→abstain |
 | seated_likely | 0.61/0.65/0.63 (29672) | 0.82/0.49/0.61 (37) | 0.27/0.50/0.35 (6) | 0.00/0.00/0.00 (30) | 0.62/0.43/0.51 (105) | 0.72/0.55/0.62 (80) | abstain→abstain |
 | upright_stationary | 0.00/0.00/0.00 (4036) | 0.00/0.00/0.00 (37) | 0.00/0.00/0.00 (6) | 0.00/0.00/0.00 (7) | 0.00/0.00/0.00 (55) | 0.00/0.00/0.00 (79) | abstain→abstain |
 
@@ -213,7 +213,7 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | class | capture24 (50 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|
-| stationary | 0.81/1.00/0.89 (72149) · gate 0.81@88816→weak | 0.47/1.00/0.64 (74) · gate 0.47@156→abstain | 0.49/1.00/0.66 (19) · gate 0.49@39→abstain | 1.00/1.00/1.00 (37) · gate 1.00@37→strong | 0.58/0.98/0.73 (187) · gate 0.58@316→abstain | 0.89/0.99/0.94 (937) · gate 0.89@1035→weak | weak→abstain |
+| stationary | 0.81/1.00/0.89 (72149) · gate 0.81@88378→weak | 0.47/1.00/0.64 (74) · gate 0.47@156→abstain | 0.49/1.00/0.66 (19) · gate 0.49@39→abstain | 1.00/1.00/1.00 (37) · gate 1.00@37→strong | 0.58/0.98/0.73 (187) · gate 0.58@316→abstain | 0.89/0.99/0.94 (937) · gate 0.89@1035→weak | weak→abstain |
 | walking | 0.84/0.08/0.14 (8168) | 0.06/0.03/0.04 (35) | 0.00/0.00/0.00 (4) | 0.00/0.00/0.00 (0) | 0.60/0.74/0.67 (43) | 0.49/0.39/0.43 (70) | abstain→abstain |
 | running | 0.64/0.51/0.57 (103) · gate 0.70@76→abstain | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 0.45/1.00/0.62 (10) · gate 0.45@22→weak | 0.96/0.81/0.88 (80) · gate 0.98@64→strong | weak→abstain |
 | stairs | 0.00/0.00/0.00 (8) | 0.00/0.00/0.00 (32) | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (29) | 0.00/0.00/0.00 (80) | abstain→abstain |
@@ -241,9 +241,9 @@ Posture targets: `recumbent` is mostly Capture-24 sleep-diary lying in the train
 
 | experiment | recumbent truth | sleep-period share | awake-lying truth (by dataset) | recumbent P/R/F1 on non-sleep windows | awake-lying gate (pooled) | awake-lying status |
 |---|---|---|---|---|---|---|
-| primary-hc | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.41/0.99/0.58 | P=0.411 n=6,237 → abstain | abstain |
-| primary-nf | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.34/1.00/0.51 | P=0.444 n=1,336 → abstain | abstain |
-| primary-art | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.27/1.00/0.43 | P=0.281 n=5,522 → abstain | abstain |
+| primary-hc | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.41/0.99/0.58 | P=0.006 n=3,699 → abstain | abstain |
+| primary-nf | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.34/1.00/0.51 | P=0.008 n=666 → abstain | abstain |
+| primary-art | 44,569 | 0.806 | 8,665 (capture24 8576, mhealth 4, pamap2 85) | 0.27/1.00/0.43 | P=0.004 n=3,476 → abstain | abstain |
 
 The awake-lying gate is reported only: the served `recumbent` status is the pooled gate's, and the class must be read as 'recumbent (mostly sleep-period lying in training data)'.
 
@@ -446,16 +446,18 @@ The owner approved non-commercial use of GOTOV and WEAR on 2026-10-06; sets with
 
 ### Caveats
 
-- **GOTOV is older adults** (35 participants, 59.5-81.3 y, BMI 23-35, recruited > 60 y) in a scripted protocol: its walking speeds are **instructed** ('slow / medium / fast pace'), never measured, so `brisk_walking` here means 'an older adult asked to walk fast' — not a cadence or speed threshold, and not validated on younger or free-living walkers. Outdoor walking exists for 22 participants only; the frozen split leaves **one** GOTOV test participant with walking (GOTOV07: 19 `brisk_walking` and 33 `walking` test windows), so every GOTOV walking / brisk_walking / cycling test number is a one-subject, descriptive result and the test gate cannot demote with < 30 accepted windows.
+- **GOTOV is older adults** (35 participants, 59.5-81.3 y, BMI 23-35, recruited > 60 y) in a scripted protocol: its walking speeds are **instructed** ('slow / medium / fast pace'), never measured, so `brisk_walking` here means 'an older adult asked to walk fast' — not a cadence or speed threshold, and not validated on younger or free-living walkers. Outdoor walking exists for **21** participants only (14 train, 6 val, 1 test; earlier versions of this summary and the frozen split manifest's free-text note say 22 — a counting error; the note is inside the frozen manifest's hash and is left as is); the frozen split leaves **one** GOTOV test participant with walking (GOTOV07: 19 `brisk_walking` and 33 `walking` test windows), so every GOTOV walking / brisk_walking / cycling test number is a one-subject, descriptive result and the test gate cannot demote with < 30 accepted windows.
 - GOTOV labels are protocol-imputed (researcher-recorded start/end): the first/last 10 s of every activity are MASK (`gotov-guard-10s`), and transitions give interior negatives only. Its movement_intensity target is the **measured** COSMED K4b2 METS (time-weighted per window; the first 60 s of each activity MASK for VO2 on-kinetics; 4 of 35 participants have no COSMED) — whole-body energy expenditure of older adults, not wrist motion.
-- WEAR is 24 (mostly young) adults doing 18 outdoor workouts on a Bangle.js; **one wrist per subject** (left unless < 95 % finite) so no movement is counted twice. `exercise_motion` is supervised only by WEAR push-ups (+complex), burpees, bench-dips and jogging with arm circles (sit-ups / lunges stay MASK: 'arms may be static').
+- WEAR is 24 (mostly young) adults doing 18 outdoor workouts on a Bangle.js; **one wrist per subject** (left unless < 95 % finite) so no movement is counted twice. `exercise_motion` is supervised only by WEAR push-ups (+complex), burpees, bench-dips and jogging with arm circles (sit-ups / lunges stay MASK: 'arms may be static'). WEAR participant identity is **unconfirmed**: the release has one file per `sbj_<k>` and no participant metadata, so it cannot be verified locally that the 24 ids are 24 distinct people (the subject split assumes they are).
+- **GOTOV loader rules were chosen on all 35 files, test participants included (G2 D-4).** The 10 s label guard (`gotov-guard-10s`) and the 60 s MET on-kinetics mask (`gotov-met-1`) were set from signal/label QC (wrist activity onsets against the protocol-imputed label onsets; COSMED VO2 plateaus) over every GOTOV file, including the 7 test participants, before any model was trained or evaluated on GOTOV. No model output was seen when they were chosen, but the test participants' raw data informed them: read GOTOV test numbers as slightly optimistic.
 - Both sets are **CC BY-NC-SA 4.0**: every `ncsa-*` bundle except `ncsa-lodo-nonc-hc` records `training_data_licences` = [CC BY 4.0, CC BY-NC-SA 4.0] and may only be used non-commercially (Nara is non-commercial; owner decision 2026-10-06). Bundles stay outside git.
 - The `ncsa-*` test split = the six CC BY test splits + the GOTOV (7) and WEAR (5) test subjects, so its pooled numbers are not comparable with the sealed `primary-*` bundles above; compare `ncsa-primary-hc` with `ncsa-lodo-nonc-hc` (same test windows, same archs and OOD method, CC BY data only). WISDM / PAMAP2 test caveats (G-8) apply unchanged.
 
 ### Key findings (computed from the sealed reports)
 
 - Pooled macro-F1 without → with NC-SA data: posture 0.656 → 0.658, locomotion 0.664 → 0.693, arm_behavior 0.417 → 0.543 (same eight-set test windows; CIs in the headline table).
-- **brisk_walking becomes supported (GOTOV walkingFast) but does not learn pace.** Pooled set-aware P/R/F1 0.92/0.82/0.87, status strong→strong — earned on pace-unknown walking {walking, brisk_walking} windows, which count as correct for either member; single-label precision/recall 0.00/0.00 (n = 19). On the only pace-labelled test windows (GOTOV07) the fast walk is called `walking` 19/19 times and `brisk_walking` 0/19; slow/medium walking is `walking` 33/33. Pace-unknown walking goes the other way: WISDM walking (set target) is argmax `brisk_walking` 67/70 times, Capture-24 free-living walking `brisk_walking` 2279 vs `walking` 1938 windows. `walking` drops to abstain→abstain and is merged into `brisk_walking` (final merge_into {'walking': 'brisk_walking'}): the decoder would read ordinary walking as brisk. The split the head learned is older-adult/slow vs young/lab walking, not pace — **do not use brisk_walking from these bundles as a pace signal**; without GOTOV it stays unsupported (covered by `walking`, strong→strong).
+- **brisk_walking becomes supported (GOTOV walkingFast) but does not learn pace.** Pooled set-target P/R/F1 0.92/0.82/0.87 — pace-unknown walking {walking, brisk_walking} windows count as correct for either member there; single-label precision/recall 0.00/0.00 (n = 19). On the only pace-labelled test windows (GOTOV07) the fast walk is called `walking` 19/19 times and `brisk_walking` 0/19; slow/medium walking is `walking` 33/33. Pace-unknown walking goes the other way: WISDM walking (set target) is argmax `brisk_walking` 67/70 times, Capture-24 free-living walking `brisk_walking` 2279 vs `walking` 1938 windows. Under the earlier set-target status rule brisk_walking was strong→strong and walking abstain→abstain, merged into brisk_walking ({'walking': 'brisk_walking'}): the decoder would have read ordinary walking as brisk. With the single-label rule (`set-family-1`, G2 D-1) brisk_walking is abstain→abstain, walking weak→weak, final merge_into {'brisk_walking': 'walking'} (specific → general only), and the walking family {walking, brisk_walking} scored as one class is strong→strong (argmax P/R 0.79/0.55). The split the head learned is older-adult/slow vs young/lab walking, not pace — **brisk_walking from these bundles is not a pace signal**; without GOTOV it stays unsupported (covered by `walking`, strong→strong).
+- **arm_behavior like-for-like (G2 D-3):** the headline 0.417 → 0.543 compares different class sets. On the 3 classes both bundles support (quiet, desk_like, repetitive_hand_motion) the mean F1 is 0.417 → 0.469 (+0.053); exercise_motion is new with NC-SA data (its windows are MASK, not scored, without it).
 - **exercise_motion becomes a class** (WEAR only): unsupported without WEAR; with it P/R/F1 0.69/0.86/0.77, status strong→weak (WEAR test 1.00/0.83/0.91, 5 subjects; pooled gate precision 0.964 at n_acc 56, CP95 lower bound 0.892 < 0.90 -> weak). `ncsa-lodo-nowear-hc` has no exercise_motion class at all.
 - WEAR test (5 subjects): running 1.00/0.39/0.56 → 1.00/0.96/0.98; stationary (stretching) 0.65/0.82/0.73 → 0.81/0.91/0.86. Without WEAR, stationary is demoted strong→abstain by the WEAR test gate (strong→abstain; with WEAR strong→weak).
 - GOTOV test (7 older adults, awake lying): recumbent 0.53/0.72/0.61 → 0.63/0.79/0.70, seated_likely 0.50/0.56/0.53 → 0.67/0.68/0.67, upright_stationary 1.00/0.12/0.21 → 0.98/0.55/0.70. GOTOV's own test gate demotes recumbent and seated_likely to abstain in every ncsa bundle (with: weak→abstain / weak→abstain): awake lying vs reclined sitting of older adults stays below 0.80 precision.
@@ -502,14 +504,14 @@ macro-F1 = sklearn convention (union of true and predicted classes); 'present-on
 
 ### Per-class test P/R/F1 and final status — without vs with
 
-Pooled over the eight-set test split. `unsupported` = the class failed the train-support rule in that bundle (< 200 train windows / 5 train subjects / 2 val subjects); a set target {walking, brisk_walking} counts as correct for either member.
+Pooled over the eight-set test split. `unsupported` = the class failed the train-support rule in that bundle (< 200 train windows / 5 train subjects / 2 val subjects); in the P/R/F1 a set target {walking, brisk_walking} counts as correct for either member; the statuses use single-label evidence (`set-family-1`).
 
 #### posture
 
 | class | test support | ncsa-lodo-nonc-hc F1 (P/R) · val→final | ncsa-primary-hc F1 (P/R) · val→final | ncsa-lodo-nogotov-hc F1 (P/R) · val→final | ncsa-lodo-nowear-hc F1 (P/R) · val→final | ncsa-primary-hc P single-label (n) | ncsa-primary-hc demotion reasons |
 |---|---|---|---|---|---|---|---|
 | recumbent (mostly sleep-period lying in training data) | 38,376 | 0.91 (0.90/0.92) · weak→abstain | 0.92 (0.91/0.92) · weak→abstain | 0.91 (0.90/0.92) · weak→abstain | 0.92 (0.91/0.92) · weak→abstain | 0.91 (36,065) | gotov test: precision 0.627 at n_acc 158 -> abstain |
-| seated_likely | 32,187 | 0.84 (0.81/0.87) · weak→abstain | 0.84 (0.81/0.88) · weak→abstain | 0.84 (0.81/0.87) · weak→abstain | 0.84 (0.81/0.88) · weak→abstain | 0.77 (25,868) | gotov test: precision 0.668 at n_acc 184 -> abstain |
+| seated_likely | 32,187 | 0.84 (0.81/0.87) · weak→abstain | 0.84 (0.81/0.88) · weak→abstain | 0.84 (0.81/0.87) · weak→abstain | 0.84 (0.81/0.88) · weak→abstain | 0.77 (25,868) | pooled test: precision 0.771 at n_acc 28694 -> abstain |
 | upright_stationary | 4,298 | 0.22 (0.47/0.14) · abstain→abstain | 0.21 (0.48/0.14) · abstain→abstain | 0.21 (0.47/0.14) · abstain→abstain | 0.21 (0.48/0.14) · abstain→abstain | 0.54 (4,298) | – |
 | postural_transition | 0 | unsupported | unsupported | unsupported | unsupported | – | – |
 
@@ -518,8 +520,8 @@ Pooled over the eight-set test split. `unsupported` = the class failed the train
 | class | test support | ncsa-lodo-nonc-hc F1 (P/R) · val→final | ncsa-primary-hc F1 (P/R) · val→final | ncsa-lodo-nogotov-hc F1 (P/R) · val→final | ncsa-lodo-nowear-hc F1 (P/R) · val→final | ncsa-primary-hc P single-label (n) | ncsa-primary-hc demotion reasons |
 |---|---|---|---|---|---|---|---|
 | stationary | 73,703 | 0.94 (0.91/0.97) · strong→abstain | 0.94 (0.91/0.97) · strong→weak | 0.94 (0.91/0.97) · strong→weak | 0.94 (0.91/0.97) · strong→abstain | 0.93 (73,462) | pamap2 test: precision 0.918 at n_acc 158 -> weak |
-| walking | 6,265 | 0.66 (0.79/0.56) · strong→strong | 0.48 (0.76/0.35) · abstain→abstain | 0.66 (0.80/0.57) · strong→strong | 0.51 (0.76/0.39) · weak→abstain | 0.05 (33) | – |
-| brisk_walking | 2,305 | unsupported | 0.87 (0.92/0.82) · strong→strong | unsupported | 0.89 (0.93/0.85) · strong→strong | 0.00 (19) | – |
+| walking | 6,265 | 0.66 (0.79/0.56) · strong→strong | 0.48 (0.76/0.35) · weak→weak | 0.66 (0.80/0.57) · strong→strong | 0.51 (0.76/0.39) · weak→abstain | 0.05 (33) | – |
+| brisk_walking | 2,305 | unsupported | 0.87 (0.92/0.82) · abstain→abstain | unsupported | 0.89 (0.93/0.85) · abstain→abstain | 0.00 (19) | – |
 | running | 296 | 0.80 (0.92/0.71) · strong→weak | 0.87 (0.89/0.85) · strong→weak | 0.88 (0.88/0.88) · strong→weak | 0.81 (0.95/0.71) · strong→weak | 0.95 (296) | pooled test: precision 0.930 at n_acc 229 -> weak |
 | stairs | 152 | 0.69 (0.65/0.74) · weak→abstain | 0.76 (0.70/0.84) · strong→weak | 0.76 (0.72/0.82) · weak→abstain | 0.69 (0.59/0.84) · strong→strong | 0.89 (152) | pooled test: precision 0.955 at n_acc 88 -> weak |
 | cycling | 855 | 0.69 (0.73/0.64) · weak→abstain | 0.72 (0.75/0.69) · strong→weak | 0.70 (0.76/0.65) · weak→abstain | 0.71 (0.74/0.69) · strong→weak | 0.86 (855) | pooled test: precision 0.934 at n_acc 361 -> weak |
@@ -598,8 +600,8 @@ Pooled over the eight-set test split. `unsupported` = the class failed the train
 
 | class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38178) · gate 0.91@38454→weak | 0.63/0.79/0.70 (126) · gate 0.63@158→abstain | 0.00/0.00/0.00 (0) · gate 0.00@45→abstain | 0.33/1.00/0.50 (4) · gate 0.33@12→weak | 0.00/0.00/0.00 (0) | 0.90/0.82/0.86 (68) · gate 0.90@62→weak | 0.00/0.00/0.00 (0) · gate 0.00@20→weak | weak→abstain |
-| seated_likely | 0.81/0.88/0.85 (31771) · gate 0.81@34475→weak | 0.67/0.68/0.67 (182) · gate 0.67@184→abstain | 0.59/0.27/0.37 (37) · gate 0.59@17→weak | 0.00/0.00/0.00 (6) · gate 0.00@3→weak | 0.83/1.00/0.91 (30) · gate 0.83@36→weak | 0.66/0.72/0.69 (81) · gate 0.66@88→abstain | 0.68/0.80/0.74 (80) · gate 0.68@94→abstain | weak→abstain |
+| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38178) · gate 0.91@36183→weak | 0.63/0.79/0.70 (126) · gate 0.63@158→abstain | 0.00/0.00/0.00 (0) · gate 0.00@45→abstain | 0.33/1.00/0.50 (4) · gate 0.33@12→weak | 0.00/0.00/0.00 (0) | 0.90/0.82/0.86 (68) · gate 0.76@25→weak | 0.00/0.00/0.00 (0) · gate 0.00@20→weak | weak→abstain |
+| seated_likely | 0.81/0.88/0.85 (31771) · gate 0.77@28288→abstain | 0.67/0.68/0.67 (182) · gate 0.67@184→abstain | 0.59/0.27/0.37 (37) · gate 0.59@17→weak | 0.00/0.00/0.00 (6) · gate 0.00@3→weak | 0.83/1.00/0.91 (30) · gate 0.83@36→weak | 0.66/0.72/0.69 (81) · gate 0.58@72→abstain | 0.68/0.80/0.74 (80) · gate 0.68@94→abstain | weak→abstain |
 | upright_stationary | 0.43/0.11/0.18 (4036) | 0.98/0.55/0.70 (78) | 0.92/0.30/0.45 (37) | 1.00/0.17/0.29 (6) | 1.00/0.14/0.25 (7) | 0.69/0.67/0.68 (55) | 1.00/0.57/0.73 (79) | abstain→abstain |
 
 | dataset | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
@@ -610,9 +612,9 @@ Pooled over the eight-set test split. `unsupported` = the class failed the train
 
 | class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wear (5 subj) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|---|---|
-| stationary | 0.91/0.97/0.94 (71954) · gate 0.97@64350→strong | 0.96/0.96/0.96 (386) · gate 1.00@327→strong | 0.99/1.00/0.99 (74) · gate 1.00@67→strong | 1.00/0.95/0.97 (19) · gate 1.00@16→weak | 1.00/1.00/1.00 (37) · gate 1.00@23→weak | 0.83/0.90/0.87 (187) · gate 0.92@158→weak | 0.81/0.91/0.86 (112) · gate 0.93@74→weak | 1.00/0.99/0.99 (937) · gate 1.00@797→strong | strong→weak |
-| walking | 0.76/0.35/0.48 (5578) | 0.63/1.00/0.78 (33) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/0.50/0.67 (2) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | abstain→abstain |
-| brisk_walking | 0.92/0.82/0.87 (2785) · gate 0.97@1266→strong | 0.00/0.00/0.00 (19) | 0.95/1.00/0.97 (35) · gate 1.00@28→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.97/0.73/0.83 (41) · gate 1.00@15→weak | 0.00/0.00/0.00 (0) | 0.88/0.96/0.92 (70) · gate 1.00@57→strong | strong→strong |
+| stationary | 0.91/0.97/0.94 (71954) · gate 0.97@64290→strong | 0.96/0.96/0.96 (386) · gate 1.00@327→strong | 0.99/1.00/0.99 (74) · gate 1.00@67→strong | 1.00/0.95/0.97 (19) · gate 1.00@16→weak | 1.00/1.00/1.00 (37) · gate 1.00@23→weak | 0.83/0.90/0.87 (187) · gate 0.92@158→weak | 0.81/0.91/0.86 (112) · gate 0.93@74→weak | 1.00/0.99/0.99 (937) · gate 1.00@797→strong | strong→weak |
+| walking | 0.76/0.35/0.48 (5578) · gate 0.00@12→weak | 0.63/1.00/0.78 (33) · gate 1.00@17→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/0.50/0.67 (2) | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | weak→weak |
+| brisk_walking | 0.92/0.82/0.87 (2785) | 0.00/0.00/0.00 (19) | 0.95/1.00/0.97 (35) | 1.00/1.00/1.00 (4) | 0.00/0.00/0.00 (0) | 0.97/0.73/0.83 (41) | 0.00/0.00/0.00 (0) | 0.88/0.96/0.92 (70) | abstain→abstain |
 | running | 0.84/0.61/0.71 (103) · gate 0.93@57→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@7→weak | 0.00/0.00/0.00 (0) | 0.36/1.00/0.53 (10) · gate 0.45@22→weak | 1.00/0.96/0.98 (93) · gate 1.00@83→strong | 1.00/1.00/1.00 (80) · gate 1.00@60→strong | strong→weak |
 | stairs | 0.04/0.25/0.06 (8) · gate 0.00@4→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (32) · gate 1.00@22→weak | 1.00/1.00/1.00 (3) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (29) · gate 1.00@17→weak | 0.00/0.00/0.00 (0) | 1.00/0.78/0.87 (80) · gate 1.00@45→strong | strong→weak |
 | cycling | 0.71/0.66/0.68 (743) · gate 0.92@285→weak | 1.00/1.00/1.00 (47) · gate 1.00@46→strong | 1.00/0.88/0.94 (33) · gate 1.00@12→weak | 1.00/1.00/1.00 (4) · gate 1.00@2→weak | 0.00/0.00/0.00 (0) | 1.00/0.96/0.98 (28) · gate 1.00@16→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | strong→weak |
@@ -640,8 +642,8 @@ Pooled over the eight-set test split. `unsupported` = the class failed the train
 
 | class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|---|
-| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38401) · gate 0.91@39065→weak | 0.53/0.72/0.61 (126) · gate 0.53@171→abstain | 0.00/0.00/0.00 (0) · gate 0.00@26→weak | 0.44/1.00/0.62 (4) · gate 0.44@9→weak | 0.00/0.00/0.00 (0) | 0.89/0.84/0.86 (75) · gate 0.89@71→weak | 0.00/0.00/0.00 (0) · gate 0.00@25→weak | weak→abstain |
-| seated_likely | 0.81/0.87/0.84 (31548) · gate 0.81@33775→weak | 0.50/0.56/0.53 (182) · gate 0.50@206→abstain | 0.86/0.81/0.83 (37) · gate 0.86@35→weak | 0.14/0.17/0.15 (6) · gate 0.14@7→weak | 0.86/1.00/0.92 (30) · gate 0.86@35→weak | 0.63/0.76/0.69 (74) · gate 0.63@89→abstain | 0.67/0.74/0.70 (80) · gate 0.67@88→abstain | weak→abstain |
+| recumbent (mostly sleep-period lying in training data) | 0.91/0.92/0.92 (38401) · gate 0.90@36571→weak | 0.53/0.72/0.61 (126) · gate 0.53@171→abstain | 0.00/0.00/0.00 (0) · gate 0.00@26→weak | 0.44/1.00/0.62 (4) · gate 0.44@9→weak | 0.00/0.00/0.00 (0) | 0.89/0.84/0.86 (75) · gate 0.70@27→weak | 0.00/0.00/0.00 (0) · gate 0.00@25→weak | weak→abstain |
+| seated_likely | 0.81/0.87/0.84 (31548) · gate 0.78@27831→abstain | 0.50/0.56/0.53 (182) · gate 0.50@206→abstain | 0.86/0.81/0.83 (37) · gate 0.86@35→weak | 0.14/0.17/0.15 (6) · gate 0.14@7→weak | 0.86/1.00/0.92 (30) · gate 0.86@35→weak | 0.63/0.76/0.69 (74) · gate 0.58@79→abstain | 0.67/0.74/0.70 (80) · gate 0.67@88→abstain | weak→abstain |
 | upright_stationary | 0.43/0.12/0.19 (4036) | 1.00/0.12/0.21 (78) | 0.92/0.32/0.48 (37) | 0.00/0.00/0.00 (6) | 1.00/0.29/0.44 (7) | 0.77/0.62/0.69 (55) | 1.00/0.58/0.74 (79) | abstain→abstain |
 
 | dataset | capture24 | gotov | hhar_watch | mhealth | opportunity | pamap2 | wisdm2019_watch |
@@ -652,8 +654,8 @@ Pooled over the eight-set test split. `unsupported` = the class failed the train
 
 | class | capture24 (50 subj) | gotov (7 subj) | hhar_watch (2 subj, descriptive) | mhealth (2 subj, descriptive) | opportunity (1 subj, descriptive) | pamap2 (2 subj, descriptive) | wear (5 subj) | wisdm2019_watch (8 subj) | final |
 |---|---|---|---|---|---|---|---|---|---|
-| stationary | 0.91/0.97/0.94 (71942) · gate 0.98@63194→strong | 0.90/0.87/0.88 (386) · gate 1.00@296→strong | 0.97/1.00/0.99 (74) · gate 1.00@70→strong | 1.00/0.84/0.91 (19) · gate 1.00@16→weak | 1.00/0.92/0.96 (37) · gate 1.00@19→weak | 0.85/0.88/0.86 (187) · gate 0.96@136→strong | 0.65/0.82/0.73 (112) · gate 0.59@61→abstain | 1.00/0.98/0.99 (937) · gate 1.00@778→strong | strong→abstain |
-| walking | 0.80/0.55/0.65 (8375) · gate 0.99@2499→strong | 0.84/1.00/0.91 (52) · gate 1.00@52→strong | 0.92/1.00/0.96 (35) · gate 1.00@30→strong | 0.57/1.00/0.73 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.71/0.98/0.82 (43) · gate 1.00@22→weak | 0.00/0.00/0.00 (0) · gate 0.00@3→weak | 0.79/0.96/0.86 (70) · gate 1.00@57→strong | strong→strong |
+| stationary | 0.91/0.97/0.94 (71942) · gate 0.98@63137→strong | 0.90/0.87/0.88 (386) · gate 1.00@296→strong | 0.97/1.00/0.99 (74) · gate 1.00@70→strong | 1.00/0.84/0.91 (19) · gate 1.00@16→weak | 1.00/0.92/0.96 (37) · gate 1.00@19→weak | 0.85/0.88/0.86 (187) · gate 0.96@136→strong | 0.65/0.82/0.73 (112) · gate 0.59@61→abstain | 1.00/0.98/0.99 (937) · gate 1.00@778→strong | strong→abstain |
+| walking | 0.80/0.55/0.65 (8375) · gate 0.99@2402→strong | 0.84/1.00/0.91 (52) · gate 1.00@52→strong | 0.92/1.00/0.96 (35) · gate 1.00@30→strong | 0.57/1.00/0.73 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 0.71/0.98/0.82 (43) · gate 1.00@22→weak | 0.00/0.00/0.00 (0) · gate 0.00@3→weak | 0.79/0.96/0.86 (70) · gate 1.00@57→strong | strong→strong |
 | running | 0.82/0.74/0.78 (103) · gate 0.87@68→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 0.00/0.00/0.00 (0) | 1.00/1.00/1.00 (10) · gate 1.00@10→weak | 1.00/0.39/0.56 (93) · gate 1.00@27→weak | 1.00/0.96/0.98 (80) · gate 1.00@64→strong | strong→weak |
 | stairs | 0.02/0.12/0.04 (8) · gate 0.00@17→weak | 0.00/0.00/0.00 (0) | 1.00/0.97/0.98 (32) · gate 1.00@27→weak | 0.00/0.00/0.00 (3) | 0.00/0.00/0.00 (0) | 0.90/0.62/0.73 (29) · gate 1.00@16→weak | 0.00/0.00/0.00 (0) · gate 0.00@8→weak | 1.00/0.78/0.87 (80) · gate 1.00@52→strong | weak→abstain |
 | cycling | 0.69/0.60/0.65 (743) · gate 0.70@645→abstain | 1.00/0.91/0.96 (47) · gate 1.00@43→strong | 1.00/0.88/0.94 (33) · gate 1.00@29→weak | 1.00/1.00/1.00 (4) · gate 1.00@4→weak | 0.00/0.00/0.00 (0) | 1.00/0.89/0.94 (28) · gate 1.00@25→weak | 0.00/0.00/0.00 (0) | 0.00/0.00/0.00 (0) | weak→abstain |
@@ -722,11 +724,11 @@ All movement-intensity sets:
 
 | experiment | recumbent truth | sleep-period share | awake-lying truth (by dataset) | recumbent P/R/F1 on non-sleep windows | awake-lying gate (pooled) | awake-lying status |
 |---|---|---|---|---|---|---|
-| ncsa-lodo-nonc-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.414 n=6,408 → abstain | abstain |
-| ncsa-primary-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.412 n=5,892 → abstain | abstain |
-| ncsa-lodo-nogotov-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.414 n=6,411 → abstain | abstain |
-| ncsa-lodo-nowear-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.413 n=5,888 → abstain | abstain |
-| ncsa-primary-nf | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.36/0.99/0.52 | P=0.461 n=1,337 → abstain | abstain |
+| ncsa-lodo-nonc-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.029 n=3,870 → abstain | abstain |
+| ncsa-primary-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.034 n=3,584 → abstain | abstain |
+| ncsa-lodo-nogotov-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.029 n=3,871 → abstain | abstain |
+| ncsa-lodo-nowear-hc | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.41/0.98/0.58 | P=0.034 n=3,580 → abstain | abstain |
+| ncsa-primary-nf | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.36/0.99/0.52 | P=0.054 n=761 → abstain | abstain |
 | ncsa-primary-art | 44,695 | 0.803 | 8,791 (capture24 8576, gotov 126, mhealth 4, pamap2 85) | 0.25/0.99/0.40 | – | – |
 
 The awake-lying gate is reported only: the served `recumbent` status is the pooled gate's, and the class must be read as 'recumbent (mostly sleep-period lying in training data)'.
@@ -858,6 +860,113 @@ The awake-lying gate is reported only: the served `recumbent` status is the pool
 | ncsa-lodo-nogotov-hc | maha_global | 14.379 | 0.047 |
 | ncsa-lodo-nowear-hc | maha_global | 14.339 | 0.051 |
 
+## Set-target status rule (G2 D-1, 2026-10-06)
+
+Rule `set-family-1`: set targets: a window whose truth is a set containing class c and another class neither confirms nor refutes c, so c's VAL operating point, status and test gates (pooled and per dataset) use only windows whose truth is exactly {c} or excludes c (single-label evidence); every multi-member set family is scored as one class (merged probability; correct iff the truth lies inside the family) and earns its own, reported, family status; merges only go specific -> general (brisk_walking -> walking, stairs -> walking). Before it, a set window (pace-unknown walking {walking, brisk_walking}, Capture-24 'sitting/lying' {recumbent, seated_likely}, Capture-24 'walking and occasional standing' {walking, brisk_walking, stationary}) counted as correct for whichever member was predicted, which made `brisk_walking` strong in `ncsa-primary-hc` on pace-unknown walking alone (VAL single-label precision 18/27 = 0.67; no correct single-label brisk prediction on TEST) and merged an abstained `walking` INTO it. Every bundle was retrained from a clean commit with the new rule and evaluated once more (`post_audit_rule_change`). Rows below: classes whose VAL status, tau or final status differ between the two rules ('set-target' = the earlier rule recomputed on the new evaluation; it equals the previously sealed status). P/R/F1 tables elsewhere still use set-target scoring for the metrics; statuses, tau and gates use the new rule.
+
+| experiment | head | class | test set windows excluded | set-target val→final (tau) | single-label val→final (tau) |
+|---|---|---|---|---|---|
+| ood-hc | posture | seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.475) |
+| ood-hc | locomotion | stationary | 453 | strong→strong (0.850) | strong→strong (0.855) |
+| ood-hc | locomotion | walking | 453 | weak→abstain (0.475) | weak→abstain (0.485) |
+| ood-art | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | weak→abstain (0.630) | weak→abstain (0.665) |
+| primary-nf | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | strong→strong (0.880) | strong→strong (0.885) |
+| primary-nf | locomotion | walking | 453 | weak→abstain (0.600) | weak→abstain (0.605) |
+| primary-art | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | weak→abstain (0.590) | weak→abstain (0.605) |
+| linear-hc | posture | seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.480) |
+| linear-art | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | weak→abstain (0.630) | weak→abstain (0.665) |
+| mlp-art | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | weak→abstain (0.590) | weak→abstain (0.605) |
+| w10-hc | posture | seated_likely | 26,872 | weak→abstain (0.515) | weak→abstain (0.605) |
+| w10-hc | locomotion | walking | 1,438 | strong→strong (0.850) | strong→strong (0.855) |
+| lodo-c24only-hc | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | strong→strong (0.875) | strong→strong (0.880) |
+| lodo-nohhar-hc | locomotion | walking | 453 | strong→strong (0.900) | strong→strong (0.905) |
+| seed1-hc | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | strong→strong (0.950) | strong→strong (0.960) |
+| seed2-hc | posture | seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.395) |
+| ncsa-ood-hc | posture | seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.520) |
+| ncsa-ood-hc | locomotion | brisk_walking | 8,759 | weak→weak (0.470) | abstain→abstain (1.000) |
+| ncsa-ood-hc | locomotion | walking | 8,759 | abstain→abstain (1.000) | weak→abstain (0.575) |
+| ncsa-ood-nf | locomotion | walking | 8,759 | weak→abstain (0.445) | abstain→abstain (1.000) |
+| ncsa-ood-art | posture | recumbent (mostly sleep-period lying in training data) | 8,630 | weak→abstain (0.665) | weak→abstain (0.775) |
+| ncsa-primary-hc | locomotion | brisk_walking | 8,759 | strong→strong (0.805) | abstain→abstain (1.000) |
+| ncsa-primary-hc | locomotion | walking | 8,759 | abstain→abstain (1.000) | weak→weak (0.840) |
+| ncsa-primary-nf | posture | seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.480) |
+| ncsa-primary-nf | locomotion | walking | 8,759 | weak→abstain (0.450) | abstain→abstain (1.000) |
+| ncsa-primary-art | locomotion | brisk_walking | 8,759 | weak→abstain (0.490) | abstain→abstain (1.000) |
+| ncsa-lodo-nowear-hc | posture | seated_likely | 8,630 | weak→abstain (0.300) | weak→abstain (0.380) |
+| ncsa-lodo-nowear-hc | locomotion | brisk_walking | 8,759 | strong→strong (0.690) | abstain→abstain (1.000) |
+| ncsa-lodo-nowear-hc | locomotion | walking | 8,759 | weak→abstain (0.470) | weak→abstain (0.830) |
+
+Merges that differ (old rule: symmetric table on the set-target statuses; new: the sealed merges, locomotion directed specific → general):
+
+| experiment | head | merge_into (set-target rule) | merge_into (sealed, new rule) |
+|---|---|---|---|
+| ood-hc | locomotion | {'walking': 'stairs'} | {} |
+| ncsa-ood-hc | locomotion | {'walking': 'brisk_walking'} | {} |
+| ncsa-primary-hc | locomotion | {'walking': 'brisk_walking'} | {'brisk_walking': 'walking'} |
+| ncsa-lodo-nowear-hc | locomotion | {'walking': 'brisk_walking'} | {} |
+
+Set families scored as ONE class (merged probability; correct iff the truth lies inside the family; reported only — a family status never changes a served per-class status):
+
+| experiment | head | family | test windows with exactly this set | val→final (tau) | argmax P/R |
+|---|---|---|---|---|---|
+| ood-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.780) | 0.946/0.991 |
+| ood-hc | locomotion | stationary+walking | 453 | strong→strong (0.855) | 0.916/0.980 |
+| ood-nf | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.825) | 0.944/0.998 |
+| ood-nf | locomotion | stationary+walking | 453 | strong→strong (0.900) | 0.900/0.983 |
+| ood-art | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.890) | 0.943/1.000 |
+| ood-art | locomotion | stationary+walking | 453 | weak→abstain (0.300) | 0.894/0.994 |
+| primary-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.685) | 0.949/0.992 |
+| primary-hc | locomotion | stationary+walking | 453 | strong→strong (0.845) | 0.925/0.976 |
+| primary-nf | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.815) | 0.946/0.993 |
+| primary-nf | locomotion | stationary+walking | 453 | strong→strong (0.865) | 0.898/0.994 |
+| primary-art | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.920) | 0.943/1.000 |
+| primary-art | locomotion | stationary+walking | 453 | weak→abstain (0.300) | 0.893/0.999 |
+| linear-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.780) | 0.946/0.991 |
+| linear-hc | locomotion | stationary+walking | 453 | strong→strong (0.875) | 0.915/0.979 |
+| mlp-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.685) | 0.949/0.992 |
+| mlp-hc | locomotion | stationary+walking | 453 | strong→strong (0.845) | 0.925/0.976 |
+| linear-art | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.885) | 0.943/1.000 |
+| linear-art | locomotion | stationary+walking | 453 | weak→abstain (0.300) | 0.893/1.000 |
+| mlp-art | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.920) | 0.943/1.000 |
+| mlp-art | locomotion | stationary+walking | 453 | weak→abstain (0.300) | 0.893/0.999 |
+| linear-nf | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.825) | 0.944/0.998 |
+| linear-nf | locomotion | stationary+walking | 453 | strong→strong (0.900) | 0.900/0.981 |
+| w10-hc | posture | recumbent+seated_likely | 26,872 | strong→abstain (0.770) | 0.944/0.995 |
+| w10-hc | locomotion | stationary+walking | 1,438 | strong→weak (0.875) | 0.914/0.986 |
+| lodo-c24only-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.570) | 0.953/0.990 |
+| lodo-c24only-hc | locomotion | stationary+walking | 453 | strong→weak (0.795) | 0.935/0.968 |
+| lodo-nohhar-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.690) | 0.949/0.993 |
+| lodo-nohhar-hc | locomotion | stationary+walking | 453 | strong→strong (0.840) | 0.927/0.976 |
+| seed1-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.680) | 0.950/0.991 |
+| seed1-hc | locomotion | stationary+walking | 453 | strong→strong (0.860) | 0.932/0.969 |
+| seed2-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.690) | 0.949/0.993 |
+| seed2-hc | locomotion | stationary+walking | 453 | strong→strong (0.840) | 0.925/0.979 |
+| ncsa-ood-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.765) | 0.947/0.991 |
+| ncsa-ood-hc | locomotion | stationary+walking+brisk_walking | 453 | strong→weak (0.835) | 0.919/0.977 |
+| ncsa-ood-hc | locomotion | walking+brisk_walking | 8,306 | strong→strong (0.935) | 0.788/0.528 |
+| ncsa-ood-nf | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.810) | 0.945/0.996 |
+| ncsa-ood-nf | locomotion | stationary+walking+brisk_walking | 453 | strong→abstain (0.900) | 0.898/0.981 |
+| ncsa-ood-nf | locomotion | walking+brisk_walking | 8,306 | weak→abstain (0.605) | 0.670/0.443 |
+| ncsa-ood-art | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.875) | 0.943/1.000 |
+| ncsa-ood-art | locomotion | stationary+walking+brisk_walking | 453 | weak→abstain (0.300) | 0.893/0.995 |
+| ncsa-ood-art | locomotion | walking+brisk_walking | 8,306 | weak→weak (0.465) | 0.802/0.153 |
+| ncsa-primary-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.695) | 0.949/0.992 |
+| ncsa-primary-hc | locomotion | stationary+walking+brisk_walking | 453 | strong→weak (0.820) | 0.925/0.976 |
+| ncsa-primary-hc | locomotion | walking+brisk_walking | 8,306 | strong→strong (0.835) | 0.794/0.546 |
+| ncsa-primary-nf | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.825) | 0.946/0.991 |
+| ncsa-primary-nf | locomotion | stationary+walking+brisk_walking | 453 | strong→abstain (0.900) | 0.898/0.980 |
+| ncsa-primary-nf | locomotion | walking+brisk_walking | 8,306 | weak→abstain (0.590) | 0.678/0.436 |
+| ncsa-primary-art | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.885) | 0.943/1.000 |
+| ncsa-primary-art | locomotion | stationary+walking+brisk_walking | 453 | weak→abstain (0.300) | 0.894/0.991 |
+| ncsa-primary-art | locomotion | walking+brisk_walking | 8,306 | weak→abstain (0.495) | 0.768/0.176 |
+| ncsa-lodo-nonc-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.685) | 0.948/0.993 |
+| ncsa-lodo-nonc-hc | locomotion | stationary+walking | 453 | strong→abstain (0.845) | 0.924/0.976 |
+| ncsa-lodo-nogotov-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.685) | 0.948/0.993 |
+| ncsa-lodo-nogotov-hc | locomotion | stationary+walking | 453 | strong→weak (0.815) | 0.926/0.977 |
+| ncsa-lodo-nowear-hc | posture | recumbent+seated_likely | 8,630 | strong→abstain (0.695) | 0.949/0.992 |
+| ncsa-lodo-nowear-hc | locomotion | stationary+walking+brisk_walking | 453 | strong→abstain (0.830) | 0.924/0.974 |
+| ncsa-lodo-nowear-hc | locomotion | walking+brisk_walking | 8,306 | strong→strong (0.810) | 0.800/0.536 |
+
 ## Split manifests (subject-level, frozen before windowing)
 
 | dataset | train | val | test | LOSO folds | sha256 |
@@ -901,7 +1010,7 @@ Limitation: leave-one-subject-out folds are defined in the split manifests (`los
 
 ## Dataset / label-mapping summary
 
-`label_mappings.json` sha256 `a3efb1521bb3d8b44bd43e7db454f80613dc8f5154bdfdbe5eb4e9b085eaca01`; full table: `eval/inertia/label_mappings.md`.
+`label_mappings.json` sha256 `e8b3598ace2bb720027f5f68c43ea042af770df0bc9bf037d643fce6f30e4e00`; full table: `eval/inertia/label_mappings.md`.
 
 | dataset | role | labels | rows | used rows posture/locomotion/arm/transition/intensity |
 |---|---|---|---|---|
@@ -992,8 +1101,52 @@ The test split is assembled only inside the TestVault; a re-evaluation needs an 
 | 55 | ncsa-lodo-nonc-hc | `f311783e3ad39b79` | `c805f429821b` | 1 |  |  |
 | 56 | ncsa-lodo-nogotov-hc | `761e347000c7ccea` | `c805f429821b` | 1 |  |  |
 | 57 | ncsa-lodo-nowear-hc | `0ae6762ef47e5e49` | `c805f429821b` | 1 |  |  |
+| 58 | ood-hc | `f109c1627eb27949` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 59 | ood-nf | `3d62fb720458df68` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 60 | ood-art | `91e4a4c1b32ceb11` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 61 | primary-hc | `5cf29c716d0ff4a8` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 62 | primary-nf | `8fb6cfeab131d1f2` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 63 | primary-art | `649715fe69031563` | `6afd705530ea` | 3 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 64 | linear-hc | `f7b8049c48f3b759` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 65 | mlp-hc | `daea9827594d158b` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 66 | linear-art | `18c96037e6d43c0e` | `6afd705530ea` | 3 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 67 | mlp-art | `885c8abdcbd432dd` | `6afd705530ea` | 3 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 68 | linear-nf | `a2a100db350f932f` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 69 | w10-hc | `0fda6959fae37218` | `fe25fb43c8cb` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 70 | lodo-noc24-hc | `7f9ac2b5ed02806f` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 71 | lodo-c24only-hc | `79278a60edaaecab` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 72 | lodo-nohhar-hc | `4111efd5219be0b5` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 73 | seed1-hc | `7910cdd036522b10` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 74 | seed2-hc | `90db595571292013` | `6afd705530ea` | 4 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 75 | ncsa-ood-hc | `d1c51571af30e6b7` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 76 | ncsa-ood-nf | `fa626b136de0b7b2` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 77 | ncsa-ood-art | `581580d7f98aa638` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 78 | ncsa-primary-hc | `e80ec473385d5987` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 79 | ncsa-primary-nf | `e64cd4bbeaf7bfc2` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 80 | ncsa-primary-art | `c0933b253dc38ca0` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 81 | ncsa-lodo-nonc-hc | `4b3f0a7422105a60` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 82 | ncsa-lodo-nogotov-hc | `4087c956ba25dece` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
+| 83 | ncsa-lodo-nowear-hc | `f04796f38f3c9f10` | `c805f429821b` | 2 | post_audit_rule_change | audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2). |
 
-Re-evaluations by reason: legacy free text (pre-enumeration): 14 (the run-1 bundle directory was deleted by an external process; the bundles were retrained deterministically and re-evaluated: every metric identical to run 1 at tolerance 1e-9; only bundle hashes differ (the manifest records creation time)); post_audit_rule_change: 17 (a training/selection/gate/metric rule changed after an audit that had seen test results; the new test numbers are NOT pristine).
+Re-evaluations by reason: legacy free text (pre-enumeration): 14 (the run-1 bundle directory was deleted by an external process; the bundles were retrained deterministically and re-evaluated: every metric identical to run 1 at tolerance 1e-9; only bundle hashes differ (the manifest records creation time)); post_audit_rule_change: 43 (a training/selection/gate/metric rule changed after an audit that had seen test results; the new test numbers are NOT pristine).
+
+### Test reuse per dataset test split (G2 D-2)
+
+`n evals (this split)` above counts evaluations of one COMBINED test split (`test_sha256`). A split that adds datasets to an earlier one has a new hash although it re-opens the earlier datasets' test subjects. Counted per dataset (identity = the frozen split manifest's sha256; recorded in every new ledger entry as `per_dataset_split_sha256` / `n_evaluations_per_dataset_split`, derived from the pre-registered eval datasets for older entries):
+
+| dataset | test-split evaluations (all experiments) | first evaluations | post_audit_rule_change re-evaluations | by ncsa-* experiments |
+|---|---|---|---|---|
+| capture24 | 83 | 26 | 43 | 18 |
+| wisdm2019_watch | 83 | 26 | 43 | 18 |
+| hhar_watch | 83 | 26 | 43 | 18 |
+| pamap2 | 83 | 26 | 43 | 18 |
+| mhealth | 83 | 26 | 43 | 18 |
+| opportunity | 83 | 26 | 43 | 18 |
+| gotov | 18 | 9 | 9 | 18 |
+| wear | 18 | 9 | 9 | 18 |
+
+The ncsa test split is the six CC BY test splits plus GOTOV/WEAR: 107,969 of its 108,875 windows (99.2%) are CC BY test windows, and they are 100.0% of the earlier CC BY test windows (107,969). So every ncsa-* evaluation re-opens those test subjects again: **read the CC BY per-dataset test numbers of every bundle as re-used, not pristine**; only GOTOV and WEAR test subjects were new when the ncsa-* bundles were first evaluated.
+
 
 ### Decoder-replay TEST ledger (replay_eval final/baseline)
 
@@ -1012,6 +1165,8 @@ Re-evaluations by reason: post_audit_rule_change: 5 (a training/selection/gate/m
 - **WISDM / PAMAP2 test numbers are not fully pristine (G-8).** Prototyping in `research/inertia-work/agentD` loaded WISDM-2019 and PAMAP2 subjects that are in the frozen TEST split and printed test-subject deltas next to the validation numbers while the head grid and the arch-selection rule were being chosen; the final `train_heads` GRID and RULE equal the prototype's. No threshold, calibration or status was fit on test, but the procedure was designed with test feedback visible, so read WISDM and PAMAP2 test results as optimistic. The prototype scripts (`proto_*.py`, `run_proto.py`, `run_lodo.py`, `select_rule.py`) load only WISDM and PAMAP2; they contain no Capture-24, HHAR, MHEALTH or Opportunity code path.
 - **Evaluator diagnostic changed between runs (G-17).** Run 1 recorded `apply_vs_apply_arrays_max_abs` (bundle.apply vs bundle.apply_arrays); run 2 records `apply_vs_training_side_max_abs` (bundle.apply vs the training-side numpy path). Every metric of the 14 re-evaluated experiments was identical between the runs; only that diagnostic field changed.
 - **Rule changes after the audit.** The strong/weak VAL rule (subject-cluster bootstrap, >= 5 subjects), the test gate (weak -> abstain, per-dataset demotion), the merge table and the macro-F1 convention were changed after a red-team audit that had seen these test results; evaluations made with the new rules are recorded as `post_audit_rule_change` re-evaluations and are not pristine either.
+- **Set-target status rule (G2 D-1, 2026-10-06).** After an audit that had seen the sealed results, statuses, tau and gates of set members were changed to single-label evidence (`set-family-1`), set families are scored as one class and locomotion merges are directed specific → general. Every bundle was retrained and re-evaluated once more (`post_audit_rule_change`); the earlier rule's statuses are shown next to the new ones in 'Set-target status rule' below.
+- **GOTOV loader rules from all 35 files (G2 D-4).** `gotov-guard-10s` and the 60 s MET on-kinetics mask of `gotov-met-1` were chosen from QC over every GOTOV file, the 7 test participants included, before any model result; no model output informed them.
 
 ## Nara/WHOOP fixture behaviour
 

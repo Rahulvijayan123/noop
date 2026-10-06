@@ -158,6 +158,14 @@ def _validate_classifier_head(name: str, meta: Any) -> None:
         _require(meta["decoder_evidence"] is (len(live) > 1) if name in SOFTMAX_HEADS else isinstance(meta["decoder_evidence"], bool),
                  f"heads.{name}.decoder_evidence must be true iff the head has > 1 strong/weak class")
     _validate_covers(name, meta.get("covers", {}), order, sup_classes)
+    fams = meta.get("families", {})
+    _require(isinstance(fams, Mapping), f"heads.{name}.families must be an object")
+    for key, fam in fams.items():
+        _require(isinstance(fam, Mapping) and isinstance(fam.get("members"), list) and len(fam["members"]) > 1
+                 and all(c in sup_classes for c in fam["members"]),
+                 f"heads.{name}.families[{key!r}].members must list > 1 supported classes")
+        _require(fam.get("status") in CLASS_STATUSES and _finite(fam.get("tau")) and 0.0 <= fam["tau"] <= 1.0,
+                 f"heads.{name}.families[{key!r}] needs a status in {CLASS_STATUSES} and a tau in [0,1]")
 
 
 def validate_merge(name: str, merge: Any, status: Mapping[str, str], sup_classes: Sequence[str]) -> None:
@@ -360,6 +368,13 @@ def validate_test_gate(manifest: Mapping[str, Any], gate: Any) -> None:
                      f"test_gate.heads.{h}.{c}: final_status {fs!r} would PROMOTE val status "
                      f"{meta['status'][c]!r}; the gate only demotes (refused)")
             final[c] = fs
+        for key, fam in (g.get("families") or {}).items():
+            _require(isinstance(fam, Mapping) and isinstance(fam.get("members"), list) and len(fam["members"]) > 1
+                     and all(c in sup for c in fam["members"]),
+                     f"test_gate.heads.{h}.families[{key!r}] must list > 1 supported classes of the head")
+            vs, fs = fam.get("val_status"), fam.get("final_status")
+            _require(vs in CLASS_STATUSES and fs in CLASS_STATUSES and STATUS_RANK[fs] <= STATUS_RANK[vs],
+                     f"test_gate.heads.{h}.families[{key!r}]: final_status must not promote the VAL family status")
         merge = g.get("merge_into", {})
         if h in MULTILABEL_HEADS:
             _require(merge == {}, f"test_gate.heads.{h}.merge_into must be empty for a multi-label head")

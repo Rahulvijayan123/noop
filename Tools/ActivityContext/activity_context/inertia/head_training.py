@@ -102,21 +102,34 @@ def train_class_head(h: str, tr: Assembled, va: Assembled, z_tr: np.ndarray, z_v
     ops = {c: A.select_operating_point(pp, tt, ss, k, bool(sup.supported[k])) for k, c in enumerate(order)}
     sup_c = [c for k, c in enumerate(order) if sup.supported[k]]
     status = {c: ops[c]["status"] for c in sup_c}
+    # G2 D-1: what the pre-2026-10-06 set-target scoring would have said (recorded for the before/after report only)
+    legacy = {c: A.select_operating_point(pp, tt, ss, k, bool(sup.supported[k]), set_rule=False)
+              for k, c in enumerate(order) if sup.supported[k]}
+    fam_ops = A.family_operating_points(pp, tt, ss, order, sup.supported)
+    families = {key: {"members": op["members"], "status": op["status"], "tau": float(op["tau"]),
+                      "n_val_family": int(op.get("n_val_class", 0)),
+                      "n_val_exact_set": int(op["n_windows_with_exactly_this_set"])} for key, op in fam_ops.items()}
     sym = A.merge_confusion(pp, tt, order)
     merge = A.merge_partners(status, order, h, sym)
     groups = A.evidence_groups(status, merge)
     raw = _probs_full(lg, {"method": "temperature", "T": 1.0}, sup.supported)
+    set_members = sorted({order[k] for f in A.observed_families(tt) for k in f}, key=order.index)
     entry = {"arch": arch, "class_order": order, "supported": [bool(s) for s in sup.supported],
              "prior": {c: float(cal["class_prior"][c]) for c in sup_c}, "status": status,
              "tau": {c: float(ops[c]["tau"]) for c in sup_c}, "merge_into": merge, "covers": sup.covers,
-             "decoder_evidence": len(groups) > 1, "evidence_groups": groups,
+             "decoder_evidence": len(groups) > 1, "evidence_groups": groups, "families": families,
              "support_counts": sup.counts, "selection": {"arch": {k: v for k, v in decision.items() if k != "per_fold"},
                                                        "grid": grids, "best_epoch": fr.best_epoch,
                                                        "merge_confusion_val_sym": sym,
+                                                       "status_rule": A.SET_RULE, "status_rule_text": A.SET_RULE_TEXT,
+                                                       "set_members_val": set_members,
                                                        "merge_rule": "abstained class -> most-confused strong/weak "
-                                                                     "partner inside abstention.MERGE_COMPAT, else none"}}
+                                                                     "partner inside abstention.MERGE_COMPAT (locomotion "
+                                                                     "directed specific -> general), else none"}}
     evidence = {"support": sup.to_dict(), "class_weights": dict(zip(order, cw.tolist())), "decision": decision,
-                "operating_points": ops, "operating_point_set": "wrist-only val" if wrist_ok else "pooled val (flagged)",
+                "operating_points": ops, "family_operating_points": fam_ops,
+                "set_target_scoring_status": {c: {"status": v["status"], "tau": float(v["tau"])} for c, v in legacy.items()},
+                "operating_point_set": "wrist-only val" if wrist_ok else "pooled val (flagged)",
                 "val_raw": _brief(M.head_report(raw, truth, order, sup.supported, null_reps=50)),
                 "val_calibrated": _brief(M.head_report(p, truth, order, sup.supported, null_reps=50))}
     return entry, fr.arrays, cal, evidence

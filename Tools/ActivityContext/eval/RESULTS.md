@@ -177,7 +177,10 @@ are dropped (none). Recordings split at gaps > 1 s. Constant-rate segments:
 the rolling-median nominal rate (20/25/50/100 Hz); a segment breaks at a rate
 change or at an interval < 0.5 or > 2.5 periods. One missing sample is
 repaired by linear interpolation of its neighbours (255 accel / 118 gyro);
-nothing is ever set to zero. A least-squares clock is fitted per segment.
+this is the named loader option `wisdm-single-dropout-linear-1` (`--repair
+none` makes such a dropout a segment break instead), and every window records
+how many repaired samples it contains (`n_repaired`; see "Test ledger, loader
+repair sensitivity and bootstrap CIs" below). Nothing is ever set to zero. A least-squares clock is fitted per segment.
 Each stream is resampled from its **measured** rate with the repo polyphase
 design (`resample_poly_direct`, which equals `resample_poly_nd` to 1e-15).
 `up/down` is the simplest fraction of 30/rate whose accumulated error over the
@@ -236,6 +239,12 @@ is 10. The run took 40 min wall time.
 The same v0 artifact (`39dc12e0…`) and v1 artifact, under the manifest
 abstention (max_prob ≥ 0.80, margin ≥ 0.15).
 
+This evaluation was not ledgered when it was made; it is recorded after the
+fact as historical entry 2 of `eval/hart/test_ledger.jsonl`. The same test
+windows were opened once more, through the ledger, for the repair sensitivity
+and the bootstrap CIs (below). The numbers in this subsection are those of the
+first evaluation; the ledgered re-run reproduces them exactly.
+
 - **(i) RESULTS.md protocol:** the training-path windows, now built
   correctly (v1 `eval_data.npz`, 12,270 windows).
 - **(ii) production-faithful protocol:** agent R's per-block stream, serve
@@ -254,7 +263,10 @@ For reference, v0's original report on its own zero-gyro windows was coverage
 0.664 and macro-F1 0.660 (above). On correct windows v0 scores 0.557 and
 0.708.
 
-Per-class precision / recall / F1 over accepted predictions:
+Per-class precision / recall / F1. Precision is over the accepted
+predictions of the class; recall is over ALL windows of the class, so an
+abstention (`unknown`) counts as a miss (the same holds for the v0 tables
+above):
 
 | class (count i / ii) | (i) v0 | (i) v1 | (ii) v0 | (ii) v1 |
 |---|---|---|---|---|
@@ -302,7 +314,9 @@ subject, and both models are poor there. VAL-only diagnostics on 1637/1639
 v0:
 
 - Band-limiting those streams to 10 Hz barely helps (0.54 → 0.55).
-- Rotating accel and gyro 90° about z raises v1 to 0.68.
+- Rotating accel and gyro 90° about z raises v1 to 0.68, but its coverage
+  drops from 0.486 to 0.417 (fewer windows pass the abstention), so the
+  rotation buys precision, not more accepted windows.
 
 During walking, the 20 Hz watches carry gravity on ±x and the ~50 Hz watches
 on −y. These four subjects used a watch with a different sensor frame, and
@@ -326,6 +340,74 @@ Negative control (protocol i, windows → stationary / unknown / other):
 
 Typing and writing are still admitted as `stationary` with high confidence.
 The C10 disagreement stands for v1, as it does for v0.
+
+### Test ledger, loader repair sensitivity and bootstrap CIs (audit G2 E-1..E-3, 2026-10-06)
+
+**Ledger.** `hart_wisdm_eval` (and `evaluate --ledger`) now open the HART test
+subjects only through `inertia.integrity.TestVault`, ledger
+`eval/hart/test_ledger.jsonl`, experiment `hart-wisdm/test`. A second
+evaluation needs an enumerated `--rerun-reason` and a `--rerun-detail`. The
+ledger holds:
+
+| # | entry | models | windows | reason |
+|---|---|---|---|---|
+| 1 | historical: RESULTS.md top section | v0 | v0 loader, 15,363 | recorded after the fact from RESULTS.md; first evaluation was not ledgered |
+| 2 | historical: the v0/v1 evaluation above | v0, v1 | v1 loader, 12,270 (+ protocol ii) | recorded after the fact from RESULTS.md; first evaluation was not ledgered |
+| 3 | repair sensitivity + bootstrap (this subsection) | v0, v1 | the same 12,270 (+ protocol ii outputs) | `post_audit_rule_change` |
+
+Entries 1-2 carry no evaluation time to the second, only a dated text. Every
+entry records `per_dataset_split_sha256 = {wisdm2019_watch: 7105df4c…}`: the
+HART test subjects ARE the Inertia heads' WISDM test subjects (the same
+seed-42 split, `splits/wisdm2019_watch.json`). Those subjects have therefore
+been opened 3 times here and 83 times by the Inertia head evaluations
+(`eval/inertia/SUMMARY.md`, "Test reuse per dataset test split"). Read every
+WISDM test number as re-used, not pristine.
+
+**Loader repair.** `wisdm.py` interpolates a single missing sample (option
+`wisdm-single-dropout-linear-1`). Over the whole archive, 15 train, 78 val and
+280 test raw samples are repaired; 11 / 75 / 259 of them fall inside aligned
+pieces. Windows that contain one: train 10 of 53,998, val 67 of 12,096 (all
+from 1639), test **241 of 12,270, all from subject 1638 (241 of its 1,389
+windows)**; 279 test windows have one within ±0.5 s. These counts use the
+repaired sample's position on the 30 Hz output grid. Matching raw timestamps
+against the window span instead gives 237 for 1638. The rebuilt npz files
+(`research/hart-v1/data-n-repaired/`, built from `744e33a7`) carry
+`n_repaired` and `n_repaired_pm05s` per window. Their windows, labels,
+subjects and sessions equal `research/hart-v1/*_data.npz` exactly. Protocol
+(ii) uses R's stream code, which resamples every block onto a uniform grid, so
+a dropout is interpolated there implicitly. For protocol (ii), a window is
+"repaired" when its span contains a raw instant the loader repairs (235 of
+12,493).
+
+Sensitivity, TEST, coverage / accepted precision / macro-F1 (4 supported):
+
+| | (i) v0 | (i) v1 | (ii) v0 | (ii) v1 |
+|---|---|---|---|---|
+| all windows | 0.557 / 0.877 / 0.708 | 0.713 / 0.905 / 0.796 | 0.547 / 0.874 / 0.701 | 0.709 / 0.895 / 0.777 |
+| excluding windows with a repaired sample | 0.559 / 0.882 / 0.710 | 0.718 / 0.909 / 0.801 | 0.549 / 0.878 / 0.701 | 0.713 / 0.899 / 0.781 |
+| excluding ±0.5 s | 0.560 / 0.883 / 0.710 | 0.719 / 0.910 / 0.801 | – | – |
+| subject 1638 only: all → excluding | 0.434 → 0.433 / 0.614 → 0.618 / 0.553 → 0.549 | 0.313 → 0.277 / 0.579 → 0.582 / 0.469 → 0.462 | – | – |
+
+The repair moves no headline number by more than 0.005. Excluding the
+repaired windows removes about a sixth of 1638's windows. On that ~50 Hz
+subject, which both models handle poorly, v1's coverage drops further (0.313
+→ 0.277). The v1 > v0 conclusion does not depend on the repair.
+
+Subject-cluster bootstrap over the 8 test subjects (1,000 resamples, seed 0,
+percentile 95 % CI; with 8 subjects the CI under-covers and is descriptive):
+
+| | (i) v0 | (i) v1 | (i) v1 − v0 | (ii) v0 | (ii) v1 | (ii) v1 − v0 |
+|---|---|---|---|---|---|---|
+| macro-F1 | 0.708 [0.634, 0.765] | 0.796 [0.712, 0.852] | +0.088 [+0.048, +0.131] | 0.701 [0.640, 0.754] | 0.777 [0.699, 0.830] | +0.077 [+0.027, +0.118] |
+| coverage | 0.557 [0.501, 0.608] | 0.713 [0.594, 0.808] | +0.157 [+0.077, +0.211] | 0.547 [0.499, 0.592] | 0.709 [0.591, 0.798] | +0.162 [+0.083, +0.219] |
+| accepted precision | 0.877 [0.795, 0.935] | 0.905 [0.834, 0.952] | – | 0.874 [0.792, 0.932] | 0.895 [0.829, 0.943] | – |
+
+The v1 − v0 difference is paired: both models are scored on the same subject
+resample. Its interval excludes 0 under both protocols, but its lower end is
+small (+0.03 under protocol ii). The macro-F1 upper bounds (0.85 / 0.83) touch
+or miss the spec §12 target of 0.85. Excluding repaired windows, protocol (i)
+gives v1 0.801 [0.725, 0.852] and v1 − v0 +0.090 [+0.054, +0.132]. Full
+report: `research/hart-v1/eval_repair_sensitivity.json`.
 
 ### Calibration of the raw softmax
 
@@ -368,9 +450,11 @@ Only `label` and `probs` differ, with 65 % and 67 % label agreement with v0.
 v1 is a new, opt-in artifact. Nothing that production loads by default
 changed: fetch_artifacts pins, the default manifest and worker configuration
 are untouched. On correct windows v1 beats v0 under both protocols, by
-+0.09 / +0.08 macro-F1 and +0.16 coverage at higher accepted precision. It is
-still below the spec §12 promotion targets: macro-F1 0.80 / 0.78 against
-≥ 0.85, and walking precision 0.87 / 0.85 against ≥ 0.90. It is also worse
++0.09 / +0.08 macro-F1 (paired subject-bootstrap 95 % CI +0.05..+0.13 /
++0.03..+0.12) and +0.16 coverage at higher accepted precision. It is
+still below the spec §12 promotion targets: macro-F1 0.80 [0.71, 0.85] /
+0.78 [0.70, 0.83] against ≥ 0.85, and walking precision 0.87 / 0.85 against
+≥ 0.90. It is also worse
 than v0 on the ~50 Hz watch subject. These are public-data results, not
 WHOOP-session evidence.
 
@@ -388,4 +472,20 @@ OMP_NUM_THREADS=1 python -m activity_context.hart_wisdm_eval \
     --wisdm <wisdm-dataset> --replay-out research/inertia-replay --replay-prefix v1=hart_v1_wisdm \
     --reference v0=research/inertia-replay/hart_wisdm_test.npz \
     --out research/hart-v1/eval_v0_v1.json --jobs 7
+# (every run is now ledgered in eval/hart/test_ledger.jsonl; a second one needs
+#  --rerun-reason <enumerated> --rerun-detail "<what and why>")
+
+# per-window repair counts (data only, no training; windows identical to v1's):
+python -m activity_context.train --wisdm <wisdm-dataset> --out research/hart-v1/data-n-repaired \
+    --seed 42 --test-fraction 0.15 --val-fraction 0.15 \
+    --expect-split research/hart-v1/split_manifest.json --jobs 4
+# repair sensitivity + bootstrap CIs (ledgered rerun):
+OMP_NUM_THREADS=1 python -m activity_context.hart_wisdm_eval --repair-sensitivity \
+    --model v0=<v0 dir>/manifest.json,<v0 dir> --model v1=research/hart-v1/manifest.json,research/hart-v1 \
+    --eval-data research/hart-v1/data-n-repaired/eval_data.npz \
+    --val-data research/hart-v1/data-n-repaired/val_data.npz --wisdm <wisdm-dataset> \
+    --replay-test v0=research/inertia-replay/hart_wisdm_test.npz,research/inertia-replay/hart_wisdm_test.json \
+    --replay-test v1=research/inertia-replay/hart_v1_wisdm_test.npz,research/inertia-replay/hart_v1_wisdm_test.json \
+    --out research/hart-v1/eval_repair_sensitivity.json --jobs 4 \
+    --rerun-reason post_audit_rule_change --rerun-detail "<...>"
 ```

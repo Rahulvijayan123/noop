@@ -98,7 +98,8 @@ LOADER_VERIFICATION = {
               "steps 4-15 ms, <= 15 ms from a uniform grid over every file; Agent C's '83 Hz' was nominal); no "
               "missing samples, no NaN; units g (median |a| over the rest labels 0.997-1.022 g per participant); "
               "31 COSMED files on the same unix-ms clock; labels protocol-imputed -> 10 s guard at every labelled "
-              "segment edge (gotov-guard-10s); outdoor walking only in 22 participants"),
+              "segment edge (gotov-guard-10s); outdoor walking only in 21 participants (14 train, 6 val, 1 test; "
+              "corrected 2026-10-06 from 22)"),
     "wear": ("loader wear-loader-1 (2026-10-06): 24 files sbj_0..23, uniform 50 Hz, units g (median |a| during "
              "stretching 0.997-1.023 g, both wrists); one wrist per subject (left unless < 95 % finite: sbj_10 left "
              "arm 25.8 % NaN -> right)"),

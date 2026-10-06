@@ -69,11 +69,13 @@ class Block:
     session: str = ""              # recording key "subject-activity-recording" (pieces share it)
     t0_ns: int = 0
     meta: Dict[str, Any] = field(default_factory=dict)
+    # 30 Hz positions of repaired raw samples (wisdm single-dropout repair; audit G2 E-1)
+    repaired_pos: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
 
 
 def _piece_to_block(p: "wisdm_loader.Piece") -> Block:
     return Block(subject=p.subject, activity=p.activity, samples=p.samples,
-                 duration_s=p.duration_s,
+                 duration_s=p.duration_s, repaired_pos=np.asarray(p.repaired_pos, dtype=np.float64),
                  session=f"{p.subject}-{p.activity}-{p.recording}", t0_ns=p.t0_ns,
                  meta={"acc_rate_hz": round(p.acc_rate_hz, 4), "acc_nominal_hz": p.acc_nominal_hz,
                        "acc_ratio": list(p.acc_ratio), "gyr_nominal_hz": p.gyr_nominal_hz,
@@ -90,21 +92,24 @@ def window_block(block: Block, window: int = WINDOW_SAMPLES, hop: int = HOP_SAMP
             for k in wisdm_loader.window_starts(len(s), window, hop, margin)]
 
 
-def _load_subject(args: Tuple[str, int]) -> Tuple[List[Block], Dict[str, Any]]:
-    wisdm_dir, subj = args
-    sd = wisdm_loader.load_subject(wisdm_dir, subj)
+def _load_subject(args: Tuple[str, int, str]) -> Tuple[List[Block], Dict[str, Any]]:
+    wisdm_dir, subj, repair = args
+    sd = wisdm_loader.load_subject(wisdm_dir, subj, repair=repair)
     return [_piece_to_block(p) for p in sd.pieces], sd.report()
 
 
 def load_all_blocks(wisdm_dir: str, subjects: Sequence[int], jobs: int = 1,
-                    report: Optional[Dict[str, Any]] = None) -> List[Block]:
+                    report: Optional[Dict[str, Any]] = None,
+                    repair: str = wisdm_loader.DEFAULT_REPAIR) -> List[Block]:
     """Aligned 30 Hz pieces of every subject with both watch files (wisdm-watch-loader-2).
 
     ``report`` (when given) receives the per-subject loader reports: duplicates, conflicting rows,
     repaired single dropouts, segment breaks, slips, and every recording excluded for lack of gyro.
+    ``repair`` = the loader's single-dropout policy (``wisdm.REPAIR_POLICIES``).
     """
+    wisdm_loader.check_repair(repair)
     subs = wisdm_loader.available_subjects(wisdm_dir, subjects)
-    work = [(wisdm_dir, s) for s in subs]
+    work = [(wisdm_dir, s, repair) for s in subs]
     if jobs > 1 and len(work) > 1:
         from concurrent.futures import ProcessPoolExecutor
         with ProcessPoolExecutor(max_workers=jobs) as ex:
@@ -250,6 +255,35 @@ def windows_from_blocks(blocks: Sequence[Block], window: int, hop: int,
     return (np.stack(xs).astype(np.float32),
             np.asarray(ys), np.asarray(subs, dtype=np.int64),
             np.asarray(sess, dtype=np.int64))
+
+
+def window_repairs(blocks: Sequence[Block], window: int, hop: int, margin: int = 0) -> np.ndarray:
+    """Repaired raw samples per window, in :func:`windows_from_blocks` order (``margin`` output samples are
+    added on both sides; 15 = 0.5 s at 30 Hz)."""
+    out: List[np.ndarray] = []
+    for b in blocks:
+        starts = wisdm_loader.window_starts(len(b.samples), window, hop, MARGIN_SAMPLES)
+        pos = np.asarray(b.repaired_pos, dtype=np.float64)
+        k = np.asarray(starts, dtype=np.float64)
+        if not pos.size or not k.size:
+            out.append(np.zeros(len(starts), dtype=np.int64))
+            continue
+        lo = np.searchsorted(pos, k - margin, side="left")
+        hi = np.searchsorted(pos, k + window - 1 + margin, side="right")
+        out.append((hi - lo).astype(np.int64))
+    return np.concatenate(out) if out else np.zeros(0, dtype=np.int64)
+
+
+def repair_summary(blocks: Sequence[Block], counts: np.ndarray, counts_pm05: np.ndarray) -> Dict[str, Any]:
+    subj = np.concatenate([np.full(len(wisdm_loader.window_starts(len(b.samples), WINDOW_SAMPLES, HOP_SAMPLES,
+                                                                   MARGIN_SAMPLES)), b.subject) for b in blocks]) \
+        if blocks else np.zeros(0, dtype=np.int64)
+    return {"repaired_samples_in_pieces": int(sum(len(b.repaired_pos) for b in blocks)),
+            "windows": int(len(counts)), "windows_with_repaired_samples": int((counts > 0).sum()),
+            "windows_with_repaired_samples_pm0.5s": int((counts_pm05 > 0).sum()),
+            "by_subject": {str(s): {"windows": int((subj == s).sum()),
+                                    "with_repaired": int(((subj == s) & (counts > 0)).sum())}
+                           for s in sorted(set(subj.tolist())) if ((subj == s) & (counts > 0)).any()}}
 
 
 def fit_scaler(x_train: np.ndarray) -> Tuple[List[float], List[float]]:
@@ -559,6 +593,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--expect-split", default=None,
                     help="split_manifest.json the subject split must equal (refuse otherwise)")
     ap.add_argument("--jobs", type=int, default=1, help="loader processes (subjects in parallel)")
+    ap.add_argument("--repair", default=wisdm_loader.DEFAULT_REPAIR, choices=sorted(wisdm_loader.REPAIR_POLICIES),
+                    help="single-dropout repair policy of the WISDM loader (recorded in the manifest)")
     args = ap.parse_args(argv)
 
     os.makedirs(args.out, exist_ok=True)
@@ -572,7 +608,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     subjects = wisdm_loader.available_subjects(wisdm_dir, list(range(1600, 1651)))
     loader_report: Dict[str, Any] = {}
-    blocks = load_all_blocks(wisdm_dir, subjects, jobs=args.jobs, report=loader_report)
+    blocks = load_all_blocks(wisdm_dir, subjects, jobs=args.jobs, report=loader_report, repair=args.repair)
     if not blocks:
         raise SystemExit("no WISDM watch blocks found (check --wisdm layout)")
 
@@ -585,6 +621,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     x_val, y_val, subj_val, sess_val = windows_from_blocks(val_b, WINDOW_SAMPLES, HOP_SAMPLES)
     x_test, y_test, subj_test, sess_test = windows_from_blocks(
         test_b, WINDOW_SAMPLES, HOP_SAMPLES)
+    rep = {sp: (window_repairs(b, WINDOW_SAMPLES, HOP_SAMPLES), window_repairs(b, WINDOW_SAMPLES, HOP_SAMPLES, 15))
+           for sp, b in (("train", train_b), ("val", val_b), ("test", test_b))}
     zero_gyro = {"train": zero_gyro_fraction(x_train), "val": zero_gyro_fraction(x_val),
                  "test": zero_gyro_fraction(x_test)}
     if any(v > 0 for v in zero_gyro.values()):
@@ -625,8 +663,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "streams": "per (subject, activity) sensor stream sorted by timestamp; exact duplicate rows "
                    "collapsed, conflicting duplicates dropped; recordings split at gaps > 1 s",
         "rate": "constant-rate segments per stream (rolling-median nominal 20/25/50/100 Hz; breaks at "
-                "rate changes and at intervals < 0.5 or > 2.5 periods; one missing sample repaired by "
-                "linear interpolation of its neighbours); least-squares clock fit per segment",
+                "rate changes and at intervals < 0.5 or > 2.5 periods; one missing sample handled by the "
+                "repair policy below); least-squares clock fit per segment",
+        "repair": {"policy": args.repair, "rule": wisdm_loader.REPAIR_POLICIES[args.repair],
+                   "per_window_key": "n_repaired (and n_repaired_pm05s: +-0.5 s) in train/val/eval_data.npz",
+                   **{sp: repair_summary(b, rep[sp][0], rep[sp][1])
+                      for sp, b in (("train", train_b), ("val", val_b), ("test", test_b))}},
         "resample": "repo polyphase design (Kaiser beta=5, 20*max(up,down)+1 taps) from the MEASURED "
                     "accel rate: up/down = simplest fraction of 30/rate with <= 2 ms accumulated "
                     "time error over the piece; gyro ratio = accel ratio * (accel/gyro nominal ratio) "
@@ -712,19 +754,21 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     np.savez_compressed(os.path.join(args.out, "train_data.npz"),
                         X=x_train, y=y_train_ids,
-                        letters=np.asarray(letters))
+                        letters=np.asarray(letters), n_repaired=rep["train"][0], n_repaired_pm05s=rep["train"][1])
     y_val_onto = np.asarray([WISDM_LABEL_MAPPING.get(c, "other_movement") for c in y_val])
     np.savez_compressed(os.path.join(args.out, "val_data.npz"),
                         X=x_val, y=y_val_ids, letters=np.asarray(letters),
                         y_ontology=y_val_onto, window_letters=y_val,
-                        subjects=subj_val, sessions=sess_val)
+                        subjects=subj_val, sessions=sess_val, n_repaired=rep["val"][0],
+                        n_repaired_pm05s=rep["val"][1])
     y_test_onto = np.asarray([WISDM_LABEL_MAPPING.get(c, "other_movement")
                               for c in y_test])
     y_test_ids = np.asarray([letter_to_id.get(c, -1) for c in y_test],
                             dtype=np.int64)
     np.savez_compressed(os.path.join(args.out, "eval_data.npz"),
                         X=x_test, y_ontology=y_test_onto, letters=y_test,
-                        subjects=subj_test, sessions=sess_test, y=y_test_ids)
+                        subjects=subj_test, sessions=sess_test, y=y_test_ids, n_repaired=rep["test"][0],
+                        n_repaired_pm05s=rep["test"][1])
 
     print(json.dumps({
         "ok": True,
@@ -736,6 +780,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         "windows": window_counts,
         "zero_gyro_window_fraction": zero_gyro,
         "excluded_recordings_no_gyro": loader_report.get("excluded_no_gyro", []),
+        "repair": {"policy": args.repair, **{sp: {k: v for k, v in repair_summary(b, rep[sp][0], rep[sp][1]).items()
+                                                  if k != "by_subject"}
+                                             for sp, b in (("train", train_b), ("val", val_b), ("test", test_b))}},
         "class_map": class_map,
         "scaler_sha256": manifest.scaler.get("sha256"),
         "split": {k: split[k] for k in ("train_subjects", "val_subjects", "test_subjects")},

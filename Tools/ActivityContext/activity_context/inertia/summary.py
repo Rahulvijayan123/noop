@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 import numpy as np
 
 from . import HEAD_CLASS_ORDERS
+from . import abstention as A
 from .experiments import EXPERIMENTS, SHORT
 from .integrity import RERUN_REASONS
 from .mappings import load_mappings, summary_counts
@@ -284,6 +285,101 @@ def _ledger(eval_dir: str, name: str = "test_ledger.jsonl") -> List[str]:
     return L
 
 
+def _rule_change(R) -> List[str]:
+    """G2 D-1: the earlier set-target scoring next to the single-label rule, per bundle and class (both computed in
+    the same evaluation, on the same bundle and test windows), the merges, and the set-family statuses."""
+    L = ["## Set-target status rule (G2 D-1, 2026-10-06)", "",
+         f"Rule `{A.SET_RULE}`: {A.SET_RULE_TEXT}. Before it, a set window (pace-unknown walking {{walking, "
+         "brisk_walking}, Capture-24 'sitting/lying' {recumbent, seated_likely}, Capture-24 'walking and occasional "
+         "standing' {walking, brisk_walking, stationary}) counted as correct for whichever member was predicted, which "
+         "made `brisk_walking` strong in `ncsa-primary-hc` on pace-unknown walking alone (VAL single-label precision "
+         "18/27 = 0.67; no correct single-label brisk prediction on TEST) and merged an abstained `walking` INTO it. "
+         "Every bundle was retrained from a clean commit with the new rule and evaluated once more "
+         "(`post_audit_rule_change`). Rows below: classes whose VAL status, tau or final status differ between the "
+         "two rules ('set-target' = the earlier rule recomputed on the new evaluation; it equals the previously sealed "
+         "status). P/R/F1 tables elsewhere still use set-target scoring for the metrics; statuses, tau and gates use "
+         "the new rule.", "",
+         "| experiment | head | class | test set windows excluded | set-target val→final (tau) | single-label val→final "
+         "(tau) |", "|---|---|---|---|---|---|"]
+    merges = []
+    fams = []
+    for n, rep in R.items():
+        for h in HEADS:
+            r = _head(rep, h)
+            if not r:
+                continue
+            for c, g in r.get("gate", {}).items():
+                o = g.get("set_target_scoring")
+                if not o:
+                    continue
+                if (o["val_status"], o["final_status"]) != (g.get("val_status"), g.get("final_status")) or \
+                        abs(float(o["tau"]) - float(g.get("tau"))) > 1e-12:
+                    L.append(f"| {n} | {h} | {class_label(h, c)} | {f(g.get('n_test_set_windows_excluded'))} | "
+                             f"{o['val_status']}→{o['final_status']} ({f(o['tau'])}) | {g.get('val_status')}→"
+                             f"{g.get('final_status')} ({f(g.get('tau'))}) |")
+            old_m = r.get("set_target_scoring_merge_into")
+            new_m = ((rep.get("seal") or {}).get("merge_into") or {}).get(h, {})
+            if old_m is not None and old_m != new_m:
+                merges.append(f"| {n} | {h} | {old_m or '{}'} | {new_m or '{}'} |")
+            for k, v in (r.get("families") or {}).items():
+                if v.get("val_status") is None:
+                    continue
+                a = v.get("argmax") or {}
+                fams.append(f"| {n} | {h} | {k} | {f(v.get('n_test_exact_set'))} | {v['val_status']}→{v.get('final_status')} "
+                            f"({f(v.get('tau'))}) | {f(a.get('precision'), 3)}/{f(a.get('recall'), 3)} |")
+    L += ["", "Merges that differ (old rule: symmetric table on the set-target statuses; new: the sealed merges, "
+          "locomotion directed specific → general):", "", "| experiment | head | merge_into (set-target rule) | "
+          "merge_into (sealed, new rule) |", "|---|---|---|---|"] + (merges or ["| – | – | – | – |"])
+    L += ["", "Set families scored as ONE class (merged probability; correct iff the truth lies inside the family; "
+          "reported only — a family status never changes a served per-class status):", "",
+          "| experiment | head | family | test windows with exactly this set | val→final (tau) | argmax P/R |",
+          "|---|---|---|---|---|---|"] + fams + [""]
+    return L
+
+
+def _reuse(R, eval_dir: str) -> List[str]:
+    """G2 D-2: test reuse per DATASET test split (the combined test_sha256 hides that a bigger split re-opens the
+    earlier datasets' test subjects)."""
+    from .evaluate_heads import ledger_history
+    from .integrity import entry_dataset_splits
+    p = os.path.join(eval_dir, "test_ledger.jsonl")
+    if not os.path.isfile(p):
+        return []
+    rows = [json.loads(x) for x in open(p) if x.strip()]
+    per: Dict[str, Dict[str, int]] = {}
+    for r in rows:
+        code = r.get("rerun_reason")
+        for d in entry_dataset_splits(r, ledger_history):
+            e = per.setdefault(d, {"all": 0, "ncsa": 0, "post_audit_rule_change": 0, "first": 0})
+            e["all"] += 1
+            e["ncsa"] += r["experiment"].startswith("ncsa-")
+            e["post_audit_rule_change"] += code == "post_audit_rule_change"
+            e["first"] += not code
+    L = ["### Test reuse per dataset test split (G2 D-2)", "",
+         "`n evals (this split)` above counts evaluations of one COMBINED test split (`test_sha256`). A split that adds "
+         "datasets to an earlier one has a new hash although it re-opens the earlier datasets' test subjects. Counted per "
+         "dataset (identity = the frozen split manifest's sha256; recorded in every new ledger entry as "
+         "`per_dataset_split_sha256` / `n_evaluations_per_dataset_split`, derived from the pre-registered eval datasets "
+         "for older entries):", "", "| dataset | test-split evaluations (all experiments) | first evaluations | "
+         "post_audit_rule_change re-evaluations | by ncsa-* experiments |", "|---|---|---|---|---|"]
+    for d in SPLIT_DATASETS:
+        if d in per:
+            e = per[d]
+            L.append(f"| {d} | {e['all']} | {e['first']} | {e['post_audit_rule_change']} | {e['ncsa']} |")
+    W, P = R.get("ncsa-primary-hc"), R.get("primary-hc")
+    if W and P:
+        wn = {x["dataset"]: x["windows"] for x in W.get("test_windows", [])}
+        pn = {x["dataset"]: x["windows"] for x in P.get("test_windows", [])}
+        cc = sum(v for d, v in wn.items() if d in pn)
+        same = sum(min(v, pn[d]) for d, v in wn.items() if d in pn)
+        L += ["", f"The ncsa test split is the six CC BY test splits plus GOTOV/WEAR: {cc:,} of its {sum(wn.values()):,} "
+              f"windows ({cc / max(1, sum(wn.values())):.1%}) are CC BY test windows, and they are {same / max(1, sum(pn.values())):.1%} "
+              f"of the earlier CC BY test windows ({sum(pn.values()):,}). So every ncsa-* evaluation re-opens those test "
+              "subjects again: **read the CC BY per-dataset test numbers of every bundle as re-used, not pristine**; only "
+              "GOTOV and WEAR test subjects were new when the ncsa-* bundles were first evaluated."]
+    return L + [""]
+
+
 def _disclosures() -> List[str]:
     return ["## Disclosures (test-set exposure and evaluator changes)", "",
             "- **WISDM / PAMAP2 test numbers are not fully pristine (G-8).** Prototyping in `research/inertia-work/agentD` "
@@ -300,7 +396,15 @@ def _disclosures() -> List[str]:
             "- **Rule changes after the audit.** The strong/weak VAL rule (subject-cluster bootstrap, >= 5 subjects), "
             "the test gate (weak -> abstain, per-dataset demotion), the merge table and the macro-F1 convention were "
             "changed after a red-team audit that had seen these test results; evaluations made with the new rules "
-            "are recorded as `post_audit_rule_change` re-evaluations and are not pristine either.", ""]
+            "are recorded as `post_audit_rule_change` re-evaluations and are not pristine either.",
+            f"- **Set-target status rule (G2 D-1, 2026-10-06).** After an audit that had seen the sealed results, "
+            f"statuses, tau and gates of set members were changed to single-label evidence (`{A.SET_RULE}`), set "
+            "families are scored as one class and locomotion merges are directed specific → general. Every bundle was "
+            "retrained and re-evaluated once more (`post_audit_rule_change`); the earlier rule's statuses are shown next "
+            "to the new ones in 'Set-target status rule' below.",
+            "- **GOTOV loader rules from all 35 files (G2 D-4).** `gotov-guard-10s` and the 60 s MET on-kinetics mask of "
+            "`gotov-met-1` were chosen from QC over every GOTOV file, the 7 test participants included, before any model "
+            "result; no model output informed them.", ""]
 
 
 def _c24_verification() -> List[str]:
@@ -351,7 +455,9 @@ NCSA_CAVEATS = [
     "**GOTOV is older adults** (35 participants, 59.5-81.3 y, BMI 23-35, recruited > 60 y) in a scripted protocol: its "
     "walking speeds are **instructed** ('slow / medium / fast pace'), never measured, so `brisk_walking` here means "
     "'an older adult asked to walk fast' — not a cadence or speed threshold, and not validated on younger or free-living "
-    "walkers. Outdoor walking exists for 22 participants only; the frozen split leaves **one** GOTOV test participant "
+    "walkers. Outdoor walking exists for **21** participants only (14 train, 6 val, 1 test; earlier versions of this "
+    "summary and the frozen split manifest's free-text note say 22 — a counting error; the note is inside the frozen "
+    "manifest's hash and is left as is); the frozen split leaves **one** GOTOV test participant "
     "with walking (GOTOV07: 19 `brisk_walking` and 33 `walking` test windows), so every GOTOV walking / brisk_walking / "
     "cycling test number is a one-subject, descriptive result and the test gate cannot demote with < 30 accepted windows.",
     "GOTOV labels are protocol-imputed (researcher-recorded start/end): the first/last 10 s of every activity are MASK "
@@ -360,7 +466,14 @@ NCSA_CAVEATS = [
     "participants have no COSMED) — whole-body energy expenditure of older adults, not wrist motion.",
     "WEAR is 24 (mostly young) adults doing 18 outdoor workouts on a Bangle.js; **one wrist per subject** (left unless "
     "< 95 % finite) so no movement is counted twice. `exercise_motion` is supervised only by WEAR push-ups (+complex), "
-    "burpees, bench-dips and jogging with arm circles (sit-ups / lunges stay MASK: 'arms may be static').",
+    "burpees, bench-dips and jogging with arm circles (sit-ups / lunges stay MASK: 'arms may be static'). WEAR "
+    "participant identity is **unconfirmed**: the release has one file per `sbj_<k>` and no participant metadata, so "
+    "it cannot be verified locally that the 24 ids are 24 distinct people (the subject split assumes they are).",
+    "**GOTOV loader rules were chosen on all 35 files, test participants included (G2 D-4).** The 10 s label guard "
+    "(`gotov-guard-10s`) and the 60 s MET on-kinetics mask (`gotov-met-1`) were set from signal/label QC (wrist "
+    "activity onsets against the protocol-imputed label onsets; COSMED VO2 plateaus) over every GOTOV file, including "
+    "the 7 test participants, before any model was trained or evaluated on GOTOV. No model output was seen when they "
+    "were chosen, but the test participants' raw data informed them: read GOTOV test numbers as slightly optimistic.",
     "Both sets are **CC BY-NC-SA 4.0**: every `ncsa-*` bundle except `ncsa-lodo-nonc-hc` records "
     "`training_data_licences` = [CC BY 4.0, CC BY-NC-SA 4.0] and may only be used non-commercially (Nara is "
     "non-commercial; owner decision 2026-10-06). Bundles stay outside git.",
@@ -496,19 +609,42 @@ def _ncsa_findings(R) -> List[str]:
                  f"is `walking` {g_m[i_w][i_w]}/{sum(g_m[i_w])}. Pace-unknown walking goes the other way: WISDM walking "
                  f"(set target) is argmax `brisk_walking` {w_m[i_b][i_b]}/{sum(w_m[i_b]) + sum(w_m[i_w])} times, Capture-24 "
                  f"free-living walking `brisk_walking` {c_m[i_b][i_b]} vs `walking` {c_m[i_w][i_w]} windows.")
-    L.append(f"- **brisk_walking becomes supported (GOTOV walkingFast) but does not learn pace.** Pooled set-aware "
-             f"P/R/F1 {prf(bw)}, status {gate(W, 'locomotion', 'brisk_walking')} — earned on pace-unknown walking "
-             f"{{walking, brisk_walking}} windows, which count as correct for either member; single-label precision/recall "
+    gw = (_head(W, "locomotion") or {}).get("gate", {})
+    old_b = (gw.get("brisk_walking") or {}).get("set_target_scoring") or {}
+    old_w = (gw.get("walking") or {}).get("set_target_scoring") or {}
+    fam = ((_head(W, "locomotion") or {}).get("families") or {}).get("walking+brisk_walking") or {}
+    fa = fam.get("argmax") or {}
+    seal_m = ((W.get("seal") or {}).get("merge_into") or {}).get("locomotion", {})
+    old_m = (_head(W, "locomotion") or {}).get("set_target_scoring_merge_into")
+    L.append(f"- **brisk_walking becomes supported (GOTOV walkingFast) but does not learn pace.** Pooled set-target "
+             f"P/R/F1 {prf(bw)} — pace-unknown walking {{walking, brisk_walking}} windows count as correct for either "
+             f"member there; single-label precision/recall "
              f"{f((sl.get('brisk_walking') or {}).get('precision'), 2)}/{f((sl.get('brisk_walking') or {}).get('recall'), 2)} "
-             f"(n = {f((sl.get('brisk_walking') or {}).get('support'))}).{split} `walking` drops to "
-             f"{gate(W, 'locomotion', 'walking')} and is merged into `brisk_walking` "
-             f"(final merge_into {((W.get('seal') or {}).get('merge_into') or {}).get('locomotion', {})}): the decoder would "
-             f"read ordinary walking as brisk. The split the head learned is older-adult/slow vs young/lab walking, not "
-             f"pace — **do not use brisk_walking from these bundles as a pace signal**; without GOTOV it stays unsupported "
-             f"(covered by `walking`, {gate(N, 'locomotion', 'walking')}).")
+             f"(n = {f((sl.get('brisk_walking') or {}).get('support'))}).{split} Under the earlier set-target status rule "
+             f"brisk_walking was {old_b.get('val_status', '–')}→{old_b.get('final_status', '–')} and walking "
+             f"{old_w.get('val_status', '–')}→{old_w.get('final_status', '–')}, merged into brisk_walking "
+             f"({old_m if old_m is not None else '–'}): the decoder would have read ordinary walking as brisk. With the "
+             f"single-label rule (`{A.SET_RULE}`, G2 D-1) brisk_walking is {gate(W, 'locomotion', 'brisk_walking')}, "
+             f"walking {gate(W, 'locomotion', 'walking')}, final merge_into {seal_m or '{}'} (specific → general only), "
+             f"and the walking family {{walking, brisk_walking}} scored as one class is "
+             f"{fam.get('val_status', '–')}→{fam.get('final_status', '–')} (argmax P/R {f(fa.get('precision'), 2)}/"
+             f"{f(fa.get('recall'), 2)}). The split the head learned is older-adult/slow vs young/lab walking, not pace — "
+             f"**brisk_walking from these bundles is not a pace signal**; without GOTOV it stays unsupported (covered by "
+             f"`walking`, {gate(N, 'locomotion', 'walking')}).")
     ex = pc(W, "arm_behavior", "exercise_motion")
     exw = pc(W, "arm_behavior", "exercise_motion", "wear")
     gt = ((_head(W, "arm_behavior") or {}).get("gate", {}).get("exercise_motion") or {}).get("test") or {}
+    common = [c for c in HEAD_CLASS_ORDERS["arm_behavior"] if pc(N, "arm_behavior", c).get("supported_by_head")
+              and pc(W, "arm_behavior", c).get("supported_by_head")]
+    if common:
+        lf_n = float(np.mean([pc(N, "arm_behavior", c)["f1"] for c in common]))
+        lf_w = float(np.mean([pc(W, "arm_behavior", c)["f1"] for c in common]))
+        newc = [c for c in HEAD_CLASS_ORDERS["arm_behavior"] if pc(W, "arm_behavior", c).get("supported_by_head")
+                and c not in common]
+        L.append(f"- **arm_behavior like-for-like (G2 D-3):** the headline {f(mf1(N, 'arm_behavior'))} → "
+                 f"{f(mf1(W, 'arm_behavior'))} compares different class sets. On the {len(common)} classes both bundles "
+                 f"support ({', '.join(common)}) the mean F1 is {f(lf_n)} → {f(lf_w)} (+{lf_w - lf_n:.3f}); "
+                 f"{', '.join(newc) or 'no class'} is new with NC-SA data (its windows are MASK, not scored, without it).")
     L.append(f"- **exercise_motion becomes a class** (WEAR only): unsupported without WEAR; with it P/R/F1 {prf(ex)}, status "
              f"{gate(W, 'arm_behavior', 'exercise_motion')} (WEAR test {prf(exw)}, 5 subjects; pooled gate precision "
              f"{f(gt.get('precision'))} at n_acc {f(gt.get('n_acc'))}, CP95 lower bound {f(gt.get('cp_lower_95'))} < 0.90 -> weak). "
@@ -546,8 +682,8 @@ def _ncsa_section(R, cw) -> List[str]:
     L += ["### Headline (pooled ncsa test split)", ""] + _headline(R, NCSA_ALL)
     L += ["### Per-class test P/R/F1 and final status — without vs with", "",
           "Pooled over the eight-set test split. `unsupported` = the class failed the train-support rule in that bundle "
-          "(< 200 train windows / 5 train subjects / 2 val subjects); a set target {walking, brisk_walking} counts as "
-          "correct for either member.", ""]
+          "(< 200 train windows / 5 train subjects / 2 val subjects); in the P/R/F1 a set target {walking, brisk_walking} "
+          f"counts as correct for either member; the statuses use single-label evidence (`{A.SET_RULE}`).", ""]
     for h in HEADS:
         L += _compare_classes(R, NCSA_COMPARE, h)
     L += ["### GOTOV / WEAR test subjects (key classes)", "", DESCRIPTIVE_NOTE + " GOTOV walking / brisk_walking / cycling "
@@ -608,7 +744,8 @@ def build_summary(eval_dir: str, bundles_root: str) -> str:
     L += ["## Per-class test F1 (precision/recall) — primary bundles", "",
           "Final status = min(VAL status, pooled test gate, every wrist dataset with >= 30 accepted windows): strong needs "
           "precision >= .95 (pooled also CP95 >= .90, recall >= .05), weak needs precision >= .80; demotions only. "
-          "P single-label = precision on windows whose truth is exactly one class.", ""]
+          f"Statuses, tau and gates of set members use single-label evidence (`{A.SET_RULE}`); the P/R/F1 cells use "
+          "set-target scoring. P single-label = precision on windows whose truth is exactly one class.", ""]
     for h in HEADS:
         L += _per_class(R, list(PRIMARY) + ["linear-hc", "mlp-hc"], h)
     L += ["## Per-dataset per-class test P/R/F1 — primary bundles", "", DESCRIPTIVE_NOTE, FEW_SUBJECTS_NOTE, ""]
@@ -628,6 +765,7 @@ def build_summary(eval_dir: str, bundles_root: str) -> str:
     L += ["### Seed variation (primary hc procedure, archs fixed from seed 0)", ""] + _seeds(R)
     if any(n.startswith("ncsa-") for n in R):
         L += _ncsa_section(R, cw)
+    L += _rule_change(R)
     sp = load_splits(list(SPLIT_DATASETS))
     L += ["## Split manifests (subject-level, frozen before windowing)", "", "| dataset | train | val | test | LOSO folds | sha256 |",
           "|---|---|---|---|---|---|"]
@@ -645,6 +783,7 @@ def build_summary(eval_dir: str, bundles_root: str) -> str:
     L += ["## Test-split ledger (evaluate-once integrity)", "",
           "The test split is assembled only inside the TestVault; a re-evaluation needs an enumerated reason ("
           + ", ".join(f"`{k}`" for k in sorted(RERUN_REASONS)) + ") plus free-text detail.", ""] + _ledger(eval_dir)
+    L += [""] + _reuse(R, eval_dir)
     if os.path.isfile(os.path.join(eval_dir, "replay_test_ledger.jsonl")):
         L += ["", "### Decoder-replay TEST ledger (replay_eval final/baseline)", ""] + _ledger(eval_dir, "replay_test_ledger.jsonl")
     L += [""] + _disclosures() + _fixture_section()

@@ -10,7 +10,11 @@
 Support (:func:`resolve_support`): a class is supported iff it has >= 200 TRAIN windows from >= 5 TRAIN
 subjects and >= 2 VAL subjects, counting windows whose target is exactly that class, plus — for a
 ``set_families`` representative — windows whose target set equals the family (``{walking, brisk_walking}``
-credits ``walking``). An unsupported family member is then *covered* by its supported representative.
+credits ``walking``). An unsupported family member is then *covered* by its supported representative (the
+representative then IS the family). Family members also record their single-label counts
+(``single_label_train_windows`` / ``single_label_val_windows``): support lets the representative train on the
+family sets, but its operating point, status and test gates only use single-label evidence
+(``abstention.SET_RULE``) unless the representative covers every other member.
 :meth:`Support.resolve` maps a raw set to the trainable set: supported members kept, covered members
 replaced by their cover, and the whole target MASKed if any member is neither supported nor covered.
 """
@@ -164,6 +168,11 @@ def resolve_support(head: str, bits_tr: np.ndarray, subj_tr: np.ndarray, bits_va
         ns = int(len(np.unique(subj_tr[ctr == k])))
         nv = int(len(np.unique(subj_va[cva == k])))
         counts[c] = {"train_windows": n, "train_subjects": ns, "val_windows": int((cva == k).sum()), "val_subjects": nv}
+        if any(c in members for members in families.values()):
+            # a set-family member: its single-label evidence (exact {c} targets) next to the family-set credit
+            one = np.uint16(1 << k)
+            counts[c].update({"single_label_train_windows": int((np.asarray(bits_tr) == one).sum()),
+                              "single_label_val_windows": int((np.asarray(bits_va) == one).sum())})
         sup[k] = n >= min_windows and ns >= min_subjects and nv >= min_val_subjects
     covers: Dict[str, List[str]] = {}
     for rep, members in families.items():

@@ -2,7 +2,7 @@
  "apply_vs_training_side_max_abs": 1.1102230246251565e-16,
  "banner": "STAND-IN ENCODER \u2014 NOT INERTIA-1; real Inertia-1 evaluation blocked: no public checkpoint",
  "bundle_id": "shadow-primary-nf",
- "bundle_sha256": "e8a34e919d5d19b5c873a85223479bb528b5bd004cfd001c1de6e72c7c40c428",
+ "bundle_sha256": "8fb6cfeab131d1f2a53c28eb0ae67544927f3828c337bc0305d8cbde7a1fb09e",
  "encoder": {
   "checkpoint_sha256": null,
   "config_sha256": "ccc4127836a08533d68d7c9ad86e5f91478b4e1040fec44dc65191c9ce6bc246",
@@ -13,6 +13,14 @@
   "inertia_repo_commit": "afcd725314c95f4afefce118821349df7d61e7e8",
   "kind": "standin"
  },
+ "eval_datasets": [
+  "capture24",
+  "wisdm2019_watch",
+  "hhar_watch",
+  "pamap2",
+  "mhealth",
+  "opportunity"
+ ],
  "evidence_tier_max": "shadow",
  "experiment": "primary-nf",
  "heads": {
@@ -61,6 +69,7 @@
      "warning": null
     }
    },
+   "families": {},
    "fixed_thresholds": [
     {
      "coverage": 0.9814991417127599,
@@ -102,28 +111,48 @@
    "gate": {
     "desk_like": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {},
      "reasons": [],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [],
+      "tau": 1.0,
+      "test": null,
+      "val_status": "abstain"
+     },
      "tau": 1.0,
      "test": null,
      "val_status": "abstain"
     },
     "quiet": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {},
      "reasons": [],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [],
+      "tau": 1.0,
+      "test": null,
+      "val_status": "abstain"
+     },
      "tau": 1.0,
      "test": null,
      "val_status": "abstain"
     },
     "repetitive_hand_motion": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {
       "capture24": {
        "cp_lower_95": 0.0,
        "decisive": true,
        "level": "abstain",
        "n_acc": 48,
+       "n_set_windows_excluded": 0,
        "n_true": 393,
        "pass": false,
        "precision": 0.0,
@@ -136,6 +165,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": null,
@@ -148,6 +178,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 29,
        "pass": false,
        "precision": null,
@@ -160,6 +191,7 @@
        "decisive": true,
        "level": "strong",
        "n_acc": 34,
+       "n_set_windows_excluded": 0,
        "n_true": 160,
        "pass": true,
        "precision": 1.0,
@@ -171,12 +203,35 @@
      "reasons": [
       "pooled test: precision 0.415 at n_acc 82 -> abstain"
      ],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [
+       "pooled test: precision 0.415 at n_acc 82 -> abstain"
+      ],
+      "tau": 0.91,
+      "test": {
+       "cp_lower_95": 0.3225727555383595,
+       "decisive": true,
+       "level": "abstain",
+       "n_acc": 82,
+       "n_set_windows_excluded": 0,
+       "n_true": 582,
+       "pass": false,
+       "precision": 0.4146341463414634,
+       "recall": 0.058419243986254296,
+       "tau": 0.91,
+       "tp": 34
+      },
+      "val_status": "weak"
+     },
      "tau": 0.91,
      "test": {
       "cp_lower_95": 0.3225727555383595,
       "decisive": true,
       "level": "abstain",
       "n_acc": 82,
+      "n_set_windows_excluded": 0,
       "n_true": 582,
       "pass": false,
       "precision": 0.4146341463414634,
@@ -189,6 +244,7 @@
       "decisive": true,
       "level": "abstain",
       "n_acc": 82,
+      "n_set_windows_excluded": 0,
       "n_true": 582,
       "pass": false,
       "precision": 0.4146341463414634,
@@ -1722,6 +1778,7 @@
      0.34975304875948326
     ]
    },
+   "set_target_scoring_merge_into": {},
    "single_label": {
     "macro_f1": 0.3530051707619016,
     "n_set_target": 0,
@@ -1749,6 +1806,10 @@
       "support": 582
      }
     }
+   },
+   "status_rule": {
+    "rule": "set-family-1",
+    "text": "set targets: a window whose truth is a set containing class c and another class neither confirms nor refutes c, so c's VAL operating point, status and test gates (pooled and per dataset) use only windows whose truth is exactly {c} or excludes c (single-label evidence); every multi-member set family is scored as one class (merged probability; correct iff the truth lies inside the family) and earns its own, reported, family status; merges only go specific -> general (brisk_walking -> walking, stairs -> walking)"
    },
    "uncalibrated_softmax": {
     "brier": 0.6319441603766733,
@@ -1807,6 +1868,125 @@
      "warning": null
     }
    },
+   "families": {
+    "stationary+walking": {
+     "argmax": {
+      "cp_lower_95": 0.8965097152430583,
+      "decisive": true,
+      "level": "weak",
+      "n_acc": 90472,
+      "n_set_windows_excluded": 0,
+      "n_true": 81723,
+      "pass": false,
+      "precision": 0.8981784419488903,
+      "recall": 0.9943345202696915,
+      "tau": 0.0,
+      "tp": 81260
+     },
+     "final_status": "strong",
+     "members": [
+      "stationary",
+      "walking"
+     ],
+     "n_test_exact_set": 453,
+     "per_dataset": {
+      "capture24": {
+       "cp_lower_95": 0.9733405106448105,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 59294,
+       "n_set_windows_excluded": 0,
+       "n_true": 80317,
+       "pass": true,
+       "precision": 0.9744324889533511,
+       "recall": 0.7193744786284348,
+       "tau": 0.865,
+       "tp": 57778
+      },
+      "hhar_watch": {
+       "cp_lower_95": 0.9689579881320451,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 95,
+       "n_set_windows_excluded": 0,
+       "n_true": 109,
+       "pass": true,
+       "precision": 1.0,
+       "recall": 0.8715596330275229,
+       "tau": 0.865,
+       "tp": 95
+      },
+      "mhealth": {
+       "cp_lower_95": 0.8292502770175191,
+       "decisive": false,
+       "level": "weak",
+       "n_acc": 16,
+       "n_set_windows_excluded": 0,
+       "n_true": 23,
+       "pass": false,
+       "precision": 1.0,
+       "recall": 0.6956521739130435,
+       "tau": 0.865,
+       "tp": 16
+      },
+      "opportunity": {
+       "cp_lower_95": 0.8073638243498646,
+       "decisive": false,
+       "level": "weak",
+       "n_acc": 14,
+       "n_set_windows_excluded": 0,
+       "n_true": 37,
+       "pass": false,
+       "precision": 1.0,
+       "recall": 0.3783783783783784,
+       "tau": 0.865,
+       "tp": 14
+      },
+      "pamap2": {
+       "cp_lower_95": 0.9164323443724349,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 123,
+       "n_set_windows_excluded": 0,
+       "n_true": 230,
+       "pass": true,
+       "precision": 0.959349593495935,
+       "recall": 0.5130434782608696,
+       "tau": 0.865,
+       "tp": 118
+      },
+      "wisdm2019_watch": {
+       "cp_lower_95": 0.994538310919341,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 547,
+       "n_set_windows_excluded": 0,
+       "n_true": 1007,
+       "pass": true,
+       "precision": 1.0,
+       "recall": 0.5431976166832175,
+       "tau": 0.865,
+       "tp": 547
+      }
+     },
+     "reasons": [],
+     "tau": 0.865,
+     "test": {
+      "cp_lower_95": 0.9736081352989046,
+      "decisive": true,
+      "level": "strong",
+      "n_acc": 60089,
+      "n_set_windows_excluded": 0,
+      "n_true": 81723,
+      "pass": true,
+      "precision": 0.9746875468055717,
+      "recall": 0.7166648311980716,
+      "tau": 0.865,
+      "tp": 58568
+     },
+     "val_status": "strong"
+    }
+   },
    "fixed_thresholds": [
     {
      "coverage": 0.8830589287857462,
@@ -1848,12 +2028,14 @@
    "gate": {
     "cycling": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {
       "capture24": {
        "cp_lower_95": 0.5431372845613032,
        "decisive": true,
        "level": "abstain",
        "n_acc": 414,
+       "n_set_windows_excluded": 0,
        "n_true": 743,
        "pass": false,
        "precision": 0.5845410628019324,
@@ -1866,6 +2048,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 17,
+       "n_set_windows_excluded": 0,
        "n_true": 33,
        "pass": false,
        "precision": 1.0,
@@ -1878,6 +2061,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 4,
+       "n_set_windows_excluded": 0,
        "n_true": 4,
        "pass": false,
        "precision": 1.0,
@@ -1890,6 +2074,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 1,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": 0.0,
@@ -1902,6 +2087,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 19,
+       "n_set_windows_excluded": 0,
        "n_true": 28,
        "pass": false,
        "precision": 1.0,
@@ -1914,6 +2100,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 28,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": 0.0,
@@ -1925,12 +2112,35 @@
      "reasons": [
       "pooled test: precision 0.584 at n_acc 483 -> abstain"
      ],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [
+       "pooled test: precision 0.584 at n_acc 483 -> abstain"
+      ],
+      "tau": 0.485,
+      "test": {
+       "cp_lower_95": 0.5456149476329363,
+       "decisive": true,
+       "level": "abstain",
+       "n_acc": 483,
+       "n_set_windows_excluded": 0,
+       "n_true": 808,
+       "pass": false,
+       "precision": 0.5838509316770186,
+       "recall": 0.349009900990099,
+       "tau": 0.485,
+       "tp": 282
+      },
+      "val_status": "weak"
+     },
      "tau": 0.485,
      "test": {
       "cp_lower_95": 0.5456149476329363,
       "decisive": true,
       "level": "abstain",
       "n_acc": 483,
+      "n_set_windows_excluded": 0,
       "n_true": 808,
       "pass": false,
       "precision": 0.5838509316770186,
@@ -1943,6 +2153,7 @@
       "decisive": true,
       "level": "abstain",
       "n_acc": 483,
+      "n_set_windows_excluded": 0,
       "n_true": 808,
       "pass": false,
       "precision": 0.5838509316770186,
@@ -1954,20 +2165,31 @@
     },
     "other": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {},
      "reasons": [],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [],
+      "tau": 1.0,
+      "test": null,
+      "val_status": "abstain"
+     },
      "tau": 1.0,
      "test": null,
      "val_status": "abstain"
     },
     "running": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {
       "capture24": {
        "cp_lower_95": 0.6008602720052273,
        "decisive": true,
        "level": "abstain",
        "n_acc": 132,
+       "n_set_windows_excluded": 0,
        "n_true": 103,
        "pass": false,
        "precision": 0.6742424242424242,
@@ -1980,6 +2202,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": null,
@@ -1992,6 +2215,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 10,
+       "n_set_windows_excluded": 0,
        "n_true": 10,
        "pass": false,
        "precision": 1.0,
@@ -2004,6 +2228,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": null,
@@ -2016,6 +2241,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 10,
+       "n_set_windows_excluded": 0,
        "n_true": 10,
        "pass": false,
        "precision": 1.0,
@@ -2028,6 +2254,7 @@
        "decisive": true,
        "level": "strong",
        "n_acc": 68,
+       "n_set_windows_excluded": 0,
        "n_true": 80,
        "pass": true,
        "precision": 1.0,
@@ -2039,12 +2266,35 @@
      "reasons": [
       "capture24 test: precision 0.674 at n_acc 132 -> abstain"
      ],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [
+       "capture24 test: precision 0.674 at n_acc 132 -> abstain"
+      ],
+      "tau": 0.59,
+      "test": {
+       "cp_lower_95": 0.7553106206626099,
+       "decisive": true,
+       "level": "weak",
+       "n_acc": 220,
+       "n_set_windows_excluded": 0,
+       "n_true": 203,
+       "pass": false,
+       "precision": 0.8045454545454546,
+       "recall": 0.8719211822660099,
+       "tau": 0.59,
+       "tp": 177
+      },
+      "val_status": "weak"
+     },
      "tau": 0.59,
      "test": {
       "cp_lower_95": 0.7553106206626099,
       "decisive": true,
       "level": "weak",
       "n_acc": 220,
+      "n_set_windows_excluded": 0,
       "n_true": 203,
       "pass": false,
       "precision": 0.8045454545454546,
@@ -2057,6 +2307,7 @@
       "decisive": true,
       "level": "weak",
       "n_acc": 219,
+      "n_set_windows_excluded": 0,
       "n_true": 203,
       "pass": false,
       "precision": 0.8082191780821918,
@@ -2068,32 +2319,44 @@
     },
     "stairs": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {},
      "reasons": [],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [],
+      "tau": 1.0,
+      "test": null,
+      "val_status": "abstain"
+     },
      "tau": 1.0,
      "test": null,
      "val_status": "abstain"
     },
     "stationary": {
      "final_status": "strong",
+     "n_test_set_windows_excluded": 453,
      "per_dataset": {
       "capture24": {
-       "cp_lower_95": 0.9717117883751261,
+       "cp_lower_95": 0.9716899877528629,
        "decisive": true,
        "level": "strong",
-       "n_acc": 55806,
-       "n_true": 72163,
+       "n_acc": 55763,
+       "n_set_windows_excluded": 453,
+       "n_true": 71710,
        "pass": true,
-       "precision": 0.9728703006845142,
-       "recall": 0.7523523135124648,
+       "precision": 0.9728493804135359,
+       "recall": 0.7565053688467438,
        "tau": 0.855,
-       "tp": 54292
+       "tp": 54249
       },
       "hhar_watch": {
        "cp_lower_95": 0.9597932057468341,
        "decisive": true,
        "level": "strong",
        "n_acc": 73,
+       "n_set_windows_excluded": 0,
        "n_true": 74,
        "pass": true,
        "precision": 1.0,
@@ -2106,6 +2369,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 16,
+       "n_set_windows_excluded": 0,
        "n_true": 19,
        "pass": false,
        "precision": 1.0,
@@ -2118,6 +2382,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 12,
+       "n_set_windows_excluded": 0,
        "n_true": 37,
        "pass": false,
        "precision": 1.0,
@@ -2130,6 +2395,7 @@
        "decisive": true,
        "level": "strong",
        "n_acc": 116,
+       "n_set_windows_excluded": 0,
        "n_true": 187,
        "pass": true,
        "precision": 0.9827586206896551,
@@ -2142,6 +2408,7 @@
        "decisive": true,
        "level": "strong",
        "n_acc": 507,
+       "n_set_windows_excluded": 0,
        "n_true": 937,
        "pass": true,
        "precision": 1.0,
@@ -2151,24 +2418,46 @@
       }
      },
      "reasons": [],
+     "set_member_on_test": true,
+     "set_target_scoring": {
+      "final_status": "strong",
+      "reasons": [],
+      "tau": 0.855,
+      "test": {
+       "cp_lower_95": 0.972037777608581,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 56530,
+       "n_set_windows_excluded": 0,
+       "n_true": 73417,
+       "pass": true,
+       "precision": 0.9731823810366177,
+       "recall": 0.7493359848536443,
+       "tau": 0.855,
+       "tp": 55014
+      },
+      "val_status": "strong"
+     },
      "tau": 0.855,
      "test": {
-      "cp_lower_95": 0.972037777608581,
+      "cp_lower_95": 0.972016504257946,
       "decisive": true,
       "level": "strong",
-      "n_acc": 56530,
-      "n_true": 73417,
+      "n_acc": 56487,
+      "n_set_windows_excluded": 453,
+      "n_true": 72964,
       "pass": true,
-      "precision": 0.9731823810366177,
-      "recall": 0.7493359848536443,
+      "precision": 0.9731619664701613,
+      "recall": 0.7533989364618168,
       "tau": 0.855,
-      "tp": 55014
+      "tp": 54971
      },
      "test_single_label": {
       "cp_lower_95": 0.972016504257946,
       "decisive": true,
       "level": "strong",
       "n_acc": 56487,
+      "n_set_windows_excluded": 0,
       "n_true": 72964,
       "pass": true,
       "precision": 0.9731619664701613,
@@ -2180,37 +2469,49 @@
     },
     "vehicle_motion": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {},
      "reasons": [],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [],
+      "tau": 1.0,
+      "test": null,
+      "val_status": "abstain"
+     },
      "tau": 1.0,
      "test": null,
      "val_status": "abstain"
     },
     "walking": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 453,
      "per_dataset": {
       "capture24": {
-       "cp_lower_95": 0.8967991533595963,
+       "cp_lower_95": 0.8944882933329983,
        "decisive": true,
        "level": "weak",
-       "n_acc": 3173,
-       "n_true": 8607,
+       "n_acc": 3014,
+       "n_set_windows_excluded": 453,
+       "n_true": 8154,
        "pass": false,
-       "precision": 0.9057674125433344,
-       "recall": 0.33391425583827117,
-       "tau": 0.6,
-       "tp": 2874
+       "precision": 0.9037823490378235,
+       "recall": 0.3340691685062546,
+       "tau": 0.605,
+       "tp": 2724
       },
       "hhar_watch": {
        "cp_lower_95": 0.46898504768579446,
        "decisive": true,
        "level": "abstain",
        "n_acc": 60,
+       "n_set_windows_excluded": 0,
        "n_true": 35,
        "pass": false,
        "precision": 0.5833333333333334,
        "recall": 1.0,
-       "tau": 0.6,
+       "tau": 0.605,
        "tp": 35
       },
       "mhealth": {
@@ -2218,11 +2519,12 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 7,
+       "n_set_windows_excluded": 0,
        "n_true": 4,
        "pass": false,
        "precision": 0.5714285714285714,
        "recall": 1.0,
-       "tau": 0.6,
+       "tau": 0.605,
        "tp": 4
       },
       "opportunity": {
@@ -2230,11 +2532,12 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": null,
        "recall": 0.0,
-       "tau": 0.6,
+       "tau": 0.605,
        "tp": 0
       },
       "pamap2": {
@@ -2242,53 +2545,79 @@
        "decisive": true,
        "level": "abstain",
        "n_acc": 31,
+       "n_set_windows_excluded": 0,
        "n_true": 43,
        "pass": false,
        "precision": 0.25806451612903225,
        "recall": 0.18604651162790697,
-       "tau": 0.6,
+       "tau": 0.605,
        "tp": 8
       },
       "wisdm2019_watch": {
-       "cp_lower_95": 0.28808889560275347,
+       "cp_lower_95": 0.2881792821939798,
        "decisive": true,
        "level": "abstain",
-       "n_acc": 64,
+       "n_acc": 61,
+       "n_set_windows_excluded": 0,
        "n_true": 70,
        "pass": false,
-       "precision": 0.390625,
-       "recall": 0.35714285714285715,
-       "tau": 0.6,
-       "tp": 25
+       "precision": 0.39344262295081966,
+       "recall": 0.34285714285714286,
+       "tau": 0.605,
+       "tp": 24
       }
      },
      "reasons": [
       "hhar_watch test: precision 0.583 at n_acc 60 -> abstain"
      ],
-     "tau": 0.6,
-     "test": {
-      "cp_lower_95": 0.8738156412423588,
-      "decisive": true,
-      "level": "weak",
-      "n_acc": 3335,
-      "n_true": 8759,
-      "pass": false,
-      "precision": 0.8833583208395802,
-      "recall": 0.33633976481333483,
+     "set_member_on_test": true,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [
+       "hhar_watch test: precision 0.583 at n_acc 60 -> abstain"
+      ],
       "tau": 0.6,
-      "tp": 2946
+      "test": {
+       "cp_lower_95": 0.8738156412423588,
+       "decisive": true,
+       "level": "weak",
+       "n_acc": 3335,
+       "n_set_windows_excluded": 0,
+       "n_true": 8759,
+       "pass": false,
+       "precision": 0.8833583208395802,
+       "recall": 0.33633976481333483,
+       "tau": 0.6,
+       "tp": 2946
+      },
+      "val_status": "weak"
      },
-     "test_single_label": {
-      "cp_lower_95": 0.8691727498783622,
+     "tau": 0.605,
+     "test": {
+      "cp_lower_95": 0.8709918665096815,
       "decisive": true,
       "level": "weak",
-      "n_acc": 3216,
+      "n_acc": 3173,
+      "n_set_windows_excluded": 453,
       "n_true": 8306,
       "pass": false,
-      "precision": 0.8790422885572139,
-      "recall": 0.34035636888995907,
-      "tau": 0.6,
-      "tp": 2827
+      "precision": 0.8808698392688308,
+      "recall": 0.33650373224175295,
+      "tau": 0.605,
+      "tp": 2795
+     },
+     "test_single_label": {
+      "cp_lower_95": 0.8709918665096815,
+      "decisive": true,
+      "level": "weak",
+      "n_acc": 3173,
+      "n_set_windows_excluded": 0,
+      "n_true": 8306,
+      "pass": false,
+      "precision": 0.8808698392688308,
+      "recall": 0.33650373224175295,
+      "tau": 0.605,
+      "tp": 2795
      },
      "val_status": "weak"
     }
@@ -4402,6 +4731,7 @@
      0.24237678309235566
     ]
    },
+   "set_target_scoring_merge_into": {},
    "single_label": {
     "macro_f1": 0.41787960091371634,
     "n_set_target": 453,
@@ -4458,6 +4788,10 @@
      }
     }
    },
+   "status_rule": {
+    "rule": "set-family-1",
+    "text": "set targets: a window whose truth is a set containing class c and another class neither confirms nor refutes c, so c's VAL operating point, status and test gates (pooled and per dataset) use only windows whose truth is exactly {c} or excludes c (single-label evidence); every multi-member set family is scored as one class (merged probability; correct iff the truth lies inside the family) and earns its own, reported, family status; merges only go specific -> general (brisk_walking -> walking, stairs -> walking)"
+   },
    "uncalibrated_softmax": {
     "brier": 0.4104173691388813,
     "classwise_ece_equal_width_15": 0.08544473726272839,
@@ -4498,7 +4832,7 @@
     "r2": 0.28451718372366674,
     "spearman": 0.7763117841137048
    },
-   "target": "clip(ln(MET)/ln(12),0,1) from Capture-24 annotation METs / PAMAP2 protocol METs"
+   "target": "clip(ln(MET)/ln(12),0,1) from Capture-24 annotation METs / PAMAP2 protocol METs / GOTOV measured COSMED METs per window (gotov-met-1)"
   },
   "posture": {
    "aurc": {
@@ -4521,39 +4855,42 @@
      "final_status": "abstain",
      "per_dataset": {
       "capture24": {
-       "cp_lower_95": 0.4224449799058374,
+       "cp_lower_95": 0.0,
        "decisive": true,
        "level": "abstain",
-       "n_acc": 1270,
-       "n_true": 8576,
+       "n_acc": 629,
+       "n_set_windows_excluded": 8576,
+       "n_true": 0,
        "pass": false,
-       "precision": 0.4456692913385827,
-       "recall": 0.06599813432835822,
-       "tau": 0.88,
-       "tp": 566
+       "precision": 0.0,
+       "recall": 0.0,
+       "tau": 0.885,
+       "tp": 0
       },
       "hhar_watch": {
        "cp_lower_95": 0.0,
        "decisive": false,
        "level": "weak",
-       "n_acc": 29,
+       "n_acc": 24,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": 0.0,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       },
       "mhealth": {
        "cp_lower_95": 0.0,
        "decisive": false,
        "level": "weak",
-       "n_acc": 1,
+       "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 4,
        "pass": false,
-       "precision": 0.0,
+       "precision": null,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       },
       "opportunity": {
@@ -4561,53 +4898,57 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": null,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       },
       "pamap2": {
-       "cp_lower_95": 0.8414928256083642,
+       "cp_lower_95": 0.4181965907479741,
        "decisive": false,
        "level": "weak",
-       "n_acc": 28,
-       "n_true": 85,
+       "n_acc": 6,
+       "n_set_windows_excluded": 54,
+       "n_true": 31,
        "pass": false,
-       "precision": 0.9642857142857143,
-       "recall": 0.3176470588235294,
-       "tau": 0.88,
-       "tp": 27
+       "precision": 0.8333333333333334,
+       "recall": 0.16129032258064516,
+       "tau": 0.885,
+       "tp": 5
       },
       "wisdm2019_watch": {
        "cp_lower_95": 0.0,
        "decisive": false,
        "level": "weak",
-       "n_acc": 8,
+       "n_acc": 7,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": 0.0,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       }
      },
      "reasons": [
-      "pooled test: precision 0.444 at n_acc 1336 -> abstain"
+      "pooled test: precision 0.008 at n_acc 666 -> abstain"
      ],
-     "tau": 0.88,
+     "tau": 0.885,
      "test": {
-      "cp_lower_95": 0.4212372941019437,
+      "cp_lower_95": 0.002962704166680391,
       "decisive": true,
       "level": "abstain",
-      "n_acc": 1336,
-      "n_true": 8665,
+      "n_acc": 666,
+      "n_set_windows_excluded": 8630,
+      "n_true": 35,
       "pass": false,
-      "precision": 0.4438622754491018,
-      "recall": 0.06843623773802654,
-      "tau": 0.88,
-      "tp": 593
+      "precision": 0.0075075075075075074,
+      "recall": 0.14285714285714285,
+      "tau": 0.885,
+      "tp": 5
      },
      "val_status": "strong"
     },
@@ -4665,6 +5006,127 @@
      "warning": null
     }
    },
+   "families": {
+    "recumbent+seated_likely": {
+     "argmax": {
+      "cp_lower_95": 0.9446250709570045,
+      "decisive": true,
+      "level": "weak",
+      "n_acc": 73741,
+      "n_set_windows_excluded": 0,
+      "n_true": 70255,
+      "pass": false,
+      "precision": 0.9460137508306098,
+      "recall": 0.9929542381325173,
+      "tau": 0.0,
+      "tp": 69760
+     },
+     "final_status": "abstain",
+     "members": [
+      "recumbent",
+      "seated_likely"
+     ],
+     "n_test_exact_set": 8630,
+     "per_dataset": {
+      "capture24": {
+       "cp_lower_95": 0.9627218018339492,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 68888,
+       "n_set_windows_excluded": 0,
+       "n_true": 69949,
+       "pass": true,
+       "precision": 0.9639124375798397,
+       "recall": 0.949291626756637,
+       "tau": 0.815,
+       "tp": 66402
+      },
+      "hhar_watch": {
+       "cp_lower_95": 0.39902036753868286,
+       "decisive": true,
+       "level": "abstain",
+       "n_acc": 74,
+       "n_set_windows_excluded": 0,
+       "n_true": 37,
+       "pass": false,
+       "precision": 0.5,
+       "recall": 1.0,
+       "tau": 0.815,
+       "tp": 37
+      },
+      "mhealth": {
+       "cp_lower_95": 0.39101158302074135,
+       "decisive": false,
+       "level": "weak",
+       "n_acc": 16,
+       "n_set_windows_excluded": 0,
+       "n_true": 10,
+       "pass": false,
+       "precision": 0.625,
+       "recall": 1.0,
+       "tau": 0.815,
+       "tp": 10
+      },
+      "opportunity": {
+       "cp_lower_95": 0.7751838914107743,
+       "decisive": true,
+       "level": "weak",
+       "n_acc": 32,
+       "n_set_windows_excluded": 0,
+       "n_true": 30,
+       "pass": false,
+       "precision": 0.90625,
+       "recall": 0.9666666666666667,
+       "tau": 0.815,
+       "tp": 29
+      },
+      "pamap2": {
+       "cp_lower_95": 0.7519771097064711,
+       "decisive": true,
+       "level": "weak",
+       "n_acc": 172,
+       "n_set_windows_excluded": 0,
+       "n_true": 149,
+       "pass": false,
+       "precision": 0.8081395348837209,
+       "recall": 0.9328859060402684,
+       "tau": 0.815,
+       "tp": 139
+      },
+      "wisdm2019_watch": {
+       "cp_lower_95": 0.4765057492259839,
+       "decisive": true,
+       "level": "abstain",
+       "n_acc": 146,
+       "n_set_windows_excluded": 0,
+       "n_true": 80,
+       "pass": false,
+       "precision": 0.547945205479452,
+       "recall": 1.0,
+       "tau": 0.815,
+       "tp": 80
+      }
+     },
+     "reasons": [
+      "hhar_watch test: precision 0.500 at n_acc 74 -> abstain"
+     ],
+     "tau": 0.815,
+     "test": {
+      "cp_lower_95": 0.9608347133794337,
+      "decisive": true,
+      "level": "strong",
+      "n_acc": 69328,
+      "n_set_windows_excluded": 0,
+      "n_true": 70255,
+      "pass": true,
+      "precision": 0.9620499653819524,
+      "recall": 0.9493559177282755,
+      "tau": 0.815,
+      "tp": 66697
+     },
+     "val_status": "strong"
+    }
+   },
    "fixed_thresholds": [
     {
      "coverage": 0.989701242027526,
@@ -4706,41 +5168,45 @@
    "gate": {
     "recumbent": {
      "final_status": "strong",
+     "n_test_set_windows_excluded": 8630,
      "per_dataset": {
       "capture24": {
-       "cp_lower_95": 0.9635281353641832,
+       "cp_lower_95": 0.9650400721869428,
        "decisive": true,
        "level": "strong",
-       "n_acc": 20520,
-       "n_true": 44480,
+       "n_acc": 19196,
+       "n_set_windows_excluded": 8576,
+       "n_true": 35904,
        "pass": true,
-       "precision": 0.9656920077972709,
-       "recall": 0.44550359712230214,
-       "tau": 0.88,
-       "tp": 19816
+       "precision": 0.9672327568243384,
+       "recall": 0.5171290106951871,
+       "tau": 0.885,
+       "tp": 18567
       },
       "hhar_watch": {
        "cp_lower_95": 0.0,
        "decisive": false,
        "level": "weak",
-       "n_acc": 29,
+       "n_acc": 24,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": 0.0,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       },
       "mhealth": {
        "cp_lower_95": 0.0,
        "decisive": false,
        "level": "weak",
-       "n_acc": 1,
+       "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 4,
        "pass": false,
-       "precision": 0.0,
+       "precision": null,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       },
       "opportunity": {
@@ -4748,86 +5214,114 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": null,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       },
       "pamap2": {
-       "cp_lower_95": 0.8414928256083642,
+       "cp_lower_95": 0.4181965907479741,
        "decisive": false,
        "level": "weak",
-       "n_acc": 28,
-       "n_true": 85,
+       "n_acc": 6,
+       "n_set_windows_excluded": 54,
+       "n_true": 31,
        "pass": false,
-       "precision": 0.9642857142857143,
-       "recall": 0.3176470588235294,
-       "tau": 0.88,
-       "tp": 27
+       "precision": 0.8333333333333334,
+       "recall": 0.16129032258064516,
+       "tau": 0.885,
+       "tp": 5
       },
       "wisdm2019_watch": {
        "cp_lower_95": 0.0,
        "decisive": false,
        "level": "weak",
-       "n_acc": 8,
+       "n_acc": 7,
+       "n_set_windows_excluded": 0,
        "n_true": 0,
        "pass": false,
        "precision": 0.0,
        "recall": 0.0,
-       "tau": 0.88,
+       "tau": 0.885,
        "tp": 0
       }
      },
      "reasons": [],
-     "tau": 0.88,
-     "test": {
-      "cp_lower_95": 0.9616958447739519,
-      "decisive": true,
-      "level": "strong",
-      "n_acc": 20586,
-      "n_true": 44569,
-      "pass": true,
-      "precision": 0.963907509958224,
-      "recall": 0.4452197715901187,
+     "set_member_on_test": true,
+     "set_target_scoring": {
+      "final_status": "strong",
+      "reasons": [],
       "tau": 0.88,
-      "tp": 19843
+      "test": {
+       "cp_lower_95": 0.9616958447739519,
+       "decisive": true,
+       "level": "strong",
+       "n_acc": 20586,
+       "n_set_windows_excluded": 0,
+       "n_true": 44569,
+       "pass": true,
+       "precision": 0.963907509958224,
+       "recall": 0.4452197715901187,
+       "tau": 0.88,
+       "tp": 19843
+      },
+      "val_status": "strong"
      },
-     "test_single_label": {
-      "cp_lower_95": 0.9605709210584052,
+     "tau": 0.885,
+     "test": {
+      "cp_lower_95": 0.9633925312587325,
       "decisive": true,
       "level": "strong",
-      "n_acc": 19998,
+      "n_acc": 19233,
+      "n_set_windows_excluded": 8630,
       "n_true": 35939,
       "pass": true,
-      "precision": 0.9628462846284629,
-      "recall": 0.5357689418180807,
-      "tau": 0.88,
-      "tp": 19255
+      "precision": 0.965631986689544,
+      "recall": 0.5167645176549153,
+      "tau": 0.885,
+      "tp": 18572
+     },
+     "test_single_label": {
+      "cp_lower_95": 0.9633925312587325,
+      "decisive": true,
+      "level": "strong",
+      "n_acc": 19233,
+      "n_set_windows_excluded": 0,
+      "n_true": 35939,
+      "pass": true,
+      "precision": 0.965631986689544,
+      "recall": 0.5167645176549153,
+      "tau": 0.885,
+      "tp": 18572
      },
      "val_status": "strong"
     },
     "seated_likely": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 8630,
      "per_dataset": {
       "capture24": {
-       "cp_lower_95": 0.8098441412397663,
+       "cp_lower_95": 0.7711085029747371,
        "decisive": true,
-       "level": "weak",
-       "n_acc": 29535,
-       "n_true": 34045,
+       "level": "abstain",
+       "n_acc": 24525,
+       "n_set_windows_excluded": 8576,
+       "n_true": 25469,
        "pass": false,
-       "precision": 0.813610970035551,
-       "recall": 0.7058305184314877,
+       "precision": 0.7755351681957187,
+       "recall": 0.7467902155561663,
        "tau": 0.3,
-       "tp": 24030
+       "tp": 19020
       },
       "hhar_watch": {
        "cp_lower_95": 0.07644039141232889,
        "decisive": false,
        "level": "weak",
        "n_acc": 5,
+       "n_set_windows_excluded": 0,
        "n_true": 37,
        "pass": false,
        "precision": 0.4,
@@ -4840,6 +5334,7 @@
        "decisive": false,
        "level": "weak",
        "n_acc": 0,
+       "n_set_windows_excluded": 0,
        "n_true": 6,
        "pass": false,
        "precision": null,
@@ -4852,6 +5347,7 @@
        "decisive": true,
        "level": "weak",
        "n_acc": 37,
+       "n_set_windows_excluded": 0,
        "n_true": 30,
        "pass": false,
        "precision": 0.8108108108108109,
@@ -4860,22 +5356,24 @@
        "tp": 30
       },
       "pamap2": {
-       "cp_lower_95": 0.43937400304398944,
+       "cp_lower_95": 0.37659574181249095,
        "decisive": true,
        "level": "abstain",
-       "n_acc": 128,
-       "n_true": 118,
+       "n_acc": 114,
+       "n_set_windows_excluded": 54,
+       "n_true": 64,
        "pass": false,
-       "precision": 0.515625,
-       "recall": 0.559322033898305,
+       "precision": 0.45614035087719296,
+       "recall": 0.8125,
        "tau": 0.3,
-       "tp": 66
+       "tp": 52
       },
       "wisdm2019_watch": {
        "cp_lower_95": 0.3842066436738106,
        "decisive": true,
        "level": "abstain",
        "n_acc": 93,
+       "n_set_windows_excluded": 0,
        "n_true": 80,
        "pass": false,
        "precision": 0.4731182795698925,
@@ -4885,26 +5383,50 @@
       }
      },
      "reasons": [
-      "pamap2 test: precision 0.516 at n_acc 128 -> abstain"
+      "pooled test: precision 0.773 at n_acc 24774 -> abstain"
      ],
+     "set_member_on_test": true,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [
+       "pamap2 test: precision 0.516 at n_acc 128 -> abstain"
+      ],
+      "tau": 0.3,
+      "test": {
+       "cp_lower_95": 0.8074271452300729,
+       "decisive": true,
+       "level": "weak",
+       "n_acc": 29798,
+       "n_set_windows_excluded": 0,
+       "n_true": 34316,
+       "pass": false,
+       "precision": 0.8111953822404189,
+       "recall": 0.7043944515677818,
+       "tau": 0.3,
+       "tp": 24172
+      },
+      "val_status": "weak"
+     },
      "tau": 0.3,
      "test": {
-      "cp_lower_95": 0.8074271452300729,
+      "cp_lower_95": 0.7684851561740922,
       "decisive": true,
-      "level": "weak",
-      "n_acc": 29798,
-      "n_true": 34316,
+      "level": "abstain",
+      "n_acc": 24774,
+      "n_set_windows_excluded": 8630,
+      "n_true": 25686,
       "pass": false,
-      "precision": 0.8111953822404189,
-      "recall": 0.7043944515677818,
+      "precision": 0.7729070800032292,
+      "recall": 0.7454644553453244,
       "tau": 0.3,
-      "tp": 24172
+      "tp": 19148
      },
      "test_single_label": {
       "cp_lower_95": 0.7684851561740922,
       "decisive": true,
       "level": "abstain",
       "n_acc": 24774,
+      "n_set_windows_excluded": 0,
       "n_true": 25686,
       "pass": false,
       "precision": 0.7729070800032292,
@@ -4916,8 +5438,17 @@
     },
     "upright_stationary": {
      "final_status": "abstain",
+     "n_test_set_windows_excluded": 0,
      "per_dataset": {},
      "reasons": [],
+     "set_member_on_test": false,
+     "set_target_scoring": {
+      "final_status": "abstain",
+      "reasons": [],
+      "tau": 1.0,
+      "test": null,
+      "val_status": "abstain"
+     },
      "tau": 1.0,
      "test": null,
      "val_status": "abstain"
@@ -6309,6 +6840,7 @@
      0.34967263871986054
     ]
    },
+   "set_target_scoring_merge_into": {},
    "single_label": {
     "macro_f1": 0.582236635087711,
     "n_set_target": 8630,
@@ -6336,6 +6868,10 @@
       "support": 4220
      }
     }
+   },
+   "status_rule": {
+    "rule": "set-family-1",
+    "text": "set targets: a window whose truth is a set containing class c and another class neither confirms nor refutes c, so c's VAL operating point, status and test gates (pooled and per dataset) use only windows whose truth is exactly {c} or excludes c (single-label evidence); every multi-member set family is scored as one class (merged probability; correct iff the truth lies inside the family) and earns its own, reported, family status; merges only go specific -> general (brisk_walking -> walking, stairs -> walking)"
    },
    "uncalibrated_softmax": {
     "brier": 0.45589236344757106,
@@ -6682,16 +7218,32 @@
   }
  },
  "integrity": {
-  "bundle_sha256": "e8a34e919d5d19b5c873a85223479bb528b5bd004cfd001c1de6e72c7c40c428",
+  "bundle_sha256": "8fb6cfeab131d1f2a53c28eb0ae67544927f3828c337bc0305d8cbde7a1fb09e",
   "experiment": "primary-nf",
-  "n_evaluations_of_experiment_any_split": 3,
-  "n_evaluations_on_this_test_split": 34,
-  "n_test_evaluations": 3,
-  "rerun_detail": "red-team fixes G-2..G-20 (clustered strong/weak, per-dataset gate weak->abstain, compatible merges, sealing, union macro-F1); retrained from clean commit a424d207",
+  "n_evaluations_of_experiment_any_split": 4,
+  "n_evaluations_on_this_test_split": 50,
+  "n_evaluations_per_dataset_split": {
+   "capture24": 62,
+   "hhar_watch": 62,
+   "mhealth": 62,
+   "opportunity": 62,
+   "pamap2": 62,
+   "wisdm2019_watch": 62
+  },
+  "n_test_evaluations": 4,
+  "per_dataset_split_sha256": {
+   "capture24": "b6110fbe0b1ed83d8f7d20d3149c67b41b574aa97b561acc9738b64a06074b67",
+   "hhar_watch": "3e4c143046e562eb233e785b7bc3f6d459a455a0e76638269acae9537f3537af",
+   "mhealth": "cc95780c0706c08f92e61f7267335b366fa761cd29fa35e3dd7d8d36a29f394b",
+   "opportunity": "2df351a0ba583c232c309e1941e3f00f10c0633c0095bb1c4b88b3b375e019b8",
+   "pamap2": "4aeb6af05b41c67b3a82724026ddb7e8b633c5270c4d00fc0f580f4adea53715",
+   "wisdm2019_watch": "7105df4cac920c71c26957bacdaad065d59d9d0312b2026a4fdf1e0c6415754f"
+  },
+  "rerun_detail": "audit G2 D-1 (2026-10-06): set-target status rule set-family-1 - VAL operating points, statuses, tau and the pooled and per-dataset test gates of a set member use only windows unambiguous for it (a set window {walking, brisk_walking} / {recumbent, seated_likely} / {walking, brisk_walking, stationary} no longer counts as correct for whichever member is predicted); set families are scored as one class (reported only); locomotion merges are directed specific->general (brisk_walking->walking, stairs->walking). Bundle retrained from clean commit 744e33a7: heads, calibration and OOD reference identical to the previously sealed bundle; statuses, tau, merges, families and provenance change. Ledger entries now also record per-dataset test-split reuse (G2 D-2).",
   "rerun_reason": "post_audit_rule_change",
   "rerun_reason_text": "a training/selection/gate/metric rule changed after an audit that had seen test results; the new test numbers are NOT pristine",
   "test_sha256": "6afd705530ea8f98e32f7c40997c4db53952ebdcd411fea823493c71a8311898",
-  "time": 1791262904
+  "time": 1791322045
  },
  "n_nonfinite_dropped": 0,
  "n_test_windows": 107969,
@@ -6705,11 +7257,11 @@
  "provenance": {
   "allow_dirty": false,
   "dirty_paths": [],
-  "git_commit": "a424d207e1c44f08e267f588b2122c787336055c",
+  "git_commit": "744e33a76ae52a758d82c6f8dd1440dbf24b913d",
   "git_dirty": false,
   "source_dirty": false,
   "source_dirty_paths": [],
-  "source_tree_sha256": "48a7a17c749ac61cf5226cbe7ae9812819d22d4d416240f39d0381db62546e0e",
+  "source_tree_sha256": "443e2fe493e33691de3d52796c5681c0a7efdd886de6e2b9f64ac5087b2b128a",
   "tools_activity_context_dirty": false
  },
  "role": "primary",
@@ -6719,7 +7271,7 @@
    "locomotion": false,
    "posture": false
   },
-  "evaluated_bundle_sha256": "e8a34e919d5d19b5c873a85223479bb528b5bd004cfd001c1de6e72c7c40c428",
+  "evaluated_bundle_sha256": "8fb6cfeab131d1f2a53c28eb0ae67544927f3828c337bc0305d8cbde7a1fb09e",
   "final_status": {
    "arm_behavior": {
     "desk_like": "abstain",
@@ -6753,8 +7305,8 @@
    "posture": {},
    "transition": {}
   },
-  "sealed_bundle_sha256": "736eb93e440fa5dad5c1c5b9c73072f514072b70693dd1ea59927f8757cd61ee",
-  "test_gate_sha256": "8f3a1be7a8809296555047348909428f498fa0a74b4a5760c2a6c43609546385"
+  "sealed_bundle_sha256": "efe44c375da389cc07169dfe5ec5188cca3cc58906105c287cecd7a5dcfa9ae6",
+  "test_gate_sha256": "f502e95b33b0ab37969fae5b54eed175de26e6b25ee585a0a671025807737666"
  },
  "test_predictions": {
   "capture24": {
@@ -6860,5 +7412,16 @@
    "subjects": 8,
    "windows": 1397
   }
+ ],
+ "training_data_licences": [
+  "CC BY 4.0"
+ ],
+ "training_datasets": [
+  "capture24",
+  "wisdm2019_watch",
+  "hhar_watch",
+  "pamap2",
+  "mhealth",
+  "opportunity"
  ]
 }

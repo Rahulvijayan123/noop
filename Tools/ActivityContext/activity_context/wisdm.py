@@ -20,8 +20,13 @@ Pipeline, per subject file pair (``raw/watch/{accel,gyro}/data_<subject>_<sensor
    of 11 intervals. A segment ends where the nominal rate changes, or at an interval shorter than 0.5
    or longer than 2.5 nominal periods. A long-then-short pair that sums to about 2 periods is delivery
    jitter and is left alone. An interval of 1.5-2.5 periods followed by a normal one is exactly ONE
-   missing sample: it is repaired by inserting the linear interpolation of its two neighbours (counted;
-   never a zero). Segments shorter than ``MIN_SEGMENT_S`` cannot hold a window and are dropped (counted).
+   missing sample. What happens to it is the named, versioned loader option ``repair``
+   (:data:`REPAIR_POLICIES`): the default ``wisdm-single-dropout-linear-1`` inserts the linear interpolation
+   of its two neighbours (counted; never a zero); ``none`` ends the segment there instead. Every repaired
+   sample is tracked to the 30 Hz output (``Piece.repaired_pos``) so each window records how many repaired
+   samples it contains (:func:`window_repair_counts`; ``train.py`` writes ``n_repaired`` per window into the
+   npz files, audit G2 E-1). Segments shorter than ``MIN_SEGMENT_S`` cannot hold a window and are dropped
+   (counted).
 5. Clock per segment: least-squares fit ``t_i = a + i / r`` over the (repaired, uniform) sample index.
    This gives the measured rate ``r`` and the fitted time of every sample, robust to the 2-20 ms
    delivery jitter of the 1637-1640 watches.
@@ -69,6 +74,21 @@ from .preprocess import (HOP_SAMPLES, N_CHANNELS, TARGET_HZ, TRANSIENT_MARGIN_SE
                          WINDOW_SAMPLES, _design_resample_filter)
 
 LOADER_VERSION = "wisdm-watch-loader-2"
+
+# Single-dropout repair (a named, versioned loader option; recorded in the HART manifest and data_report.json).
+REPAIR_POLICIES: Dict[str, str] = {
+    "wisdm-single-dropout-linear-1": "an interval of 1.5-2.5 nominal periods followed by a normal one is ONE missing "
+                                     "sample: it is inserted as the linear interpolation of its two neighbours "
+                                     "(timestamp = their midpoint); every window records how many it contains",
+    "none": "no repair: such an interval ends the constant-rate segment like any other irregular interval",
+}
+DEFAULT_REPAIR = "wisdm-single-dropout-linear-1"
+
+
+def check_repair(repair: str) -> str:
+    if repair not in REPAIR_POLICIES:
+        raise ValueError(f"repair must be one of {sorted(REPAIR_POLICIES)}, got {repair!r}")
+    return repair
 
 M_S2_TO_G = 1.0 / 9.80665
 RAD_S_TO_DEG_S = 180.0 / math.pi
@@ -175,6 +195,7 @@ class Segment:
     ref_ns: int                 # time reference (first raw timestamp of the segment)
     max_resid_s: float
     n_repaired: int = 0
+    repaired_index: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))  # inserted samples
 
     @property
     def n(self) -> int:
@@ -246,8 +267,12 @@ class StreamStats:
 
 
 def constant_rate_segments(ts_ns: np.ndarray, x: np.ndarray,
-                           stats: Optional[StreamStats] = None) -> List[Segment]:
-    """Split ONE sorted, de-duplicated recording into uniform-rate segments (see module doc, step 4)."""
+                           stats: Optional[StreamStats] = None, repair: str = DEFAULT_REPAIR) -> List[Segment]:
+    """Split ONE sorted, de-duplicated recording into uniform-rate segments (see module doc, step 4).
+
+    ``repair`` (:data:`REPAIR_POLICIES`): what a single missing sample does — interpolated (default) or a
+    segment break (``none``)."""
+    policy_none = check_repair(repair) == "none"
     st = stats if stats is not None else StreamStats()
     n = ts_ns.size
     if n < 3:
@@ -268,10 +293,13 @@ def constant_rate_segments(ts_ns: np.ndarray, x: np.ndarray,
     brk |= (nom == 0)
     brk[1:] |= nom[1:] != nom[:-1]
     nxt_ok = np.r_[r[1:] >= SPLIT_SHORT, True]
-    repair = (~jitter) & (r > REPAIR_LONG) & (r <= SPLIT_LONG) & nxt_ok & (nom > 0)
+    rep_mask = (~jitter) & (r > REPAIR_LONG) & (r <= SPLIT_LONG) & nxt_ok & (nom > 0)
     brk |= (~jitter) & ((r < SPLIT_SHORT) | (r > SPLIT_LONG))
     brk |= (~jitter) & (r > REPAIR_LONG) & (r <= SPLIT_LONG) & ~nxt_ok
-    repair &= ~brk
+    rep_mask &= ~brk
+    if policy_none:
+        brk |= rep_mask                                                # "none": the dropout ends the segment
+        rep_mask = np.zeros_like(rep_mask)
     st.n_breaks += int(brk.sum())
     st.n_unknown_rate_samples += int(np.sum(nom == 0))
 
@@ -289,12 +317,13 @@ def constant_rate_segments(ts_ns: np.ndarray, x: np.ndarray,
             continue
         t_seg = ts_ns[s:e]
         x_seg = x[s:e]
-        rep = np.flatnonzero(repair[s:e - 1])                          # interval k: between k and k+1
+        rep = np.flatnonzero(rep_mask[s:e - 1])                          # interval k: between k and k+1
         if rep.size:
             ins_t = (t_seg[rep] + t_seg[rep + 1]) // 2
             ins_x = 0.5 * (x_seg[rep] + x_seg[rep + 1])
             t_seg = np.insert(t_seg, rep + 1, ins_t)
             x_seg = np.insert(x_seg, rep + 1, ins_x, axis=0)
+        rep_idx = (rep + 1 + np.arange(rep.size)).astype(np.int64)   # positions of the inserted samples
         dur = (t_seg[-1] - t_seg[0]) / 1e9
         if dur < MIN_SEGMENT_S:
             st.n_short_segment_samples += int(e - s)
@@ -302,7 +331,7 @@ def constant_rate_segments(ts_ns: np.ndarray, x: np.ndarray,
         st.n_repaired += int(rep.size)
         a, rate, ref, resid = fit_clock(t_seg)
         out.append(Segment(ts_ns=t_seg, x=x_seg, nominal_hz=seg_nom, rate_hz=rate, a_s=a, ref_ns=ref,
-                           max_resid_s=resid, n_repaired=int(rep.size)))
+                           max_resid_s=resid, n_repaired=int(rep.size), repaired_index=rep_idx))
     return out
 
 
@@ -407,7 +436,9 @@ class Piece:
     offset_s: float                 # gyro - accel instant offset (constant over the piece)
     time_error_s: float             # max |output time - (t0 + k/30)| over the piece (rational approx.)
     wander_s: float = 0.0           # max transient gyro-timestamp excursion tolerated inside the piece
-    n_repaired: int = 0
+    n_repaired: int = 0             # repaired samples of the two source segments (whole segments)
+    # 30 Hz output position (fractional sample index) of every repaired raw sample inside this piece
+    repaired_pos: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float64))
 
     @property
     def n(self) -> int:
@@ -531,6 +562,12 @@ def align_run(acc: Segment, gyr: Segment, j0: int, j1: int, c: float, subject: i
         st.n_short += 1
         return None
     t0_abs_s = acc.ref_ns / 1e9 + float(acc.t_fit(ia))
+    # repaired raw samples on the 30 Hz output grid: accel index i -> (i - ia) * ua/da; gyro index j -> (j - jg) *
+    # k * ua/da (both grids start at the same instant up to the sub-sample offset)
+    ra = acc.repaired_index[(acc.repaired_index >= ia) & (acc.repaired_index <= ia1)]
+    rg = gyr.repaired_index[(gyr.repaired_index >= jg) & (gyr.repaired_index <= j1)]
+    pos = np.concatenate([(ra - ia) * (ua / da), (rg - jg) * kf * (ua / da)]).astype(np.float64)
+    pos = np.sort(pos[(pos >= 0) & (pos <= n - 1)])
     st.n_pieces += 1
     return Piece(subject=subject, activity=activity, recording=recording,
                  t0_ns=int(round(t0_abs_s * 1e9)),
@@ -538,7 +575,7 @@ def align_run(acc: Segment, gyr: Segment, j0: int, j1: int, c: float, subject: i
                  acc_rate_hz=rate_a, acc_nominal_hz=acc.nominal_hz, acc_ratio=(ua, da),
                  gyr_rate_hz=rate_a / kf, gyr_nominal_hz=gyr.nominal_hz, gyr_ratio=(ug, dg),
                  offset_s=frac / rate_a, time_error_s=abs(eps) * (n - 1) / TARGET_HZ,
-                 wander_s=wander / rate_a, n_repaired=acc.n_repaired + gyr.n_repaired)
+                 wander_s=wander / rate_a, n_repaired=acc.n_repaired + gyr.n_repaired, repaired_pos=pos)
 
 
 def align_segments(acc: Segment, gyr: Segment, subject: int, activity: str, recording: int,
@@ -571,6 +608,21 @@ def window_starts(n: int, window: int = WINDOW_SAMPLES, hop: int = HOP_SAMPLES,
     return out
 
 
+def window_repair_counts(piece: Piece, starts: Sequence[int], window: int = WINDOW_SAMPLES,
+                         margin: int = 0) -> np.ndarray:
+    """Repaired raw samples inside each window [k - margin, k + window - 1 + margin] (output samples) of a piece.
+
+    ``margin = 0`` counts the samples inside the window; ``margin = 15`` (0.5 s) also counts dropouts close
+    enough to reach the window through the resampling filter's main lobe."""
+    pos = np.asarray(piece.repaired_pos, dtype=np.float64)
+    k = np.asarray(starts, dtype=np.float64)
+    if not pos.size or not k.size:
+        return np.zeros(len(k), dtype=np.int64)
+    lo = np.searchsorted(pos, k - margin, side="left")
+    hi = np.searchsorted(pos, k + window - 1 + margin, side="right")
+    return (hi - lo).astype(np.int64)
+
+
 # ---------------------------------------------------------------------------
 # Subject loader
 # ---------------------------------------------------------------------------
@@ -601,10 +653,17 @@ class SubjectData:
     n_unparsed: int = 0
     n_wrong_subject: int = 0
     gyro_only_activities: List[str] = field(default_factory=list)
+    repair: str = DEFAULT_REPAIR
+    repaired_ts_ns: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int64))  # accel + gyro, sorted
 
     def report(self) -> Dict[str, Any]:
+        starts = [window_starts(p.n) for p in self.pieces]
+        per_win = [window_repair_counts(p, k) for p, k in zip(self.pieces, starts)]
         return {
             "subject": self.subject,
+            "repair": self.repair,
+            "n_repaired_samples_in_pieces": int(sum(len(p.repaired_pos) for p in self.pieces)),
+            "n_windows_with_repaired_samples": int(sum(int((c > 0).sum()) for c in per_win)),
             "n_pieces": len(self.pieces),
             "n_windows": int(sum(len(window_starts(p.n)) for p in self.pieces)),
             "accel": self.acc_stats.__dict__.copy(),
@@ -621,7 +680,7 @@ class SubjectData:
 
 
 def _stream_segments(raw: RawStream, activity: str, scale: float,
-                     stats: StreamStats) -> List[Tuple[int, List[Segment], float]]:
+                     stats: StreamStats, repair: str = DEFAULT_REPAIR) -> List[Tuple[int, List[Segment], float]]:
     """[(recording index, segments, recording seconds)] of one activity of one sensor stream."""
     m = raw.activity == activity
     t, v, n_exact, n_conf = sorted_unique(raw.ts_ns[m], raw.xyz[m] * scale)
@@ -630,7 +689,7 @@ def _stream_segments(raw: RawStream, activity: str, scale: float,
     stats.n_conflicting_dropped += n_conf
     out = []
     for ri, (s, e) in enumerate(recordings(t)):
-        segs = constant_rate_segments(t[s:e], v[s:e], stats)
+        segs = constant_rate_segments(t[s:e], v[s:e], stats, repair)
         out.append((ri, segs, float((t[e - 1] - t[s]) / 1e9) if e - s > 1 else 0.0))
     return out
 
@@ -640,8 +699,10 @@ def subject_paths(wisdm_dir: str, subject: int) -> Tuple[str, str]:
             os.path.join(wisdm_dir, "raw", "watch", "gyro", f"data_{subject}_gyro_watch.txt"))
 
 
-def load_subject(wisdm_dir: str, subject: int) -> SubjectData:
-    """All aligned 30 Hz pieces of one subject plus an exclusion/quality report."""
+def load_subject(wisdm_dir: str, subject: int, repair: str = DEFAULT_REPAIR) -> SubjectData:
+    """All aligned 30 Hz pieces of one subject plus an exclusion/quality report (``repair``: see
+    :data:`REPAIR_POLICIES`)."""
+    check_repair(repair)
     ap, gp = subject_paths(wisdm_dir, subject)
     acc = parse_raw(ap, subject)
     gyr = parse_raw(gp, subject)
@@ -651,10 +712,13 @@ def load_subject(wisdm_dir: str, subject: int) -> SubjectData:
     reports: List[RecordingReport] = []
     acc_acts = sorted(set(acc.activity.tolist()))
     gyr_acts = sorted(set(gyr.activity.tolist()))
+    rep_ts: List[np.ndarray] = []
     for act in acc_acts:
-        a_recs = _stream_segments(acc, act, M_S2_TO_G, acc_stats)
-        g_recs = _stream_segments(gyr, act, RAD_S_TO_DEG_S, gyr_stats) if act in gyr_acts else []
+        a_recs = _stream_segments(acc, act, M_S2_TO_G, acc_stats, repair)
+        g_recs = _stream_segments(gyr, act, RAD_S_TO_DEG_S, gyr_stats, repair) if act in gyr_acts else []
         g_segs = [s for _, segs, _ in g_recs for s in segs]
+        rep_ts += [sg.ts_ns[sg.repaired_index] for _, segs, _ in a_recs for sg in segs]
+        rep_ts += [sg.ts_ns[sg.repaired_index] for sg in g_segs]
         g_secs = sum(sec for _, _, sec in g_recs)
         for ri, a_segs, a_sec in a_recs:
             rec_pieces: List[Piece] = []
@@ -683,7 +747,9 @@ def load_subject(wisdm_dir: str, subject: int) -> SubjectData:
     return SubjectData(subject=subject, pieces=pieces, recordings=reports, acc_stats=acc_stats,
                        gyr_stats=gyr_stats, align_stats=align_stats, n_unparsed=acc.n_unparsed + gyr.n_unparsed,
                        n_wrong_subject=acc.n_wrong_subject + gyr.n_wrong_subject,
-                       gyro_only_activities=sorted(set(gyr_acts) - set(acc_acts)))
+                       gyro_only_activities=sorted(set(gyr_acts) - set(acc_acts)), repair=repair,
+                       repaired_ts_ns=np.sort(np.concatenate(rep_ts)).astype(np.int64) if rep_ts
+                       else np.zeros(0, dtype=np.int64))
 
 
 def available_subjects(wisdm_dir: str, subjects: Sequence[int]) -> List[int]:
