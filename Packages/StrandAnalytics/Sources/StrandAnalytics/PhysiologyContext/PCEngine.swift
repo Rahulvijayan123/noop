@@ -157,14 +157,19 @@ extension PhysiologyContext {
             let functional = Functional.daySummary(identity: identity, bouts: bouts, hart: hart, strap: strap,
                                                    observations: observations, sleep: sleep, mode: mode,
                                                    cutoff: input.availabilityCutoff, config: policy.functional)
-            let deviceRegimeKey = deviceRegimeKey(input.regime, timeline: timeline, dayWindow: identity.dayWindow)
+            // Device-level products carry their own definition version in the regime, so values computed under
+            // an older definition (e.g. pc-functional-1) never pool with the current one.
+            let boutRegimeKey = deviceRegimeKey(input.regime, timeline: timeline, dayWindow: identity.dayWindow,
+                                                product: policy.exertion.version)
+            let functionalRegimeKey = deviceRegimeKey(input.regime, timeline: timeline, dayWindow: identity.dayWindow,
+                                                      product: policy.functional.version)
 
             // Daily context-conditioned values: envelopes, bouts, functional, and the engine's coverage series.
             var dailyValues = ContextReferences.dailyValues(envelopes: envelopes, identity: identity, mode: mode,
                                                             finality: finality, config: policy.reference)
-            dailyValues += ExertionBouts.dailyValues(bouts, identity: identity, regimeKey: deviceRegimeKey,
+            dailyValues += ExertionBouts.dailyValues(bouts, identity: identity, regimeKey: boutRegimeKey,
                                                      mode: mode, config: policy.exertion)
-            dailyValues += Functional.dailyValues(functional, regimeKey: deviceRegimeKey, mode: mode,
+            dailyValues += Functional.dailyValues(functional, regimeKey: functionalRegimeKey, mode: mode,
                                                   finality: finality, config: policy.functional)
             if let today = coverage.last, today.day == identity.day {
                 dailyValues.append(DailyValue(day: identity.day, seriesKey: motionCoverageSeries,
@@ -200,7 +205,8 @@ extension PhysiologyContext {
             let features = FeatureRegistry.evaluate(functional: functional, regimes: regimes,
                                                     availability: availability)
             let selection = Eligibility.selection(envelopes: envelopes, observations: observations,
-                                                  dayWindow: identity.dayWindow)
+                                                  dayWindow: identity.dayWindow, dailyValues: dailyValues,
+                                                  reference: policy.reference)
 
             let hasObservations = !observations.heartRate.isEmpty || !observations.beatIntervals.isEmpty
                 || !observations.motion.isEmpty
@@ -398,7 +404,7 @@ extension PhysiologyContext {
         /// functional features): vendor, family, source kind, firmware and the placement that covered most of the
         /// day. Stable for a device whatever measurement families happen to exist that day.
         static func deviceRegimeKey(_ device: DeviceRegimeInput, timeline: RegimeTimeline,
-                                    dayWindow: Interval) -> String {
+                                    dayWindow: Interval, product: String) -> String {
             var byPlacement: [String: Int] = [:]
             for seg in timeline.placements {
                 byPlacement[seg.placement, default: 0] += seg.interval.overlapSeconds(with: dayWindow)
@@ -406,7 +412,7 @@ extension PhysiologyContext {
             let placement = byPlacement.filter { $0.value > 0 }
                 .max { ($0.value, $1.key) < ($1.value, $0.key) }?.key ?? "unknown"
             let text = ["device", device.vendor, device.deviceFamily ?? "", device.sourceKind ?? "",
-                        device.firmware ?? "", placement].joined(separator: "|")
+                        device.firmware ?? "", placement, product].joined(separator: "|")
             return "dev-" + PhysiologyContext.fnv1a(text)
         }
 
