@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 import StrandDesign
 import WhoopStore
 
@@ -55,19 +56,14 @@ struct AsleepDurationCard: View {
             SectionHeader("Asleep duration", overline: "Trend")
             ChartCard(
                 title: "Hours asleep",
-                subtitle: String(localized: "Per night, trailing 30 days"),
+                subtitle: String(localized: "One bar per night · dashed line is your average"),
                 trailing: avg.map { String(localized: "\(String(format: "%.1f", $0)) h avg") },
                 height: NoopMetrics.chartHeight,
                 tint: StrandPalette.restColor,
                 chart: {
                     if pts.count >= 2 {
-                        TrendChart(points: pts,
-                                   gradient: StrandPalette.restGradient,
-                                   valueRange: Self.trendRange(pts),
-                                   showsBars: true,
-                                   height: NoopMetrics.chartHeight,
-                                   valueFormat: { String(format: "%.1f h", $0) },
-                                   accessibilityLabel: String(localized: "Hours asleep trend"))
+                        AsleepDurationBars(points: pts, average: avg)
+                            .frame(height: NoopMetrics.chartHeight)
                     } else {
                         Self.sparsePlaceholder
                     }
@@ -137,5 +133,95 @@ struct AsleepDurationCard: View {
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(verbatim: "\(String(localized: "Trend")): \(deltaText ?? "—")"))
+    }
+}
+
+/// One bar per night, labelled with its weekday and date and its hours, so the chart reads without
+/// tapping. Nights are categories keyed by their calendar day (never positioned on a time axis), so a
+/// night can't slide a day under a timezone change; the trend dates are UTC-parsed day keys.
+private struct AsleepDurationBars: View {
+    let points: [TrendPoint]
+    let average: Double?
+
+    private static let utc: TimeZone = TimeZone(identifier: "UTC") ?? .current
+
+    private static func formatter(_ template: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.timeZone = utc
+        f.setLocalizedDateFormatFromTemplate(template)
+        return f
+    }
+
+    private static let keyFormat = formatter("yyyyMMdd")
+    private static let weekdayFormat = formatter("EEE")
+    private static let dayFormat = formatter("MMMd")
+
+    private var keys: [String] { points.map { Self.keyFormat.string(from: $0.date) } }
+    private var showsValues: Bool { points.count <= 8 }
+
+    private var labelledKeys: [String] {
+        let all = keys
+        guard all.count > 8 else { return all }
+        let step = Int((Double(all.count) / 6).rounded(.up))
+        return all.enumerated().filter { $0.offset % step == 0 || $0.offset == all.count - 1 }.map(\.element)
+    }
+
+    private var yMax: Double {
+        let top = (points.map(\.value).max() ?? 8)
+        return Swift.max(4, (top / 2).rounded(.up) * 2 + (showsValues ? 1 : 0))
+    }
+
+    var body: some View {
+        let keys = self.keys
+        Chart {
+            ForEach(Array(points.enumerated()), id: \.offset) { i, p in
+                BarMark(x: .value("Night", keys[i]), y: .value("Hours asleep", p.value), width: .ratio(0.62))
+                    .foregroundStyle(LinearGradient(gradient: StrandPalette.restGradient,
+                                                    startPoint: .bottom, endPoint: .top))
+                    .cornerRadius(4)
+                    .annotation(position: .top, spacing: 3) {
+                        if showsValues {
+                            Text(String(format: "%.1f", p.value))
+                                .font(StrandFont.captionNumber)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                    }
+            }
+            if let average {
+                RuleMark(y: .value("Average", average))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+        .chartYScale(domain: 0...yMax)
+        .chartYAxis {
+            AxisMarks(position: .leading, values: .stride(by: 2)) { value in
+                AxisGridLine().foregroundStyle(StrandPalette.hairline)
+                AxisValueLabel {
+                    if let h = value.as(Double.self) {
+                        Text("\(Int(h))h").font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+            }
+        }
+        .chartXAxis {
+            AxisMarks(values: labelledKeys) { value in
+                AxisValueLabel(centered: true) {
+                    if let key = value.as(String.self), let date = Self.keyFormat.date(from: key) {
+                        VStack(spacing: 1) {
+                            Text(Self.weekdayFormat.string(from: date))
+                                .font(StrandFont.captionNumber)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                            Text(Self.dayFormat.string(from: date))
+                                .font(StrandFont.captionNumber)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                        }
+                        .fixedSize()
+                    }
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Hours asleep per night"))
     }
 }
