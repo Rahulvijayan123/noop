@@ -84,11 +84,16 @@ Code: `Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuali
 
 * **Wire decoding.** `GaitQualityResponse` is `Decodable`; its `init(from:)` refuses anything that is not exactly
   §4 with a `GaitQualityResponseError` (thrown as is): `ok:false` → `serviceError(kind)`; schema other than
-  `gait-quality-1`; `model_id ≠ eldernet`; `model_version` not `[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}`; a `weights`
+  `gait-quality-1`; a top-level key outside the §4 set (`GaitQualityWire.responseKeys`: `id, op, ok, schema, model_id,
+  model_version, weights, upstream_commit, preprocessing_version, window_s, hop_s, calibration, gait_threshold,
+  windows, n_dropped_nonfinite, duration_ms`; `id` / `op` optional) → `unknownField` (stricter than `motion-heads-1`,
+  whose decoder ignores unknown top-level keys: a new §4 field is a contract change made here and in that set
+  together); `model_id ≠ eldernet`; `model_version` not `[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}`; a `weights`
   key outside the six heads, a digest that is not 64 lower-case hex, or no `gait_detection`; `upstream_commit` not
   7–40 hex; `preprocessing_version ≠ eldernet-prep-1`; `window_s ≠ 10`; `hop_s ∉ {1, 2, 5, 10}`; `gait_threshold ∉
-  (0, 1)`; `calibration` with an output other than `gait_prob`, without string `method` / `fit`, or a non-numeric
-  parameter. Windows: known keys only (`s, e, gait_prob, is_gait, prefiltered, speed_mps, cadence_spm, stride_m,
+  (0, 1)`; `calibration` with an output other than `gait_prob`, without string `method` / `fit`, a non-numeric or
+  nonfinite parameter, a temperature `T` ≤ 0 (or `method: temperature` without `T`), or a `threshold` parameter
+  outside [0, 1] (other methods' numeric parameters are carried as they are). Windows: known keys only (`s, e, gait_prob, is_gait, prefiltered, speed_mps, cadence_spm, stride_m,
   regularity, steps`); `s`, `e` integral with |x| < 9e15 (never `Int(x)`), `s ≥ 0`, `e − s = 10`, strictly
   increasing `s`; `gait_prob` finite in [0, 1]; `is_gait` a boolean that agrees with `gait_prob ≥ gait_threshold`
   within 1e-6 (rounding); a `prefiltered` window is `gait_prob 0, is_gait false`; metrics finite, in range (speed
@@ -96,7 +101,9 @@ Code: `Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuali
   windows (null = absent). `n_dropped_nonfinite` / `duration_ms` non-negative integers. Text that is not JSON (a
   NaN token) fails in `JSONDecoder` first; its counter kind is `nonfinite` / `malformed_json`
   (`GaitQualityResponseError.notJSON`). `GaitQualityWindow` and `GaitQualityModelInfo` decode through the same
-  checks, so a snapshot, a stored config or a replay record can never carry what the wire would refuse.
+  checks, so a snapshot, a stored config or a replay record can never carry what the wire would refuse; a model
+  object is "a response without `windows`" (`GaitQualityWire.modelInfoKeys`: the framing keys are tolerated,
+  `schema` / `ok` must still say `gait-quality-1` / `true` when present, anything else is refused).
 * **Weights digest** (what a deployment pins): sha256 of `eldernet-weights-1\n` followed by `name=sha256\n` for
   each served head in name order (`GaitQualityModelInfo.weightsDigest`; Python:
   `hashlib.sha256(("eldernet-weights-1\n" + "".join(f"{k}={v}\n" for k, v in sorted(w.items()))).encode())`).
@@ -107,11 +114,10 @@ Code: `Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuali
   below `hop_s`.
 * **Config.** `ActivityDecoderConfig.gaitQuality: GaitQualityEvidenceConfig? = nil`. Fields: `mode`
   (`shadow` never feeds the decoder; `candidate`; `production` needs both pins), `model`, `gaitPrior` π ∈ [0.01,
-  0.99] (the calibration set's gait prevalence; no default), `gaitWeight` 0.25, `briskWeight` 0, `briskRule`
-  cadence|speed (100 steps/min or 1.34 m/s), `hartRedundancy` 0.65 and `inertiaRedundancy` 0.65 (the Inertia
-  default, itself above the measured HART ρ̂ = 0.61; ElderNet's own overlap is not measured yet),
-  `accelerometerBudget` 0.5 (Inertia's body budget), `expectedModelVersion`, `expectedWeightsDigest`. Weights and
-  the budget ≤ 0.8. A refused config (`shadow_mode`, `model_version_mismatch`, `weights_digest_mismatch`,
+  0.99] (default `defaultGaitPrior` = **0.085**, see "π" below), `gaitWeight` 0.25, `briskWeight` 0, `briskRule`
+  cadence|speed (100 steps/min or 1.34 m/s), `hartRedundancy` **0.65** and `inertiaRedundancy` **0.66** (see
+  "Redundancy" below), `accelerometerBudget` 0.5 (Inertia's body budget), `expectedModelVersion`,
+  `expectedWeightsDigest`. Weights and the budget ≤ 0.8. A refused config (`shadow_mode`, `model_version_mismatch`, `weights_digest_mismatch`,
   `production_needs_pins`, `invalid_config: …`) or a track whose windows come from another model
   (`model_mismatch`) or none (`no_gait_quality_input`) is decoded with the entry removed
   (`ActivityContextTrackBuilder.effectiveConfig`): output, snapshot and `cacheTag` byte-identical to today.
@@ -120,12 +126,44 @@ Code: `Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuali
   get 1. Rows carry an ε = 0.02 floor; L(m) = clip(r_other + a·(r_own − r_other), 0.1, 10) with a = (1+ε)/(1+2ε),
   so q = π gives exactly 1. Added with `isEvidence: false`, tempered (× `evidenceTemperature`) like every
   channel. ElderNet cannot name stairs: that mode stays behind its specialist gate.
-* **Redundancy and the shared budget.** Weight × (1 − ρ_HART) on seconds where HART's encoder channel speaks and
-  × (1 − ρ_Inertia) where an Inertia locomotion term is active (both when both speak), capped at the budget. Per
-  second and per mode the gait term (and then the brisk split) gets only the room left under `accelerometerBudget
-  · ln 10` after Inertia's whole pull on that mode (locomotion, posture inside its set, any specialist gate it
-  opened). So every accelerometer-derived term together stays ≤ T · max(B_acc, B_Inertia) · ln 10 per mode
-  (tested); seconds where the budget cut a term are counted (`budget_limited_seconds`).
+* **`run` stays neutral.** ElderNet was fine-tuned on walking. Measured on VAL, its served `gait_prob` on
+  running / jogging windows averages 0.096 (3.4 % ≥ 0.5), on cycling 0.061 and on vehicle 0.091, all close to
+  π: running reads as neither gait nor non-gait, so run is on neither side of the compat. A high q lifts walk /
+  briskWalk / stairs against run, a low q lifts the non-gait modes against it, and run's own score never moves
+  (`testRunStaysNeutralAsMeasured`). Revisit only if a later measurement on labelled running windows says
+  otherwise.
+* **π** is the mean served `gait_prob` over all windows the decoder sees (Capture-24 VAL, hop 5: **0.0849**,
+  95 % CI 0.076–0.095), pre-filtered windows (q = 0) included, under the deployment's served model and calibration
+  (`GaitQualityEvidenceConfig.defaultGaitPrior` = 0.085, that value rounded; re-derive it whenever the model, its
+  calibration or the hop changes). Only that mean makes the ratio neutral ON AVERAGE (E[q/π] = E[(1 − q)/(1 − π)]
+  = 1). The labelled gait share of the same
+  windows (0.065, §8) is lower, so with it q/π leans towards gait on average; the 2026-10-06 replay (and its ρ̂
+  below) used π = 0.065. The replay header's `gait_prior` defaults to 0.085; the worker still requires
+  `FRWHOOP_ELDERNET_GAIT_PRIOR` explicitly in candidate mode (§6).
+* **Redundancy.** Weight × (1 − ρ_HART) on seconds where HART's encoder channel speaks and × (1 − ρ_Inertia) where
+  an Inertia locomotion term is active (both when both speak), capped at the budget. The ρ applied is
+  max(config ρ, measured ρ̂) (`effectiveHartRedundancy`, `effectiveInertiaRedundancy`; part of the config tag): a
+  config may raise a discount, never take it below the measurement (as Inertia's `bundle.fusion.rho_hart` does for
+  its own head). Measured ρ̂ (residual log-likelihood-ratio correlation, VAL subjects only, 2026-10-06 replay at
+  π = 0.065; `GaitQualityEvidenceConfig.measuredHartRedundancy` / `measuredInertiaRedundancy`):
+
+  | pair | data | windows | ρ̂ | config default (floor) |
+  |---|---|---|---|---|
+  | ElderNet vs HART v1 encoder channel | WISDM VAL (8 subjects) | 13,138 | 0.332 | ρ_HART **0.65** (kept cautious: HART v1 only, 8 subjects) |
+  | ElderNet vs Inertia locomotion (stand-in encoder) | Capture-24 VAL | 357,688 | 0.652 (WISDM VAL 0.614) | ρ_Inertia **0.66** |
+
+  Re-measure, and update the constants (and a default a new ρ̂ exceeds), when HART, the Inertia encoder or
+  ElderNet's served model changes.
+* **The shared budget: what it bounds, exactly.** Per second and per mode the gait term (and then the brisk split)
+  gets only the room left under `accelerometerBudget · ln 10` after Inertia's whole pull on that mode (locomotion,
+  posture inside its set, any specialist gate it opened). So per mode, |Inertia locomotion| + |Inertia posture (in
+  S)| + Inertia's gate opening + |ElderNet gait| + |ElderNet brisk| ≤ T · max(B_acc, B_Inertia) · ln 10, each term
+  in absolute value (tested term by term, so no cancellation between terms can hide a missing clip; seconds where
+  the budget cut a term are counted, `budget_limited_seconds`). It does NOT bound the other channels that read the
+  same wrist: HART's encoder channel (weight 0.8), movement intensity, the gait-presence / cadence channel (step
+  counter or IMU rhythm) and the gravity-orientation (posture) channel are outside it and add on top. And it is a
+  per-mode bound: the log-odds between two modes can move by up to twice it (one mode up by the whole bound, the
+  other down by the whole bound; tested).
 * **Walk vs brisk walk.** On a gait window carrying the rule's metric, p = sigmoid((cadence − 100)/6) (or
   ((speed − 1.34)/0.08)) gives ratios on walk and briskWalk only, renormalised inside that pair against the
   current belief (it never changes P(gait)). Default weight 0: the verdict is computed and counted
@@ -143,8 +181,9 @@ Code: `Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuali
   <cfgtag>` only when the channel is accepted for the track; `cacheTag` gains `-eg<weights12><cfgtag>` (after
   Inertia's `-ih…`); snapshot restore with another stamp (or none) is `discarded("gait_quality_mismatch")`. The
   config tag covers mode, weights, rule, thresholds, π, both ρ, the budget, hop, window, threshold, model version
-  and calibration. `GaitQualityTrackReport` on the track counts windows in / attached / dropped / ingested / gait
-  / pre-filtered, evidence and budget-limited seconds, brisk verdicts and states that carried the block.
+  and calibration; both ρ are the applied (effective) ones. `GaitQualityTrackReport` on the track counts windows in
+  / attached / dropped / ingested / gait / pre-filtered, evidence and budget-limited seconds, brisk verdicts and
+  states that carried the block.
 
 ## 6. Worker (shadow first)
 
@@ -156,27 +195,39 @@ Code: `Tools/CloudWorker/Sources/frwhoop-worker/ActivityGaitQuality.swift`, hook
 | `FRWHOOP_ELDERNET_ENABLED` | `1`/`true`/`yes`/`on` (any case) = on; `0`/`false`/`no`/`off` or unset = off; anything else keeps ElderNet off and is logged as a configuration error |
 | `FRWHOOP_ELDERNET_MODE` | `shadow` (default) or `candidate` |
 | `FRWHOOP_ELDERNET_WEIGHTS_DIR` | fetched weights, passed as `--weights-dir` (required when on) |
+| `FRWHOOP_ELDERNET_UPSTREAM_DIR` | the sha-verified upstream ElderNet source checkout (`python -m activity_context.eldernet.upstream fetch --dest DIR`), passed as `--upstream-dir` (required when on: a configuration error otherwise; without it the child reports `model_missing`) |
 | `FRWHOOP_ELDERNET_MODEL_VERSION` | the pinned `model_version` (required in candidate mode; enforced in shadow mode when set) |
 | `FRWHOOP_ELDERNET_WEIGHTS_SHA256` | the pinned weights digest (§5; 64 hex; required in candidate mode; enforced when set) |
-| `FRWHOOP_ELDERNET_GAIT_PRIOR` | π for the candidate decode, in [0.01, 0.99] (required in candidate mode) |
+| `FRWHOOP_ELDERNET_GAIT_PRIOR` | π for the candidate decode, in [0.01, 0.99] (required in candidate mode): the mean served `gait_prob` over the VAL windows the decoder sees (§5; 0.085 for the served defaults) |
 | `FRWHOOP_ELDERNET_PYTHON` | interpreter (default: the activity python) |
 | `FRWHOOP_ELDERNET_TIMEOUT_SECONDS` | worker-side request timeout, default 60, clamped to `FRWHOOP_ACTIVITY_LEASE_SECONDS / 3`; the child gets `--timeout` strictly below it |
+| `FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS` | wall time ElderNet may spend in one job (readiness check and chunk calls together), default 600; once used, ElderNet is stopped for that job (`job_time_budget`) |
 
-* A third `ActivityPythonService` (`python -m activity_context.eldernet.serve --weights-dir <dir> --timeout <s>`,
+* A third `ActivityPythonService` (`python -m activity_context.eldernet.serve --weights-dir <dir> --upstream-dir
+  <dir> --timeout <s>`,
   restart cap 4, 120 s cooldown, 16 MiB response lines, raw lines kept so a NaN line fails at once). Never in the
-  readiness gate. At the start of each job: start, ping (`model_available`), and with pins set compare the ping's
-  `model_version` and the digest of its `weights` map; then, per chunk and after HART (and Inertia): renew the
-  lease (a lost lease ends the job as before HART), infer, decode strictly, check the pins on the response.
-  Failures are absorbed, counted and logged once per kind; transport failures, `model_missing`,
-  `weights_mismatch`, `timeout` and pin refusals (`pin_mismatch`) stop ElderNet for the job; a NaN line or invalid
-  values cost one chunk. A chunk whose HART answer comes from the on-host cache is still sent to ElderNet. HART's
-  v1 and v2 payloads are byte-identical with ElderNet on or off.
+  readiness gate. At the start of each job: renew the lease (a start-up plus a ping can take up to a request
+  timeout, a third of the lease; a lost lease ends the job as before HART), start, ping (`model_available`), and
+  with pins set compare the ping's `model_version` and the digest of its `weights` map; then, per chunk and after
+  HART (and Inertia): renew the lease (a lost lease ends the job as before HART), infer, decode strictly, check the
+  pins on the response. Failures are absorbed, counted and logged once per kind. Everything that would repeat on
+  every chunk stops ElderNet for the rest of the job: transport failures (timeout, crash, launch failure, restart
+  cooldown, an oversized line), the service's `model_missing`, `weights_mismatch`, `timeout`, `malformed` (the
+  request itself) and `output_too_large`, pin refusals (`pin_mismatch`), and the decoder's `schema`, `malformed` and
+  `invalid_values` refusals (`ElderNetStage.stoppingServiceKinds`). Only a NaN line (`malformed_json` /
+  `nonfinite`) or a service `internal` error costs a single chunk. A per-job time budget
+  (`FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS`, default 600 s, about three times a normal full day at hop 5) sums the wall
+  time of the readiness check and of every chunk call; once it is used, ElderNet is stopped for the job
+  (`job_time_budget`, counted in `eldernet_budget_exhausted`, logged once), the chunks it answered are kept. A chunk
+  whose HART answer comes from the on-host cache is still sent to ElderNet. HART's v1 and v2 payloads are
+  byte-identical with ElderNet on or off. Inertia (INERTIA1.md §8) follows the same rules.
 * **Shadow row** (`activity_gait_windows_days`, migration `20261006090000_activity_gait_windows.sql`, one row per
   owner, device, UTC day, `model_version`, mode): provenance (weights per head, their digest — recomputed and
   checked by the RPC — commit, preprocessing, hop, threshold), `windows` in `gait-windows-1` (`{"format", "n",
   "w": 10, "h": hop, "s0", "ds": [start deltas], "gp": [gait prob ‰], "g": [0|1], "pf": [0|1], "sp": [cm/s|-1],
   "cad": [steps/min|-1], "st": [cm|-1], "rg": [%|-1], "stp": [steps × 10|-1]}`, omitted above 512 KiB, refused
-  above 1 MiB), `summary` (counts, failure kinds, mean gait probability, ElderNet's own `gait` metrics over its gait
+  above 1 MiB; the table CHECK reads `windows ->> 'format' is not distinct from 'gait-windows-1'`, so a missing or
+  null `format` is refused even by a write that bypasses the RPC), `summary` (counts, failure kinds, mean gait probability, ElderNet's own `gait` metrics over its gait
   windows, `track_report`: the candidate decode's report or a dry-run attachment). Fenced RPC
   `publish_activity_gait_windows_day` under its own savepoint after the day document (and the Inertia row) and
   before the v1 publish; NULL is counted as `eldernet_shadow_fenced`.
@@ -185,7 +236,7 @@ Code: `Tools/CloudWorker/Sources/frwhoop-worker/ActivityGaitQuality.swift`, hook
   shadow row, never in `activity_context_days` / `activity_context_epochs`; otherwise `withheld_reason`
   (`model_not_pinned`, `gait_prior_not_set`, the config's refusal, `context_days_disabled`).
 * **Counters** (heartbeat, only with ElderNet on): `eldernet_jobs`, `_chunks`, `_windows`, `_failures`,
-  `_unavailable`, `_pin_refused`, `_shadow_stored`, `_shadow_failures`, `_shadow_fenced`, `_candidate_documents`,
+  `_unavailable`, `_pin_refused`, `_budget_exhausted`, `_shadow_stored`, `_shadow_failures`, `_shadow_fenced`, `_candidate_documents`,
   `_candidate_withheld`, `_windows_attached`, `_windows_dropped`, `_rows_pruned`, `_prune_failures`.
 * **Retention:** `prune_activity_gait_windows_days(30, 10000)` every 6 h while ElderNet is on.
 
@@ -218,8 +269,10 @@ the format authority; INERTIA1.md "Replay record format" for the base format) ca
 
 * header `"gait_quality": {"model": <a gait-quality-1 infer response without "windows": model_id … gait_threshold>,
   "gait_prior": π, "config": {"gait", "brisk", "brisk_rule", "brisk_cadence_spm", "brisk_speed_mps",
-  "hart_redundancy", "inertia_redundancy", "accelerometer_budget"}}` (`config` and each of its keys optional:
-  candidate defaults). The model goes through the wire decoder's checks.
+  "hart_redundancy", "inertia_redundancy", "accelerometer_budget"}}` (`gait_prior`, `config` and each of its keys
+  optional: candidate defaults, π 0.085; the ρ keys are config values, applied as max(config, measured ρ̂) exactly
+  as in the worker). The model goes through the wire decoder's model checks behind `GaitQualityWire.modelInfoKeys`
+  (a response without `windows`: framing keys tolerated, any other key refused).
 * observation key `"gait_quality"`: a §4 window object, attached like `motion_heads` (a second that has data,
   never one of its own); the structural checks on decode, then the model checks (window length, threshold
   agreement). A window in a file whose header has no `gait_quality.model` is refused.

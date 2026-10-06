@@ -354,7 +354,11 @@ config_mismatch | timeout | internal | output_too_large`. Response line ≤ 12 M
   > 0 and the mode is candidate or production. Even then the opening is inside Inertia's budget: per second
   and per mode, Inertia's whole pull — locomotion term + posture term (inside S) + the gate it opened — is at
   most T · bodyBudget · ln 10 (the support rises from 0.04 only by the room the other two terms left). An
-  encoder or workout that names the mode still opens it fully, as before.
+  encoder or workout that names the mode still opens it fully, as before. With ElderNet's gait channel also
+  active, this per-mode bound is shared: Inertia's terms and ElderNet's gait and brisk terms together stay
+  ≤ T · max(B_acc, bodyBudget) · ln 10 per mode, term by term in absolute value (ELDERNET.md §5, "The shared
+  budget: what it bounds, exactly"); HART's encoder channel and the strap channels are outside it, and two modes'
+  log-odds can move by up to twice it.
 * A head whose classes prepare to a single evidence group (r ≡ 1), or that the bundle marks
   `decoder_evidence: false`, is inert: no likelihood term and no specialist gate.
 * Provenance: optional `ActivityStateVersions` field naming `inertia-1:<bundle12>:<cfgtag>` only when
@@ -378,11 +382,18 @@ Second `ActivityPythonService` instance (own process, timeout, restart cap) runn
 | `FRWHOOP_INERTIA_CHECKPOINT` | encoder checkpoint (→ `--checkpoint` and `INERTIA1_CKPT_PATH`) |
 | `FRWHOOP_INERTIA_PYTHON` | interpreter (default: the activity python) |
 | `FRWHOOP_INERTIA_TIMEOUT_SECONDS` | worker-side request timeout, default 60, clamped to at most `FRWHOOP_ACTIVITY_LEASE_SECONDS / 3` (logged when clamped). The child gets `--timeout` strictly below it (worker − 5 s while that leaves ≥ 5 s, else 5 s, else half), so its structured `timeout` answer arrives before the worker gives up on the line |
+| `FRWHOOP_INERTIA_JOB_BUDGET_SECONDS` | wall time Inertia may spend in one job (readiness check and chunk calls together), default 600; once used, Inertia is stopped for that job (`job_time_budget`, `inertia_budget_exhausted`) |
 | `FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW` | `1`/`true`/`yes`/`on` passes `--allow-standin-shadow` (default off; **shadow mode only**, a configuration error in candidate mode): exercises the shadow lane on real WHOOP data with a stand-in encoder. Its rows are stored with `encoder_kind = standin` and can never feed the decoder (the decoder refuses stand-ins; the table refuses a stand-in candidate document) |
 
 Inertia is never part of the readiness gate and its failures never fail a job: logged with kind,
-counted, the HART path continues. The job lease is renewed before every Inertia call exactly as before every
-HART call (a lost lease ends the job the same way). The worker's on-host cache (`ActivityLocalCache`) holds
+counted, the HART path continues. Everything that would repeat on every chunk stops Inertia for the rest of the
+job: transport failures, the service's `model_missing`, `timeout`, `checkpoint_mismatch`, `config_mismatch`,
+`bundle_mismatch`, `malformed` and `output_too_large`, and the decoder's `schema`, `malformed` and
+`invalid_probabilities` refusals (`InertiaStage.stoppingServiceKinds`); only a NaN line or a service `internal`
+error costs a single chunk. A per-job time budget (`FRWHOOP_INERTIA_JOB_BUDGET_SECONDS`, default 600 s) sums the
+wall time of its readiness check and chunk calls; once used, Inertia is stopped for the job (`job_time_budget`).
+The job lease is renewed before Inertia's job-start readiness check (start + ping, up to a request timeout) and
+before every Inertia call, exactly as before every HART call (a lost lease ends the job the same way). The worker's on-host cache (`ActivityLocalCache`) holds
 HART answers only: a chunk whose HART answer is reused from it is still sent to Inertia (with its own lease
 renewal), so a day's shadow row is never partial because HART was cached. Shadow output is stored in its own table, never in
 `activity_context_epochs` / `activity_context_days`. Candidate mode additionally decodes the day a
@@ -401,7 +412,9 @@ Shadow rows (`activity_motion_heads_days`, migration `20261005170000_activity_mo
   omitted on the sleep route) or, without a candidate decode, a dry-run attachment (attached / dropped).
   The same counts are summed in the lane stats and heartbeat (`inertia_windows_attached`,
   `inertia_windows_dropped`, `inertia_posture_omitted`), next to `inertia_shadow_fenced` (rows the fenced RPC
-  refused) and `inertia_bundle_refused`.
+  refused), `inertia_bundle_refused` and `inertia_budget_exhausted`.
+* The `windows` CHECK has no NULL hole: `windows ->> 'format' is not distinct from 'mh-col-1'`, so a missing or
+  null `format` is refused even by a write that bypasses the RPC (the contract test proves it).
 * A `candidate_document` can only be stored for `encoder_kind = 'inertia1'`, `mode = 'candidate'` and a
   candidate / production tier (table CHECK and RPC).
 * Retention: `prune_activity_motion_heads_days(keep_days 30, max_rows 10000)` deletes rows computed more than
