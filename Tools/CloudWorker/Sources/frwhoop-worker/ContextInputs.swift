@@ -568,10 +568,21 @@ enum ContextInputs {
     }
 
     static func number(_ any: Any?) -> Double? {
-        if let n = any as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() { return n.doubleValue }
+        // A JSON boolean is never a number (on Darwin it would otherwise bridge to Double below).
+        if let n = any as? NSNumber { return isJSONBoolean(n) ? nil : n.doubleValue }
         if let d = any as? Double { return d }
         if let i = any as? Int { return Double(i) }
         return nil
+    }
+
+    /// JSON booleans are never numbers. CFGetTypeID exists only on Darwin; on Linux the decoded booleans are the
+    /// canonical NSNumber singletons (`isBooleanNumber`, PushBatch.swift).
+    static func isJSONBoolean(_ n: NSNumber) -> Bool {
+        #if canImport(Darwin)
+        return CFGetTypeID(n) == CFBooleanGetTypeID()
+        #else
+        return isBooleanNumber(n)
+        #endif
     }
 
     static func finite(_ d: Double) -> Double? { d.isFinite ? d : nil }
