@@ -61,9 +61,11 @@ create table public.activity_gait_windows_days (
   foreign key (user_id, device_id) references public.devices(user_id, id) on delete cascade,
   check (mode = 'candidate' or (candidate_document is null and withheld_reason is null)),
   check (mode = 'shadow' or ((candidate_document is null) <> (withheld_reason is null))),
-  -- A comparison document always names the gait evidence that shaped it, whatever writes the row.
+  -- A comparison document always names the gait evidence that shaped it, whatever writes the row (`is not distinct
+  -- from`, so a missing stamp is false, never NULL: a NULL check passes).
   constraint activity_gait_windows_days_candidate_stamped check (candidate_document is null
-    or (mode = 'candidate' and jsonb_typeof(candidate_document -> 'versions' -> 'gait_quality') = 'string'))
+    or (mode = 'candidate'
+        and jsonb_typeof(candidate_document -> 'versions' -> 'gait_quality') is not distinct from 'string'))
 );
 create sequence if not exists public.activity_gait_windows_days_result_revision_seq;
 grant usage, select on sequence public.activity_gait_windows_days_result_revision_seq to service_role;

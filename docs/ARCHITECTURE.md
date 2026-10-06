@@ -190,6 +190,16 @@ and the day's windows come from that bundle; with them off the decoder's output 
 Its pull on any mode is bounded per second by its budget, specialist modes included, and its posture term
 steps aside while the band says asleep or in bed.
 
+A third optional expert, ElderNet gait quality (`Tools/ActivityContext/ELDERNET.md`: a public, fine-tuned wrist
+model for gait detection, speed, cadence, stride length, regularity and steps), runs the same way: off by default,
+shadow-first, its own table, never part of the published documents. In the decoder its gait probability is one
+more distinct, tempered channel (a likelihood ratio against the calibration-set prevalence, so an uninformative
+window changes nothing), discounted where HART and Inertia's locomotion head already speak (all three read the
+same wrist accelerometer) and sharing one per-second accelerometer budget with every Inertia term; it stays off
+unless `ActivityDecoderConfig.gaitQuality` accepts the windows' model, and off it is byte-identical. The quality
+metrics are reported, not evidence: a published state, its runs and the intervals built from them carry an
+optional `gait` block only while the posterior is on walking and ElderNet detects gait.
+
 That decoding also leaves a durable record. Each run carries a canonical activity class (a closed
 vocabulary, with a confidence) beside the display wording. On the phone, each local day's runs are saved
 as timestamp-aligned intervals in the on-device store (`activityContextInterval`), and the per-sample
