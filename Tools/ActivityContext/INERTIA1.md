@@ -477,3 +477,18 @@ Output (`nara-activity-replay-out-1`): `{"format", "arms": {arm: {seq: {"states"
 arm_behavior` (full probabilities), `display` (label or null), `class` / `class_confidence` (canonical
 `ActivityClass`), `unknown {posture, locomotion, arm_behavior}`, `overall_confidence`,
 `overall_uncertainty`, `transition` (event or null). A refused arm has `refusal` set and no states.
+
+## Kotlin parity
+
+The ActivityContext decoder has no Kotlin twin. Android only extracts and stores IMU features
+(`ImuFeatureExtractor.kt`, `Whoop5RawImu.kt`, `ImuSessionFileStore.kt`). Against nara/main 3ef55959, this
+branch adds 74 one-sided Swift identities (2 files, 38 functions, 15 properties, 19 constants), each with an exact
+`platform_specific` entry in `Tools/parity_dispositions.json`. They are not `experimental`, which is for a
+temporary gap and needs its own issue and expiry. Two new `test-only-callsite` findings need a source fix, since
+no disposition covers findings: `MotionHeadsEvidenceConfig.candidate`, called only from `Tools/CloudWorker`
+(outside the ledger's globs), and `ActivityContextTrackBuilder.cacheTag(for:config:)`, never called in production.
+Already failing on nara/main and unchanged here: baseline drift (`duplicate-implementation|Strand`;
+`test-only-callsite` in StrandAnalytics, StrandImport and WhoopStore), `day_string_implementations` 12→13, a
+stale twin-map authority (main needs `--refresh-derived --migrate-authority`), and 3 parity self-tests. To re-run:
+`python3 Tools/ActivityContext/kotlin_parity_dispositions.py --base nara/main [--channel eldernet --write]`, then
+`python3 Tools/parity_ratchet.py --base nara/main --offline`. Use nara/main because origin/main is unrelated history.
