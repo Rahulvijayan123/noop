@@ -17,6 +17,9 @@ import WhoopStore
 /// rendered from the shared [SleepModel].
 struct NightDetailCard: View {
     let model: SleepModel
+    /// The Sleep tab already shows the Rest score (hero), the debt ledger and the asleep-duration trend, so it
+    /// passes `true` to leave those three tiles out. Today keeps the full grid.
+    var omitsRepeatedTiles = false
 
     private let tileColumns = [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)]
 
@@ -36,6 +39,7 @@ struct NightDetailCard: View {
             SectionHeader("Night detail", overline: "Metrics")
 
             #if os(iOS)
+            if !omitsRepeatedTiles {
             // On iOS, Sleep Debt is the actionable summary for the section, so it leads at the
             // full two-column width. The remaining six peer metrics keep the established 2 × 3 grid.
             StatTile(
@@ -46,10 +50,12 @@ struct NightDetailCard: View {
                 sparkline: spark(debt.series),
                 sparkColor: StrandPalette.metricRose)
                 .frame(maxWidth: .infinity)
+            }
             #endif
 
             LazyVGrid(columns: tileColumns, alignment: .leading, spacing: NoopMetrics.gap) {
 
+                if !omitsRepeatedTiles {
                 StatTile(
                     label: "Rest",
                     value: pctValue(perf.latest),
@@ -58,6 +64,7 @@ struct NightDetailCard: View {
                     accent: perf.latest.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textPrimary,
                     sparkline: spark(perf.series),
                     sparkColor: StrandPalette.restColor)
+                }
 
                 StatTile(
                     label: "Efficiency",
@@ -77,6 +84,7 @@ struct NightDetailCard: View {
                     sparkline: spark(cons.series),
                     sparkColor: StrandPalette.metricCyan)
 
+                if !omitsRepeatedTiles {
                 StatTile(
                     label: "Hours vs Needed",
                     value: pctValue(need.latest),
@@ -85,6 +93,7 @@ struct NightDetailCard: View {
                     accent: need.latest.map { StrandPalette.recoveryColor(min(100, $0)) } ?? StrandPalette.textPrimary,
                     sparkline: spark(need.series),
                     sparkColor: StrandPalette.restColor)
+                }
 
                 StatTile(
                     label: "Restorative",
@@ -105,6 +114,7 @@ struct NightDetailCard: View {
                     sparkColor: StrandPalette.metricPurple)
 
                 #if !os(iOS)
+                if !omitsRepeatedTiles {
                 // macOS keeps the original adaptive dashboard instead of stretching one
                 // phone-width summary tile across an unbounded desktop detail pane.
                 StatTile(
@@ -114,6 +124,7 @@ struct NightDetailCard: View {
                     accent: nightDetailDebtColor(debt.latest),
                     sparkline: spark(debt.series),
                     sparkColor: StrandPalette.metricRose)
+                }
                 #endif
             }
         }
