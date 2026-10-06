@@ -66,7 +66,8 @@ and the final posterior. HART, the engineered features and the 1 Hz strap stream
 Public datasets go through the same steps from their own rate/units (`inertia/datasets/*`): units → g,
 Butterworth 10 Hz + `resample_poly` (or `np.interp` for non-integer rates) → 20 Hz, gaps > 1 s split.
 Any dataset-specific repair (e.g. PAMAP2 ≤ 50 ms dropout fill) is versioned in the loader, recorded per
-window as `filled_fraction`, and never applies to WHOOP data.
+window as `filled_fraction`, and never applies to WHOOP data. GOTOV (600/7 Hz) takes the `np.interp` path; its
+label guard (`gotov-guard-10s`) only MASKs labels, it never fills samples.
 
 ## 4. Encoder
 
@@ -152,7 +153,10 @@ per head the `merge_into` / `decoder_evidence` recomputed for the final statuses
 
 `movement_intensity`: a 1-output head, sigmoid output, target `clip(ln(MET)/ln(12), 0, 1)` (sleep 0.95 → 0,
 1.5 → 0.16, 3 → 0.44, 6 → 0.72) from the MET attached to the source label (Capture-24 annotation METs,
-PAMAP2 protocol METs); `interval80` (split-conformal half-width on val) in the manifest. One output only:
+PAMAP2 protocol METs) or, for GOTOV, the window's own **measured** MET (`measured_COSMED` rows; loader
+`gotov-met-1`: COSMED K4b2 breath-by-breath METS held ≤ 15 s, time-weighted over the window, ≥ 90 % of the window
+measured, the first 60 s of each activity MASK for VO2 on-kinetics); `interval80` (split-conformal half-width on
+val) in the manifest. One output only:
 a separate `wrist_motion` target would be an analytic function of the window (the engineered intensity
 already provides it) and is not trained.
 
@@ -193,15 +197,30 @@ val subjects; unsupported classes are −inf at inference and absent from the wi
 
 ### Training data policy
 
-Training uses CC BY 4.0 wrist/forearm data only: Capture-24 (wrist, 100 Hz, free-living), WISDM-2019 watch,
-HHAR watches, PAMAP2 hand, MHEALTH right lower arm, Opportunity wrists/forearms. Non-wrist sets (HAPT
-waist, HARTH / HAR70+ back+thigh) are pooled-ablation and transition-timing references only. CC BY-NC-SA
-sets (WEAR, GOTOV) and sets with no stated licence (ExtraSensory, RealWorld, UT) are excluded from
-training pending an explicit licensing decision. All signals are converted to g before preprocessing
-(m/s² ÷ 9.80665, mg ÷ 1000). The audited crosswalk is `activity_context/inertia/label_mappings.json`; CC BY 4.0
-attribution (creators, titles, DOIs, changes made) is in `NOTICE.md`. Data locations come from the
-environment only (`INERTIA_DATA_ROOT`, `INERTIA_CACHE_DIR`, `INERTIA_BUNDLES_DIR`, `INERTIA_HAR_ROOT`,
-`WISDM_DIR`; `activity_context/inertia/paths.py`), never from a path in code.
+Training uses wrist/forearm data under two licences:
+
+* **CC BY 4.0**: Capture-24 (wrist, 100 Hz, free-living), WISDM-2019 watch, HHAR watches, PAMAP2 hand, MHEALTH
+  right lower arm, Opportunity wrists/forearms (the six sets of every bundle before 2026-10-06).
+* **CC BY-NC-SA 4.0** (owner decision **2026-10-06**: non-commercial use approved; Nara is non-commercial):
+  GOTOV (right-wrist GENEActiv, 600/7 Hz, 35 older adults 59.5-81 y, scripted protocol, COSMED-measured MET for
+  31) and WEAR (Bangle.js, 50 Hz, 24 subjects, 18 outdoor workouts; one wrist per subject — left unless < 95 %
+  finite — so no movement is counted twice). Their crosswalk rows keep exactly Agent C's audited
+  `used_for_training` (every such row is confidence high/medium; low / candidate rows stay unused) and carry a
+  `licence_decision`; the decision itself is the `licence_decisions` block of `label_mappings.json`. Loader policy:
+  GOTOV labels are protocol-imputed, so the first/last 10 s of every labelled segment are MASK
+  (`gotov-guard-10s`); its movement_intensity target is the window's measured METS (`gotov-met-1`, see
+  `movement_intensity` above). Every bundle records `training.training_data_licences` (and the top-level
+  `training_data_licences`); one that lists `CC BY-NC-SA 4.0` inherits its non-commercial / share-alike terms.
+  Bundles stay outside git.
+
+Non-wrist sets (HAPT waist, HARTH / HAR70+ back+thigh) are pooled-ablation and transition-timing references
+only. Sets with **no stated licence** (ExtraSensory, RealWorld 2016, UT complex) or a conflicting one (UCI HMP)
+remain excluded from all training (`excluded_licence`). All signals are converted to g before preprocessing
+(m/s² ÷ 9.80665, mg ÷ 1000; GOTOV and WEAR are already in g, checked ≈ 1 g at rest). The audited crosswalk is
+`activity_context/inertia/label_mappings.json`; attribution for every dataset (creators, titles, DOIs, licences,
+changes made) is in `NOTICE.md`. Data locations come from the environment only (`INERTIA_DATA_ROOT`,
+`INERTIA_CACHE_DIR`, `INERTIA_BUNDLES_DIR`, `INERTIA_HAR_ROOT`, `WISDM_DIR`; `activity_context/inertia/paths.py`),
+never from a path in code.
 
 ### Bundle file keys (authority: `activity_context/inertia/bundle.py`)
 

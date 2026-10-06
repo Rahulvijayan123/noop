@@ -3,7 +3,8 @@
 * :func:`class_targets` — ``uint16`` bitmask per window and class head, **0 = MASK**. Only pure ``cls``
   windows (one non-null label >= 90%) carry class targets; ``trn`` windows are MASK for class heads. A
   window whose label is withheld (OOD hold-out) or whose dataset is not a training dataset is MASK.
-* :func:`intensity_targets` — ``clip(ln MET / ln 12, 0, 1)`` from the label's audited MET, NaN = MASK.
+* :func:`intensity_targets` — ``clip(ln MET / ln 12, 0, 1)`` from the label's audited MET, or — for labels whose
+  row is ``measured_COSMED`` (GOTOV) — from the window's own measured MET (meta ``met``); NaN = MASK.
 * There is no ``unknown`` target anywhere: a missing target is MASK (0 / NaN / -1), never a class.
 
 Support (:func:`resolve_support`): a class is supported iff it has >= 200 TRAIN windows from >= 5 TRAIN
@@ -22,7 +23,7 @@ from typing import Dict, List, Mapping, Optional, Sequence
 import numpy as np
 
 from . import HEAD_CLASS_ORDERS
-from .mappings import Crosswalk, bitmask
+from .mappings import Crosswalk, bitmask, met_to_intensity
 
 MIN_TRAIN_WINDOWS = 200
 MIN_TRAIN_SUBJECTS = 5
@@ -70,13 +71,25 @@ def intensity_targets(meta, cw: Crosswalk, ood_holdout: bool = False,
     ok = (meta["kind"].to_numpy() == "cls") & meta["pure"].to_numpy().astype(bool)
     ok &= ~_excluded(meta, cw, ood_holdout, train_datasets)
     ds, lab = meta["dataset"].to_numpy(), meta["label"].to_numpy()
-    cache: Dict[tuple, float] = {}
+    met = (np.asarray(pd_numeric(meta["met"]), np.float64) if "met" in meta.columns
+           else np.full(len(meta), np.nan))
+    cache: Dict[tuple, tuple] = {}
     for i in np.flatnonzero(ok):
         key = (ds[i], lab[i])
         if key not in cache:
-            cache[key] = cw.intensity_target(ds[i], lab[i])
-        out[i] = cache[key]
+            cache[key] = (cw.intensity_measured(ds[i], lab[i]), cw.intensity_target(ds[i], lab[i]))
+        measured, fixed = cache[key]
+        if measured:
+            out[i] = met_to_intensity(met[i]) if np.isfinite(met[i]) and met[i] > 0 else np.nan
+        else:
+            out[i] = fixed
     return out
+
+
+def pd_numeric(col) -> np.ndarray:
+    """A meta column as float (None / missing -> NaN)."""
+    import pandas as pd
+    return pd.to_numeric(col, errors="coerce").to_numpy(np.float64)
 
 
 def transition_targets(meta, trans: np.ndarray, cw: Crosswalk, ood_holdout: bool = False,

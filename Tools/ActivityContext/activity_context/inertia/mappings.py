@@ -13,7 +13,10 @@ Target encodings used downstream
 --------------------------------
 * class heads: ``uint16`` bitmask over the head's class order (bit k = class k), **0 = MASK**. A
   ``class`` row sets one bit, a ``set`` row several (truth is one of them). There is no ``unknown``.
-* ``movement_intensity``: float in [0, 1] (``clip(ln MET / ln 12, 0, 1)``), NaN = MASK.
+* ``movement_intensity``: float in [0, 1] (``clip(ln MET / ln 12, 0, 1)``), NaN = MASK. A row's MET is either a
+  fixed audited value (``{"met": <number>, "value": ...}``) or ``{"met": "measured_COSMED", ...}``: the MET is
+  measured per window (GOTOV COSMED, loader ``gotov-met-1``, window meta ``met``) and the row only says whether
+  that label's windows are supervised (:meth:`Crosswalk.intensity_measured`).
 * ``transition``: a row's target is ``none`` (interior windows may be all-events-0 negatives) or MASK;
   positives come only from label changes (``transition_rules``) — never from a per-label row.
 """
@@ -40,6 +43,7 @@ ROLES = ("train_wrist", "pooled_ablation_non_wrist", "ood_only", "excluded_licen
          "future")
 TRANSITION_STATES = ("sit", "stand", "lie", "walk", "run", "sleep", "other")
 MET_LOG_BASE = 12.0
+MEASURED_MET = "measured_COSMED"           # per-window measured MET (window meta "met"), not a fixed label value
 
 
 class MappingError(ValueError):
@@ -120,10 +124,19 @@ class Crosswalk:
         return bitmask([t] if r["target_type"] == "class" else t, head)
 
     def intensity_target(self, dataset: str, source_label: str) -> float:
+        """The label's fixed intensity target; NaN when unsupervised or measured per window (see
+        :meth:`intensity_measured`)."""
         r = self.row(dataset, source_label, "movement_intensity")
-        if not r["used_for_training"] or r["target_type"] != "regression":
+        if not r["used_for_training"] or r["target_type"] != "regression" or self.intensity_measured(dataset, source_label):
             return float("nan")
         return met_to_intensity(float(r["nara_target"]["met"]))
+
+    def intensity_measured(self, dataset: str, source_label: str) -> bool:
+        """True iff the label's windows are supervised with their own measured MET (window meta ``met``)."""
+        r = self.row(dataset, source_label, "movement_intensity")
+        t = r["nara_target"]
+        return bool(r["used_for_training"] and r["target_type"] == "regression" and isinstance(t, dict)
+                    and t.get("met") == MEASURED_MET)
 
     def transition_none_ok(self, dataset: str, source_label: str) -> bool:
         r = self.row(dataset, source_label, "transition")
@@ -215,8 +228,10 @@ def validate(cw: Crosswalk) -> List[str]:
         if head == "transition" and tt == "class" and tgt != "none" and tgt not in HEAD_CLASS_ORDERS["transition"]:
             out.append(f"{key}: transition target {tgt!r} is neither 'none' nor an event")
         if head == "movement_intensity" and tt == "regression":
-            if isinstance(tgt, dict) and isinstance(tgt.get("met"), str) and not r["used_for_training"]:
-                continue        # per-minute measured METs (GOTOV, excluded): not a fixed label value
+            if isinstance(tgt, dict) and tgt.get("met") == MEASURED_MET:
+                if not str(tgt.get("value", "")).strip():
+                    out.append(f"{key}: a measured-MET target must describe how the window MET is formed")
+                continue        # measured per window (GOTOV COSMED, loader gotov-met-1): not a fixed label value
             try:
                 v = met_to_intensity(float(tgt["met"]))
                 if abs(v - float(tgt["value"])) > 1e-3:
@@ -255,6 +270,10 @@ def markdown_table(cw: Crosswalk, datasets: Optional[Sequence[str]] = None) -> s
     for ds in sorted(cw.doc["dataset_roles"]):
         v = cw.doc["dataset_roles"][ds]
         lines.append(f"| {ds} | {v['role']} | {v.get('licence', '')} | {v.get('placement', '')} | {v.get('note', '')} |")
+    for dec in cw.doc.get("licence_decisions", []):
+        lines += ["", f"## Licence decision {dec['date']}", "", f"{dec['decision']} — {dec['licence']}; {dec['basis']}.",
+                  "", f"Rows: {dec['rows']}.", "", "Conditions:", ""] + [f"- {c}" for c in dec["conditions"]]
+        lines += ["", "Still excluded: " + "; ".join(f"{d} ({why})" for d, why in dec["still_excluded"].items()) + "."]
     lines += ["", "## Rows", "", "| dataset | source label | name | head | target | type | confidence | "
               "used_for_training | rationale |", "|---|---|---|---|---|---|---|---|---|"]
     for r in cw.doc["mappings"]:
@@ -266,6 +285,8 @@ def markdown_table(cw: Crosswalk, datasets: Optional[Sequence[str]] = None) -> s
         elif isinstance(tgt, dict):
             tgt = f"MET {tgt.get('met')} → {tgt.get('value')}"
         used = "yes" if r["used_for_training"] else ("no (policy)" if r.get("audit_used_for_training") else "no")
+        if r.get("licence_decision") and r["used_for_training"]:
+            used = "yes (NC-SA, 2026-10-06)"
         rat = str(r["rationale"]).replace("|", "/").replace("\n", " ")
         name = str(r.get("source_label_name", "")).replace("|", "/")
         lab = str(r["source_label"]).replace("|", "/")

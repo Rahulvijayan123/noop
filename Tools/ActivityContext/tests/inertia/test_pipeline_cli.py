@@ -45,3 +45,24 @@ def test_experiments_preregistered_and_standin():
             assert e.arch[5:] in EXPERIMENTS
         if e.ood_from:
             assert EXPERIMENTS[e.ood_from].role == "ood_bench" and EXPERIMENTS[e.ood_from].encoder == e.encoder
+
+
+def test_ncsa_experiments_declared_with_licences():
+    """GOTOV/WEAR (CC BY-NC-SA 4.0) experiments are pre-registered; their bundles record the licences."""
+    from activity_context.inertia.build_bundle import training_data_licences
+    from activity_context.inertia.experiments import NC_SA, WRIST, WRIST_NC
+    from activity_context.inertia.mappings import load_mappings
+    cw = load_mappings()
+    names = {f"ncsa-{r}-{e}" for r in ("ood", "primary") for e in ("hc", "nf", "art")} | {
+        "ncsa-lodo-nonc-hc", "ncsa-lodo-nogotov-hc", "ncsa-lodo-nowear-hc"}
+    assert names <= set(DECLARED)
+    for n in names:
+        e = get_experiment(n)
+        assert e.eval_datasets == WRIST_NC and e.datasets[:len(e.train_datasets)] == e.train_datasets
+        lic = training_data_licences(cw, e.train_datasets)
+        assert lic["licences"] == (["CC BY 4.0", "CC BY-NC-SA 4.0"] if set(NC_SA) & set(e.train_datasets) else ["CC BY 4.0"])
+        assert (lic["note"] is not None) == bool(set(NC_SA) & set(e.train_datasets))
+    assert get_experiment("ncsa-lodo-nonc-hc").train_datasets == WRIST
+    assert "gotov" not in get_experiment("ncsa-lodo-nogotov-hc").train_datasets
+    assert get_experiment("primary-hc").datasets == WRIST                  # sealed experiments unchanged
+    assert training_data_licences(cw, WRIST)["licences"] == ["CC BY 4.0"]

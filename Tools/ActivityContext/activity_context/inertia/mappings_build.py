@@ -7,6 +7,11 @@ output file (so it can be audited without reading code):
 * ``dataset_roles``: licence/placement policy (INERTIA1.md §5 "Training data policy"). Only
   ``train_wrist`` datasets keep ``used_for_training``; every other row is forced to ``false`` with
   ``policy`` naming the reason and ``audit_used_for_training`` keeping Agent C's value.
+* ``licence_decisions``: the owner's decision of 2026-10-06 — GOTOV and WEAR (CC BY-NC-SA 4.0) are
+  ``train_wrist`` for non-commercial use. Their rows keep exactly Agent C's audited ``used_for_training`` (every
+  such row is confidence high/medium; asserted) and say so in ``licence_decision``; their low-confidence /
+  candidate rows stay unused with an explicit ``policy``. Sets with no stated (or a conflicting) licence stay
+  ``excluded_licence``. GOTOV's measured-MET rows get the explicit per-window rule (loader ``gotov-met-1``).
 * ``transition_states``: per (dataset, source label) the coarse state used to derive transition events
   from label changes (sit/stand/lie/walk/run/sleep/other, null = unlabelled), computed by the documented
   rule ``transition_states_rule`` from the audited posture/locomotion rows.
@@ -43,8 +48,8 @@ ROLES = {
     "harth": ("pooled_ablation_non_wrist", "CC BY 4.0", "back/thigh"),
     "har70plus": ("pooled_ablation_non_wrist", "CC BY 4.0", "back/thigh"),
     "daphnet_fog": ("ood_only", "CC BY 4.0", "ankle/thigh/trunk (non-wrist)"),
-    "wear": ("excluded_licence", "CC BY-NC-SA 4.0", "wrist"),
-    "gotov": ("excluded_licence", "CC BY-NC-SA 4.0", "wrist"),
+    "wear": ("train_wrist", "CC BY-NC-SA 4.0", "wrist (one per subject: left, else right; Bangle.js)"),
+    "gotov": ("train_wrist", "CC BY-NC-SA 4.0", "wrist (right, GENEActiv)"),
     "extrasensory_watch": ("excluded_licence", "no licence stated", "wrist"),
     "realworld2016": ("excluded_licence", "no licence stated", "forearm"),
     "ut_complex_shoaib2016": ("excluded_licence", "no licence stated (and no subject ids)", "wrist"),
@@ -57,12 +62,47 @@ ROLE_NOTES = {
     "train_wrist": "v1 training set (CC BY 4.0, wrist/forearm)",
     "pooled_ablation_non_wrist": "non-wrist: pooled-placement ablation / transition-timing reference only",
     "ood_only": "OOD probe only (non-wrist; informative, not a Nara wrist result)",
-    "excluded_licence": "excluded from training pending an explicit licensing decision",
+    "excluded_licence": "excluded from training: no licence stated (or a conflicting one); not covered by the "
+                        "2026-10-06 licence decision",
     "excluded_other": "excluded from v1 training (see note)",
     "future": "future personal supervision; not a v1 dependency",
 }
 NULL_LABELS = {"opportunity": ["loc:0"], "pamap2": ["0"], "hhar_watch": ["null"], "mhealth": ["0"],
-               "capture24": ["<NA>"], "daphnet_fog": ["0"], "uci_hapt_waist": [], "harth": [], "har70plus": []}
+               "capture24": ["<NA>"], "daphnet_fog": ["0"], "uci_hapt_waist": [], "harth": [], "har70plus": [],
+               "gotov": ["NA"], "wear": ["null"]}
+NC_SA = ("gotov", "wear")
+NC_SA_NOTE = ("training set since 2026-10-06: CC BY-NC-SA 4.0, non-commercial use approved by the owner (Nara is "
+              "non-commercial); attribution in Tools/ActivityContext/NOTICE.md; bundles record training_data_licences")
+LICENCE_DECISIONS = [{
+    "date": "2026-10-06",
+    "decision": "GOTOV and WEAR (CC BY-NC-SA 4.0) may be used to train the Inertia motion heads (non-commercial use)",
+    "datasets": list(NC_SA), "licence": "CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)",
+    "basis": "approved by the owner on 2026-10-06; Nara is non-commercial (PolyForm Noncommercial 1.0.0)",
+    "conditions": ["attribution and the changes made are listed in Tools/ActivityContext/NOTICE.md and ATTRIBUTION.md",
+                   "no raw or windowed data is committed or redistributed (only aggregate metrics and label vocabularies)",
+                   "every bundle trained on them records training_data_licences including 'CC BY-NC-SA 4.0' and stays "
+                   "outside git; such bundles must not be used commercially or relicensed under terms that drop the "
+                   "NC/SA conditions"],
+    "rows": "Agent C's audited used_for_training is kept as is (every such row is confidence high/medium); its "
+            "low-confidence / candidate rows stay unused",
+    "still_excluded": {"extrasensory_watch": "no licence stated", "realworld2016": "no licence stated",
+                       "ut_complex_shoaib2016": "no licence stated (and no subject ids)",
+                       "uci_hmp_wrist": "UCI CC BY 4.0 vs README commercial restriction (conflict)"},
+}]
+GOTOV_MET_RULE = ("per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 "
+                  "breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over "
+                  "the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity "
+                  "(VO2 on-kinetics) and participants without COSMED are MASK")
+LOADER_VERIFICATION = {
+    "gotov": ("loader gotov-loader-1 (2026-10-06): 35/35 right-wrist files; GENEActiv clock 600/7 = 85.714 Hz (CSV "
+              "steps 4-15 ms, <= 15 ms from a uniform grid over every file; Agent C's '83 Hz' was nominal); no "
+              "missing samples, no NaN; units g (median |a| over the rest labels 0.997-1.022 g per participant); "
+              "31 COSMED files on the same unix-ms clock; labels protocol-imputed -> 10 s guard at every labelled "
+              "segment edge (gotov-guard-10s); outdoor walking only in 22 participants"),
+    "wear": ("loader wear-loader-1 (2026-10-06): 24 files sbj_0..23, uniform 50 Hz, units g (median |a| during "
+             "stretching 0.997-1.023 g, both wrists); one wrist per subject (left unless < 95 % finite: sbj_10 left "
+             "arm 25.8 % NaN -> right)"),
+}
 EVENT_PAIRS = [
     ("sit", "stand", ["sit_to_stand_like"]), ("stand", "sit", ["stand_to_sit_like"]),
     ("sit", "lie", ["lying_down_like"]), ("stand", "lie", ["lying_down_like"]),
@@ -92,6 +132,12 @@ TRANSITION_RULES = {
     "wisdm2019_watch": {"mode": "negatives_only",
                         "source": "separate recordings; timestamps jump at activity changes -> no positives"},
     "mhealth": {"mode": "negatives_only", "source": "all changes through 20-60 s nulls -> no positives"},
+    "gotov": {"mode": "negatives_only",
+              "source": "Agent C: labels imputed from the protocol (researcher-recorded start/end), NA gaps 15-80 s -> "
+                        "no positives; interior windows of the audited 'none' rows are negatives (after the 10 s "
+                        "label guard)"},
+    "wear": {"mode": "mask", "source": "Agent C: run_start/run_stop candidates only (low); null content unknown -> "
+                                       "no transition targets"},
 }
 COMMON_TRANSITION_POLICY = {
     "positive": "event interval [a, b] lies inside [w0 + 1 s, w1 - 1 s] (event-presence semantics)",
@@ -104,6 +150,28 @@ COMMON_TRANSITION_POLICY = {
 SET_FAMILIES = {"locomotion": {"walking": ["walking", "brisk_walking"]}}
 OOD_HOLDOUT_FIXED = {"wisdm2019_watch": ["M", "O", "P"], "pamap2": ["20", "24"], "mhealth": ["8", "12"]}
 C24_OOD_GROUPS = ("sports", "manual-work")
+
+
+def ROLES_NOTE(dataset: str) -> str:
+    return ROLE_NOTES[ROLES[dataset][0]]
+
+
+def _nc_sa_row(r: Dict[str, Any]) -> None:
+    """GOTOV / WEAR row under the 2026-10-06 licence decision (see ``licence_decisions``)."""
+    from .mappings import MEASURED_MET, MappingError
+    if r["used_for_training"]:
+        if r["mapping_confidence"] not in ("high", "medium"):
+            raise MappingError(f"{r['dataset']}/{r['source_label']}/{r['nara_head']}: a trained NC-SA row must be "
+                               "confidence high/medium")
+        r["licence_decision"] = ("2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as "
+                                 f"audited by Agent C (confidence {r['mapping_confidence']})")
+    elif r["target_type"] != "mask":
+        r["policy"] = (f"not trained: Agent C's audit left this row unused (confidence {r['mapping_confidence']}"
+                       f"{'' if r['mapping_confidence'] == 'low' else ', candidate'}); unchanged by the 2026-10-06 "
+                       "licence decision")
+    t = r["nara_target"]
+    if r["nara_head"] == "movement_intensity" and isinstance(t, dict) and t.get("met") == MEASURED_MET:
+        r["nara_target"] = {"met": MEASURED_MET, "value": GOTOV_MET_RULE}
 
 
 def _state(rows: Dict[str, Dict[str, Any]], dataset: str, label: str) -> Optional[str]:
@@ -123,7 +191,7 @@ def _state(rows: Dict[str, Dict[str, Any]], dataset: str, label: str) -> Optiona
         return "sit"
     if post == "upright_stationary" and loco == "stationary":
         return "stand"
-    if isinstance(loco, list) and "walking" in loco and "stationary" not in loco or loco == "walking":
+    if isinstance(loco, list) and "walking" in loco and "stationary" not in loco or loco in ("walking", "brisk_walking"):
         return "walk"
     if loco == "running":
         return "run"
@@ -171,7 +239,9 @@ def normalise(src: Dict[str, Any], src_sha256: str, src_path: str) -> Dict[str, 
         r["audit_used_for_training"] = bool(r["used_for_training"])
         if role != "train_wrist" and r["used_for_training"]:
             r["used_for_training"] = False
-            r["policy"] = f"dataset role {role}: {ROLE_NOTES[role]} ({ROLES[r['dataset']][1]})"
+            r["policy"] = f"dataset role {role}: {ROLES_NOTE(r['dataset'])} ({ROLES[r['dataset']][1]})"
+        if r["dataset"] in NC_SA:
+            _nc_sa_row(r)
     by_label: Dict[tuple, Dict[str, Dict[str, Any]]] = {}
     for r in rows:
         by_label.setdefault((r["dataset"], r["source_label"]), {})[r["nara_head"]] = r
@@ -184,7 +254,11 @@ def normalise(src: Dict[str, Any], src_sha256: str, src_path: str) -> Dict[str, 
     roles = {ds: {"role": r, "licence": lic, "placement": pl, "note": ROLE_NOTES[r]}
              for ds, (r, lic, pl) in ROLES.items()}
     roles["dsads"]["note"] = "CC BY 4.0 but the arm segment of the RA/LA units is not stated; not in the v1 list"
+    for ds in NC_SA:
+        roles[ds]["note"] = NC_SA_NOTE
     meta = portable(copy.deepcopy(src["datasets"]))
+    for ds, note in LOADER_VERIFICATION.items():
+        meta[ds]["loader_verification"] = note
     meta["capture24"]["mirror_verification"] = (
         "HF mirror nz00shuuuu verified identical to the ORA release for every complete ORA file (48 participants, "
         "449,565,923 rows; x/y/z within float32 rounding <= 4.8e-7; timestamps and annotations exactly equal; "
@@ -200,12 +274,13 @@ def normalise(src: Dict[str, Any], src_sha256: str, src_path: str) -> Dict[str, 
         "ontology_source": src.get("ontology_source"),
         "conventions": conventions,
         "dataset_roles": roles,
+        "licence_decisions": LICENCE_DECISIONS,
         "datasets": meta,
         "transition_states_rule": (
             "null label -> null; posture recumbent -> lie (Capture-24 '7030 sleeping' -> sleep: diary onset/offset "
             "is not an event); posture seated_likely -> sit; posture upright_stationary with locomotion stationary "
             "-> stand; locomotion containing walking (and not stationary) -> walk; running -> run; else other. "
-            "Uses Agent C's audited rows (audit_used_for_training). A change between equal states is not a boundary."),
+            "Uses Agent C's audited rows (audit_used_for_training). A change between equal states is not a boundary. (brisk_walking counts as walk.)"),
         "transition_states": states,
         "event_pairs": [{"from": a, "to": b, "events": e} for a, b, e in EVENT_PAIRS],
         "transition_derivation": src["transition_derivation"],

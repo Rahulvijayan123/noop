@@ -199,8 +199,9 @@ the gate into the bundle (`test_gate.json`); a re-evaluation needs `--rerun-reas
   `afcd725314c95f4afefce118821349df7d61e7e8`; encoder code narrowly vendored under
   `activity_context/inertia/vendor/` (see NOTICE.md). No upstream weights are used or committed.
 - **Inertia head datasets** (CAPTURE-24, HHAR, PAMAP2, MHEALTH, OPPORTUNITY, Daphnet; UCI HAPT / HARTH /
-  HAR70+ as label-vocabulary references) — all CC BY 4.0; creators, DOIs and changes made are in NOTICE.md.
-  No raw data is committed or redistributed.
+  HAR70+ as label-vocabulary references) — all CC BY 4.0; since 2026-10-06 also **GOTOV** and **WEAR** — CC BY-NC-SA
+  4.0, non-commercial use approved by the owner (bundles trained on them record `training_data_licences`).
+  Creators, DOIs, licences and changes made are in NOTICE.md. No raw data is committed or redistributed.
 - The package's own code is part of NOOP, licensed under the repo's PolyForm
   Noncommercial 1.0.0 (see repo LICENSE). granite-tsfm / torch / transformers
   keep their own licenses (Apache-2.0 / BSD-style) and are runtime-only deps.
