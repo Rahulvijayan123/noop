@@ -27,20 +27,25 @@ young healthy wearers — Nara validates before any metric is used as evidence);
    **No imputation, no gap bridging, no "longest valid segment" selection, no edge-day dropping**: those
    upstream steps target multi-day files and would fabricate or discard motion here. Each contiguous run is
    processed on its own.
-3. 100 → 30 Hz with the same resampler upstream uses (reproduced exactly or called directly; the audit records
-   which and its parity against `pipelines.general`).
-4. 10 s windows (300 samples) on a grid anchored at the request `start_ts`, hop per upstream (`window_overlap_sec`),
-   fully inside the run and clear of resampler edge transients.
-5. Upstream auto-calibration / non-wear detection: applied only if valid on a single run (decided by the audit;
-   default off, recorded in the manifest). Wear is Nara's own evidence.
+3. 100 → 30 Hz with the same resampler upstream uses. **Decided: reproduced exactly** — `actipy.processing.resample`
+   is nearest-neighbour (no anti-alias filter); `preprocess.py` reproduces its index map bit-for-bit (numpy only, so
+   the serve needs no pandas/actipy).
+4. 10 s windows (300 samples) on a grid anchored at the request `start_ts`, fully inside the run. **Decided:** hop
+   5 s served by default (`--hop-s` / request `hop_s` ∈ {1, 2, 5, 10}; 1 = upstream `window_overlap_sec` 9); edge
+   margin 0 — the nearest-neighbour map has no transient, so a window reads exactly its own 10 s of samples.
+5. Upstream auto-calibration / non-wear detection. **Decided: both off** (ping `preprocessing` says so). Non-wear
+   needs >= 72 h upstream; gravity calibration needs the whole recording and is the one measured whole-day
+   difference from upstream (0.1-0.6 % of windows flip is_gait on Capture-24 days it changes; VALIDATION.md §1).
+   Wear is Nara's own evidence.
 
 ## 3. Gait detection made window-local
 
 Upstream skips windows below a recording-relative Otsu variance threshold (capped at an absolute static
 ceiling) before the classifier. That makes one window's answer depend on the rest of the request. Nara uses a
-fixed, documented static pre-filter (the upstream absolute ceiling) so every window's output depends only on
-that window — deterministic and chunking-independent — and the audit measures the difference against
-upstream on whole recordings.
+fixed, documented static pre-filter (the upstream absolute ceiling, mean per-axis variance <= 0.013² g²) so every
+window's output depends only on that window — deterministic and chunking-independent. Measured on six whole
+Capture-24 days: upstream's Otsu threshold was always above the ceiling, so the two pre-filters agreed on every
+window.
 
 ## 4. Wire format `gait-quality-1` (`python -m activity_context.eldernet.serve`)
 
@@ -103,3 +108,14 @@ Gait detection P/R/F1, calibration and risk-coverage vs walking labels on the fr
 annotated steps where available (OxWalk); speed ordinal checks (GOTOV slow < normal < fast); parity with
 upstream `pipelines.general` on whole recordings; latency/RAM. Splits are the frozen subject splits in
 `Tools/ActivityContext/splits/`.
+
+## 8. Results and operating values (eval/eldernet/VALIDATION.md, VALIDATION.json)
+
+* Parity: upstream toy example and three 3 h Capture-24 segments reproduce upstream bouts and metrics (detection
+  agreement 1.000, quality within 3.6e-5).
+* Served defaults: no calibration, `gait_threshold` 0.5 (upstream argmax). VAL fit (`eval/eldernet/calibration.json`,
+  `--calibration`): T = 1.047 (free-living; ≈ upstream already calibrated), high-precision threshold 0.93.
+* Decoder π: **0.065** (Capture-24 VAL, gait share of labelled 10 s windows at hop 5; 0.125 if pre-filtered windows
+  are excluded).
+* Serve: ~650 MB RSS, ~1.9 ms per window per head on one thread; keep hop 5 and <= 1 h requests under the 60 s
+  timeout.
