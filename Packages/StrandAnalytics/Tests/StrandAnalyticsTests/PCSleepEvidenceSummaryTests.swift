@@ -336,6 +336,84 @@ final class PCSleepEvidenceSummaryTests: XCTestCase {
 
     // MARK: Engine integration
 
+    // MARK: Split main night (worker review RC-03 remainder)
+
+    /// 23:00–02:00 and 02:50–07:00: one split main sleep whose 50-minute awakening is 10.4 % of the 8-hour hull.
+    func splitNight() -> (eps: [PC.SleepEpisode], hull: PC.Interval, obs: PC.SanitizedObservations, cutoff: Int) {
+        let cutoff = F.identity(day).dayWindow.end + 40 * 3600
+        let a = F.session("a", F.at(prev, 23), F.at(day, 2))
+        let b = F.session("b", F.at(day, 2, 50), F.at(day, 7))
+        let eps = PC.SleepRhythm.episodes(sessions: [a, b], identity: F.identity(day), mode: .retrospective,
+                                          cutoff: cutoff, config: config)
+        let obs = PC.SanitizedObservations(heartRate: F.hr(F.at(prev, 22), F.at(day, 12), bpm: 58))
+        return (eps, PC.Interval(F.at(prev, 23), F.at(day, 7)), obs, cutoff)
+    }
+
+    func testASessionAggregateOverASplitNightLeavesTheGapBetweenFragmentsOut() throws {
+        let (eps, hull, obs, _) = splitNight()
+        XCTAssertNotNil(eps[0].splitGroupId)
+        XCTAssertEqual(eps[0].splitGroupId, eps[1].splitGroupId)
+
+        // Over the whole hull the awakening is 10.4 % of the support, so it is not "asleep".
+        let whole = PC.SleepRhythm.sleepWear(for: hull, episodes: eps, observations: obs, config: config)
+        XCTAssertNotEqual(whole.sleepState, .asleep)
+        XCTAssertFalse(whole.reasons.contains(PC.SleepRhythm.splitSleepGapExcluded))
+
+        // A value pooled over the fragments measured nothing in the gap: it is left out, and the context says so.
+        let pooled = PC.SleepRhythm.sleepWear(for: hull, episodes: eps, observations: obs, config: config,
+                                              excludingSplitGaps: true)
+        XCTAssertEqual(pooled.sleepState, .asleep)
+        XCTAssertEqual(pooled.wearState, .worn)
+        XCTAssertTrue(pooled.reasons.contains(PC.SleepRhythm.splitSleepGapExcluded))
+        let share = try XCTUnwrap(pooled.diagnostics.first { $0.name == "split_gap_share" }?.value)
+        XCTAssertEqual(share, 3000.0 / 28_800.0, accuracy: 1e-12)
+        XCTAssertEqual(pooled.diagnostics.first { $0.name == "asleep_share" }?.value, 1.0)
+
+        // Only a gap whose fragments the support overlaps on BOTH sides is left out.
+        let edge = PC.Interval(F.at(day, 1, 55), F.at(day, 2, 5))
+        let e = PC.SleepRhythm.sleepWear(for: edge, episodes: eps, observations: obs, config: config,
+                                         excludingSplitGaps: true)
+        XCTAssertFalse(e.reasons.contains(PC.SleepRhythm.splitSleepGapExcluded))
+        XCTAssertEqual(e, PC.SleepRhythm.sleepWear(for: edge, episodes: eps, observations: obs, config: config))
+        // A gap that is not between fragments of one split group (two separate episodes) is never left out.
+        let apart = PC.SleepRhythm.episodes(sessions: [F.session("x", F.at(day, 1), F.at(day, 2)),
+                                                      F.session("y", F.at(day, 13), F.at(day, 14))],
+                                            identity: F.identity(day), mode: .retrospective,
+                                            cutoff: F.identity(day).dayWindow.end + 40 * 3600, config: config)
+        XCTAssertTrue(apart.allSatisfy { $0.splitGroupId == nil })
+        let across = PC.SleepRhythm.sleepWear(for: .init(F.at(day, 1), F.at(day, 14)), episodes: apart,
+                                              observations: obs, config: config, excludingSplitGaps: true)
+        XCTAssertFalse(across.reasons.contains(PC.SleepRhythm.splitSleepGapExcluded))
+    }
+
+    func testTheEngineLeavesTheGapOutOnlyForSessionAggregates() throws {
+        let (_, hull, obs, cutoff) = splitNight()
+        let sessions = [F.session("a", F.at(prev, 23), F.at(day, 2)), F.session("b", F.at(day, 2, 50), F.at(day, 7))]
+        func measurement(_ id: String, _ aggregation: PC.Aggregation) -> PC.MeasurementInput {
+            PC.MeasurementInput(metric: .hrvRmssd,
+                                method: .init(id: id, algorithmVersion: "t", aggregation: aggregation,
+                                              windowS: hull.duration, units: "ms"),
+                                source: .init(product: .scoringSnapshot, key: id), value: 48, support: hull,
+                                availableAt: F.at(day, 7, 20))
+        }
+        let input = PC.DayInput(identity: F.identity(day), mode: .retrospective, availabilityCutoff: cutoff,
+                                generatedAt: cutoff, heartRate: obs.heartRate,
+                                beatIntervals: obs.heartRate.map { .init(ts: $0.ts, rrMs: $0.ts % 2 == 0 ? 1080 : 1100) },
+                                measurements:[measurement("snapshot.hrv_rmssd.night", .session),
+                                               measurement("series.hrv_rmssd.hull", .window)],
+                                sleepSessions: sessions, regime: .init(scoringAlgorithmVersion: "frwhoop-server-1"))
+        let doc = PC.Engine.buildDay(input, history: .empty)
+        let night = try XCTUnwrap(doc.envelopes.first { $0.method.id == "snapshot.hrv_rmssd.night" })
+        XCTAssertEqual(night.sleepWear.sleepState, .asleep)
+        XCTAssertTrue(night.sleepWear.reasons.contains(PC.SleepRhythm.splitSleepGapExcluded))
+        XCTAssertEqual(night.verdict(.sleepMeasurement)?.state, .eligible, "\(String(describing: night.verdict(.sleepMeasurement)))")
+        // The composition still accounts for every second of the support, the gap included.
+        XCTAssertEqual(night.activity.intervalS, hull.duration)
+        let windowed = try XCTUnwrap(doc.envelopes.first { $0.method.id == "series.hrv_rmssd.hull" })
+        XCTAssertNotEqual(windowed.sleepWear.sleepState, .asleep, "a windowed value measured the gap too")
+        XCTAssertNotEqual(windowed.verdict(.sleepMeasurement)?.state, .eligible)
+    }
+
     func testEngineDocumentCarriesSleepContextAndRoundTrips() throws {
         let id = F.identity(day)
         let cutoff = F.at(day, 18)

@@ -26,7 +26,7 @@ import Foundation
 extension PhysiologyContext {
 
     public struct SleepConfig: Codable, Equatable, Sendable {
-        public var version = "pc-sleep-1"
+        public var version = "pc-sleep-2"
         /// A session whose end is within this many seconds of the cutoff is incomplete. The detector places an end
         /// only after its 15-min centered stillness window and 15-min run merge have seen post-end data
         /// (`SleepStager.stillWindowMin`, `mergeMin`), so a younger end can still move.
@@ -378,7 +378,7 @@ extension PhysiologyContext {
 
     public enum SleepRhythm {
 
-        public static let version = "pc-sleep-1"
+        public static let version = "pc-sleep-2"
 
         // MARK: Evidence labels and bases
         public static let evidenceDetectedSleep = "detected_sleep_session"
@@ -415,6 +415,7 @@ extension PhysiologyContext {
         public static let partiallyInDetectedSleep: ReasonCode = "partially_in_detected_sleep"
         public static let overlapsIncompleteEpisode: ReasonCode = "overlaps_incomplete_episode"
         public static let insideSplitSleepGap: ReasonCode = "inside_split_sleep_gap"
+        public static let splitSleepGapExcluded: ReasonCode = "split_sleep_gap_excluded"
         public static let sleepSourcesDisagree: ReasonCode = "sleep_sources_disagree"
         public static let bandStateInputsUndocumented: ReasonCode = "band_state_inputs_undocumented"
         public static let sleepEvidenceInsufficient: ReasonCode = "sleep_evidence_insufficient"
@@ -453,7 +454,8 @@ extension PhysiologyContext {
             sessionReachesCutoff, detectorMayExtend, ownerDayProvisional, sourceDayDiffers,
             classificationProvisional, scorerNapFlag, mainNightRuleApplied, splitSleep, hrOnlySession, stagesUnverified,
             invalidSupport, noDetectorOutput, detectorInputMissing, detectorLagWindow, ownerDaysUnread,
-            partiallyInDetectedSleep, overlapsIncompleteEpisode, insideSplitSleepGap, sleepSourcesDisagree,
+            partiallyInDetectedSleep, overlapsIncompleteEpisode, insideSplitSleepGap, splitSleepGapExcluded,
+            sleepSourcesDisagree,
             bandStateInputsUndocumented, sleepEvidenceInsufficient, noWearEvidence, wearEvidenceInsufficient,
             wearSourcesDisagree, wearFromHeartSignal, noCompletedSleepBefore, sleepInProgress, insideSleepEpisode,
             referenceBeyondLookback, napAfterMainWake, noMainSleepReference, wakeMayBeRevised,
@@ -703,8 +705,14 @@ extension PhysiologyContext {
         /// `observations` must be sorted by `ts` (the sanitized streams are). Asleep comes from detected episodes
         /// (or the band's own sleep state); awake only from positive evidence; wear from wear events and the
         /// presence of a heart-rate signal. Quiet motion is never evidence of either.
+        ///
+        /// `excludingSplitGaps` is for session aggregates (a nightly value pooled over the fragments of a split main
+        /// sleep): such a value measured only inside the fragments, so the gaps between fragments its support spans
+        /// are left out of every share (`split_sleep_gap_excluded`, diagnostic `split_gap_share`). A windowed value
+        /// measured every beat in its support, gaps included, and is evaluated over all of it.
         public static func sleepWear(for support: Interval, episodes: [SleepEpisode],
-                                     observations: SanitizedObservations, config: SleepConfig) -> SleepWearContext {
+                                     observations: SanitizedObservations, config: SleepConfig,
+                                     excludingSplitGaps: Bool = false) -> SleepWearContext {
             guard support.isValid else {
                 return SleepWearContext(sleepState: .unknown, sleepEvidence: [], sleepDependsOnHeartSignals: false,
                                         wearState: .unknown, wearEvidence: [], reasons: [invalidSupport])
@@ -739,16 +747,21 @@ extension PhysiologyContext {
                 if support.end > lo { blockedSpans.append(Interval(lo, support.end)) }
             }
             let blocked = merged(blockedSpans)
+            let gaps = excludingSplitGaps ? splitGaps(spannedBy: support, episodes: episodes, sleep: sleepUnion) : []
             var inside = [Int](repeating: 0, count: nBins)
+            var excluded = [Int](repeating: 0, count: nBins)
             var hrOutsideS = 0
             for k in 0..<nBins {
                 let b = bin(k)
                 inside[k] = sleepUnion.reduce(0) { $0 + $1.overlapSeconds(with: b) }
-                if hrBin[k] { hrOutsideS += b.duration - inside[k] }
+                excluded[k] = gaps.reduce(0) { $0 + $1.overlapSeconds(with: b) }
+                if hrBin[k] { hrOutsideS += b.duration - inside[k] - excluded[k] }
             }
             let asleepDetS = inside.reduce(0, +)
-            let outsideS = support.duration - asleepDetS
-            let dur = Double(support.duration)
+            let excludedS = excluded.reduce(0, +)
+            let outsideS = support.duration - asleepDetS - excludedS
+            // Gaps are only taken where the support overlaps fragments on both sides, so detected sleep remains.
+            let dur = Double(max(1, support.duration - excludedS))
 
             var reasons: [ReasonCode] = []
             var detectorReasons: [ReasonCode] = []
@@ -773,7 +786,7 @@ extension PhysiologyContext {
             var awakeDetS = 0, awakeBandS = 0, asleepBandS = 0, conflictS = 0
             for k in 0..<nBins {
                 let b = bin(k)
-                let outside = b.duration - inside[k]
+                let outside = b.duration - inside[k] - excluded[k]
                 guard outside > 0 else { continue }
                 if blocked.contains(where: { $0.overlapSeconds(with: b) > 0 }) { continue }
                 let bAsleep = bandAsleep[k] && !bandAwake[k]
@@ -811,6 +824,7 @@ extension PhysiologyContext {
                 reasons.append(overlapsIncompleteEpisode)
             }
             if asleepDetS == 0 && inSplitGap(support, episodes: episodes) { reasons.append(insideSplitSleepGap) }
+            if excludedS > 0 { reasons.append(splitSleepGapExcluded) }
             if state != .asleep { reasons += detectorReasons }
             if state == .unknown && reasons.isEmpty { reasons.append(sleepEvidenceInsufficient) }
             // The detector confirms sleep with heart rate and its "no sleep here" needs heart-rate coverage; the
@@ -822,15 +836,17 @@ extension PhysiologyContext {
             var wornHrS = 0, wornEventS = 0, notWornS = 0, wearConflictS = 0
             for k in 0..<nBins {
                 let b = bin(k)
+                let measured = b.duration - excluded[k]
+                guard measured > 0 else { continue }
                 let mid = b.start + b.duration / 2
                 let eventState = spans.first(where: { $0.interval.contains(mid) })?.state
                 if hrBin[k] {
-                    wornHrS += b.duration
-                    if eventState == .offWrist { wearConflictS += b.duration }
+                    wornHrS += measured
+                    if eventState == .offWrist { wearConflictS += measured }
                 } else if eventState == .onWrist && dataBin[k] {
-                    wornEventS += b.duration
+                    wornEventS += measured
                 } else if eventState == .offWrist {
-                    notWornS += b.duration
+                    notWornS += measured
                 }
             }
             let wornShare = Double(wornHrS + wornEventS) / dur
@@ -853,12 +869,15 @@ extension PhysiologyContext {
                 reasons.append(wornHrS + wornEventS + notWornS == 0 ? noWearEvidence : wearEvidenceInsufficient)
             }
 
-            let diagnostics = [
+            var diagnostics = [
                 Diagnostic("asleep_share", asleepShare), Diagnostic("awake_share", awakeShare),
                 Diagnostic("detected_sleep_share", Double(asleepDetS) / dur),
                 Diagnostic("heart_rate_bin_share", Double(hrBin.filter { $0 }.count) / Double(nBins)),
                 Diagnostic("worn_share", wornShare), Diagnostic("not_worn_share", notWornShare),
             ]
+            if excludedS > 0 {
+                diagnostics.append(Diagnostic("split_gap_share", Double(excludedS) / Double(support.duration)))
+            }
             return SleepWearContext(sleepState: state, sleepEvidence: evidence,
                                     sleepDependsOnHeartSignals: sleepDependsOnHeart, wearState: wearState,
                                     wearEvidence: wearEvidence, reasons: unique(reasons).sorted(),
@@ -901,6 +920,29 @@ extension PhysiologyContext {
                 }
             }
             return false
+        }
+
+        /// The gaps between consecutive fragments of one split main sleep where `support` overlaps the fragments on
+        /// both sides, minus any detected sleep inside them (sorted, merged).
+        static func splitGaps(spannedBy support: Interval, episodes: [SleepEpisode], sleep: [Interval]) -> [Interval] {
+            let grouped = Dictionary(grouping: episodes.filter { $0.splitGroupId != nil }, by: { $0.splitGroupId! })
+            var gaps: [Interval] = []
+            for key in grouped.keys.sorted() {
+                let fragments = grouped[key]!.sorted { ($0.interval, $0.id) < ($1.interval, $1.id) }
+                for (a, b) in zip(fragments, fragments.dropFirst()) where b.interval.start > a.interval.end {
+                    guard a.interval.overlapSeconds(with: support) > 0,
+                          b.interval.overlapSeconds(with: support) > 0 else { continue }
+                    var rest = [Interval(a.interval.end, b.interval.start)]
+                    for s in sleep {
+                        rest = rest.flatMap { r -> [Interval] in
+                            guard r.overlapSeconds(with: s) > 0 else { return [r] }
+                            return [Interval(r.start, s.start), Interval(s.end, r.end)].filter(\.isValid)
+                        }
+                    }
+                    gaps += rest
+                }
+            }
+            return merged(gaps)
         }
 
         struct WearSpan { var interval: Interval; var state: WearEventState }

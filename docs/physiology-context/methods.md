@@ -104,6 +104,11 @@ Full detail: [notes/sleep.md](notes/sleep.md).
 - **Awake evidence** requires HR coverage over the support and that every owner day that could hold a covering
   session has been read, with a 90-min allowance for detector latency (engineering choice from `minSleepMin` 60 min).
   Quiet motion never establishes asleep, awake or worn.
+- **Split nights.** A session aggregate (a nightly value pooled over the fragments of one split main sleep) measured
+  nothing between the fragments, so its sleep / wear shares leave out the gaps between fragments its support spans
+  (`split_sleep_gap_excluded`, diagnostic `split_gap_share`); without this a 50-minute awakening in an 8-hour night
+  (10.4 %) made the night `unknown`. A windowed value measured every beat in its support and is evaluated over all of
+  it; the activity composition always covers the whole support.
 - **Wake-relative timing**: real UTC seconds since the latest complete main sleep (else nap), with explicit zone,
   offset and local clock; correct across DST (23 h / 25 h days).
 - **Sleep loss / timing change**: vs the median of 5–14 prior nights (circular for midpoints), regularity as the SD

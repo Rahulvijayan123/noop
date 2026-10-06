@@ -367,6 +367,7 @@ enum PhysiologyContextWording {
         "partially_in_detected_sleep": String(localized: "partly inside detected sleep"),
         "overlaps_incomplete_episode": String(localized: "overlaps sleep that was not finished"),
         "inside_split_sleep_gap": String(localized: "between two parts of split sleep"),
+        "split_sleep_gap_excluded": String(localized: "the time awake between two parts of split sleep is left out"),
         "sleep_sources_disagree": String(localized: "sleep sources disagree"),
         "sleep_evidence_insufficient": String(localized: "too little evidence about sleep"),
         "no_wear_evidence": String(localized: "no data on whether the strap was worn"),

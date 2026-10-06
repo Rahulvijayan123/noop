@@ -46,7 +46,7 @@ reaches outside the support the measurement says so in `source.key`, which the e
 keeps the plain key. Counts are by definition, not contribution: the snapshot does not say whether a nap produced a
 value (no beats, the over-count gate, the wear gate) or which sessions were HR-only.
 
-**Remaining (engine-side).** `MeasurementInput.support` is one interval. For a split main night the hull includes the
+**Remaining (engine-side) — repaired by the lead after this branch merged:** System C now leaves the gaps between fragments out of a session aggregate's sleep / wear shares (`split_sleep_gap_excluded`; methods §4; `PCSleepEvidenceSummaryTests.testTheEngineLeavesTheGapOutOnlyForSessionAggregates`). Original finding: `MeasurementInput.support` is one interval. For a split main night the hull includes the
 inter-fragment gap, which no fragment measured. Checked with a scratch run (not committed): gaps of 1,200 s and
 2,400 s (4 % and 8 % of the hull) stay `asleep` / eligible with a nightly value; a 3,000 s gap (10.4 %) is
 `unknown (sleep_evidence_unknown)` and the night has no `hrv_rmssd.sleep_night` value. Fragmented nights with long

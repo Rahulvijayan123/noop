@@ -121,7 +121,8 @@ extension PhysiologyContext {
                 let preceding = IntervalAlgebra.precedingHistory(before: m.support.start, track: primary,
                                                                  lookbackS: policy.join.precedingLookbackS)
                 let sleepWear = SleepRhythm.sleepWear(for: m.support, episodes: episodes,
-                                                      observations: observations, config: policy.sleep)
+                                                      observations: observations, config: policy.sleep,
+                                                      excludingSplitGaps: m.method.aggregation == .session)
                 let wake = SleepRhythm.wakeReference(at: m.support.start, episodes: episodes, mode: mode,
                                                      cutoff: input.availabilityCutoff, config: policy.sleep)
                 let recent = ExertionBouts.recentRefs(before: m.support.start, bouts: allBouts,
