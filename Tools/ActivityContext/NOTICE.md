@@ -11,7 +11,8 @@ HART (EdgeIntelligenceLab/HART)
 WISDM Smartphone and Smartwatch Activity and Biometrics Dataset
   Weiss, G. (2019). UCI Machine Learning Repository.
   https://doi.org/10.24432/C5HK59 — License: CC BY 4.0.
-  Used for: watch-stream adaptation training (20 Hz accel m/s^2 + gyro rad/s).
+  Used for: watch-stream adaptation training (accel m/s^2 + gyro rad/s at the
+  watches' native 20 / 25 / 50 / 100 Hz, resampled to 30 Hz).
   Raw archive is a download-time artifact (310 MB, sha256 pinned in
   fetch_artifacts.py); derived windows/metrics keep this attribution.
 

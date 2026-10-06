@@ -129,6 +129,21 @@ constants), plus per-subject (held-out test) and per-WISDM-letter breakdowns
 (the C10 disagreement cases F typing / Q writing / R clapping / S folding are
 reported per letter for the spec §12 negative-control inspection).
 
+`train` loads WISDM through `activity_context/wisdm.py` (`wisdm-watch-loader-2`):
+each (subject, activity) sensor stream is sorted by timestamp and
+de-duplicated, split into constant-rate segments (the watches record 20 Hz,
+~50 Hz accel / ~25 Hz gyro for subjects 1637–1640, and some blocks switch
+between 20 Hz and ~100 Hz), resampled from each segment's MEASURED rate to
+30 Hz with the repo polyphase design, and gyro is aligned to accel on one
+30 Hz time base through the shared clock. Nothing is zero-filled: time covered
+by only one sensor yields no windows, and recordings without gyro are
+excluded and listed in `data_report.json`. Windows follow serve.py exactly
+(4 s / 2 s grid, 1 s FIR-transient margin). `--expect-split
+<split_manifest.json>` refuses to train unless the subject split matches a
+previous run. (v0, `hart-wisdm-v0`, was trained on the older loader, which
+zero-filled the gyro of 82 % of its windows and time-stretched the 50 Hz
+subjects 2.5×; see eval/RESULTS.md.)
+
 `train` does a SUBJECT-HELD-OUT 3-way split BEFORE windowing (spec §7;
 upstream's windowed `random_split` is not used): subjects are shuffled with a
 fixed seed into disjoint train (~70%) / val (~15%) / test (~15%) groups, so
@@ -145,7 +160,14 @@ time/fft input encodings + head trainable (upstream finetune.py:121-130),
 with **early stopping on subject-held-out val macro-F1** (patience 2, bounded
 by `--epochs`) and restores the best epoch before saving. Training uses
 `ACTIVITY_TRAIN_THREADS` (default 4) CPU threads; inference/serve stay
-single-threaded and deterministic.
+single-threaded and deterministic. torch is seeded before the checkpoint
+load, so the new head's initialization and the whole run are reproducible.
+
+`python -m activity_context.hart_wisdm_eval` (offline, `[model]` extra) runs
+one or more HART artifacts on the held-out WISDM subjects under both the
+training-path windows and agent R's production-faithful replay windows,
+with calibration diagnostics (NLL / Brier / ECE) and a VAL-fit temperature
+reported (never applied to serve).
 
 ## Artifact policy
 
