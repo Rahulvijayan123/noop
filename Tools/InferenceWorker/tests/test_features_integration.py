@@ -274,7 +274,7 @@ def test_committed_fixture_pair_round_trips_over_real_http():
 
     fixture_path = os.path.join(
         os.path.dirname(__file__), "..", "..", "..", "Tools", "CloudWorker",
-        "Tests", "frwhoop-workerTests", "Fixtures", "sleep_features_request.json")
+        "Tests", "frwhoop-workerTests", "SleepFeatureWireFixtures", "sleep_features_request.json")
     if not os.path.exists(fixture_path):  # pragma: no cover - fixture is committed
         pytest.skip("cross-language fixture not present")
     body = json.load(open(fixture_path))

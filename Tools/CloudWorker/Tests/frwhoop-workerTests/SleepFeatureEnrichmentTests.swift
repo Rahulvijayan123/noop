@@ -280,7 +280,7 @@ final class SleepFeatureEnrichmentTests: XCTestCase {
     /// JSON is the REAL Python sidecar's answer to it (captured over HTTP,
     /// `duration_ms` stripped as wall-clock). A change on either side that
     /// breaks the pair fails here before it reaches production.
-    private static let fixtureDir = "Fixtures"
+    private static let fixtureDir = "SleepFeatureWireFixtures"
 
     private func fixtureData(_ name: String) throws -> Data {
         let url = Bundle.module.url(forResource: name.replacingOccurrences(

@@ -43,7 +43,10 @@ let package = Package(
             // The committed sleep-features fixture pair (the Swift-assembled
             // request + the real Python sidecar's response to it) is a test
             // RESOURCE: the cross-language contract tests read both files.
-            resources: [.copy("Fixtures")]
+            // Named SleepFeatureWireFixtures, NOT Fixtures/: .gitignore's
+            // `Fixtures/` rule is the repo's personal-data guard and is never
+            // overridden; these files are SYNTHETIC (no personal data).
+            resources: [.copy("SleepFeatureWireFixtures")]
         ),
     ]
 )

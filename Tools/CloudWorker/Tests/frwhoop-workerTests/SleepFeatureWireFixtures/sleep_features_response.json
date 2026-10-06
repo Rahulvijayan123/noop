@@ -1,0 +1,1960 @@
+{
+ "algorithm_version": "nara-sleep-features-1",
+ "capabilities": {
+  "cpc_cycles": {
+   "ready": false,
+   "reason": "no_independent_respiratory_modulation_signal"
+  },
+  "cvhr_screening": {
+   "ready": false,
+   "reason": "no_validated_port"
+  },
+  "oxygen_events": {
+   "ready": false,
+   "reason": "unverified_sparse_oxygen"
+  },
+  "ppg_autonomic_events": {
+   "ready": false,
+   "reason": "no_continuous_ppg"
+  },
+  "sleepecg_shadow": {
+   "ready": false,
+   "reason": "candidate_lane_result_not_provided",
+   "report": {
+    "agreement_by_label": {
+     "nrem": null,
+     "rem": null,
+     "wake": null
+    },
+    "agreement_pct": null,
+    "disagreement_near_onset_offset_pct": null,
+    "epochs_compared": null,
+    "reason": "candidate_lane_result_not_provided",
+    "reasons": [
+     "candidate_lane_result_not_provided"
+    ],
+    "sleepecg_distribution": {
+     "nrem": null,
+     "rem": null,
+     "wake": null
+    },
+    "status": "not_run",
+    "v2_distribution": {
+     "nrem": null,
+     "rem": null,
+     "wake": null
+    },
+    "weights_revision": null
+   }
+  },
+  "waveform_staging": {
+   "ready": false,
+   "reason": "continuous_ppg_not_delivered"
+  }
+ },
+ "dependencies": {
+  "config": {
+   "breath_min_intervals_per_window": 20,
+   "breath_run_coverage": 0.8,
+   "continuity_known_fraction": 0.95,
+   "continuity_max_gap_s": 60,
+   "curve_max_interpolated_bins": 2,
+   "curve_valid_bin_fraction": 0.75,
+   "entropy_min_pairs": 100,
+   "history_days": 31,
+   "minute_valid_seconds": 45,
+   "rhythm_day_coverage": 0.8,
+   "rhythm_min_days": 5,
+   "settling_mad_bpm": 2.0,
+   "settling_slope_bpm_per_min": 0.1,
+   "sri_min_pair_fraction": 0.8,
+   "sri_min_paired_minutes": 5760,
+   "sri_min_valid_days": 5,
+   "stage_hrv_coverage": 0.8,
+   "stage_hrv_max_rejected_fraction": 0.2,
+   "stage_hrv_min_pairs": 100,
+   "stage_min_windows": 2,
+   "stage_purity_fraction": 0.9,
+   "stage_window_s": 300,
+   "thermal_min_minutes_per_side": 15,
+   "thermal_min_post_slope_c_per_min": 0.005,
+   "thermal_min_rss_improvement": 0.2,
+   "thermal_min_sustained_c": 0.1
+  },
+  "config_version": "sleep-features-defaults-1",
+  "neurokit2": "0.2.13",
+  "numpy": "2.5.3",
+  "scipy": "1.18.1",
+  "sleepecg": "0.5.9",
+  "yasa": "0.8.0"
+ },
+ "nights": [
+  {
+   "architecture": {
+    "bouts": {
+     "deep": {
+      "count": 1,
+      "max_min": 30.0,
+      "median_min": 30.0,
+      "p90_min": 30.0,
+      "total_min": 30.0
+     },
+     "light": {
+      "count": 3,
+      "max_min": 180.0,
+      "median_min": 95.0,
+      "p90_min": 163.0,
+      "total_min": 365.0
+     },
+     "rem": {
+      "count": 1,
+      "max_min": 40.0,
+      "median_min": 40.0,
+      "p90_min": 40.0,
+      "total_min": 40.0
+     },
+     "wake": {
+      "count": 3,
+      "max_min": 20.0,
+      "median_min": 15.0,
+      "p90_min": 19.0,
+      "total_min": 45.0
+     }
+    },
+    "deep_front_load_fraction": 1.0,
+    "deep_latency_from_onset_min": 90.0,
+    "eligible_pairs": 959,
+    "entropy_rate_bits_per_transition": 0.06439175503333933,
+    "excluded_pairs_gap": 0,
+    "excluded_pairs_uns": 0,
+    "reasons": [],
+    "rem_late_fraction": 1.0,
+    "rem_latency_from_onset_min": 310.0,
+    "row_weights": [
+     0.09280500521376434,
+     0.7612095933263816,
+     0.06256517205422316,
+     0.08342022940563086
+    ],
+    "sleep_period_third_known_fraction": [
+     1.0,
+     1.0,
+     1.0
+    ],
+    "status": "available",
+    "transition_counts": [
+     [
+      87,
+      1,
+      0,
+      1
+     ],
+     [
+      2,
+      727,
+      1,
+      0
+     ],
+     [
+      0,
+      1,
+      59,
+      0
+     ],
+     [
+      0,
+      1,
+      0,
+      79
+     ]
+    ],
+    "transition_probabilities": [
+     [
+      0.9775280898876404,
+      0.011235955056179775,
+      0.0,
+      0.011235955056179775
+     ],
+     [
+      0.0027397260273972603,
+      0.9958904109589041,
+      0.0013698630136986301,
+      0.0
+     ],
+     [
+      0.0,
+      0.016666666666666666,
+      0.9833333333333333,
+      0.0
+     ],
+     [
+      0.0,
+      0.0125,
+      0.0,
+      0.9875
+     ]
+    ]
+   },
+   "continuity": {
+    "awakening_duration": {
+     "count": 1,
+     "max_min": 10.0,
+     "median_min": 10.0,
+     "p90_min": 10.0
+    },
+    "longest_sleep_bout_min": 300.0,
+    "mean_sleep_bout_min": 217.5,
+    "reasons": [],
+    "recurrent_awakening_index_per_h": 0.138,
+    "recurrent_awakenings": 1,
+    "recurrent_awakenings_60s_plus": 1,
+    "return_to_sleep_latency_median_min": 10.0,
+    "sfi_yasa_per_h": 0.28,
+    "sleep_bouts": {
+     "count": 2
+    },
+    "sleep_efficiency_pct": 90.62,
+    "sleep_maintenance_efficiency_pct": 97.75,
+    "sol_5min_run_min": 20.0,
+    "sol_min": 20.0,
+    "spt_min": 445.0,
+    "status": "available",
+    "terminal_wake_min": 15.0,
+    "tib_min": 480.0,
+    "tst_min": 435.0,
+    "waso_min": 10.0,
+    "yasa_stats": {
+     "%DEEP": 6.8966,
+     "%LIGHT": 83.908,
+     "%REM": 9.1954,
+     "DEEP": 30.0,
+     "LIGHT": 365.0,
+     "Lat_REM": 330.0,
+     "REM": 40.0,
+     "SE": 90.625,
+     "SFI": 0.2759,
+     "SME": 97.7528,
+     "SOL": 20.0,
+     "SOL_5min": 20.0,
+     "SPT": 445.0,
+     "TIB": 480.0,
+     "TST": 435.0,
+     "WAKE": 45.0,
+     "WASO": 10.0
+    }
+   },
+   "coverage": {
+    "breath_intervals": 6675,
+    "breath_run_min": 445.0,
+    "hr_gap_max_s": 1.0,
+    "known_epoch_fraction": 1.0,
+    "known_fraction": 1.0,
+    "max_unresolved_gap_s": 0.0,
+    "night_span_s": 28800.0,
+    "observed_hr_min": 480,
+    "observed_offset_edge": true,
+    "observed_onset_edge": true,
+    "observed_temp_min": 480,
+    "overlap_seconds": 0.0,
+    "rr_rejected_fraction": 0.0,
+    "rr_rows": 26400,
+    "sources": {
+     "hr": 28800,
+     "resp": 6675,
+     "rr": 26400,
+     "temp": 28800
+    },
+    "temp_gap_max_s": 1.0,
+    "valid_hr_min": 480,
+    "valid_temp_min": 480
+   },
+   "end_utc": "2026-10-05T07:00:00Z",
+   "is_nap": false,
+   "metric_status": {
+    "module_errors": [],
+    "night_gate": {
+     "reasons": [],
+     "status": "available"
+    }
+   },
+   "night_id": "sleep-d-1791154800",
+   "respiratory_variability": {
+    "algorithm_source": "SleepStager.respBreathTrack(rr)",
+    "cv_interval": 0.0,
+    "estimate_source": "rsa_derived_rr",
+    "intervals_valid": 6674,
+    "notes": "RSA-derived estimates; weak RSA, ectopics, medication or missing R-R can erase estimated breaths without airflow stopping; an unobserved breath is not an apnea; not measured ventilation/tidal volume/respiratory effort.",
+    "outlier_fraction_vs_personal": {
+     "fraction": null,
+     "reasons": [
+      "no_personal_baseline"
+     ],
+     "status": "withheld"
+    },
+    "quality": {
+     "night_run_coverage": 0.9270486111111111,
+     "total_windows": 96,
+     "usable_windows": 89
+    },
+    "rate_bpm": 15.0,
+    "reasons": [],
+    "rmssd_interval_s": 0.0,
+    "sd_interval_s": 0.0,
+    "stage_conditioned": {
+     "deep": {
+      "cv_interval": 0.0,
+      "rate_bpm": 15.0,
+      "windows": 6
+     },
+     "light": {
+      "cv_interval": 0.0,
+      "rate_bpm": 15.0,
+      "windows": 73
+     },
+     "rem": {
+      "cv_interval": 0.0,
+      "rate_bpm": 15.0,
+      "windows": 8
+     },
+     "wake": {
+      "cv_interval": 0.0,
+      "rate_bpm": 15.0,
+      "windows": 2
+     }
+    },
+    "status": "available",
+    "unobserved_breath_is_not_apnea": true,
+    "valid_run_min": 444.98333333333335
+   },
+   "settling": {
+    "hr_curve": [
+     {
+      "bpm": null,
+      "ts": 1791154200,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154260,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154320,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154380,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154440,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154500,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154560,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154620,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154680,
+      "valid": false
+     },
+     {
+      "bpm": null,
+      "ts": 1791154740,
+      "valid": false
+     },
+     {
+      "bpm": 71.79016666666666,
+      "ts": 1791154800,
+      "valid": true
+     },
+     {
+      "bpm": 71.77016666666665,
+      "ts": 1791154860,
+      "valid": true
+     },
+     {
+      "bpm": 71.75016666666667,
+      "ts": 1791154920,
+      "valid": true
+     },
+     {
+      "bpm": 71.73016666666666,
+      "ts": 1791154980,
+      "valid": true
+     },
+     {
+      "bpm": 71.71016666666667,
+      "ts": 1791155040,
+      "valid": true
+     },
+     {
+      "bpm": 71.69016666666667,
+      "ts": 1791155100,
+      "valid": true
+     },
+     {
+      "bpm": 71.67016666666666,
+      "ts": 1791155160,
+      "valid": true
+     },
+     {
+      "bpm": 71.65016666666668,
+      "ts": 1791155220,
+      "valid": true
+     },
+     {
+      "bpm": 71.63016666666667,
+      "ts": 1791155280,
+      "valid": true
+     },
+     {
+      "bpm": 71.61016666666666,
+      "ts": 1791155340,
+      "valid": true
+     },
+     {
+      "bpm": 71.59016666666668,
+      "ts": 1791155400,
+      "valid": true
+     },
+     {
+      "bpm": 71.57016666666667,
+      "ts": 1791155460,
+      "valid": true
+     },
+     {
+      "bpm": 71.55016666666666,
+      "ts": 1791155520,
+      "valid": true
+     },
+     {
+      "bpm": 71.53016666666667,
+      "ts": 1791155580,
+      "valid": true
+     },
+     {
+      "bpm": 71.51016666666666,
+      "ts": 1791155640,
+      "valid": true
+     },
+     {
+      "bpm": 71.49016666666667,
+      "ts": 1791155700,
+      "valid": true
+     },
+     {
+      "bpm": 71.47016666666667,
+      "ts": 1791155760,
+      "valid": true
+     },
+     {
+      "bpm": 71.45016666666666,
+      "ts": 1791155820,
+      "valid": true
+     },
+     {
+      "bpm": 71.43016666666668,
+      "ts": 1791155880,
+      "valid": true
+     },
+     {
+      "bpm": 71.41016666666667,
+      "ts": 1791155940,
+      "valid": true
+     },
+     {
+      "bpm": 71.77875,
+      "ts": 1791156000,
+      "valid": true
+     },
+     {
+      "bpm": 71.32875,
+      "ts": 1791156060,
+      "valid": true
+     },
+     {
+      "bpm": 70.87875,
+      "ts": 1791156120,
+      "valid": true
+     },
+     {
+      "bpm": 70.42875000000001,
+      "ts": 1791156180,
+      "valid": true
+     },
+     {
+      "bpm": 69.97874999999999,
+      "ts": 1791156240,
+      "valid": true
+     },
+     {
+      "bpm": 69.52875,
+      "ts": 1791156300,
+      "valid": true
+     },
+     {
+      "bpm": 69.07875,
+      "ts": 1791156360,
+      "valid": true
+     },
+     {
+      "bpm": 68.62875,
+      "ts": 1791156420,
+      "valid": true
+     },
+     {
+      "bpm": 68.17875000000001,
+      "ts": 1791156480,
+      "valid": true
+     },
+     {
+      "bpm": 67.72874999999999,
+      "ts": 1791156540,
+      "valid": true
+     },
+     {
+      "bpm": 67.27875,
+      "ts": 1791156600,
+      "valid": true
+     },
+     {
+      "bpm": 66.82875,
+      "ts": 1791156660,
+      "valid": true
+     },
+     {
+      "bpm": 66.37875,
+      "ts": 1791156720,
+      "valid": true
+     },
+     {
+      "bpm": 65.92875000000001,
+      "ts": 1791156780,
+      "valid": true
+     },
+     {
+      "bpm": 65.47874999999999,
+      "ts": 1791156840,
+      "valid": true
+     },
+     {
+      "bpm": 65.02875,
+      "ts": 1791156900,
+      "valid": true
+     },
+     {
+      "bpm": 64.57875,
+      "ts": 1791156960,
+      "valid": true
+     },
+     {
+      "bpm": 64.12875,
+      "ts": 1791157020,
+      "valid": true
+     },
+     {
+      "bpm": 63.678749999999994,
+      "ts": 1791157080,
+      "valid": true
+     },
+     {
+      "bpm": 63.228750000000005,
+      "ts": 1791157140,
+      "valid": true
+     },
+     {
+      "bpm": 62.77875,
+      "ts": 1791157200,
+      "valid": true
+     },
+     {
+      "bpm": 62.32875,
+      "ts": 1791157260,
+      "valid": true
+     },
+     {
+      "bpm": 61.87875,
+      "ts": 1791157320,
+      "valid": true
+     },
+     {
+      "bpm": 61.428749999999994,
+      "ts": 1791157380,
+      "valid": true
+     },
+     {
+      "bpm": 60.978750000000005,
+      "ts": 1791157440,
+      "valid": true
+     },
+     {
+      "bpm": 60.52875,
+      "ts": 1791157500,
+      "valid": true
+     },
+     {
+      "bpm": 60.07875,
+      "ts": 1791157560,
+      "valid": true
+     },
+     {
+      "bpm": 59.62875,
+      "ts": 1791157620,
+      "valid": true
+     },
+     {
+      "bpm": 59.178749999999994,
+      "ts": 1791157680,
+      "valid": true
+     },
+     {
+      "bpm": 58.728750000000005,
+      "ts": 1791157740,
+      "valid": true
+     },
+     {
+      "bpm": 58.27875,
+      "ts": 1791157800,
+      "valid": true
+     },
+     {
+      "bpm": 57.82875,
+      "ts": 1791157860,
+      "valid": true
+     },
+     {
+      "bpm": 57.37875,
+      "ts": 1791157920,
+      "valid": true
+     },
+     {
+      "bpm": 56.928749999999994,
+      "ts": 1791157980,
+      "valid": true
+     },
+     {
+      "bpm": 56.478750000000005,
+      "ts": 1791158040,
+      "valid": true
+     },
+     {
+      "bpm": 56.02875,
+      "ts": 1791158100,
+      "valid": true
+     },
+     {
+      "bpm": 55.57875,
+      "ts": 1791158160,
+      "valid": true
+     },
+     {
+      "bpm": 55.12875,
+      "ts": 1791158220,
+      "valid": true
+     },
+     {
+      "bpm": 54.678749999999994,
+      "ts": 1791158280,
+      "valid": true
+     },
+     {
+      "bpm": 54.22875,
+      "ts": 1791158340,
+      "valid": true
+     },
+     {
+      "bpm": 54.03933333333333,
+      "ts": 1791158400,
+      "valid": true
+     },
+     {
+      "bpm": 54.11933333333333,
+      "ts": 1791158460,
+      "valid": true
+     },
+     {
+      "bpm": 54.199333333333335,
+      "ts": 1791158520,
+      "valid": true
+     },
+     {
+      "bpm": 54.279333333333334,
+      "ts": 1791158580,
+      "valid": true
+     },
+     {
+      "bpm": 54.35933333333333,
+      "ts": 1791158640,
+      "valid": true
+     },
+     {
+      "bpm": 54.43933333333334,
+      "ts": 1791158700,
+      "valid": true
+     },
+     {
+      "bpm": 54.519333333333336,
+      "ts": 1791158760,
+      "valid": true
+     },
+     {
+      "bpm": 54.599333333333334,
+      "ts": 1791158820,
+      "valid": true
+     },
+     {
+      "bpm": 54.67933333333333,
+      "ts": 1791158880,
+      "valid": true
+     },
+     {
+      "bpm": 54.75933333333333,
+      "ts": 1791158940,
+      "valid": true
+     },
+     {
+      "bpm": 54.839333333333336,
+      "ts": 1791159000,
+      "valid": true
+     },
+     {
+      "bpm": 54.919333333333334,
+      "ts": 1791159060,
+      "valid": true
+     },
+     {
+      "bpm": 54.99933333333333,
+      "ts": 1791159120,
+      "valid": true
+     },
+     {
+      "bpm": 55.07933333333333,
+      "ts": 1791159180,
+      "valid": true
+     },
+     {
+      "bpm": 55.159333333333336,
+      "ts": 1791159240,
+      "valid": true
+     },
+     {
+      "bpm": 55.239333333333335,
+      "ts": 1791159300,
+      "valid": true
+     },
+     {
+      "bpm": 55.31933333333333,
+      "ts": 1791159360,
+      "valid": true
+     },
+     {
+      "bpm": 55.39933333333333,
+      "ts": 1791159420,
+      "valid": true
+     },
+     {
+      "bpm": 55.47933333333333,
+      "ts": 1791159480,
+      "valid": true
+     },
+     {
+      "bpm": 55.559333333333335,
+      "ts": 1791159540,
+      "valid": true
+     },
+     {
+      "bpm": 55.63933333333333,
+      "ts": 1791159600,
+      "valid": true
+     },
+     {
+      "bpm": 55.71933333333333,
+      "ts": 1791159660,
+      "valid": true
+     },
+     {
+      "bpm": 55.79933333333334,
+      "ts": 1791159720,
+      "valid": true
+     },
+     {
+      "bpm": 55.879333333333335,
+      "ts": 1791159780,
+      "valid": true
+     },
+     {
+      "bpm": 55.95933333333333,
+      "ts": 1791159840,
+      "valid": true
+     },
+     {
+      "bpm": 56.03933333333333,
+      "ts": 1791159900,
+      "valid": true
+     },
+     {
+      "bpm": 56.11933333333333,
+      "ts": 1791159960,
+      "valid": true
+     },
+     {
+      "bpm": 56.199333333333335,
+      "ts": 1791160020,
+      "valid": true
+     },
+     {
+      "bpm": 56.279333333333334,
+      "ts": 1791160080,
+      "valid": true
+     },
+     {
+      "bpm": 56.35933333333333,
+      "ts": 1791160140,
+      "valid": true
+     },
+     {
+      "bpm": 56.43933333333334,
+      "ts": 1791160200,
+      "valid": true
+     },
+     {
+      "bpm": 56.519333333333336,
+      "ts": 1791160260,
+      "valid": true
+     },
+     {
+      "bpm": 56.599333333333334,
+      "ts": 1791160320,
+      "valid": true
+     },
+     {
+      "bpm": 56.67933333333333,
+      "ts": 1791160380,
+      "valid": true
+     },
+     {
+      "bpm": 56.75933333333333,
+      "ts": 1791160440,
+      "valid": true
+     },
+     {
+      "bpm": 56.839333333333336,
+      "ts": 1791160500,
+      "valid": true
+     },
+     {
+      "bpm": 56.919333333333334,
+      "ts": 1791160560,
+      "valid": true
+     },
+     {
+      "bpm": 56.99933333333333,
+      "ts": 1791160620,
+      "valid": true
+     },
+     {
+      "bpm": 57.07933333333333,
+      "ts": 1791160680,
+      "valid": true
+     },
+     {
+      "bpm": 57.159333333333336,
+      "ts": 1791160740,
+      "valid": true
+     },
+     {
+      "bpm": 57.239333333333335,
+      "ts": 1791160800,
+      "valid": true
+     },
+     {
+      "bpm": 57.31933333333333,
+      "ts": 1791160860,
+      "valid": true
+     },
+     {
+      "bpm": 57.39933333333333,
+      "ts": 1791160920,
+      "valid": true
+     },
+     {
+      "bpm": 57.47933333333333,
+      "ts": 1791160980,
+      "valid": true
+     },
+     {
+      "bpm": 57.559333333333335,
+      "ts": 1791161040,
+      "valid": true
+     },
+     {
+      "bpm": 57.63933333333333,
+      "ts": 1791161100,
+      "valid": true
+     },
+     {
+      "bpm": 57.71933333333333,
+      "ts": 1791161160,
+      "valid": true
+     },
+     {
+      "bpm": 57.79933333333334,
+      "ts": 1791161220,
+      "valid": true
+     },
+     {
+      "bpm": 57.879333333333335,
+      "ts": 1791161280,
+      "valid": true
+     },
+     {
+      "bpm": 57.95933333333333,
+      "ts": 1791161340,
+      "valid": true
+     }
+    ],
+    "hr_drop_bpm": 9.771416666666681,
+    "hr_early_sleep_slope_bpm_min": -0.45,
+    "hr_nadir_latency_min": 39.0,
+    "hr_pre_onset_slope_bpm_min": -0.019999999999999574,
+    "hr_settling_latency_min": 36.0,
+    "hrv_early_sleep_curve": [
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791156000
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791156300
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791156600
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791156900
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791157200
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791157500
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791157800
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791158100
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791158400
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791158700
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791159000
+     },
+     {
+      "coverage": 1.0,
+      "pairs": 299,
+      "rmssd_ms": 0.0,
+      "ts": 1791159300
+     }
+    ],
+    "hrv_early_sleep_log_slope_per_min": null,
+    "reasons": [
+     "thin_data"
+    ],
+    "status": "partial",
+    "temp_curve": [
+     {
+      "celsius": null,
+      "ts": 1791154200,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154260,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154320,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154380,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154440,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154500,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154560,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154620,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154680,
+      "valid": false
+     },
+     {
+      "celsius": null,
+      "ts": 1791154740,
+      "valid": false
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791154800,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791154860,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791154920,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791154980,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155040,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155100,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155160,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155220,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155280,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155340,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155400,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155460,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155520,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155580,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155640,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155700,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155760,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155820,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155880,
+      "valid": true
+     },
+     {
+      "celsius": 30.0,
+      "ts": 1791155940,
+      "valid": true
+     },
+     {
+      "celsius": 30.0059,
+      "ts": 1791156000,
+      "valid": true
+     },
+     {
+      "celsius": 30.0179,
+      "ts": 1791156060,
+      "valid": true
+     },
+     {
+      "celsius": 30.0299,
+      "ts": 1791156120,
+      "valid": true
+     },
+     {
+      "celsius": 30.0419,
+      "ts": 1791156180,
+      "valid": true
+     },
+     {
+      "celsius": 30.0539,
+      "ts": 1791156240,
+      "valid": true
+     },
+     {
+      "celsius": 30.0659,
+      "ts": 1791156300,
+      "valid": true
+     },
+     {
+      "celsius": 30.0779,
+      "ts": 1791156360,
+      "valid": true
+     },
+     {
+      "celsius": 30.0899,
+      "ts": 1791156420,
+      "valid": true
+     },
+     {
+      "celsius": 30.1019,
+      "ts": 1791156480,
+      "valid": true
+     },
+     {
+      "celsius": 30.1139,
+      "ts": 1791156540,
+      "valid": true
+     },
+     {
+      "celsius": 30.1259,
+      "ts": 1791156600,
+      "valid": true
+     },
+     {
+      "celsius": 30.137900000000002,
+      "ts": 1791156660,
+      "valid": true
+     },
+     {
+      "celsius": 30.1499,
+      "ts": 1791156720,
+      "valid": true
+     },
+     {
+      "celsius": 30.1619,
+      "ts": 1791156780,
+      "valid": true
+     },
+     {
+      "celsius": 30.1739,
+      "ts": 1791156840,
+      "valid": true
+     },
+     {
+      "celsius": 30.1859,
+      "ts": 1791156900,
+      "valid": true
+     },
+     {
+      "celsius": 30.1979,
+      "ts": 1791156960,
+      "valid": true
+     },
+     {
+      "celsius": 30.2099,
+      "ts": 1791157020,
+      "valid": true
+     },
+     {
+      "celsius": 30.2219,
+      "ts": 1791157080,
+      "valid": true
+     },
+     {
+      "celsius": 30.2339,
+      "ts": 1791157140,
+      "valid": true
+     },
+     {
+      "celsius": 30.2459,
+      "ts": 1791157200,
+      "valid": true
+     },
+     {
+      "celsius": 30.2579,
+      "ts": 1791157260,
+      "valid": true
+     },
+     {
+      "celsius": 30.2699,
+      "ts": 1791157320,
+      "valid": true
+     },
+     {
+      "celsius": 30.2819,
+      "ts": 1791157380,
+      "valid": true
+     },
+     {
+      "celsius": 30.2939,
+      "ts": 1791157440,
+      "valid": true
+     },
+     {
+      "celsius": 30.3059,
+      "ts": 1791157500,
+      "valid": true
+     },
+     {
+      "celsius": 30.3179,
+      "ts": 1791157560,
+      "valid": true
+     },
+     {
+      "celsius": 30.3299,
+      "ts": 1791157620,
+      "valid": true
+     },
+     {
+      "celsius": 30.3419,
+      "ts": 1791157680,
+      "valid": true
+     },
+     {
+      "celsius": 30.3539,
+      "ts": 1791157740,
+      "valid": true
+     },
+     {
+      "celsius": 30.3659,
+      "ts": 1791157800,
+      "valid": true
+     },
+     {
+      "celsius": 30.3779,
+      "ts": 1791157860,
+      "valid": true
+     },
+     {
+      "celsius": 30.3899,
+      "ts": 1791157920,
+      "valid": true
+     },
+     {
+      "celsius": 30.4019,
+      "ts": 1791157980,
+      "valid": true
+     },
+     {
+      "celsius": 30.413899999999998,
+      "ts": 1791158040,
+      "valid": true
+     },
+     {
+      "celsius": 30.4259,
+      "ts": 1791158100,
+      "valid": true
+     },
+     {
+      "celsius": 30.4379,
+      "ts": 1791158160,
+      "valid": true
+     },
+     {
+      "celsius": 30.4499,
+      "ts": 1791158220,
+      "valid": true
+     },
+     {
+      "celsius": 30.4619,
+      "ts": 1791158280,
+      "valid": true
+     },
+     {
+      "celsius": 30.4739,
+      "ts": 1791158340,
+      "valid": true
+     },
+     {
+      "celsius": 30.4859,
+      "ts": 1791158400,
+      "valid": true
+     },
+     {
+      "celsius": 30.4979,
+      "ts": 1791158460,
+      "valid": true
+     },
+     {
+      "celsius": 30.509900000000002,
+      "ts": 1791158520,
+      "valid": true
+     },
+     {
+      "celsius": 30.5219,
+      "ts": 1791158580,
+      "valid": true
+     },
+     {
+      "celsius": 30.5339,
+      "ts": 1791158640,
+      "valid": true
+     },
+     {
+      "celsius": 30.5459,
+      "ts": 1791158700,
+      "valid": true
+     },
+     {
+      "celsius": 30.5579,
+      "ts": 1791158760,
+      "valid": true
+     },
+     {
+      "celsius": 30.5699,
+      "ts": 1791158820,
+      "valid": true
+     },
+     {
+      "celsius": 30.5819,
+      "ts": 1791158880,
+      "valid": true
+     },
+     {
+      "celsius": 30.5939,
+      "ts": 1791158940,
+      "valid": true
+     },
+     {
+      "celsius": 30.6059,
+      "ts": 1791159000,
+      "valid": true
+     },
+     {
+      "celsius": 30.6179,
+      "ts": 1791159060,
+      "valid": true
+     },
+     {
+      "celsius": 30.6299,
+      "ts": 1791159120,
+      "valid": true
+     },
+     {
+      "celsius": 30.6419,
+      "ts": 1791159180,
+      "valid": true
+     },
+     {
+      "celsius": 30.6539,
+      "ts": 1791159240,
+      "valid": true
+     },
+     {
+      "celsius": 30.6659,
+      "ts": 1791159300,
+      "valid": true
+     },
+     {
+      "celsius": 30.6779,
+      "ts": 1791159360,
+      "valid": true
+     },
+     {
+      "celsius": 30.6899,
+      "ts": 1791159420,
+      "valid": true
+     },
+     {
+      "celsius": 30.701900000000002,
+      "ts": 1791159480,
+      "valid": true
+     },
+     {
+      "celsius": 30.7139,
+      "ts": 1791159540,
+      "valid": true
+     },
+     {
+      "celsius": 30.7259,
+      "ts": 1791159600,
+      "valid": true
+     },
+     {
+      "celsius": 30.7379,
+      "ts": 1791159660,
+      "valid": true
+     },
+     {
+      "celsius": 30.7499,
+      "ts": 1791159720,
+      "valid": true
+     },
+     {
+      "celsius": 30.7619,
+      "ts": 1791159780,
+      "valid": true
+     },
+     {
+      "celsius": 30.7739,
+      "ts": 1791159840,
+      "valid": true
+     },
+     {
+      "celsius": 30.7859,
+      "ts": 1791159900,
+      "valid": true
+     },
+     {
+      "celsius": 30.7979,
+      "ts": 1791159960,
+      "valid": true
+     },
+     {
+      "celsius": 30.8099,
+      "ts": 1791160020,
+      "valid": true
+     },
+     {
+      "celsius": 30.8219,
+      "ts": 1791160080,
+      "valid": true
+     },
+     {
+      "celsius": 30.8339,
+      "ts": 1791160140,
+      "valid": true
+     },
+     {
+      "celsius": 30.8459,
+      "ts": 1791160200,
+      "valid": true
+     },
+     {
+      "celsius": 30.8579,
+      "ts": 1791160260,
+      "valid": true
+     },
+     {
+      "celsius": 30.8699,
+      "ts": 1791160320,
+      "valid": true
+     },
+     {
+      "celsius": 30.8819,
+      "ts": 1791160380,
+      "valid": true
+     },
+     {
+      "celsius": 30.8939,
+      "ts": 1791160440,
+      "valid": true
+     },
+     {
+      "celsius": 30.9059,
+      "ts": 1791160500,
+      "valid": true
+     },
+     {
+      "celsius": 30.9179,
+      "ts": 1791160560,
+      "valid": true
+     },
+     {
+      "celsius": 30.9299,
+      "ts": 1791160620,
+      "valid": true
+     },
+     {
+      "celsius": 30.9419,
+      "ts": 1791160680,
+      "valid": true
+     },
+     {
+      "celsius": 30.9539,
+      "ts": 1791160740,
+      "valid": true
+     },
+     {
+      "celsius": 30.9659,
+      "ts": 1791160800,
+      "valid": true
+     },
+     {
+      "celsius": 30.977899999999998,
+      "ts": 1791160860,
+      "valid": true
+     },
+     {
+      "celsius": 30.9899,
+      "ts": 1791160920,
+      "valid": true
+     },
+     {
+      "celsius": 31.0019,
+      "ts": 1791160980,
+      "valid": true
+     },
+     {
+      "celsius": 31.0139,
+      "ts": 1791161040,
+      "valid": true
+     },
+     {
+      "celsius": 31.0259,
+      "ts": 1791161100,
+      "valid": true
+     },
+     {
+      "celsius": 31.0379,
+      "ts": 1791161160,
+      "valid": true
+     },
+     {
+      "celsius": 31.0499,
+      "ts": 1791161220,
+      "valid": true
+     },
+     {
+      "celsius": 31.0619,
+      "ts": 1791161280,
+      "valid": true
+     },
+     {
+      "celsius": 31.073900000000002,
+      "ts": 1791161340,
+      "valid": true
+     }
+    ]
+   },
+   "stage_algorithm_version": "frwhoop-server-1",
+   "stage_physiology": {
+    "model_dependent": true,
+    "notes": "Stage-conditioned physiology is model-dependent (sleep-v2 stages are estimates); stage-conditioned HRV does not independently prove autonomic changes. No clinical claim is made.",
+    "reasons": [],
+    "stage_source": "sleep-v2",
+    "stages": {
+     "deep": {
+      "excluded_mixed_stage_min": 0.0,
+      "hr_median_bpm": 59.199333333333335,
+      "hr_p10_bpm": 58.27133333333333,
+      "hr_p90_bpm": 60.12733333333333,
+      "movement": {
+       "reasons": [
+        "movement_stream_not_in_request"
+       ],
+       "status": "not_applicable"
+      },
+      "movement_detector": "1hz_gravity_change_stream",
+      "movement_events_per_h": null,
+      "oxygen": {
+       "reasons": [
+        "oxygen_unverified_sparse"
+       ],
+       "status": "not_applicable"
+      },
+      "reasons": [],
+      "resp_median_bpm": 15.0,
+      "resp_variability_cv": 0.0,
+      "rmssd_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 6
+      },
+      "sdnn_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 6
+      },
+      "skin_temp_mad_c": 0.09000000000000163,
+      "skin_temp_median_c": 31.259900000000002,
+      "status": "available",
+      "thin_data": false,
+      "valid_min": 30,
+      "windows": 6
+     },
+     "light": {
+      "excluded_mixed_stage_min": 0.0,
+      "hr_median_bpm": 68.43933333333334,
+      "hr_p10_bpm": 56.49498333333334,
+      "hr_p90_bpm": 83.44733333333333,
+      "movement": {
+       "reasons": [
+        "movement_stream_not_in_request"
+       ],
+       "status": "not_applicable"
+      },
+      "movement_detector": "1hz_gravity_change_stream",
+      "movement_events_per_h": null,
+      "oxygen": {
+       "reasons": [
+        "oxygen_unverified_sparse"
+       ],
+       "status": "not_applicable"
+      },
+      "reasons": [],
+      "resp_median_bpm": 15.0,
+      "resp_variability_cv": 0.0,
+      "rmssd_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 72
+      },
+      "sdnn_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 72
+      },
+      "skin_temp_mad_c": 1.499999999999993,
+      "skin_temp_median_c": 32.549899999999994,
+      "status": "available",
+      "thin_data": false,
+      "valid_min": 365,
+      "windows": 72
+     },
+     "rem": {
+      "excluded_mixed_stage_min": 0.0,
+      "hr_median_bpm": 77.19933333333333,
+      "hr_p10_bpm": 75.95133333333335,
+      "hr_p90_bpm": 78.44733333333333,
+      "movement": {
+       "reasons": [
+        "movement_stream_not_in_request"
+       ],
+       "status": "not_applicable"
+      },
+      "movement_detector": "1hz_gravity_change_stream",
+      "movement_events_per_h": null,
+      "oxygen": {
+       "reasons": [
+        "oxygen_unverified_sparse"
+       ],
+       "status": "not_applicable"
+      },
+      "reasons": [],
+      "resp_median_bpm": 15.0,
+      "resp_variability_cv": 0.0,
+      "rmssd_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 8
+      },
+      "sdnn_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 8
+      },
+      "skin_temp_mad_c": 0.11999999999999744,
+      "skin_temp_median_c": 33.959900000000005,
+      "status": "available",
+      "thin_data": false,
+      "valid_min": 40,
+      "windows": 8
+     },
+     "wake": {
+      "excluded_mixed_stage_min": 0.0,
+      "hr_median_bpm": 74.99933333333334,
+      "hr_p10_bpm": 71.49816666666666,
+      "hr_p90_bpm": 87.20733333333334,
+      "movement": {
+       "reasons": [
+        "movement_stream_not_in_request"
+       ],
+       "status": "not_applicable"
+      },
+      "movement_detector": "1hz_gravity_change_stream",
+      "movement_events_per_h": null,
+      "oxygen": {
+       "reasons": [
+        "oxygen_unverified_sparse"
+       ],
+       "status": "not_applicable"
+      },
+      "reasons": [],
+      "resp_median_bpm": 15.0,
+      "resp_variability_cv": 0.0,
+      "rmssd_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 2
+      },
+      "sdnn_ms": {
+       "iqr": 0.0,
+       "median": 0.0,
+       "windows": 2
+      },
+      "skin_temp_mad_c": 1.8599999999999994,
+      "skin_temp_median_c": 33.629900000000006,
+      "status": "available",
+      "thin_data": false,
+      "valid_min": 45,
+      "windows": 2
+     }
+    },
+    "status": "available"
+   },
+   "stage_source": "sleep-v2",
+   "start_utc": "2026-10-04T23:00:00Z",
+   "thermal": {
+    "baseline_c": 30.0,
+    "early_sleep_delta_c": 0.5398999999999994,
+    "notes": [
+     "Exploratory breakpoint feature: NOT an established sleep-onset detector.",
+     "Wrist skin temperature also moves with room temperature, bedding, contact, medication or fever; no vasodilation, core temperature or causation is inferred from the wrist channel alone.",
+     "The request carries no charging/wear evidence per skin-temperature sample, so charging-interval exclusion is not applied in this wave; minute validity is time-support only."
+    ],
+    "observed_skin_temp_rhythm": {
+     "acrophase_h": null,
+     "amplitude_c": null,
+     "daily_amplitude_c": null,
+     "fit_quality": null,
+     "is": null,
+     "iv": null,
+     "mesor_c": null,
+     "notes": [
+      "acrophase is skin-temperature acrophase, not DLMO or core-temperature minimum",
+      "IS/IV use the spec's population-moment formulas; other packages may use sample-variance conventions and differ slightly at finite n."
+     ],
+     "phase_stability_h": null,
+     "reasons": [
+      "multi_day_history_not_requested"
+     ],
+     "status": "withheld"
+    },
+    "peak_latency_min": 440.0,
+    "pre_wake_slope_c_min": 0.011999999999999863,
+    "reasons": [],
+    "rise_slope_c_min": 0.01200000000000001,
+    "status": "available",
+    "thermal_to_sleep_latency_min": 0.0,
+    "thermal_transition": {
+     "improvement_pct": 100.0,
+     "n_left_valid": 20,
+     "n_right_valid": 46,
+     "onset_min": 0.0,
+     "post_slope_c_min": 0.01200000000000001,
+     "pre_transition_mad_c": 0.0,
+     "rss_single": 0.12992801848797883,
+     "rss_split": 5.048709793414476e-29,
+     "supported": true,
+     "sustained_c": 0.27590000000000003,
+     "sustained_threshold_c": 0.1
+    }
+   },
+   "user_edited": false
+  }
+ ],
+ "regularity": {
+  "clock_profile": {
+   "adjacent_night_phase_shift_min": {
+    "n": 8,
+    "reasons": [],
+    "status": "available",
+    "value": 0.0
+   },
+   "bed_time": {
+    "circadian_mean_min": 959.9999999999998,
+    "circadian_sd_min": -0.0,
+    "n": 9,
+    "reasons": [],
+    "status": "available"
+   },
+   "dst_transition_days": 0,
+   "final_wake": {
+    "circadian_mean_min": 0.0,
+    "circadian_sd_min": -0.0,
+    "n": 9,
+    "reasons": [],
+    "status": "available"
+   },
+   "midsleep": {
+    "circadian_mean_min": 1200.0000000000002,
+    "circadian_sd_min": -0.0,
+    "n": 9,
+    "reasons": [],
+    "status": "available"
+   },
+   "sleep_onset": {
+    "circadian_mean_min": 959.9999999999998,
+    "circadian_sd_min": -0.0,
+    "n": 9,
+    "reasons": [],
+    "status": "available"
+   },
+   "social_jetlag_min": {
+    "reasons": [
+     "workday_labels_unavailable"
+    ],
+    "status": "withheld",
+    "value": null
+   },
+   "timing_source": "history_grid"
+  },
+  "history_revision_digest": null,
+  "pair_coverage_by_hour": [
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "pair_policy": "elapsed_24h",
+  "reasons": [
+   "insufficient_history",
+   "insufficient_valid_days",
+   "insufficient_paired_minutes",
+   "insufficient_pair_fraction"
+  ],
+  "sri_14d": {
+   "eligible_minutes": 0,
+   "paired_minutes": 0,
+   "reasons": [
+    "insufficient_history",
+    "insufficient_valid_days",
+    "insufficient_paired_minutes",
+    "insufficient_pair_fraction"
+   ],
+   "status": "withheld",
+   "valid_days": 0,
+   "value": null
+  },
+  "sri_30d": {
+   "eligible_minutes": 0,
+   "paired_minutes": 0,
+   "reasons": [
+    "insufficient_history",
+    "insufficient_valid_days",
+    "insufficient_paired_minutes",
+    "insufficient_pair_fraction"
+   ],
+   "status": "withheld",
+   "valid_days": 0,
+   "value": null
+  },
+  "sri_7d": {
+   "eligible_minutes": 0,
+   "paired_minutes": 0,
+   "reasons": [
+    "insufficient_history",
+    "insufficient_valid_days",
+    "insufficient_paired_minutes",
+    "insufficient_pair_fraction"
+   ],
+   "status": "withheld",
+   "valid_days": 0,
+   "value": null
+  },
+  "status": "partial"
+ },
+ "schema_version": 1,
+ "status": "available",
+ "status_reasons": []
+}
