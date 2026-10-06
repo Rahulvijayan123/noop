@@ -90,13 +90,12 @@ def resample_uniform(x: np.ndarray, fs: float) -> np.ndarray:
     return x[nearest_index_uniform(x.shape[0], fs)]
 
 
-def resample_timestamps(t: np.ndarray, x: np.ndarray) -> np.ndarray:
-    """Irregular contiguous source (``t`` seconds, strictly increasing) -> 30 Hz on the grid ``t[0] + k/30``
-    for ``k <= (t[-1] - t[0]) * 30`` (rounded): each output copies the nearest source sample (ties later)."""
+def nearest_timestamp_index(t: np.ndarray) -> np.ndarray:
+    """Source index of each 30 Hz output sample on the grid ``t[0] + k/30`` for ``k <= round((t[-1] - t[0]) * 30)``:
+    the nearest source sample by time (ties -> the later one, as pandas ``get_indexer(method='nearest')``)."""
     t = np.asarray(t, dtype=np.float64)
-    x = np.asarray(x, dtype=np.float64)
-    if t.ndim != 1 or x.shape != (t.size, 3) or t.size == 0:
-        raise PreprocessError("timestamps / samples shape mismatch")
+    if t.ndim != 1 or t.size == 0:
+        raise PreprocessError("timestamps must be a non-empty 1-D array")
     if t.size > 1 and not (np.diff(t) > 0).all():
         raise PreprocessError("timestamps must be strictly increasing")
     m = int(np.around((t[-1] - t[0]) * RATE_HZ)) + 1
@@ -104,7 +103,16 @@ def resample_timestamps(t: np.ndarray, x: np.ndarray) -> np.ndarray:
     right = np.clip(np.searchsorted(t, tq, side="left"), 0, t.size - 1)
     left = np.clip(right - 1, 0, t.size - 1)
     take_left = (tq - t[left]) < (t[right] - tq)
-    return x[np.where(take_left, left, right)]
+    return np.where(take_left, left, right)
+
+
+def resample_timestamps(t: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """Irregular contiguous source (``t`` seconds, strictly increasing, ``x`` [N, 3] g) -> 30 Hz on the grid
+    ``t[0] + k / 30`` by :func:`nearest_timestamp_index`."""
+    x = np.asarray(x, dtype=np.float64)
+    if x.shape != (np.asarray(t).size, 3):
+        raise PreprocessError("timestamps / samples shape mismatch")
+    return x[nearest_timestamp_index(t)]
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +220,6 @@ def stack_windows(windows: Sequence[GaitWindow]) -> np.ndarray:
 
 
 __all__ = ["PREPROCESSING_VERSION", "SOURCE_HZ", "EDGE_MARGIN_S", "PreprocessError", "GaitWindow", "validate_hop",
-           "n_output_samples", "nearest_index_uniform", "resample_uniform", "resample_timestamps",
+           "n_output_samples", "nearest_index_uniform", "resample_uniform", "nearest_timestamp_index", "resample_timestamps",
            "window_starts", "windows_from_30hz", "run_accel_30hz", "windows_from_run", "windows_from_seconds",
            "window_indices", "windows_from_array", "finite_segments", "stack_windows"]

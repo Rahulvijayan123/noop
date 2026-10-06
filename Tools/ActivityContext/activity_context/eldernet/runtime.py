@@ -143,9 +143,8 @@ def decode_request_seconds(start: int, end: int, body: List[str], head: List[str
     return out
 
 
-def infer_seconds(rt: ElderNetRuntime, seconds: List[tuple], start: int, end: int, hop_s: int
-                  ) -> Tuple[List[Dict[str, Any]], int]:
-    """Decoded seconds -> wire windows and the count of nonfinite windows omitted."""
+def score_request_seconds(rt: ElderNetRuntime, seconds: List[tuple], start: int, end: int, hop_s: int):
+    """Decoded seconds -> (windows, raw WindowScores or None): the served path before wire rounding."""
     try:
         windows = windows_from_seconds(seconds, start, end, hop_s)
     except PreprocessError as exc:
@@ -153,8 +152,16 @@ def infer_seconds(rt: ElderNetRuntime, seconds: List[tuple], start: int, end: in
     if len(windows) > MAX_WINDOWS_PER_RESPONSE:
         raise RequestError("malformed", "too many windows for one response; request a shorter run or a larger hop")
     if not windows:
+        return [], None
+    return windows, score_windows(rt.heads, stack_windows(windows), rt.calibration)
+
+
+def infer_seconds(rt: ElderNetRuntime, seconds: List[tuple], start: int, end: int, hop_s: int
+                  ) -> Tuple[List[Dict[str, Any]], int]:
+    """Decoded seconds -> wire windows and the count of nonfinite windows omitted."""
+    windows, scores = score_request_seconds(rt, seconds, start, end, hop_s)
+    if not windows:
         return [], 0
-    scores = score_windows(rt.heads, stack_windows(windows), rt.calibration)
     return wire_windows(windows, scores)
 
 
@@ -206,5 +213,6 @@ def handle_request(rt: ElderNetRuntime, req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 __all__ = ["MAX_OUTPUT_BYTES", "MAX_WINDOWS_PER_RESPONSE", "PREPROCESSING", "RequestError", "ElderNetRuntime",
-           "load_calibration", "build_runtime", "parse_infer_request", "decode_request_seconds", "infer_seconds",
+           "load_calibration", "build_runtime", "parse_infer_request", "decode_request_seconds", "score_request_seconds",
+           "infer_seconds",
            "handle_infer", "handle_ping", "handle_request"]

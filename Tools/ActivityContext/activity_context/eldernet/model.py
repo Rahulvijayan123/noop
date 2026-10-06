@@ -35,6 +35,16 @@ from . import DETECTION_HEAD, FEATURE_VECTOR_SIZE, HEAD_NAMES, QUALITY_HEADS, WI
 from .vendor.models import ElderNet, resnet_feature_extractor
 from .weights import WeightsError
 
+def no_nnpack():
+    """``torch.backends.nnpack.flags(enabled=False)`` where this torch build has it, else a no-op."""
+    import contextlib
+    try:
+        import torch.backends.nnpack as nnpack
+    except ImportError:                    # pragma: no cover - older torch builds
+        return contextlib.nullcontext()
+    return nnpack.flags(enabled=False)
+
+
 KNOWN_UNUSED_KEYS = frozenset({"regressor.var.weight", "regressor.var.bias"})
 DEFAULT_MAX_BATCH = 64
 
@@ -109,7 +119,7 @@ class ElderNetHeads:
             return np.zeros((0, width), np.float64)
         model, mb = self.models[name], self.max_batch
         out = np.empty((n, width), np.float64)
-        with torch.inference_mode(), torch.backends.nnpack.flags(enabled=False):
+        with torch.inference_mode(), no_nnpack():
             for i in range(0, n, mb):
                 chunk = x[i:i + mb]
                 k = chunk.shape[0]
@@ -137,5 +147,5 @@ def load_heads(paths: Mapping[str, str], threads: Optional[int] = 1,
     return ElderNetHeads(models, threads=threads, max_batch=max_batch)
 
 
-__all__ = ["KNOWN_UNUSED_KEYS", "DEFAULT_MAX_BATCH", "build_head", "read_state_dict", "load_strict",
+__all__ = ["no_nnpack", "KNOWN_UNUSED_KEYS", "DEFAULT_MAX_BATCH", "build_head", "read_state_dict", "load_strict",
            "ElderNetHeads", "load_heads"]
