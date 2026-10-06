@@ -1,5 +1,7 @@
 # System-level comparison of the activity decoder arms — STAND-IN, NOT INERTIA-1
 
+> **Note (2026-10-06, after this comparison was run):** the set-target status rule `set-family-1` (second audit, finding D-1) re-sealed every head bundle; the bundles decoded here are archived in `research/inertia-bundles-archive/pre-set-family-1-20261006/`. For `shadow-primary-hc` no served class status changed (only τ of set members moved, walking/stationary by +0.005, and no strong specialist class exists, so the decoder's Inertia evidence is unaffected); the `ncsa-*` bundles, where `brisk_walking` was spuriously strong, were never decoded here. The ElderNet arms (§12–13) used π = 0.065; the decoder default is now the mean-neutral 0.085, so the ElderNet decodes carry a small (~0.025 nat) pull toward gait that the default no longer has.
+
 Status (2026-10-05 22:40 PDT): **measured on the final code and the sealed post-audit bundles.** Decoder
 built from HEAD `227ff05c` (after the red-team audit fixes `1802a012` / `a424d207` and the nara/main merge
 `0176a63e`); P2's bundles retrained from clean commit `a424d207` and sealed; every TEST decode ledgered
