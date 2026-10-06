@@ -30,6 +30,14 @@ final class ContextLaneTests: XCTestCase {
 
     // MARK: - Configuration
 
+    func testJsonBooleansAreNeverReadAsNumbers() throws {
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(#"{"t":true,"f":false,"n":1,"d":61.5}"#.utf8)) as? [String: Any])
+        XCTAssertNil(ContextInputs.number(decoded["t"]))
+        XCTAssertNil(ContextInputs.number(decoded["f"]))
+        XCTAssertEqual(ContextInputs.number(decoded["n"]), 1)
+        XCTAssertEqual(ContextInputs.number(decoded["d"]), 61.5)
+    }
+
     func testTheLaneIsOffByDefault() throws {
         let c = try WorkerConfig(environment: baseEnv())
         XCTAssertFalse(c.contextEnabled)
