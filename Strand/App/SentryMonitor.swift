@@ -6,8 +6,9 @@ import Sentry
 /// Inert unless the build bakes in a DSN (`NOOP_SENTRY_DSN` → `NOOPSentryDSN` in Info.plist), so a clean
 /// checkout still sends nothing. No PII, screenshots, view hierarchy or request bodies are captured.
 enum SentryMonitor {
-    /// The main thread blocked this long is an app hang. Sentry's default is 2s; Nara's bar is 1s.
-    static let hangThreshold: TimeInterval = 1.0
+    /// Apple's definition of a hang: the main thread unresponsive for more than 250 ms (Xcode Organizer and
+    /// MetricKit use the same bar). Sentry's default is 2 s.
+    static let hangThreshold: TimeInterval = 0.25
 
     static func start() {
         let raw = (Bundle.main.object(forInfoDictionaryKey: "NOOPSentryDSN") as? String) ?? ""
@@ -32,6 +33,10 @@ enum SentryMonitor {
             options.enableCrashHandler = true
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = hangThreshold
+            // Report hangs that only delay some frames, not just full stalls, and app kills by the watchdog.
+            options.enableReportNonFullyBlockingAppHangs = true
+            options.enableWatchdogTerminationTracking = true
+            options.enableAutoSessionTracking = true
 
             options.tracesSampleRate = 1.0
             options.enableAutoPerformanceTracing = true
