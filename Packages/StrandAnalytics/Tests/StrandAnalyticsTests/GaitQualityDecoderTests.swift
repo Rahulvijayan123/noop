@@ -21,7 +21,7 @@ final class GaitQualityDecoderTests: XCTestCase {
         return xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count)
     }
 
-    private func encoded(_ track: ActivityContextTrack) throws -> String {
+    private func trackJSON(_ track: ActivityContextTrack) throws -> String {
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
         return String(decoding: try e.encode(track.states), as: UTF8.self)
@@ -117,12 +117,12 @@ final class GaitQualityDecoderTests: XCTestCase {
         var o = ActivitySim.Options()
         o.encoder = SimEncoder.coarse("walking")
         sim.walk(60, opt: o)
-        let config = GaitKit.config(gait: 0.8, hartRedundancy: 0.65, inertiaRedundancy: 0.5, budget: 0.8)
+        let config = GaitKit.config(gait: 0.8, hartRedundancy: 0.65, inertiaRedundancy: 0.7, budget: 0.8)
         let g = try prepared(config)
         XCTAssertEqual(g.effectiveWeights(hartSpeaks: false, inertiaLocomotionSpeaks: false).gait, 0.8, accuracy: 1e-12)
         XCTAssertEqual(g.effectiveWeights(hartSpeaks: true, inertiaLocomotionSpeaks: false).gait, 0.8 * 0.35, accuracy: 1e-12)
-        XCTAssertEqual(g.effectiveWeights(hartSpeaks: false, inertiaLocomotionSpeaks: true).gait, 0.8 * 0.5, accuracy: 1e-12)
-        XCTAssertEqual(g.effectiveWeights(hartSpeaks: true, inertiaLocomotionSpeaks: true).gait, 0.8 * 0.35 * 0.5,
+        XCTAssertEqual(g.effectiveWeights(hartSpeaks: false, inertiaLocomotionSpeaks: true).gait, 0.8 * 0.3, accuracy: 1e-12)
+        XCTAssertEqual(g.effectiveWeights(hartSpeaks: true, inertiaLocomotionSpeaks: true).gait, 0.8 * 0.35 * 0.3,
                        accuracy: 1e-12, "each overlap is discounted on its own")
         XCTAssertEqual(try prepared(GaitKit.config(gait: 0.8, budget: 0.3)).effectiveWeights(hartSpeaks: false,
                        inertiaLocomotionSpeaks: false).gait, 0.3, "never above the accelerometer budget")
@@ -167,9 +167,12 @@ final class GaitQualityDecoderTests: XCTestCase {
 
     // MARK: - HART, Inertia and ElderNet share one accelerometer
 
-    /// Per second and per mode, every accelerometer-derived term together — Inertia's locomotion term, its
-    /// posture term inside S, any specialist gate Inertia opened, the gait term and the brisk split — stays
-    /// within T · max(B_acc, B_Inertia) · ln 10, with HART present or not.
+    /// Per second and per mode, the terms the shared budget covers — Inertia's locomotion term, its posture term
+    /// inside S, any specialist gate Inertia opened, the gait term and the brisk split — stay within
+    /// T · max(B_acc, B_Inertia) · ln 10 TERM BY TERM (the sum of their absolute values, so one term pulling up
+    /// and another pulling down cannot hide a missing clip), with HART present or not. The recorded terms are
+    /// first tied to what the score actually applied. HART's encoder channel and the strap channels are outside
+    /// this budget (they are identical in `base` and `with` here, so they cancel out of the comparison).
     func testHartGaitAndInertiaStayInsideTheSharedAccelerometerBudget() throws {
         var walk = ActivitySim(start: 1_760_000_000, seed: 12)
         var o = ActivitySim.Options()
@@ -200,7 +203,7 @@ final class GaitQualityDecoderTests: XCTestCase {
             (0.8, 0.8, 0.8, 0.8, 0.8, 0.8), (0.8, 0.8, 0.5, 0.8, 0.8, 0.8), (0.8, 0.8, 0.8, 0.8, 0.8, 0.25),
             (0, 0, 0.5, 0.8, 0.8, 0.5),
         ]
-        var checked = 0, limited = 0
+        var checked = 0, limited = 0, opposed = 0
         for sim in sims {
             var f = try lastFeatures(sim)
             XCTAssertEqual(f.encoder?.classProbs["stairs"] ?? 0, 0, "no other evidence names a specialist")
@@ -208,17 +211,31 @@ final class GaitQualityDecoderTests: XCTestCase {
                 for (gaitLabel, make) in gaitWindows {
                     for (wl, wp, bodyBudget, wg, wb, budget) in weightings {
                         let mh = try inertia(locomotion: wl, posture: wp, bodyBudget: bodyBudget)
+                        // The lowest Inertia discount a config can get (the measured ρ̂ floors it).
                         let g = try prepared(GaitKit.config(gait: wg, brisk: wb, inertiaRedundancy: 0, budget: budget))
                         f.motionHeads = MotionHeadsKit.window(endingAt: f.ts, posture: posture, locomotion: loco)
                         f.gaitQuality = make(f.ts)
                         let base = ActivityContextModel.score(f, temperature: T)
                         let with = ActivityContextModel.score(f, temperature: T, motionHeads: mh, gaitQuality: g)
+                        let context = "\(label) / \(gaitLabel), weights \(wl)/\(wp)/\(bodyBudget)/\(wg)/\(wb)/\(budget)"
+                        let terms = try XCTUnwrap(with.accelerometerTerms, context)
                         let bound = T * max(budget, bodyBudget) * log(10) + 1e-12
                         for m in 0..<BodyMode.count {
-                            let pull = abs(with.logL[m] - base.logL[m]) + abs(with.postureShift?[m] ?? 0)
-                                + abs(with.briskShift?[m] ?? 0)
-                            XCTAssertLessThanOrEqual(pull, bound, "\(label) / \(gaitLabel), weights \(wl)/\(wp)/\(bodyBudget)/"
-                                                     + "\(wg)/\(wb)/\(budget): mode \(BodyMode(rawValue: m)!)")
+                            let mode = "\(context): mode \(BodyMode(rawValue: m)!)"
+                            // The recorded terms are exactly what was applied: the score's own change on the mode
+                            // (locomotion + gate + gait enter `logL`; posture and brisk are applied by the decoder).
+                            XCTAssertEqual(with.logL[m] - base.logL[m],
+                                           terms.inertiaLocomotion[m] + terms.inertiaGate[m] + terms.gait[m],
+                                           accuracy: 1e-9, mode)
+                            XCTAssertEqual(terms.inertiaPosture[m], with.postureShift?[m] ?? 0, accuracy: 1e-12, mode)
+                            XCTAssertEqual(terms.brisk[m], with.briskShift?[m] ?? 0, accuracy: 1e-12, mode)
+                            // Term by term: no cancellation between them.
+                            let perTerm = [terms.inertiaLocomotion[m], terms.inertiaPosture[m], terms.inertiaGate[m],
+                                           terms.gait[m], terms.brisk[m]]
+                            XCTAssertLessThanOrEqual(perTerm.reduce(0) { $0 + abs($1) }, bound, mode)
+                            if perTerm.contains(where: { $0 > 1e-9 }), perTerm.contains(where: { $0 < -1e-9 }) {
+                                opposed += 1
+                            }
                         }
                         XCTAssertEqual(with.logL[BodyMode.unknown.rawValue], base.logL[BodyMode.unknown.rawValue])
                         XCTAssertEqual(with.channels, base.channels)
@@ -230,6 +247,39 @@ final class GaitQualityDecoderTests: XCTestCase {
         }
         XCTAssertEqual(checked, 3 * 5 * 4 * 7)
         XCTAssertGreaterThan(limited, 0, "the budget actually binds in some of these cases")
+        XCTAssertGreaterThan(opposed, 0, "some modes see terms of opposite sign: a net-change check alone could hide a clip")
+    }
+
+    /// What the budget does NOT bound, stated as tests: HART's encoder channel speaks outside it (a second with the
+    /// encoder differs from one without by more than the budget, while the bounded terms stay inside it), and it
+    /// is a per-mode bound, so the log-odds between two modes may move by up to twice the bound.
+    func testTheSharedBudgetIsPerModeAndLeavesTheOtherChannelsOutside() throws {
+        let sim = bareWalk(60)
+        var f = try lastFeatures(sim)
+        XCTAssertNil(f.encoder)
+        // Inertia sure of walking, ElderNet sure of gait, both at the ceiling: walk up, seated down, each by the bound.
+        let mh = try inertia(locomotion: 0.8, posture: 0, bodyBudget: 0.8)
+        let g = try prepared(GaitKit.config(gait: 0.8, inertiaRedundancy: 0, budget: 0.8))
+        f.motionHeads = MotionHeadsKit.window(endingAt: f.ts, posture: nil, locomotion: MotionHeadsKit.peaked(L, "walking", 0.999))
+        f.gaitQuality = GaitKit.window(endingAt: f.ts, p: 0.999)
+        let base = ActivityContextModel.score(f, temperature: T)
+        let with = ActivityContextModel.score(f, temperature: T, motionHeads: mh, gaitQuality: g)
+        let bound = T * 0.8 * log(10)
+        let walk = BodyMode.walk.rawValue, seated = BodyMode.seated.rawValue
+        let up = with.logL[walk] - base.logL[walk], down = with.logL[seated] - base.logL[seated]
+        XCTAssertLessThanOrEqual(abs(up), bound + 1e-12)
+        XCTAssertLessThanOrEqual(abs(down), bound + 1e-12)
+        XCTAssertGreaterThan(up - down, bound * 1.5, "walk vs seated moves by well over one bound (up to two)")
+        XCTAssertLessThanOrEqual(up - down, 2 * bound + 1e-12)
+
+        // HART's encoder channel is not inside the budget: it moves the score on its own, by more than the bound.
+        var withEncoder = f
+        withEncoder.encoder = MotionEncoderOutput(encoderId: "hart", encoderVersion: "test", startTs: f.ts - 4,
+                                                  endTs: f.ts, classProbs: ["walking": 0.97, "stationary": 0.03],
+                                                  calibrated: true, abstained: false)
+        let hart = ActivityContextModel.score(withEncoder, temperature: T)
+        XCTAssertGreaterThan((hart.logL[walk] - hart.logL[seated]) - (base.logL[walk] - base.logL[seated]), bound,
+                             "the encoder channel adds on top of the accelerometer budget")
     }
 
     func testWithoutInertiaTheGaitTermIsBoundedByItsOwnWeightAndTheBudget() throws {
@@ -306,8 +356,97 @@ final class GaitQualityDecoderTests: XCTestCase {
         XCTAssertNil(GaitKit.config(mode: .shadow).gaitQuality!.provenanceStamp)
         let d = GaitQualityEvidenceConfig(mode: .candidate, model: m, gaitPrior: 0.2)
         XCTAssertEqual([d.gaitWeight, d.briskWeight, d.hartRedundancy, d.inertiaRedundancy, d.accelerometerBudget,
-                        d.briskCadenceSpm, d.briskSpeedMps], [0.25, 0, 0.65, 0.65, 0.5, 100, 1.34])
+                        d.briskCadenceSpm, d.briskSpeedMps], [0.25, 0, 0.65, 0.66, 0.5, 100, 1.34])
         XCTAssertEqual(d.briskRule, .cadence)
+        XCTAssertEqual(GaitQualityEvidenceConfig(mode: .candidate, model: m).gaitPrior, 0.085, "π defaults to 0.085")
+    }
+
+    // MARK: - Operating values (placeholders until measured)
+
+    /// ρ_HART and ρ_Inertia: the config defaults are cautious floors at or above ElderNet's measured overlap
+    /// (ρ̂ = 0.332 against HART v1 on WISDM VAL, 0.652 against Inertia's locomotion head on Capture-24 VAL). The
+    /// applied ρ is max(config, measured ρ̂): a config may raise a discount, never take it below the measurement.
+    func testRedundancyDiscountsAreFloorsAtOrAboveTheMeasuredOverlap() throws {
+        typealias C = GaitQualityEvidenceConfig
+        XCTAssertEqual(C.measuredHartRedundancy, 0.332)
+        XCTAssertEqual(C.measuredInertiaRedundancy, 0.652)
+        for rho in [C.measuredHartRedundancy, C.measuredInertiaRedundancy, C.defaultHartRedundancy, C.defaultInertiaRedundancy] {
+            XCTAssertTrue(rho.isFinite && (0...1).contains(rho))
+        }
+        XCTAssertEqual(C.defaultHartRedundancy, 0.65)
+        XCTAssertEqual(C.defaultInertiaRedundancy, 0.66)
+        XCTAssertGreaterThanOrEqual(C.defaultHartRedundancy, C.measuredHartRedundancy, "the default is a floor above ρ̂")
+        XCTAssertGreaterThanOrEqual(C.defaultInertiaRedundancy, C.measuredInertiaRedundancy)
+        XCTAssertEqual(C.effectiveRedundancy(config: 0.65, measured: nil), 0.65)
+        XCTAssertEqual(C.effectiveRedundancy(config: 0.65, measured: 0.8), 0.8, "a higher measurement raises it")
+        XCTAssertEqual(C.effectiveRedundancy(config: 0.65, measured: 0.4), 0.65, "a lower one never lowers it")
+        XCTAssertEqual(C.effectiveRedundancy(config: 0.3, measured: .nan), 0.3, "an invalid ρ̂ is ignored")
+        XCTAssertEqual(C.effectiveRedundancy(config: 0.3, measured: 1.5), 0.3)
+
+        // Defaults apply as they are; a config may go higher; below the measurement it is floored.
+        let d = GaitQualityEvidenceConfig(mode: .candidate, model: GaitKit.model())
+        XCTAssertEqual(d.effectiveHartRedundancy, 0.65)
+        XCTAssertEqual(d.effectiveInertiaRedundancy, 0.66)
+        let raised = try XCTUnwrap(GaitKit.config(hartRedundancy: 0.9, inertiaRedundancy: 0.8).gaitQuality)
+        XCTAssertEqual(raised.effectiveHartRedundancy, 0.9)
+        XCTAssertEqual(raised.effectiveInertiaRedundancy, 0.8)
+        let low = try XCTUnwrap(GaitKit.config(hartRedundancy: 0.1, inertiaRedundancy: 0.4).gaitQuality)
+        XCTAssertEqual(low.effectiveHartRedundancy, C.measuredHartRedundancy)
+        XCTAssertEqual(low.effectiveInertiaRedundancy, C.measuredInertiaRedundancy)
+        // The channel applies the effective ρ, and the tag names it (so a floored config tags as its floor).
+        let g = try prepared(GaitKit.config(gait: 0.8, hartRedundancy: 0.1, inertiaRedundancy: 0.4, budget: 0.8))
+        XCTAssertEqual(g.hartRedundancy, C.measuredHartRedundancy)
+        XCTAssertEqual(g.inertiaRedundancy, C.measuredInertiaRedundancy)
+        XCTAssertEqual(g.effectiveWeights(hartSpeaks: true, inertiaLocomotionSpeaks: true).gait,
+                       0.8 * (1 - C.measuredHartRedundancy) * (1 - C.measuredInertiaRedundancy), accuracy: 1e-12)
+        XCTAssertEqual(low.configTag, try XCTUnwrap(GaitKit.config(hartRedundancy: C.measuredHartRedundancy,
+            inertiaRedundancy: C.measuredInertiaRedundancy).gaitQuality).configTag)
+        XCTAssertNotEqual(try XCTUnwrap(GaitKit.config(hartRedundancy: 0.5).gaitQuality).configTag,
+                          try XCTUnwrap(GaitKit.config(hartRedundancy: 0.9).gaitQuality).configTag)
+    }
+
+    /// π is the mean served gait probability over the windows the decoder sees (0.085 on Capture-24 VAL), not the
+    /// labelled gait share (0.065): only the mean makes the likelihood ratio neutral on average.
+    func testTheDefaultGaitPriorIsTheMeanServedProbabilitySoTheChannelIsMeanNeutral() throws {
+        let pi = GaitQualityEvidenceConfig.defaultGaitPrior
+        XCTAssertEqual(pi, 0.085)
+        XCTAssertTrue(GaitQualityEvidenceConfig.gaitPriorBounds.contains(pi))
+        // 1000 served windows whose mean q is π: 775 at 0 (pre-filtered or plainly still), 105 at 0.02, 50 at 0.3,
+        // 70 of confident gait at 0.97 (Σq = 85). Both ratios average to exactly 1.
+        let pool: [Double] = Array(repeating: 0, count: 775) + Array(repeating: 0.02, count: 105)
+            + Array(repeating: 0.3, count: 50) + Array(repeating: 0.97, count: 70)
+        let n = Double(pool.count)
+        XCTAssertEqual(pool.reduce(0, +) / n, pi, accuracy: 1e-12)
+        XCTAssertEqual(pool.map { $0 / pi }.reduce(0, +) / n, 1, accuracy: 1e-9)
+        XCTAssertEqual(pool.map { (1 - $0) / (1 - pi) }.reduce(0, +) / n, 1, accuracy: 1e-9)
+        // With the labelled share (0.065) instead, the same windows lean towards gait on average.
+        XCTAssertGreaterThan(pool.map { $0 / 0.065 }.reduce(0, +) / n, 1.2)
+        // The default is what a config gets without one.
+        var dc = ActivityDecoderConfig()
+        dc.gaitQuality = GaitQualityEvidenceConfig(mode: .candidate, model: GaitKit.model())
+        XCTAssertEqual(try prepared(dc).prior, pi)
+    }
+
+    /// `run` is neutral (L = 1) on every window: on VAL ElderNet's served gait_prob on running / jogging windows
+    /// averages 0.096 (3.4 % ≥ 0.5), about π. A sure gait window lifts walk against run, a sure non-gait one lifts
+    /// seated against run, and run itself never moves.
+    func testRunStaysNeutralAsMeasured() throws {
+        let g = try prepared(GaitKit.config(prior: GaitQualityEvidenceConfig.defaultGaitPrior, gait: 0.8, budget: 0.8))
+        let run = BodyMode.run.rawValue
+        XCTAssertFalse(PreparedGaitQuality.gaitModes.contains(.run))
+        XCTAssertFalse(PreparedGaitQuality.nonGaitModes.contains(.run))
+        for q in [0.0, 0.01, GaitQualityEvidenceConfig.defaultGaitPrior, 0.5, 0.93, 1.0] {
+            XCTAssertEqual(g.likelihood(q)[run], 1, "q \(q): run is neutral")
+        }
+        var f = try lastFeatures(bareWalk(60))
+        for (q, lifted) in [(0.999, BodyMode.walk), (0.001, BodyMode.seated)] {
+            f.gaitQuality = GaitKit.window(endingAt: f.ts, p: q)
+            let base = ActivityContextModel.score(f, temperature: T)
+            let with = ActivityContextModel.score(f, temperature: T, gaitQuality: g)
+            XCTAssertEqual(with.logL[run], base.logL[run], "q \(q): run's score is untouched")
+            XCTAssertEqual(try XCTUnwrap(with.accelerometerTerms).gait[run], 0)
+            XCTAssertGreaterThan(with.logL[lifted.rawValue] - with.logL[run], base.logL[lifted.rawValue] - base.logL[run])
+        }
     }
 
     func testConfigBoundsAreValidated() throws {
@@ -346,7 +485,7 @@ final class GaitQualityDecoderTests: XCTestCase {
         sim.desk(60); sim.walk(120); sim.still(60)
         let input = sim.trackInput()
         let windows = stride(from: input.dayStart + 10, to: input.dayEnd, by: 5).map { GaitKit.window(endingAt: $0, p: 0.95) }
-        let off = ActivityContextTrackBuilder.build(input)
+        let off = TrackKit.builtTrack(input)
         let e = JSONEncoder()
         e.outputFormatting = [.sortedKeys]
         var withWindows = input
@@ -362,7 +501,7 @@ final class GaitQualityDecoderTests: XCTestCase {
         ]
         for (label, variant, config, refusal) in cases {
             XCTAssertFalse(ActivityContextTrackBuilder.acceptsGaitQuality(for: variant, config: config), label)
-            let t = ActivityContextTrackBuilder.build(variant, config: config)
+            let t = TrackKit.builtTrack(variant, config: config)
             XCTAssertEqual(t.gaitQuality?.refusal, refusal, label)
             XCTAssertNil(t.gaitQuality?.stamp, label)
             XCTAssertNil(t.snapshot.versions.gaitQuality, label)
@@ -378,7 +517,7 @@ final class GaitQualityDecoderTests: XCTestCase {
         // Accepted: the stamp and the suffix, on the track and on the persisted day.
         let config = GaitKit.config()
         XCTAssertTrue(ActivityContextTrackBuilder.acceptsGaitQuality(for: withWindows, config: config))
-        let on = ActivityContextTrackBuilder.build(withWindows, config: config)
+        let on = TrackKit.builtTrack(withWindows, config: config)
         let stamp = try XCTUnwrap(config.gaitQuality?.provenanceStamp)
         XCTAssertEqual(on.gaitQuality?.stamp, stamp)
         XCTAssertEqual(on.snapshot.versions.gaitQuality, stamp)
@@ -452,7 +591,7 @@ final class GaitQualityDecoderTests: XCTestCase {
                                                         cadence: Double(80 + (e % 50))) }
         var config = GaitKit.config(gait: 0.4, brisk: 0.3)
         config.motionHeads = MotionHeadsKit.config(locomotion: 0.3, posture: 0.2, arm: 0.4).motionHeads
-        XCTAssertEqual(try encoded(decode(obs, config)), try encoded(decode(obs, config)))
+        XCTAssertEqual(try trackJSON(decode(obs, config)), try trackJSON(decode(obs, config)))
     }
 
     // MARK: - Track builder
@@ -482,7 +621,7 @@ final class GaitQualityDecoderTests: XCTestCase {
         XCTAssertEqual(report.droppedNoObservation, 1)
         XCTAssertEqual(report.droppedOutOfRange, 1)
         XCTAssertEqual(report.windowsIn, 5)
-        let track = ActivityContextTrackBuilder.build(withGait, config: config)
+        let track = TrackKit.builtTrack(withGait, config: config)
         XCTAssertEqual(track.observedSeconds, plain.count)
         XCTAssertEqual(track.gaitQuality?.attached, 3)
         XCTAssertEqual(track.gaitQuality?.windowsIngested, 3)

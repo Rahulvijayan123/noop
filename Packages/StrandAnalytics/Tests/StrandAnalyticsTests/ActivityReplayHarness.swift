@@ -19,14 +19,18 @@ import Foundation
 //        "allow_standin_evidence_for_testing": false},                           a stand-in bundle needs true
 //      "gait_quality": {                                                          optional; needed by the ElderNet arms
 //        "model": <a gait-quality-1 infer response without "windows" (model_id … gait_threshold)>,
-//        "gait_prior": 0.2,                                                       required: π of the calibration set
+//        "gait_prior": 0.085,                                                     optional: π, the mean served gait_prob
+//                                                                                 (default GaitQualityEvidenceConfig.defaultGaitPrior)
 //        "config": {"gait": 0.25, "brisk": 0, "brisk_rule": "cadence", "brisk_cadence_spm": 100,
 //                   "brisk_speed_mps": 1.34, "hart_redundancy": 0.65, "inertia_redundancy": 0.65,
 //                   "accelerometer_budget": 0.5}}}                               optional, candidate defaults
+//   (`hart_redundancy` / `inertia_redundancy` are the config ρ; the decode applies max(config ρ, the measured
+//   ρ̂ constants in GaitQualityEvidenceConfig), exactly as the worker's candidate decode does.)
 //   The bundle goes through exactly the wire decoder's validation (`MotionHeadsBundleInfo` decodes through
 //   `MotionHeadsResponse.parseBundle`), and so does every `motion_heads` window (structure on decode, then
 //   `validate(against:)` the header's bundle): a record the serve path would have refused is refused here. The
-//   same holds for `gait_quality.model` (`GaitQualityResponse.parseModel`) and every `gait_quality` window.
+//   same holds for `gait_quality.model` (`GaitQualityResponse.parseModelInfo`: the wire's model checks behind the
+//   `GaitQualityWire.modelInfoKeys` whitelist) and every `gait_quality` window.
 //   every further line, one observation:
 //     {"seq": "<sequence id>", "obs": <ActivityObservationRecord>}
 //
@@ -186,7 +190,8 @@ struct ActivityReplayHeader: Codable {
     }
     struct GaitQuality: Codable {
         var model: GaitQualityModelInfo
-        var gaitPrior: Double
+        /// nil = `GaitQualityEvidenceConfig.defaultGaitPrior`.
+        var gaitPrior: Double?
         var config: GaitWeights?
         enum CodingKeys: String, CodingKey { case model, gaitPrior = "gait_prior", config }
     }
@@ -320,7 +325,7 @@ enum ActivityReplay {
         var c = base
         let w = g.config
         c.gaitQuality = GaitQualityEvidenceConfig(
-            mode: .candidate, model: g.model, gaitPrior: g.gaitPrior,
+            mode: .candidate, model: g.model, gaitPrior: g.gaitPrior ?? GaitQualityEvidenceConfig.defaultGaitPrior,
             gaitWeight: w?.gait ?? GaitQualityEvidenceConfig.defaultGaitWeight,
             briskWeight: w?.brisk ?? 0, briskRule: w?.briskRule ?? .cadence,
             briskCadenceSpm: w?.briskCadenceSpm ?? GaitQualityEvidenceConfig.defaultBriskCadenceSpm,
