@@ -93,6 +93,9 @@ limited to 8 KiB, except `stretch-feedback`.
 | `GET`, `POST /compute-requests` | Submits and reads a hosted compute request. |
 | `GET`, `POST /placement` | Reads and declares the owner's manual strap placement (`placement_intervals`). |
 | `POST /stretch-feedback` | Stores the person's verdict on a detected activity stretch (below). |
+| `GET /context` | The stored physiology context of one device-day (`?deviceId=&day=[&mode=][&metric=]`; see Physiology context). |
+| `GET /context/history` | Context episodes, bouts and daily values over up to 120 days (`?deviceId=&from=&to=[&mode=]`). |
+| `GET`, `POST /exposures` | Reads and records revisioned exposure events (medication, caffeine, meals, ...); `POST` takes up to 25 per request, body up to 64 KiB. |
 
 ### Activity stretch feedback
 
@@ -789,6 +792,27 @@ order by day desc;
 | ActivityContext v2 day documents (runs, events, confidence, uncertainty, provenance) | Supabase Postgres only (`activity_context_days`) | There is no B2 copy; the table is the store of record |
 | v1 30-second epochs (raw-IMU days) | Supabase Postgres (`activity_context_epochs`) | |
 | Phone-built documents | The phone only | They are never uploaded; the server rebuilds the same document from the stored streams |
+
+## Physiology context (off by default)
+
+The context lane attaches measurement conditions, recent history, exposures and responses to the published
+measurements (series points and nightly snapshot values) and stores one context document per device-day and mode
+(`causal_live` for the owner's today, `retrospective` for closed days). It is off unless `FRWHOOP_CONTEXT_ENABLED=1`;
+`context` in `FRWHOOP_DISABLE_LANES` also turns it off. It reads published products and raw streams and writes only
+its own tables through fenced RPCs, so it never re-dirties scoring and a context failure never blocks scoring,
+series, BLE or uploads.
+
+- Migration `20261005120000_physiology_context.sql`: `physiology_context_jobs` (queue, enqueued from scoring
+  completions by fingerprint), `physiology_context_days` (one immutable row per published revision; the summary
+  document), `physiology_context_envelope_tables` (one interned envelope table per metric), current
+  `physiology_context_daily_values` / `_bouts` / `_episodes`, insert-only `physiology_context_frozen_references`, and
+  `exposure_event_revisions` / `exposure_events`. All service-role RPCs; owners can read only their own rows.
+- Invalidation: scoring completions (D−1..D+1), placement changes, exposure revisions (`[start − 24 h, end + 72 h]`)
+  and a `history_changed` cascade over the next 28 retrospective days. A policy change does not reprocess history by
+  itself; see `docs/physiology-context/rollout.md`.
+- Routes: `GET /scores/context`, `GET /scores/context/history`, `GET`/`POST /scores/exposures` (table above).
+
+Design, methods, validation and rollout: [`docs/physiology-context/`](physiology-context/).
 
 ## Health checks
 
