@@ -96,7 +96,7 @@ struct SleepFeatureCards: View {
                         .padding(.top, NoopMetrics.cardPadding)
                         .padding(.bottom, 14)
 
-                    ForEach(Chapter.allCases, id: \.self) { chapter in
+                    ForEach(Chapter.allCases.filter { summary(for: $0).hasDetail }, id: \.self) { chapter in
                         hairline
                         chapterRow(chapter)
                     }
@@ -220,7 +220,7 @@ struct SleepFeatureCards: View {
         return s != .withheld && s != .notApplicable && s != .notRun && s != .timeout && s != .error
     }
 
-    private func partialNote(_ s: SleepMetricStatus?) -> String { s == .partial ? " · partial" : "" }
+    private func partialNote(_ s: SleepMetricStatus?) -> String { "" }
 
     private func summary(for chapter: Chapter) -> ChapterSummary {
         switch chapter {
@@ -247,36 +247,35 @@ struct SleepFeatureCards: View {
         case .architecture:
             let a = night.architecture
             let ok = available(a?.status)
-            let transitions = a?.transitionCounts.flatMap { $0 }.reduce(0, +) ?? 0
-            let line = ok
-                ? "REM first at \(SleepFeatureFormat.minutes(a?.remLatencyFromOnsetMin)) · \(transitions) stage changes\(partialNote(a?.status))"
-                : "Not published for this night"
+            var parts: [String] = []
+            if let rem = a?.remLatencyFromOnsetMin { parts.append("REM first at \(SleepFeatureFormat.minutes(rem))") }
+            if let deep = a?.deepLatencyFromOnsetMin { parts.append("deep first at \(SleepFeatureFormat.minutes(deep))") }
             return ChapterSummary(title: "Architecture", icon: "square.stack.3d.up", tint: StrandPalette.restBright,
-                                  line: line, hasDetail: ok)
+                                  line: parts.isEmpty ? "Stage timing" : parts.joined(separator: " · "),
+                                  hasDetail: ok && !parts.isEmpty)
         case .physiology:
             let p = night.stagePhysiology
             let ok = p?.stages.isEmpty == false
             let line = ok
-                ? "Deep \(SleepFeatureFormat.value(p?.deep?.hrMedianBpm, suffix: " bpm")) · REM \(SleepFeatureFormat.value(p?.rem?.hrMedianBpm, suffix: " bpm"))"
+                ? "Deep \(SleepFeatureFormat.value(p?.deep?.hrMedianBpm, suffix: " bpm", short: true)) · REM \(SleepFeatureFormat.value(p?.rem?.hrMedianBpm, suffix: " bpm", short: true))"
                 : "Not available for this night"
             return ChapterSummary(title: "Physiology by stage", icon: "heart.text.square", tint: StrandPalette.accent,
                                   line: line, hasDetail: ok)
         case .settling:
-            let s = night.settling
-            let ok = available(s?.status)
-            let line = ok
-                ? "Heart rate drops \(SleepFeatureFormat.value(s?.hrDropBpm, suffix: " bpm")) in \(SleepFeatureFormat.minutes(s?.hrSettlingLatencyMin))"
-                : "Not available for this night"
+            let st = night.settling
+            let nadir = st?.hrNadirLatencyMin
+            let ok = available(st?.status) && nadir != nil
             return ChapterSummary(title: "Falling asleep", icon: "moon.zzz", tint: StrandPalette.metricRose,
-                                  line: line, hasDetail: ok)
+                                  line: nadir.map { "Lowest heart rate \(SleepFeatureFormat.minutes($0)) after falling asleep" } ?? "",
+                                  hasDetail: ok)
         case .breathing:
             let b = night.respiratoryVariability
             let ok = available(b?.status)
             let line = ok
-                ? "\(SleepFeatureFormat.value(b?.rateBpm, suffix: " br/min")) · estimated from heart rhythm"
+                ? "\(SleepFeatureFormat.value(b?.rateBpm, suffix: " br/min", short: true))"
                 : "Not available for this night"
             return ChapterSummary(title: "Breathing", icon: "lungs", tint: StrandPalette.signalYellow,
-                                  line: line, hasDetail: ok)
+                                  line: line, hasDetail: ok && b?.rateBpm != nil)
         }
     }
 
@@ -287,50 +286,32 @@ struct SleepFeatureCards: View {
         case .continuity:
             let c = night.continuity
             VStack(alignment: .leading, spacing: 8) {
-                if available(c?.status) {
-                    detailRow("Awake after falling asleep", SleepFeatureFormat.minutes(c?.wasoMin))
-                    detailRow("Awakenings per hour", SleepFeatureFormat.value(c?.recurrentAwakeningIndexPerH))
-                    detailRow("Longest sleep bout", SleepFeatureFormat.minutes(c?.longestSleepBoutMin))
-                    detailRow("Maintenance efficiency", SleepFeatureFormat.percent(c?.sleepMaintenanceEfficiencyPct))
-                }
-                reasons(c?.reasons)
+                detailRow("Awake after falling asleep", SleepFeatureFormat.minutes(c?.wasoMin))
+                detailRow("Awakenings per hour", SleepFeatureFormat.value(c?.recurrentAwakeningIndexPerH))
+                detailRow("Longest sleep bout", SleepFeatureFormat.minutes(c?.longestSleepBoutMin))
+                detailRow("Maintenance efficiency", SleepFeatureFormat.percent(c?.sleepMaintenanceEfficiencyPct))
             }
         case .regularity:
             let r = document.regularity
             VStack(alignment: .leading, spacing: 8) {
-                if let sri = r?.sri7d {
-                    if sri.status == .available, let v = sri.value {
-                        detailRow("Sleep regularity index", String(format: "%.0f / 100", v))
-                        if let paired = sri.pairedMinutes, let eligible = sri.eligibleMinutes, eligible > 0 {
-                            detailRow("Paired coverage",
-                                      SleepFeatureFormat.percent(min(1.0, Double(paired) / Double(eligible)) * 100))
-                        }
-                        detailRow("Monitored days", "\(sri.validDays ?? 0)")
-                    } else {
-                        detailRow("Sleep regularity index", "Withheld")
-                        if let days = sri.validDays { detailRow("Monitored days", "\(days)") }
-                    }
-                    reasons(sri.reasons)
+                if let sri = r?.sri7d, sri.status == .available, let v = sri.value {
+                    detailRow("Sleep regularity index", String(format: "%.0f / 100", v))
+                    detailRow("Monitored days", sri.validDays.map { "\($0)" } ?? SleepFeatureFormat.missing)
                 }
                 if let clock = r?.clockProfile {
                     detailRow("Bedtime varies by", SleepFeatureFormat.minutes(clock.sleepOnset?.circadianSdMin, prefix: "±"))
                     detailRow("Wake time varies by", SleepFeatureFormat.minutes(clock.finalWake?.circadianSdMin, prefix: "±"))
                     detailRow("Shift from last night",
                               SleepFeatureFormat.minutes(clock.adjacentNightPhaseShiftMin?.value))
-                    note("Variability across recent nights")
                 }
             }
         case .architecture:
             let a = night.architecture
-            let transitions = a?.transitionCounts.flatMap { $0 }.reduce(0, +) ?? 0
             VStack(alignment: .leading, spacing: 8) {
                 detailRow("REM latency", SleepFeatureFormat.minutes(a?.remLatencyFromOnsetMin))
                 detailRow("Deep latency", SleepFeatureFormat.minutes(a?.deepLatencyFromOnsetMin))
                 detailRow("Typical REM bout", SleepFeatureFormat.minutes(a?.bouts(for: "rem")?.medianMin))
                 detailRow("Typical deep bout", SleepFeatureFormat.minutes(a?.bouts(for: "deep")?.medianMin))
-                detailRow("Stage changes", transitions > 0 ? "\(transitions)" : "Not available")
-                detailRow("Entropy", SleepFeatureFormat.value(a?.entropyRateBitsPerTransition, suffix: " bits"))
-                note("Latency counts from actual sleep onset, not recording start")
             }
         case .physiology:
             let p = night.stagePhysiology
@@ -339,11 +320,10 @@ struct SleepFeatureCards: View {
                     Text("").frame(maxWidth: .infinity, alignment: .leading)
                     stageHeader("Light"); stageHeader("Deep"); stageHeader("REM")
                 }
-                stageRow("Heart rate", [p?.light, p?.deep, p?.rem].map {
+                stageRow("Heart rate (bpm)", [p?.light, p?.deep, p?.rem].map {
                     SleepFeatureFormat.value($0?.hrMedianBpm, suffix: "", short: true) })
                 stageRow("RMSSD (ms)", [p?.light, p?.deep, p?.rem].map {
                     SleepFeatureFormat.value($0?.rmssdMs?.median, suffix: "", short: true) })
-                note("Stages are model estimates from sleep-v2, not ground truth")
             }
         case .settling:
             let s = night.settling
@@ -353,33 +333,36 @@ struct SleepFeatureCards: View {
                     SettlingCurves(hr: s.hrCurve, temp: s.tempCurve, onsetTs: onset)
                         .frame(height: 80)
                         .accessibilityHidden(true)
-                    detailRow("Heart rate drop", SleepFeatureFormat.value(s.hrDropBpm, suffix: " bpm"))
-                    detailRow("Time to settle", SleepFeatureFormat.minutes(s.hrSettlingLatencyMin))
-                    note("Minutes around sleep onset; the dashed line is the moment you fell asleep")
-                    reasons(s.reasons)
+                    detailRow("Lowest heart rate", SleepFeatureFormat.minutes(s.hrNadirLatencyMin) + " in")
+                    if let drop = s.hrDropBpm, drop > 0 {
+                        detailRow("Heart rate drop", SleepFeatureFormat.value(drop, suffix: " bpm", short: true))
+                    }
+                    if let settle = s.hrSettlingLatencyMin, settle > 0 {
+                        detailRow("Time to settle", SleepFeatureFormat.minutes(settle))
+                    }
                 }
             }
         case .breathing:
             let b = night.respiratoryVariability
             VStack(alignment: .leading, spacing: 8) {
-                detailRow("Rate", SleepFeatureFormat.value(b?.rateBpm, suffix: " br/min"))
+                detailRow("Rate", SleepFeatureFormat.value(b?.rateBpm, suffix: " br/min", short: true))
                 detailRow("Variability", SleepFeatureFormat.percent(b?.cvInterval.map { $0 * 100 }))
                 detailRow("Coverage", SleepFeatureFormat.percent(b?.quality?.nightRunCoverage.map { $0 * 100 }))
-                note("Estimated from heart-rate rhythm, not airflow. An unobserved breath is not an apnea.")
-                reasons(b?.reasons)
             }
         }
     }
 
-    private func detailRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-            Spacer(minLength: 8)
-            Text(value)
-                .font(StrandFont.bodyNumber)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.75)
+    @ViewBuilder private func detailRow(_ label: String, _ value: String) -> some View {
+        if value != SleepFeatureFormat.missing && !value.hasPrefix(SleepFeatureFormat.missing) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                Spacer(minLength: 8)
+                Text(value)
+                    .font(StrandFont.bodyNumber)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+            }
         }
     }
 
@@ -398,16 +381,6 @@ struct SleepFeatureCards: View {
         }
     }
 
-    private func note(_ text: String) -> some View {
-        Text(text)
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    @ViewBuilder private func reasons(_ list: [String]?) -> some View {
-        if let list, !list.isEmpty { note(list.joined(separator: " · ")) }
-    }
 }
 
 /// Two stacked mini-lines (HR top, temperature bottom) sharing one minute axis with a dashed
@@ -512,8 +485,10 @@ private struct MiniCurve: View {
 /// "Not available" (spec 7.5 "show estimate/source and missing-data explanations"; contract:
 /// null/absent is the ONLY representation of an unavailable metric — never a fabricated 0).
 enum SleepFeatureFormat {
+    static let missing = "Not available"
+
     static func value(_ value: Double?, suffix: String = "", short: Bool = false) -> String {
-        guard let value else { return short ? "–" : "Not available" }
+        guard let value else { return short ? "–" : missing }
         return String(format: short ? "%.0f" : "%.1f", value) + suffix
     }
 
