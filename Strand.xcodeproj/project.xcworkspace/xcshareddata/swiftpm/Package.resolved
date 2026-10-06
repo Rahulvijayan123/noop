@@ -19,6 +19,15 @@
       }
     },
     {
+      "identity" : "sentry-cocoa",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/getsentry/sentry-cocoa.git",
+      "state" : {
+        "revision" : "b539e098293067be54fa5cf1f11d9e16cdbba94a",
+        "version" : "9.30.0"
+      }
+    },
+    {
       "identity" : "supabase-swift",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/supabase/supabase-swift.git",

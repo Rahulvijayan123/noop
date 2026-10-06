@@ -34,4 +34,7 @@ NOOP_SOURCE_REVISION = development
 NOOP_FINAL_HOSTED_COMPUTE = NO
 NOOP_ALLOW_LEGACY_ENROLLMENT = NO
 NOOP_LEGACY_FLEET_TOKEN =
+// Sentry DSN (crash/hang/slow-transaction reporting). Empty disables Sentry. Set in CloudPushSecrets.xcconfig
+// using https:/$()/ for the scheme. Public-by-design ingest key, not an auth token.
+NOOP_SENTRY_DSN =
 #include? "CloudPushSecrets.xcconfig"
