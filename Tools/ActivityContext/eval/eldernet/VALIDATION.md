@@ -79,8 +79,19 @@ interrupted household gait.
   with all three paces (pooled medians 1.26 / 1.44 / 1.50 m/s; normal − slow > 0 in 21 / 21, Wilcoxon p 5e-7;
   fast − normal > 0 in 19 / 21, p 1.5e-4). Cadence: 20 / 21 ordered (106 / 115 / 121 steps/min).
 
-**OxWalk** (step-annotated free-living, CC BY 4.0): see `VALIDATION.json["oxwalk"]` — the ORA download
-(290 MB, no range support) was repeatedly interrupted; status recorded there.
+**OxWalk** (39 healthy adults 18+, one hour of unscripted free living each, dominant-wrist Axivity AX3 100 Hz,
+video-annotated heel strikes; `VALIDATION_OXWALK.json`). Rules fixed before evaluation (`oxwalk.py`): a window is
+gait if it holds >= 6 annotated steps, non-gait if 0, masked if 1-5 (2,142 of 27,213 windows).
+
+* Detection: P 0.983 [0.972, 0.990], R 0.869 [0.809, 0.914], F1 0.922, specificity 0.994, AUROC 0.994
+  (7,566 gait / 17,505 non-gait windows). At tau 0.93: P 0.999, R 0.474.
+* Step count per 10 s window (6,572 windows that are gait by truth and detected): bias −0.34 steps, MAE 1.02
+  (7.1 %), Pearson r 0.86, 95 % limits of agreement [−3.8, +3.1] (true mean 16.8 steps). Cadence vs 6 × annotated
+  steps: bias +4.7 steps/min, MAE 7.1 (10.5 %), r 0.84.
+* Per-participant hour totals (non-overlapping 10 s windows, detection included): median absolute error 15 %
+  (IQR 6-34 %); 55,574 predicted vs 62,841 annotated steps overall (−11.6 %). The largest relative errors are
+  participants with few steps (e.g. 258 annotated, 76 predicted), i.e. short gait the detector does not call.
+  112 detected windows had no annotated step (mean 8.9 predicted steps).
 
 ## 4. Serve latency and memory (`python -m activity_context.eldernet.serve`, 1 torch thread, batch 64)
 
@@ -99,7 +110,7 @@ the default 60 s timeout on a loaded host: the worker should keep hop 5 and <= 1
 
 ## 5. Not measured / limitations
 
-* Cadence and step count against annotated steps (OxWalk) — see §3.
+* Step / cadence agreement is measured on healthy adults only (OxWalk); none in older adults.
 * Speed / stride length have no reference in these datasets beyond GOTOV's ordinal paces; ElderNet was fine-tuned
   on older adults with impaired gait and a systematic shift is expected on young healthy wearers.
 * No WHOOP-recorded ground truth: all wrist data here are other devices (Axivity, GENEActiv, smartwatches) with
