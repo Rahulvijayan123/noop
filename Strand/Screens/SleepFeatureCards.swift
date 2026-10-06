@@ -45,7 +45,10 @@ struct SleepFeatureSection: View {
     @State private var loaded: (document: SleepFeatureDocument, night: SleepFeatureNight)?
 
     var body: some View {
-        Group {
+        // The 1-pt anchor is load-bearing: a `.task` on an empty view never fires, so with no document yet
+        // nothing would ever load one.
+        ZStack(alignment: .top) {
+            Color.clear.frame(height: 1)
             if let loaded {
                 SleepFeatureCards(document: loaded.document, night: loaded.night)
             }
