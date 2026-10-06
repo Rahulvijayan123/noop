@@ -89,6 +89,35 @@ enum MeasurementContextSelection {
             ?? ranked.first
     }
 
+    /// The day-level stable-awake comparisons for a window that carries none of its own: the engine attaches a
+    /// comparison only to the envelope that is its value, so a 5-minute window that fed today's median has none.
+    /// Matched by the window's stable-awake series (e.g. `hrv_rmssd.stable_awake_5min`), its own regime first.
+    /// Empty for a nightly value, for a window that has its own comparisons, and for metrics without one.
+    static func dayStableAwakeComparisons(for e: PhysiologyContext.MeasurementEnvelope,
+                                          in comparisons: [PhysiologyContext.ReferenceComparison])
+        -> [PhysiologyContext.ReferenceComparison] {
+        guard !isNightly(e), e.comparisons.isEmpty, e.method.windowS > 0, e.method.windowS % 60 == 0 else { return [] }
+        var config = PhysiologyContext.ReferenceConfig()
+        config.stableAwakeWindowS = e.method.windowS
+        guard let series = PhysiologyContext.ContextReferences.stableAwakeSeriesKey(metric: e.metric, config: config)
+        else { return [] }
+        let matching = comparisons.filter { $0.seriesKey == series }
+        let sameRegime = matching.filter { $0.regimeKey == e.regimeKey }
+        return sameRegime.isEmpty ? matching : sameRegime
+    }
+
+    /// Whether a persistent episode was detected against (or confirmed by) the frozen historical reference: the
+    /// frozen persistence rule found it, or its reasons say the historical reference agrees or still differs.
+    static func isAgainstHistoricalReference(_ e: PhysiologyContext.ChangeEpisode) -> Bool {
+        if e.detector == "frozen_persistence" { return true }
+        let frozen: Set<PhysiologyContext.ReasonCode> = [
+            PhysiologyContext.ChangeDetection.frozenReferenceDeviation,
+            PhysiologyContext.ChangeDetection.rollingAdaptedFrozenDeviationPersists,
+            PhysiologyContext.ChangeDetection.frozenAndRollingAgree,
+        ]
+        return e.reasons.contains(where: frozen.contains)
+    }
+
     /// The episode of the headline reference's series (or, without one, of the page's series family), the
     /// most notable first and the newest among equals.
     static func episode(for e: PhysiologyContext.MeasurementEnvelope,
@@ -163,78 +192,381 @@ enum PhysiologyContextWording {
     }
 
     // MARK: Reasons
+    //
+    // Every code in the engine's registries (`<System>.reasonCodes`: IntervalAlgebra, Engine,
+    // SignalValidityEngine, MotionEvidence, Eligibility, SleepRhythm, ExertionBouts, Exposures, ContextReferences,
+    // ChangeDetection, Functional) has exactly one of: a plain phrase in `reasonPhrases`, or a place in
+    // `diagnosticsOnlyReasons` (developer detail: shown raw under Diagnostics, never in the normal flow).
+    // `PhysiologyContextWordingCoverageTests` fails when a registered code has neither, or when a mapped code is
+    // not registered. A code from a newer server that is in neither list reads as humanized words.
 
-    /// A reason code's plain meaning, written to follow "…: " in a sentence (lower case, no full stop).
+    /// Plain meanings, written to follow "…: " in a sentence (lower case, no full stop). No illness, medication
+    /// effect, psychological state or recovery is ever claimed.
+    static let reasonPhrases: [String: String] = [
+        // Join (IntervalAlgebra)
+        "invalid_interval": String(localized: "the measurement time is not valid"),
+        "no_activity_records": String(localized: "no activity data covers it"),
+        "uncovered_time": String(localized: "part of it has no activity data"),
+        "mostly_uncovered": String(localized: "most of it has no activity data"),
+        "unknown_label_time": String(localized: "activity is unknown for part of it"),
+        "mixed_states": String(localized: "activity changed during it"),
+        "heart_rate_dependent_source": String(localized: "the activity labels read heart rate"),
+        "gap": String(localized: "a gap in the data"),
+        "movement": String(localized: "movement"),
+        "unknown_label": String(localized: "unknown activity"),
+        "lookback_limit": String(localized: "the look-back limit"),
+        // Engine
+        "no_measurements": String(localized: "no measurements for this day"),
+        "no_observations": String(localized: "no sensor data for this day"),
+        "activity_evidence_unavailable": String(localized: "no motion data to judge activity"),
+        "sleep_evidence_unavailable": String(localized: "no sleep was detected"),
+        "shared_beat_intervals": String(localized: "these values come from the same heartbeats"),
+        "labels_read_heart_rate": String(localized: "these labels read heart rate"),
+        "motion_shared_across_systems": String(localized: "the same motion data feeds several checks"),
+        "shared_optical_sensor": String(localized: "these values come from the same optical sensor"),
+        // Signal validity: input checks
+        "future_timestamp": String(localized: "some samples were dated in the future"),
+        "timestamp_spike": String(localized: "some sample times jumped"),
+        "conflicting_duplicates_rejected": String(localized: "conflicting duplicate samples were left out"),
+        "non_monotonic_timestamps": String(localized: "some sample times were out of order"),
+        "clock_reset_detected": String(localized: "the strap's clock was reset"),
+        "overlapping_timelines_suspected": String(localized: "two overlapping recordings may be mixed"),
+        "disconnection": String(localized: "the strap disconnected"),
+        "source_change": String(localized: "the data source changed"),
+        "device_clock_ahead": String(localized: "the strap's clock was ahead"),
+        // Signal validity: per measurement
+        "no_heart_rate_samples": String(localized: "no heart rate samples"),
+        "no_beat_intervals": String(localized: "no beat-to-beat data"),
+        "no_skin_temperature_samples": String(localized: "no skin temperature samples"),
+        "insufficient_coverage": String(localized: "too little signal coverage"),
+        "partial_coverage": String(localized: "the signal covers only part of it"),
+        "flatline": String(localized: "the signal was flat"),
+        "flatline_run": String(localized: "the signal was flat for a stretch"),
+        "out_of_band_samples": String(localized: "some values were outside the expected range"),
+        "mostly_out_of_band": String(localized: "most values were outside the expected range"),
+        "contains_break": String(localized: "the recording has a break"),
+        "insufficient_clean_beats": String(localized: "too few clean beats"),
+        "insufficient_valid_pairs": String(localized: "too few usable pairs of beats"),
+        "insufficient_beat_coverage": String(localized: "too few beats were captured"),
+        "partial_beat_coverage": String(localized: "beats were captured for only part of it"),
+        "partial_window_coverage": String(localized: "the signal covers only part of the window"),
+        "excess_rejected_beats": String(localized: "too many beats were rejected"),
+        "elevated_rejected_beats": String(localized: "more beats than usual were rejected"),
+        "beats_outside_kernel_range": String(localized: "some beats were outside the range used for HRV"),
+        "rr_over_count_same_second": String(localized: "the beat data looks over-counted"),
+        "rr_over_count_cross_second": String(localized: "the beat data looks over-counted across seconds"),
+        "rr_under_covered": String(localized: "some beats were missed"),
+        "rr_coverage_unmeasurable": String(localized: "beat coverage could not be measured"),
+        "beat_values_untrustworthy": String(localized: "beat timings may not be accurate"),
+        "motion_contaminated": String(localized: "movement affected the signal"),
+        "motion_present": String(localized: "there was movement during it"),
+        "motion_unobserved": String(localized: "no motion data to check for movement"),
+        "heart_rate_dependent_motion_ignored": String(localized: "motion labels that read heart rate were not used"),
+        "window_length_dependent": String(localized: "the value depends on the window length"),
+        "insufficient_beats": String(localized: "too few beats"),
+        "insufficient_breath_intervals": String(localized: "too few breaths detected"),
+        "insufficient_run_coverage": String(localized: "too little continuous signal"),
+        "partial_run_coverage": String(localized: "continuous signal for only part of it"),
+        "rsa_only_estimate": String(localized: "estimated from heartbeat timing only"),
+        "no_in_band_samples": String(localized: "no readings in the range seen when worn"),
+        "insufficient_in_band_samples": String(localized: "too few readings in the range seen when worn"),
+        "partial_in_band": String(localized: "only some readings were in the range seen when worn"),
+        "skin_not_core_temperature": String(localized: "skin temperature, not core body temperature"),
+        "unverified_strap_estimate": String(localized: "the strap's estimate is unverified"),
+        // Signal validity: measurement conditions (regime)
+        "placement_changed": String(localized: "where the strap was worn changed"),
+        "placement_history_starts": String(localized: "placement records start here"),
+        "placement_record_gap": String(localized: "no placement record for part of it"),
+        "method_version_changed": String(localized: "the calculation method changed"),
+        "vendor_differs": String(localized: "a different device brand"),
+        "device_family_differs": String(localized: "a different device model"),
+        "device_family_unknown": String(localized: "the device model is unknown"),
+        "source_kind_differs": String(localized: "a different kind of data source"),
+        "source_kind_unknown": String(localized: "the kind of data source is unknown"),
+        "firmware_differs": String(localized: "different strap firmware"),
+        "firmware_unknown": String(localized: "the strap firmware is unknown"),
+        "placement_differs": String(localized: "the strap was worn in a different place"),
+        "placement_unknown": String(localized: "where the strap was worn is unknown"),
+        "placement_mixed": String(localized: "the strap was worn in more than one place"),
+        "method_differs": String(localized: "a different calculation method"),
+        "algorithm_version_differs": String(localized: "a different calculation version"),
+        "aggregation_differs": String(localized: "summarized a different way"),
+        "window_differs": String(localized: "a different window length"),
+        "units_differs": String(localized: "different units"),
+        "regime_key_differs": String(localized: "measured under different conditions"),
+        // Signal validity: inputs that do not exist or are limited
+        "no_qualified_waveform": String(localized: "no validated pulse waveform from this strap"),
+        "no_core_temperature_sensor": String(localized: "this strap has no core temperature sensor"),
+        "wrist_orientation_likelihood_only":
+            String(localized: "arm orientation gives only a likely posture, never a confirmed one"),
+        "no_gravity_vector": String(localized: "no orientation data"),
+        "heart_rate_independent_source": String(localized: "does not read heart rate"),
+        "display_only": String(localized: "shown for reference only"),
+        "sleep_detector_uses_heart_rate": String(localized: "sleep detection reads heart rate"),
+        "wear_from_heart_rate_signal": String(localized: "wear is judged from the heart rate signal"),
+        "awake_evidence_unavailable": String(localized: "no data to tell whether you were awake"),
+        "wear_evidence_unavailable": String(localized: "no data to tell whether the strap was worn"),
+        "no_source_records": String(localized: "no records from this source"),
+        "step_counter_present": String(localized: "step counts are available"),
+        "excluded_from_comparisons": String(localized: "not used in comparisons"),
+        // Motion evidence
+        "motion_magnitude_unavailable": String(localized: "how much you moved could not be measured"),
+        "no_motion_samples": String(localized: "no motion data"),
+        // Eligibility
+        "stable_awake_low_movement": String(localized: "awake with little movement"),
+        "inside_supported_sleep": String(localized: "inside detected sleep"),
+        "inside_locomotion": String(localized: "during walking or running"),
+        "after_exertion_bout": String(localized: "after an activity bout"),
+        "signal_invalid": String(localized: "the signal did not pass quality checks"),
+        "signal_degraded": String(localized: "the signal is usable with limitations"),
+        "signal_validity_missing": String(localized: "no signal"),
+        "signal_unverified": String(localized: "the value is unverified"),
+        "signal_unsupported": String(localized: "this signal is not supported"),
+        "heart_rate_dependent_activity_ignored": String(localized: "activity labels that read heart rate were not used"),
+        "insufficient_activity_coverage": String(localized: "too little activity data"),
+        "asleep": String(localized: "it was during sleep"),
+        "sleep_wake_mixed": String(localized: "it was partly during sleep"),
+        "awake_evidence_unknown": String(localized: "it is unclear whether you were awake"),
+        "not_worn": String(localized: "the strap may not have been worn"),
+        "wear_mixed": String(localized: "the strap was off for part of it"),
+        "wear_evidence_unknown": String(localized: "it is unclear whether the strap was worn"),
+        "movement_in_support": String(localized: "movement during the measurement"),
+        "insufficient_stationary": String(localized: "not still for enough of it"),
+        "insufficient_preceding_stillness": String(localized: "not still for long enough beforehand"),
+        "preceding_stillness_unobserved": String(localized: "no activity data for the time before it"),
+        "recent_locomotion": String(localized: "walking or running shortly before"),
+        "recent_locomotion_unobserved": String(localized: "no activity data for the minutes before it"),
+        "recent_exertion_bout": String(localized: "an activity bout shortly before"),
+        "exertion_history_exceeds_limit": String(localized: "a lot of walking or running in the past day"),
+        "not_asleep": String(localized: "it was not during sleep"),
+        "sleep_evidence_unknown": String(localized: "it is unclear whether you were asleep"),
+        "no_supported_exertion": String(localized: "no activity bout around it"),
+        // Sleep, wake and rhythm
+        "session_end_clipped_to_cutoff": String(localized: "sleep after the data cut-off is not included yet"),
+        "session_reaches_cutoff": String(localized: "the sleep record reaches the data cut-off"),
+        "detector_may_extend": String(localized: "the sleep record may still be extended"),
+        "owner_day_provisional": String(localized: "the day this sleep belongs to may change"),
+        "classification_provisional": String(localized: "whether this is a nap or main sleep may change"),
+        "split_sleep": String(localized: "sleep was split into parts"),
+        "hr_only_session": String(localized: "sleep was detected from heart rate only"),
+        "stages_unverified": String(localized: "sleep stages are unverified"),
+        "invalid_support": String(localized: "the time span is not valid"),
+        "no_detector_output": String(localized: "no sleep detection for this time"),
+        "detector_input_missing": String(localized: "sleep detection had too little data for this time"),
+        "detector_lag_window": String(localized: "sleep detection may not have caught up yet"),
+        "detector_owner_days_unread": String(localized: "sleep detection has not covered every nearby day yet"),
+        "partially_in_detected_sleep": String(localized: "partly inside detected sleep"),
+        "overlaps_incomplete_episode": String(localized: "overlaps sleep that was not finished"),
+        "inside_split_sleep_gap": String(localized: "between two parts of split sleep"),
+        "sleep_sources_disagree": String(localized: "sleep sources disagree"),
+        "sleep_evidence_insufficient": String(localized: "too little evidence about sleep"),
+        "no_wear_evidence": String(localized: "no data on whether the strap was worn"),
+        "wear_evidence_insufficient": String(localized: "too little evidence about wear"),
+        "wear_sources_disagree": String(localized: "wear sources disagree"),
+        "wear_from_heart_signal": String(localized: "wear is judged from the heart signal"),
+        "no_completed_sleep_before": String(localized: "no completed sleep before it"),
+        "sleep_in_progress": String(localized: "sleep was still in progress"),
+        "inside_sleep_episode": String(localized: "it was inside a sleep period"),
+        "reference_beyond_lookback": String(localized: "the last sleep was too long ago"),
+        "nap_after_main_wake": String(localized: "counted from the main sleep, not the later nap"),
+        "no_main_sleep_reference": String(localized: "no main sleep to count from"),
+        "wake_may_be_revised": String(localized: "the wake time may still change"),
+        "reference_time_after_cutoff": String(localized: "the wake time is after the data cut-off"),
+        "no_sleep_episodes": String(localized: "no sleep periods were detected"),
+        "no_main_sleep": String(localized: "no main sleep was detected"),
+        "main_sleep_incomplete": String(localized: "the main sleep was not finished"),
+        "prior_nights_insufficient": String(localized: "too few earlier nights"),
+        "stages_unavailable": String(localized: "no sleep stages"),
+        "timezone_history_unknown": String(localized: "earlier time zones are unknown"),
+        "prior_zone_assumed_same": String(localized: "earlier days are assumed to be in the same time zone"),
+        "utc_offset_changed_in_window": String(localized: "the time zone changed during this period"),
+        "rhythm_proxy_only": String(localized: "daily rhythm is estimated from timing only"),
+        "rhythm_samples_insufficient": String(localized: "too few days to estimate the daily rhythm"),
+        "endogenous_phase_unmeasured": String(localized: "the body clock itself is not measured"),
+        "sleep_labels_read_heart_signals": String(localized: "sleep labels read heart signals"),
+        "rhythm_proxy_reads_heart_rate": String(localized: "the daily rhythm estimate reads heart rate"),
+        // Exertion bouts and follow-up
+        "disconnect": String(localized: "the strap disconnected"),
+        "continued_movement": String(localized: "movement continued"),
+        "next_bout": String(localized: "another bout started"),
+        "cutoff_reached": String(localized: "the data ends here for now"),
+        "no_follow_up": String(localized: "no data afterwards"),
+        "bout_ongoing": String(localized: "it is still going"),
+        "ended_at_evidence_gap": String(localized: "it ended at a gap in the data"),
+        "overlaps_hr_detected_workout": String(localized: "it overlaps a workout detected from heart rate"),
+        "workout_without_locomotion_evidence": String(localized: "a logged workout without walking or running data"),
+        "workout_clipped_at_cutoff": String(localized: "the workout continues past the data cut-off"),
+        "insufficient_follow_up_samples": String(localized: "too little data afterwards"),
+        "pre_bout_hr_insufficient_coverage": String(localized: "too little heart rate data before it"),
+        "pre_bout_window_in_prior_recovery": String(localized: "the minutes before it were soon after another bout"),
+        "pre_bout_window_overlaps_prior_bout": String(localized: "the minutes before it overlap another bout"),
+        "preceding_state_unknown": String(localized: "activity before it is unknown"),
+        "hr_insufficient_coverage_during_bout": String(localized: "too little heart rate data during it"),
+        "pre_bout_reference_unavailable": String(localized: "no heart rate level from before it"),
+        "end_hr_unavailable": String(localized: "no heart rate at its end"),
+        "optical_hr_during_movement_unvalidated":
+            String(localized: "optical heart rate during movement is not validated"),
+        "respiration_unavailable_during_movement": String(localized: "no breathing rate during movement"),
+        "no_supported_post_bout_respiratory_estimator": String(localized: "breathing rate after activity is not measured"),
+        "hrv_recovery_window_unsupported": String(localized: "HRV after activity is not measured"),
+        "insufficient_samples_at_offset": String(localized: "too few readings at this point"),
+        "follow_up_motion_unobserved": String(localized: "no motion data afterwards"),
+        "rise_too_small_for_fraction": String(localized: "heart rate rose too little to compare"),
+        "rise_too_small_for_return": String(localized: "heart rate rose too little to time a return"),
+        "not_returned_by_last_observed_offset":
+            String(localized: "heart rate was not back near the earlier level by the last reading"),
+        "return_undetermined_earlier_offset_unobserved":
+            String(localized: "an earlier reading is missing, so the return time is unknown"),
+        "post_effort_hr_decline_not_clinical_hrr":
+            String(localized: "the drop in heart rate afterwards is not a clinical test"),
+        "cadence_unavailable": String(localized: "no step rate"),
+        "insufficient_cadence_minutes": String(localized: "too few minutes with a step rate"),
+        "uncalibrated_step_counter": String(localized: "the step counter is not calibrated"),
+        "wrist_cadence_not_gait_speed": String(localized: "step rate at the wrist is not walking speed"),
+        "speed_unavailable": String(localized: "speed is not measured"),
+        "grade_unavailable": String(localized: "incline is not measured"),
+        "external_load_unavailable": String(localized: "carried load is not measured"),
+        "ambient_unavailable": String(localized: "weather and temperature are not measured"),
+        "coverage_unknown_for_part_of_window": String(localized: "data coverage is unknown for part of this period"),
+        "no_motion_observed_in_window": String(localized: "no motion data in this period"),
+        // Exposures
+        "association_only": String(localized: "shown side by side only, not as a cause"),
+        "concurrent_events": String(localized: "other events happened at the same time"),
+        "time_uncertain": String(localized: "the time is uncertain"),
+        "insufficient_measurements": String(localized: "too few measurements to compare"),
+        "behavior_change": String(localized: "activity also changed"),
+        "behavior_unobserved": String(localized: "activity was not observed"),
+        "window_partially_searched": String(localized: "only part of the period was checked"),
+        "regime_change": String(localized: "measurement conditions changed"),
+        "pharmacology_not_modelled": String(localized: "how substances act in the body is not modelled"),
+        "late_entries_included": String(localized: "includes entries made later"),
+        "aligned_events_limited": String(localized: "only some events are compared"),
+        "no_exposure_records": String(localized: "nothing was recorded"),
+        "candidate_not_confirmed": String(localized: "suggested, not confirmed"),
+        "invalid_dose_dropped": String(localized: "an amount that could not be read was left out"),
+        // References
+        "time_band_stratum": String(localized: "matched by time of day"),
+        "degraded_validity_included": String(localized: "includes a signal usable with limitations"),
+        "relative_use_only": String(localized: "for relative comparison only"),
+        "no_history": String(localized: "no earlier data"),
+        "insufficient_history": String(localized: "not enough comparable days yet"),
+        "provisional_support": String(localized: "based on few days so far"),
+        "history_in_other_regime_only": String(localized: "earlier data was measured under different conditions"),
+        "other_regime_history_not_pooled": String(localized: "data from different conditions is kept separate"),
+        "stale_history": String(localized: "the earlier data is old"),
+        "history_values_excluded": String(localized: "some earlier values were left out"),
+        "scale_floored": String(localized: "the usual range was widened to a minimum"),
+        "constant_history": String(localized: "earlier values were all the same"),
+        "center_uncertainty_approximate": String(localized: "the \u{00B1} range is approximate"),
+        "frozen_reference_is_historical_not_healthy":
+            String(localized: "a historical reference is your own past data, not a healthy range"),
+        "frozen_not_registered": String(localized: "no historical reference has been set yet"),
+        "pooled_toward_parent": String(localized: "partly based on related contexts"),
+        "context_unsupported_parent_only": String(localized: "based on related contexts only"),
+        "parent_insufficient_child_only": String(localized: "based on this context only"),
+        "no_population_prior": String(localized: "no population data is used"),
+        // Change episodes
+        "coincides_with_regime_boundary": String(localized: "it starts when measurement conditions changed"),
+        "split_at_regime_boundary": String(localized: "split where measurement conditions changed"),
+        "rolling_adapted_frozen_deviation_persists":
+            String(localized: "the recent range has adjusted, but the difference from the historical reference remains"),
+        "rolling_adapted_not_proof_of_recovery":
+            String(localized: "the recent range adjusted to the new values; that does not mean they went back"),
+        "returned_toward_reference": String(localized: "values moved back toward the reference"),
+        "frozen_reference_deviation": String(localized: "differs from the historical reference"),
+        "gradual_drift": String(localized: "a gradual drift"),
+        "frozen_and_rolling_agree": String(localized: "the historical and recent references agree"),
+        "frozen_and_rolling_disagree": String(localized: "the historical and recent references disagree"),
+        "frozen_unavailable": String(localized: "no historical reference yet"),
+        "alternative_detector_agrees": String(localized: "a second check agrees"),
+        "alternative_detector_silent": String(localized: "a second check did not flag it"),
+        "gap_reset": String(localized: "restarted after a gap in the data"),
+        "too_few_supported_days": String(localized: "too few days with data"),
+        "no_reference": String(localized: "no reference yet"),
+        "isolated_excursion": String(localized: "a single unusual day"),
+        "recurring_within_window": String(localized: "it happened more than once in this period"),
+        "starts_at_window_start": String(localized: "it may have started before this period"),
+        "no_recent_support": String(localized: "no recent days with data"),
+        "descriptive_not_diagnostic": String(localized: "a description of your data only, not a medical judgement"),
+        "shared_inputs_not_independent": String(localized: "these values share inputs, so they are not independent"),
+        "selection_reads_heart_rate": String(localized: "which values were used depends on heart rate"),
+        "no_deviating_series": String(localized: "no series differs from its reference"),
+        "distinct_groups_not_proven_independent": String(localized: "separate groups are not proven independent"),
+        // Functional (daily movement pattern)
+        "day_not_started_at_cutoff": String(localized: "the day had not started at the data cut-off"),
+        "day_incomplete_at_cutoff": String(localized: "the day was not over at the data cut-off"),
+        "insufficient_wear_coverage": String(localized: "the strap was worn too little"),
+        "insufficient_worn_time_for_rates": String(localized: "too little worn time to give rates"),
+        "wear_missingness_may_be_informative": String(localized: "when the strap was off may itself matter"),
+        "sleep_not_excluded_from_waking_time": String(localized: "sleep could not be separated from waking time"),
+        "no_waking_time": String(localized: "no waking time"),
+        "no_bouts": String(localized: "no activity bouts"),
+        "wear_denominator_uses_heart_signal_presence": String(localized: "worn time is judged from the heart signal"),
+        "rest_after_bout_right_censored": String(localized: "rest after the last bout was cut short"),
+        "transition_denominator_too_small": String(localized: "too few changes of activity to compare"),
+        "observed_behaviour_not_diagnosis": String(localized: "observed movement only, not a medical judgement"),
+    ]
+
+    /// Developer detail: how inputs were cleaned, which estimator or detector ran, provenance of a daily value.
+    /// Never shown in the normal flow; the raw code is listed under Diagnostics.
+    static let diagnosticsOnlyReasons: Set<String> = [
+        // Join and engine
+        "overlapping_records_resolved", "history_from_future_dropped",
+        // Signal validity input hygiene
+        "out_of_contract_units", "outside_read_window", "exact_duplicates_collapsed",
+        "availability_basis_sensor_time", "equal_value_beats_kept",
+        // Motion evidence basis
+        "motion_basis_dynamic_acceleration", "motion_basis_gravity_delta", "step_counter_stepping",
+        // Sleep record resolution
+        "session_revision_resolved", "overlapping_session_superseded", "session_availability_basis_end",
+        "source_day_differs_from_owner_day", "scorer_nap_flag", "main_night_rule_applied",
+        "band_state_inputs_undocumented",
+        // Exertion bookkeeping
+        "merged_hart_and_strap_evidence", "step_counter_unclassed_legacy", "observed_prorated_partial_day",
+        // Exposure bookkeeping
+        "invalid_revisions_ignored",
+        // Daily value provenance and reference estimators
+        "nightly_snapshot", "stable_awake_windows", "multiple_nightly_values_longest_kept",
+        "overlapping_windows_not_counted", "duplicate_history_day_resolved", "future_history_ignored",
+        "log_transform", "non_positive_value_for_log", "small_sample_scale_correction", "winsorized_mean_estimator",
+        "scale_from_rolling_view", "scale_from_recent_window", "frozen_registered_this_run",
+        "frozen_registers_in_other_mode", "frozen_scale_floored_by_current_policy",
+        // Change detection internals
+        "detector_cusum", "detector_persistence", "no_declared_dependence",
+    ]
+
+    /// The explicit plain phrase for a code, or nil (diagnostics-only, or a code this app does not know).
+    static func phrase(_ code: PhysiologyContext.ReasonCode) -> String? {
+        reasonPhrases[code.rawValue]
+    }
+
+    static func isDiagnosticsOnly(_ code: PhysiologyContext.ReasonCode) -> Bool {
+        diagnosticsOnlyReasons.contains(code.rawValue)
+    }
+
+    /// A reason code's plain meaning, written to follow "…: " in a sentence (lower case, no full stop). A code
+    /// without a phrase reads as humanized words.
     static func reason(_ code: PhysiologyContext.ReasonCode) -> String {
-        switch code.rawValue {
-        // Join and engine (contracts.md §12)
-        case "invalid_interval": return String(localized: "the measurement time is not valid")
-        case "no_activity_records": return String(localized: "no activity data covers it")
-        case "uncovered_time": return String(localized: "part of it has no activity data")
-        case "mostly_uncovered": return String(localized: "most of it has no activity data")
-        case "unknown_label_time": return String(localized: "activity is unknown for part of it")
-        case "mixed_states": return String(localized: "activity changed during it")
-        case "overlapping_records_resolved": return String(localized: "overlapping activity records were reconciled")
-        case "heart_rate_dependent_source": return String(localized: "the activity labels read heart rate")
-        case "gap": return String(localized: "a gap in the data")
-        case "movement": return String(localized: "movement")
-        case "unknown_label": return String(localized: "unknown activity")
-        case "lookback_limit": return String(localized: "the look-back limit")
-        case "history_from_future_dropped": return String(localized: "later data was left out")
-        case "measurement_after_cutoff": return String(localized: "a measurement arrived after the cut-off")
-        case "no_measurements": return String(localized: "no measurements for this day")
-        case "no_observations": return String(localized: "no sensor data for this day")
-        case "activity_evidence_unavailable": return String(localized: "no motion data to judge activity")
-        case "sleep_evidence_unavailable": return String(localized: "no sleep was detected")
-        case "shared_beat_intervals": return String(localized: "these values come from the same heartbeats")
-        case "labels_read_heart_rate": return String(localized: "these labels read heart rate")
-        case "motion_shared_across_systems": return String(localized: "the same motion data feeds several checks")
-        case "not_implemented": return String(localized: "this check is not available yet")
-        case "regime_differs": return String(localized: "it was measured under different conditions")
-        // Eligibility and validity (the signal workstream's registry; unknown codes fall back to words)
-        case "insufficient_stationary_share", "not_stationary", "insufficient_stillness":
-            return String(localized: "not still for enough of it")
-        case "insufficient_coverage", "low_coverage", "insufficient_qualified_coverage":
-            return String(localized: "too little signal coverage")
-        case "insufficient_preceding_stillness", "preceding_stillness_short":
-            return String(localized: "not still for long enough beforehand")
-        case "awake_unknown", "awake_evidence_unknown", "sleep_state_unknown":
-            return String(localized: "it is unclear whether you were awake")
-        case "wear_unknown", "wear_evidence_unknown":
-            return String(localized: "it is unclear whether the strap was worn")
-        case "not_worn": return String(localized: "the strap may not have been worn")
-        case "asleep", "during_sleep": return String(localized: "it was during sleep")
-        case "not_in_sleep", "outside_sleep": return String(localized: "it was outside detected sleep")
-        case "recent_exertion": return String(localized: "activity shortly before")
-        case "recent_walking", "recent_locomotion": return String(localized: "walking shortly before")
-        case "locomotion", "walking_during_support", "locomotion_during_support":
-            return String(localized: "walking during the measurement")
-        case "signal_invalid", "validity_invalid": return String(localized: "the signal did not pass quality checks")
-        case "signal_missing", "validity_missing": return String(localized: "no signal")
-        case "unverified": return String(localized: "the value is unverified")
-        case "no_bout", "no_supported_bout": return String(localized: "no supported activity bout around it")
-        case "insufficient_history", "insufficient_days", "insufficient_support":
-            return String(localized: "not enough comparable days yet")
-        // Bout censoring (System D)
-        case "disconnect": return String(localized: "the strap disconnected")
-        case "continued_movement": return String(localized: "movement continued")
-        case "next_bout": return String(localized: "another bout started")
-        case "cutoff_reached": return String(localized: "the data ends here for now")
-        case "no_follow_up": return String(localized: "no data afterwards")
-        default: return humanized(code.rawValue)
-        }
+        phrase(code) ?? humanized(code.rawValue)
     }
 
-    /// The first reason in plain words, or nil.
+    /// The codes the normal flow may show: every code except the diagnostics-only ones, in order.
+    static func shownReasons(_ codes: [PhysiologyContext.ReasonCode]) -> [PhysiologyContext.ReasonCode] {
+        codes.filter { !isDiagnosticsOnly($0) }
+    }
+
+    /// The leading reason in plain words, or nil: the first shown reason. The engine lists the deciding reasons
+    /// first (review-contract RC-05), so this is the one that decided the verdict.
     static func topReason(_ codes: [PhysiologyContext.ReasonCode]) -> String? {
-        codes.first.map(reason)
+        shownReasons(codes).first.map(reason)
     }
 
-    /// Every reason in plain words, as one sentence fragment list.
+    /// Every shown reason in plain words, as one sentence fragment list.
     static func reasonList(_ codes: [PhysiologyContext.ReasonCode]) -> String? {
-        guard !codes.isEmpty else { return nil }
+        let shown = shownReasons(codes)
+        guard !shown.isEmpty else { return nil }
         var seen = Set<String>()
-        let phrases = codes.map(reason).filter { seen.insert($0).inserted }
+        let phrases = shown.map(reason).filter { seen.insert($0).inserted }
         return capitalizedFirst(phrases.joined(separator: "; "))
     }
 
@@ -246,9 +578,11 @@ enum PhysiologyContextWording {
         case "stationary": return String(localized: "Stationary")
         case "low_movement": return String(localized: "Low movement")
         case "sleeping": return String(localized: "Sleeping")
-        case "lying_down": return String(localized: "Lying down")
-        case "sitting", "sitting_desk": return String(localized: "Sitting")
-        case "standing": return String(localized: "Standing")
+        // Posture classes come from arm orientation (and the decoder reads heart rate): a likelihood only,
+        // never a confirmed posture.
+        case "lying_down": return String(localized: "Likely lying down")
+        case "sitting", "sitting_desk": return String(localized: "Likely sitting")
+        case "standing": return String(localized: "Likely standing")
         case "walking": return String(localized: "Walking")
         case "brisk_walking": return String(localized: "Brisk walking")
         case "running": return String(localized: "Running")
@@ -260,6 +594,17 @@ enum PhysiologyContextWording {
         case "vigorous_activity": return String(localized: "Vigorous activity")
         default: return capitalizedFirst(humanized(label))
         }
+    }
+
+    /// Posture classes: shown as likelihoods ("Likely standing"), never as a confirmed posture.
+    static let postureLabels: Set<String> = ["lying_down", "sitting", "sitting_desk", "standing"]
+
+    /// The decoder's estimate for a label. Every decoder label is an estimate that reads heart rate, so each one
+    /// reads as a likelihood: "Likely standing", "Likely walking".
+    static func likelyActivity(_ label: String) -> String {
+        if postureLabels.contains(label) { return activityLabel(label) }
+        let name = activityLabel(label).lowercased()
+        return String(localized: "Likely \(name)")
     }
 
     /// "Recent walking" and friends, for the movement a label names.
@@ -423,14 +768,50 @@ enum PhysiologyContextWording {
         }
     }
 
+    /// "Reference 52 ms ± 2 ms (approx.)". The ± is an approximate standard error of the reference centre (it
+    /// assumes independent days), so it always says so.
+    static func referenceCenter(_ c: PhysiologyContext.ReferenceComparison, units: String,
+                                locale: Locale = .current) -> String? {
+        guard let center = c.center, center.isFinite else { return nil }
+        let centre = value(center, units: units, locale: locale)
+        guard let u = c.centerUncertainty, u.isFinite, u > 0 else { return String(localized: "Reference \(centre)") }
+        let spread = value(u, units: units, locale: locale)
+        return String(localized: "Reference \(centre) \u{00B1} \(spread) (approx.)")
+    }
+
+    /// "Today's stable awake median: +6 ms vs your 28-day reference". A day-level comparison shown next to a
+    /// single window: the difference is the day's median's, never the window's own.
+    static func stableAwakeMedianLine(_ c: PhysiologyContext.ReferenceComparison, units: String,
+                                      locale: Locale = .current) -> String {
+        if let diff = c.signedDifference, c.status == .ready || c.status == .provisional {
+            let delta = signedDifference(diff, units: units, locale: locale)
+            return String(localized: "Today's stable awake median: \(delta) vs \(referenceName(c))")
+        }
+        let why = referenceLine(c, units: units, locale: locale)
+        let lowered = why.prefix(1).lowercased() + why.dropFirst()
+        return String(localized: "Today's stable awake median: \(lowered)")
+    }
+
     // MARK: Episodes
 
+    /// An episode's state. A persistent shift reads "Persistent change from historical reference" only when it
+    /// was detected against, or confirmed by, the frozen historical reference; a shift found against the rolling
+    /// view alone (no frozen reference, or one that disagrees) reads "…from your recent usual range".
+    static func episodeState(_ e: PhysiologyContext.ChangeEpisode) -> String {
+        guard e.state == .persistentShift, MeasurementContextSelection.isAgainstHistoricalReference(e) else {
+            return episodeState(e.state)
+        }
+        return String(localized: "Persistent change from historical reference")
+    }
+
+    /// A state without its episode. A persistent shift says nothing about a historical reference here, because
+    /// the state alone does not say which reference it was detected against.
     static func episodeState(_ state: PhysiologyContext.EpisodeState) -> String {
         switch state {
         case .usualVariation: return String(localized: "Within usual variation")
         case .transientDeviation: return String(localized: "Transient deviation from reference")
         case .recurringEpisode: return String(localized: "Recurring deviation from reference")
-        case .persistentShift: return String(localized: "Persistent change from historical reference")
+        case .persistentShift: return String(localized: "Persistent change from your recent usual range")
         case .insufficientEvidence: return String(localized: "Insufficient evidence for a change")
         }
     }
@@ -484,13 +865,30 @@ enum PhysiologyContextWording {
         }
     }
 
+    /// The censoring vocabulary of System D (what cut a follow-up short).
+    static let censoringReasons: [PhysiologyContext.ReasonCode] = [
+        PhysiologyContext.ExertionBouts.censorDisconnect, PhysiologyContext.ExertionBouts.censorContinuedMovement,
+        PhysiologyContext.ExertionBouts.censorNextBout, PhysiologyContext.ExertionBouts.censorCutoffReached,
+        PhysiologyContext.ExertionBouts.censorNoFollowUp,
+    ]
+
+    /// Why a censored bout's follow-up stopped: the first censoring event of its recovery (the one that truncated
+    /// it), else the censoring code among its reasons, else too few samples afterwards. Never just the first of
+    /// the bout's reasons, which are sorted by name.
+    static func censoringCause(_ bout: PhysiologyContext.ExertionBout) -> PhysiologyContext.ReasonCode? {
+        if let first = bout.recovery?.censoring.first { return first }
+        if let code = bout.reasons.first(where: censoringReasons.contains) { return code }
+        let sparse = PhysiologyContext.ExertionBouts.insufficientFollowUpSamples
+        return bout.reasons.contains(sparse) ? sparse : nil
+    }
+
     /// The follow-up after a bout: complete, still going, or cut short (and why).
     static func boutStatus(_ bout: PhysiologyContext.ExertionBout) -> String {
         switch bout.status {
         case .complete: return String(localized: "Follow-up complete")
         case .ongoing: return String(localized: "Ongoing")
         case .censored:
-            return topReason(bout.reasons).map { String(localized: "Follow-up incomplete: \($0)") }
+            return censoringCause(bout).map { String(localized: "Follow-up incomplete: \(reason($0))") }
                 ?? String(localized: "Follow-up incomplete")
         }
     }
@@ -540,7 +938,32 @@ enum PhysiologyContextWording {
         }
     }
 
-    /// Recording status of a category. Not recorded is not "none".
+    /// Recording status of a category over its window. A denial ("no") that covers only part of the window reads
+    /// "Recorded as none for part of this period": the rest is unrecorded, not none. A denial whose coverage was
+    /// not reported is treated the same way.
+    static func exposureCategoryStatus(_ s: PhysiologyContext.ExposureCategoryStatus) -> String {
+        if s.status == PhysiologyContext.Exposures.statusDenied, !deniedWholePeriod(s) {
+            return String(localized: "Recorded as none for part of this period")
+        }
+        return exposureCategoryStatus(s.status)
+    }
+
+    /// How much of the window the denial covers, for a partial denial ("33% of this period; the rest is not
+    /// recorded"). Nil otherwise.
+    static func exposureCategoryNote(_ s: PhysiologyContext.ExposureCategoryStatus,
+                                     locale: Locale = .current) -> String? {
+        guard s.status == PhysiologyContext.Exposures.statusDenied, !deniedWholePeriod(s),
+              let coverage = s.deniedCoverage, coverage.isFinite else { return nil }
+        let share = percent(min(0.99, max(0, coverage)), locale: locale)
+        return String(localized: "\(share) of this period; the rest is not recorded")
+    }
+
+    static func deniedWholePeriod(_ s: PhysiologyContext.ExposureCategoryStatus) -> Bool {
+        guard let coverage = s.deniedCoverage, coverage.isFinite else { return false }
+        return coverage >= 0.9995
+    }
+
+    /// Recording status of a category, by status alone. Not recorded is not "none".
     static func exposureCategoryStatus(_ status: String) -> String {
         switch status {
         case "recorded": return String(localized: "Recorded")
@@ -583,11 +1006,17 @@ enum PhysiologyContextWording {
     static func assessment(_ name: String) -> String {
         switch name {
         case "ppg_waveform_quality": return String(localized: "PPG waveform quality")
-        case "spo2_validity", "spo2_candidate", "spo2": return String(localized: "Blood oxygen")
+        case "spo2_signal_validity", "spo2_validity", "spo2_candidate", "spo2": return String(localized: "Blood oxygen")
         case "core_temperature": return String(localized: "Core temperature")
-        case "posture": return String(localized: "Posture")
+        case "posture": return String(localized: "Posture (likelihood only)")
         case "hrv_signal_validity": return String(localized: "HRV signal quality")
+        case "respiratory_signal_validity": return String(localized: "Respiratory rate signal quality")
+        case "skin_temperature_signal_validity": return String(localized: "Skin temperature signal quality")
+        case "activity_composition": return String(localized: "Activity data")
+        case "measurement_product": return String(localized: "Measurement")
         case "stable_awake_eligibility": return String(localized: "Stable awake check")
+        case "sleep_measurement_eligibility": return String(localized: "Sleep check")
+        case "activity_response_eligibility": return String(localized: "Activity response check")
         default: return capitalizedFirst(humanized(name))
         }
     }

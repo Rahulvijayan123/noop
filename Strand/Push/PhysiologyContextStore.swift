@@ -35,10 +35,12 @@ final class PhysiologyContextStore: ObservableObject {
         case signedOut
         /// Signed in, but the account's cloud path has not started yet.
         case accountNotReady
-        /// The server predates the context routes (405).
+        /// The server predates the context routes (405), or its database does not have them yet (404).
         case unsupportedServer
         /// The server has no context for the day.
         case noData
+        /// The server gave up building the day's context (its job is dead-lettered): no update is on its way.
+        case processingFailed
     }
 
     enum PendingReason: String, Sendable, Equatable {
@@ -112,6 +114,11 @@ final class PhysiologyContextStore: ObservableObject {
     @Published private(set) var histories: [HistoryKey: HistoryState] = [:]
     /// Bumped when what a read depends on changes (read candidates, account). Cards key their load on it.
     @Published private(set) var epoch = 0
+
+    /// Seconds between re-reads while a card shows pending or updating context: a bounded backoff that covers
+    /// about 15 minutes, longer than the server's own cadence (it waits at least 10 minutes before it re-queues
+    /// a job). The card stops when it leaves the screen and, after the last read, says to check back later.
+    nonisolated static let pollDelaysS: [Int] = [30, 30, 60, 60, 90, 120, 150, 180, 180]
 
     /// Every device id the server may hold this strap's context under, best first (`AppModel.hostedReadCandidates`).
     private(set) var readCandidates = ["my-whoop"]
@@ -246,15 +253,17 @@ final class PhysiologyContextStore: ObservableObject {
 
     /// The state one server answer puts a card in.
     nonisolated static func classify(_ day: PhysiologyContextDay) -> State {
+        // A dead-lettered job will not produce the update: say the context is unavailable instead of "on its way".
+        let failed = day.job?.deadLetter == true
         switch day.status {
         case .none:
-            return .unavailable(.noData)
+            return .unavailable(failed ? .processingFailed : .noData)
         case .pending:
             return .pending(day.document == nil ? nil : day, .computing)
         case .available:
-            guard day.document != nil else { return .unavailable(.noData) }
+            guard day.document != nil else { return .unavailable(failed ? .processingFailed : .noData) }
             // Built from an earlier scoring result: never pair it silently with the value now on screen.
-            if day.pairing?.consistent == false { return .stale(day) }
+            if day.pairing?.consistent == false { return failed ? .unavailable(.processingFailed) : .stale(day) }
             return .available(day)
         }
     }
@@ -263,7 +272,8 @@ final class PhysiologyContextStore: ObservableObject {
     nonisolated static func isSettledAnswer(_ state: State) -> Bool {
         switch state {
         case .pending: return true
-        case .unavailable(let reason): return reason == .noData || reason == .unsupportedServer
+        case .unavailable(let reason):
+            return reason == .noData || reason == .unsupportedServer || reason == .processingFailed
         default: return false
         }
     }

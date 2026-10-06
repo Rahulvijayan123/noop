@@ -48,7 +48,7 @@ struct PhysiologyContextHistoryModel: Equatable {
         typealias W = PhysiologyContextWording
         let episodes = history.episodes.sorted { ($0.lastDay, $0.id) > ($1.lastDay, $1.id) }.map { e in
             ContextHistoryEpisodeRow(
-                id: e.id, title: W.series(e.seriesKey), state: W.episodeState(e.state),
+                id: e.id, title: W.series(e.seriesKey), state: W.episodeState(e),
                 dates: dates(e, locale: locale), direction: W.direction(e.direction),
                 badges: W.episodeBadges(e), reasons: W.reasonList(e.reasons))
         }
@@ -94,13 +94,14 @@ enum PhysiologyContextHistoryCopy {
         case .accountNotReady: return String(localized: "Context history appears once your account finishes connecting.")
         case .unsupportedServer: return String(localized: "Context history isn't available from the server yet.")
         case .noData: return String(localized: "No context history yet.")
+        case .processingFailed: return String(localized: "Context history is unavailable.")
         }
     }
 
     static var allFixedText: [String] {
         [title, loading, failed, pending, noEpisodes, noBouts, refreshFailed, episodesFootnote]
             + [PhysiologyContextStore.UnavailableReason.cloudOff, .signedOut, .accountNotReady, .unsupportedServer,
-               .noData].map(unavailable)
+               .noData, .processingFailed].map(unavailable)
     }
 }
 

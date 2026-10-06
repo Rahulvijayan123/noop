@@ -163,7 +163,9 @@ final class PhysiologyContextAppTests: XCTestCase {
                           verdicts: [PC.EligibilityVerdict] = [], comparisons: [PC.ReferenceComparison] = [],
                           validity: PC.ValidityState = .valid, coverage: Double? = 0.95,
                           sleep: PC.SleepWakeState = .awake, sinceActivity: Int? = nil,
-                          lastActivity: String? = nil, finality: PC.Finality = .final) -> PC.MeasurementEnvelope {
+                          lastActivity: String? = nil, finality: PC.Finality = .final,
+                          decoder: PC.ActivityComposition? = nil,
+                          exposureCoverage: [PC.ExposureCategoryStatus]? = nil) -> PC.MeasurementEnvelope {
         let method = nightly
             ? PC.MethodRef(id: "snapshot.\(metric.rawValue).night", algorithmVersion: "frwhoop-server-1",
                            aggregation: .session, windowS: support.duration, units: units)
@@ -179,7 +181,7 @@ final class PhysiologyContextAppTests: XCTestCase {
             localTime: PC.localTime(at: support.start, timezoneId: tz),
             validity: PC.SignalValidity(state: validity, reasons: validity == .valid ? [] : ["signal_invalid"],
                                         coverage: coverage, observedS: support.duration),
-            regimeKey: "r1", activity: comp, decoderActivity: nil,
+            regimeKey: "r1", activity: comp, decoderActivity: decoder,
             preceding: PC.PrecedingHistory(lookback: PC.Interval(support.start - 1800, support.start),
                                            source: .strapMotion, stillRunS: 600, stillRunEndedBy: "movement",
                                            secondsSinceSupportedActivity: sinceActivity,
@@ -195,8 +197,9 @@ final class PhysiologyContextAppTests: XCTestCase {
                 exertion: [PC.ExertionWindowSummary(windowH: 24, interval: PC.Interval(support.start - 86_400, support.start),
                                                     boutCount: 2, locomotionS: 2400, observedS: 70_000, reasons: [])],
                 exposures: [],
-                exposureCoverage: [PC.ExposureCategoryStatus(kind: .caffeine, status: "recorded"),
-                                   PC.ExposureCategoryStatus(kind: .alcohol, status: "unrecorded")]),
+                exposureCoverage: exposureCoverage
+                    ?? [PC.ExposureCategoryStatus(kind: .caffeine, status: "recorded"),
+                        PC.ExposureCategoryStatus(kind: .alcohol, status: "unrecorded")]),
             eligibility: verdicts, comparisons: comparisons, finality: finality)
     }
 
@@ -216,20 +219,23 @@ final class PhysiologyContextAppTests: XCTestCase {
     }
 
     private func episode(_ state: PC.EpisodeState, ongoing: Bool = true, finality: PC.Finality = .provisional,
-                         series: String = "hrv_rmssd.stable_awake_5min") -> PC.ChangeEpisode {
-        PC.ChangeEpisode(id: "ep-\(state.rawValue)-\(series)", seriesKey: series, regimeKey: "r1", state: state,
-                         direction: -1, startDay: "2026-09-24", lastDay: day, ongoing: ongoing, durationDays: 8,
-                         finality: finality, reasons: ["insufficient_history"])
+                         series: String = "hrv_rmssd.stable_awake_5min", detector: String = "",
+                         reasons: [PC.ReasonCode] = ["insufficient_history"]) -> PC.ChangeEpisode {
+        PC.ChangeEpisode(id: "ep-\(state.rawValue)-\(series)-\(detector)", seriesKey: series, regimeKey: "r1",
+                         state: state, direction: -1, startDay: "2026-09-24", lastDay: day, ongoing: ongoing,
+                         durationDays: 8, finality: finality, reasons: reasons, detector: detector)
     }
 
     /// A day value carrying `envelopes` (and `episodes`) in an otherwise engine-built document.
     private func contextDay(envelopes: [PC.MeasurementEnvelope], episodes: [PC.ChangeEpisode] = [],
                             mode: PC.ProcessingMode = .retrospective, finality: PC.Finality = .final,
                             consistent: Bool? = true, exposures: PC.ExposureDaySummary? = nil,
-                            availability: [PC.AvailabilityEntry] = []) throws -> PhysiologyContextDay {
+                            availability: [PC.AvailabilityEntry] = [],
+                            comparisons: [PC.ReferenceComparison]? = nil) throws -> PhysiologyContextDay {
         var doc = builtDocument()
         doc.envelopes = envelopes
         doc.episodes = episodes
+        if let comparisons { doc.comparisons = comparisons }
         doc.header.interpretation.mode = mode
         doc.header.interpretation.finality = finality
         if let exposures { doc.exposures = exposures }
@@ -708,7 +714,8 @@ final class PhysiologyContextAppTests: XCTestCase {
         XCTAssertEqual(W.episodeBadges(episode(.persistentShift)).map(\.text), ["Ongoing", "Provisional"])
         XCTAssertEqual(W.episodeBadges(episode(.transientDeviation, ongoing: false, finality: .final)).map(\.text),
                        ["Transient", "Final"])
-        XCTAssertEqual(W.episodeState(.persistentShift), "Persistent change from historical reference")
+        // RC-19: the state alone never claims a historical reference.
+        XCTAssertEqual(W.episodeState(.persistentShift), "Persistent change from your recent usual range")
     }
 
     // MARK: - Card summary
@@ -736,7 +743,8 @@ final class PhysiologyContextAppTests: XCTestCase {
         let e = envelope(support: support, labels: [("still", 276)], unknownS: 9, uncoveredS: 15,
                          verdicts: [verdict(.stableAwakeRest, .eligible)], comparisons: [reference()],
                          finality: .provisional)
-        let day = try contextDay(envelopes: [e], episodes: [episode(.persistentShift)], finality: .provisional)
+        let day = try contextDay(envelopes: [e], episodes: [episode(.persistentShift, detector: "frozen_persistence")],
+                                 finality: .provisional)
         let summary = MeasurementContextSummary.build(day: day, metric: .hrvRmssd, locale: gb)
         XCTAssertEqual(summary.envelopeId, e.id)
         XCTAssertEqual(summary.statePhrase, "Stable awake measurement")
@@ -753,17 +761,18 @@ final class PhysiologyContextAppTests: XCTestCase {
         let w = dayWindow
         let support = PC.Interval(w.start + 9 * 3600, w.start + 9 * 3600 + 300)
         let walking = envelope(support: support, labels: [("still", 200), ("walking", 100)],
-                               verdicts: [verdict(.stableAwakeRest, .ineligible, ["walking_during_support"])])
+                               verdicts: [verdict(.stableAwakeRest, .ineligible, ["movement_in_support"])])
         XCTAssertEqual(PhysiologyContextWording.statePhrase(walking), "Recent walking")
         let afterWalk = envelope(support: support, verdicts: [verdict(.stableAwakeRest, .ineligible)],
                                  sinceActivity: 240, lastActivity: "walking")
         XCTAssertEqual(PhysiologyContextWording.statePhrase(afterWalk), "Recent walking")
         let summary = MeasurementContextSummary.build(day: try contextDay(envelopes: [walking]), metric: .hrvRmssd, locale: gb)
         XCTAssertEqual(summary.eligibilityText,
-                       "Does not qualify for the stable awake comparison: walking during the measurement")
+                       "Does not qualify for the stable awake comparison: movement during the measurement")
         XCTAssertEqual(summary.referenceText, "No reference comparison for this measurement yet")
 
-        let unknown = envelope(support: support, verdicts: [verdict(.stableAwakeRest, .unknown, ["awake_unknown"])])
+        let unknown = envelope(support: support,
+                               verdicts: [verdict(.stableAwakeRest, .unknown, ["awake_evidence_unknown"])])
         XCTAssertEqual(PhysiologyContextWording.statePhrase(unknown), "Insufficient context")
         XCTAssertEqual(PhysiologyContextWording.eligibilityLine(unknown.verdict(.stableAwakeRest), kind: .stableAwakeRest),
                        "Can't tell whether it qualifies for the stable awake comparison: it is unclear whether you were awake")
@@ -788,8 +797,8 @@ final class PhysiologyContextAppTests: XCTestCase {
         let w = dayWindow
         let e = envelope(support: PC.Interval(w.start + 9 * 3600, w.start + 9 * 3600 + 300),
                          labels: [("still", 240)], unknownS: 30, uncoveredS: 30,
-                         verdicts: [verdict(.stableAwakeRest, .unknown, ["wear_unknown"]),
-                                    verdict(.sleepMeasurement, .ineligible, ["not_in_sleep"])],
+                         verdicts: [verdict(.stableAwakeRest, .unknown, ["wear_evidence_unknown"]),
+                                    verdict(.sleepMeasurement, .ineligible, ["not_asleep"])],
                          comparisons: [reference(), reference(view: .frozen, status: .insufficient, diff: nil)])
         let event = PC.ExposureEvent(eventId: "ev1", revision: 2, kind: .caffeine, label: "Espresso",
                                      occurred: PC.Interval(w.start + 8 * 3600, w.start + 8 * 3600 + 1),
@@ -812,7 +821,7 @@ final class PhysiologyContextAppTests: XCTestCase {
         XCTAssertEqual(row("activity", "unknown")?.value, "10%")
         XCTAssertEqual(row("activity", "uncovered")?.value, "10%")
         XCTAssertEqual(row("eligibility", "eligibility-stable_awake_rest")?.value, "Can't tell")
-        XCTAssertEqual(row("eligibility", "eligibility-sleep_measurement")?.note, "It was outside detected sleep")
+        XCTAssertEqual(row("eligibility", "eligibility-sleep_measurement")?.note, "It was not during sleep")
         XCTAssertEqual(row("references", "reference-0")?.value, "+6 ms")
         XCTAssertEqual(row("references", "reference-1")?.value, "Not enough comparable days yet")
         XCTAssertEqual(row("exposures", "exposure-event-ev1")?.title, "Espresso")
@@ -833,7 +842,8 @@ final class PhysiologyContextAppTests: XCTestCase {
         let w = dayWindow
         let history = PhysiologyContextHistory(
             from: "2026-09-02", to: day, deviceId: "d", mode: nil,
-            episodes: [episode(.persistentShift), episode(.transientDeviation, series: "resp_rate.sleep_night")],
+            episodes: [episode(.persistentShift, reasons: ["frozen_and_rolling_agree"]),
+                       episode(.transientDeviation, series: "resp_rate.sleep_night")],
             bouts: [PC.ExertionBout(id: "b1", interval: PC.Interval(w.start + 7 * 3600, w.start + 7 * 3600 + 1800),
                                     day: day, kind: "walking", status: .censored, durationS: 1800,
                                     reasons: ["continued_movement"]),
@@ -850,6 +860,371 @@ final class PhysiologyContextAppTests: XCTestCase {
         XCTAssertEqual(model.bouts.last?.status, "Follow-up incomplete: movement continued")
         XCTAssertEqual(model.bouts.first?.status, "Ongoing")
         XCTAssertEqual(model.bouts.last?.duration, "30 min")
+    }
+
+    // MARK: - Review repairs (review-contract RC-05/06/14/16/19/22, review-statistics P6)
+
+    private func bout(_ id: String, status: PC.BoutStatus, reasons: [PC.ReasonCode],
+                      censoring: [PC.ReasonCode]?) -> PC.ExertionBout {
+        let w = dayWindow
+        let interval = PC.Interval(w.start + 7 * 3600, w.start + 7 * 3600 + 1800)
+        var b = PC.ExertionBout(id: id, interval: interval, day: day, kind: "walking", status: status,
+                                durationS: 1800, reasons: reasons)
+        if let censoring {
+            let none = PC.BoutChannel(channel: "hrv", state: .unsupported, reasons: [])
+            b.recovery = PC.BoutRecovery(followUp: PC.Interval(interval.end, interval.end + 300), anchorHrBpm: 120,
+                                         referenceBpm: 80, observations: [], truncatedAt: interval.end + 90,
+                                         censoring: censoring, timeToReturnS: nil, hrv: none, respiratory: none,
+                                         reasons: [])
+        }
+        return b
+    }
+
+    /// RC-06: the follow-up line names what cut the follow-up short, not the alphabetically first reason.
+    func testACensoredBoutNamesItsCensoringCause() {
+        typealias W = PhysiologyContextWording
+        // The engine sorts a bout's reasons, so "ended_at_evidence_gap" comes before the censoring code.
+        let nextBout = bout("b1", status: .censored, reasons: ["ended_at_evidence_gap", "next_bout"],
+                            censoring: ["next_bout", "disconnect"])
+        XCTAssertEqual(W.boutStatus(nextBout), "Follow-up incomplete: another bout started")
+        // An older document without the recovery: the censoring code among the reasons.
+        let noRecovery = bout("b2", status: .censored, reasons: ["ended_at_evidence_gap", "next_bout"], censoring: nil)
+        XCTAssertEqual(W.boutStatus(noRecovery), "Follow-up incomplete: another bout started")
+        // Nothing truncated it, but the readings were too sparse.
+        let sparse = bout("b3", status: .censored,
+                          reasons: ["ended_at_evidence_gap", "insufficient_follow_up_samples"], censoring: [])
+        XCTAssertEqual(W.boutStatus(sparse), "Follow-up incomplete: too little data afterwards")
+        let unexplained = bout("b4", status: .censored, reasons: ["ended_at_evidence_gap"], censoring: [])
+        XCTAssertEqual(W.boutStatus(unexplained), "Follow-up incomplete")
+        let history = PhysiologyContextHistory(from: "2026-09-02", to: day, deviceId: "d", mode: nil, episodes: [],
+                                               bouts: [nextBout], dailyValues: [], undecodedElements: 0,
+                                               fetchedAtMs: 0)
+        let model = PhysiologyContextHistoryModel.build(history, metric: .hrvRmssd, zone: TimeZone(identifier: tz)!,
+                                                        locale: gb)
+        XCTAssertEqual(model.bouts.first?.status, "Follow-up incomplete: another bout started")
+    }
+
+    /// RC-14: one "no" that covers a third of the window is not "none" for the whole window.
+    func testAPartialDenialIsNotNoneForTheWholePeriod() throws {
+        typealias W = PhysiologyContextWording
+        let w = dayWindow
+        let e = envelope(support: PC.Interval(w.start + 9 * 3600, w.start + 9 * 3600 + 300),
+                         verdicts: [verdict(.stableAwakeRest, .eligible)],
+                         exposureCoverage: [PC.ExposureCategoryStatus(kind: .caffeine, status: "denied",
+                                                                      deniedCoverage: 1.0 / 3.0),
+                                            PC.ExposureCategoryStatus(kind: .alcohol, status: "denied",
+                                                                      deniedCoverage: 1.0),
+                                            PC.ExposureCategoryStatus(kind: .meal, status: "denied",
+                                                                      deniedCoverage: 0.999),
+                                            PC.ExposureCategoryStatus(kind: .heat, status: "unrecorded")])
+        let model = MeasurementContextDetailModel.build(day: try contextDay(envelopes: [e]), metric: .hrvRmssd,
+                                                        isStale: false, locale: gb)
+        func row(_ id: String) -> ContextDetailRow? {
+            model.sections.first { $0.id == "exposures" }?.rows.first { $0.id == id }
+        }
+        XCTAssertEqual(row("exposure-status-caffeine")?.value, "Recorded as none for part of this period")
+        XCTAssertEqual(row("exposure-status-caffeine")?.note, "33% of this period; the rest is not recorded")
+        XCTAssertEqual(row("exposure-status-alcohol")?.value, "Recorded as none")
+        XCTAssertNil(row("exposure-status-alcohol")?.note)
+        XCTAssertEqual(row("exposure-status-meal")?.value, "Recorded as none for part of this period")
+        XCTAssertEqual(row("exposure-status-meal")?.note, "99% of this period; the rest is not recorded",
+                       "a near-complete denial never rounds up to the whole period")
+        XCTAssertEqual(row("exposure-status-heat")?.value, "Not recorded")
+        XCTAssertTrue(model.sections.first { $0.id == "exposures" }?.footnote?
+            .contains("Recording status covers the days before this measurement.") ?? false)
+        // A denial whose coverage was not reported is not claimed for the whole period either.
+        XCTAssertEqual(W.exposureCategoryStatus(PC.ExposureCategoryStatus(kind: .caffeine, status: "denied")),
+                       "Recorded as none for part of this period")
+    }
+
+    /// RC-16: a 5-minute window that fed today's stable-awake median carries no comparison of its own. The card
+    /// may show the day's comparison, but only as the median's.
+    func testAWindowShowsTodaysMedianComparisonOnlyAsTheMedians() throws {
+        let w = dayWindow
+        let window = envelope(support: PC.Interval(w.start + 14 * 3600 + 300, w.start + 14 * 3600 + 600),
+                              verdicts: [verdict(.stableAwakeRest, .eligible)], comparisons: [])
+        let median = reference(series: "hrv_rmssd.stable_awake_5min")
+        let band = reference(diff: 11, series: "hrv_rmssd.stable_awake_5min.band_12_18")
+        let nightlySeries = reference(diff: -9, series: "hrv_rmssd.sleep_night")
+        let day = try contextDay(envelopes: [window], episodes: [episode(.transientDeviation)],
+                                 comparisons: [nightlySeries, band, median])
+        let summary = MeasurementContextSummary.build(day: day, metric: .hrvRmssd, locale: gb)
+        XCTAssertEqual(summary.referenceText, "Today's stable awake median: +6 ms vs your 28-day reference")
+        XCTAssertEqual(summary.episodeText, "Transient deviation from reference")
+
+        let detail = MeasurementContextDetailModel.build(day: day, metric: .hrvRmssd, isStale: false, locale: gb)
+        let rows = detail.sections.first { $0.id == "references" }?.rows ?? []
+        XCTAssertEqual(rows.map(\.id), ["day-reference-0"])
+        XCTAssertEqual(rows.first?.value, "+6 ms")
+        XCTAssertTrue(rows.first?.note?.hasPrefix("Today's stable awake median, not this window alone") ?? false)
+
+        // Without a day comparison nothing is borrowed; a window's own comparison is its own.
+        let alone = try contextDay(envelopes: [window], comparisons: [nightlySeries, band])
+        XCTAssertEqual(MeasurementContextSummary.build(day: alone, metric: .hrvRmssd, locale: gb).referenceText,
+                       "No reference comparison for this measurement yet")
+        let single = envelope(support: window.support, verdicts: [verdict(.stableAwakeRest, .eligible)],
+                              comparisons: [reference(diff: 3)])
+        let own = try contextDay(envelopes: [single], comparisons: [median])
+        XCTAssertEqual(MeasurementContextSummary.build(day: own, metric: .hrvRmssd, locale: gb).referenceText,
+                       "+3 ms vs your 28-day reference")
+        // A nightly value never takes the stable-awake comparison.
+        let nightly = envelope(nightly: true, support: PC.Interval(w.start - 3000, w.start + 24_000))
+        XCTAssertTrue(MeasurementContextSelection.dayStableAwakeComparisons(for: nightly, in: [median]).isEmpty)
+        let status = PhysiologyContextWording.stableAwakeMedianLine(reference(status: .insufficient, diff: nil),
+                                                                    units: "ms", locale: gb)
+        XCTAssertEqual(status, "Today's stable awake median: not enough comparable days for a reference yet")
+    }
+
+    /// RC-19: "historical reference" only when the frozen reference found or confirmed the shift.
+    func testPersistentChangeNamesTheReferenceItWasDetectedAgainst() throws {
+        typealias W = PhysiologyContextWording
+        let historical = "Persistent change from historical reference"
+        let recent = "Persistent change from your recent usual range"
+        XCTAssertEqual(W.episodeState(episode(.persistentShift, detector: "frozen_persistence",
+                                              reasons: ["frozen_reference_deviation", "gradual_drift"])), historical)
+        XCTAssertEqual(W.episodeState(episode(.persistentShift, detector: "cusum",
+                                              reasons: ["detector_cusum", "frozen_and_rolling_agree"])), historical)
+        XCTAssertEqual(W.episodeState(episode(.persistentShift, detector: "cusum",
+                                              reasons: ["detector_cusum", "rolling_adapted_frozen_deviation_persists"])),
+                       historical)
+        XCTAssertEqual(W.episodeState(episode(.persistentShift, detector: "cusum",
+                                              reasons: ["detector_cusum", "frozen_unavailable"])), recent)
+        XCTAssertEqual(W.episodeState(episode(.persistentShift, detector: "persistence",
+                                              reasons: ["detector_persistence", "frozen_and_rolling_disagree"])), recent)
+        XCTAssertEqual(W.episodeState(episode(.transientDeviation, detector: "frozen_persistence")),
+                       "Transient deviation from reference")
+
+        let w = dayWindow
+        let e = envelope(support: PC.Interval(w.start + 14 * 3600, w.start + 14 * 3600 + 300),
+                         verdicts: [verdict(.stableAwakeRest, .eligible)], comparisons: [reference()])
+        let rolling = episode(.persistentShift, detector: "cusum", reasons: ["detector_cusum", "frozen_unavailable"])
+        let summary = MeasurementContextSummary.build(day: try contextDay(envelopes: [e], episodes: [rolling]),
+                                                      metric: .hrvRmssd, locale: gb)
+        XCTAssertEqual(summary.episodeText, recent)
+        let history = PhysiologyContextHistory(from: "2026-09-02", to: day, deviceId: "d", mode: nil,
+                                               episodes: [rolling], bouts: [], dailyValues: [], undecodedElements: 0,
+                                               fetchedAtMs: 0)
+        let model = PhysiologyContextHistoryModel.build(history, metric: .hrvRmssd, zone: TimeZone(identifier: tz)!,
+                                                        locale: gb)
+        XCTAssertEqual(model.metricEpisodes.first?.state, recent)
+        XCTAssertEqual(model.metricEpisodes.first?.reasons, "No historical reference yet",
+                       "the detector's name stays in diagnostics")
+    }
+
+    /// P6: the reference centre's ± is an approximation and says so.
+    func testTheReferenceUncertaintyIsMarkedApproximate() throws {
+        typealias W = PhysiologyContextWording
+        XCTAssertEqual(W.referenceCenter(reference(), units: "ms", locale: gb), "Reference 52 ms \u{00B1} 2 ms (approx.)")
+        var noSpread = reference()
+        noSpread.centerUncertainty = nil
+        XCTAssertEqual(W.referenceCenter(noSpread, units: "ms", locale: gb), "Reference 52 ms")
+        let w = dayWindow
+        let e = envelope(support: PC.Interval(w.start + 14 * 3600, w.start + 14 * 3600 + 300),
+                         verdicts: [verdict(.stableAwakeRest, .eligible)], comparisons: [reference()])
+        let model = MeasurementContextDetailModel.build(day: try contextDay(envelopes: [e]), metric: .hrvRmssd,
+                                                        isStale: false, locale: gb)
+        let note = model.sections.first { $0.id == "references" }?.rows.first?.note ?? ""
+        XCTAssertTrue(note.contains("Reference 52 ms \u{00B1} 2 ms (approx.)"), note)
+    }
+
+    /// RC-22: posture classes are likelihoods, never confirmed posture.
+    func testDecoderPostureIsShownAsALikelihood() throws {
+        typealias W = PhysiologyContextWording
+        XCTAssertEqual(W.activityLabel("standing"), "Likely standing")
+        XCTAssertEqual(W.activityLabel("sitting_desk"), "Likely sitting")
+        XCTAssertEqual(W.activityLabel("lying_down"), "Likely lying down")
+        XCTAssertEqual(W.likelyActivity("standing"), "Likely standing")
+        XCTAssertEqual(W.likelyActivity("walking"), "Likely walking")
+        let w = dayWindow
+        let support = PC.Interval(w.start + 14 * 3600, w.start + 14 * 3600 + 300)
+        var decoder = composition(support, labels: [("standing", 300)], source: .decoderIntervals)
+        decoder.heartRateDependent = true
+        let e = envelope(support: support, verdicts: [verdict(.stableAwakeRest, .eligible)], decoder: decoder)
+        let availability = [PC.AvailabilityEntry(metric: nil, assessment: "posture", source: "strap_gravity_orientation",
+                                                 state: .unverified, comparability: "not_applicable",
+                                                 reasons: ["wrist_orientation_likelihood_only"])]
+        let model = MeasurementContextDetailModel.build(day: try contextDay(envelopes: [e], availability: availability),
+                                                        metric: .hrvRmssd, isStale: false, locale: gb)
+        let decoderRow = model.sections.first { $0.id == "activity" }?.rows.first { $0.id == "decoder" }
+        XCTAssertEqual(decoderRow?.value, "Likely standing")
+        XCTAssertTrue(decoderRow?.note?.contains("not a confirmed one") ?? false)
+        let posture = model.sections.first { $0.id == "availability" }?.rows.first
+        XCTAssertEqual(posture?.title, "Posture (likelihood only)")
+        XCTAssertEqual(posture?.note, "Arm orientation gives only a likely posture, never a confirmed one")
+        for text in model.allText {
+            XCTAssertNil(text.range(of: #"^(Standing|Sitting|Lying down)$"#, options: .regularExpression),
+                         "\"\(text)\" presents a posture as confirmed")
+        }
+    }
+
+    /// RC-15 (normal flow): diagnostics-only codes never reach the card, detail or history; Diagnostics keeps them
+    /// raw. The card leads with the first shown reason (the engine lists deciding reasons first, RC-05).
+    func testDiagnosticsOnlyCodesStayInDiagnostics() throws {
+        typealias W = PhysiologyContextWording
+        XCTAssertEqual(W.reasonList(["overlapping_records_resolved", "uncovered_time"]), "Part of it has no activity data")
+        XCTAssertNil(W.reasonList(["detector_cusum", "log_transform"]))
+        XCTAssertNil(W.topReason(["winsorized_mean_estimator"]))
+        XCTAssertEqual(W.eligibilityLine(verdict(.stableAwakeRest, .ineligible,
+                                                 ["movement_in_support", "signal_degraded"]), kind: .stableAwakeRest),
+                       "Does not qualify for the stable awake comparison: movement during the measurement")
+        XCTAssertEqual(W.eligibilityLine(verdict(.stableAwakeRest, .unknown, ["signal_degraded"]), kind: .stableAwakeRest),
+                       "Can't tell whether it qualifies for the stable awake comparison: the signal is usable with limitations")
+
+        let diagnosticsOnly = PhysiologyContextReasonRegistries.codes.filter {
+            W.isDiagnosticsOnly(PC.ReasonCode($0))
+        }.sorted().map { PC.ReasonCode($0) }
+        XCTAssertFalse(diagnosticsOnly.isEmpty)
+        let w = dayWindow
+        var e = envelope(support: PC.Interval(w.start + 14 * 3600, w.start + 14 * 3600 + 300),
+                         verdicts: [verdict(.stableAwakeRest, .ineligible, diagnosticsOnly + ["movement_in_support"]),
+                                    verdict(.sleepMeasurement, .unknown, diagnosticsOnly)],
+                         comparisons: [reference()])
+        e.validity.reasons = diagnosticsOnly
+        e.activity.reasons = diagnosticsOnly
+        e.sleepWear.reasons = diagnosticsOnly
+        e.comparisons[0].reasons = diagnosticsOnly
+        let day = try contextDay(envelopes: [e], episodes: [episode(.persistentShift, detector: "cusum",
+                                                                    reasons: diagnosticsOnly)])
+        let card = MeasurementContextSummary.build(day: day, metric: .hrvRmssd, locale: gb)
+        XCTAssertEqual(card.eligibilityText,
+                       "Does not qualify for the stable awake comparison: movement during the measurement")
+        let detail = MeasurementContextDetailModel.build(day: day, metric: .hrvRmssd, isStale: false, locale: gb)
+        let history = PhysiologyContextHistoryModel.build(
+            PhysiologyContextHistory(from: "2026-09-02", to: self.day, deviceId: "d", mode: nil,
+                                     episodes: day.document?.episodes ?? [], bouts: [], dailyValues: [],
+                                     undecodedElements: 0, fetchedAtMs: 0),
+            metric: .hrvRmssd, zone: TimeZone(identifier: tz)!, locale: gb)
+        let shown = (card.allText + detail.allText + history.allText).joined(separator: "\n").lowercased()
+        for code in diagnosticsOnly {
+            XCTAssertFalse(shown.contains(W.humanized(code.rawValue)), "\(code) reached the normal flow")
+            XCTAssertFalse(shown.contains(code.rawValue), "\(code) reached the normal flow raw")
+        }
+        let raw = detail.diagnostics.first { $0.id == "d-codes" }?.value ?? ""
+        for code in diagnosticsOnly { XCTAssertTrue(raw.contains(code.rawValue), "\(code) missing from Diagnostics") }
+    }
+
+    // MARK: - Integration review repairs (R8, R9, R11)
+
+    /// R9: a new edge function without its migration answers 404 (the read RPC does not exist). That is the same
+    /// "not available from the server" state as an old server's 405, never an error, and it is server-wide.
+    @MainActor
+    func testAMissingContextMigrationsFourOhFourIsUnsupportedNotAnError() async throws {
+        ContextStub.status = 404
+        ContextStub.body = ["error": "request_rejected"]
+        let repo = repository()
+        let day = try await repo.dayContext(day: self.day, deviceIds: ["whoop-A", "my-whoop"])
+        XCTAssertEqual(day, .unsupportedServer)
+        XCTAssertEqual(ContextStub.requestCount, 1, "a 404 is server-wide: the other candidates are not asked")
+        let history = try await repo.history(from: "2026-09-02", to: self.day, deviceIds: ["whoop-A"])
+        XCTAssertEqual(history, .unsupportedServer)
+
+        let s = store(repository: repo)
+        let key = PhysiologyContextStore.Key(day: self.day, metric: .hrvRmssd)
+        await s.load(key)
+        XCTAssertEqual(s.state(for: key), .unavailable(.unsupportedServer))
+        let range = PhysiologyContextStore.HistoryKey(from: "2026-09-02", to: self.day)
+        await s.loadHistory(range)
+        XCTAssertEqual(s.historyState(for: range), .unavailable(.unsupportedServer))
+    }
+
+    /// R8: a dead-lettered job is decoded, and its day reads "Context unavailable for this day", never "on its
+    /// way"; it is not polled.
+    @MainActor
+    func testADeadLetteredJobIsUnavailableNotOnItsWay() async throws {
+        let doc = try jsonObject(builtDocument())
+        func body(_ status: String, document: Any?, consistent: Bool?) -> [String: Any] {
+            var b = contextBody(document: document, status: status, consistent: consistent)
+            var context = b["context"] as? [String: Any] ?? [:]
+            context["job"] = ["pending": false, "dirty_at": "2026-10-02T03:00:00Z", "dead_letter": true,
+                              "leased": false, "input_revision": 5, "completed_revision": 4,
+                              "reasons": ["worker_failed"]]
+            b["context"] = context
+            return b
+        }
+        let repo = repository()
+        ContextStub.body = body("available", document: doc, consistent: false)
+        guard case .loaded(let stale) = try await repo.dayContext(day: self.day, deviceId: "whoop-A") else {
+            return XCTFail("expected a loaded day")
+        }
+        XCTAssertEqual(stale.job, PhysiologyContextDay.Job(pending: false, dirtyAt: "2026-10-02T03:00:00Z",
+                                                           deadLetter: true, leased: false, inputRevision: "5",
+                                                           completedRevision: "4", reasons: ["worker_failed"]))
+        XCTAssertEqual(PhysiologyContextStore.classify(stale), .unavailable(.processingFailed),
+                       "an earlier result's context whose update was given up is not \"on its way\"")
+        XCTAssertFalse(PhysiologyContextStore.State.unavailable(.processingFailed).wantsPolling)
+        XCTAssertEqual(MeasurementContextCopy.unavailable(.processingFailed), "Context unavailable for this day.")
+
+        ContextStub.body = body("none", document: nil, consistent: nil)
+        guard case .loaded(let none) = try await repo.dayContext(day: self.day, deviceId: "whoop-A") else {
+            return XCTFail("expected a loaded day")
+        }
+        XCTAssertEqual(PhysiologyContextStore.classify(none), .unavailable(.processingFailed))
+
+        // A current context stays current; the detail says the latest data could not be added.
+        ContextStub.body = body("available", document: doc, consistent: true)
+        guard case .loaded(let current) = try await repo.dayContext(day: self.day, deviceId: "whoop-A") else {
+            return XCTFail("expected a loaded day")
+        }
+        guard case .available = PhysiologyContextStore.classify(current) else { return XCTFail("expected available") }
+        let detail = MeasurementContextDetailModel.build(day: current, metric: .hrvRmssd, isStale: false, locale: gb)
+        XCTAssertEqual(detail.sections.first { $0.id == "processing" }?.rows.first { $0.id == "job" }?.value,
+                       "Couldn't be updated with the latest data")
+        XCTAssertEqual(detail.diagnostics.first { $0.id == "d-job" }?.value, "dead_letter")
+
+        let s = store(repository: repo)
+        s.setReadCandidates(["whoop-A"])
+        let key = PhysiologyContextStore.Key(day: self.day, metric: .hrvRmssd)
+        ContextStub.body = body("available", document: doc, consistent: false)
+        await s.load(key)
+        XCTAssertEqual(s.state(for: key), .unavailable(.processingFailed))
+        ContextStub.status = 503
+        await s.load(key)
+        XCTAssertEqual(s.state(for: key), .unavailable(.processingFailed), "a failed re-read keeps the server's answer")
+    }
+
+    /// R8: the card re-reads on a bounded backoff long enough to see the server's next attempt (it waits at
+    /// least 10 minutes before re-queueing), and afterwards says to check back later instead of "on its way".
+    func testPollingCoversTheServersCadenceAndThenSaysCheckBackLater() {
+        let delays = PhysiologyContextStore.pollDelaysS
+        let total = delays.reduce(0, +)
+        XCTAssertGreaterThanOrEqual(total, 15 * 60 - 60, "covers about 15 minutes")
+        XCTAssertLessThanOrEqual(total, 20 * 60, "bounded")
+        XCTAssertLessThanOrEqual(delays.first ?? .max, 30, "the first re-read comes soon")
+        XCTAssertEqual(delays, delays.sorted(), "a backoff never shortens")
+        XCTAssertLessThanOrEqual(delays.count, 12)
+
+        XCTAssertEqual(MeasurementContextSummary.stale().note,
+                       "This day's results changed after its context was built. Updated context is on its way.")
+        let late = MeasurementContextSummary.stale(checkBackLater: true)
+        XCTAssertEqual(late.statePhrase, "Context updating")
+        XCTAssertEqual(late.note, "This day's results changed after its context was built. The update is taking longer than usual. Check back later.")
+        XCTAssertEqual(MeasurementContextCopy.pending(.computing, checkBackLater: true),
+                       "Measurement context for this day is being prepared. Check back later.")
+        XCTAssertEqual(MeasurementContextCopy.pending(.computing), "Measurement context for this day is being prepared.")
+    }
+
+    /// R11: "Local day" is the day that owns the document (a night belongs to the day it ends on), not the date
+    /// the night started; the start and end dates are shown separately.
+    func testTheDetailsLocalDayIsTheDayThatOwnsTheDocument() throws {
+        typealias W = PhysiologyContextWording
+        let w = dayWindow
+        let night = envelope(nightly: true, support: PC.Interval(w.start - 50 * 60, w.start + 6 * 3600 + 42 * 60),
+                             verdicts: [verdict(.sleepMeasurement, .eligible)])
+        XCTAssertEqual(night.localTime.localDay, "2026-09-30", "the night starts the evening before")
+        let model = MeasurementContextDetailModel.build(day: try contextDay(envelopes: [night]), metric: .hrvRmssd,
+                                                        isStale: false, locale: gb)
+        let row = model.sections.first { $0.id == "measurement" }?.rows.first { $0.id == "day" }
+        XCTAssertEqual(row?.value, W.day(day, locale: gb))
+        XCTAssertNotEqual(row?.value, W.day("2026-09-30", locale: gb))
+        let zone = TimeZone(identifier: tz)!
+        XCTAssertEqual(row?.note, "From \(W.dayAndTime(night.support.start, zone: zone, locale: gb)) to \(W.dayAndTime(night.support.end, zone: zone, locale: gb))")
+        // A window inside one date needs no dates.
+        let window = envelope(support: PC.Interval(w.start + 9 * 3600, w.start + 9 * 3600 + 300))
+        let windowModel = MeasurementContextDetailModel.build(day: try contextDay(envelopes: [window]),
+                                                              metric: .hrvRmssd, isStale: false, locale: gb)
+        let windowRow = windowModel.sections.first { $0.id == "measurement" }?.rows.first { $0.id == "day" }
+        XCTAssertEqual(windowRow?.value, W.day(day, locale: gb))
+        XCTAssertNil(windowRow?.note)
     }
 
     // MARK: - Copy rules
@@ -871,15 +1246,11 @@ final class PhysiologyContextAppTests: XCTestCase {
         let w = dayWindow
         let support = PC.Interval(w.start + 10 * 3600, w.start + 10 * 3600 + 300)
 
-        // Every reason the app knows, the engine's and join's registries, and unknown codes.
-        let codes: [String] = PC.Engine.reasonCodes.map(\.rawValue) + PC.IntervalAlgebra.reasonCodes.map(\.rawValue) + [
-            "not_implemented", "regime_differs", "insufficient_stationary_share", "insufficient_coverage",
-            "insufficient_preceding_stillness", "awake_unknown", "wear_unknown", "not_worn", "asleep", "not_in_sleep",
-            "recent_exertion", "recent_walking", "walking_during_support", "signal_invalid", "signal_missing",
-            "unverified", "no_bout", "insufficient_history", "disconnect", "continued_movement", "next_bout",
-            "cutoff_reached", "no_follow_up", "stress_index_high", "recovered_fully", "illness_flag", "brand_new_code",
-        ]
+        // Every code of every registry, plus unknown codes a newer server might send.
+        let codes: [String] = PhysiologyContextReasonRegistries.codes.sorted()
+            + ["stress_index_high", "recovered_fully", "illness_flag", "brand_new_code"]
         texts += codes.map { W.reason(PC.ReasonCode($0)) }
+        texts += codes.compactMap { W.reasonList([PC.ReasonCode($0)]) }
 
         // Every state of every enum the screens describe.
         texts += PC.ValidityState.allCases.map(W.validity)
@@ -900,6 +1271,11 @@ final class PhysiologyContextAppTests: XCTestCase {
         texts += PC.EligibilityState.allCases.map(W.eligibilityState)
         let categoryStatuses = ["recorded", "denied", "candidate_only", "unrecorded"]
         texts += categoryStatuses.map(W.exposureCategoryStatus)
+        for coverage in [nil, 0.0, 0.33, 0.999, 1.0] as [Double?] {
+            let status = PC.ExposureCategoryStatus(kind: .caffeine, status: "denied", deniedCoverage: coverage)
+            texts.append(W.exposureCategoryStatus(status))
+            texts += [W.exposureCategoryNote(status, locale: en)].compactMap { $0 }
+        }
         let boutKinds = ["walking", "running", "stepping", "workout", "mixed_locomotion"]
         texts += boutKinds.map(W.boutKind)
         let seriesKeys = ["hrv_rmssd.sleep_night", "resting_hr.sleep_night", "resp_rate.sleep_night",
@@ -909,6 +1285,7 @@ final class PhysiologyContextAppTests: XCTestCase {
         let labels: Set<String> = PC.MotionVocabulary.stationary.union(PC.MotionVocabulary.locomotion)
             .union(PC.MotionVocabulary.otherMovement)
         texts += labels.map(W.activityLabel)
+        texts += labels.map(W.likelyActivity)
         let evidence = ["detected_sleep_session", "outside_detected_sleep", "band_sleep_state", "wear_events",
                         "heart_rate_signal_present"]
         texts += evidence.map(W.evidence)
@@ -935,10 +1312,20 @@ final class PhysiologyContextAppTests: XCTestCase {
             for view in PC.ReferenceView.allCases {
                 texts.append(W.referenceLine(reference(view: view, status: status), units: "ms", locale: en))
                 texts.append(W.referenceLine(reference(view: view, status: status, diff: nil), units: "bpm", locale: en))
+                texts.append(W.stableAwakeMedianLine(reference(view: view, status: status), units: "ms", locale: en))
+                texts.append(W.stableAwakeMedianLine(reference(view: view, status: status, diff: nil), units: "bpm",
+                                                     locale: en))
             }
         }
+        texts += [W.referenceCenter(reference(), units: "ms", locale: en)].compactMap { $0 }
+        // A window with no comparison of its own, on a day whose stable-awake median has one.
+        envelopes.append(envelope(support: support, verdicts: [verdict(.stableAwakeRest, .eligible)]))
+        let episodes = PC.EpisodeState.allCases.map { episode($0) }
+            + [episode(.persistentShift, detector: "frozen_persistence", reasons: ["frozen_reference_deviation"]),
+               episode(.persistentShift, detector: "cusum", reasons: ["detector_cusum", "frozen_unavailable"])]
         for e in envelopes {
-            let day = try contextDay(envelopes: [e], episodes: PC.EpisodeState.allCases.map { episode($0) })
+            let day = try contextDay(envelopes: [e], episodes: episodes,
+                                     comparisons: PC.ReferenceStatus.allCases.map { reference(status: $0) })
             for metric in [PC.MetricKind.hrvRmssd, .restingHeartRate] {
                 texts += MeasurementContextSummary.build(day: day, metric: metric, locale: en).allText
                 for stale in [false, true] {
@@ -954,7 +1341,7 @@ final class PhysiologyContextAppTests: XCTestCase {
             }
         }
         let history = PhysiologyContextHistory(from: "2026-09-02", to: day, deviceId: "d", mode: nil,
-                                               episodes: PC.EpisodeState.allCases.map { episode($0) },
+                                               episodes: episodes,
                                                bouts: bouts, dailyValues: [], undecodedElements: 0, fetchedAtMs: 0)
         texts += PhysiologyContextHistoryModel.build(history, metric: .hrvRmssd, zone: .current, locale: en).allText
         texts += MeasurementContextSummary.stale().allText
