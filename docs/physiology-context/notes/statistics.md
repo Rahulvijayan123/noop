@@ -302,8 +302,8 @@ baseline can describe a changed state without proving recovery.
 | `transient_deviation` | Same-direction days with \|z_rolling\| ≥ 2.5 (Leys et al. 2013 cutoff), merged across ≤ 1 non-deviating supported day, outside a same-direction persistent episode (`isolated_excursion`) |
 | `recurring_episode` | ≥ 2 same-direction transients, each starting ≤ 28 days after the previous ended. Reported once (start = first, last = last, `occurrences`); its members are not repeated. |
 | `persistent_shift` | CUSUM alarm sustained, or the frozen persistence rule as above |
-| `usual_variation` | Status entry: ≥ 7 scored days in the window and no ongoing non-usual episode |
-| `insufficient_evidence` | Status entry: < 7 scored days (`too_few_supported_days`, plus `no_reference` when nothing could be scored) |
+| `usual_variation` | Status entry: ≥ 7 detector days (scored, past the burn-in) in the window and no ongoing non-usual episode; it starts at the first detector day |
+| `insufficient_evidence` | Status entry: < 7 detector days (`too_few_supported_days`, plus `no_reference` when nothing could be scored and `detector_burn_in` when the days were burn-in) |
 
 Every episode carries:
 
@@ -324,7 +324,7 @@ Rolling and frozen agreement is recorded as `frozen_and_rolling_agree`, `frozen_
 **Ids and ongoing.** `id = "ep_" + FNV-1a(series|regime|startDay|direction|policyFingerprint)`. At most one episode
 exists per (start day, direction); the stronger state wins. An episode is `ongoing` only if its condition holds on the
 latest scored day **and** that day is within 3 days of `day` (`no_recent_support` otherwise). An episode reaching back
-to the first scored day of the window carries `starts_at_window_start`. Nothing is called disease progression.
+to the first detector day of the window carries `starts_at_window_start`. Nothing is called disease progression.
 Nothing notifies.
 
 ## 4. Multi-signal dependence
@@ -771,7 +771,7 @@ All commands were run in `Packages/StrandAnalytics` on branch `pc/fix-stats` (fr
 | `swift test --filter "PCReference\|PCChange\|PCEvaluation\|PCReviewStats"` | 21 + 20 + 11 + 12 tests; the report and the two review print tests are skipped unless `PC_EVAL_REPORT=1` / `REVIEW_PRINT=1`; one failure, `testReviewRepresentedShareReflectsWhatEntersReferences` (R-F8, signal workstream) |
 | `PC_EVAL_REPORT=1 swift test --filter PCEvaluationReportTests` | Tables in §6, 2 284 s on a loaded machine. Optional `PC_EVAL_REPLICATES`, `PC_EVAL_SENS_REPLICATES`, `PC_EVAL_SEED`, `PC_EVAL_OUT=<path>` |
 | `REVIEW_PRINT=1 swift test --filter PCReviewStatsRegressionTests` | Re-check table in §6 (the 2000-replicate test takes about 11 minutes in debug) |
-| `swift test --parallel` | See review-statistics-repairs.md |
+| `swift test --parallel` | 2 804 tests; 4 failures, none in System F: `testReviewRepresentedShareReflectsWhatEntersReferences` (R-F8, signal workstream) and the contract review's `testRC05_…`, `testRC06_…`, `testRC11_…` (eligibility, bout and functional workstreams; confirmed defects in review-contract.md, failing by design at `204ea2c3`) |
 
 ## 12. Requests to the lead
 

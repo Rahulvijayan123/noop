@@ -65,6 +65,14 @@ without at φ = 0: 7.4 / 6.2 % and 7.0 / 5.0 % (P8, now stated in statistics.md 
 5.9 / 6.4 %. The R-F2 regression (φ = 0.3, 300 replicates): documents with ≥ 1 CUSUM episode 21.7 % with a 90-day
 load vs 29.7 % with full lookback; episodes starting before D−56 fell from 180 of 262 (review) to 5 of 68.
 
+## Test runs
+
+In `Packages/StrandAnalytics`: `swift test --filter "PCReference|PCChange|PCEvaluation|PCReviewStats"` passes except
+R-F8 (signal workstream). `swift test --parallel`: 2 804 tests, 4 failures, none in System F:
+`testReviewRepresentedShareReflectsWhatEntersReferences` (R-F8) and the contract review's RC-05, RC-06 and RC-11
+regressions (eligibility, bout and functional files; confirmed defects in review-contract.md, failing by design at
+`204ea2c3`).
+
 ## Requests to the lead
 
 See statistics.md §12. In short: contracts §13 versions (`pc-reference-2`, `pc-change-2`) and §5 series keys
