@@ -1,0 +1,389 @@
+{
+ "auroc": {
+  "auroc": 0.9940904237700146,
+  "ci95": [
+   0.9905409577899301,
+   0.996612372679988
+  ],
+  "n_boot": 300,
+  "warning": null
+ },
+ "cadence_spm": {
+  "bias": 4.742936776312691,
+  "loa95": [
+   -18.729999689918458,
+   28.215873242543836
+  ],
+  "mae": 7.074105479843502,
+  "mape": 0.10531949242545927,
+  "n": 6572,
+  "pearson_r": 0.8436916586113932,
+  "pred_mean": 105.74506702585622,
+  "true_mean": 101.00213024954351
+ },
+ "calibrated_operating_point": {
+  "balanced_accuracy": 0.736924105291317,
+  "ci95": {
+   "balanced_accuracy": [
+    0.6816179313113944,
+    0.779362852427759
+   ],
+   "f1": [
+    0.5328192305269288,
+    0.7168987800819991
+   ],
+   "precision": [
+    0.9979874550680575,
+    1.0
+   ],
+   "recall": [
+    0.363432098911407,
+    0.558731963852827
+   ],
+   "specificity": [
+    0.9996028489133237,
+    1.0
+   ]
+  },
+  "f1": 0.6429980276134122,
+  "n_gait": 7566,
+  "n_non_gait": 17505,
+  "n_predicted_gait": 3588,
+  "n_subjects": 39,
+  "n_windows": 25071,
+  "precision": 0.9994425863991081,
+  "recall": 0.4739624636531853,
+  "small_sample": false,
+  "specificity": 0.9998857469294488,
+  "threshold": 0.93
+ },
+ "calibration": {
+  "calibration_id": "eldernet-val-T1.0473-tau0.930",
+  "gait_prob": {
+   "T": 1.047343,
+   "fit": "val",
+   "method": "temperature"
+  },
+  "gait_threshold": 0.93
+ },
+ "detected_windows_with_0_true_steps": {
+  "mean_pred_steps": 8.913940774542946,
+  "n": 112
+ },
+ "ece_calibrated": 0.054649626475335916,
+ "ece_uncalibrated": 0.0510572545672733,
+ "integrity": {
+  "bundle_sha256": "eldernet-437a38b+cal:16191350862fb8de",
+  "experiment": "eldernet_oxwalk_external_v1",
+  "n_evaluations_of_experiment_any_split": 1,
+  "n_evaluations_on_this_test_split": 1,
+  "n_test_evaluations": 1,
+  "rerun_detail": null,
+  "rerun_reason": null,
+  "rerun_reason_text": null,
+  "test_sha256": "812c86d3b0ec9b5b6563a5dfdd815a818a71cfb116413fd34c386e329e1d41b2",
+  "time": 1791313350
+ },
+ "model_version": "eldernet-437a38b",
+ "n_masked_1_to_5_steps": 2142,
+ "n_windows_total": 27213,
+ "participant_totals": {
+  "mean_ape": 0.20748694218216984,
+  "median_ape": 0.1531134487339184,
+  "per_participant": {
+   "oxwalk:P01": {
+    "ape": 0.06601873263630763,
+    "file_steps": 867,
+    "pred": 809.7617588043213,
+    "true": 867.0
+   },
+   "oxwalk:P02": {
+    "ape": 0.5118648690997429,
+    "file_steps": 477,
+    "pred": 232.8404574394226,
+    "true": 477.0
+   },
+   "oxwalk:P03": {
+    "ape": 0.04290583338516559,
+    "file_steps": 4144,
+    "pred": 3966.198226451874,
+    "true": 4144.0
+   },
+   "oxwalk:P04": {
+    "ape": 0.5345176486877733,
+    "file_steps": 213,
+    "pred": 97.28581142425537,
+    "true": 209.0
+   },
+   "oxwalk:P05": {
+    "ape": 0.24053746642488422,
+    "file_steps": 528,
+    "pred": 400.99621772766113,
+    "true": 528.0
+   },
+   "oxwalk:P06": {
+    "ape": 0.12205860890498778,
+    "file_steps": 441,
+    "pred": 494.8278465270996,
+    "true": 441.0
+   },
+   "oxwalk:P07": {
+    "ape": 0.10158897050329156,
+    "file_steps": 2368,
+    "pred": 2127.4373178482056,
+    "true": 2368.0
+   },
+   "oxwalk:P08": {
+    "ape": 0.43036408199689774,
+    "file_steps": 382,
+    "pred": 217.60092067718506,
+    "true": 382.0
+   },
+   "oxwalk:P09": {
+    "ape": 0.3318053243331732,
+    "file_steps": 431,
+    "pred": 287.99190521240234,
+    "true": 431.0
+   },
+   "oxwalk:P10": {
+    "ape": 0.20192571565614525,
+    "file_steps": 282,
+    "pred": 225.05694818496704,
+    "true": 282.0
+   },
+   "oxwalk:P11": {
+    "ape": 0.1880545473774435,
+    "file_steps": 3956,
+    "pred": 3208.8084287643433,
+    "true": 3952.0
+   },
+   "oxwalk:P12": {
+    "ape": 0.04665085726422533,
+    "file_steps": 4154,
+    "pred": 3960.212338924408,
+    "true": 4154.0
+   },
+   "oxwalk:P13": {
+    "ape": 0.0580005858699216,
+    "file_steps": 4064,
+    "pred": 3817.9236254692078,
+    "true": 4053.0
+   },
+   "oxwalk:P14": {
+    "ape": 0.11702047563206845,
+    "file_steps": 2668,
+    "pred": 2355.7893710136414,
+    "true": 2668.0
+   },
+   "oxwalk:P15": {
+    "ape": 0.02861254075784932,
+    "file_steps": 1419,
+    "pred": 1459.6011953353882,
+    "true": 1419.0
+   },
+   "oxwalk:P16": {
+    "ape": 0.001394812059943448,
+    "file_steps": 1851,
+    "pred": 1853.5817971229553,
+    "true": 1851.0
+   },
+   "oxwalk:P17": {
+    "ape": 0.361616365753319,
+    "file_steps": 1908,
+    "pred": 1207.8218359947205,
+    "true": 1892.0
+   },
+   "oxwalk:P18": {
+    "ape": 0.3384887238251998,
+    "file_steps": 217,
+    "pred": 143.54794692993164,
+    "true": 217.0
+   },
+   "oxwalk:P19": {
+    "ape": 0.4498708415622554,
+    "file_steps": 726,
+    "pred": 399.3937690258026,
+    "true": 726.0
+   },
+   "oxwalk:P20": {
+    "ape": 0.28600998023121627,
+    "file_steps": 194,
+    "pred": 138.51406383514404,
+    "true": 194.0
+   },
+   "oxwalk:P21": {
+    "ape": 0.19805549264363817,
+    "file_steps": 1177,
+    "pred": 933.4634065628052,
+    "true": 1164.0
+   },
+   "oxwalk:P22": {
+    "ape": 0.14575415622502338,
+    "file_steps": 1443,
+    "pred": 1232.6767525672913,
+    "true": 1443.0
+   },
+   "oxwalk:P23": {
+    "ape": 0.10755524697241844,
+    "file_steps": 308,
+    "pred": 274.8729839324951,
+    "true": 308.0
+   },
+   "oxwalk:P24": {
+    "ape": 0.03388794693603958,
+    "file_steps": 5521,
+    "pred": 5333.9046449661255,
+    "true": 5521.0
+   },
+   "oxwalk:P25": {
+    "ape": 0.35329911515519424,
+    "file_steps": 259,
+    "pred": 167.4955291748047,
+    "true": 259.0
+   },
+   "oxwalk:P26": {
+    "ape": 0.1531134487339184,
+    "file_steps": 1672,
+    "pred": 1415.9943137168884,
+    "true": 1672.0
+   },
+   "oxwalk:P27": {
+    "ape": 0.015231660854669265,
+    "file_steps": 324,
+    "pred": 319.06494188308716,
+    "true": 324.0
+   },
+   "oxwalk:P28": {
+    "ape": 0.7048414843951085,
+    "file_steps": 258,
+    "pred": 76.15089702606201,
+    "true": 258.0
+   },
+   "oxwalk:P29": {
+    "ape": 0.07752070152502266,
+    "file_steps": 556,
+    "pred": 512.8984899520874,
+    "true": 556.0
+   },
+   "oxwalk:P30": {
+    "ape": 0.02218761273878836,
+    "file_steps": 5939,
+    "pred": 5807.227767944336,
+    "true": 5939.0
+   },
+   "oxwalk:P31": {
+    "ape": 0.4203113536725099,
+    "file_steps": 1044,
+    "pred": 605.1949467658997,
+    "true": 1044.0
+   },
+   "oxwalk:P32": {
+    "ape": 0.22925958402737476,
+    "file_steps": 1820,
+    "pred": 1401.9768166542053,
+    "true": 1819.0
+   },
+   "oxwalk:P33": {
+    "ape": 0.04777504910854052,
+    "file_steps": 4813,
+    "pred": 4583.0586886405945,
+    "true": 4813.0
+   },
+   "oxwalk:P34": {
+    "ape": 0.05040104845736889,
+    "file_steps": 94,
+    "pred": 89.26230144500732,
+    "true": 94.0
+   },
+   "oxwalk:P35": {
+    "ape": 0.28806373356760434,
+    "file_steps": 1884,
+    "pred": 1341.2879259586334,
+    "true": 1884.0
+   },
+   "oxwalk:P36": {
+    "ape": 0.20450296025976913,
+    "file_steps": 293,
+    "pred": 221.9436740875244,
+    "true": 279.0
+   },
+   "oxwalk:P37": {
+    "ape": 0.39384491212906375,
+    "file_steps": 248,
+    "pred": 150.3264617919922,
+    "true": 248.0
+   },
+   "oxwalk:P38": {
+    "ape": 0.0530758271342381,
+    "file_steps": 3356,
+    "pred": 3177.877524137497,
+    "true": 3356.0
+   },
+   "oxwalk:P39": {
+    "ape": 0.13400242860652198,
+    "file_steps": 605,
+    "pred": 523.9285306930542,
+    "true": 605.0
+   }
+  },
+  "sum_pred": 55573.79838061333,
+  "sum_true": 62841.0
+ },
+ "preprocessing_version": "eldernet-prep-1",
+ "rules": {
+  "gait_min_steps": 6,
+  "hop_s": 5,
+  "non_gait_steps": 0,
+  "totals_hop_s": 10
+ },
+ "steps_per_window": {
+  "bias": -0.340730290476752,
+  "loa95": [
+   -3.803193490456855,
+   3.1217329095033506
+  ],
+  "mae": 1.0177971198656033,
+  "mape": 0.07102685499285011,
+  "n": 6572,
+  "pearson_r": 0.8579764608025688,
+  "pred_mean": 16.492958084447167,
+  "true_mean": 16.83368837492392
+ },
+ "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23",
+ "upstream_default": {
+  "balanced_accuracy": 0.9311123070988441,
+  "ci95": {
+   "balanced_accuracy": [
+    0.9010744407191381,
+    0.953816736403953
+   ],
+   "f1": [
+    0.8842614123403069,
+    0.9498372896329392
+   ],
+   "precision": [
+    0.9717690369008729,
+    0.9903183917095517
+   ],
+   "recall": [
+    0.8091014494344572,
+    0.9136316119304405
+   ],
+   "specificity": [
+    0.9905254163324532,
+    0.9960672345803336
+   ]
+  },
+  "f1": 0.9223859649122808,
+  "n_gait": 7566,
+  "n_non_gait": 17505,
+  "n_predicted_gait": 6684,
+  "n_subjects": 39,
+  "n_windows": 25071,
+  "precision": 0.983243566726511,
+  "recall": 0.8686227861485594,
+  "small_sample": false,
+  "specificity": 0.9936018280491288,
+  "threshold": 0.5
+ }
+}
