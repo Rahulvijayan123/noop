@@ -382,6 +382,128 @@ final class PCReferenceTests: XCTestCase {
         XCTAssertNil(Self.view(bare, .conditioned, series: band)?.robustZ)
     }
 
+    // MARK: Scale floors in native resolution (R-F1; V12 count and rate cases)
+
+    func rolling(_ series: String, history: [Double], today: Double) throws -> PC.ReferenceComparison {
+        let e = Ref.dayNumber(Self.day)!
+        let hist = history.enumerated().map { i, v in Self.value(Ref.dayKey(e - history.count + i), v, series: series) }
+        let cs = Self.compare([Self.value(Self.day, today, series: series)], hist).comparisons
+        return try XCTUnwrap(Self.view(cs, .rolling, series: series))
+    }
+
+    func testCountAndRateSeriesGetNativeResolutionFloorsNotMicroscopicOnes() throws {
+        let zeros = [Double](repeating: 0, count: 20)
+        // One bout after 20 bout-free days: one count over the integer floor, not 1 / 1e-6.
+        let count = try rolling(PC.Functional.seriesBoutCount, history: zeros, today: 1)
+        XCTAssertEqual(count.scale, 1)
+        XCTAssertEqual(count.robustZ, 1)
+        XCTAssertTrue(count.reasons.contains(Ref.constantHistory))
+        XCTAssertFalse(count.reasons.contains(Ref.scaleFloorDefault))
+        // One bout, or one 60-s minimum bout of locomotion, in the minimum 4 worn waking hours: |z| = 1.
+        let rate = try rolling(PC.Functional.seriesBoutsPerWornHour, history: zeros, today: 0.25)
+        XCTAssertEqual(try XCTUnwrap(rate.robustZ), 1, accuracy: 1e-12)
+        let loco = try rolling(PC.Functional.seriesLocomotionPerWornHour, history: zeros, today: 15)
+        XCTAssertEqual(try XCTUnwrap(loco.robustZ), 1, accuracy: 1e-12)
+        // Every functional series the product emits has a listed floor (longest prefix wins).
+        for key in [PC.Functional.seriesLocomotionPerWornHour, PC.Functional.seriesBoutsPerWornHour,
+                    PC.Functional.seriesMedianBout, PC.Functional.seriesPausesPerBoutHour,
+                    PC.Functional.seriesCadenceMean, PC.Functional.seriesCadenceCv, PC.Functional.seriesActiveToRest,
+                    PC.Functional.seriesRestAfterBout, PC.Functional.seriesLocomotionTotal,
+                    PC.Functional.seriesBoutCount] {
+            XCTAssertNotNil(Ref.listedFloor(key, config: .init()), key)
+        }
+        XCTAssertEqual(Ref.listedFloor(PC.Functional.seriesLocomotionPerWornHour, config: .init())?.floor, 15)
+        XCTAssertEqual(Ref.listedFloor(PC.Functional.seriesLocomotionTotal, config: .init())?.floor, 60)
+        // HR-derived post-effort declines: the 1 bpm integer floor.
+        let rec = try rolling(PC.ExertionBouts.recoverySeriesKey(kind: "walk", config: .init()),
+                              history: Array(repeating: 20, count: 20), today: 21)
+        XCTAssertEqual(rec.scale, 1)
+        XCTAssertEqual(rec.robustZ, 1)
+        // An unlisted series: the larger of 2 % of |center| and one native unit, flagged as the default rule.
+        let unknown = try rolling("custom.metric", history: zeros, today: 0.5)
+        XCTAssertEqual(unknown.scale, 1)
+        XCTAssertEqual(unknown.robustZ, 0.5)
+        XCTAssertTrue(unknown.reasons.contains(Ref.scaleFloorDefault))
+        let large = try rolling("custom.metric", history: Array(repeating: 1000, count: 20), today: 1040)
+        XCTAssertEqual(try XCTUnwrap(large.scale), 20, accuracy: 1e-9)
+        XCTAssertEqual(try XCTUnwrap(large.robustZ), 2, accuracy: 1e-9)
+        // Listed physiological series never carry the default reason.
+        let hr = try rolling("resting_hr.sleep_night", history: Array(repeating: 52, count: 20), today: 53)
+        XCTAssertFalse(hr.reasons.contains(Ref.scaleFloorDefault))
+    }
+
+    // MARK: Frozen authority (R-F7, P4)
+
+    func testRegisteredFrozenReferenceIsTheAuthorityAndBackfilledDaysNeverRegisterAnother() throws {
+        let t = Ref.dayNumber(Self.day)!
+        // Registered by a later day's run; its window ends after the scored (back-filled) day.
+        let stored = PC.FrozenReference(id: "frz_stored", seriesKey: "hrv_rmssd.sleep_night", regimeKey: "r1",
+                                        version: 1, fromDay: Ref.dayKey(t - 5), toDay: Ref.dayKey(t + 8),
+                                        supportDays: 14, center: log(45), scale: 0.1, transform: "ln",
+                                        selectionRule: "x", createdForDay: Ref.dayKey(t + 60), policyFingerprint: "fp")
+        let out = Self.compare([Self.value(Self.day, 44)], Self.history(30) { 40 + Double($0 % 5) }, frozen: [stored])
+        XCTAssertTrue(out.newFrozen.isEmpty, "a registered reference exists: never a second version 1")
+        let f = try XCTUnwrap(Self.view(out.comparisons, .frozen))
+        XCTAssertEqual(f.status, .unavailable)
+        XCTAssertNil(f.robustZ)
+        XCTAssertEqual(f.referenceId, "frz_stored")
+        XCTAssertTrue(f.reasons.contains(Ref.frozenWindowNotCompleteForDay))
+        XCTAssertFalse(f.reasons.contains(Ref.frozenRegisteredThisRun))
+        // A day after its window uses it (retrospective mode), whatever day it was created for.
+        let later = Ref.dayKey(t + 20)
+        let l = Ref.compare([Self.value(later, 44)], history: Self.history(30, endingBefore: later) { 40 + Double($0 % 5) },
+                            frozen: [stored], day: later, policyFingerprint: "fp", config: .init())
+        XCTAssertEqual(Self.view(l.comparisons, .frozen)?.status, .ready)
+        XCTAssertEqual(Self.view(l.comparisons, .frozen)?.referenceId, "frz_stored")
+        XCTAssertTrue(l.newFrozen.isEmpty)
+        // Causal mode: a reference created for the day or later is ignored even when its window ended before it.
+        var early = stored
+        early.fromDay = Ref.dayKey(t - 40); early.toDay = Ref.dayKey(t - 27)
+        let liveHistory = Self.history(30, mode: .causalLive) { 40 + Double($0 % 5) }
+        let live = Self.compare([Self.value(Self.day, 44, mode: .causalLive)], liveHistory, frozen: [early])
+        let lf = try XCTUnwrap(Self.view(live.comparisons, .frozen))
+        XCTAssertNotEqual(lf.status, .ready)
+        XCTAssertNil(lf.robustZ)
+        XCTAssertTrue(lf.reasons.contains(Ref.frozenCreatedAfterDayIgnored))
+        early.createdForDay = Ref.dayKey(t - 1)
+        let ok = Self.compare([Self.value(Self.day, 44, mode: .causalLive)], liveHistory, frozen: [early])
+        XCTAssertEqual(Self.view(ok.comparisons, .frozen)?.status, .ready)
+    }
+
+    // MARK: Causal partial days (P2)
+
+    func testCausalPartialDayAccumulatingValuesCarryNoDistance() throws {
+        let series = "heart_rate.stable_awake_5min"
+        let hist = Self.history(20, series: series, mode: .causalLive) { 69 + Double($0 % 3) }
+        let cs = Self.compare([Self.value(Self.day, 58, series: series, mode: .causalLive)], hist).comparisons
+            .filter { $0.seriesKey == series }
+        XCTAssertEqual(cs.map(\.view), [.recent, .rolling, .frozen])
+        for c in cs {
+            XCTAssertNil(c.robustZ)
+            XCTAssertNil(c.signedDifference)
+            XCTAssertNil(c.transformedDifference)
+            XCTAssertNotEqual(c.status, .ready)
+            XCTAssertTrue(c.reasons.contains(Ref.partialDayComposition), "\(c.view)")
+        }
+        XCTAssertNotNil(Self.view(cs, .rolling, series: series)?.center, "the reference itself stays visible")
+        // The time-band stratum keeps its conditioned (like-for-like) comparison.
+        let band = series + ".band_06_12"
+        let bh = Self.history(20, series: band, mode: .causalLive) { 58 + Double($0 % 3) }
+        let b = Self.compare([Self.value(Self.day, 58, series: band, mode: .causalLive)], bh + hist).comparisons
+        XCTAssertNotNil(Self.view(b, .conditioned, series: band)?.robustZ)
+        // Retrospective (whole-day) values, and causal nightly values, are compared as usual.
+        let retro = Self.compare([Self.value(Self.day, 58, series: series)],
+                                 Self.history(20, series: series) { 69 + Double($0 % 3) }).comparisons
+        XCTAssertNotNil(Self.view(retro, .rolling, series: series)?.robustZ)
+        let night = Self.compare([Self.value(Self.day, 44, mode: .causalLive)],
+                                 Self.history(20, mode: .causalLive) { 40 + Double($0 % 5) }).comparisons
+        XCTAssertNotNil(Self.view(night, .rolling)?.robustZ)
+        // Functional features accumulate over the waking time so far: the same rule.
+        let fh = Self.history(20, series: PC.Functional.seriesBoutsPerWornHour, mode: .causalLive) { 0.5 + Double($0 % 3) * 0.1 }
+        let fc = Self.compare([Self.value(Self.day, 0.1, series: PC.Functional.seriesBoutsPerWornHour, mode: .causalLive)], fh)
+        XCTAssertTrue(fc.comparisons.allSatisfy { $0.robustZ == nil && $0.reasons.contains(Ref.partialDayComposition) })
+    }
+
     // MARK: Leakage and reproducibility
 
     func testAppendingLaterDaysNeverChangesAnEarlierDaysComparisons() throws {
