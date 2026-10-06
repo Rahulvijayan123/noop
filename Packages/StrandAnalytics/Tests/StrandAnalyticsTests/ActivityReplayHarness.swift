@@ -2,23 +2,31 @@ import Foundation
 @testable import StrandAnalytics
 
 // ActivityReplayHarness.swift — offline replay of recorded per-second evidence through the ActivityContext
-// decoder, for the system comparison HART vs Inertia vs HART + Inertia (spec §22–§23).
+// decoder, for the system comparison HART vs Inertia vs ElderNet and their combinations (spec §22–§23).
 //
 // Replay record format `nara-activity-replay-1` (also documented in Tools/ActivityContext/INERTIA1.md,
 // "Replay record format"). JSON Lines, UTF-8, one JSON object per line:
 //
 //   line 1, the header:
 //     {"format": "nara-activity-replay-1",
-//      "arms": ["streams", "hart", "inertia", "hart+inertia", "naive_average"],   optional, default: all five
+//      "arms": ["streams", "hart", "inertia", "hart+inertia", "naive_average",
+//               "eldernet", "hart+eldernet", "hart+eldernet+inertia"],            optional, default: all eight
 //      "decoder": {"resting_hr": 60, "max_hr": 190},                              optional (personalised config)
 //      "motion_heads": {                                                          optional; needed by the Inertia arms
 //        "bundle": <a motion-heads-1 infer response without "windows" (encoder_id … hop_s, "bundle": {heads, ood})>,
 //        "config": {"locomotion": 0.25, "posture": 0.25, "arm": 0.25, "body_budget": 0.5,
 //                   "arm_budget": 0.5, "hart_redundancy": 0.65},                  optional, candidate defaults
-//        "allow_standin_evidence_for_testing": false}}                           a stand-in bundle needs true
+//        "allow_standin_evidence_for_testing": false},                           a stand-in bundle needs true
+//      "gait_quality": {                                                          optional; needed by the ElderNet arms
+//        "model": <a gait-quality-1 infer response without "windows" (model_id … gait_threshold)>,
+//        "gait_prior": 0.2,                                                       required: π of the calibration set
+//        "config": {"gait": 0.25, "brisk": 0, "brisk_rule": "cadence", "brisk_cadence_spm": 100,
+//                   "brisk_speed_mps": 1.34, "hart_redundancy": 0.65, "inertia_redundancy": 0.65,
+//                   "accelerometer_budget": 0.5}}}                               optional, candidate defaults
 //   The bundle goes through exactly the wire decoder's validation (`MotionHeadsBundleInfo` decodes through
 //   `MotionHeadsResponse.parseBundle`), and so does every `motion_heads` window (structure on decode, then
-//   `validate(against:)` the header's bundle): a record the serve path would have refused is refused here.
+//   `validate(against:)` the header's bundle): a record the serve path would have refused is refused here. The
+//   same holds for `gait_quality.model` (`GaitQualityResponse.parseModel`) and every `gait_quality` window.
 //   every further line, one observation:
 //     {"seq": "<sequence id>", "obs": <ActivityObservationRecord>}
 //
@@ -37,13 +45,18 @@ import Foundation
 //                   a HART (or baseline) window completed at or before ts; probs keyed by v1 label
 //     motion_heads  a motion-heads-1 window object (s, e, posture, locomotion, arm_behavior, transition,
 //                   movement_intensity, ood_score, is_ood)|null
+//     gait_quality  a gait-quality-1 window object (s, e, gait_prob, is_gait, prefiltered, speed_mps, cadence_spm,
+//                   stride_m, regularity, steps)|null — attached like motion_heads, never a second of its own
 //     wear          "onWrist" | "offWrist" | "unknown" (default "unknown")
 //     sleep         "asleep" | "awake" | "unknown" (default "unknown")
 //     in_bed        bool (default false)
 //     workout       bool (default false), workout_kind "unspecified"|"running"|"walking"|"cycling"|"other"
 //
-// Arms: `streams` drops encoder, imu and motion_heads; `hart` drops motion_heads; `inertia` drops encoder and
-// decodes with the motion-heads config; `hart+inertia` keeps everything; `naive_average` is the FORBIDDEN
+// Arms: `streams` drops encoder, imu, motion_heads and gait_quality; `hart` drops motion_heads and gait_quality;
+// `inertia` drops encoder and gait_quality and decodes with the motion-heads config; `hart+inertia` drops
+// gait_quality; `eldernet` drops encoder and motion_heads and decodes with the gait config; `hart+eldernet` drops
+// motion_heads; `hart+eldernet+inertia` keeps everything with both configs. (The five original arms decode
+// exactly what they decoded before ElderNet existed.) `naive_average` (gait_quality dropped) is the FORBIDDEN
 // baseline kept only as an ablation: the encoder probabilities are replaced by 0.5·HART + 0.5·Inertia
 // locomotion mapped to the v1 labels (stationary → stationary; walking, brisk_walking, stairs → walking;
 // running → running; cycling, vehicle_motion, other → other_movement), using the latest non-OOD Inertia window
@@ -52,7 +65,8 @@ import Foundation
 // Output (`nara-activity-replay-out-1`, one JSON document): per arm, per sequence, the published 5-s states
 // (posture / locomotion / arm_behavior probabilities, display label, canonical class and its confidence,
 // unknown mass per body head, overall confidence / uncertainty, the event field), every flagged event, and the
-// motion-heads report (stamp, refusal, attach / OOD counts).
+// motion-heads report (stamp, refusal, attach / OOD counts) and the gait-quality report; a state that carries the
+// reported ElderNet block has it under `gait`.
 
 /// Mirror of `ActivityObservation` (see the format above).
 struct ActivityObservationRecord: Codable, Equatable {
@@ -75,6 +89,7 @@ struct ActivityObservationRecord: Codable, Equatable {
     var imu: ImuWindowFeatures?
     var encoder: Encoder?
     var motionHeads: MotionHeadsWindow?
+    var gaitQuality: GaitQualityWindow?
     var wear: WearEvidence
     var sleep: SleepEvidence
     var inBed: Bool
@@ -84,6 +99,7 @@ struct ActivityObservationRecord: Codable, Equatable {
     enum CodingKeys: String, CodingKey {
         case ts, dyn, grav, steps, hr, imu, encoder, wear, sleep, workout
         case strapClass = "strap_class", motionHeads = "motion_heads", inBed = "in_bed", workoutKind = "workout_kind"
+        case gaitQuality = "gait_quality"
     }
 
     init(_ o: ActivityObservation) {
@@ -91,7 +107,7 @@ struct ActivityObservationRecord: Codable, Equatable {
         imu = o.imu
         encoder = o.encoder.map { Encoder(id: $0.encoderId, version: $0.encoderVersion, s: $0.startTs, e: $0.endTs,
                                           probs: $0.classProbs, calibrated: $0.calibrated, abstained: $0.abstained) }
-        motionHeads = o.motionHeads; wear = o.wear; sleep = o.sleep; inBed = o.inBed
+        motionHeads = o.motionHeads; gaitQuality = o.gaitQuality; wear = o.wear; sleep = o.sleep; inBed = o.inBed
         workout = o.loggedWorkout; workoutKind = o.workoutKind
     }
 
@@ -106,6 +122,7 @@ struct ActivityObservationRecord: Codable, Equatable {
         imu = try c.decodeIfPresent(ImuWindowFeatures.self, forKey: .imu)
         encoder = try c.decodeIfPresent(Encoder.self, forKey: .encoder)
         motionHeads = try c.decodeIfPresent(MotionHeadsWindow.self, forKey: .motionHeads)
+        gaitQuality = try c.decodeIfPresent(GaitQualityWindow.self, forKey: .gaitQuality)
         wear = try c.decodeIfPresent(WearEvidence.self, forKey: .wear) ?? .unknown
         sleep = try c.decodeIfPresent(SleepEvidence.self, forKey: .sleep) ?? .unknown
         inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed) ?? false
@@ -120,7 +137,7 @@ struct ActivityObservationRecord: Codable, Equatable {
                                                        endTs: $0.e, classProbs: $0.probs, calibrated: $0.calibrated,
                                                        abstained: $0.abstained) },
             wear: wear, sleep: sleep, inBed: inBed, loggedWorkout: workout, workoutKind: workoutKind,
-            motionHeads: motionHeads)
+            motionHeads: motionHeads, gaitQuality: gaitQuality)
     }
 }
 
@@ -152,18 +169,43 @@ struct ActivityReplayHeader: Codable {
         }
     }
 
+    struct GaitWeights: Codable {
+        var gait: Double?
+        var brisk: Double?
+        var briskRule: GaitQualityEvidenceConfig.BriskRule?
+        var briskCadenceSpm: Double?
+        var briskSpeedMps: Double?
+        var hartRedundancy: Double?
+        var inertiaRedundancy: Double?
+        var accelerometerBudget: Double?
+        enum CodingKeys: String, CodingKey {
+            case gait, brisk, briskRule = "brisk_rule", briskCadenceSpm = "brisk_cadence_spm"
+            case briskSpeedMps = "brisk_speed_mps", hartRedundancy = "hart_redundancy"
+            case inertiaRedundancy = "inertia_redundancy", accelerometerBudget = "accelerometer_budget"
+        }
+    }
+    struct GaitQuality: Codable {
+        var model: GaitQualityModelInfo
+        var gaitPrior: Double
+        var config: GaitWeights?
+        enum CodingKeys: String, CodingKey { case model, gaitPrior = "gait_prior", config }
+    }
+
     var format: String
     var arms: [String]?
     var decoder: DecoderParams?
     var motionHeads: MotionHeads?
+    var gaitQuality: GaitQuality? = nil
 
     enum CodingKeys: String, CodingKey {
         case format, arms, decoder
         case motionHeads = "motion_heads"
+        case gaitQuality = "gait_quality"
     }
 
     static let formatName = "nara-activity-replay-1"
-    static let allArms = ["streams", "hart", "inertia", "hart+inertia", "naive_average"]
+    static let allArms = ["streams", "hart", "inertia", "hart+inertia", "naive_average",
+                          "eldernet", "hart+eldernet", "hart+eldernet+inertia"]
 }
 
 struct ActivityReplayLine: Codable {
@@ -220,6 +262,14 @@ enum ActivityReplay {
                 do { try w.validate(against: bundle, index: i) }
                 catch { throw Failure.line(i + 2, "\(error)") }
             }
+            if let g = record.obs.gaitQuality {
+                // The same model checks as the wire decoder (window length, threshold agreement).
+                guard let model = header.gaitQuality?.model else {
+                    throw Failure.line(i + 2, "gait_quality window without a header gait_quality.model")
+                }
+                do { try g.validate(against: model, index: i) }
+                catch { throw Failure.line(i + 2, "\(error)") }
+            }
             if bySeq[record.seq] == nil { order.append(record.seq); bySeq[record.seq] = [] }
             if let last = bySeq[record.seq]!.last, record.obs.ts <= last.ts {
                 throw Failure.unordered(seq: record.seq, ts: record.obs.ts)
@@ -262,6 +312,22 @@ enum ActivityReplay {
             armBudget: w?.armBudget ?? MotionHeadsEvidenceConfig.defaultArmBudget,
             hartRedundancy: w?.hartRedundancy ?? MotionHeadsEvidenceConfig.defaultHartRedundancy,
             allowStandInEvidenceForTesting: mh.allowStandIn ?? false)
+        return c
+    }
+
+    static func gaitConfig(_ header: ActivityReplayHeader, base: ActivityDecoderConfig) -> ActivityDecoderConfig? {
+        guard let g = header.gaitQuality else { return nil }
+        var c = base
+        let w = g.config
+        c.gaitQuality = GaitQualityEvidenceConfig(
+            mode: .candidate, model: g.model, gaitPrior: g.gaitPrior,
+            gaitWeight: w?.gait ?? GaitQualityEvidenceConfig.defaultGaitWeight,
+            briskWeight: w?.brisk ?? 0, briskRule: w?.briskRule ?? .cadence,
+            briskCadenceSpm: w?.briskCadenceSpm ?? GaitQualityEvidenceConfig.defaultBriskCadenceSpm,
+            briskSpeedMps: w?.briskSpeedMps ?? GaitQualityEvidenceConfig.defaultBriskSpeedMps,
+            hartRedundancy: w?.hartRedundancy ?? GaitQualityEvidenceConfig.defaultHartRedundancy,
+            inertiaRedundancy: w?.inertiaRedundancy ?? GaitQualityEvidenceConfig.defaultInertiaRedundancy,
+            accelerometerBudget: w?.accelerometerBudget ?? GaitQualityEvidenceConfig.defaultAccelerometerBudget)
         return c
     }
 
@@ -308,19 +374,37 @@ enum ActivityReplay {
 
     static func arm(_ name: String, _ obs: [ActivityObservation], header: ActivityReplayHeader) -> ArmPlan {
         let base = baseConfig(header)
+        // The five original arms never see ElderNet windows (nor a gait config): they decode what they always did.
+        let noGait = obs.map { var o = $0; o.gaitQuality = nil; return o }
         switch name {
         case "streams":
-            return .decode(obs.map { var o = $0; o.encoder = nil; o.imu = nil; o.motionHeads = nil; return o }, base)
+            return .decode(noGait.map { var o = $0; o.encoder = nil; o.imu = nil; o.motionHeads = nil; return o }, base)
         case "hart":
-            return .decode(obs.map { var o = $0; o.motionHeads = nil; return o }, base)
+            return .decode(noGait.map { var o = $0; o.motionHeads = nil; return o }, base)
         case "inertia", "hart+inertia":
             guard let config = inertiaConfig(header) else { return .refused("no_bundle") }
             if let why = config.motionHeads?.evidenceRefusal { return .refused(why) }
-            let arm = name == "inertia" ? obs.map { var o = $0; o.encoder = nil; return o } : obs
+            let arm = name == "inertia" ? noGait.map { var o = $0; o.encoder = nil; return o } : noGait
             return .decode(arm, config)
         case "naive_average":
             guard let mh = header.motionHeads else { return .refused("no_bundle") }
-            return .decode(naiveAverage(obs, holdS: mh.bundle.hopS), base)
+            return .decode(naiveAverage(noGait, holdS: mh.bundle.hopS), base)
+        case "eldernet", "hart+eldernet":
+            guard let config = gaitConfig(header, base: base) else { return .refused("no_gait_model") }
+            if let why = config.gaitQuality?.evidenceRefusal { return .refused(why) }
+            let arm = obs.map { o -> ActivityObservation in
+                var o = o
+                o.motionHeads = nil
+                if name == "eldernet" { o.encoder = nil }
+                return o
+            }
+            return .decode(arm, config)
+        case "hart+eldernet+inertia":
+            guard let inertia = inertiaConfig(header) else { return .refused("no_bundle") }
+            if let why = inertia.motionHeads?.evidenceRefusal { return .refused(why) }
+            guard let config = gaitConfig(header, base: inertia) else { return .refused("no_gait_model") }
+            if let why = config.gaitQuality?.evidenceRefusal { return .refused(why) }
+            return .decode(obs, config)
         default:
             return .refused("unknown_arm")
         }
@@ -346,6 +430,10 @@ enum ActivityReplay {
         } else {
             out["transition"] = NSNull()
         }
+        // Only the ElderNet arms can carry the reported block; every other state record is unchanged.
+        if let g = s.gait, let object = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(g)) {
+            out["gait"] = object
+        }
         return out
     }
 
@@ -368,6 +456,9 @@ enum ActivityReplay {
                     ]
                     if let report = track.motionHeads {
                         entry["motion_heads"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(report))
+                    }
+                    if let report = track.gaitQuality {
+                        entry["gait_quality"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(report))
                     }
                     perSeq[id] = entry
                 }
