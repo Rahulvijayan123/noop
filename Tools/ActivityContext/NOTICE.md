@@ -65,6 +65,133 @@ Inertia-1 (yang-ai-lab/Inertia-1)
 scipy / torch (optional [inertia] extra) and scikit-learn / pandas / pyarrow ([inertia-train])
   BSD-3-Clause / BSD-style / Apache-2.0 respectively; runtime dependencies only, not vendored.
 
+ElderNet gait quality (yonbrand/gait-quality) — activity_context/eldernet/
+  https://github.com/yonbrand/gait-quality
+  Pinned commit: 437a38bcc69f42717fe73c1f7dbea7e1f7a50d23
+  Copyright © 2022, University of Oxford
+  License: University of Oxford SSL-wearables Academic Use Licence (full text below) — internal academic,
+  non-commercial research only; accepted by the owner on 2026-10-05 (Nara is PolyForm Noncommercial).
+  Used for: the ElderNet architecture (ResNet-18 from OxWearables/ssl-wearables + FC heads) and its six
+  fine-tuned checkpoints (gait detection, gait speed, stride length, cadence, stride regularity, step count).
+  Vendored / re-expressed files (each carries this notice, the upstream path and the SHA):
+    vendor/models.py   <- models.py (Downsample, ResBlock, Resnet feature extractor, LinearLayers, Classifier,
+                          Regressor, ElderNet)
+    vendor/__init__.py (notice + file map only)
+    bouts.py           <- gait_quality/detection.py (centre-second voting, merge_bouts, detect_bouts),
+                          gait_quality/quality.py (summarise_bouts, summarise_recording)
+  Modified versions remain under the same licence; under its clause 1.2(d) the University is granted a
+  licence to any modified source code. Weights: fetched by sha256 from the pinned commit
+  (python -m activity_context.eldernet.weights fetch), never committed.
+  Citation: Brand, Y. E., Buchman, A. S., Kluge, F., Palmerini, L., Becker, C., Cereatti, A., Maetzler, W.,
+  Vereijken, B., Yarnall, A. J., Rochester, L., Del Din, S., Mueller, A., Hausdorff, J. M., & Perlman, O.
+  (2026). Continuous Assessment of Daily-Living Gait Using Self-Supervised Learning of Wrist-Worn
+  Accelerometer Data. npj Digital Medicine. https://doi.org/10.1038/s41746-026-02528-2
+
+  In this study, we utilized the pre-trained UK Biobank SSL model. For its implementation, we used the
+  model architecture from the following repository:
+  (https://github.com/OxWearables/ssl-wearables/tree/main).
+  As a result, we are subject to the same license terms as specified in the original repository:
+
+  **These licence terms apply to all licences granted by THE CHANCELLOR, MASTERS AND SCHOLARS OF THE
+  UNIVERSITY OF OXFORD whose administrative offices are at University Offices, Wellington Square, Oxford
+  OX1 2JD, United Kingdom (the “University”) for use of “SSL-wearables” (“the Software”) through this
+  website (https://github.com/OxWearables) (the ”Website”).
+
+  By downloading the Software through the Website, you (the “Licensee”) are confirming that you agree that
+  your use of the Software is subject to these licence terms**
+
+  PLEASE READ THESE LICENCE TERMS CAREFULLY BEFORE DOWNLOADING THE SOFTWARE. IF YOU DO NOT AGREE TO THESE
+  LICENCE TERMS YOU SHOULD NOT DOWNLOAD THE SOFTWARE.
+
+  THE SOFTWARE IS INTENDED FOR USE BY ACADEMICS CARRYING OUT RESEARCH AND NOT FOR USE BY CONSUMERS OR
+  COMMERCIAL BUSINESSES.
+
+  Academic Use Licence 1.1 The Licensee is granted a limited non-exclusive and non-transferable royalty
+  free licence to download and use the Software provided that the Licensee will:
+  (a) limit their use of the Software to their own internal academic non-commercial research which is
+  undertaken for the purposes of education or other scholarly use; (b) not use the Software for or on
+  behalf of any third party or to provide a service or integrate all or part of the Software into a
+  product for sale or license to third parties; (c) use the Software in accordance with the prevailing
+  instructions and guidance for use given on the Website and comply with procedures on the Website for
+  user identification, authentication and access; (d) comply with all applicable laws and regulations with
+  respect to their use of the Software; and (e) ensure that the Copyright Notice “Copyright © 2022,
+  University of Oxford” appears prominently wherever the Software is reproduced and is referenced or cited
+  with the Copyright Notice when the Software is described in any research publication or on any documents
+  or other material created using the Software. 1.2 The Licensee may only reproduce, modify, transmit or
+  transfer the Software where:
+
+  (a) such reproduction, modification, transmission or transfer is for academic, research or other
+  scholarly use; (b) the conditions of this Licence are imposed upon the receiver of the Software or any
+  modified Software; (c) all original and modified Source Code is included in any transmitted software
+  program; and (d) the Licensee grants the University an irrevocable, indefinite, royalty free,
+  non-exclusive unlimited licence to use and sub-licence any modified Source Code as part of the Software.
+  1.3 The University reserves the right at any time and without liability or prior notice to the Licensee
+  to revise, modify and replace the functionality and performance of the access to and operation of the
+  Software.
+
+  1.4 The Licensee acknowledges and agrees that the University owns all intellectual property rights in
+  the Software. The Licensee shall not have any right, title or interest in the Software.
+
+  1.5 This Licence will terminate immediately and the Licensee will no longer have any right to use the
+  Software or exercise any of the rights granted to the Licensee upon any breach of the conditions in
+  Section 1 of this Licence.
+
+  Indemnity and Liability 2.1 The Licensee shall defend, indemnify and hold harmless the University
+  against any claims, actions, proceedings, losses, damages, expenses and costs (including without
+  limitation court costs and reasonable legal fees) arising out of or in connection with the Licensee's
+  possession or use of the Software, or any breach of these terms by the Licensee.
+  2.2 The Software is provided on an ‘as is’ basis and the Licensee uses the Software at their own risk.
+  No representations, conditions, warranties or other terms of any kind are given in respect of the the
+  Software and all statutory warranties and conditions are excluded to the fullest extent permitted by
+  law. Without affecting the generality of the previous sentences, the University gives no implied or
+  express warranty and makes no representation that the Software or any part of the Software: (a) will
+  enable specific results to be obtained; or (b) meets a particular specification or is comprehensive
+  within its field or that it is error free or will operate without interruption; or (c) is suitable for
+  any particular, or the Licensee's specific purposes.
+
+  2.3 Except in relation to fraud, death or personal injury, the University's liability to the Licensee
+  for any use of the Software, in negligence or arising in any other way out of the subject matter of
+  these licence terms, will not extend to any incidental or consequential damages or losses, or any loss
+  of profits, loss of revenue, loss of data, loss of contracts or opportunity, whether direct or indirect.
+
+  2.4 The Licensee hereby irrevocably undertakes to the University not to make any claim against any
+  employee, student, researcher or other individual engaged by the University, being a claim which seeks
+  to enforce against any of them any liability whatsoever in connection with these licence terms or their
+  subject-matter.
+
+  General 3.1 Severability - If any provision (or part of a provision) of these licence terms is found by
+  any court or administrative body of competent jurisdiction to be invalid, unenforceable or illegal, the
+  other provisions shall remain in force. 3.2 Entire Agreement - These licence terms constitute the whole
+  agreement between the parties and supersede any previous arrangement, understanding or agreement between
+  them relating to the Software. 3.3 Law and Jurisdiction - These licence terms and any disputes or claims
+  arising out of or in connection with them shall be governed by, and construed in accordance with, the
+  law of England. The Licensee irrevocably submits to the exclusive jurisdiction of the English courts for
+  any dispute or claim that arises out of or in connection with these licence terms.
+  If you are interested in using the Software commercially, please contact Oxford University Innovation
+  Limited to negotiate a licence. Contact details are enquiries@innovation.ox.ac.uk
+
+Mobilise-D Technical Validation Study (TVS) dataset, v1.0.2 — ElderNet fine-tuning data; golden fixture
+  Del Din, S. et al. (2025). Mobilise-D Technical Validation Study (TVS) dataset (Version V1.0.2) [Data set].
+  Zenodo. https://doi.org/10.5281/zenodo.15861907 — License: CC BY 4.0.
+  Used for: fixtures/eldernet/golden_gait_quality_request.json contains seconds [12, 83) of upstream's
+  committed toy excerpt examples/toy_wrist.csv.gz (participant PD4010, INDIP left wrist, 100 Hz, g).
+  Changes made (by Nara): cut to that range, axes x/y/z kept as WHOOP ax/ay/az, quantised to i16 at
+  1/4096 g, packed as NPB1 columns with zero gyro, prefixed by 21 s of synthetic rest.
+
+Validation-only datasets for ElderNet (activity_context/eldernet/external.py; never committed or
+redistributed; only aggregate metrics in eval/eldernet/)
+  GOTOV Human Physical Activity and Energy Expenditure Dataset on Older Individuals — Slagboom, E.,
+    Beekman, M., Paraschiakos, S., Cachucho, R., & Knobbe, A. LUMC / LIACS (figshare article 12716081).
+    License: CC BY-NC-SA 4.0 (accepted by the owner for this non-commercial use). Paper: Paraschiakos, S.,
+    Cachucho, R., Moed, M., et al. (2020). Activity recognition using wearable sensors for tracking the
+    elderly. User Modeling and User-Adapted Interaction. https://doi.org/10.1007/s11257-020-09268-2
+    Changes: GENEActiv wrist stream read in g, nearest-neighbour 30 Hz, 10 s windows, protocol labels mapped
+    to gait / non-gait / masked (external.py). This entry covers the ElderNet validation use only.
+  OxWalk: Wrist and hip-based activity tracker dataset for free-living step detection and gait recognition —
+    Small, S. R., von Fritsch, L., Doherty, A., Khalid, S., & Price, A. (2022). University of Oxford.
+    https://doi.org/10.5287/bodleian:ORQ2abnbR — License: CC BY 4.0. Changes: dominant-wrist 100 Hz Axivity
+    streams windowed at 30 Hz (nearest neighbour); video-annotated heel strikes counted per 10 s window.
+
 Public datasets used by the Inertia head pipeline (activity_context/inertia/, offline research only)
 ------------------------------------------------------------------------------------------------------
 Every dataset in this first list is licensed under the Creative Commons Attribution 4.0 International

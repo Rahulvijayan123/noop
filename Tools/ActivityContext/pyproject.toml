@@ -28,6 +28,12 @@ inertia = [
     "torch==2.8.0",          # CPU fp32 inference of the vendored encoders
     "scipy==1.17.1",         # Butterworth/filtfilt + resample_poly (inertia-prep-1), erf GELU in heads
 ]
+# ElderNet gait quality (activity_context.eldernet): six pinned upstream heads, CPU inference. numpy-only
+# preprocessing (nearest-neighbour 30 Hz, upstream-identical), so no scipy/pandas/actipy at serve time.
+# Weights: University of Oxford Academic Use Licence, fetched by sha256, never committed (ELDERNET.md).
+eldernet = [
+    "torch==2.8.0",
+]
 # Offline head training / evaluation (never needed by the serve process).
 inertia-train = [
     "scikit-learn==1.9.1",
@@ -42,6 +48,8 @@ activity-train = "activity_context.train:main"
 activity-evaluate = "activity_context.evaluate:main"
 activity-fetch = "activity_context.fetch_artifacts:main"
 activity-inertia-serve = "activity_context.inertia.serve:main"
+activity-eldernet-serve = "activity_context.eldernet.serve:main"
+activity-eldernet-run = "activity_context.eldernet.run:main"
 
 [tool.setuptools.packages.find]
 include = ["activity_context*"]
