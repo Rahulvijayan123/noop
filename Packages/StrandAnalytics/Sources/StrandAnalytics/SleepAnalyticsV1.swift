@@ -70,11 +70,25 @@ public struct SleepAnalyticsMetric: Codable, Equatable, Sendable {
 
     public init(value: Double?, unit: String, status: SleepAnalyticsStatus,
                 reason: SleepAnalyticsReason? = nil) {
-        precondition(value == nil || value!.isFinite, "sleep analytics values are finite or nil")
-        self.value = value
+        // Finite-only by SANITIZATION, not precondition (review P2-4: precondition() is
+        // stripped under -O, so the shipped builds would have no guard and JSONEncoder
+        // would throw away the WHOLE document over one bad leaf). A non-finite value
+        // becomes an explicit null with `computation_failed` — the metric withholds
+        // itself, never the day.
+        if let v = value, v.isFinite {
+            self.value = v
+            self.status = status
+            self.reason = reason
+        } else if value == nil {
+            self.value = nil
+            self.status = status
+            self.reason = reason
+        } else {
+            self.value = nil
+            self.status = .unavailable
+            self.reason = .computationFailed
+        }
         self.unit = unit
-        self.status = status
-        self.reason = reason
     }
 
     public static func available(_ value: Double, unit: String) -> SleepAnalyticsMetric {
@@ -361,6 +375,25 @@ public struct SleepAnalyticsTimeline: Equatable, Sendable {
     public let discardedSpanCount: Int
     /// Seconds those discarded invalid spans claimed (0 for empty spans).
     public let discardedSpanSeconds: Int
+    /// Fragment ids that repeated in the adapter's input (exact duplicates dropped; spec 4.1
+    /// reports them rather than silently ignoring the second copy).
+    public let duplicateFragmentCount: Int
+    /// Seconds of fragment-fragment overlap the adapter's input carried (clipped for
+    /// containment, REPORTED here — never silently re-bounded lineage; a resolved
+    /// main-night group is disjoint by construction, so > 0 is an adapter contract
+    /// violation the quality blocks surface).
+    public let fragmentOverlapSeconds: Double
+    /// True when every retained native stage segment boundary is a multiple of the
+    /// epoch grid from its fragment start — the stager's original grid alignment is
+    /// established (spec 4.9). False (e.g. an edit moved the effective start to a
+    /// non-epoch boundary) means the native epoch TRANSITION MATRIX is withheld
+    /// (`unsupported_source`); duration metrics are unaffected.
+    public let epochAlignmentEstablished: Bool
+    /// Shared stream diagnostics the normalization pass already computed (spec
+    /// section 4 "Quality and missingness": received/valid/duplicate/rejected), for
+    /// group quality blocks to surface (the evidence sets are the shared input
+    /// support mask's own counts).
+    public let streamCounts: [String: Int]
     /// Overlap/conflict seconds resolved to `unknown` (spec 4.2).
     public let conflictSeconds: Int
 
@@ -861,11 +894,15 @@ public enum SleepAnalyticsV1 {
     public static func documentFingerprint(input: SleepAnalyticsInput,
                                           timeline: SleepAnalyticsTimeline,
                                           config: SleepAnalyticsConfig) -> String {
+        // Fragments are hashed in (start, id) order (review P3-4): the fingerprint is
+        // stable under adapter fragment reordering. Stage-CONTENT changes are covered
+        // through `inputRevision` (the adapter bumps it when edits re-stage a night) —
+        // that dependency is documented for the worker adapter.
         var parts: [String] = []
-        for f in timeline.fragments {
+        for f in timeline.fragments.sorted(by: { ($0.start, $0.id) < ($1.start, $1.id) }) {
             parts.append("\(f.id):\(f.start):\(f.end):\(f.sourceKind.rawValue):\(f.sourceEpochSeconds.map(String.init) ?? "-")")
         }
-        for f in input.fragments {
+        for f in input.fragments.sorted(by: { ($0.start, $0.id) < ($1.start, $1.id) }) {
             parts.append("edit:\(f.id):\(f.edited ? 1 : 0):\(f.editRevision.map(String.init) ?? "-")")
         }
         parts.append("stage:\(input.stageSourceVersion)")

@@ -80,20 +80,28 @@ extension SleepAnalyticsV1 {
         var fragments: [SleepAnalyticsTimeline.FragmentSpan] = []
         var discardedSpanCount = 0
         var discardedSpanSeconds = 0
+        var duplicateFragmentCount = 0
+        var fragmentOverlapSeconds = 0.0
         var seenFragmentIds = Set<String>()
         for f in input.fragments {
             guard f.end > f.start else { continue }          // invalid span → not a fragment
-            guard seenFragmentIds.insert(f.id).inserted else { continue }   // exact duplicate id
+            guard seenFragmentIds.insert(f.id).inserted else {             // exact duplicate id
+                duplicateFragmentCount += 1                                 // (reported, P3-1)
+                continue
+            }
             fragments.append(SleepAnalyticsTimeline.FragmentSpan(
                 id: f.id, start: f.start, end: f.end,
                 sourceKind: f.sourceKind, sourceEpochSeconds: f.sourceEpochSeconds,
                 totalsMinutes: f.totalsMinutes))
         }
         fragments.sort { $0.start < $1.start }
-        // A later fragment starting inside an earlier one clips at the boundary (equal-
-        // precedence overlap between DIFFERENT fragments is impossible from one resolved
-        // group; the adapter contract forbids it, and clipping keeps the map disjoint).
+        // A later fragment starting inside an earlier one is an ADAPTER CONTRACT VIOLATION
+        // (a resolved main-night group is disjoint by construction). It is clipped for
+        // containment — the timeline stays disjoint — but the overlap is REPORTED
+        // (`fragmentOverlapSeconds`, review P2-5): never silently re-bounded lineage. The
+        // document's FragmentInfo carries the adapter's original bounds either way.
         for i in fragments.indices.dropFirst() where fragments[i].start < fragments[i - 1].end {
+            fragmentOverlapSeconds += Double(fragments[i - 1].end - fragments[i].start)
             fragments[i] = SleepAnalyticsTimeline.FragmentSpan(
                 id: fragments[i].id, start: fragments[i - 1].end, end: fragments[i].end,
                 sourceKind: fragments[i].sourceKind,
@@ -119,6 +127,7 @@ extension SleepAnalyticsV1 {
         // ── Per-fragment normalization ──
         var intervals: [SleepAnalyticsTimeline.Interval] = []
         var conflictSeconds = 0
+        var nativeEpochAlignment = true      // P2-3: false when any native fragment is misaligned
 
         for (fragmentIndex, fragment) in fragments.enumerated() {
             let stages = input.fragments.first(where: { $0.id == fragment.id })?.stages ?? []
@@ -130,7 +139,8 @@ extension SleepAnalyticsV1 {
                     evidenceSeconds: evidenceSeconds, offWrist: input.offWristIntervals,
                     config: config, intervals: &intervals, conflictSeconds: &conflictSeconds,
                     discardedSpanCount: &discardedSpanCount,
-                    discardedSpanSeconds: &discardedSpanSeconds)
+                    discardedSpanSeconds: &discardedSpanSeconds,
+                    epochAlignment: &nativeEpochAlignment)
 
             case .timestampedExternal:
                 normalizeExternalFragment(
@@ -146,6 +156,19 @@ extension SleepAnalyticsV1 {
                 break
             }
         }
+
+        // Shared stream diagnostics (review P2-2: computed once here, surfaced through
+        // every group's quality block instead of being discarded).
+        let streamCounts = [
+            "hr_received": hrReceived,
+            "hr_valid": hrReceived - hrDuplicate - hrRejected,
+            "hr_duplicate": hrDuplicate,
+            "hr_rejected": hrRejected,
+            "gravity_received": gravityReceived,
+            "gravity_valid": gravityReceived - gravityDuplicate - gravityRejected,
+            "gravity_duplicate": gravityDuplicate,
+            "gravity_rejected": gravityRejected,
+        ]
 
         // ── Anchors (spec section 4 quality: onset/offset observability) ──
         let asleepIntervals = intervals.filter {
@@ -170,11 +193,20 @@ extension SleepAnalyticsV1 {
             let fragmentStart = onsetInterval.flatMap {
                 $0.fragmentIndex < fragments.count ? fragments[$0.fragmentIndex].start : nil
             }
-            let precededByWake = fragmentStart.map { onset > $0 } ?? false
+            // The onset is observed when a supported WAKE interval precedes it INSIDE
+            // its own fragment, or a supported wake interval ENDS exactly at the onset
+            // in an abutting fragment (a split night whose wake fragment directly
+            // touches the sleep fragment — the strap was worn and labeled wake right
+            // up to the onset, so the prefix is observed even though the wake lives in
+            // another fragment; the no-gap rule above already excludes a real gap).
+            let wakeInsideFragment = fragmentStart.map { onset > $0 } ?? false
                 && intervals.contains {
                     $0.labelSupported && $0.label == .wake && $0.end <= onset && $0.end > (fragmentStart ?? windowStart)
                 }
-            onsetPrefixObserved = !prefixUnknown && !prefixGap && precededByWake
+            let wakeAbutting = intervals.contains {
+                $0.labelSupported && $0.label == .wake && $0.end == onset
+            }
+            onsetPrefixObserved = !prefixUnknown && !prefixGap && (wakeInsideFragment || wakeAbutting)
         }
         if let offset = lastSupportedAsleepEnd {
             let suffixUnknown = intervals.contains {
@@ -203,6 +235,10 @@ extension SleepAnalyticsV1 {
             inferredGapIntervals: inferredGaps,
             discardedSpanCount: discardedSpanCount,
             discardedSpanSeconds: discardedSpanSeconds,
+            duplicateFragmentCount: duplicateFragmentCount,
+            fragmentOverlapSeconds: fragmentOverlapSeconds,
+            epochAlignmentEstablished: nativeEpochAlignment,
+            streamCounts: streamCounts,
             conflictSeconds: conflictSeconds,
             firstSupportedAsleepStart: firstSupportedAsleepStart,
             lastSupportedAsleepEnd: lastSupportedAsleepEnd,
@@ -224,22 +260,23 @@ extension SleepAnalyticsV1 {
         intervals: inout [SleepAnalyticsTimeline.Interval],
         conflictSeconds: inout Int,
         discardedSpanCount: inout Int,
-        discardedSpanSeconds: inout Int) {
+        discardedSpanSeconds: inout Int,
+        epochAlignment: inout Bool) {
 
         // 4.1: clip to the fragment; drop invalid spans; count them.
         var clipped: [(start: Int, end: Int, label: SleepAnalyticsLabel)] = []
         for seg in stages {
-            guard let label = mapStageLabel(seg.stage) else {
-                // Unscored/artifact/unknown-named segments never fabricate coverage: their
-                // span stays unknown (covered by the uncovered-time rule below).
-                if seg.end > seg.start {
-                    clipped.append((max(seg.start, fragment.start), min(seg.end, fragment.end), .unknown))
-                }
-                continue
-            }
+            // Invalid spans are discarded and counted REGARDLESS of label validity
+            // (review P3-2: the native and external paths report the same count).
             guard seg.end > seg.start else {
                 discardedSpanCount += 1
                 discardedSpanSeconds += max(0, seg.end - seg.start)
+                continue
+            }
+            guard let label = mapStageLabel(seg.stage) else {
+                // Unscored/artifact/unknown-named segments never fabricate coverage: their
+                // span stays unknown (covered by the uncovered-time rule below).
+                clipped.append((max(seg.start, fragment.start), min(seg.end, fragment.end), .unknown))
                 continue
             }
             let s = max(seg.start, fragment.start), e = min(seg.end, fragment.end)
@@ -261,8 +298,17 @@ extension SleepAnalyticsV1 {
         let sortedBoundaries = boundaries.filter { $0 >= fragment.start && $0 <= fragment.end }.sorted()
 
         // 4.4/4.9: the native epoch grid. The stager's resolution and alignment are
-        // established for native fragments: epochs are [start, start+30), …, clipped at end.
+        // established for native fragments when every retained segment boundary is a
+        // multiple of the epoch length from the fragment start (the stager grids at the
+        // session start; an edit that moved the effective start to a non-epoch boundary
+        // breaks that identity). Misalignment is REPORTED (`epochAlignmentEstablished`
+        // false): the epoch transition matrix is withheld as unsupported_source while
+        // duration metrics stay computed from the intervals (review P2-3).
         let epochSeconds = fragment.sourceEpochSeconds ?? config.nativeEpochSeconds
+        let aligned = deduped.allSatisfy {
+            ($0.start - fragment.start) % epochSeconds == 0 && ($0.end - fragment.start) % epochSeconds == 0
+        }
+        epochAlignment = epochAlignment && aligned
         let epochStarts = stride(from: fragment.start, to: fragment.end, by: epochSeconds)
 
         // Slices with resolved labels (conflicts → unknown), used by the epoch majority rule.
@@ -298,6 +344,14 @@ extension SleepAnalyticsV1 {
             // wins: slices are visited in ascending order). Each slice's label is resolved
             // EXACTLY once — `sliceLabel` also counts conflicted seconds, so it must never be
             // called twice for the same slice.
+            //
+            // CONFLICT RULE (spec 4.2, review P2-1): a conflicted slice is `unknown over the
+            // conflict` and can NEVER be absorbed back into a label by the epoch majority —
+            // an epoch that contains ANY conflicted slice is UNKNOWN as a whole. The epoch is
+            // the timeline's atomic unit, so a partially-conflicted epoch has an ambiguous
+            // label and stays unknown rather than borrowing its clean remainder's label.
+            // Consumers must derive observed metrics from the intervals (the conflict is
+            // excluded there), never from `conflictSeconds` alone.
             var sliceList: [(Int, Int)] = []
             var b = epochStart
             for next in sortedBoundaries where next > epochStart && next < epochEnd {
@@ -305,17 +359,30 @@ extension SleepAnalyticsV1 {
             }
             if b < epochEnd { sliceList.append((b, epochEnd)) }
             let sliceLabels = sliceList.map { sliceLabel($0.0, $0.1) }
-            var counts: [SleepAnalyticsLabel: Int] = [:]
-            for (i, label) in sliceLabels.enumerated() {
-                counts[label, default: 0] += sliceList[i].1 - sliceList[i].0
+            // A conflicted slice is unknown WITH covering segments; an uncovered slice is
+            // unknown WITHOUT any. Only the former poisons the epoch (an uncovered gap
+            // inside an epoch is the ordinary no-coverage case the majority handles).
+            var hasConflict = false
+            for (i, label) in sliceLabels.enumerated() where label == .unknown {
+                let from = sliceList[i].0, to = sliceList[i].1
+                if deduped.contains(where: { $0.start < to && $0.end > from }) {
+                    hasConflict = true
+                    break
+                }
             }
             var bestLabel = SleepAnalyticsLabel.unknown
-            var bestCount = 0
-            for label in sliceLabels {              // ascending → earliest slice wins ties
-                let count = counts[label] ?? 0
-                if count > bestCount { bestCount = count; bestLabel = label }
+            if !hasConflict {
+                var counts: [SleepAnalyticsLabel: Int] = [:]
+                for (i, label) in sliceLabels.enumerated() {
+                    counts[label, default: 0] += sliceList[i].1 - sliceList[i].0
+                }
+                var bestCount = 0
+                for label in sliceLabels {          // ascending → earliest slice wins ties
+                    let count = counts[label] ?? 0
+                    if count > bestCount { bestCount = count; bestLabel = label }
+                }
+                if bestCount == 0 { bestLabel = .unknown }
             }
-            if bestCount == 0 { bestLabel = .unknown }
 
             // Support mask: ≥15 distinct valid-evidence seconds (≥50% of a clipped epoch),
             // and explicit off-wrist evidence overrides support (spec 4.4).
