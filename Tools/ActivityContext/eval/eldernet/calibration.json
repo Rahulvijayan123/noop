@@ -1,0 +1,70 @@
+{
+  "calibration_id": "eldernet-val-T1.0473-tau0.930",
+  "fit": {
+    "datasets": [
+      "wisdm2019_watch",
+      "hhar_watch",
+      "pamap2",
+      "mhealth",
+      "opportunity",
+      "capture24"
+    ],
+    "n_val_gait": 15636,
+    "n_val_scored": 230576,
+    "rejected_rules": [
+      {
+        "T": 0.557066,
+        "capture24_val_ece": 0.026,
+        "reason": "worsened free-living calibration; lab sets dominated",
+        "rule": "temperature NLL, each VAL dataset weight 1"
+      }
+    ],
+    "split": "val",
+    "temperature_fit_datasets": [
+      "capture24"
+    ],
+    "temperature_weighting": "every classified (not pre-filtered) free-living VAL window weight 1",
+    "threshold_fit_datasets": [
+      "wisdm2019_watch",
+      "hhar_watch",
+      "pamap2",
+      "mhealth",
+      "opportunity",
+      "capture24"
+    ],
+    "val_split_sha256": "35e7f6b74e52eb9a096402af5a6bd5ae3698ee6216cc15f4ec3d7ebc55ad79e2"
+  },
+  "gait_prob": {
+    "T": 1.047343,
+    "fit": "val",
+    "method": "temperature"
+  },
+  "gait_threshold": 0.93,
+  "model_version": "eldernet-437a38b",
+  "operating_point": {
+    "cluster_bootstrap": {
+      "n_boot": 1000,
+      "quantile": 0.05,
+      "seed": 0,
+      "unit": "val subject (all subjects scored by the head)"
+    },
+    "n_val_class": 15636,
+    "n_val_subjects_class": 33,
+    "rule": "at tau: CP95 lower >= 0.95, cluster q05 >= 0.95, recall >= 0.1, >= 5 accepted val subjects; precision >= 0.95 for all tau' >= tau (n_acc >= 60)",
+    "status": "strong",
+    "tau": 0.93
+  },
+  "operating_point_evidence": {
+    "cluster_q05": 0.9512062492147061,
+    "cp_lower_95": 0.9695918204088945,
+    "n_acc": 4335,
+    "n_subjects_acc": 33,
+    "precision": 0.9739331026528258,
+    "recall": 0.2700179073931952,
+    "tau": 0.93,
+    "tp": 4222
+  },
+  "preprocessing_version": "eldernet-prep-1",
+  "schema": "nara.eldernet.calibration/1",
+  "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23"
+}

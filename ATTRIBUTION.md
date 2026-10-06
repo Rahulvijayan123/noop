@@ -66,6 +66,28 @@ NOOP builds on prior community reverse-engineering and interoperability work:
     Parra, doi:10.24432/C54G7M), **HARTH** (Logacjov, Kongsvold, Bach, Bårdstu & Mork, doi:10.24432/C5NC90),
     **HAR70+** (Logacjov & Ustad, doi:10.24432/C5CW3D).
 
+## Activity context (ElderNet gait quality)
+- **`yonbrand/gait-quality`** (ElderNet) — **Copyright © 2022, University of Oxford**, University of Oxford
+  SSL-wearables **Academic Use Licence** (non-commercial academic research only; accepted by the owner on
+  2026-10-05; full text in `Tools/ActivityContext/NOTICE.md`). Pinned to commit
+  `437a38bcc69f42717fe73c1f7dbea7e1f7a50d23`. The ElderNet model definitions (ResNet-18 from
+  OxWearables/ssl-wearables + FC heads) are narrowly vendored into
+  `Tools/ActivityContext/activity_context/eldernet/vendor/` and the bout rules are re-expressed in
+  `activity_context/eldernet/bouts.py`, each file carrying the licence notice, upstream path and SHA. The six
+  fine-tuned checkpoints are fetched by sha256 from the pinned commit at deploy time and never committed.
+  Please cite: Brand, Y. E., Buchman, A. S., Kluge, F., Palmerini, L., Becker, C., Cereatti, A., Maetzler, W.,
+  Vereijken, B., Yarnall, A. J., Rochester, L., Del Din, S., Mueller, A., Hausdorff, J. M. & Perlman, O.
+  (2026). Continuous Assessment of Daily-Living Gait Using Self-Supervised Learning of Wrist-Worn Accelerometer
+  Data. *npj Digital Medicine*. doi:10.1038/s41746-026-02528-2. Contract: `Tools/ActivityContext/ELDERNET.md`.
+- **Mobilise-D Technical Validation Study (TVS) dataset** (v1.0.2, CC BY 4.0) — ElderNet was fine-tuned on
+  it, and 70 s of upstream's committed toy excerpt (participant PD4010, INDIP left wrist) is part of the golden
+  test fixture `Tools/ActivityContext/fixtures/eldernet/golden_gait_quality_request.json` (converted to WHOOP
+  i16 columns). Del Din, S. et al. (2025), Zenodo, doi:10.5281/zenodo.15861907.
+- **Validation-only datasets** (never committed; aggregate metrics only): **GOTOV** (Paraschiakos et al.,
+  LUMC; CC BY-NC-SA 4.0, accepted by the owner) and **OxWalk** (Small, von Fritsch, Doherty, Khalid & Price,
+  University of Oxford, 2022; CC BY 4.0; doi:10.5287/bodleian:ORQ2abnbR), plus the CC BY 4.0 sets listed
+  under Inertia-1 above.
+
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device
   SQLite layout (`DataBase/<user_id>/de/<user_id>.db`, JSON `value` columns, the `*_day`

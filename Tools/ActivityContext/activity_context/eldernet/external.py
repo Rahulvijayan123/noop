@@ -5,8 +5,8 @@
 
 GOTOV (Paraschiakos et al. 2020; LUMC; CC BY-NC-SA 4.0, accepted by the owner): 35 participants aged 59.5-81.3,
 GENEActiv wrist, ~86 Hz (ms timestamps with jitter), in g; protocol activities. This validation-only reader
-reads ``Activity_Measurements/GOTOVxx/GOTOVxx-GENEActiv-wrist.csv`` directly (the canonical Inertia loader is
-written elsewhere). Truth: walkingSlow / walkingNormal / walkingFast / walkingStairsUp = gait; lying, sitting
+reads ``Activity_Measurements/GOTOVxx/GOTOVxx-GENEActiv-wrist.csv`` directly, independent of any Inertia loader,
+so the ElderNet result does not depend on Inertia's label mapping. Truth: walkingSlow / walkingNormal / walkingFast / walkingStairsUp = gait; lying, sitting
 (chair / sofa / couch), standing, cycling = non-gait; step, syncJumping, dishwashing, stakingShelves,
 vacuumCleaning, NA = masked. Ordinal check: per participant, the median ElderNet speed and cadence over
 detected-gait windows of each pace label must satisfy slow < normal < fast.

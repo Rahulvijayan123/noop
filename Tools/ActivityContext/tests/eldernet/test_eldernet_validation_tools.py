@@ -81,6 +81,7 @@ def test_fit_on_val_then_test_once(tmp_path, monkeypatch):
     for split, ss in subj.items():
         _write_parts(work, "toyds", split, ss, rng, shift=1.0)
     monkeypatch.setattr(V, "DATASETS", ("toyds",))
+    monkeypatch.setattr(V, "FREE_LIVING", ("toyds",))
     monkeypatch.setattr("activity_context.eldernet.extract.split_subjects", lambda d, s: subj[s])
     monkeypatch.setattr(V, "load_split", lambda w, s, datasets=("toyds",): {
         "toyds": __import__("activity_context.eldernet.extract", fromlist=["x"]).load_split_parts(w, "toyds", s, subj[s])})

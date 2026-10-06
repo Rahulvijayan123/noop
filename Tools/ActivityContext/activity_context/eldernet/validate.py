@@ -7,8 +7,8 @@ Inputs are the per-window outputs of :mod:`.extract` (served detector, hop 5 s).
 stationary / cycling / vehicle = non-gait (crosswalk; ``datasets.py``), running reported separately, the rest
 masked. A pre-filtered window keeps ``gait_prob`` 0 under any calibration (as served).
 
-``fit`` (VAL subjects only): temperature T on the detector's logit gap, NLL with every VAL dataset weighted
-equally; then the operating threshold through ``inertia.abstention.select_operating_point`` (target precision
+``fit`` (VAL subjects only): temperature T on the detector's logit gap by NLL over the FREE-LIVING VAL windows
+(Capture-24 — the only free-living wrist set, i.e. the WHOOP use case); then the operating threshold through ``inertia.abstention.select_operating_point`` (target precision
 0.95, subject-cluster bootstrap q05, stability above tau) on the pooled VAL windows (free-living Capture-24
 dominates them, as WHOOP data would). ``test`` opens the TEST payload only inside an
 ``inertia.integrity.TestVault`` whose ledger is ``eval/eldernet/test_ledger.jsonl``.
@@ -33,6 +33,12 @@ DATASETS = ("wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity",
 EVAL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "eval", "eldernet")
 EXPERIMENT = "eldernet_frozen_detection_v1"
 DECLARED = (EXPERIMENT,)
+FREE_LIVING = ("capture24",)
+# Rule history (VAL only, before TEST was opened): weighting all six VAL datasets equally gave T = 0.557, which
+# sharpened the five well-separated lab sets but tripled free-living ECE (Capture-24 VAL 0.008 -> 0.026);
+# replaced by the free-living fit (T ~ 1.05, Capture-24 VAL ECE 0.008).
+REJECTED_RULES = [{"rule": "temperature NLL, each VAL dataset weight 1", "T": 0.557066,
+                   "capture24_val_ece": 0.026, "reason": "worsened free-living calibration; lab sets dominated"}]
 
 
 def load_split(work: str, split: str, datasets: Sequence[str] = DATASETS) -> Dict[str, Dict[str, np.ndarray]]:
@@ -76,12 +82,14 @@ def fit(work: str, out_dir: str = EVAL_DIR) -> Dict:
     val = load_split(work, "val")
     zs, ys, ws, ps, subs = [], [], [], [], []
     for d, c in val.items():
+        if d not in FREE_LIVING:
+            continue
         m = _scored(c)
         clf = m & ~c["prefiltered"].astype(bool)
         if clf.any():
             zs.append(c["logit_diff"][clf])
             ys.append((c["truth"][clf] == GAIT).astype(float))
-            ws.append(np.full(int(clf.sum()), 1.0 / clf.sum()))
+            ws.append(np.ones(int(clf.sum())))
     T = fit_temperature(np.concatenate(zs), np.concatenate(ys), np.concatenate(ws))
     for d, c in val.items():
         m = _scored(c)
@@ -99,7 +107,9 @@ def fit(work: str, out_dir: str = EVAL_DIR) -> Dict:
            "operating_point_evidence": op.get("evidence"),
            "fit": {"split": "val", "val_split_sha256": split_sha256(val), "datasets": list(val),
                    "n_val_scored": int(len(y)), "n_val_gait": int(y.sum()),
-                   "temperature_weighting": "each VAL dataset weight 1 (windows 1/n within dataset)"},
+                   "temperature_fit_datasets": [d for d in val if d in FREE_LIVING],
+                   "temperature_weighting": "every classified (not pre-filtered) free-living VAL window weight 1",
+                   "threshold_fit_datasets": list(val), "rejected_rules": REJECTED_RULES},
            "model_version": MODEL_VERSION, "upstream_commit": UPSTREAM_COMMIT,
            "preprocessing_version": PREPROCESSING_VERSION}
     os.makedirs(out_dir, exist_ok=True)
