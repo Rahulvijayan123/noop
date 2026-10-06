@@ -71,6 +71,9 @@ struct ActivityLane {
     var streamDaysEnabled: Bool = true
     /// Stream-day jobs processed per wake.
     var streamDayBudget: Int = 4
+    /// Inertia-1 motion heads (shadow / candidate), or nil when off (`FRWHOOP_INERTIA_ENABLED`). Never part of
+    /// the readiness gate; its failures never fail a job (`ActivityMotionHeads.swift`).
+    var inertia: InertiaStage? = nil
     /// Extra seconds before/after a run sent to Python for resample filter
     /// state (C10 serve protocol: up to 3).
     static let boundarySeconds = 3
@@ -124,6 +127,22 @@ struct ActivityLane {
         /// Stream-day jobs that failed and were settled with backoff (dead-letter at the queue's cap).
         var streamDayFailures = 0
         var lastStreamDayError: String?
+        /// Inertia (only moves when the stage is configured). Failures are counted per chunk or per job start
+        /// and never reach the HART path.
+        var inertiaJobs = 0
+        var inertiaChunks = 0
+        var inertiaWindows = 0
+        var inertiaFailures = 0
+        /// Jobs where the Inertia model was not available (ping said so, or the child would not start).
+        var inertiaUnavailable = 0
+        var lastInertiaError: String?
+        var lastInertiaErrorKind: String?
+        var inertiaShadowStored = 0
+        var inertiaShadowFailures = 0
+        var lastInertiaShadowError: String?
+        var inertiaCandidateDocuments = 0
+        var inertiaCandidateWithheld = 0
+        var lastInertiaWithheldReason: String?
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -569,40 +588,21 @@ struct ActivityLane {
         //    the long work. Windows are collected per run and folded ONCE
         //    through the shared policy in step 6 (see
         //    `ActivityLane.activityDocument` for why the fold is one call).
-        var windows: [ActivityPythonService.WindowPrediction] = []
-        var versions = Self.resolvedVersions(
-            reportedModel: service.reportedModelVersion,
-            reportedPreprocessing: service.reportedPreprocessingVersion)
-        // One request per bounded body chunk (audit P1-2): a contiguous run
-        // longer than maxRequestBodySeconds is split at second boundaries and
-        // each chunk carries its own head/tail filter state. serve.py emits
-        // windows only inside the chunk's [start_ts, end_ts), so no window is
-        // duplicated in the single day fold below; the only loss is the
-        // protocol's single 4-s straddle per interior boundary.
-        for run in runs {
-            for request in Self.runRequests(timeline: timeline, run: run) {
-                let renewed = isTrue(try db.callFunctionForJSON(
+        // Lazily, one run's chunks at a time: a full day's base64 columns are never all in memory at once.
+        let requests = runs.lazy.flatMap { Self.runRequests(timeline: timeline, run: $0) }
+        let db = self.db, token = job.leaseToken, lease = leaseSeconds
+        let inferred = try Self.inferChunks(
+            requests, service: service, inertia: inertia,
+            versions: Self.resolvedVersions(reportedModel: service.reportedModelVersion,
+                                            reportedPreprocessing: service.reportedPreprocessingVersion),
+            stats: &stats,
+            renew: {
+                isTrue(try db.callFunctionForJSON(
                     "SELECT public.renew_activity_context_v2($1::uuid, $2::integer)::text",
-                    [job.leaseToken, String(leaseSeconds)]))
-                guard renewed else {
-                    throw PostgresClient.Error(message: "activity lease lost during inference",
-                                               sqlstate: "55000", kind: .stale)
-                }
-                let result = try service.infer(run: request)
-                guard result.ok else {
-                    let kind = result.errorKind ?? "inference"
-                    if kind == "model_missing" {
-                        stats.modelUnavailable += 1
-                        throw ActivityError.retryable("model_unavailable: \(result.error ?? "")")
-                    }
-                    throw ActivityError.retryable("inference_\(kind): \(result.error ?? "")")
-                }
-                if let mv = result.modelVersion, !mv.isEmpty { versions.model = mv }
-                if let pv = result.preprocessingVersion, !pv.isEmpty { versions.preprocessing = pv }
-                windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
-                stats.windowsInferred += result.windows.count
-            }
-        }
+                    [token, String(lease)]))
+            })
+        let windows = inferred.windows
+        let versions = inferred.versions
 
         // 6. Build the C10 document from the SHARED StrandAnalytics policy
         //    and join (`ActivityContextPolicy` + `ActivityContextJoin`) — the
@@ -626,14 +626,133 @@ struct ActivityLane {
 
         // 6b. ActivityContext v2: the same windows plus their IMU features and the day's stored
         //     streams through the shared probabilistic decoder. Best effort — see the type comment.
-        let dayDocument = try buildContextDay(
+        let context = try buildContextDayAndInput(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise)
+
+        // 6c. Inertia shadow row (and candidate comparison): built from what 6b decoded, never changing it.
+        let motionHeads = motionHeadsPayload(job: job, collector: inferred.motionHeads, context: context)
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
-        return try publishDay(job: job, payloadText: payloadText, dayDocument: dayDocument,
-                              durationMS: durationMS, dayBounds: dayBounds)
+        return try publishDay(job: job, payloadText: payloadText, dayDocument: context.built,
+                              durationMS: durationMS, dayBounds: dayBounds, motionHeads: motionHeads)
+    }
+
+    /// What step 5 produced: the HART windows and versions exactly as before, plus the Inertia collector.
+    struct ChunkInference {
+        var windows: [ActivityPythonService.WindowPrediction] = []
+        var versions: (model: String, preprocessing: String)
+        var motionHeads = MotionHeadsCollector()
+    }
+
+    /// Step 5 for a job's chunks. One request per bounded body chunk (audit P1-2): a contiguous run longer
+    /// than maxRequestBodySeconds is split at second boundaries and each chunk carries its own head/tail
+    /// filter state. serve.py emits windows only inside the chunk's [start_ts, end_ts), so no window is
+    /// duplicated in the single day fold; the only loss is the protocol's single 4-s straddle per interior
+    /// boundary.
+    ///
+    /// For each chunk: renew the lease, HART infer (a failure ends the job exactly as before), then — only when
+    /// an Inertia stage is configured and was ready at the start of the job — the Inertia infer for the same
+    /// chunk, whose every failure is absorbed and counted. The HART windows, versions and DB calls are the same
+    /// with or without Inertia.
+    static func inferChunks<Requests: Sequence>(
+        _ requests: Requests, service: ActivityPythonService,
+        inertia: InertiaStage?, versions start: (model: String, preprocessing: String),
+        stats: inout Stats, renew: () throws -> Bool) throws -> ChunkInference
+        where Requests.Element == ActivityPythonService.RunRequest {
+        var out = ChunkInference(versions: start)
+        var inertiaReady = false
+        if let inertia {
+            stats.inertiaJobs += 1
+            if let down = inertia.begin() {
+                stats.inertiaUnavailable += 1
+                out.motionHeads.stopped = down.kind
+                noteInertiaFailure(&stats, kind: down.kind, message: down.message)
+            } else {
+                inertiaReady = true
+            }
+        }
+        for request in requests {
+            let renewed = try renew()
+            guard renewed else {
+                throw PostgresClient.Error(message: "activity lease lost during inference",
+                                           sqlstate: "55000", kind: .stale)
+            }
+            let result = try service.infer(run: request)
+            guard result.ok else {
+                let kind = result.errorKind ?? "inference"
+                if kind == "model_missing" {
+                    stats.modelUnavailable += 1
+                    throw ActivityError.retryable("model_unavailable: \(result.error ?? "")")
+                }
+                throw ActivityError.retryable("inference_\(kind): \(result.error ?? "")")
+            }
+            if let mv = result.modelVersion, !mv.isEmpty { out.versions.model = mv }
+            if let pv = result.preprocessingVersion, !pv.isEmpty { out.versions.preprocessing = pv }
+            out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
+            stats.windowsInferred += result.windows.count
+
+            // Inertia for the same chunk. Isolated: nothing below can throw.
+            guard inertiaReady, let inertia, out.motionHeads.stopped == nil else { continue }
+            out.motionHeads.chunks += 1
+            stats.inertiaChunks += 1
+            switch inertia.infer(request) {
+            case .ok(let response):
+                if let first = out.motionHeads.responses.first, first.bundle != response.bundle {
+                    out.motionHeads.failedChunks += 1
+                    out.motionHeads.failureKinds["bundle_changed", default: 0] += 1
+                    out.motionHeads.stopped = "bundle_changed"
+                    stats.inertiaFailures += 1
+                    noteInertiaFailure(&stats, kind: "bundle_changed", message: "the bundle changed during a job")
+                    continue
+                }
+                out.motionHeads.responses.append(response)
+                stats.inertiaWindows += response.windows.count
+            case .failed(let kind, let message, let stop):
+                out.motionHeads.failedChunks += 1
+                out.motionHeads.failureKinds[kind, default: 0] += 1
+                if stop { out.motionHeads.stopped = kind }
+                stats.inertiaFailures += 1
+                noteInertiaFailure(&stats, kind: kind, message: message)
+            }
+        }
+        return out
+    }
+
+    /// Record an Inertia failure and say why on stderr, once per distinct kind in a row.
+    static func noteInertiaFailure(_ stats: inout Stats, kind: String, message: String) {
+        if stats.lastInertiaErrorKind != kind {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: inertia \(kind) (HART path unaffected): \(message)\n").data(using: .utf8)!)
+        }
+        stats.lastInertiaErrorKind = kind
+        stats.lastInertiaError = String("\(kind): \(message)".prefix(240))
+    }
+
+    /// The Inertia shadow payload for this job (and, in candidate mode, the comparison decode), or nil when
+    /// Inertia is off or produced nothing valid. Never throws: a failure here is counted and skipped.
+    mutating func motionHeadsPayload(job: ActivityJob, collector: MotionHeadsCollector,
+                                     context: ContextDayBuild) -> String? {
+        guard let inertia, let heads = collector.trackInput else { return nil }
+        let candidate = ActivityMotionHeadsDays.candidate(mode: inertia.mode, heads: heads, input: context.input,
+                                                         generatedAt: context.generatedAt)
+        switch candidate {
+        case .notRequested: break
+        case .withheld(let why):
+            stats.inertiaCandidateWithheld += 1
+            stats.lastInertiaWithheldReason = why
+        case .document:
+            stats.inertiaCandidateDocuments += 1
+        }
+        do {
+            return try ActivityMotionHeadsDays.payload(day: job.day, mode: inertia.mode, collector: collector,
+                                                      candidate: candidate)
+        } catch {
+            stats.inertiaShadowFailures += 1
+            stats.lastInertiaShadowError = ActivityContextDays.safeReason(error)
+            return nil
+        }
     }
 
     /// Steps 7–8 as a unit (internal so a scratch database can exercise it without B2 or Python).
@@ -645,9 +764,13 @@ struct ActivityLane {
     ///    route 2). Best effort: the next cycle handles a transient failure.
     ///
     /// Returns true when the v1 publish committed.
+    ///
+    /// `motionHeads` (the Inertia shadow row) is written after the v2 document and before the v1 publish, under
+    /// its own savepoint and its own fenced RPC: it needs the live lease (the v1 publish releases it), it
+    /// commits only with the v1 epochs, and a rejection of it never reaches either publish.
     mutating func publishDay(job: ActivityJob, payloadText: String,
                              dayDocument: ActivityContextDays.Built?, durationMS: Int,
-                             dayBounds: (start: Int, end: Int)) throws -> Bool {
+                             dayBounds: (start: Int, end: Int), motionHeads: String? = nil) throws -> Bool {
         try db.beginTransaction(.readCommitted)
         do {
             var dayStored = false
@@ -663,6 +786,24 @@ struct ActivityLane {
                     noteContextDayFailure(why)
                 }
             }
+            var motionHeadsStored = false
+            if let motionHeads {
+                switch try ActivityMotionHeadsDays.publish(
+                    db: db, token: job.leaseToken, revision: job.inputRevision, payload: motionHeads) {
+                case .stored:
+                    motionHeadsStored = true
+                case .fenced:
+                    break
+                case .rejected(let why):
+                    stats.inertiaShadowFailures += 1
+                    if stats.lastInertiaShadowError != why {
+                        FileHandle.standardError.write(
+                            ("frwhoop-worker: inertia shadow row skipped (publishes unaffected): \(why)\n")
+                                .data(using: .utf8)!)
+                    }
+                    stats.lastInertiaShadowError = why
+                }
+            }
             let publishJSON = try db.callFunctionForJSONRaw(
                 "SELECT public.publish_activity_context_v2($1::uuid,$2::bigint,$3::jsonb,$4::bigint)::text",
                 [job.leaseToken, String(job.inputRevision), payloadText, String(durationMS)])
@@ -670,6 +811,7 @@ struct ActivityLane {
             if let revision, revision > 0 {
                 try db.commitTransaction()
                 if dayStored { stats.contextDaysPublished += 1 }
+                if motionHeadsStored { stats.inertiaShadowStored += 1 }
                 _ = try? db.callFunctionForJSON(
                     "SELECT public.scoring_dirty_span($1::uuid,$2::uuid,$3::bigint,$4::bigint)::text",
                     [job.userId, job.deviceId, String(dayBounds.start), String(dayBounds.end)])
@@ -695,7 +837,29 @@ struct ActivityLane {
         asleep: [(start: Int, end: Int)],
         inBed: [(start: Int, end: Int)] = [],
         exercise: [(start: Int, end: Int)]) throws -> ActivityContextDays.Built? {
-        guard contextDaysEnabled else { return nil }
+        try buildContextDayAndInput(job: job, dayBounds: dayBounds, windows: windows, versions: versions,
+                                    asleep: asleep, inBed: inBed, exercise: exercise).built
+    }
+
+    /// The v2 day document and the decoder input it was built from (the Inertia candidate decodes the same
+    /// input a second time).
+    struct ContextDayBuild {
+        var built: ActivityContextDays.Built?
+        var input: ActivityContextTrackInput?
+        var generatedAt: Int
+    }
+
+    mutating func buildContextDayAndInput(
+        job: ActivityJob, dayBounds: (start: Int, end: Int),
+        windows: [ActivityPythonService.WindowPrediction],
+        versions: (model: String, preprocessing: String),
+        asleep: [(start: Int, end: Int)],
+        inBed: [(start: Int, end: Int)] = [],
+        exercise: [(start: Int, end: Int)]) throws -> ContextDayBuild {
+        let started = Int(Date().timeIntervalSince1970)
+        guard contextDaysEnabled else { return ContextDayBuild(built: nil, input: nil, generatedAt: started) }
+        var builtInput: ActivityContextTrackInput?
+        var generatedAt = started
         do {
             guard try renewLease(job: job) else {
                 throw PostgresClient.Error(message: "activity lease lost before the context decode",
@@ -709,14 +873,17 @@ struct ActivityLane {
                 windows: windows, streams: streams, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
                 encoderVersion: versions.model)
-            return try ActivityContextDays.build(
+            builtInput = input
+            generatedAt = now
+            let built = try ActivityContextDays.build(
                 input: input, day: job.day, modelVersion: versions.model,
                 preprocessingVersion: versions.preprocessing, generatedAt: now)
+            return ContextDayBuild(built: built, input: input, generatedAt: now)
         } catch let e as PostgresClient.Error where e.kind == .connectionLost || e.kind == .stale {
             throw e
         } catch {
             noteContextDayFailure(ActivityContextDays.safeReason(error))
-            return nil
+            return ContextDayBuild(built: nil, input: builtInput, generatedAt: generatedAt)
         }
     }
 

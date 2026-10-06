@@ -39,6 +39,16 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   Downloaded at train time (never committed or redistributed); only aggregate
   held-out metrics are recorded (`Tools/ActivityContext/eval/RESULTS.md`).
 
+## Activity context (Inertia-1 motion heads)
+- **`yang-ai-lab/Inertia-1`** (MIT, "Copyright (c) 2026 The Inertia-1 Authors") — the ART and PatchTST
+  encoder architectures. Only the encoder-side `encode()` path is narrowly vendored into
+  `Tools/ActivityContext/activity_context/inertia/vendor/` (MIT header with upstream path in every file;
+  full licence in `Tools/ActivityContext/NOTICE.md`), pinned to commit
+  `afcd725314c95f4afefce118821349df7d61e7e8`. No official pretrained checkpoint is publicly available, so
+  none is used or committed; the lane runs only against an explicitly supplied, hash-verified checkpoint,
+  and the stand-ins and fixtures (including a small seeded random-init test checkpoint) are not Inertia-1.
+  Contract: `Tools/ActivityContext/INERTIA1.md`.
+
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device
   SQLite layout (`DataBase/<user_id>/de/<user_id>.db`, JSON `value` columns, the `*_day`

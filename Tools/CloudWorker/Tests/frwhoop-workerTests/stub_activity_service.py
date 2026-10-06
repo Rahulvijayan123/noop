@@ -23,6 +23,10 @@ Test knobs (fields on any request):
   "legacy_no_feat": true     -> an older serve.py: no "feat", no "feature_schema"
   "feature_schema": "x"      -> stamp "x" instead of imu-feat-1 (layout mismatch test)
   "feat_nulls": true         -> cadence_hz and orientation_change_deg are JSON null
+
+Argv:
+  --ping-status S            -> ping reports model_status S (e.g. hart_unavailable, the real serve.py's
+                                answer for a HART manifest whose checkpoint does not load); default "loaded"
 """
 import json
 import sys
@@ -30,6 +34,9 @@ import time
 
 
 def main():
+    ping_status = "loaded"
+    if "--ping-status" in sys.argv:
+        ping_status = sys.argv[sys.argv.index("--ping-status") + 1]
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -54,7 +61,7 @@ def main():
             resp = {
                 "id": rid,
                 "ok": True,
-                "model_status": "loaded",
+                "model_status": ping_status,
                 "model_version": "stub-model",
                 "preprocessing_version": "stub-preprocess",
             }

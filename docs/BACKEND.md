@@ -667,6 +667,51 @@ activity job (unchanged claim / download / decode / lease renewal)
   minutes: 1,075 runs, 523 events, 450 KB of JSON) is built in about 0.8 s in a release build. The same
   code takes about 19 s in a debug build, so time it with the release binary the worker runs.
 
+### Inertia-1 motion heads (shadow / candidate, off by default)
+
+A second, optional expert beside HART (contract: `Tools/ActivityContext/INERTIA1.md`). With
+`FRWHOOP_INERTIA_ENABLED=1` and `FRWHOOP_INERTIA_BUNDLE_DIR` set, the activity lane starts a SECOND Python
+child (`python -m activity_context.inertia.serve --bundle <dir> [--checkpoint <path>]`, its own timeout,
+restart cap and response cap) and, after each HART chunk, asks it for `motion-heads-1` windows (posture,
+locomotion, arm, transition heads, movement intensity, OOD) for the same chunk.
+
+```text
+activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (isolated)
+  -> strict Swift validation (MotionHeadsResponse: schema, class keys, sums, NaN)
+  -> shadow payload (provenance + compact windows + OOD counts)
+     [candidate mode: + the day decoded a second time with Inertia evidence, or why it was withheld]
+  -> ONE transaction: publish_activity_context_day (savepoint)
+                      -> publish_activity_motion_heads_day (savepoint, fenced) -> activity_motion_heads_days
+                      -> publish_activity_context_v2 (unchanged)
+```
+
+- **Never gates, never fails a job.** Inertia is not part of the readiness gate. A missing model (ping
+  `model_available: false`), timeout, crash, malformed or invalid output is counted (`inertia_failures`,
+  `inertia_unavailable`), logged once per distinct kind, and the HART path continues. A timeout, crash or
+  `model_missing` stops Inertia for the rest of that job, so a broken child costs at most one timeout.
+- **The published documents are untouched.** v1 epochs and the `activity_context_days` document are
+  byte-identical with Inertia on or off; the candidate comparison is stored only in
+  `activity_motion_heads_days.candidate_document` (the read surface would otherwise rank it first).
+- **Evidence gate.** Candidate decodes run only for `encoder_kind = inertia1` (a pinned Inertia-1
+  checkpoint) with `evidence_tier_max >= candidate`; anything else (every stand-in today) stores
+  `withheld_reason` (`encoder_kind_standin`, `evidence_tier_shadow`, ...). `FRWHOOP_INERTIA_MODE` accepts
+  only `shadow` (default) and `candidate`; production evidence needs a code and config change.
+- **Storage.** `activity_motion_heads_days`, one row per `(user_id, device_id, day, bundle_id, mode)`,
+  migration `20261005170000_activity_motion_heads.sql`. Service role writes through the fenced
+  `publish_activity_motion_heads_day(token, revision, payload)` (live lease and current revision, else
+  NULL; stable `invalid_motion_heads_*` errors; 16 MiB payload, 8 MiB windows); owners may select their own
+  rows. Contract: `supabase/functions/tests/activity_motion_heads_contract.sql`.
+- **Deploy order.** Migration first. A worker with Inertia on and no migration still publishes v1 and v2;
+  the shadow write fails under its savepoint and is counted (`inertia_shadow_failures`).
+- **Rollback.** Unset `FRWHOOP_INERTIA_ENABLED` and restart. Nothing reads the table.
+- **Check.**
+
+  ```sql
+  select day, mode, bundle_id, encoder_kind, evidence_tier_max, n_windows, n_ood, withheld_reason,
+         candidate_document is not null as has_candidate, computed_at
+  from public.activity_motion_heads_days order by computed_at desc limit 10;
+  ```
+
 ### Stream days (a document for every day with measurements)
 
 Raw IMU is uploaded for only a handful of sessions, but heart rate, gravity, steps and wear events are

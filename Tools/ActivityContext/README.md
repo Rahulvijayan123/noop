@@ -157,6 +157,27 @@ single-threaded and deterministic.
 - `checkpoint/`, `.venv/`, `__pycache__/`, `*.part` are gitignored (see
   `.gitignore` in this directory).
 
+## Inertia-1 motion heads (optional, separate process)
+
+`activity_context/inertia/` adds a second, independent lane: accel-only `inertia-prep-1`
+preprocessing (100 → 20 Hz, 30 s / 10 s windows), a narrowly vendored Inertia-1 encoder (ART /
+PatchTST, verify-on-load), numpy-only calibrated heads (posture, locomotion, arm behaviour, multi-label
+transitions, movement intensity) with OOD scores, and its own serve process
+(`python -m activity_context.inertia.serve`, wire schema `motion-heads-1`). It never runs inside the
+HART serve process and its failures never touch it. **The contract is
+[`INERTIA1.md`](INERTIA1.md)** — formats, versions, failure kinds, worker/decoder rules.
+
+No official pretrained Inertia-1 checkpoint is publicly available, so nothing here claims Inertia-1
+results: the encoder runs only against an explicit, sha256-pinned `--checkpoint` /
+`$INERTIA1_CKPT_PATH`, and the stand-ins (`standin:*`) run only with `--allow-standin-shadow`.
+
+```bash
+uv pip install --python .venv/bin/python -e ".[dev,inertia]"      # + ".[inertia-train]" for training
+.venv/bin/python -m pytest tests/inertia                           # skips cleanly without the extras
+.venv/bin/python -m activity_context.inertia.make_golden --check   # golden fixtures (fixtures/inertia)
+.venv/bin/python -m activity_context.inertia.bench                 # eval/inertia/perf.json
+```
+
 ## Licenses / attribution
 
 - **HART** (EdgeIntelligenceLab/HART) — MIT, pinned commit
@@ -166,6 +187,9 @@ single-threaded and deterministic.
   (Weiss, G., 2019, UCI id 507, DOI 10.24432/C5HK59) — CC BY 4.0. Derived
   windows/metrics may be shared with attribution; the raw archive is not
   redistributed.
+- **Inertia-1** (yang-ai-lab/Inertia-1) — MIT, pinned commit
+  `afcd725314c95f4afefce118821349df7d61e7e8`; encoder code narrowly vendored under
+  `activity_context/inertia/vendor/` (see NOTICE.md). No upstream weights are used or committed.
 - The package's own code is part of NOOP, licensed under the repo's PolyForm
   Noncommercial 1.0.0 (see repo LICENSE). granite-tsfm / torch / transformers
   keep their own licenses (Apache-2.0 / BSD-style) and are runtime-only deps.

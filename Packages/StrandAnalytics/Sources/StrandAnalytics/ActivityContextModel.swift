@@ -403,6 +403,16 @@ enum ActivityContextModel {
         /// True when the primary movement channel had data.
         var hasMotion: Bool
         var channels: Int
+        /// Inertia posture term per body mode (tempered log factor, 0 outside the stationary / transition
+        /// set). The decoder renormalises it inside that set against its current belief, so it moves mass only
+        /// within the set. nil without Inertia posture evidence.
+        var postureShift: [Double]? = nil
+        /// Inertia arm-head likelihood per arm state and its weight (before `armTemperature`).
+        var arm: (L: [Double], weight: Double)? = nil
+        /// An Inertia term entered this second's score.
+        var motionHeadsApplied = false
+        /// A specialist mode was plausible this second only because Inertia named it.
+        var specialistOpenedByMotionHeads = false
     }
 
     /// Instantaneous soft arm-behaviour likelihoods (not normalized) from movement-pattern features.
@@ -444,14 +454,23 @@ enum ActivityContextModel {
         return q
     }
 
-    /// Score every body mode against the features.
-    static func score(_ f: ActivityFeatures, temperature: Double) -> Score {
+    /// Score every body mode against the features. `motionHeads` adds the Inertia-1 channels (see
+    /// `ActivityContextMotionHeadsFusion.swift`) after the existing ones; nil (the default) scores exactly
+    /// as before.
+    static func score(_ f: ActivityFeatures, temperature: Double,
+                      motionHeads: PreparedMotionHeads? = nil) -> Score {
         let n = BodyMode.count
         var logL = [Double](repeating: 0, count: n)
         var dis = [Double](repeating: 0, count: n)
         var weightSum = 0.0
         var channels = 0
         let unknownIdx = BodyMode.unknown.rawValue
+        // Inertia terms for this second (nil when Inertia is off, no window applies, or it is OOD).
+        var inertia: PreparedMotionHeads.Terms? = nil
+        if let motionHeads, let window = f.motionHeads {
+            inertia = motionHeads.terms(for: window, hartSpeaks: f.encoder != nil)
+        }
+        var specialistOpenedByMotionHeads = false
 
         // Accumulate one channel: `values[m]` are per-mode likelihoods in (0, 1]; `unknownValue` is the
         // constant the unknown mode gets (no discrimination).
@@ -599,7 +618,11 @@ enum ActivityContextModel {
             let mode = BodyMode(rawValue: m)!
             let said = f.encoder?.classProbs[label] ?? 0
             let covered = f.loggedWorkout && profiles[m].workout >= 0.9 && workoutCovers(mode, kind: f.workoutKind)
-            var s = (said >= 0.15 || covered) ? 1.0 : 0.04
+            // Inertia may open the gate only for a strong class at or above its threshold, on a window that is
+            // not OOD (`PreparedMotionHeads.terms`).
+            let namedByInertia = inertia?.opens.contains(m) ?? false
+            if namedByInertia && !(said >= 0.15 || covered) { specialistOpenedByMotionHeads = true }
+            var s = (said >= 0.15 || covered || namedByInertia) ? 1.0 : 0.04
             if mode == .otherExercise { s = max(s, 0.04 + 0.96 * effort) }
             support[m] = s
         }
@@ -621,6 +644,26 @@ enum ActivityContextModel {
             add(v, unknownValue: informative ? uGate : 1.0, weight: wGate)
         }
 
+        // 8. Inertia-1 heads: distinct, tempered channels (never averaged with the encoder above), all with
+        // `isEvidence: false` so they never reduce the missing-sensor unknown bonus. Unknown gets 1.
+        var postureShift: [Double]? = nil
+        var armTerm: (L: [Double], weight: Double)? = nil
+        if let t = inertia {
+            if let loco = t.locomotion {
+                add(loco.L, unknownValue: 1.0, weight: loco.weight, isEvidence: false)
+            }
+            if let post = t.posture {
+                // Counted in the agreement measure like any channel, but applied by the decoder (renormalised
+                // inside the stationary / transition set), not through `logL`.
+                weightSum += post.weight
+                let best = max(post.L.max() ?? 1, 1e-6)
+                for m in 0..<n where m != unknownIdx { dis[m] += post.weight * log(max(post.L[m], 1e-6) / best) }
+                dis[unknownIdx] += post.weight * min(0, log(1 / best))
+                postureShift = post.L.map { temperature * post.weight * log(max($0, 1e-6)) }
+            }
+            armTerm = t.arm
+        }
+
         // A missing primary movement channel is itself information: nothing can be claimed about
         // stillness or gait without it, so the unknown mode earns a standing bonus.
         if !hasMotion { logL[unknownIdx] += wMotion * log(1 / uMotion) * 0.8 }
@@ -628,7 +671,9 @@ enum ActivityContextModel {
 
         for m in 0..<n { logL[m] *= temperature }
         if weightSum > 0 { for m in 0..<n { dis[m] /= weightSum } }
-        return Score(logL: logL, disagreement: dis, hasMotion: hasMotion, channels: channels)
+        return Score(logL: logL, disagreement: dis, hasMotion: hasMotion, channels: channels,
+                     postureShift: postureShift, arm: armTerm, motionHeadsApplied: inertia != nil,
+                     specialistOpenedByMotionHeads: specialistOpenedByMotionHeads)
     }
 
     /// Arm-chain emission context: how plausible each arm class is given the body posterior.

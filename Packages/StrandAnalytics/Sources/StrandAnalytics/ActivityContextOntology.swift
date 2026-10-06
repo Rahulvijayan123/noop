@@ -171,21 +171,26 @@ public struct ActivityStateVersions: Codable, Equatable, Sendable {
     public var featureSchema: String
     public var encoderId: String?
     public var encoderVersion: String?
+    /// Inertia-1 motion-head evidence that shaped the state (`inertia-1:<bundle12>:<cfgtag>`). Written only
+    /// when that evidence was active, so a state decoded without it encodes exactly the keys it always did.
+    public var motionHeads: String?
 
     public init(schema: Int = ActivityContextVersions.schema,
                 ontology: String = ActivityContextVersions.ontology,
                 decoder: String = ActivityContextVersions.decoder,
                 featureSchema: String = ActivityContextVersions.featureSchema,
-                encoderId: String? = nil, encoderVersion: String? = nil) {
+                encoderId: String? = nil, encoderVersion: String? = nil, motionHeads: String? = nil) {
         self.schema = schema; self.ontology = ontology; self.decoder = decoder
         self.featureSchema = featureSchema
         self.encoderId = encoderId; self.encoderVersion = encoderVersion
+        self.motionHeads = motionHeads
     }
 
     enum CodingKeys: String, CodingKey {
         case schema, ontology, decoder
         case featureSchema = "feature_schema"
         case encoderId = "encoder", encoderVersion = "encoder_version"
+        case motionHeads = "motion_heads"
     }
 }
 

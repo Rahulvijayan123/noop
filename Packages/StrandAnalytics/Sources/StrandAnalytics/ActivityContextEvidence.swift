@@ -183,16 +183,20 @@ public struct ActivityObservation: Equatable, Sendable {
     public var loggedWorkout: Bool
     /// What the covering workout is (meaningful only while `loggedWorkout`).
     public var workoutKind: WorkoutKind
+    /// A new Inertia-1 motion-heads window attached to this second (carried until superseded or older than
+    /// the bundle's hop). A separate channel from `encoder`; ignored unless `ActivityDecoderConfig.motionHeads`
+    /// accepts its bundle. It never creates an observation second of its own.
+    public var motionHeads: MotionHeadsWindow?
 
     public init(ts: Int, dynAccelG: Double? = nil, gravity: [Double]? = nil, stepTicks: Int? = nil,
                 strapClass: Int? = nil, hrBpm: Int? = nil, imu: ImuWindowFeatures? = nil,
                 encoder: MotionEncoderOutput? = nil, wear: WearEvidence = .unknown,
                 sleep: SleepEvidence = .unknown, inBed: Bool = false, loggedWorkout: Bool = false,
-                workoutKind: WorkoutKind = .unspecified) {
+                workoutKind: WorkoutKind = .unspecified, motionHeads: MotionHeadsWindow? = nil) {
         self.ts = ts; self.dynAccelG = dynAccelG; self.gravity = gravity; self.stepTicks = stepTicks
         self.strapClass = strapClass; self.hrBpm = hrBpm; self.imu = imu; self.encoder = encoder
         self.wear = wear; self.sleep = sleep; self.inBed = inBed; self.loggedWorkout = loggedWorkout
-        self.workoutKind = workoutKind
+        self.workoutKind = workoutKind; self.motionHeads = motionHeads
     }
 }
 
@@ -259,6 +263,9 @@ struct ActivityFeatures: Equatable {
     var evidence: ActivityEvidenceSummary
     /// Seconds of data in the trailing 10 s window (warm-up indicator), 0…10.
     var windowFill: Int
+    /// The Inertia window that applies at this second (held for the bundle's hop), only while Inertia
+    /// evidence is active.
+    var motionHeads: MotionHeadsWindow?
 }
 
 /// Causal ring of recent seconds. Codable so a decoder restart resumes with its context intact.
@@ -304,6 +311,10 @@ struct ActivityFeatureWindow: Codable, Equatable {
     var lastHr: Int?
     var imuSeenTs: Int?
     var encoderSeenTs: Int?
+    /// The latest Inertia window and the second it was attached to. Only ever set while Inertia evidence is
+    /// active, so a decoder without it encodes exactly the keys it always did.
+    var motionHeads: MotionHeadsWindow?
+    var motionHeadsSeenTs: Int?
 
     init() {}
 
@@ -313,6 +324,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case samples, hrBuckets, imu, encoder, lastSleep, lastSleepTs, lastWear, lastWorkoutTs, lastWorkoutKind
         case lastHrTs, lastHr, imuSeenTs, encoderSeenTs
+        case motionHeads, motionHeadsSeenTs
     }
 
     init(from decoder: Decoder) throws {
@@ -330,14 +342,20 @@ struct ActivityFeatureWindow: Codable, Equatable {
         lastHr = try c.decodeIfPresent(Int.self, forKey: .lastHr)
         imuSeenTs = try c.decodeIfPresent(Int.self, forKey: .imuSeenTs)
         encoderSeenTs = try c.decodeIfPresent(Int.self, forKey: .encoderSeenTs)
+        motionHeads = try c.decodeIfPresent(MotionHeadsWindow.self, forKey: .motionHeads)
+        motionHeadsSeenTs = try c.decodeIfPresent(Int.self, forKey: .motionHeadsSeenTs)
     }
 
     mutating func reset() { self = ActivityFeatureWindow() }
 
-    /// Ingest one observation and return the features at its timestamp.
-    mutating func push(_ obs: ActivityObservation, restingHR: Double, maxHR: Double) -> ActivityFeatures {
+    /// Ingest one observation and return the features at its timestamp. `motionHeadsHoldS` is the Inertia
+    /// hold (the bundle's hop) while Inertia evidence is active, and 0 otherwise: then a window on the
+    /// observation is neither kept nor reported.
+    mutating func push(_ obs: ActivityObservation, restingHR: Double, maxHR: Double,
+                       motionHeadsHoldS: Int = 0) -> ActivityFeatures {
         if let imu = obs.imu { self.imu = imu; imuSeenTs = obs.ts }
         if let enc = obs.encoder { self.encoder = enc; encoderSeenTs = obs.ts }
+        if motionHeadsHoldS > 0, let heads = obs.motionHeads { self.motionHeads = heads; motionHeadsSeenTs = obs.ts }
         lastSleep = obs.sleep
         if obs.sleep != .unknown { lastSleepTs = obs.ts }
         lastWear = obs.wear
@@ -362,7 +380,13 @@ struct ActivityFeatureWindow: Codable, Equatable {
         let cutoff = obs.ts - Self.horizonS
         if let first = samples.first, first.ts < cutoff { samples.removeAll { $0.ts < cutoff } }
 
-        return features(at: obs.ts, restingHR: restingHR, maxHR: maxHR)
+        var f = features(at: obs.ts, restingHR: restingHR, maxHR: maxHR)
+        // An Inertia window applies each second while it is younger than one hop.
+        if motionHeadsHoldS > 0, let heads = motionHeads, let seen = motionHeadsSeenTs,
+           obs.ts >= seen, obs.ts - seen < motionHeadsHoldS {
+            f.motionHeads = heads
+        }
+        return f
     }
 
     private mutating func addHeartRate(_ hr: Int, at ts: Int) {

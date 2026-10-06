@@ -43,8 +43,11 @@ extension ActivityDecoderConfig {
         return recent.count % 2 == 1 ? Double(recent[mid]) : Double(recent[mid - 1] + recent[mid]) / 2
     }
 
-    /// A short, filename-safe tag that differs whenever the heart-rate reference does.
+    /// A short, filename-safe tag that differs whenever the heart-rate reference does, and (only when
+    /// Inertia-1 evidence is active) whenever its bundle or evidence config does.
     public var cacheTag: String {
-        "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
+        let base = "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
+        guard let heads = motionHeads, heads.evidenceRefusal == nil else { return base }
+        return base + "-ih\(heads.bundle.bundle12)\(heads.configTag)"
     }
 }

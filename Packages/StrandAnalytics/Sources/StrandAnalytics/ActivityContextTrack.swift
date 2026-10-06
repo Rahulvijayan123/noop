@@ -38,6 +38,9 @@ public struct ActivityContextTrackInput {
     public var encoderVersion: String
     /// Optional per-window features computed from the 30 Hz IMU branch (see `Tools/ActivityContext`).
     public var imuWindows: [ImuWindowFeatures]
+    /// Optional Inertia-1 motion-head windows and their bundle. Used only when the decode's
+    /// `ActivityDecoderConfig.motionHeads` accepts the same bundle; otherwise nothing is attached.
+    public var motionHeads: MotionHeadsTrackInput?
 
     public init(dayStart: Int, dayEnd: Int,
                 hr: [HRSample] = [], gravity: [GravitySample] = [], steps: [StepSample] = [],
@@ -45,13 +48,13 @@ public struct ActivityContextTrackInput {
                 workouts: [DayStateWorkout] = [], offWrist: [DayStateSpan] = [],
                 encoderWindows: [ActivityWindowPrediction] = [],
                 encoderId: String = "hart", encoderVersion: String = "unknown",
-                imuWindows: [ImuWindowFeatures] = []) {
+                imuWindows: [ImuWindowFeatures] = [], motionHeads: MotionHeadsTrackInput? = nil) {
         self.dayStart = dayStart; self.dayEnd = dayEnd
         self.hr = hr; self.gravity = gravity; self.steps = steps
         self.sleep = sleep; self.inBed = inBed; self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
         self.workouts = workouts; self.offWrist = offWrist
         self.encoderWindows = encoderWindows; self.encoderId = encoderId; self.encoderVersion = encoderVersion
-        self.imuWindows = imuWindows
+        self.imuWindows = imuWindows; self.motionHeads = motionHeads
     }
 }
 
@@ -67,6 +70,8 @@ public struct ActivityContextTrack: Sendable {
     public var observedSeconds: Int
     /// Last second fed to the decoder.
     public var lastTs: Int?
+    /// How Inertia-1 windows were attached and used, or why they were not (nil without a motion-heads config).
+    public var motionHeads: MotionHeadsTrackReport? = nil
 
     /// This track followed by one that continued it from `snapshot` (events the decoder keeps flagging
     /// across the join are listed once).
@@ -79,9 +84,11 @@ public struct ActivityContextTrack: Sendable {
                 merged.append(e)
             }
         }
+        var report = motionHeads
+        if let n = next.motionHeads { report = report?.merged(with: n) ?? n }
         return ActivityContextTrack(states: states + next.states, events: merged, snapshot: next.snapshot,
                                     restore: restore, observedSeconds: observedSeconds + next.observedSeconds,
-                                    lastTs: next.lastTs ?? lastTs)
+                                    lastTs: next.lastTs ?? lastTs, motionHeads: report)
     }
 }
 
@@ -94,7 +101,10 @@ public enum ActivityContextTrackBuilder {
     public static func build(_ input: ActivityContextTrackInput,
                              config: ActivityDecoderConfig = ActivityDecoderConfig(),
                              resuming snapshot: ActivityDecoderSnapshot? = nil) -> ActivityContextTrack {
-        decode(observations(for: input), config: config, resuming: snapshot)
+        let (obs, attach) = observations(for: input, config: config)
+        var track = decode(obs, config: config, resuming: snapshot)
+        if let attach { track.motionHeads = attach.merged(with: track.motionHeads ?? MotionHeadsTrackReport()) }
+        return track
     }
 
     /// Feed ready-made observations (one per second, time ordered) through a decoder.
@@ -124,7 +134,49 @@ public enum ActivityContextTrackBuilder {
         }
         return ActivityContextTrack(states: states, events: events, snapshot: decoder.snapshot(),
                                     restore: decoder.restoreOutcome, observedSeconds: accepted,
-                                    lastTs: decoder.lastObservationTs)
+                                    lastTs: decoder.lastObservationTs, motionHeads: decoder.motionHeadsReport)
+    }
+
+    /// The observations for `input` with its Inertia windows attached when `config.motionHeads` accepts their
+    /// bundle (the same digest) — exactly `observations(for:)` otherwise. The report says what was attached
+    /// and dropped, or why nothing was (nil when the config has no motion-heads entry at all).
+    public static func observations(for input: ActivityContextTrackInput, config: ActivityDecoderConfig)
+        -> (observations: [ActivityObservation], report: MotionHeadsTrackReport?) {
+        var out = observations(for: input)
+        guard let heads = config.motionHeads else { return (out, nil) }
+        var report = MotionHeadsTrackReport(stamp: heads.provenanceStamp, refusal: heads.evidenceRefusal)
+        guard let mh = input.motionHeads else { return (out, report) }
+        report.windowsIn = mh.windows.count
+        guard report.refusal == nil else { return (out, report) }
+        guard mh.bundle.bundleSha256 == heads.bundle.bundleSha256, mh.bundle == heads.bundle else {
+            report.stamp = nil
+            report.refusal = "bundle_mismatch"
+            return (out, report)
+        }
+        attachMotionHeads(mh.windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
+        return (out, report)
+    }
+
+    /// Inertia never creates an observation second: each window is attached to the first on-wrist observed
+    /// second in `[e, e + 2]` inside `[lo, hi)`, or dropped and counted. Two windows on one second keep the
+    /// later one (it supersedes the other, as it would a second later).
+    static func attachMotionHeads(_ windows: [MotionHeadsWindow], to out: inout [ActivityObservation],
+                                  lo: Int, hi: Int, report: inout MotionHeadsTrackReport) {
+        guard !windows.isEmpty, hi > lo else { return }
+        var indexAt: [Int: Int] = [:]
+        for (i, o) in out.enumerated() where o.wear != .offWrist { indexAt[o.ts] = i }
+        let ordered = windows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        for w in ordered {
+            guard w.endTs < hi, w.endTs + 2 >= lo else { report.droppedOutOfRange += 1; continue }
+            var target: Int?
+            for ts in max(w.endTs, lo)...min(w.endTs + 2, hi - 1) {
+                if let i = indexAt[ts] { target = i; break }
+            }
+            guard let i = target else { report.droppedNoObservation += 1; continue }
+            if out[i].motionHeads != nil { report.droppedSuperseded += 1; report.attached -= 1 }
+            out[i].motionHeads = w
+            report.attached += 1
+        }
     }
 
     /// Step ticks per second = counter delta between consecutive samples 1–2 s apart, bounded by the gait
@@ -670,7 +722,7 @@ public enum ActivityContextDayBuilder {
                               chunkObservations: Int = 3_600,
                               progress: ((ActivityContextDayDocument) -> Void)? = nil)
         -> (document: ActivityContextDayDocument, how: ActivityContextDayUpdate) {
-        let all = ActivityContextTrackBuilder.observations(for: input)
+        let all = ActivityContextTrackBuilder.observations(for: input, config: config).observations
 
         func fresh(_ reason: String) -> (ActivityContextDayDocument, ActivityContextDayUpdate) {
             let document = decodeFromStart(all, input: input, now: now, config: config,

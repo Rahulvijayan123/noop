@@ -34,6 +34,12 @@ final class ActivityPythonService {
         var maxResponseLineBytes: Int
         var restartCap: Int
         var restartCooldownSeconds: Double
+        /// Extra environment for the child (the Inertia service passes `INERTIA1_CKPT_PATH` this way).
+        var extraEnvironment: [String: String] = [:]
+        /// Keep each response's raw line next to its parsed object (`inferRaw`), and fail a request whose
+        /// response line carries its id but is not JSON (a NaN token, say) at once instead of waiting for the
+        /// timeout. Off for the HART service, whose behaviour is unchanged.
+        var keepsRawLines = false
 
         /// FRWHOOP_ACTIVITY_PYTHON (default python3), FRWHOOP_ACTIVITY_HOME
         /// (default <cwd>/Tools/ActivityContext), FRWHOOP_ACTIVITY_MODEL_DIR,
@@ -109,6 +115,9 @@ final class ActivityPythonService {
         var modelVersion: String?
         var preprocessingVersion: String?
         var error: String?
+        /// Other string fields of the ping (the Inertia service reports encoder_id, encoder_kind,
+        /// heads_version, bundle_sha256, evidence_tier_max …), for logs and the heartbeat.
+        var details: [String: String] = [:]
     }
 
     struct WindowPrediction {
@@ -163,6 +172,10 @@ final class ActivityPythonService {
     private var readBuffer = Data()
     private var stderrTail = Data()
     private var responses: [String: [String: Any]] = [:]
+    /// Raw response lines by request id (only with `keepsRawLines`).
+    private var rawLines: [String: Data] = [:]
+    /// Ids of requests waiting for a response (only tracked with `keepsRawLines`).
+    private var pendingIds: Set<String> = []
     private var failures: [String: String] = [:]
     private var restartCount = 0
     private var lastRestartAt: Date?
@@ -251,6 +264,7 @@ final class ActivityPythonService {
         env["PYTHONUNBUFFERED"] = "1"
         env["FRWHOOP_ACTIVITY_HOME"] = home.path
         if let modelDir = config.modelDir { env["FRWHOOP_ACTIVITY_MODEL_DIR"] = modelDir }
+        for (k, v) in config.extraEnvironment { env[k] = v }
         proc.environment = env
 
         let stdinPipe = Pipe()
@@ -272,6 +286,7 @@ final class ActivityPythonService {
         self.eofDetected = false
         self.readBuffer = Data()
         self.responses = [:]
+        self.rawLines = [:]
         self.failures = [:]
         self.restartCount += 1
         self.lastRestartAt = Date()
@@ -325,9 +340,18 @@ final class ActivityPythonService {
                 // Non-JSON diagnostics are common on startup; they are not a
                 // response. Treat a stray line with no id as harmless unless
                 // nothing is pending.
+                if config.keepsRawLines, !pendingIds.isEmpty {
+                    // A line that names a pending request but does not parse (a NaN token) is that request's
+                    // answer: fail it now rather than at the timeout.
+                    let text = String(decoding: lineData, as: UTF8.self)
+                    for pending in pendingIds where text.contains("\"\(pending)\"") {
+                        failures[pending] = "unparseable response line"
+                    }
+                }
                 continue
             }
             responses[id] = obj
+            if config.keepsRawLines { rawLines[id] = Data(lineData) }
         }
     }
 
@@ -369,6 +393,52 @@ final class ActivityPythonService {
     }
 
     func infer(run: RunRequest) throws -> InferResult {
+        let obj = try roundTrip(Self.inferRequest(run))
+        lock.lock()
+        defer { lock.unlock() }
+        let result = Self.parseInfer(obj)
+        if let echo = obj["echo"] as? [String: Any] { lastEcho = echo }
+        if result.ok {
+            if let mv = result.modelVersion, !mv.isEmpty { reportedModelVersion = mv }
+            if let pv = result.preprocessingVersion, !pv.isEmpty { reportedPreprocessingVersion = pv }
+            if lastPingStatus == nil || !lastPingStatus!.modelAvailable {
+                lastPingStatus = PingStatus(ok: true, modelAvailable: true,
+                                            modelStatus: "loaded",
+                                            modelVersion: result.modelVersion,
+                                            preprocessingVersion: result.preprocessingVersion,
+                                            error: nil)
+            }
+        }
+        if !result.ok {
+            // Remember model state so the lane can fail soft without another ping.
+            if result.errorKind == "model_missing" {
+                lastPingStatus = PingStatus(ok: false, modelAvailable: false,
+                                            modelStatus: "model_missing", modelVersion: nil,
+                                            preprocessingVersion: nil, error: result.error)
+            }
+        }
+        return result
+    }
+
+    /// The same infer request as `infer`, answered by a service whose response is not a HART document (the
+    /// Inertia motion-heads service): the parsed object and, with `keepsRawLines`, the exact response line
+    /// for a strict decoder. Nothing about the response is interpreted here.
+    func inferRaw(run: RunRequest) throws -> (object: [String: Any], line: Data?) {
+        let request = Self.inferRequest(run)
+        let obj = try roundTrip(request)
+        lock.lock()
+        defer { lock.unlock() }
+        if (obj["ok"] as? Bool) == false, (obj["kind"] as? String) == "model_missing", var ping = lastPingStatus {
+            ping.modelAvailable = false
+            ping.modelStatus = "model_missing"
+            lastPingStatus = ping
+        }
+        return (obj, lastRawLine)
+    }
+
+    private var lastRawLine: Data?
+
+    static func inferRequest(_ run: RunRequest) -> [String: Any] {
         // head_b64/tail_b64 are sent in BOTH the top-level C10 shape AND
         // inside `run`: serve.py reads them from `run` (its original and
         // current placement — CONTRACTS put them top-level, and the deployed
@@ -395,31 +465,7 @@ final class ActivityPythonService {
         if let extra = run.extra {
             for (k, v) in extra { request[k] = v }
         }
-        let obj = try roundTrip(request)
-        lock.lock()
-        defer { lock.unlock() }
-        let result = Self.parseInfer(obj)
-        if let echo = obj["echo"] as? [String: Any] { lastEcho = echo }
-        if result.ok {
-            if let mv = result.modelVersion, !mv.isEmpty { reportedModelVersion = mv }
-            if let pv = result.preprocessingVersion, !pv.isEmpty { reportedPreprocessingVersion = pv }
-            if lastPingStatus == nil || !lastPingStatus!.modelAvailable {
-                lastPingStatus = PingStatus(ok: true, modelAvailable: true,
-                                            modelStatus: "loaded",
-                                            modelVersion: result.modelVersion,
-                                            preprocessingVersion: result.preprocessingVersion,
-                                            error: nil)
-            }
-        }
-        if !result.ok {
-            // Remember model state so the lane can fail soft without another ping.
-            if result.errorKind == "model_missing" {
-                lastPingStatus = PingStatus(ok: false, modelAvailable: false,
-                                            modelStatus: "model_missing", modelVersion: nil,
-                                            preprocessingVersion: nil, error: result.error)
-            }
-        }
-        return result
+        return request
     }
 
     /// Ask the child to exit and reap it. Best effort: the child may ignore
@@ -473,6 +519,20 @@ final class ActivityPythonService {
         }
         let deadline = Date().addingTimeInterval(config.requestTimeoutSeconds)
         let opName = payload["op"] as? String ?? "request"
+        if config.keepsRawLines {
+            lock.lock()
+            pendingIds.insert(id)
+            lastRawLine = nil
+            lock.unlock()
+        }
+        defer {
+            if config.keepsRawLines {
+                lock.lock()
+                pendingIds.remove(id)
+                rawLines.removeValue(forKey: id)
+                lock.unlock()
+            }
+        }
 
         // Write the request line.
         do {
@@ -493,8 +553,13 @@ final class ActivityPythonService {
         lock.lock()
         while true {
             if let response = responses.removeValue(forKey: id) {
+                if config.keepsRawLines { lastRawLine = rawLines.removeValue(forKey: id) }
                 lock.unlock()
                 return response
+            }
+            if config.keepsRawLines, let why = failures.removeValue(forKey: id) {
+                lock.unlock()
+                throw ServiceError.malformedResponse(why)
             }
             if let fatal = failures.removeValue(forKey: "*") {
                 lock.unlock()
@@ -551,16 +616,31 @@ final class ActivityPythonService {
 
     // MARK: - Parsing
 
-    private static func parsePing(_ obj: [String: Any]) -> PingStatus {
+    /// Model statuses that mean "nothing usable is loaded" even when the ping itself succeeded.
+    ///
+    /// Fix (ping-parse bug): only `model_missing` / `missing` used to count as unavailable, but the real
+    /// `activity_context.serve` answers a HART manifest whose checkpoint does not load with `ok: true,
+    /// model_status: "hart_unavailable"` (and the Inertia service with `inertia_unavailable`). The lane then
+    /// believed the model was up, claimed jobs and failed every one of them on `model_missing` instead of
+    /// failing soft before claiming. An explicit `model_available: false` also counts as unavailable, and
+    /// neither signal can be overridden by the other.
+    static let unavailableModelStatuses: Set<String> = ["model_missing", "missing", "hart_unavailable",
+                                                        "inertia_unavailable"]
+
+    static func parsePing(_ obj: [String: Any]) -> PingStatus {
         let ok = (obj["ok"] as? Bool) ?? false
         var modelAvailable = ok
         var modelStatus = "unknown"
         if let raw = obj["model_status"] as? String {
             modelStatus = raw
-            modelAvailable = ok && raw != "model_missing" && raw != "missing"
+            if unavailableModelStatuses.contains(raw) { modelAvailable = false }
         }
-        if let raw = obj["model_available"] as? Bool {
-            modelAvailable = ok && raw
+        if let raw = obj["model_available"] as? Bool, !raw {
+            modelAvailable = false
+        }
+        var details: [String: String] = [:]
+        for (k, v) in obj {
+            if let s = v as? String, k != "id", k != "op" { details[k] = s }
         }
         return PingStatus(
             ok: ok,
@@ -568,7 +648,8 @@ final class ActivityPythonService {
             modelStatus: modelStatus,
             modelVersion: obj["model_version"] as? String,
             preprocessingVersion: obj["preprocessing_version"] as? String,
-            error: obj["error"] as? String)
+            error: (obj["error"] as? String) ?? (obj["model_error"] as? String),
+            details: details)
     }
 
     private static func parseInfer(_ obj: [String: Any]) -> InferResult {

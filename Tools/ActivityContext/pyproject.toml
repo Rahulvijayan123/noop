@@ -23,6 +23,17 @@ model = [
 dev = [
     "pytest>=8.0,<10",
 ]
+# Inertia-1 motion heads (activity_context.inertia): encoder + preprocessing + serve.
+inertia = [
+    "torch==2.8.0",          # CPU fp32 inference of the vendored encoders
+    "scipy==1.17.1",         # Butterworth/filtfilt + resample_poly (inertia-prep-1), erf GELU in heads
+]
+# Offline head training / evaluation (never needed by the serve process).
+inertia-train = [
+    "scikit-learn==1.9.1",
+    "pandas==3.0.6",
+    "pyarrow==25.0.1",
+]
 
 [project.scripts]
 activity-serve = "activity_context.serve:main"
@@ -30,9 +41,13 @@ activity-infer = "activity_context.infer:main"
 activity-train = "activity_context.train:main"
 activity-evaluate = "activity_context.evaluate:main"
 activity-fetch = "activity_context.fetch_artifacts:main"
+activity-inertia-serve = "activity_context.inertia.serve:main"
 
 [tool.setuptools.packages.find]
 include = ["activity_context*"]
+
+[tool.setuptools.package-data]
+"activity_context.inertia" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

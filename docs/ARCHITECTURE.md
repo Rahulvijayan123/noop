@@ -181,6 +181,13 @@ heads, transitions) for the heart-rate day page. The worker produces the same do
 decoder and stores it per UTC day, but nothing serves it to the phone yet; the app still draws its
 local result.
 
+An optional second motion expert, Inertia-1 (`Tools/ActivityContext/INERTIA1.md`), can run beside HART on
+the worker. It is off by default and shadow-first: its head outputs are stored in their own table and,
+in candidate mode, compared against a second decode of the day, but the published documents never change.
+In the decoder its heads are separate, tempered channels (never an average with HART) that stay off unless
+`ActivityDecoderConfig.motionHeads` accepts a real Inertia-1 bundle; with them off the decoder's output is
+byte-identical to before.
+
 That decoding also leaves a durable record. Each run carries a canonical activity class (a closed
 vocabulary, with a confidence) beside the display wording. On the phone, each local day's runs are saved
 as timestamp-aligned intervals in the on-device store (`activityContextInterval`), and the per-sample
