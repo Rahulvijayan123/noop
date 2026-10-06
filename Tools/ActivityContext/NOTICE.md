@@ -66,10 +66,11 @@ scipy / torch (optional [inertia] extra) and scikit-learn / pandas / pyarrow ([i
 
 Public datasets used by the Inertia head pipeline (activity_context/inertia/, offline research only)
 ------------------------------------------------------------------------------------------------------
-Every dataset below is licensed under the Creative Commons Attribution 4.0 International licence
-(CC BY 4.0, https://creativecommons.org/licenses/by/4.0/) as stated on its official record (checked
-2026-10-05). None of their raw data is committed or redistributed by this repository; the files are
-downloaded by the operator into $INERTIA_DATA_ROOT (outside git).
+Every dataset in this first list is licensed under the Creative Commons Attribution 4.0 International
+licence (CC BY 4.0, https://creativecommons.org/licenses/by/4.0/) as stated on its official record (checked
+2026-10-05); GOTOV and WEAR (CC BY-NC-SA 4.0) are listed separately below. None of their raw data is
+committed or redistributed by this repository; the files are downloaded by the operator into
+$INERTIA_DATA_ROOT (outside git).
 
 Changes made (all datasets, by Nara): accelerometer streams converted to g (m/s^2 / 9.80665, milli-g /
 1000), filtered (4th-order 10 Hz Butterworth, zero-phase) and resampled to 20 Hz, split at gaps > 1 s,
@@ -128,6 +129,44 @@ Daphnet Freezing of Gait — out-of-distribution probe only (non-wrist; never tr
   (2010). Wearable Assistant for Parkinson's Disease Patients With the Freezing of Gait Symptom. IEEE
   Trans. Inf. Technol. Biomed. 14(2), 436-446. https://doi.org/10.1109/TITB.2009.2036165
 
+Datasets licensed CC BY-NC-SA 4.0 — training (wrist), evaluation; used since 2026-10-06
+  Licence: Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0,
+  https://creativecommons.org/licenses/by-nc-sa/4.0/). The owner approved their NON-COMMERCIAL use for
+  training the Inertia motion heads on 2026-10-06 (Nara is non-commercial: PolyForm Noncommercial 1.0.0).
+  No raw or windowed data of theirs is committed or redistributed; committed outputs are aggregate metrics,
+  tables and label vocabularies only. Head bundles trained on them are derived material: they record
+  `training_data_licences` = ["CC BY 4.0", "CC BY-NC-SA 4.0"] in manifest.json, stay outside git, and must
+  only be used non-commercially (and, if ever shared, under CC BY-NC-SA 4.0 with this attribution). Use does
+  not imply endorsement by the dataset creators.
+
+GOTOV Human Physical Activity and Energy Expenditure Dataset on Older Individuals — training (right wrist),
+evaluation, measured-MET movement-intensity targets
+  Paraschiakos, S., Beekman, M., Knobbe, A., Cachucho, R., & Slagboom, E. (2021). GOTOV Human Physical
+  Activity and Energy Expenditure Dataset on Older Individuals [Dataset]. 4TU.ResearchData (Leiden University
+  Medical Center / LIACS). https://doi.org/10.4121/12716081.v2 — CC BY-NC-SA 4.0.
+  Papers (requested citations): Paraschiakos, S., Cachucho, R., Moed, M., et al. (2020). Activity recognition
+  using wearable sensors for tracking the elderly. User Modeling and User-Adapted Interaction 30, 567-605.
+  https://doi.org/10.1007/s11257-020-09268-2 ; Paraschiakos, S., de Sá, C. R., Okai, J., Slagboom, E. P.,
+  Beekman, M., & Knobbe, A. (2020). RNNs on monitoring physical activity energy expenditure in older people.
+  https://arxiv.org/abs/2006.01169
+  Changes made (by Nara): only the right-wrist GENEActiv stream (already in g) and the COSMED METS column are
+  read; samples placed on the device's uniform 600/7 Hz clock (the CSV timestamps stay within 15 ms of it);
+  the first/last 10 s of every protocol-imputed labelled segment masked (gotov-guard-10s); per-window measured
+  MET formed from the breath-by-breath METS (gotov-met-1: held <= 15 s, time-weighted, first 60 s of each
+  activity masked); then the common changes above (10 Hz low-pass, 20 Hz, 30 s windows, frozen subject split
+  Tools/ActivityContext/splits/gotov.json, crosswalk labels). Ankle/chest/Equivital data are not used.
+
+WEAR: An Outdoor Sports Dataset for Wearable and Egocentric Activity Recognition — training (one wrist per
+subject), evaluation
+  Bock, M., Kuehne, H., Van Laerhoven, K., & Moeller, M. (2024). WEAR: An Outdoor Sports Dataset for
+  Wearable and Egocentric Activity Recognition. Proc. ACM Interact. Mob. Wearable Ubiquitous Technol. 8(4),
+  Article 175. https://doi.org/10.1145/3699776 — dataset (University of Siegen,
+  https://github.com/mariusbock/wear) licensed CC BY-NC-SA 4.0.
+  Changes made (by Nara): only the raw/inertial/50hz accelerometer of ONE wrist per subject (left unless < 95 %
+  of its samples are finite, else right; already in g) is read; non-finite rows removed (the run is split, never
+  interpolated); then the common changes above (frozen subject split Tools/ActivityContext/splits/wear.json,
+  crosswalk labels). Leg streams and the egocentric video are not used.
+
 Reference only (label vocabularies and documentation audited into label_mappings.json; no samples used
 for training, evaluation or any committed number; role pooled_ablation_non_wrist):
   Smartphone-Based Recognition of Human Activities and Postural Transitions (UCI HAPT): Reyes-Ortiz, J.,
@@ -139,5 +178,5 @@ for training, evaluation or any committed number; role pooled_ablation_non_wrist
   HAR70+: Logacjov, A., & Ustad, A. UCI Machine Learning Repository. https://doi.org/10.24432/C5CW3D —
     CC BY 4.0. Paper: Ustad, A., et al. Sensors 23(5), 2368 (2023), https://doi.org/10.3390/s23052368
   The crosswalk also lists label names of datasets that are EXCLUDED from all use (DSADS, RealWorld 2016,
-  GOTOV and WEAR [CC BY-NC-SA], ExtraSensory, UT Complex, UCI HMP, RecoFit) so the exclusion is auditable;
-  no data of theirs is used.
+  ExtraSensory, UT Complex [no licence stated], UCI HMP [conflicting licence], RecoFit) so the exclusion is
+  auditable; no data of theirs is used. (GOTOV and WEAR were in this list until the 2026-10-06 decision.)

@@ -20,7 +20,7 @@ from . import events as Ev
 from . import metrics as M
 from . import ood as O
 from .assemble import activity_keys, any_target, assemble
-from .experiments import WRIST
+from .experiments import HELDOUT_DATASET_OOD
 
 TIMING_DATASETS = ("opportunity", "pamap2", "hhar_watch")
 
@@ -108,11 +108,13 @@ def eval_intensity(bundle, out, test) -> Dict[str, Any]:
                 "mae_constant_test_mean": float(np.abs(t - t.mean()).mean())}
 
     return {"interval80": q, "pooled": rep(v), "per_dataset": {d: rep(v & (ds == d)) for d in sorted(np.unique(ds[v]))},
-            "target": "clip(ln(MET)/ln(12),0,1) from Capture-24 annotation METs / PAMAP2 protocol METs"}
+            "target": "clip(ln(MET)/ln(12),0,1) from Capture-24 annotation METs / PAMAP2 protocol METs / GOTOV "
+                      "measured COSMED METs per window (gotov-met-1)"}
 
 
 def _refit(exp, cw, cache_root):
-    tr = assemble(exp.encoder, [exp.window], WRIST, cw, exp.ood_holdout, exp.train_datasets, ("train",), cache_root)
+    tr = assemble(exp.encoder, [exp.window], exp.datasets, cw, exp.ood_holdout, exp.train_datasets, ("train",),
+                  cache_root)
     idt = any_target(tr)
     return O.OODModel(tr.emb[idt], activity_keys(tr.meta[idt]), tr.meta["uid"].to_numpy()[idt])
 
@@ -130,7 +132,8 @@ def eval_ood(exp, bundle, out, test, daph, cw, cache_root) -> Dict[str, Any]:
                            "id_test_false_alarm_rate": float(np.mean(out["ood_score"][idm] > om["threshold"])),
                            "n_id_test": int(idm.sum())}
     loc = test.targets["locomotion"]
-    if not (exp.role == "ood_bench" or exp.name == "lodo-nohhar-hc") or daph is None or not len(daph.meta):
+    heldout_ds = HELDOUT_DATASET_OOD.get(exp.name)
+    if not (exp.role == "ood_bench" or heldout_ds) or daph is None or not len(daph.meta):
         return rep
     model = _refit(exp, cw, cache_root)
     arr = bundle.ood_arrays
@@ -146,10 +149,11 @@ def eval_ood(exp, bundle, out, test, daph, cw, cache_root) -> Dict[str, Any]:
     raw_t = numpy_logits(bundle.heads_arrays, "locomotion", meta_l["arch"], z_t)[:, sup]
     raw_d = numpy_logits(bundle.heads_arrays, "locomotion", meta_l["arch"], z_d)[:, sup]
     sets = {"heldout_activities_test": held & out["valid"], "daphnet_fog_nonwrist": None}
-    if exp.name == "lodo-nohhar-hc":          # held-out DATASET: HHAR never trained on; its activities were
-        sets = {"heldout_dataset_hhar_test": (test.meta["dataset"] == "hhar_watch").to_numpy() & cls & out["valid"],
+    if heldout_ds:                            # held-out DATASET (never trained on): its test windows are the OOD set
+        short = heldout_ds.replace("_watch", "")
+        sets = {f"heldout_dataset_{short}_test": (test.meta["dataset"] == heldout_ds).to_numpy() & cls & out["valid"],
                 "daphnet_fog_nonwrist": None}
-        idm = idm & (test.meta["dataset"] != "hhar_watch").to_numpy()
+        idm = idm & (test.meta["dataset"] != heldout_ds).to_numpy()
     rep["benchmark"] = {}
     for name, mask in sets.items():
         if mask is not None and not mask.any():

@@ -132,6 +132,15 @@ def assert_disjoint_windows(subjects: np.ndarray, split_names: np.ndarray) -> Di
     return {k: len(v) for k, v in per.items()}
 
 
+AGENTC_LARGE_SPLIT = ("Agent C split(): numpy default_rng(42).permutation of the sorted subject ids; first 20% test, "
+                      "next 20% val, rest train")
+FROZEN_NOTES = {
+    "gotov": ("35 participants with a right-wrist GENEActiv file (frozen 2026-10-06 for the NC-SA licence decision); "
+              "outdoor walking/cycling exists for 22 of them: 14 train, 6 val, 1 test (GOTOV07)"),
+    "wear": "24 subjects sbj_0..23 (frozen 2026-10-06 for the NC-SA licence decision)",
+}
+
+
 def freeze_from_agentc(src_path: str, datasets: Sequence[str], splits_dir: str = SPLITS_DIR) -> List[str]:
     """Convert Agent C's ``split_manifests.json`` into per-dataset ``nara-split-1`` files."""
     with open(src_path, encoding="utf-8") as f:
@@ -141,9 +150,10 @@ def freeze_from_agentc(src_path: str, datasets: Sequence[str], splits_dir: str =
         s = src[ds]
         method = ("official P102-P151 test; P001-P101 seeded 81/20" if ds == "capture24" else
                   "Nara HART split (numpy default_rng(42) shuffle, 15%/15%)" if ds == "wisdm2019_watch" else
-                  "seeded subject permutation (Agent C)")
+                  AGENTC_LARGE_SPLIT if ds in FROZEN_NOTES else "seeded subject permutation (Agent C)")
         doc = make_manifest(ds, s["train_subjects"], s["val_subjects"], s["test_subjects"], seed=s.get("seed"),
-                            method=method, note=s.get("note", ""), loso_folds=s.get("loso_folds"),
+                            method=method, note=s.get("note", "") or FROZEN_NOTES.get(ds, ""),
+                            loso_folds=s.get("loso_folds"),
                             source=f"Agent C split_manifests.json ({ds})")
         paths.append(write_split(doc, splits_dir))
     return paths

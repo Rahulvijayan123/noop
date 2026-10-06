@@ -28,7 +28,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .cache import CACHE_ROOT
 
-ALL_DATASETS = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity", "daphnet_fog")
+ALL_DATASETS = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity", "daphnet_fog",
+                "gotov", "wear")
+CLASS_ONLY = ("daphnet_fog", "gotov", "wear")      # windowed for w30 only by default (no dense transition series)
 
 
 def _csv(s: Optional[str], default: Sequence[str]) -> List[str]:
@@ -39,7 +41,7 @@ def cmd_windows(a) -> int:
     from .cache import build_windows
     for ds in _csv(a.datasets, ALL_DATASETS):
         t = time.time()
-        specs = _csv(a.specs, ("w30", "w30t", "w10")) if ds != "daphnet_fog" else ["w30"]
+        specs = _csv(a.specs, ("w30", "w30t", "w10")) if ds not in CLASS_ONLY else _csv(a.specs, ("w30",))
         out = build_windows(ds, specs, root=a.cache, workers=a.workers, force=a.force)
         print(json.dumps({"dataset": ds, "seconds": round(time.time() - t, 1),
                           "windows": {k: {"n": v["n_windows"], "by_split": v["n_by_split"]} for k, v in out.items()}}),

@@ -16,6 +16,10 @@ Window sets (one pass per recording, see :data:`SPECS`):
 
 Capture-24 TRAIN ``w30``/``w10`` windows are capped at 1000 per (subject, fine label), keeping the windows
 with the smallest sha256(uid) (deterministic); val/test are uncapped. Eval hop = train hop (documented).
+
+Measured MET (GOTOV, ``Recording.met``): a window's ``met`` is the mean of the per-sample MET over the window's
+20 Hz samples when >= ``MET_COVERAGE`` (90 %) of them carry a measurement, else None (MASK). Recordings without
+``met`` get no ``met`` field (their intensity target, if any, is the label's audited MET).
 """
 
 from __future__ import annotations
@@ -35,6 +39,7 @@ from .transition_targets import (N_EVENTS, derive_boundaries, label_segments, ma
 RATE = ipre.TARGET_HZ
 EDGE_S = float(ipre.EDGE_MARGIN_S)
 PURITY = 0.9
+MET_COVERAGE = 0.9
 C24_TRAIN_CAP = 1000
 WINDOWS_VERSION = "inertia-windows-1"
 
@@ -92,12 +97,14 @@ def window_recording(rec: Recording, cw: Crosswalk, specs: Sequence[Spec], split
     for sl in ipre.segment_on_gaps(rec.t, max_gap_s=rec.split_step_s):
         t, x, codes = rec.t[sl], rec.xyz_g[sl], rec.labels[sl]
         filled = rec.filled[sl] if rec.filled is not None else np.zeros(len(t), bool)
+        met = rec.met[sl] if rec.met is not None else None
         if len(t) < 2 or (t[-1] - t[0]) < min(s.window_s for s in specs) + 2 * EDGE_S:
             continue
         if not rec.uniform:                       # irregular watch clock: linear regrid onto the nominal rate
             tg, x = _regrid(t, x, rec.source_hz)
             near = _nearest(t, tg)
             codes, filled, t = codes[near], filled[near], tg
+            met = met[near] if met is not None else None
         try:
             x20 = ipre.resample_to_20hz(x, rec.source_hz)
         except ipre.PreprocessError:
@@ -105,6 +112,7 @@ def window_recording(rec: Recording, cw: Crosswalk, specs: Sequence[Spec], split
         t20 = t[0] + np.arange(len(x20)) / RATE
         src_idx = np.clip(np.round(np.arange(len(x20)) * rec.source_hz / RATE).astype(np.int64), 0, len(t) - 1)
         lab20, fill20 = codes[src_idx], filled[src_idx]
+        met20 = met[src_idx] if met is not None else None
         segs = label_segments(t, codes, rec.source_hz, states)
         run_end = t[-1] + 1.0 / rec.source_hz
         for spec in specs:
@@ -143,6 +151,10 @@ def window_recording(rec: Recording, cw: Crosswalk, specs: Sequence[Spec], split
                     "pure": bool(pure), "filled_fraction": float(fill20[i:i + T].mean()),
                     "placement": rec.placement, "device": rec.device, "wrist_side": rec.wrist_side,
                     "source_hz": float(rec.source_hz), "kind": spec.kind})
+                if met20 is not None:
+                    mw = met20[i:i + T]
+                    fin = np.isfinite(mw)
+                    acc[spec.name]["meta"][-1]["met"] = float(mw[fin].mean()) if fin.mean() >= MET_COVERAGE else None
     out = {}
     for spec in specs:
         a = acc[spec.name]
@@ -171,5 +183,5 @@ def _cap(meta: List[Dict], cap: int) -> np.ndarray:
     return np.array(sorted(keep), np.int64)
 
 
-__all__ = ["Spec", "SPECS", "window_recording", "window_uid", "uid_rank", "PURITY", "C24_TRAIN_CAP",
+__all__ = ["Spec", "SPECS", "window_recording", "window_uid", "uid_rank", "PURITY", "MET_COVERAGE", "C24_TRAIN_CAP",
            "WINDOWS_VERSION", "DENSE_TRN"]

@@ -15,6 +15,14 @@ Roles
 ``window``      10 s windows (stand-in window benchmark; class heads only).
 ``lodo``        leave-one-dataset-out transfer.
 ``seed``        seeds 1, 2 of the primary hc procedure with the primary's selected architectures.
+
+NC-SA experiments (``ncsa-*``, declared 2026-10-06 after the owner approved non-commercial use of GOTOV and WEAR,
+CC BY-NC-SA 4.0, and BEFORE any of their test splits was opened): the same procedures on the eight wrist sets
+:data:`WRIST_NC` (the six CC BY sets + GOTOV + WEAR), every one evaluated on the test subjects of all eight.
+``ncsa-lodo-nonc-hc`` trains on the six CC BY sets only (the "without NC-SA data" reference on the same test
+split, archs and OOD method fixed from ``ncsa-primary-hc`` / ``ncsa-ood-hc``); ``ncsa-lodo-nogotov-hc`` /
+``ncsa-lodo-nowear-hc`` leave one NC-SA set out (its contribution on its own test subjects; the left-out set is
+also scored as a held-out-dataset OOD probe). Their bundles record ``training_data_licences``.
 """
 
 from __future__ import annotations
@@ -33,8 +41,12 @@ HC = "standin:handcrafted-stats-v1"
 NF = "standin:nara-imu-feat-1-accel"
 ART = "standin:inertia-arch-random-init/ar_transformer-small/seed0"
 REAL = "inertia-1/ar_transformer-small/30s@20hz"
-WRIST = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity")
+WRIST = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity")     # CC BY 4.0
+NC_SA = ("gotov", "wear")                                                                      # CC BY-NC-SA 4.0
+WRIST_NC = WRIST + NC_SA
 SHORT = {HC: "hc", NF: "nf", ART: "art", REAL: "inertia1"}
+# leave-one-dataset-out experiments whose left-out dataset is also scored as a held-out-dataset OOD probe
+HELDOUT_DATASET_OOD = {"lodo-nohhar-hc": "hhar_watch", "ncsa-lodo-nogotov-hc": "gotov", "ncsa-lodo-nowear-hc": "wear"}
 
 
 @dataclass(frozen=True)
@@ -57,6 +69,11 @@ class Experiment:
     @property
     def bundle_id(self) -> str:
         return f"shadow-{self.name}"
+
+    @property
+    def datasets(self) -> Tuple[str, ...]:
+        """Every dataset the experiment assembles (training first, then evaluation-only), in a stable order."""
+        return tuple(dict.fromkeys(self.train_datasets + self.eval_datasets))
 
     @property
     def trn_window(self) -> Optional[str]:
@@ -92,6 +109,24 @@ EXPERIMENTS: Dict[str, Experiment] = {e.name: e for e in [
                  description=f"primary hc procedure, seed {k}") for k in (1, 2)],
     Experiment(name="primary-inertia1", encoder=REAL, role="primary", ood_from=None, save_predictions=True,
                description="REAL Inertia-1 (blocked: no public checkpoint)"),
+    # --- NC-SA (GOTOV + WEAR), declared 2026-10-06 before any of these test evaluations -------------------------
+    *[Experiment(name=f"ncsa-ood-{SHORT[e]}", encoder=e, role="ood_bench", ood_holdout=True, arch="linear",
+                 train_datasets=WRIST_NC, eval_datasets=WRIST_NC,
+                 description="OOD benchmark bundle on the eight wrist sets incl. GOTOV/WEAR (CC BY-NC-SA 4.0)")
+      for e in (HC, NF, ART)],
+    *[Experiment(name=f"ncsa-primary-{SHORT[e]}", encoder=e, role="primary", ood_from=f"ncsa-ood-{SHORT[e]}",
+                 train_datasets=WRIST_NC, eval_datasets=WRIST_NC,
+                 description=f"primary stand-in bundle ({SHORT[e]}) on the eight wrist sets incl. GOTOV/WEAR "
+                             "(CC BY-NC-SA 4.0); CV-selected head archs") for e in (HC, NF, ART)],
+    Experiment(name="ncsa-lodo-nonc-hc", encoder=HC, role="lodo", arch="from:ncsa-primary-hc", ood_from="ncsa-ood-hc",
+               train_datasets=WRIST, eval_datasets=WRIST_NC,
+               description="without NC-SA data: train on the six CC BY sets -> the eight-set test (GOTOV/WEAR unseen)"),
+    Experiment(name="ncsa-lodo-nogotov-hc", encoder=HC, role="lodo", arch="from:ncsa-primary-hc",
+               ood_from="ncsa-ood-hc", train_datasets=WRIST + ("wear",), eval_datasets=WRIST_NC,
+               description="train without GOTOV -> GOTOV test (GOTOV's contribution; older adults, measured MET)"),
+    Experiment(name="ncsa-lodo-nowear-hc", encoder=HC, role="lodo", arch="from:ncsa-primary-hc",
+               ood_from="ncsa-ood-hc", train_datasets=WRIST + ("gotov",), eval_datasets=WRIST_NC,
+               description="train without WEAR -> WEAR test (WEAR's contribution; exercise_motion)"),
 ]}
 
 
@@ -111,4 +146,4 @@ REPLAY_DECLARED = tuple(sorted([f"replay-baseline/{d}" for d in REPLAY_DATASETS]
                                 for e in EXPERIMENTS.values() if e.role == "primary"]))
 
 __all__ = ["Experiment", "EXPERIMENTS", "DECLARED", "REPLAY_DECLARED", "get_experiment", "BUNDLES_ROOT", "EVAL_ROOT",
-           "HC", "NF", "ART", "REAL", "WRIST", "SHORT"]
+           "HC", "NF", "ART", "REAL", "WRIST", "NC_SA", "WRIST_NC", "SHORT", "HELDOUT_DATASET_OOD"]

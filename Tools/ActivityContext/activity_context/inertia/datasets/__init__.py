@@ -13,8 +13,14 @@ explicit, versioned (``LOADER_VERSION`` per module) and recorded per sample (``f
   dropouts split the run. Never applied to WHOOP data.
 * Irregular-clock watches (WISDM, HHAR): ``uniform=False``; windows.py regrids each run onto the
   nominal rate (linear, runs are split at any step > ``max_step_s``) before resampling.
+* GOTOV (``gotov-guard-10s``): the first/last 10 s of every protocol-imputed labelled segment are relabelled
+  null (MASK). WEAR: one wrist stream per subject (left if >= 95 % finite, else right).
 
-Physiology columns (PAMAP2 heart rate, MHEALTH ECG) are never parsed.
+A loader may attach a per-sample measured MET (``met``, NaN = no measurement; GOTOV ``gotov-met-1`` from
+COSMED breath-by-breath METS). It is a movement_intensity TARGET only (windows.py averages it per window),
+never a head input.
+
+Physiology columns (PAMAP2 heart rate, MHEALTH ECG, GOTOV Equivital / COSMED except METS) are never parsed.
 """
 
 from __future__ import annotations
@@ -39,9 +45,12 @@ def resolve_root(root, default: str, dataset: str) -> str:
                                         f"INERTIA_DATA_ROOT{' / WISDM_DIR' if dataset == 'wisdm2019_watch' else ''})")
 LOADERS = {
     "capture24": "capture24", "wisdm2019_watch": "wisdm", "hhar_watch": "hhar", "pamap2": "pamap2",
-    "mhealth": "mhealth", "opportunity": "opportunity", "daphnet_fog": "daphnet",
+    "mhealth": "mhealth", "opportunity": "opportunity", "daphnet_fog": "daphnet", "gotov": "gotov", "wear": "wear",
 }
-TRAIN_WRIST = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity")
+# role train_wrist: the six CC BY 4.0 sets, plus the two CC BY-NC-SA 4.0 sets approved on 2026-10-06
+CC_BY_WRIST = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity")
+NC_SA_WRIST = ("gotov", "wear")
+TRAIN_WRIST = CC_BY_WRIST + NC_SA_WRIST
 
 
 class DatasetError(RuntimeError):
@@ -66,6 +75,7 @@ class Recording:
     max_step_s: Optional[float] = None   # split runs at steps > this (default 1.5 / source_hz, or 1 s)
     filled: Optional[np.ndarray] = None  # bool [N]: sample produced by a documented loader repair
     meta: Dict[str, Any] = field(default_factory=dict)
+    met: Optional[np.ndarray] = None     # float [N]: measured MET per sample (NaN = none); target only
 
     def __post_init__(self):
         n = len(self.t)
@@ -73,6 +83,8 @@ class Recording:
             raise DatasetError(f"{self.session}: inconsistent array shapes")
         if self.filled is not None and self.filled.shape != (n,):
             raise DatasetError(f"{self.session}: filled mask shape mismatch")
+        if self.met is not None and self.met.shape != (n,):
+            raise DatasetError(f"{self.session}: met shape mismatch")
         if self.labels.size and (self.labels.min() < 0 or self.labels.max() >= len(self.label_names)):
             raise DatasetError(f"{self.session}: label code out of range")
 
@@ -123,5 +135,5 @@ def rest_median_norm(rec: Recording, rest_labels: Sequence[str]) -> float:
     return float(np.median(np.linalg.norm(rec.xyz_g[sel], axis=1)))
 
 
-__all__ = ["G", "HAR_ROOT", "LOADERS", "TRAIN_WRIST", "DatasetError", "Recording", "ms2_to_g", "mg_to_g",
+__all__ = ["G", "HAR_ROOT", "LOADERS", "TRAIN_WRIST", "CC_BY_WRIST", "NC_SA_WRIST", "DatasetError", "Recording", "ms2_to_g", "mg_to_g",
            "encode_labels", "loader", "iter_recordings", "list_units", "rest_median_norm"]

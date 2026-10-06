@@ -48,8 +48,9 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   none is used or committed; the lane runs only against an explicitly supplied, hash-verified checkpoint,
   and the stand-ins and fixtures (including a small seeded random-init test checkpoint) are not Inertia-1.
   Contract: `Tools/ActivityContext/INERTIA1.md`.
-- **Public activity datasets (all CC BY 4.0)** used offline to train and evaluate the stand-in heads —
-  never committed or redistributed; only aggregate metrics and label vocabularies are recorded. Full
+- **Public activity datasets (CC BY 4.0, plus GOTOV and WEAR under CC BY-NC-SA 4.0)** used offline to train and
+  evaluate the stand-in heads — never committed or redistributed; only aggregate metrics and label vocabularies
+  are recorded. Full
   creator lists, titles, DOIs, introductory papers and the changes made (unit conversion to g, 10 Hz
   low-pass, resampling to 20 Hz, windowing, frozen subject splits, label mapping to Nara classes) are in
   `Tools/ActivityContext/NOTICE.md`:
@@ -62,6 +63,14 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   - **Daphnet Freezing of Gait** (out-of-distribution probe only) — Roggen, Plotnik & Hausdorff (2010), UCI,
     doi:10.24432/C56K78.
   - **WISDM-2019** (also used by the HART path above) — Weiss (2019), UCI, doi:10.24432/C5HK59.
+  - **CC BY-NC-SA 4.0 — non-commercial use approved by the owner on 2026-10-06** (Nara is non-commercial): head
+    bundles trained on these record `training_data_licences` including "CC BY-NC-SA 4.0", stay outside git and are
+    for non-commercial use only; no raw data is committed or redistributed.
+    - **GOTOV** (older adults; right-wrist GENEActiv + COSMED measured MET) — Paraschiakos, Beekman, Knobbe, Cachucho
+      & Slagboom (2021), 4TU.ResearchData, doi:10.4121/12716081.v2; paper Paraschiakos et al. (2020), UMUAI,
+      doi:10.1007/s11257-020-09268-2.
+    - **WEAR** (outdoor workouts; Bangle.js wrists) — Bock, Kuehne, Van Laerhoven & Moeller (2024), IMWUT 8(4) 175,
+      doi:10.1145/3699776 (University of Siegen).
   - Reference only (label vocabularies audited, no samples used): **UCI HAPT** (Reyes-Ortiz, Anguita, Oneto &
     Parra, doi:10.24432/C54G7M), **HARTH** (Logacjov, Kongsvold, Bach, Bårdstu & Mork, doi:10.24432/C5NC90),
     **HAR70+** (Logacjov & Ustad, doi:10.24432/C5CW3D).

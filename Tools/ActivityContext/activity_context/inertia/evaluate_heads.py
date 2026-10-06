@@ -36,7 +36,7 @@ from .bundle import BundleError, gate_document, load_bundle, seal_bundle
 from .cache import CACHE_ROOT, CacheError
 from .contract import InertiaUnavailable
 from .eval_parts import eval_intensity, eval_ood, eval_transition, save_predictions
-from .experiments import BUNDLES_ROOT, DECLARED, EVAL_ROOT, WRIST, Experiment, get_experiment
+from .experiments import BUNDLES_ROOT, DECLARED, EVAL_ROOT, Experiment, get_experiment
 from .integrity import TestVault, array_sha256, assert_calibration_provenance, assert_head_inputs
 from .mappings import load_mappings
 from .targets import CLASS_HEADS, Support, bits_to_matrix
@@ -252,7 +252,7 @@ def evaluate_experiment(exp: Experiment, cache_root: Optional[str] = None, bundl
     specs = [exp.window] + ([exp.trn_window] if exp.trn_window else [])
 
     def load_test():                                    # called only inside the vault
-        test = assemble(exp.encoder, specs, WRIST, cw, False, None, ("test",), cache_root)
+        test = assemble(exp.encoder, specs, exp.eval_datasets, cw, False, None, ("test",), cache_root)
         try:
             extra = assemble(exp.encoder, [exp.window], ("daphnet_fog",), cw, False, None, ("ood",), cache_root)
         except CacheError:
@@ -276,6 +276,9 @@ def evaluate_experiment(exp: Experiment, cache_root: Optional[str] = None, bundl
                                "encoder": man["encoder"], "evidence_tier_max": man["evidence_tier_max"],
                                "banner": man["training"]["standin_banner"], "role": exp.role,
                                "provenance": {k: man["training"].get(k) for k in PROVENANCE_KEYS},
+                               "training_datasets": list(man["training"].get("training_datasets") or []),
+                               "eval_datasets": list(exp.eval_datasets),
+                               "training_data_licences": man["training"].get("training_data_licences"),
                                "apply_vs_training_side_max_abs": parity, "n_test_windows": int(len(t.meta)),
                                "n_nonfinite_dropped": int((~out["valid"]).sum()),
                                "test_windows": t.meta.groupby(["dataset"]).agg(windows=("uid", "size"),

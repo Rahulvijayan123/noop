@@ -33,6 +33,10 @@ FIXTURE_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..
 HEADS = ("posture", "locomotion", "arm_behavior")
 PRIMARY = ("primary-hc", "primary-nf", "primary-art")
 ARCH = ("linear-hc", "mlp-hc", "linear-art", "mlp-art", "linear-nf")
+NCSA_PRIMARY = ("ncsa-primary-hc", "ncsa-primary-nf", "ncsa-primary-art")
+NCSA_COMPARE = ("ncsa-lodo-nonc-hc", "ncsa-primary-hc", "ncsa-lodo-nogotov-hc", "ncsa-lodo-nowear-hc")
+NCSA_ALL = NCSA_COMPARE + ("ncsa-primary-nf", "ncsa-primary-art")
+SPLIT_DATASETS = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity", "gotov", "wear")
 
 
 def _load(eval_dir: str) -> Dict[str, Dict[str, Any]]:
@@ -183,10 +187,10 @@ def _intensity(R, names) -> List[str]:
     return L + [""]
 
 
-def _ood(R) -> List[str]:
+def _ood(R, names=("ood-hc", "ood-nf", "ood-art", "lodo-nohhar-hc"), selected=None) -> List[str]:
     L = ["| bundle | OOD set | method | AUROC | AUPRC (prev.) | FPR@95 OOD+ | ID false alarm @op | OOD detect @op |",
          "|---|---|---|---|---|---|---|---|"]
-    for n in ("ood-hc", "ood-nf", "ood-art", "lodo-nohhar-hc"):
+    for n in names:
         o = (R.get(n) or {}).get("ood", {})
         for s, rows in o.get("benchmark", {}).items():
             for m, v in rows.items():
@@ -197,6 +201,8 @@ def _ood(R) -> List[str]:
                          f"{f(v['id_false_alarm_at_op'])} | {f(v['ood_detect_rate_at_op'])} |")
     L += ["", "| bundle | method (VAL-selected) | threshold | ID test false-alarm rate |", "|---|---|---|---|"]
     for n, rep in R.items():
+        if selected is not None and n not in selected:
+            continue
         o = rep.get("ood", {})
         L.append(f"| {n} | {o.get('bundle_method')}{'@' + str(o['k']) if o.get('k') else ''} | {f(o.get('threshold'))} | "
                  f"{f(o.get('id_test_false_alarm_rate'))} |")
@@ -231,7 +237,8 @@ def _seeds(R) -> List[str]:
 def _windows_table() -> List[str]:
     from .cache import CACHE_ROOT, read_manifest
     L = ["| dataset | spec | window/hop (s) | train | val | test | ood | subjects | loader |", "|---|---|---|---|---|---|---|---|---|"]
-    for ds in ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity", "daphnet_fog"):
+    for ds in ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity", "daphnet_fog", "gotov",
+               "wear"):
         for spec in ("w30", "w30t", "w10"):
             try:
                 m = read_manifest(CACHE_ROOT, spec, ds)
@@ -340,6 +347,153 @@ def _fixture_section() -> List[str]:
     return L
 
 
+NCSA_CAVEATS = [
+    "**GOTOV is older adults** (35 participants, 59.5-81.3 y, BMI 23-35, recruited > 60 y) in a scripted protocol: its "
+    "walking speeds are **instructed** ('slow / medium / fast pace'), never measured, so `brisk_walking` here means "
+    "'an older adult asked to walk fast' — not a cadence or speed threshold, and not validated on younger or free-living "
+    "walkers. Outdoor walking exists for 22 participants only; the frozen split leaves **one** GOTOV test participant "
+    "with walking (GOTOV07: 19 `brisk_walking` and 33 `walking` test windows), so every GOTOV walking / brisk_walking / "
+    "cycling test number is a one-subject, descriptive result and the test gate cannot demote with < 30 accepted windows.",
+    "GOTOV labels are protocol-imputed (researcher-recorded start/end): the first/last 10 s of every activity are MASK "
+    "(`gotov-guard-10s`), and transitions give interior negatives only. Its movement_intensity target is the **measured** "
+    "COSMED K4b2 METS (time-weighted per window; the first 60 s of each activity MASK for VO2 on-kinetics; 4 of 35 "
+    "participants have no COSMED) — whole-body energy expenditure of older adults, not wrist motion.",
+    "WEAR is 24 (mostly young) adults doing 18 outdoor workouts on a Bangle.js; **one wrist per subject** (left unless "
+    "< 95 % finite) so no movement is counted twice. `exercise_motion` is supervised only by WEAR push-ups (+complex), "
+    "burpees, bench-dips and jogging with arm circles (sit-ups / lunges stay MASK: 'arms may be static').",
+    "Both sets are **CC BY-NC-SA 4.0**: every `ncsa-*` bundle except `ncsa-lodo-nonc-hc` records "
+    "`training_data_licences` = [CC BY 4.0, CC BY-NC-SA 4.0] and may only be used non-commercially (Nara is "
+    "non-commercial; owner decision 2026-10-06). Bundles stay outside git.",
+    "The `ncsa-*` test split = the six CC BY test splits + the GOTOV (7) and WEAR (5) test subjects, so its pooled numbers "
+    "are not comparable with the sealed `primary-*` bundles above; compare `ncsa-primary-hc` with `ncsa-lodo-nonc-hc` "
+    "(same test windows, same archs and OOD method, CC BY data only). WISDM / PAMAP2 test caveats (G-8) apply unchanged.",
+]
+
+
+def _ncsa_mapping_table(cw) -> List[str]:
+    L = ["| dataset | head | trained rows (source label → target, confidence) |", "|---|---|---|"]
+    for ds in ("gotov", "wear"):
+        for h in ("posture", "locomotion", "arm_behavior", "transition", "movement_intensity"):
+            rows = [r for r in cw.doc["mappings"] if r["dataset"] == ds and r["nara_head"] == h and r["used_for_training"]]
+            if not rows:
+                continue
+
+            def tgt(r):
+                t = r["nara_target"]
+                return ("measured MET" if isinstance(t, dict) else "{" + ", ".join(t) + "}" if isinstance(t, list) else str(t))
+            cells = "; ".join(f"{r['source_label']} → {tgt(r)} ({r['mapping_confidence'][0].upper()})" for r in rows)
+            L.append(f"| {ds} | {h} | {cells} |")
+    left = [f"{r['dataset']}/{r['source_label']}/{r['nara_head']} ({r['mapping_confidence']})" for r in cw.doc["mappings"]
+            if r["dataset"] in ("gotov", "wear") and not r["used_for_training"] and r["target_type"] != "mask"]
+    return L + ["", "Not trained (Agent C left them unused: low confidence or candidate): " + "; ".join(left) + ".", ""]
+
+
+def _compare_classes(R, names, h) -> List[str]:
+    L = [f"#### {h}", "", "| class | test support | " + " | ".join(f"{n} F1 (P/R) · val→final" for n in names) +
+         " | ncsa-primary-hc P single-label (n) | ncsa-primary-hc demotion reasons |", "|---|---|" + "---|" * (len(names) + 2)]
+    for c in HEAD_CLASS_ORDERS[h]:
+        cells, sup = [], "–"
+        for n in names:
+            r = _head(R.get(n), h)
+            if not r:
+                cells.append("–")
+                continue
+            pc = r["pooled"]["per_class"][c]
+            sup = f(pc["support"])
+            if not pc["supported_by_head"]:
+                cells.append("unsupported")
+                continue
+            g = r.get("gate", {}).get(c, {})
+            cells.append(f"{f(pc['f1'], 2)} ({f(pc['precision'], 2)}/{f(pc['recall'], 2)}) · "
+                         f"{g.get('val_status', '–')}→{g.get('final_status', '–')}")
+        ph = _head(R.get("ncsa-primary-hc"), h) or {}
+        sl = (ph.get("single_label") or {}).get("per_class", {}).get(c)
+        single = f"{f(sl['precision'], 2)} ({f(sl['support'])})" if sl else "–"
+        reasons = "; ".join(ph.get("gate", {}).get(c, {}).get("reasons", [])) or "–"
+        L.append(f"| {class_label(h, c)} | {sup} | " + " | ".join(cells) + f" | {single} | {reasons} |")
+    return L + [""]
+
+
+FOCUS = (("gotov", "locomotion", ("stationary", "walking", "brisk_walking", "cycling", "other")),
+         ("gotov", "posture", ("recumbent", "seated_likely", "upright_stationary")),
+         ("gotov", "arm_behavior", ("desk_like",)),
+         ("wear", "locomotion", ("stationary", "running", "other")),
+         ("wear", "arm_behavior", ("exercise_motion",)))
+
+
+def _focus(R, names) -> List[str]:
+    L = ["| test dataset | head | class | " + " | ".join(f"{n} P/R/F1 (n)" for n in names) + " |",
+         "|---|---|---|" + "---|" * len(names)]
+    for ds, h, classes in FOCUS:
+        for c in classes:
+            cells = []
+            for n in names:
+                v = ((_head(R.get(n), h) or {}).get("per_dataset", {}).get(ds) or {}).get("per_class", {}).get(c)
+                if not v:
+                    cells.append("–")
+                elif not v["supported_by_head"]:
+                    cells.append(f"unsupported ({v.get('support', 0)})")
+                else:
+                    cells.append(f"{f(v['precision'], 2)}/{f(v['recall'], 2)}/{f(v['f1'], 2)} ({v['support']})")
+            L.append(f"| {ds} | {h} | {class_label(h, c)} | " + " | ".join(cells) + " |")
+    return L + [""]
+
+
+def _intensity_dataset(R, names, ds) -> List[str]:
+    L = ["| experiment | trained on GOTOV | n | MAE | MAE const (test mean) | R² | Spearman | 80% coverage |",
+         "|---|---|---|---|---|---|---|---|"]
+    for n in names:
+        r = _head(R.get(n), "movement_intensity")
+        if not r:
+            continue
+        v = r["per_dataset"].get(ds, {})
+        tr = ds in EXPERIMENTS[n].train_datasets
+        L.append(f"| {n} | {'yes' if tr else 'no'} | {f(v.get('n'))} | {f(v.get('mae'))} | {f(v.get('mae_constant_test_mean'))} | "
+                 f"{f(v.get('r2'))} | {f(v.get('spearman'))} | {f(v.get('interval80_coverage'))} |")
+    return L + [""]
+
+
+def _ncsa_section(R, cw) -> List[str]:
+    L = ["## With vs without NC-SA data (GOTOV + WEAR, CC BY-NC-SA 4.0; licence decision 2026-10-06)", "",
+         "The owner approved non-commercial use of GOTOV and WEAR on 2026-10-06; sets with no stated licence "
+         "(ExtraSensory, RealWorld 2016, UT complex, UCI HMP) stay excluded. The `ncsa-*` experiments were declared in "
+         "`experiments.py` before any of their test splits was opened, trained from a clean commit and evaluated once "
+         "(sealed) like every other bundle. `ncsa-lodo-nonc-hc` = **without** NC-SA data (six CC BY sets; archs and OOD "
+         "method fixed from `ncsa-primary-hc` / `ncsa-ood-hc`); `ncsa-primary-hc` = **with**; `ncsa-lodo-nogotov-hc` / "
+         "`ncsa-lodo-nowear-hc` leave one NC-SA set out.", "", "### Caveats", ""]
+    L += [f"- {c}" for c in NCSA_CAVEATS] + ["", "### Crosswalk rows trained since 2026-10-06", ""] + _ncsa_mapping_table(cw)
+    L += ["### Headline (pooled ncsa test split)", ""] + _headline(R, NCSA_ALL)
+    L += ["### Per-class test P/R/F1 and final status — without vs with", "",
+          "Pooled over the eight-set test split. `unsupported` = the class failed the train-support rule in that bundle "
+          "(< 200 train windows / 5 train subjects / 2 val subjects); a set target {walking, brisk_walking} counts as "
+          "correct for either member.", ""]
+    for h in HEADS:
+        L += _compare_classes(R, NCSA_COMPARE, h)
+    L += ["### GOTOV / WEAR test subjects (key classes)", "", DESCRIPTIVE_NOTE + " GOTOV walking / brisk_walking / cycling "
+          "test windows all come from ONE participant (GOTOV07).", ""] + _focus(R, NCSA_COMPARE + ("ncsa-primary-nf",))
+    L += ["### Per-dataset macro-F1 (ncsa test split)", "", DESCRIPTIVE_NOTE, ""]
+    for h in HEADS:
+        L += _per_dataset_f1(R, list(NCSA_ALL), h)
+    L += ["### Per-dataset per-class test P/R/F1 — ncsa-primary-hc and ncsa-lodo-nonc-hc", "", DESCRIPTIVE_NOTE,
+          FEW_SUBJECTS_NOTE, ""]
+    for n in ("ncsa-primary-hc", "ncsa-lodo-nonc-hc"):
+        for h in HEADS:
+            L += _per_dataset_classes(R, n, h)
+    L += ["### Movement intensity on GOTOV (measured COSMED MET)", "",
+          "Target `clip(ln MET / ln 12, 0, 1)` of the window's measured METS (7 GOTOV test participants, those with "
+          "COSMED); `MAE const` = predicting the GOTOV test mean (an oracle constant; R² is relative to it).", ""]
+    L += _intensity_dataset(R, NCSA_ALL, "gotov")
+    L += ["All movement-intensity sets:", ""] + _intensity(R, NCSA_ALL)
+    L += ["### Awake lying (GOTOV lying is awake by protocol)", ""] + _awake_lying(R, NCSA_ALL)
+    L += ["### Transition events (ncsa)", ""] + _transition(R, NCSA_COMPARE)
+    L += ["### Calibration (ncsa primaries)", ""] + _calibration(R, NCSA_PRIMARY + ("ncsa-lodo-nonc-hc",))
+    L += ["### OOD (ncsa)", "", "`heldout_dataset_<set>_test` = the left-out NC-SA set's test windows scored as "
+          "out-of-distribution by the LODO bundle that never saw it.", ""]
+    L += _ood(R, ("ncsa-ood-hc", "ncsa-ood-nf", "ncsa-ood-art", "ncsa-lodo-nogotov-hc", "ncsa-lodo-nowear-hc"),
+              selected=set(n for n in R if n.startswith("ncsa-")))
+    return L
+
+
 def build_summary(eval_dir: str, bundles_root: str) -> str:
     R = _load(eval_dir)
     for n, rep in R.items():
@@ -354,13 +508,15 @@ def build_summary(eval_dir: str, bundles_root: str) -> str:
          "use stand-in encoders (`standin:handcrafted-stats-v1` = engineered baseline, `standin:nara-imu-feat-1-accel` = what "
          "the decoder already sees, `standin:inertia-arch-random-init/ar_transformer-small/seed0` = negative control). "
          "All are `evidence_tier_max = shadow`.", "", "## Experiments", "",
-         "| experiment | role | encoder | window | training datasets | bundle | evaluated sha256 | sealed sha256 | git commit | evaluated |",
-         "|---|---|---|---|---|---|---|---|---|---|"]
+         "| experiment | role | encoder | window | training datasets | training data licences | bundle | evaluated sha256 | "
+         "sealed sha256 | git commit | evaluated |",
+         "|---|---|---|---|---|---|---|---|---|---|---|"]
     for n, e in EXPERIMENTS.items():
         rep = R.get(n)
         seal = (rep or {}).get("seal") or {}
         prov = (rep or {}).get("provenance") or {}
-        L.append(f"| {n} | {e.role} | {SHORT.get(e.encoder, e.encoder)} | {e.window} | {', '.join(e.train_datasets)} | "
+        lic = ", ".join(sorted({cw.doc["dataset_roles"][d]["licence"] for d in e.train_datasets}))
+        L.append(f"| {n} | {e.role} | {SHORT.get(e.encoder, e.encoder)} | {e.window} | {', '.join(e.train_datasets)} | {lic} | "
                  f"`{e.bundle_id}` | `{(rep or {}).get('bundle_sha256', '')[:16]}` | `{str(seal.get('sealed_bundle_sha256', '–'))[:16]}` | "
                  f"`{str(prov.get('git_commit') or '–')[:12]}`{' (dirty)' if prov.get('source_dirty') else ''} | "
                  f"{'yes (n=' + str(rep['integrity']['n_test_evaluations']) + ')' if rep else ('blocked' if e.encoder.startswith('inertia-1/') else 'no')} |")
@@ -382,14 +538,16 @@ def build_summary(eval_dir: str, bundles_root: str) -> str:
     L += ["## Calibration (test; fit on val only)", ""] + _calibration(R, PRIMARY)
     L += ["## Transition events", ""] + _transition(R, PRIMARY)
     L += ["## Movement intensity", ""] + _intensity(R, PRIMARY)
-    L += ["## OOD", ""] + _ood(R)
+    L += ["## OOD", ""] + _ood(R, selected=set(n for n in R if not n.startswith("ncsa-")))
     L += ["## Ablations", "", "### 10 s vs 30 s windows (stand-in hc, class heads)", ""] + _headline(R, ("primary-hc", "w10-hc"))
     L += ["### Linear vs MLP (forced, test)", ""] + _headline(R, ("linear-hc", "mlp-hc", "linear-art", "mlp-art"))
     L += ["### Leave-one-dataset-out transfer (hc)", "", DESCRIPTIVE_NOTE, ""]
     for h in HEADS:
         L += _per_dataset_f1(R, ["primary-hc", "lodo-noc24-hc", "lodo-c24only-hc", "lodo-nohhar-hc"], h)
     L += ["### Seed variation (primary hc procedure, archs fixed from seed 0)", ""] + _seeds(R)
-    sp = load_splits(["capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity"])
+    if any(n.startswith("ncsa-") for n in R):
+        L += _ncsa_section(R, cw)
+    sp = load_splits(list(SPLIT_DATASETS))
     L += ["## Split manifests (subject-level, frozen before windowing)", "", "| dataset | train | val | test | LOSO folds | sha256 |",
           "|---|---|---|---|---|---|"]
     L += [f"| {s['dataset']} | {s['train']} | {s['val']} | {s['test']} | {s['loso_folds']} | `{s['sha256']}` |" for s in split_summary(sp)]

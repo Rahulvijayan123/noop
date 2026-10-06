@@ -112,10 +112,37 @@ def test_class_targets_mask_not_unknown(cw):
     meta = pd.DataFrame([{"dataset": "wisdm2019_watch", "label": "A", "kind": "cls", "pure": True},
                          {"dataset": "wisdm2019_watch", "label": "D", "kind": "cls", "pure": True},
                          {"dataset": "wisdm2019_watch", "label": "D", "kind": "trn", "pure": False},
-                         {"dataset": "gotov", "label": "standing", "kind": "cls", "pure": True}])
+                         {"dataset": "extrasensory_watch", "label": "SITTING", "kind": "cls", "pure": True}])
     post = class_targets(meta, cw, "posture")
     assert list(post) == [0, 1 << HEAD_CLASS_ORDERS["posture"].index("seated_likely"), 0, 0]
     assert np.isnan(intensity_targets(meta, cw)).all()
     held = class_targets(pd.DataFrame([{"dataset": "pamap2", "label": "24", "kind": "cls", "pure": True}]), cw,
                          "arm_behavior", ood_holdout=True)
     assert list(held) == [0]
+
+
+def test_measured_met_window_mean_and_coverage(cw):
+    """GOTOV-style per-sample MET: window met = mean over the window when >= 90 % measured, else None (MASK);
+    measured-MET labels take their target from it, other labels never do."""
+    fs = 50.0
+    names = ["NA", "walkingFast"]
+    codes = np.repeat(np.array([1] * 200, np.int32), int(fs))
+    n = len(codes)
+    met = np.full(n, 4.0)
+    met[int(100 * fs):int(130 * fs)] = np.nan                       # 30 s without a measurement
+    x = np.tile([0.0, 0.0, 1.0], (n, 1))
+    rec = Recording(dataset="gotov", subject="gotov:GOTOV05", session="gotov:GOTOV05", placement="wrist_right",
+                    device="synthetic", wrist_side="right", axis_frame="x", source_hz=fs, t=np.arange(n) / fs,
+                    xyz_g=x, labels=codes, label_names=names, met=met)
+    meta = pd.DataFrame(window_recording(rec, cw, [SPECS["w30"]], "train")["w30"]["meta"])
+    early = meta[meta["t1"] <= 100.0]
+    gap = meta[(meta["t0"] >= 100.0) & (meta["t1"] <= 130.0 + 1e-9)]
+    assert np.allclose(early["met"], 4.0) and gap["met"].isna().all()
+    it = intensity_targets(meta, cw)
+    assert np.allclose(it[early.index], np.log(4.0) / np.log(12.0), atol=1e-6) and np.isnan(it[gap.index]).all()
+    wisdm = pd.DataFrame([{"dataset": "wisdm2019_watch", "label": "A", "kind": "cls", "pure": True, "met": 5.0}])
+    assert np.isnan(intensity_targets(wisdm, cw)).all()             # a measured value never overrides the crosswalk
+    with pytest.raises(Exception):
+        Recording(dataset="gotov", subject="s", session="s", placement="wrist_right", device="d", wrist_side="right",
+                  axis_frame="x", source_hz=fs, t=np.arange(3) / fs, xyz_g=np.zeros((3, 3)),
+                  labels=np.zeros(3, np.int32), label_names=["NA"], met=np.zeros(2))

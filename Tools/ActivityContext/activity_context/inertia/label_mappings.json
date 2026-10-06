@@ -121,40 +121,40 @@
    "note": "OOD probe only (non-wrist; informative, not a Nara wrist result)"
   },
   "wear": {
-   "role": "excluded_licence",
+   "role": "train_wrist",
    "licence": "CC BY-NC-SA 4.0",
-   "placement": "wrist",
-   "note": "excluded from training pending an explicit licensing decision"
+   "placement": "wrist (one per subject: left, else right; Bangle.js)",
+   "note": "training set since 2026-10-06: CC BY-NC-SA 4.0, non-commercial use approved by the owner (Nara is non-commercial); attribution in Tools/ActivityContext/NOTICE.md; bundles record training_data_licences"
   },
   "gotov": {
-   "role": "excluded_licence",
+   "role": "train_wrist",
    "licence": "CC BY-NC-SA 4.0",
-   "placement": "wrist",
-   "note": "excluded from training pending an explicit licensing decision"
+   "placement": "wrist (right, GENEActiv)",
+   "note": "training set since 2026-10-06: CC BY-NC-SA 4.0, non-commercial use approved by the owner (Nara is non-commercial); attribution in Tools/ActivityContext/NOTICE.md; bundles record training_data_licences"
   },
   "extrasensory_watch": {
    "role": "excluded_licence",
    "licence": "no licence stated",
    "placement": "wrist",
-   "note": "excluded from training pending an explicit licensing decision"
+   "note": "excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision"
   },
   "realworld2016": {
    "role": "excluded_licence",
    "licence": "no licence stated",
    "placement": "forearm",
-   "note": "excluded from training pending an explicit licensing decision"
+   "note": "excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision"
   },
   "ut_complex_shoaib2016": {
    "role": "excluded_licence",
    "licence": "no licence stated (and no subject ids)",
    "placement": "wrist",
-   "note": "excluded from training pending an explicit licensing decision"
+   "note": "excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision"
   },
   "uci_hmp_wrist": {
    "role": "excluded_licence",
    "licence": "UCI CC BY 4.0 vs README commercial restriction (conflict)",
    "placement": "wrist",
-   "note": "excluded from training pending an explicit licensing decision"
+   "note": "excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision"
   },
   "dsads": {
    "role": "excluded_other",
@@ -175,6 +175,30 @@
    "note": "future personal supervision; not a v1 dependency"
   }
  },
+ "licence_decisions": [
+  {
+   "date": "2026-10-06",
+   "decision": "GOTOV and WEAR (CC BY-NC-SA 4.0) may be used to train the Inertia motion heads (non-commercial use)",
+   "datasets": [
+    "gotov",
+    "wear"
+   ],
+   "licence": "CC BY-NC-SA 4.0 (https://creativecommons.org/licenses/by-nc-sa/4.0/)",
+   "basis": "approved by the owner on 2026-10-06; Nara is non-commercial (PolyForm Noncommercial 1.0.0)",
+   "conditions": [
+    "attribution and the changes made are listed in Tools/ActivityContext/NOTICE.md and ATTRIBUTION.md",
+    "no raw or windowed data is committed or redistributed (only aggregate metrics and label vocabularies)",
+    "every bundle trained on them records training_data_licences including 'CC BY-NC-SA 4.0' and stays outside git; such bundles must not be used commercially or relicensed under terms that drop the NC/SA conditions"
+   ],
+   "rows": "Agent C's audited used_for_training is kept as is (every such row is confidence high/medium); its low-confidence / candidate rows stay unused",
+   "still_excluded": {
+    "extrasensory_watch": "no licence stated",
+    "realworld2016": "no licence stated",
+    "ut_complex_shoaib2016": "no licence stated (and no subject ids)",
+    "uci_hmp_wrist": "UCI CC BY 4.0 vs README commercial restriction (conflict)"
+   }
+  }
+ ],
  "datasets": {
   "capture24": {
    "name": "CAPTURE-24 (Oxford)",
@@ -534,7 +558,8 @@
    "subject_field": "GOTOV02..GOTOV36 (31 with COSMED)",
    "continuity": "continuous; labels imputed from protocol schedule; NA gaps 15-80 s between activities (standing >1 min between activities)",
    "labels": "syncJumping, standing, step, lyingDownLeft, lyingDownRight, sittingSofa, sittingCouch, sittingChair, walkingStairsUp, dishwashing, stakingShelves, vacuumCleaning, walkingSlow, walkingNormal, walkingFast, cycling",
-   "wrist_relevant": true
+   "wrist_relevant": true,
+   "loader_verification": "loader gotov-loader-1 (2026-10-06): 35/35 right-wrist files; GENEActiv clock 600/7 = 85.714 Hz (CSV steps 4-15 ms, <= 15 ms from a uniform grid over every file; Agent C's '83 Hz' was nominal); no missing samples, no NaN; units g (median |a| over the rest labels 0.997-1.022 g per participant); 31 COSMED files on the same unix-ms clock; labels protocol-imputed -> 10 s guard at every labelled segment edge (gotov-guard-10s); outdoor walking only in 22 participants"
   },
   "wear": {
    "name": "WEAR (Univ. Siegen)",
@@ -561,7 +586,8 @@
    "subject_field": "sbj_id 0..23",
    "continuity": "continuous outdoor sessions; video-annotated workout segments with 'null' between (median 30 s)",
    "labels": "18 workouts: jogging (+rotating arms, skipping, sidesteps, butt-kicks), stretching (triceps, lunging, shoulders, hamstrings, lumbar rotation), push-ups(+complex), sit-ups(+complex), burpees, lunges(+complex), bench-dips; null",
-   "wrist_relevant": true
+   "wrist_relevant": true,
+   "loader_verification": "loader wear-loader-1 (2026-10-06): 24 files sbj_0..23, uniform 50 Hz, units g (median |a| during stretching 0.997-1.023 g, both wrists); one wrist per subject (left unless < 95 % finite: sbj_10 left arm 25.8 % NaN -> right)"
   },
   "extrasensory_watch": {
    "name": "ExtraSensory (UCSD)",
@@ -683,7 +709,7 @@
    "role": "future personal supervision; not a v1 dependency; not queried"
   }
  },
- "transition_states_rule": "null label -> null; posture recumbent -> lie (Capture-24 '7030 sleeping' -> sleep: diary onset/offset is not an event); posture seated_likely -> sit; posture upright_stationary with locomotion stationary -> stand; locomotion containing walking (and not stationary) -> walk; running -> run; else other. Uses Agent C's audited rows (audit_used_for_training). A change between equal states is not a boundary.",
+ "transition_states_rule": "null label -> null; posture recumbent -> lie (Capture-24 '7030 sleeping' -> sleep: diary onset/offset is not an event); posture seated_likely -> sit; posture upright_stationary with locomotion stationary -> stand; locomotion containing walking (and not stationary) -> walk; running -> run; else other. Uses Agent C's audited rows (audit_used_for_training). A change between equal states is not a boundary. (brisk_walking counts as walk.)",
  "transition_states": {
   "capture24": {
    "7030 sleeping;MET 0.95": "sleep",
@@ -974,7 +1000,7 @@
    "WITH_FRIENDS": "other"
   },
   "gotov": {
-   "NA": "other",
+   "NA": null,
    "cycling": "other",
    "dishwashing": "stand",
    "lyingDownLeft": "lie",
@@ -987,7 +1013,7 @@
    "step": "other",
    "syncJumping": "other",
    "vacuumCleaning": "other",
-   "walkingFast": "other",
+   "walkingFast": "walk",
    "walkingNormal": "walk",
    "walkingSlow": "walk",
    "walkingStairsUp": "other"
@@ -1219,7 +1245,7 @@
    "jogging (skipping)": "run",
    "lunges": "other",
    "lunges (complex)": "other",
-   "null": "other",
+   "null": null,
    "push-ups": "other",
    "push-ups (complex)": "other",
    "sit-ups": "other",
@@ -1574,6 +1600,14 @@
   "mhealth": {
    "mode": "negatives_only",
    "source": "all changes through 20-60 s nulls -> no positives"
+  },
+  "gotov": {
+   "mode": "negatives_only",
+   "source": "Agent C: labels imputed from the protocol (researcher-recorded start/end), NA gaps 15-80 s -> no positives; interior windows of the audited 'none' rows are negatives (after the 10 s label guard)"
+  },
+  "wear": {
+   "mode": "mask",
+   "source": "Agent C: run_start/run_stop candidates only (low); null content unknown -> no transition targets"
   }
  },
  "set_families": {
@@ -11936,7 +11970,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -11998,7 +12032,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12062,7 +12096,7 @@
    "rationale": "pace free",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12088,7 +12122,7 @@
    "used_for_training": false,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12126,7 +12160,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12152,7 +12186,7 @@
    "used_for_training": false,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12189,7 +12223,7 @@
    "rationale": "jumping, ~1.7 min",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12239,7 +12273,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12253,7 +12287,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12279,7 +12313,7 @@
    "used_for_training": false,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12305,7 +12339,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12319,7 +12353,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12345,7 +12379,7 @@
    "used_for_training": false,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12371,7 +12405,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12385,7 +12419,7 @@
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12411,7 +12445,7 @@
    "used_for_training": false,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "realworld2016",
@@ -12434,10 +12468,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'standing (rest between activities)' is standing still by protocol (upright, not ambulating), so the posture target is upright_stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12448,10 +12482,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'standing (rest between activities)' is standing in place by protocol: no ambulation, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12474,10 +12508,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); 60 s rests",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12486,14 +12520,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12504,10 +12538,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'lying down left' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12518,10 +12552,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'lying down left' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12544,10 +12578,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); ",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12556,14 +12590,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12574,10 +12608,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'lying down right' is lying by protocol (awake; not a sleep-diary label), so the posture target is recumbent",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12588,10 +12622,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'lying down right' is lying by protocol: no ambulation or vehicle travel, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12614,10 +12648,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); ",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12626,14 +12660,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12644,10 +12678,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'sitting on sofa, watching TV' is seated by protocol, so the posture target is seated_likely",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12658,10 +12692,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'sitting on sofa, watching TV' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12673,7 +12707,8 @@
    "mapping_confidence": "low",
    "rationale": "TV watching",
    "used_for_training": false,
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "gotov",
@@ -12684,10 +12719,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); ",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12696,14 +12731,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12714,9 +12749,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "semi-reclined",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12727,10 +12762,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'sitting on couch, feet on couch, reading newspaper' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12753,10 +12788,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); ",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12765,14 +12800,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12783,10 +12818,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'sitting on office chair, computer work' is seated by protocol, so the posture target is seated_likely",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12797,10 +12832,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "'sitting on office chair, computer work' is seated by protocol: no ambulation or vehicle travel, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12811,9 +12846,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "computer work by protocol",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12824,10 +12859,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); ",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12836,14 +12871,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12866,9 +12901,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "~17 s bouts",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12901,14 +12936,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -12919,9 +12954,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "'stand and wash dishes'",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12932,10 +12967,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "'stand and wash dishes' is standing in place by protocol: no ambulation, so locomotion is stationary",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12947,7 +12982,8 @@
    "mapping_confidence": "low",
    "rationale": "manipulative",
    "used_for_training": false,
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "gotov",
@@ -12958,10 +12994,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); ",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -12970,14 +13006,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13000,10 +13036,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "'stacking shelves' mixes short steps with reaching/pushing, neither still nor sustained gait, so locomotion is other",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13036,14 +13072,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13066,10 +13102,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "'vacuum cleaning' mixes short steps with reaching/pushing, neither still nor sustained gait, so locomotion is other",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13082,7 +13118,8 @@
    "rationale": "'vacuum cleaning' is a sustained, repetitive push-pull arm movement, so the arm target is repetitive_hand_motion",
    "used_for_training": false,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "gotov",
@@ -13103,14 +13140,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13133,9 +13170,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "instructed slow pace -> genuinely not brisk",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13158,10 +13195,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); 5-min bout",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13170,14 +13207,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13200,9 +13237,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "instructed medium pace (older adults)",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13225,10 +13262,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); 5-min bout",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13237,14 +13274,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13267,9 +13304,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "instructed fast self-selected pace; the only public wrist label that separates pace (older adults, NC licence)",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13292,10 +13329,10 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); 5-min bout",
-   "used_for_training": false,
+   "used_for_training": true,
    "window_rule": "interior_only",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "gotov",
@@ -13304,14 +13341,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13334,10 +13371,10 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "direct (source label equals Nara class): source label 'cycling' -> cycling",
-   "used_for_training": false,
+   "used_for_training": true,
    "rationale_source": "Nara normaliser: explicit rationale (mappings_rationales; Agent C left it blank)",
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13370,14 +13407,14 @@
    "nara_head": "movement_intensity",
    "nara_target": {
     "met": "measured_COSMED",
-    "value": "f(METS) per aligned minute"
+    "value": "per window: clip(ln(mean measured METS) / ln 12, 0, 1); loader gotov-met-1: COSMED K4b2 breath-by-breath METS (> 0), each held until the next breath when <= 15 s later, time-weighted over the window's 20 Hz samples, >= 90 % of the window measured; the first 60 s of every activity (VO2 on-kinetics) and participants without COSMED are MASK"
    },
    "target_type": "regression",
    "mapping_confidence": "high",
    "rationale": "COSMED K4b2 indirect calorimetry METS merged per participant (Energy_Expenditure_Measurements); best intensity target available",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "gotov",
@@ -13580,9 +13617,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "jogging",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "wear",
@@ -13607,7 +13644,8 @@
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); segments split by short nulls (pauses?)",
    "used_for_training": false,
    "window_rule": "interior_only",
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -13642,9 +13680,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "jogging variant: gait modified",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -13655,9 +13693,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "arm circles while jogging",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "wear",
@@ -13670,7 +13708,8 @@
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); segments split by short nulls (pauses?)",
    "used_for_training": false,
    "window_rule": "interior_only",
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -13705,9 +13744,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "jogging variant: gait modified",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -13732,7 +13771,8 @@
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); segments split by short nulls (pauses?)",
    "used_for_training": false,
    "window_rule": "interior_only",
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -13767,9 +13807,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "jogging variant: gait modified",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -13794,7 +13834,8 @@
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); segments split by short nulls (pauses?)",
    "used_for_training": false,
    "window_rule": "interior_only",
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -13829,9 +13870,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "jogging variant: gait modified",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -13856,7 +13897,8 @@
    "rationale": "interior windows only (>= guard from any segment boundary / recording edge); segments split by short nulls (pauses?)",
    "used_for_training": false,
    "window_rule": "interior_only",
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence low); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -13891,9 +13933,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "static stretch in place",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -13952,9 +13994,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "static stretch in place",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14013,9 +14055,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "static stretch in place",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14074,9 +14116,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "static stretch in place",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14135,9 +14177,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "static stretch in place",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14196,9 +14238,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14209,9 +14251,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "arms load-bearing/moving",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "wear",
@@ -14258,9 +14300,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14271,9 +14313,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "arms load-bearing/moving",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "wear",
@@ -14320,9 +14362,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14334,7 +14376,8 @@
    "mapping_confidence": "medium",
    "rationale": "arms may be static (on chest/hips)",
    "used_for_training": false,
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence medium, candidate); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -14381,9 +14424,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14395,7 +14438,8 @@
    "mapping_confidence": "medium",
    "rationale": "arms may be static (on chest/hips)",
    "used_for_training": false,
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence medium, candidate); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -14442,9 +14486,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14455,9 +14499,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "arms load-bearing/moving",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "wear",
@@ -14504,9 +14548,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14518,7 +14562,8 @@
    "mapping_confidence": "medium",
    "rationale": "arms may be static (on chest/hips)",
    "used_for_training": false,
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence medium, candidate); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -14565,9 +14610,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14579,7 +14624,8 @@
    "mapping_confidence": "medium",
    "rationale": "arms may be static (on chest/hips)",
    "used_for_training": false,
-   "audit_used_for_training": false
+   "audit_used_for_training": false,
+   "policy": "not trained: Agent C's audit left this row unused (confidence medium, candidate); unchanged by the 2026-10-06 licence decision"
   },
   {
    "dataset": "wear",
@@ -14626,9 +14672,9 @@
    "target_type": "class",
    "mapping_confidence": "medium",
    "rationale": "floor/in-place strength exercise, no gait",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence medium)"
   },
   {
    "dataset": "wear",
@@ -14639,9 +14685,9 @@
    "target_type": "class",
    "mapping_confidence": "high",
    "rationale": "arms load-bearing/moving",
-   "used_for_training": false,
+   "used_for_training": true,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (CC BY-NC-SA 4.0)"
+   "licence_decision": "2026-10-06: CC BY-NC-SA 4.0 approved for non-commercial training; row trained as audited by Agent C (confidence high)"
   },
   {
    "dataset": "wear",
@@ -14738,7 +14784,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -14751,7 +14797,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -14800,7 +14846,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -14876,7 +14922,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -14937,7 +14983,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -14998,7 +15044,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -15047,7 +15093,7 @@
    "rationale": "asleep; self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -15060,7 +15106,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -15589,7 +15635,7 @@
    "rationale": "driver is seated",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",
@@ -17410,7 +17456,7 @@
    "rationale": "self-reported in-the-wild minute labels (label noise); 20-s watch samples",
    "used_for_training": false,
    "audit_used_for_training": true,
-   "policy": "dataset role excluded_licence: excluded from training pending an explicit licensing decision (no licence stated)"
+   "policy": "dataset role excluded_licence: excluded from training: no licence stated (or a conflicting one); not covered by the 2026-10-06 licence decision (no licence stated)"
   },
   {
    "dataset": "extrasensory_watch",

@@ -60,13 +60,54 @@ def test_no_mask_row_used_and_no_unknown_target(cw):
 
 def test_only_train_wrist_datasets_train(cw):
     train = set(cw.datasets("train_wrist"))
-    assert train == {"capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity"}
+    assert train == {"capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity", "gotov", "wear"}
     for r in cw.doc["mappings"]:
         if r["used_for_training"]:
             assert r["dataset"] in train
-    for ds in ("wear", "gotov", "extrasensory_watch", "realworld2016", "ut_complex_shoaib2016"):
+    # no stated (or a conflicting) licence: still excluded after the 2026-10-06 decision
+    for ds in ("extrasensory_watch", "realworld2016", "ut_complex_shoaib2016", "uci_hmp_wrist"):
         assert cw.role(ds) == "excluded_licence"
         assert all(cw.class_target(ds, lab, "locomotion") == 0 for lab in cw.source_labels(ds))
+
+
+def test_nc_sa_licence_decision(cw):
+    """GOTOV/WEAR (CC BY-NC-SA 4.0) train since 2026-10-06 with exactly Agent C's audited rows (all high/medium);
+    low-confidence / candidate rows stay unused with an explicit policy."""
+    dec = cw.doc["licence_decisions"][0]
+    assert dec["date"] == "2026-10-06" and dec["datasets"] == ["gotov", "wear"]
+    assert set(dec["still_excluded"]) == {"extrasensory_watch", "realworld2016", "ut_complex_shoaib2016", "uci_hmp_wrist"}
+    for ds in ("gotov", "wear"):
+        assert cw.role(ds) == "train_wrist" and cw.doc["dataset_roles"][ds]["licence"] == "CC BY-NC-SA 4.0"
+    nc = [r for r in cw.doc["mappings"] if r["dataset"] in ("gotov", "wear")]
+    for r in nc:
+        assert r["used_for_training"] == r["audit_used_for_training"]
+        if r["used_for_training"]:
+            assert r["mapping_confidence"] in ("high", "medium") and r["licence_decision"].startswith("2026-10-06")
+        elif r["target_type"] != "mask":
+            assert r["policy"].startswith("not trained")
+    assert sum(r["used_for_training"] for r in nc) == 69
+    L = lambda ds, lab: Mp.mask_classes(cw.class_target(ds, lab, "locomotion"), "locomotion")
+    assert L("gotov", "walkingSlow") == ["walking"] and L("gotov", "walkingNormal") == ["walking"]
+    assert L("gotov", "walkingFast") == ["brisk_walking"]                      # the only brisk_walking supervision
+    A = lambda ds, lab: Mp.mask_classes(cw.class_target(ds, lab, "arm_behavior"), "arm_behavior")
+    for lab in ("push-ups", "push-ups (complex)", "burpees", "bench-dips", "jogging (rotating arms)"):
+        assert A("wear", lab) == ["exercise_motion"]
+    for lab in ("sit-ups", "sit-ups (complex)", "lunges", "lunges (complex)"):    # medium but 'arms may be static'
+        assert A("wear", lab) == [] and cw.row("wear", lab, "arm_behavior")["mapping_confidence"] == "medium"
+    assert A("gotov", "sittingSofa") == [] and A("gotov", "dishwashing") == []    # low confidence: unused
+    assert A("gotov", "sittingChair") == ["desk_like"]
+    for lab in ("NA", "syncJumping", "step"):
+        assert all(cw.class_target("gotov", lab, h) == 0 for h in ("posture", "locomotion", "arm_behavior"))
+    assert cw.transition_state("gotov", "NA") is None and cw.transition_state("wear", "null") is None
+    assert cw.transition_state("gotov", "walkingFast") == "walk"
+
+
+def test_gotov_measured_met_rows(cw):
+    assert cw.intensity_measured("gotov", "walkingFast") and cw.intensity_measured("gotov", "lyingDownLeft")
+    assert np.isnan(cw.intensity_target("gotov", "walkingFast"))       # no fixed label value: measured per window
+    assert not cw.intensity_measured("gotov", "NA") and not cw.intensity_measured("wear", "jogging")
+    assert not cw.intensity_measured("capture24", "7030 sleeping;MET 0.95")
+    assert "gotov-met-1" in cw.row("gotov", "cycling", "movement_intensity")["nara_target"]["value"]
 
 
 def test_missing_target_is_mask_never_unknown(cw):

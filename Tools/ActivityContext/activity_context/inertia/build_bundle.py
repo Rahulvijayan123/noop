@@ -29,7 +29,7 @@ from .metrics import binary_auc as M_auc
 from .assemble import activity_keys, any_target, assemble, head_rows
 from .cache import CACHE_ROOT
 from .contract import InertiaUnavailable
-from .experiments import BUNDLES_ROOT, WRIST, Experiment, get_experiment
+from .experiments import BUNDLES_ROOT, Experiment, get_experiment
 from .head_training import train_class_head, train_intensity_head, train_transition_head
 from .heads import HEAD_INPUTS, fit_standardizer, numpy_logits
 from .integrity import array_sha256, assert_head_inputs
@@ -148,11 +148,23 @@ def run_experiment(exp: Experiment, cache_root: Optional[str] = None, bundles_ro
     t0 = time.time()
     cw = load_mappings()
     specs = [exp.window] + ([exp.trn_window] if exp.trn_window else [])
-    data = assemble(exp.encoder, specs, WRIST, cw, exp.ood_holdout, exp.train_datasets, ("train", "val"), cache_root)
+    data = assemble(exp.encoder, specs, exp.datasets, cw, exp.ood_holdout, exp.train_datasets, ("train", "val"),
+                    cache_root)
     sha = train_bundle(exp, data, out_dir, cw, _encoder_info(exp, cache_root), bundles_root, provenance=prov,
                        tier=tier)
     return {"bundle_dir": out_dir, "bundle_sha256": sha, "seconds": round(time.time() - t0, 1),
             "evidence_tier_max": tier}
+
+
+def training_data_licences(cw, train_datasets) -> Dict[str, Any]:
+    """Licences of the data a bundle is trained on (from the crosswalk's ``dataset_roles``), e.g. ``["CC BY 4.0",
+    "CC BY-NC-SA 4.0"]``. A bundle listing CC BY-NC-SA 4.0 inherits its non-commercial / share-alike terms."""
+    by = {d: cw.doc["dataset_roles"][d]["licence"] for d in train_datasets}
+    out: Dict[str, Any] = {"licences": sorted(set(by.values())), "by_dataset": by, "note": None}
+    if "CC BY-NC-SA 4.0" in out["licences"]:
+        out["note"] = ("trained on CC BY-NC-SA 4.0 data (GOTOV/WEAR; owner decision 2026-10-06): non-commercial use only, "
+                       "share-alike; attribution in Tools/ActivityContext/NOTICE.md")
+    return out
 
 
 def recumbent_composition(a, cw) -> Dict[str, Any]:
@@ -221,20 +233,23 @@ def train_bundle(exp: Experiment, data, out_dir: str, cw, enc_info: Dict[str, An
     log(f"{exp.name}: OOD reference")
     ood_arrays, ood_meta, ood_sel = fit_ood(exp, cw, tr, va, z_tr, z_va, arrays, heads, _ood_choice(exp, bundles_root))
     emb_info = next(iter(data.emb_info.values())) if data.emb_info else {"encoder_version": enc_info.get("encoder_version")}
-    splits = load_splits(WRIST)
+    splits = load_splits(exp.datasets)
+    licences = training_data_licences(cw, exp.train_datasets)
     window_s = SPECS[exp.window].window_s
     unit_contract = {"axes": list(INERTIA_AXES), "units": "g", "gravity": "kept", "rate_hz": 20, "normalization": "none"}
     training = {
         "experiment": exp.name, "role": exp.role, "description": exp.description, "seed": exp.seed,
         "standin_banner": STANDIN_BANNER, "head_inputs": list(HEAD_INPUTS),
         "training_datasets": list(exp.train_datasets), "eval_datasets": list(exp.eval_datasets),
+        "training_data_licences": licences["licences"], "training_data_licence_by_dataset": licences["by_dataset"],
+        "training_data_licence_note": licences["note"],
         "ood_holdout": exp.ood_holdout, "split_manifest_sha256": combined_sha256(splits),
         "split_manifests": {d: s["sha256"] for d, s in splits.items()}, "label_mappings_sha256": cw.sha256,
         "calibration_method": {h: c["method"] for h, c in cal.items()},
         "operating_thresholds": {h: {c: {"status": m["status"][c], "tau": m["tau"][c],
                                          "evidence": evidence[h].get("operating_points", {}).get(c, {}).get("evidence")}
                                      for c in m["status"]} for h, m in heads.items() if "status" in m},
-        "ood_selection": ood_sel, "window_policy": {"window_s": window_s, "train_hop_s": {d: SPECS[exp.window].hop_s(d) for d in WRIST},
+        "ood_selection": ood_sel, "window_policy": {"window_s": window_s, "train_hop_s": {d: SPECS[exp.window].hop_s(d) for d in exp.datasets},
                                                     "eval_hop_s": "same as train (documented in windows.py)",
                                                     "capture24_train_cap": "1000 per (subject, fine label)"},
         "n_windows": {"train": int(len(tr.meta)), "val": int(len(va.meta))}, "embedding_cache": data.emb_info,
@@ -258,7 +273,8 @@ def train_bundle(exp: Experiment, data, out_dir: str, cw, enc_info: Dict[str, An
         "axis_order": list(INERTIA_AXES), "unit_contract": unit_contract,
         "head_architecture": {h: m["arch"] for h, m in heads.items()},
         "head_class_order": {h: list(HEAD_CLASS_ORDERS[h]) for h in heads if h in HEAD_CLASS_ORDERS},
-        "training_datasets": list(exp.train_datasets), "split_manifest_sha256": training["split_manifest_sha256"],
+        "training_datasets": list(exp.train_datasets), "training_data_licences": licences["licences"],
+        "split_manifest_sha256": training["split_manifest_sha256"],
         "label_mappings_sha256": cw.sha256, "calibration_method": training["calibration_method"],
         "operating_thresholds": training["operating_thresholds"], "git_commit": training["git_commit"],
     }
@@ -300,4 +316,5 @@ def _jsonable(o):
     return o
 
 
-__all__ = ["run_experiment", "train_bundle", "fit_ood", "git_info", "recumbent_composition", "STANDIN_BANNER"]
+__all__ = ["run_experiment", "train_bundle", "fit_ood", "git_info", "recumbent_composition", "training_data_licences",
+           "STANDIN_BANNER"]
