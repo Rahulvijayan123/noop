@@ -3,7 +3,9 @@
 Workstream: signal & eligibility. Branch `pc/signal` (from contract commit `71dce34a`).
 Files: `PhysiologyContext/PCSignalValidity.swift`, `PCMotionEvidence.swift`, `PCEligibility.swift`; tests
 `PCSignalFixtureTests.swift`, `PCSignalSanitizeTests.swift`, `PCSignalValidityTests.swift`, `PCSignalRegimeTests.swift`,
-`PCMotionEvidenceTests.swift`, `PCEligibilityTests.swift`. Versions `pc-validity-1`, `pc-motion-1`, `pc-eligibility-1`.
+`PCMotionEvidenceTests.swift`, `PCEligibilityTests.swift`. Versions `pc-validity-2`, `pc-motion-1`, `pc-eligibility-2`
+(bumped by the review repairs, `notes/review-signal-repairs.md`: placement scope, declared target-dependent gates,
+deciding-reason order, entered-share accounting).
 Every public skeleton signature is unchanged. Additions: config fields (all defaulted, all in `Policy.fingerprint`),
 `MotionBasis`, `StrapMotionEvidence`, `MotionEvidence.strapEvidence`, `SelectionSummary.eligibleObservedS`
 (defaulted init parameter), `SanitizedObservations.breakSeparates`, `InputContractReport.count(_:)`,
@@ -122,7 +124,7 @@ The motion share is computed from the HR-independent track the engine passes in.
 | Gate | Default | Source |
 | --- | --- | --- |
 | Coverage = distinct sample seconds / support seconds | < 0.10 invalid `insufficient_coverage`; < 0.50 degraded `partial_coverage` | engineering default |
-| Plausible band per sample (diagnostic) | 30–220 bpm; > 50 % outside ⇒ degraded `mostly_out_of_band`, else note `out_of_band_samples`; never invalid on value | engine's derived windows (`Engine.heartRateWindows`) |
+| Plausible band per sample (diagnostic) | 30–220 bpm; > 50 % outside ⇒ degraded `mostly_out_of_band`, else note `out_of_band_samples`; never invalid on value. A value-reading screen: declared as the target-dependent gate `hr_plausible_band` | engineering default (the engine's derived windows keep every contract-valid sample) |
 | Flatline (identical bpm, steps ≤ 2 s) | ≥ 300 s degraded `flatline_run`; ≥ 900 s and ≥ 80 % of support invalid `flatline` | conservative: smoothed integer bpm can hold a value for minutes in deep sleep |
 | Motion | diagnostic `movement_share` only: movement raises HR, it does not corrupt the sample | spec §7 |
 
@@ -159,7 +161,8 @@ Both kinds of support then apply:
 | Gate | Default | Source |
 | --- | --- | --- |
 | Rejected fraction (out-of-range + ectopic) | > 0.35 invalid `excess_rejected_beats`; > 0.20 degraded `elevated_rejected_beats` | `defaultSpotMaxRejectedFraction`; ≥ 80 % normal beats (Peltola 2012, research.md §4) |
-| Out-of-kernel-band beats (300–2000 ms) | note `beats_outside_kernel_range` (a measurement limit, not an artifact claim) | `HRVAnalyzer.rrMinMs/rrMaxMs` |
+| Out-of-kernel-band beats (300–2000 ms) | note `beats_outside_kernel_range` (a measurement limit, not an artifact claim); the rejection reads the target's own beat values: declared gate `rr_kernel_range` | `HRVAnalyzer.rrMinMs/rrMaxMs` |
+| Ectopic rejection (`cleanRRGapAware`) | counts toward the rejected fraction; reads the target's own beat values: declared gate `ectopic_rejection` | `HRVAnalyzer` |
 | Over-count verdict (`classifyCoverage(rrCoverage, collapsedCoverage)`) | same-second / cross-second ⇒ invalid `rr_over_count_*`; under-covered / unmeasurable ⇒ note | `successiveDiffIsTrustworthy`, `beatSpreadIsTrustworthy` |
 | Beat accuracy (`beatAccurateFraction` < 0.5) | SDNN invalid, RMSSD degraded `beat_values_untrustworthy` | `beatValuesAreTrustworthy` (HRVAnalyzer deliberately does not gate RMSSD here) |
 | Motion share | > 0.30 invalid `motion_contaminated`; > 0.10 degraded `motion_present` | `DaytimeStress.activityMaskFraction`, `restingMaxAmbulatoryShare`; PRV vs motion (research.md §5) |
@@ -231,7 +234,13 @@ comparisons.
 ### `regimeTimeline`
 
 - **Placement records.** Each `PlacementInput` is clipped to the read window; an open-ended record runs to the window
-  end. Overlaps are resolved by `IntervalAlgebra.resolve`: revision, then `recordedAt`, then a stable id.
+  end.
+- **Scope first (RC-17).** The worker reads device-scoped and account-level (`device_id is null`) rows together. A
+  device-scoped record (`scope` nil or `device`) wins over an account-level one (`scope = account`) wherever they
+  overlap, whatever the revisions — the app's `PlacementStore` rule. The account-level record applies only where no
+  device-scoped record exists, and its segments carry `PlacementSegment.scope = account`.
+- **Within one scope** overlaps are resolved by `IntervalAlgebra.resolve`: revision, then `recordedAt`, then a stable
+  id. Tested: `PCSignalRegimeTests.testDeviceScopedPlacementWinsOverAnAccountLevelOneWhereTheyOverlap`.
 - **Unknown placement.** Time before the first record, and gaps between records, is `unknown` / `none`. It is never
   back-filled (V04).
 - **Placement boundaries:**
@@ -283,8 +292,8 @@ Rows are listed in a fixed order. `comparability` is the rule applied across reg
 
 | Assessment | Source | State | Comparability / reasons |
 | --- | --- | --- | --- |
-| `heart_rate_signal_validity`, `resting_heart_rate_signal_validity` | `strap_heart_rate` | supported / unavailable | `identical_regime_only` |
-| `hrv_signal_validity` (RMSSD, SDNN) | `strap_rr_intervals` | supported; partial on a day-level over-count or untrustworthy beat values; unavailable | SDNN `identical_window_length_only` |
+| `heart_rate_signal_validity`, `resting_heart_rate_signal_validity` | `strap_heart_rate` | supported / unavailable | `identical_regime_only`; declared gate `hr_plausible_band` |
+| `hrv_signal_validity` (RMSSD, SDNN) | `strap_rr_intervals` | supported; partial on a day-level over-count or untrustworthy beat values; unavailable | SDNN `identical_window_length_only`; declared gates `rr_kernel_range`, `ectopic_rejection` |
 | `respiratory_signal_validity` | `strap_rr_intervals_rsa` | as RR | `rsa_only_estimate` |
 | `skin_temperature_signal_validity` | `strap_skin_temperature` | supported / partial (no in-band) / unavailable | `relative_within_regime_only`, `skin_not_core_temperature` |
 | `core_temperature` | none | **unsupported** | `no_core_temperature_sensor` |
@@ -292,8 +301,8 @@ Rows are listed in a fixed order. `comparability` is the rule applied across reg
 | `ppg_waveform_quality` | none | **unsupported** | `no_qualified_waveform` |
 | `posture` | `strap_gravity_orientation` | **unverified** / unavailable | `wrist_orientation_likelihood_only` |
 | `activity_composition` | `hart_epochs`, `strap_motion`, `decoder_intervals` | supported / unavailable | HR-independent or `heart_rate_dependent_source` + `display_only`; strap shows the motion basis |
-| `stable_awake_eligibility` | `context_layer` | partial / unavailable | `sleep_detector_uses_heart_rate`, `wear_from_heart_rate_signal`, `awake_evidence_unavailable`, … |
-| `sleep_measurement_eligibility` | `detected_sleep_sessions` | partial / unavailable | `sleep_detector_uses_heart_rate` |
+| `stable_awake_eligibility` | `context_layer` | partial / unavailable | `sleep_detector_uses_heart_rate`, `sleep_detector_hr_confirmation` (declared gate), `wear_from_heart_rate_signal`, `awake_evidence_unavailable`, … |
+| `sleep_measurement_eligibility` | `detected_sleep_sessions` | partial / unavailable | `sleep_detector_uses_heart_rate`, `sleep_detector_hr_confirmation` (declared gate) |
 | `activity_response_eligibility` | `context_layer` | supported / unavailable | — |
 | `measurement_product` | `<product>:<method id>` | supported (SpO2 unverified) | per-metric rule |
 
@@ -306,14 +315,32 @@ In causal mode, measurement-product rows list only measurements available at the
 - Every check contributes `fail` (determined and failed), `unknown` (could not be determined) or nothing.
 - Any fail ⇒ `ineligible`. Otherwise any unknown ⇒ `unknown`. Otherwise `eligible`.
 - All reasons are kept, so an ineligible verdict also lists what was unknown.
-- An eligible verdict carries a positive reason: `stable_awake_low_movement`, `inside_supported_sleep`,
-  `inside_locomotion` or `after_exertion_bout`.
+- **Deciding reasons first (RC-05).** `reasons` lists, in order: for `ineligible` the failed checks then the unknown
+  ones; for `unknown` the unknown checks; for `eligible` the positive reason (`stable_awake_low_movement`,
+  `inside_supported_sleep`, `inside_locomotion` or `after_exertion_bout`). The checks that did not decide the state
+  follow — `signal_degraded`, `heart_rate_dependent_activity_ignored`, `recent_locomotion_unobserved`, a non-required
+  `wear_mixed` / `wear_evidence_unknown`, and a positive activity check on a verdict that failed — and are repeated in
+  `EligibilityVerdict.notes` (omitted from JSON when empty; old verdicts decode with none). `reasons.first`, which the
+  card shows, is therefore always why the verdict has its state; `decidingReasons` is `reasons` without `notes`.
 
 ### Value independence and dependence
 
 - **No check reads the measurement value.** `evaluate` has no value parameter (V03).
-- `targetDependentGates = [signal_invalid]` on every verdict. Validity reads the target's own signal and is declared
-  for selection-bias review.
+- `targetDependentGates` lists the gates in effect for the verdict that read the target's own signal or sensor
+  (P1, RC-21), always starting with `signal_invalid` (the validity gate):
+  - `hr_plausible_band` — HR / resting HR, when the assessment found samples outside 30–220 bpm
+    (`out_of_band_samples` > 0)
+  - `rr_kernel_range` / `ectopic_rejection` — RMSSD / SDNN, when the assessment rejected beats outside 300–2000 ms /
+    as ectopic (`out_of_range_beats` / `ectopic_rejected` > 0). They feed the rejected fraction and the clean-beat
+    counts, so they can decide `invalid` / `degraded`; listed whenever they acted on the input (a superset of "changed
+    the state", conservative for review)
+  - `sleep_detector_hr_confirmation` — optical-pulse metrics (HR, resting HR, RMSSD, SDNN, respiration) whenever the
+    sleep / wake state came from the detector or the band state (`sleepDependsOnHeartSignals`). The detector keeps a
+    sleep run only when its HR is low relative to the day and its "no sleep here" needs HR coverage
+  - `wear_from_heart_rate_presence` — optical-pulse metrics, when wear came from HR presence and the comparison
+    requires wear (stable awake rest, sleep measurement)
+  - Skin temperature gets neither context gate (the detector and HR presence do not read it); `dependsOn` still names
+    the HR dependence.
 - Signal validity maps to: invalid ⇒ fail `signal_invalid`; degraded ⇒ note `signal_degraded`; missing / unsupported
   ⇒ unknown; unverified ⇒ fail.
 - An HR-dependent composition, or the decoder as source, is never used. The verdict notes
@@ -385,10 +412,41 @@ One summary per (comparison, metric) present:
 - counts of eligible, ineligible and unknown verdicts
 - `eligibleSupportS`: the union of eligible supports within the day, so overlapping trailing supports count once
 - `observedS`: distinct observed seconds of the metric's input stream (HR samples, beat seconds, skin samples)
-- `eligibleObservedS`: observed seconds inside eligible supports
-- `representedShare = eligibleObservedS / observedS`, which is at most 1. The skeleton's "eligibleSupportS / observedS"
-  could exceed 1 and is replaced; the doc comment is updated.
-- the top 10 ineligible and unknown reasons
+- `eligibleObservedS`, `eligibleShare = eligibleObservedS / observedS`: the eligibility-level (System B) share
+- `enteredCount`, `enteredSupportS`, `enteredObservedS` (R-F8): eligible envelopes that are a source of one of the
+  day's reference values for the comparison (`*.stable_awake_*` / the nightly series), with their support union and
+  observed seconds. System F also drops degraded stable-awake windows, other window lengths and days with fewer than
+  3 non-overlapping windows, so this can be far below the eligible count.
+- `representedShare = enteredObservedS / observedS` — what actually reaches references, at most `eligibleShare`. nil
+  when nothing was observed, and nil (with `enteredCount` nil) for pairs that build no envelope reference series
+  (activity response: its series come from bouts). Before R-F8 it was the eligibility-level share.
+- the top 10 exclusion reasons of ineligible and unknown verdicts, counting only deciding reasons (`notes` are not
+  exclusions)
+- `selection(…, dailyValues:reference:)` takes the day's System F values; when nil it rebuilds them with
+  `ContextReferences.dailyValues` and the given `ReferenceConfig` (default), so the rule is System F's own. The engine
+  does not pass them yet (request R6).
+
+### Selection bias (spec §8, §14)
+
+Every route into a reference is selected partly on the target's own sensor, so the references describe a selected
+subset of the day and of the nights:
+
+- **Nightly HR-derived series** (`resting_hr`, `heart_rate`, `hrv_rmssd`, `hrv_sdnn_index`, `resp_rate` `.sleep_night`)
+  need a sleep-measurement verdict, which needs the detector's "asleep". The detector keeps a run only when its median
+  HR is at most 1.05 × the day's median (1.30 × when deeply still). A night with a disproportionate nocturnal HR rise —
+  fever, pain, autonomic disturbance — can lose its sleep session and drop out of the references and episodes. It is
+  now declared (`sleep_detector_hr_confirmation`); it is not evaluated.
+- **Stable-awake series** use the same detector for "awake" (and a missed sleep run reads as awake), HR presence for
+  wear, the RR kernel range and ectopic rejection for HRV validity, the HR plausible band for HR validity, and System
+  F's exclusion of degraded windows. Sustained HR above 200 or below 30 bpm therefore tends to end as `invalid
+  (excess_rejected_beats)` HRV: an extreme kept with its diagnostics, but out of every reference.
+- **What is measured now**: per verdict, which of these gates were in effect (`targetDependentGates`); per day and
+  comparison, how much observed time was eligible (`eligibleShare`) and how much entered references
+  (`representedShare`), and the deciding exclusion reasons.
+- **Not yet evaluated** (spec: "declared and evaluated"): whether exclusion is associated with HR level, symptoms or
+  disease state. That needs authorized real days: compare HR level (and symptom reports) of nights with HR observed
+  but no `*.sleep_night` value against included nights, and of eligible-but-not-entered windows against entered ones.
+  Until then the references must be read as "the quiet, detector-confirmed part of the day", never as the whole day.
 
 ## 7. Policy sensitivity (stable awake rest)
 
@@ -502,8 +560,13 @@ Reading:
 `insufficient_activity_coverage`, `asleep`, `sleep_wake_mixed`, `awake_evidence_unknown`, `not_worn`, `wear_mixed`,
 `wear_evidence_unknown`, `movement_in_support`, `insufficient_stationary`, `insufficient_preceding_stillness`,
 `preceding_stillness_unobserved`, `recent_locomotion`, `recent_locomotion_unobserved`, `recent_exertion_bout`,
-`exertion_history_exceeds_limit`, `not_asleep`, `sleep_evidence_unknown`, `no_supported_exertion`. `dependsOn`
-labels: `sleep_detector_uses_heart_rate`, `wear_from_heart_rate_signal`, `activity_labels_read_heart_rate`.
+`exertion_history_exceeds_limit`, `not_asleep`, `sleep_evidence_unknown`, `no_supported_exertion`, and the
+target-dependent gates `sleep_detector_hr_confirmation`, `wear_from_heart_rate_presence`, `hr_plausible_band`,
+`rr_kernel_range`, `ectopic_rejection` (`Eligibility.targetDependentGateCodes` lists them with `signal_invalid`).
+`dependsOn` labels: `sleep_detector_uses_heart_rate`, `wear_from_heart_rate_signal`, `activity_labels_read_heart_rate`.
+
+`SignalValidityEngine.reasonCodes` also carries the gate codes `hr_plausible_band`, `rr_kernel_range`,
+`ectopic_rejection` and `sleep_detector_hr_confirmation` (availability-matrix declarations).
 
 ## 9. Limitations and unsupported inputs
 
@@ -556,10 +619,13 @@ labels: `sleep_detector_uses_heart_rate`, `wear_from_heart_rate_signal`, `activi
 | --- | --- |
 | V02 quiet IMU, unknown wear / sleep | `PCEligibilityTests.testQuietMotionWithUnknownWearAndSleepIsUnknownWithExplicitReasons`, `testHeartRateDependentActivityIsNeverEligibilityEvidence`, `PCMotionEvidenceTests.testNoMotionMeansUncoveredNeverStill` |
 | V03 elevated HR / low HRV | `PCEligibilityTests.testStableAwakeWithElevatedHeartRateAndLowHrvStaysEligibleAndValid`, `testEvaluateNeverReadsTheValue`, `PCSignalValidityTests.testHeartRateFullCoverageIsValidAndElevatedValuesAreNotArtifacts`, `testLowHrvAtRestIsValid` |
-| V04 placement / firmware / method change | `PCSignalRegimeTests` (all), including `testPlacementChangeMidDayIsABoundaryWithDifferentRegimeKeys`, `testHistoryBeforeTheFirstPlacementRecordIsUnknownNotBackFilled`, `testFirmwareVendorAndUnknownAttributesAreIncompatible`, `testMethodAlgorithmAndWindowChangesAreIncompatible`, `testAlgorithmVersionChangeAcrossTheDayIsAMethodBoundary`, `testEngineDocumentRegistersBothPlacementRegimes` |
+| V04 placement / firmware / method change | `PCSignalRegimeTests` (all), including `testDeviceScopedPlacementWinsOverAnAccountLevelOneWhereTheyOverlap` (RC-17), `testPlacementChangeMidDayIsABoundaryWithDifferentRegimeKeys`, `testHistoryBeforeTheFirstPlacementRecordIsUnknownNotBackFilled`, `testFirmwareVendorAndUnknownAttributesAreIncompatible`, `testMethodAlgorithmAndWindowChangesAreIncompatible`, `testAlgorithmVersionChangeAcrossTheDayIsAMethodBoundary`, `testEngineDocumentRegistersBothPlacementRegimes` |
 | V05 duplicates, equal RR, gaps, clock resets | `PCSignalSanitizeTests` (identity, contract, timing, ordering), `PCSignalValidityTests.testRepeatedEqualIntervalsInOneSecondAreDistinctBeatsWithValidAdjacency`, `testAGapSplitsRunsAndNoPairIsFabricatedAcrossIt`, `testASourceChannelChangeSplitsAdjacency`, over-count tests |
 | V10 (report part) | `PCSignalSanitizeTests.testLiveReportNeverCountsDataBeyondTheCutoff`, `PCSignalRegimeTests.testAvailabilityMatrixInLiveModeListsOnlyMeasurementsAvailableAtTheCutoff` |
 | V13 (eligibility dependence) | `PCEligibilityTests.testHeartDerivedEvidenceIsDeclaredInDependsOn` |
+| §8 / §14 target-dependent gates (P1, RC-21) | `PCEligibilityTests.testTargetDependentGatesAreDeclaredWhenTheyApply`, `testSustainedHighHeartRateBeatsDeclareTheKernelRangeGate`, `testEngineDeclaresTheSleepDetectorGateOnNightlyHeartDerivedVerdicts` |
+| §16 deciding reason (RC-05) | `PCEligibilityTests.testDecidingReasonsComeFirstAndNotesAreSeparated`, `PCReviewContractRegressionTests.testRC05_…` |
+| §14 selection accounting (R-F8) | `PCEligibilityTests.testSelectionCountsUnionOfEligibleSupportAndRepresentedShareOfObservedTime`, `testSelectionCountsWhatEnteredTheDailyValues`, `PCReviewStatsRegressionTests.testReviewRepresentedShareReflectsWhatEntersReferences` |
 | §7 SpO2 / PPG / skin | `testSpo2CandidateIsAlwaysUnverified`, `testSkinTemperatureIsNeverCoreAndOffWristRangeIsInvalid`, `testAvailabilityMatrixStatesUnsupportedAndUnverifiedRowsExplicitly` |
 | §8 sensitivity | `PCEligibilityTests.testStableAwakePolicySensitivitySweep` |
 
@@ -587,6 +653,18 @@ Test files and counts:
 Not run: the worker, backend and app suites (not touched by this workstream), and real-data replay (no authorized
 real days in this worktree).
 
+Review repairs (`pc/fix-signal`, `review-signal-repairs.md`):
+
+```
+swift test --filter "PCSignal|PCMotion|PCEligibility|PCExertion|PCFunctional|PCReviewContract|testReviewRepresentedShare"
+    # 130 tests, 0 failures
+swift test --parallel
+    # 2804 tests; 8 failures, all statistics-owned PCReviewStatsRegressionTests (R-F1, R-F1b, R-F2, R-F3, R-F4,
+    # R-F6/P4, R-F7, P2) that the parallel statistics repair handles; testReviewRepresentedShare… passes
+```
+
+Eligibility tests are now 21 and regime tests 11.
+
 ## 12. Requests to the lead (files I do not own)
 
 - **R1 — motion basis on the track.** Add `reasons: [ReasonCode] = []` to `ResolvedTrack`, copied into
@@ -604,3 +682,10 @@ real days in this worktree).
   envelope. Consider hoisting them to document level in a later schema.
 - **R5 — engine read window.** `SignalValidityEngine.readWindow` uses `Engine.rawLookbackS` / `rawLookaheadS`
   (internal). Please keep those names stable, or expose the read window on `Engine`.
+- **R6 — selection from the engine's daily values (R-F8).** In `Engine.buildDay`, call
+  `Eligibility.selection(envelopes:observations:dayWindow:dailyValues: dailyValues, reference: policy.reference)`.
+  Today the engine omits them, so selection rebuilds the daily values with the default `ReferenceConfig`: correct
+  under `Policy.default`, wrong if `policy.reference` is changed.
+- **R7 — app reads `notes` / gates.** The card already shows `reasons.first`, which is now the deciding reason. The
+  detail view lists all reasons; it may label `verdict.notes` as notes, and the new gate and functional codes need
+  phrases (RC-15).

@@ -11,8 +11,11 @@ import Foundation
 // give waking time (when no episode is known, waking time includes sleep and says so). A minute is worn when no
 // wrist-off event holds and it has heart-signal presence (≥ 30 HR samples), locomotion evidence, or an on-wrist
 // event with motion samples. Heart-signal presence is heart-derived, which is acceptable for a wear denominator
-// (it never enters a physiological value here). Totals compare across days only when worn waking time is at least
-// 70 % of waking time and the day is complete; wear-normalized values need at least 4 worn waking hours.
+// (it never enters a physiological value here). A missing activity interval is not sedentary time (spec §6.1): the
+// rates divide by motion-observed worn waking time — worn waking seconds that also carry an HR-independent motion
+// label — and count their numerators over the same worn waking minutes. Wear-normalized values need at least 4 such
+// hours; with less (or none) they are unavailable with a reason, never 0. Totals compare across days only when worn
+// waking time and motion-observed worn waking time are each at least 70 % of waking time and the day is complete.
 //
 // Movement features come from the same heart-rate independent evidence as System D (HART first, else strap
 // motion). Wrist cadence is uncalibrated counter steps per minute: it is not gait speed or stride length.
@@ -20,11 +23,14 @@ import Foundation
 extension PhysiologyContext {
 
     public struct FunctionalConfig: Codable, Equatable, Sendable {
-        public var version = "pc-functional-1"
+        public var version = "pc-functional-2"
         /// Day totals compare across days only when worn waking time is at least this share of waking time.
         public var minWearShareForTotals = 0.7
-        /// Wear-normalized values need at least this much worn waking time.
+        /// Wear-normalized values need at least this much worn waking time, and at least this much motion-observed
+        /// worn waking time (worn waking seconds with an HR-independent motion label).
         public var minWornWakingSForRates = 4 * 3600
+        /// Day totals also need motion-observed worn waking time of at least this share of waking time.
+        public var minMotionObservedShareForTotals = 0.7
         /// A minute is worn by heart-signal presence with at least this many HR samples (1 Hz stream).
         public var wearMinHrSamplesPerMinute = 30
         /// Other-movement seconds allowed between a stationary and a locomotion run for a direct transition.
@@ -58,7 +64,12 @@ extension PhysiologyContext {
         public var wornWakingS: Int? = nil
         /// `wornWakingS / wakingS`.
         public var wearShare: Double? = nil
-        /// True when worn waking time meets the floor for wear-normalized values.
+        /// Worn waking seconds that also carry an HR-independent motion label (the rate denominator; nil when wear
+        /// is unknown). Locomotion can only be seen in these seconds.
+        public var motionObservedWornWakingS: Int? = nil
+        /// `motionObservedWornWakingS / wornWakingS`.
+        public var motionObservedShare: Double? = nil
+        /// True when worn and motion-observed worn waking time meet the floor for wear-normalized values.
         public var ratesSupported: Bool = false
         public var boutIds: [String] = []
         public var boutCount: Int = 0
@@ -66,7 +77,7 @@ extension PhysiologyContext {
         public var boutDurationP90: Double? = nil
         public var boutDurationMaxS: Int? = nil
         public var boutSecondsTotal: Int = 0
-        /// Locomotion seconds of the HR-independent evidence in waking time (bouts and shorter walks).
+        /// Locomotion seconds of the HR-independent evidence in worn waking time (bouts and shorter walks).
         public var locomotionS: Int? = nil
         public var locomotionSecondsPerWornHour: Double? = nil
         public var boutsPerWornHour: Double? = nil
@@ -103,8 +114,8 @@ extension PhysiologyContext {
 
         enum CodingKeys: String, CodingKey {
             case day, observedWearS, wearBasis, dayS, totalsComparable, reasons, evaluated, wakingS, sleepExcludedS,
-                 wornWakingS, wearShare, ratesSupported, boutIds, boutCount, boutDurationMedianS, boutDurationP90,
-                 boutDurationMaxS, boutSecondsTotal, locomotionS, locomotionSecondsPerWornHour, boutsPerWornHour,
+                 wornWakingS, wearShare, motionObservedWornWakingS, motionObservedShare, ratesSupported, boutIds,
+                 boutCount, boutDurationMedianS, boutDurationP90, boutDurationMaxS, boutSecondsTotal, locomotionS, locomotionSecondsPerWornHour, boutsPerWornHour,
                  cadenceMeanStepsPerMin, cadenceWithinBoutCvMedian, cadenceMinutes, cadenceBouts, pauseCount,
                  pauseMedianS, pausesPerBoutHour, restToActiveTransitions, activeToRestTransitions,
                  activeToRestPerActiveMin, restToActivePerRestMin, restAfterBoutMedianS, restAfterBoutCount,
@@ -125,6 +136,8 @@ extension PhysiologyContext {
             sleepExcludedS = try c.decodeIfPresent(Int.self, forKey: .sleepExcludedS) ?? 0
             wornWakingS = try c.decodeIfPresent(Int.self, forKey: .wornWakingS)
             wearShare = try c.decodeIfPresent(Double.self, forKey: .wearShare)
+            motionObservedWornWakingS = try c.decodeIfPresent(Int.self, forKey: .motionObservedWornWakingS)
+            motionObservedShare = try c.decodeIfPresent(Double.self, forKey: .motionObservedShare)
             ratesSupported = try c.decodeIfPresent(Bool.self, forKey: .ratesSupported) ?? false
             boutIds = try c.decodeIfPresent([String].self, forKey: .boutIds) ?? []
             boutCount = try c.decodeIfPresent(Int.self, forKey: .boutCount) ?? 0
@@ -154,7 +167,7 @@ extension PhysiologyContext {
 
     public enum Functional {
 
-        public static let version = "pc-functional-1"
+        public static let version = "pc-functional-2"
 
         // MARK: Reason codes
         public static let dayNotStarted: ReasonCode = "day_not_started_at_cutoff"
@@ -171,12 +184,25 @@ extension PhysiologyContext {
         public static let restAfterBoutRightCensored: ReasonCode = "rest_after_bout_right_censored"
         public static let transitionDenominatorTooSmall: ReasonCode = "transition_denominator_too_small"
         public static let observedBehaviourNotDiagnosis: ReasonCode = "observed_behaviour_not_diagnosis"
+        /// Worn waking time has no HR-independent motion label at all: rates and totals are unavailable, not 0.
+        public static let motionEvidenceUnavailable: ReasonCode = "motion_evidence_unavailable"
+        /// Worn waking time has strap motion labels but no step counter and no HART labels, so locomotion cannot be
+        /// seen (WHOOP 4.0): rates and totals are unavailable, not 0.
+        public static let locomotionUnobservableWithoutStepCounter: ReasonCode =
+            "locomotion_unobservable_without_step_counter"
+        /// Motion-observed worn waking time is above 0 but below the rate floor.
+        public static let insufficientMotionObservedTimeForRates: ReasonCode =
+            "insufficient_motion_observed_time_for_rates"
+        /// Worn waking time meets the totals floor but its motion-observed part does not.
+        public static let insufficientMotionCoverage: ReasonCode = "insufficient_motion_coverage"
 
         public static let reasonCodes: [ReasonCode] = [
             dayNotStarted, dayIncompleteAtCutoff, wearEvidenceUnavailable, insufficientWearCoverage,
             insufficientWornTimeForRates, wearMissingnessMayBeInformative, sleepNotExcluded, noWakingTime,
             activityEvidenceUnavailable, noBouts, wearFromHeartSignal, restAfterBoutRightCensored,
-            transitionDenominatorTooSmall, observedBehaviourNotDiagnosis,
+            transitionDenominatorTooSmall, observedBehaviourNotDiagnosis, motionEvidenceUnavailable,
+            locomotionUnobservableWithoutStepCounter, insufficientMotionObservedTimeForRates,
+            insufficientMotionCoverage,
             ExertionBouts.cadenceUnavailable, ExertionBouts.wristCadenceNotGaitSpeed,
             ExertionBouts.uncalibratedStepCounter,
         ]
@@ -213,19 +239,20 @@ extension PhysiologyContext {
             if sleep.episodes.isEmpty { reasons.append(sleepNotExcluded) }
             let sleepS = ExertionBouts.totalDuration(sleepSpans)
             let wakingS = evaluated.duration - sleepS
-            let waking = subtract(sleepSpans, from: evaluated)
 
             let evidence = BoutEvidence(hart: hart, strap: strap, maxUnknown: config.maxUnknownFraction)
             if evidence.coveredSeconds(in: evaluated) == 0 { reasons.append(activityEvidenceUnavailable) }
 
-            // Wear per minute bin.
+            // Wear per minute bin; the worn waking pieces are kept so every rate counts its numerator and its
+            // denominator over the same seconds (RC-20).
             let hrTs = observations.heartRate.filter { (30...250).contains($0.bpm) }.map(\.ts).sorted()
             let motionTs = observations.motion.map(\.ts).sorted()
             let events = observations.wearEvents.sorted { ($0.ts, $0.state.rawValue) < ($1.ts, $1.state.rawValue) }
             let eventTs = events.map(\.ts)
             let hasHeart = countIn(hrTs, evaluated) > 0
             let hasEvents = !events.filter { $0.ts < evaluated.end }.isEmpty
-            var wornS = 0, wornWakingS = 0
+            var wornS = 0
+            var wornWaking: [Interval] = []
             var locomotionWear = false
             for b in stride(from: evaluated.start, to: evaluated.end, by: 60) {
                 let bin = Interval(b, min(b + 60, evaluated.end))
@@ -240,8 +267,26 @@ extension PhysiologyContext {
                 guard heartPresent || locomotion || onWithMotion else { continue }
                 if !heartPresent && !onWithMotion { locomotionWear = true }
                 wornS += bin.duration
-                wornWakingS += bin.duration - sleepSpans.reduce(0) { $0 + $1.overlapSeconds(with: bin) }
+                for piece in subtract(sleepSpans, from: bin) {
+                    if var last = wornWaking.last, last.end == piece.start {
+                        last.end = piece.end
+                        wornWaking[wornWaking.count - 1] = last
+                    } else {
+                        wornWaking.append(piece)
+                    }
+                }
             }
+            let wornWakingS = ExertionBouts.totalDuration(wornWaking)
+            // Motion-observed worn waking time: worn waking seconds with a known HR-independent label in which
+            // locomotion could have been seen. HART labels walking itself; strap labels can show locomotion only
+            // with a step counter (WHOOP 4.0 has none: its still / movement labels never become locomotion).
+            let stepCounterSeen = !observations.steps.isEmpty
+                || strap.spans.contains { MotionVocabulary.isLocomotion($0.label) }
+            let motionObservedS = Int(wornWaking.reduce(0.0) {
+                $0 + evidence.observedSeconds(in: $1, strap: stepCounterSeen)
+            }.rounded())
+            // Strap motion was labelled over the worn time, but without a step counter it cannot show locomotion.
+            let strapWithoutCounter = !stepCounterSeen && wornWaking.contains { evidence.observedSeconds(in: $0) > 0 }
             var basis: [String] = []
             if hasHeart { basis.append("heart_rate_signal") }
             if hasEvents { basis.append("wear_events") }
@@ -260,6 +305,8 @@ extension PhysiologyContext {
                 reasons.append(wearEvidenceUnavailable)
             } else {
                 summary.wornWakingS = wornWakingS
+                summary.motionObservedWornWakingS = motionObservedS
+                if wornWakingS > 0 { summary.motionObservedShare = Double(motionObservedS) / Double(wornWakingS) }
                 if wakingS > 0 {
                     share = Double(wornWakingS) / Double(wakingS)
                 } else {
@@ -272,11 +319,27 @@ extension PhysiologyContext {
                 reasons.append(insufficientWearCoverage)
                 reasons.append(wearMissingnessMayBeInformative)
             }
-            summary.totalsComparable = wearKnown && wearEnough && evaluated.end == dayWindow.end
-            let rates = wearKnown && wornWakingS >= config.minWornWakingSForRates && wornWakingS > 0
-            if wearKnown && !rates { reasons.append(insufficientWornTimeForRates) }
+            // A missing activity interval is not sedentary time: without motion evidence over the worn time there
+            // is no rate and no comparable total, only a reason (RC-11).
+            let motionShareOfWaking = wakingS > 0 ? Double(motionObservedS) / Double(wakingS) : 0
+            let motionEnoughForTotals = motionShareOfWaking >= config.minMotionObservedShareForTotals
+            // Listed when wear alone would allow totals (below the wear floor the motion share is lower too).
+            if wearKnown && wakingS > 0 && wearEnough && !motionEnoughForTotals {
+                reasons.append(insufficientMotionCoverage)
+            }
+            summary.totalsComparable = wearKnown && wearEnough && motionEnoughForTotals
+                && evaluated.end == dayWindow.end
+            let wornEnough = wearKnown && wornWakingS >= config.minWornWakingSForRates && wornWakingS > 0
+            let motionEnough = motionObservedS >= config.minWornWakingSForRates && motionObservedS > 0
+            if wearKnown && !wornEnough { reasons.append(insufficientWornTimeForRates) }
+            if wearKnown && wornWakingS > 0 && motionObservedS == 0 {
+                reasons.append(strapWithoutCounter ? locomotionUnobservableWithoutStepCounter : motionEvidenceUnavailable)
+            } else if wornEnough && !motionEnough {
+                reasons.append(insufficientMotionObservedTimeForRates)
+            }
+            let rates = wornEnough && motionEnough
             summary.ratesSupported = rates
-            let wornHours = Double(wornWakingS) / 3600
+            let observedHours = Double(motionObservedS) / 3600
 
             // Bouts owned by the day.
             let dayBouts = ExertionBouts.unique(bouts).filter { $0.day == identity.day }
@@ -316,7 +379,7 @@ extension PhysiologyContext {
             summary.cadenceWithinBoutCvMedian = RobustStats.median(cvs)
 
             // Locomotion and transitions over waking evidence.
-            let walk = walkWaking(evidence: evidence, waking: waking, config: config)
+            let walk = walkWaking(evidence: evidence, waking: wornWaking, config: config)
             summary.locomotionS = Int(walk.activeS.rounded())
             summary.restToActiveTransitions = walk.restToActive
             summary.activeToRestTransitions = walk.activeToRest
@@ -330,8 +393,11 @@ extension PhysiologyContext {
                 reasons.append(transitionDenominatorTooSmall)
             }
             if rates {
-                summary.locomotionSecondsPerWornHour = walk.activeS / wornHours
-                summary.boutsPerWornHour = Double(dayBouts.count) / wornHours
+                // Numerators over the same worn waking seconds as the motion-observed denominator: locomotion is
+                // only ever labelled in observed seconds, and a bout counts when it overlaps the worn waking time.
+                let wornBouts = dayBouts.filter { b in wornWaking.contains { $0.overlapSeconds(with: b.interval) > 0 } }
+                summary.locomotionSecondsPerWornHour = walk.activeS / observedHours
+                summary.boutsPerWornHour = Double(wornBouts.count) / observedHours
             }
 
             // Rest following activity: still seconds after each ended bout until the next movement.
@@ -354,6 +420,8 @@ extension PhysiologyContext {
         }
 
         /// Daily values contributed by the functional product (only when `totalsComparable` or wear-normalized).
+        /// Without motion-observed worn time neither applies, so a day with no motion evidence publishes nothing
+        /// rather than zeros (RC-11).
         public static func dailyValues(_ summary: FunctionalDaySummary, regimeKey: String, mode: ProcessingMode,
                                        finality: Finality, config: FunctionalConfig) -> [DailyValue] {
             guard summary.observedWearS != nil, let worn = summary.wornWakingS else { return [] }
@@ -366,11 +434,13 @@ extension PhysiologyContext {
                                       mode: mode, finality: finality, sourceIds: summary.boutIds,
                                       reasons: (reasons + [observedBehaviourNotDiagnosis]).sorted()))
             }
+            // The rates' support is the motion-observed worn waking time they divide by.
+            let observed = summary.motionObservedWornWakingS ?? worn
             if summary.ratesSupported {
                 add(seriesLocomotionPerWornHour, summary.locomotionSecondsPerWornHour, units: "s_per_h", count: 1,
-                    unit: "day", supportS: worn)
+                    unit: "day", supportS: observed)
                 add(seriesBoutsPerWornHour, summary.boutsPerWornHour, units: "per_h", count: 1, unit: "day",
-                    supportS: worn)
+                    supportS: observed)
                 if summary.boutCount > 0 {
                     add(seriesMedianBout, summary.boutDurationMedianS, units: "s", count: summary.boutCount,
                         unit: "bout", supportS: summary.boutSecondsTotal)
@@ -407,8 +477,9 @@ extension PhysiologyContext {
             return .unknown
         }
 
-        /// Locomotion / stationary seconds and direct transitions over the waking pieces of the evidence. A gap,
-        /// an unknown span, a sleep boundary or more than `transitionMaxBridgeS` of other movement breaks the chain.
+        /// Locomotion / stationary seconds and direct transitions over the worn waking pieces of the evidence. A
+        /// gap, an unknown span, a sleep or unworn boundary or more than `transitionMaxBridgeS` of other movement
+        /// breaks the chain.
         static func walkWaking(evidence: BoutEvidence, waking: [Interval],
                                config: FunctionalConfig) -> (activeS: Double, restS: Double, restToActive: Int,
                                                              activeToRest: Int) {
@@ -704,9 +775,18 @@ extension PhysiologyContext {
         static func generalValue(_ id: String, _ f: FunctionalDaySummary) -> (Double?, [ReasonCode]) {
             var missing: [ReasonCode] = []
             if f.observedWearS == nil { missing.append(Functional.wearEvidenceUnavailable) }
-            let rateMissing: [ReasonCode] = f.ratesSupported ? [] : [Functional.insufficientWornTimeForRates]
+            let rateBlockers: Set<ReasonCode> = [Functional.insufficientWornTimeForRates,
+                                                 Functional.motionEvidenceUnavailable,
+                                                 Functional.locomotionUnobservableWithoutStepCounter,
+                                                 Functional.insufficientMotionObservedTimeForRates]
+            let rateBlocking = f.reasons.filter { rateBlockers.contains($0) }
+            let rateMissing: [ReasonCode] = f.ratesSupported ? []
+                : (rateBlocking.isEmpty ? [Functional.insufficientWornTimeForRates] : rateBlocking)
             let totalBlockers: Set<ReasonCode> = [Functional.insufficientWearCoverage, Functional.dayIncompleteAtCutoff,
-                                                  Functional.noWakingTime, Functional.wearEvidenceUnavailable]
+                                                  Functional.noWakingTime, Functional.wearEvidenceUnavailable,
+                                                  Functional.insufficientMotionCoverage,
+                                                  Functional.motionEvidenceUnavailable,
+                                                  Functional.locomotionUnobservableWithoutStepCounter]
             let blockers = f.reasons.filter { totalBlockers.contains($0) }
             let totalMissing: [ReasonCode] = f.totalsComparable ? []
                 : (blockers.isEmpty ? [Functional.insufficientWearCoverage] : blockers)

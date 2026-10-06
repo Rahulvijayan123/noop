@@ -49,8 +49,16 @@ final class PCReviewContractRegressionTests: XCTestCase {
     func testRC02_functionalRegimeKeyDoesNotDependOnWhichMeasurementsExist() {
         let base = Self.s + 8 * 3600
         let hr = (base..<(base + 5 * 3600)).map { PC.HeartRateObservation(ts: $0, bpm: 70) }
+        // Fixture adjusted for RC-11 (fix-signal): functional rates now need motion-observed worn time (missing
+        // motion is not zero activity), so the 5 worn hours carry a quiet strap motion stream and a step counter
+        // that reports without counting. The assertion — one regime key whatever measurements exist — is unchanged.
+        let motion = (base..<(base + 5 * 3600)).map { PC.MotionObservation(ts: $0, dynAccelG: 0.003) }
+        let steps = stride(from: base, to: base + 5 * 3600, by: 5).map { PC.StepObservation(ts: $0, counter: 100) }
         func functionalKey(_ extra: [PC.MeasurementInput]) -> String? {
-            PC.Engine.buildDay(Self.input(hr: hr, measurements: extra), history: .empty)
+            var input = Self.input(hr: hr, measurements: extra)
+            input.motion = motion
+            input.steps = steps
+            return PC.Engine.buildDay(input, history: .empty)
                 .dailyValues.first { $0.seriesKey.hasPrefix("functional.") }?.regimeKey
         }
         guard let reference = functionalKey([]) else { return XCTFail("no functional daily value") }

@@ -5,19 +5,22 @@ import Foundation
 // OWNER: signal & eligibility workstream. Behaviour, defaults and reason codes: docs/physiology-context/notes/signal.md.
 //
 // Behavioural eligibility never requires a favourable value of the metric being studied: no gate reads the
-// measurement's value (V03). The one gate that reads the target's own signal — signal validity — is declared in
-// `EligibilityVerdict.targetDependentGates` so its selection effect can be reviewed.
+// measurement's value (V03). Gates that read the target's own signal or sensor — signal validity and the input
+// screens behind it (HR plausible band, RR kernel range, ectopic rejection), and for optical-pulse metrics the
+// HR-confirmed sleep detector and HR-presence wear — are declared in `EligibilityVerdict.targetDependentGates` so
+// their selection effect can be reviewed (notes/signal.md §6, "Selection bias").
 //
 // Tri-state logic: every check is evaluated and contributes `fail` (determined and failed → ineligible), `unknown`
 // (could not be determined) or nothing. Any fail ⇒ ineligible; else any unknown ⇒ unknown; else eligible. All
-// reasons are kept, so an ineligible verdict also lists what was unknown. Quiet motion is never evidence of being
+// reasons are kept, the deciding ones first (fails, then unknowns; the positive reason when eligible); recorded
+// limits that did not decide follow and are repeated in `notes`. Quiet motion is never evidence of being
 // awake, worn or rested: those come only from `SleepWearContext` (System C), and unknown stays unknown (V02).
 // Wrist posture is never used: arm orientation is a likelihood, not a confirmed standing or orthostatic event.
 
 extension PhysiologyContext {
 
     public struct EligibilityConfig: Codable, Equatable, Sendable {
-        public var version = "pc-eligibility-1"
+        public var version = "pc-eligibility-2"
         public var motion = MotionEvidenceConfig()
         /// Stable awake rest: stationary share of the WHOLE support (ActivityContextJoin.restingStationaryFloor).
         public var stationaryFloorShare = 0.90
@@ -58,23 +61,66 @@ extension PhysiologyContext {
     public struct EligibilityVerdict: Codable, Equatable, Sendable, Hashable {
         public var comparison: ComparisonKind
         public var state: EligibilityState
+        /// Every reason, the deciding ones first: for `ineligible` the failed checks (then what was unknown), for
+        /// `unknown` the undetermined checks, for `eligible` the positive reason. Recorded limits that did not
+        /// decide the state follow them and are also listed in `notes`. `reasons.first` is therefore always why
+        /// the verdict has its state.
         public var reasons: [ReasonCode]
         public var evidence: [Diagnostic]
-        /// Gates that read the target metric's own signal (declared for selection-bias review).
+        /// Gates in effect for this verdict that read the target metric's own signal or its sensor (declared for
+        /// selection-bias review): `signal_invalid` always; `hr_plausible_band`, `rr_kernel_range` and
+        /// `ectopic_rejection` when the validity assessment applied them to this measurement's input;
+        /// `sleep_detector_hr_confirmation` and `wear_from_heart_rate_presence` when the sleep / wake or wear
+        /// state the comparison relied on came from heart-rate evidence and the metric is optical-pulse derived.
         public var targetDependentGates: [ReasonCode]
         /// Evidence sources that depend on heart-derived signals (e.g. `sleep_detector_uses_heart_rate`).
         public var dependsOn: [String]
         public var policyVersion: String
+        /// The subset of `reasons` that did not decide the state (e.g. `signal_degraded`,
+        /// `recent_locomotion_unobserved`). Selection accounting counts only the other reasons as exclusions.
+        public var notes: [ReasonCode] = []
 
         public init(comparison: ComparisonKind, state: EligibilityState, reasons: [ReasonCode],
                     evidence: [Diagnostic] = [], targetDependentGates: [ReasonCode] = [], dependsOn: [String] = [],
-                    policyVersion: String) {
+                    policyVersion: String, notes: [ReasonCode] = []) {
             self.comparison = comparison; self.state = state; self.reasons = reasons; self.evidence = evidence
             self.targetDependentGates = targetDependentGates; self.dependsOn = dependsOn
-            self.policyVersion = policyVersion
+            self.policyVersion = policyVersion; self.notes = notes
         }
 
         public func evidence(_ name: String) -> Double? { evidence.first { $0.name == name }?.value }
+
+        /// The reasons that decided the state (`reasons` without `notes`).
+        public var decidingReasons: [ReasonCode] { reasons.filter { !notes.contains($0) } }
+
+        enum CodingKeys: String, CodingKey {
+            case comparison, state, reasons, evidence, targetDependentGates, dependsOn, policyVersion, notes
+        }
+
+        /// Verdicts written before `notes` existed decode with no notes; empty notes are not written.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            comparison = try c.decode(ComparisonKind.self, forKey: .comparison)
+            state = try c.decode(EligibilityState.self, forKey: .state)
+            reasons = try c.decode([ReasonCode].self, forKey: .reasons)
+            evidence = try c.decode([Diagnostic].self, forKey: .evidence)
+            targetDependentGates = try c.decode([ReasonCode].self, forKey: .targetDependentGates)
+            dependsOn = try c.decode([String].self, forKey: .dependsOn)
+            policyVersion = try c.decode(String.self, forKey: .policyVersion)
+            notes = try c.decodeIfPresent([ReasonCode].self, forKey: .notes) ?? []
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(comparison, forKey: .comparison)
+            try c.encode(state, forKey: .state)
+            try c.encode(reasons, forKey: .reasons)
+            try c.encode(evidence, forKey: .evidence)
+            try c.encode(targetDependentGates, forKey: .targetDependentGates)
+            try c.encode(dependsOn, forKey: .dependsOn)
+            try c.encode(policyVersion, forKey: .policyVersion)
+            if !notes.isEmpty { try c.encode(notes, forKey: .notes) }
+        }
     }
 
     public struct ReasonCount: Codable, Equatable, Sendable {
@@ -83,7 +129,10 @@ extension PhysiologyContext {
         public init(reason: ReasonCode, count: Int) { self.reason = reason; self.count = count }
     }
 
-    /// Context-selection accounting for one comparison and metric over the day (spec §14 last bullet).
+    /// Context-selection accounting for one comparison and metric over the day (spec §14 last bullet): how much of
+    /// the observed day is eligible (System B), and how much of it actually entered the day's reference values
+    /// (System F's daily values, which also drop degraded windows, other window lengths and days with too few
+    /// windows).
     public struct SelectionSummary: Codable, Equatable, Sendable {
         public var comparison: ComparisonKind
         public var metric: MetricKind
@@ -95,27 +144,66 @@ extension PhysiologyContext {
         /// Seconds of the day with any observation of the metric's input stream (HR samples for heart-rate
         /// metrics, beat seconds for HRV / respiration, samples for skin temperature).
         public var observedS: Int
-        /// `eligibleObservedS / observedS`: the share of the day's observed time that eligible measurements
-        /// represent (nil when nothing was observed). Never above 1.
+        /// `enteredObservedS / observedS`: the share of the day's observed time represented by measurements that
+        /// entered a reference value (a daily value) for this comparison. nil when nothing was observed or when no
+        /// envelope-built reference series exists for this comparison and metric (activity-response series are
+        /// built from bouts, not envelopes). Never above 1, never above `eligibleShare`.
         public var representedShare: Double?
-        /// Ineligible + unknown reason counts, most frequent first (top `Eligibility.topExclusionReasons`).
+        /// Ineligible + unknown verdicts' deciding reasons (notes excluded), most frequent first
+        /// (top `Eligibility.topExclusionReasons`).
         public var exclusionReasons: [ReasonCount]
         /// Observed seconds inside the union of eligible supports.
         public var eligibleObservedS: Int = 0
+        /// `eligibleObservedS / observedS`: the eligibility-level share (System B only; nil when nothing observed).
+        public var eligibleShare: Double? = nil
+        /// Eligible verdicts whose envelope entered a daily value of this comparison (nil when no envelope-built
+        /// reference series exists for the pair).
+        public var enteredCount: Int? = nil
+        /// Seconds of the day covered by the union of the entered envelopes' supports.
+        public var enteredSupportS: Int = 0
+        /// Observed seconds inside the union of the entered envelopes' supports.
+        public var enteredObservedS: Int = 0
 
         public init(comparison: ComparisonKind, metric: MetricKind, eligible: Int, ineligible: Int, unknown: Int,
                     eligibleSupportS: Int, observedS: Int, representedShare: Double?,
-                    exclusionReasons: [ReasonCount], eligibleObservedS: Int = 0) {
+                    exclusionReasons: [ReasonCount], eligibleObservedS: Int = 0, eligibleShare: Double? = nil,
+                    enteredCount: Int? = nil, enteredSupportS: Int = 0, enteredObservedS: Int = 0) {
             self.comparison = comparison; self.metric = metric; self.eligible = eligible
             self.ineligible = ineligible; self.unknown = unknown; self.eligibleSupportS = eligibleSupportS
             self.observedS = observedS; self.representedShare = representedShare
             self.exclusionReasons = exclusionReasons; self.eligibleObservedS = eligibleObservedS
+            self.eligibleShare = eligibleShare; self.enteredCount = enteredCount
+            self.enteredSupportS = enteredSupportS; self.enteredObservedS = enteredObservedS
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case comparison, metric, eligible, ineligible, unknown, eligibleSupportS, observedS, representedShare,
+                 exclusionReasons, eligibleObservedS, eligibleShare, enteredCount, enteredSupportS, enteredObservedS
+        }
+
+        /// Summaries written before the entered-share fields existed decode with their defaults.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            comparison = try c.decode(ComparisonKind.self, forKey: .comparison)
+            metric = try c.decode(MetricKind.self, forKey: .metric)
+            eligible = try c.decode(Int.self, forKey: .eligible)
+            ineligible = try c.decode(Int.self, forKey: .ineligible)
+            unknown = try c.decode(Int.self, forKey: .unknown)
+            eligibleSupportS = try c.decode(Int.self, forKey: .eligibleSupportS)
+            observedS = try c.decode(Int.self, forKey: .observedS)
+            representedShare = try c.decodeIfPresent(Double.self, forKey: .representedShare)
+            exclusionReasons = try c.decode([ReasonCount].self, forKey: .exclusionReasons)
+            eligibleObservedS = try c.decodeIfPresent(Int.self, forKey: .eligibleObservedS) ?? 0
+            eligibleShare = try c.decodeIfPresent(Double.self, forKey: .eligibleShare)
+            enteredCount = try c.decodeIfPresent(Int.self, forKey: .enteredCount)
+            enteredSupportS = try c.decodeIfPresent(Int.self, forKey: .enteredSupportS) ?? 0
+            enteredObservedS = try c.decodeIfPresent(Int.self, forKey: .enteredObservedS) ?? 0
         }
     }
 
     public enum Eligibility {
 
-        public static let version = "pc-eligibility-1"
+        public static let version = "pc-eligibility-2"
         public static let topExclusionReasons = 10
 
         // MARK: Reason codes — positive
@@ -152,6 +240,21 @@ extension PhysiologyContext {
         public static let notAsleep: ReasonCode = "not_asleep"
         public static let sleepEvidenceUnknown: ReasonCode = "sleep_evidence_unknown"
         public static let noSupportedExertion: ReasonCode = "no_supported_exertion"
+        // MARK: Target-dependent gates (`EligibilityVerdict.targetDependentGates`; `signal_invalid` is the first)
+        /// The sleep detector keeps a sleep run only when its heart rate is low enough relative to the day, and its
+        /// "no sleep here" needs heart-rate coverage: the sleep / wake state of an optical-pulse metric is selected
+        /// partly on that metric's own sensor.
+        public static let gateSleepDetectorHrConfirmation: ReasonCode = "sleep_detector_hr_confirmation"
+        /// Wear established from the presence of a heart-rate signal (the target's own sensor).
+        public static let gateWearFromHeartRatePresence: ReasonCode = "wear_from_heart_rate_presence"
+        public static let gateHrPlausibleBand: ReasonCode = SignalValidityEngine.gateHrPlausibleBand
+        public static let gateRrKernelRange: ReasonCode = SignalValidityEngine.gateRrKernelRange
+        public static let gateEctopicRejection: ReasonCode = SignalValidityEngine.gateEctopicRejection
+
+        public static let targetDependentGateCodes: [ReasonCode] = [
+            signalInvalid, gateHrPlausibleBand, gateRrKernelRange, gateEctopicRejection,
+            gateSleepDetectorHrConfirmation, gateWearFromHeartRatePresence,
+        ]
 
         public static let reasonCodes: [ReasonCode] = [
             stableAwakeLowMovement, insideSupportedSleep, insideLocomotion, afterExertionBout, invalidInterval,
@@ -160,8 +263,13 @@ extension PhysiologyContext {
             sleepWakeMixed, awakeEvidenceUnknown, notWorn, wearMixed, wearEvidenceUnknown, movementInSupport,
             insufficientStationary, insufficientPrecedingStillness, precedingStillnessUnobserved, recentLocomotion,
             recentLocomotionUnobserved, recentExertionBout, exertionHistoryExceedsLimit, notAsleep,
-            sleepEvidenceUnknown, noSupportedExertion,
+            sleepEvidenceUnknown, noSupportedExertion, gateSleepDetectorHrConfirmation, gateWearFromHeartRatePresence,
+            gateHrPlausibleBand, gateRrKernelRange, gateEctopicRejection,
         ]
+
+        /// Metrics measured by the optical pulse sensor (HR, beat intervals and what is derived from them).
+        static let opticalPulseMetrics: Set<MetricKind> = [.heartRate, .restingHeartRate, .hrvRmssd, .hrvSdnn,
+                                                           .respiratoryRate]
 
         // MARK: Dependence labels (`EligibilityVerdict.dependsOn`)
         public static let sleepDetectorUsesHeartRate = "sleep_detector_uses_heart_rate"
@@ -184,23 +292,45 @@ extension PhysiologyContext {
             }
         }
 
-        /// Accumulates checks for one verdict.
+        /// Accumulates checks for one verdict. Failed, undetermined, positive and note reasons are kept apart so the
+        /// verdict can list the deciding reasons first.
         private struct Builder {
-            var failed = false
-            var undetermined = false
-            var reasons: [ReasonCode] = []
+            var fails: [ReasonCode] = []
+            var unknowns: [ReasonCode] = []
+            var positives: [ReasonCode] = []
+            var notes: [ReasonCode] = []
             var evidence: [Diagnostic] = []
             var dependsOn: [String] = []
-            mutating func fail(_ r: ReasonCode) { failed = true; add(r) }
-            mutating func unknown(_ r: ReasonCode) { undetermined = true; add(r) }
-            mutating func note(_ r: ReasonCode) { add(r) }
-            mutating func add(_ r: ReasonCode) { if !reasons.contains(r) { reasons.append(r) } }
+            var gates: [ReasonCode] = [signalInvalid]
+            mutating func fail(_ r: ReasonCode) { Self.add(&fails, r) }
+            mutating func unknown(_ r: ReasonCode) { Self.add(&unknowns, r) }
+            /// A positive reason: deciding when the verdict is eligible, a note otherwise.
+            mutating func positive(_ r: ReasonCode) { Self.add(&positives, r) }
+            mutating func note(_ r: ReasonCode) { Self.add(&notes, r) }
+            mutating func gate(_ r: ReasonCode) { Self.add(&gates, r) }
             mutating func depends(_ s: String) { if !dependsOn.contains(s) { dependsOn.append(s) } }
+            static func add(_ list: inout [ReasonCode], _ r: ReasonCode) { if !list.contains(r) { list.append(r) } }
             /// Evidence is rounded to 1e-4 for the document (decisions use the unrounded values).
             mutating func diag(_ name: String, _ value: Double?) {
                 if let v = value, v.isFinite { evidence.append(Diagnostic(name, (v * 10_000).rounded() / 10_000)) }
             }
-            var state: EligibilityState { failed ? .ineligible : (undetermined ? .unknown : .eligible) }
+            var state: EligibilityState {
+                !fails.isEmpty ? .ineligible : (!unknowns.isEmpty ? .unknown : .eligible)
+            }
+            /// (all reasons with the deciding ones first, the non-deciding subset).
+            func ordered() -> (reasons: [ReasonCode], notes: [ReasonCode]) {
+                let deciding: [ReasonCode]
+                var trailing: [ReasonCode]
+                switch state {
+                case .ineligible: deciding = fails + unknowns; trailing = positives + notes
+                case .unknown: deciding = unknowns; trailing = positives + notes
+                case .eligible: deciding = positives; trailing = notes
+                }
+                var seen = Set<ReasonCode>()
+                let first = deciding.filter { seen.insert($0).inserted }
+                trailing = trailing.filter { seen.insert($0).inserted }
+                return (first + trailing, trailing)
+            }
         }
 
         /// Activity shares over the whole support from an HR-independent composition.
@@ -237,7 +367,7 @@ extension PhysiologyContext {
                 b.unknown(invalidInterval)
                 return finish(kind, b, config)
             }
-            // The target-dependent quality gate (reads the measurement's own signal, never its value).
+            // The target-dependent quality gate (reads the measurement's own signal, never its value alone).
             switch validity.state {
             case .valid: break
             case .degraded: b.note(signalDegraded)
@@ -246,6 +376,8 @@ extension PhysiologyContext {
             case .unverified: b.fail(signalUnverified)
             case .unsupported: b.unknown(signalUnsupported)
             }
+            declareValidityGates(&b, metric: metric, validity: validity)
+            declareContextGates(&b, kind: kind, metric: metric, sleepWear: sleepWear)
             let activityUsable = !activity.heartRateDependent && activity.source != .decoderIntervals
                 && activity.source != .none && activity.coveredS > 0
             if activity.heartRateDependent || activity.source == .decoderIntervals {
@@ -266,17 +398,47 @@ extension PhysiologyContext {
         }
 
         private static func finish(_ kind: ComparisonKind, _ b: Builder, _ config: EligibilityConfig) -> EligibilityVerdict {
-            var reasons = b.reasons
+            var b = b
             if b.state == .eligible {
                 switch kind {
-                case .stableAwakeRest: reasons.insert(stableAwakeLowMovement, at: 0)
-                case .sleepMeasurement: reasons.insert(insideSupportedSleep, at: 0)
+                case .stableAwakeRest: b.positives.insert(stableAwakeLowMovement, at: 0)
+                case .sleepMeasurement: b.positives.insert(insideSupportedSleep, at: 0)
                 case .activityResponse: break  // the positive reason was added by the check that passed
                 }
             }
+            let (reasons, notes) = b.ordered()
             return EligibilityVerdict(comparison: kind, state: b.state, reasons: reasons, evidence: b.evidence,
-                                      targetDependentGates: [signalInvalid], dependsOn: b.dependsOn,
-                                      policyVersion: config.version)
+                                      targetDependentGates: b.gates, dependsOn: b.dependsOn,
+                                      policyVersion: config.version, notes: notes)
+        }
+
+        /// Validity gates that read the target's own input values: the HR plausible band (a majority of samples
+        /// outside it degrades the estimate), the RR kernel range (300–2000 ms beats are rejected) and ectopic
+        /// rejection (beats that differ too much from their neighbours are rejected). Declared when the
+        /// assessment applied them to this measurement (its incident counters are non-zero), whatever the state.
+        private static func declareValidityGates(_ b: inout Builder, metric: MetricKind, validity: SignalValidity) {
+            switch metric {
+            case .heartRate, .restingHeartRate:
+                if (validity.diagnostic("out_of_band_samples") ?? 0) > 0 { b.gate(gateHrPlausibleBand) }
+            case .hrvRmssd, .hrvSdnn:
+                if (validity.diagnostic("out_of_range_beats") ?? 0) > 0 { b.gate(gateRrKernelRange) }
+                if (validity.diagnostic("ectopic_rejected") ?? 0) > 0 { b.gate(gateEctopicRejection) }
+            default:
+                break
+            }
+        }
+
+        /// Context gates that read the target's own sensor for optical-pulse metrics: a sleep / wake state from the
+        /// HR-confirmed sleep detector (or the band's undocumented sleep state), and wear from heart-rate presence
+        /// where wear is required. Skin temperature is not read by either, so it only records the dependence.
+        private static func declareContextGates(_ b: inout Builder, kind: ComparisonKind, metric: MetricKind,
+                                                sleepWear: SleepWearContext) {
+            guard opticalPulseMetrics.contains(metric) else { return }
+            if sleepWear.sleepDependsOnHeartSignals { b.gate(gateSleepDetectorHrConfirmation) }
+            let wearRequired = kind != .activityResponse
+            let wearFromHeart = sleepWear.wearDependsOnHeartSignals
+                || sleepWear.wearEvidence.contains(SleepRhythm.evidenceHeartRateSignal)
+            if wearRequired && wearFromHeart { b.gate(gateWearFromHeartRatePresence) }
         }
 
         private static func awakeAndWorn(_ b: inout Builder, _ sw: SleepWearContext) {
@@ -392,9 +554,9 @@ extension PhysiologyContext {
                 .min { $0.secondsBeforeMeasurement < $1.secondsBeforeMeasurement }
             if let f = follows { b.diag("seconds_since_last_bout", Double(f.secondsBeforeMeasurement)) }
             if usable && s.locomotion >= config.activityResponseMinLocomotionShare {
-                b.note(insideLocomotion)
+                b.positive(insideLocomotion)
             } else if follows != nil {
-                b.note(afterExertionBout)
+                b.positive(afterExertionBout)
             } else if !usable {
                 b.unknown(activity.coveredS > 0 && !activity.heartRateDependent ? insufficientActivityCoverage
                                                                                 : activityEvidenceUnavailable)
@@ -408,13 +570,21 @@ extension PhysiologyContext {
         // MARK: Selection accounting
 
         /// Selection accounting over the day's envelopes for each (comparison, metric) pair present.
+        ///
+        /// `dailyValues` are the day's System F values built from these envelopes; when nil they are rebuilt here
+        /// with `reference` (`ContextReferences.dailyValues`), so the entered counts follow the same inclusion
+        /// rules. An envelope "entered" a comparison when its id is a source of a daily value of that comparison's
+        /// series (`*.stable_awake_*` for stable awake rest, the nightly series for sleep measurement).
         public static func selection(envelopes: [MeasurementEnvelope], observations: SanitizedObservations,
-                                     dayWindow: Interval) -> [SelectionSummary] {
+                                     dayWindow: Interval, dailyValues: [DailyValue]? = nil,
+                                     reference: ReferenceConfig = .init()) -> [SelectionSummary] {
             struct Key: Hashable { let comparison: ComparisonKind; let metric: MetricKind }
             var groups: [Key: [(MeasurementEnvelope, EligibilityVerdict)]] = [:]
             for e in envelopes {
                 for v in e.eligibility { groups[Key(comparison: v.comparison, metric: e.metric), default: []].append((e, v)) }
             }
+            let entered = enteredEnvelopes(envelopes: envelopes, dayWindow: dayWindow, dailyValues: dailyValues,
+                                           reference: reference)
             var observedCache: [String: [Int]] = [:]
             func observedSeconds(_ metric: MetricKind) -> [Int] {
                 let key: String
@@ -438,40 +608,96 @@ extension PhysiologyContext {
                 return out
             }
             let keys = groups.keys.sorted { ($0.comparison.rawValue, $0.metric.rawValue) < ($1.comparison.rawValue, $1.metric.rawValue) }
-            return keys.map { key in
-                let items = groups[key]!
-                var eligible = 0, ineligible = 0, unknown = 0
-                var reasonCounts: [ReasonCode: Int] = [:]
-                var supports: [Interval] = []
-                for (e, v) in items {
-                    switch v.state {
-                    case .eligible:
-                        eligible += 1
-                        if let iv = e.support.intersection(dayWindow) { supports.append(iv) }
-                    case .ineligible, .unknown:
-                        if v.state == .ineligible { ineligible += 1 } else { unknown += 1 }
-                        for r in v.reasons { reasonCounts[r, default: 0] += 1 }
-                    }
-                }
-                let union = SignalValidityEngine.mergeIntervals(supports)
-                let eligibleS = union.reduce(0) { $0 + $1.duration }
-                let observed = observedSeconds(key.metric)
+            func observedInside(_ union: [Interval], _ observed: [Int]) -> Int {
                 var inside = 0
                 var u = 0
                 for t in observed {
                     while u < union.count, union[u].end <= t { u += 1 }
                     if u < union.count, union[u].contains(t) { inside += 1 }
                 }
+                return inside
+            }
+            return keys.map { key in
+                let items = groups[key]!
+                var eligible = 0, ineligible = 0, unknown = 0, enteredCount = 0
+                var reasonCounts: [ReasonCode: Int] = [:]
+                var supports: [Interval] = []
+                var enteredSupports: [Interval] = []
+                for (e, v) in items {
+                    switch v.state {
+                    case .eligible:
+                        eligible += 1
+                        if let iv = e.support.intersection(dayWindow) { supports.append(iv) }
+                        if entered[key.comparison]?.contains(e.id) ?? false {
+                            enteredCount += 1
+                            if let iv = e.support.intersection(dayWindow) { enteredSupports.append(iv) }
+                        }
+                    case .ineligible, .unknown:
+                        if v.state == .ineligible { ineligible += 1 } else { unknown += 1 }
+                        // Only the reasons that decided the verdict are exclusions; notes are recorded limits.
+                        for r in v.decidingReasons { reasonCounts[r, default: 0] += 1 }
+                    }
+                }
+                let union = SignalValidityEngine.mergeIntervals(supports)
+                let enteredUnion = SignalValidityEngine.mergeIntervals(enteredSupports)
+                let observed = observedSeconds(key.metric)
+                let inside = observedInside(union, observed)
+                let enteredInside = observedInside(enteredUnion, observed)
+                let hasSeries = hasReferenceSeries(key.comparison, metric: key.metric, reference: reference)
                 let top = reasonCounts.map { ReasonCount(reason: $0.key, count: $0.value) }
                     .sorted { ($1.count, $0.reason.rawValue) < ($0.count, $1.reason.rawValue) }
                     .prefix(topExclusionReasons)
+                let share: (Int) -> Double? = { n in observed.isEmpty ? nil : Double(n) / Double(observed.count) }
                 return SelectionSummary(comparison: key.comparison, metric: key.metric, eligible: eligible,
-                                        ineligible: ineligible, unknown: unknown, eligibleSupportS: eligibleS,
+                                        ineligible: ineligible, unknown: unknown,
+                                        eligibleSupportS: union.reduce(0) { $0 + $1.duration },
                                         observedS: observed.count,
-                                        representedShare: observed.isEmpty ? nil
-                                            : Double(inside) / Double(observed.count),
-                                        exclusionReasons: Array(top), eligibleObservedS: inside)
+                                        representedShare: hasSeries ? share(enteredInside) : nil,
+                                        exclusionReasons: Array(top), eligibleObservedS: inside,
+                                        eligibleShare: share(inside), enteredCount: hasSeries ? enteredCount : nil,
+                                        enteredSupportS: enteredUnion.reduce(0) { $0 + $1.duration },
+                                        enteredObservedS: enteredInside)
             }
+        }
+
+        /// Whether System F builds a reference series from envelopes of this comparison and metric.
+        static func hasReferenceSeries(_ comparison: ComparisonKind, metric: MetricKind,
+                                       reference: ReferenceConfig) -> Bool {
+            switch comparison {
+            case .stableAwakeRest:
+                return reference.stableAwakeMetrics.contains(metric)
+                    && ContextReferences.stableAwakeSeriesKey(metric: metric, config: reference) != nil
+            case .sleepMeasurement:
+                return reference.nightlyMetrics.contains(metric) && metric != .spo2Candidate
+            case .activityResponse:
+                return false
+            }
+        }
+
+        /// Envelope ids that are sources of a daily value, per comparison.
+        static func enteredEnvelopes(envelopes: [MeasurementEnvelope], dayWindow: Interval,
+                                     dailyValues: [DailyValue]?,
+                                     reference: ReferenceConfig) -> [ComparisonKind: Set<String>] {
+            let values = dailyValues ?? ContextReferences.dailyValues(
+                envelopes: envelopes,
+                identity: DayIdentity(deviceScope: "", day: "", timezoneId: "UTC", dayWindow: dayWindow),
+                mode: .retrospective, finality: .provisional, config: reference)
+            var byId: [String: MeasurementEnvelope] = [:]
+            for e in envelopes { byId[e.id] = e }
+            var out: [ComparisonKind: Set<String>] = [:]
+            for v in values {
+                for id in v.sourceIds {
+                    guard let e = byId[id] else { continue }
+                    if let key = ContextReferences.stableAwakeSeriesKey(metric: e.metric, config: reference),
+                       v.seriesKey == key || v.seriesKey.hasPrefix(key + ".") {
+                        out[.stableAwakeRest, default: []].insert(id)
+                    } else if let key = ContextReferences.nightlySeriesKey(metric: e.metric, method: e.method),
+                              v.seriesKey == key {
+                        out[.sleepMeasurement, default: []].insert(id)
+                    }
+                }
+            }
+            return out
         }
     }
 }

@@ -20,7 +20,7 @@ import WhoopProtocol
 extension PhysiologyContext {
 
     public struct ValidityConfig: Codable, Equatable, Sendable {
-        public var version = "pc-validity-1"
+        public var version = "pc-validity-2"
 
         // MARK: Input contract (sanitize)
         public var hrContractMinBpm = 20
@@ -193,8 +193,12 @@ extension PhysiologyContext {
         public var interval: Interval
         public var placement: String
         public var placementSource: String
-        public init(interval: Interval, placement: String, placementSource: String) {
+        /// `account` when the placement comes from an account-level record (no device-scoped record covers the
+        /// interval); nil for a device-scoped record or no record.
+        public var scope: String? = nil
+        public init(interval: Interval, placement: String, placementSource: String, scope: String? = nil) {
             self.interval = interval; self.placement = placement; self.placementSource = placementSource
+            self.scope = scope
         }
     }
 
@@ -281,7 +285,7 @@ extension PhysiologyContext {
 
     public enum SignalValidityEngine {
 
-        public static let version = "pc-validity-1"
+        public static let version = "pc-validity-2"
 
         // MARK: Reason codes — input contract
         public static let outOfContractUnits: ReasonCode = "out_of_contract_units"
@@ -339,6 +343,17 @@ extension PhysiologyContext {
         public static let partialInBand: ReasonCode = "partial_in_band"
         public static let skinNotCoreTemperature: ReasonCode = "skin_not_core_temperature"
         public static let unverifiedStrapEstimate: ReasonCode = "unverified_strap_estimate"
+        // Target-dependent screens inside the assessments: they read the target's own input values. Declared in
+        // the availability matrix (per assessment) and in eligibility verdicts' `targetDependentGates` (per
+        // measurement, when applied) for selection-bias review.
+        /// HR samples outside 30–220 bpm; a majority outside degrades the estimate (never invalid on value).
+        public static let gateHrPlausibleBand: ReasonCode = "hr_plausible_band"
+        /// Beats outside the HRV kernel's 300–2000 ms range are rejected and count toward the rejected fraction.
+        public static let gateRrKernelRange: ReasonCode = "rr_kernel_range"
+        /// Ectopic-looking beats (successive-difference screen) are rejected and count toward the rejected fraction.
+        public static let gateEctopicRejection: ReasonCode = "ectopic_rejection"
+        /// Sleep / wake from the HR-confirmed sleep detector (eligibility rows).
+        public static let gateSleepDetectorHrConfirmation: ReasonCode = "sleep_detector_hr_confirmation"
 
         // MARK: Reason codes — regime and comparability
         public static let placementChanged: ReasonCode = "placement_changed"
@@ -398,8 +413,13 @@ extension PhysiologyContext {
             noQualifiedWaveform, noCoreTemperatureSensor, wristOrientationLikelihoodOnly, noGravityVector,
             heartRateIndependentSource, displayOnly, sleepDetectorUsesHeartRate, wearFromHeartRateSignal,
             awakeEvidenceUnavailable, wearEvidenceUnavailable, sleepEvidenceUnavailable, noSourceRecords,
-            stepCounterPresent, excludedFromComparisons,
+            stepCounterPresent, excludedFromComparisons, gateHrPlausibleBand, gateRrKernelRange,
+            gateEctopicRejection, gateSleepDetectorHrConfirmation,
         ]
+
+        /// Placement record scopes (`PlacementInput.scope`): a device-scoped record wins over an account-level one.
+        public static let placementScopeDevice = "device"
+        public static let placementScopeAccount = "account"
 
         /// The engine's raw read window for a day: `[dayStart − 30 h, dayEnd + 6 h)`.
         public static func readWindow(_ identity: DayIdentity) -> Interval {
@@ -1082,34 +1102,53 @@ extension PhysiologyContext {
         public static func regimeTimeline(_ input: DayInput, config: ValidityConfig) -> RegimeTimeline {
             let window = readWindow(input.identity)
             let earliest = input.placements.map(\.start).min()
-            var records: [LabelRecord] = []
+            // Scope first (RC-17, the app's `PlacementStore` rule): a device-scoped record (scope nil or `device`)
+            // wins over an account-level record wherever they overlap, whatever their revisions; the account-level
+            // record applies only where no device-scoped record exists. Within one scope, overlaps resolve by
+            // revision, then `recordedAt`, then a stable id.
+            var deviceRecords: [LabelRecord] = []
+            var accountRecords: [LabelRecord] = []
             for p in input.placements {
                 let end = p.end ?? window.end
                 guard end > p.start, let iv = Interval(p.start, end).intersection(window) else { continue }
                 let placement = normalize(p.placement)
-                records.append(LabelRecord(interval: iv, label: "\(placement)|\(normalize(p.source))",
-                                           revision: p.revision, availableAt: p.recordedAt,
-                                           tieBreak: "placement:\(p.start):\(p.end ?? -1):\(placement):\(p.source)"))
+                let account = p.scope.map(normalize) == placementScopeAccount
+                let record = LabelRecord(interval: iv, label: "\(placement)|\(normalize(p.source))",
+                                         revision: p.revision, availableAt: p.recordedAt,
+                                         tieBreak: "placement:\(p.start):\(p.end ?? -1):\(placement):\(p.source)")
+                if account { accountRecords.append(record) } else { deviceRecords.append(record) }
             }
-            let resolved = IntervalAlgebra.resolve(records, source: .none, heartRateDependent: false)
+            let device = IntervalAlgebra.resolve(deviceRecords, source: .none, heartRateDependent: false).spans
+            let account = IntervalAlgebra.resolve(accountRecords, source: .none, heartRateDependent: false).spans
+            var spans: [(interval: Interval, label: String?, scope: String?)] = device.map { ($0.interval, $0.label, nil) }
+            let deviceCover = mergeIntervals(device.map(\.interval))
+            for s in account {
+                for piece in subtract(deviceCover, from: s.interval) {
+                    spans.append((piece, s.label, placementScopeAccount))
+                }
+            }
+            spans.sort { $0.interval < $1.interval }
             var segments: [PlacementSegment] = []
-            func append(_ iv: Interval, _ placement: String, _ source: String) {
+            func append(_ iv: Interval, _ placement: String, _ source: String, _ scope: String?) {
                 if var last = segments.last, last.interval.end == iv.start, last.placement == placement,
-                   last.placementSource == source {
+                   last.placementSource == source, last.scope == scope {
                     last.interval.end = iv.end
                     segments[segments.count - 1] = last
                 } else {
-                    segments.append(PlacementSegment(interval: iv, placement: placement, placementSource: source))
+                    segments.append(PlacementSegment(interval: iv, placement: placement, placementSource: source,
+                                                     scope: scope))
                 }
             }
             var cursor = window.start
-            for span in resolved.spans {
-                if span.interval.start > cursor { append(Interval(cursor, span.interval.start), "unknown", "none") }
+            for span in spans {
+                if span.interval.start > cursor {
+                    append(Interval(cursor, span.interval.start), "unknown", "none", nil)
+                }
                 let parts = (span.label ?? "unknown|none").split(separator: "|", maxSplits: 1).map(String.init)
-                append(span.interval, parts.first ?? "unknown", parts.count > 1 ? parts[1] : "none")
+                append(span.interval, parts.first ?? "unknown", parts.count > 1 ? parts[1] : "none", span.scope)
                 cursor = span.interval.end
             }
-            if cursor < window.end { append(Interval(cursor, window.end), "unknown", "none") }
+            if cursor < window.end { append(Interval(cursor, window.end), "unknown", "none", nil) }
 
             var boundaries: [RegimeBoundary] = []
             if segments.count >= 2 {
@@ -1254,11 +1293,13 @@ extension PhysiologyContext {
             let rr = o.beatIntervals
 
             // Heart rate.
+            // Target-dependent screens are declared on the rows of the assessments that apply them (spec §8:
+            // a necessary target-dependent quality gate is declared and evaluated for selection bias).
             for metric in [MetricKind.heartRate, .restingHeartRate] {
                 rows.append(AvailabilityEntry(metric: metric, assessment: "\(metric.rawValue)_signal_validity",
                                               source: "strap_heart_rate", state: hasHR ? .supported : .unavailable,
                                               comparability: "identical_regime_only",
-                                              reasons: hasHR ? [] : [noHeartRateSamples]))
+                                              reasons: (hasHR ? [] : [noHeartRateSamples]) + [gateHrPlausibleBand]))
             }
 
             // Beat intervals: day-level over-count and beat-accuracy screens.
@@ -1279,13 +1320,14 @@ extension PhysiologyContext {
                     rrState = .partial; rrReasons.append(beatValuesUntrustworthy)
                 }
             }
+            let hrvGates = [gateRrKernelRange, gateEctopicRejection]
             rows.append(AvailabilityEntry(metric: .hrvRmssd, assessment: "hrv_signal_validity",
                                           source: "strap_rr_intervals", state: rrState,
-                                          comparability: "identical_regime_only", reasons: rrReasons))
+                                          comparability: "identical_regime_only", reasons: rrReasons + hrvGates))
             rows.append(AvailabilityEntry(metric: .hrvSdnn, assessment: "hrv_signal_validity",
                                           source: "strap_rr_intervals", state: rrState,
                                           comparability: "identical_window_length_only",
-                                          reasons: rrReasons + [windowLengthDependent]))
+                                          reasons: rrReasons + [windowLengthDependent] + hrvGates))
             rows.append(AvailabilityEntry(metric: .respiratoryRate, assessment: "respiratory_signal_validity",
                                           source: "strap_rr_intervals_rsa", state: rrState,
                                           comparability: "identical_regime_only", reasons: rrReasons + [rsaOnlyEstimate]))
@@ -1351,13 +1393,16 @@ extension PhysiologyContext {
             if !hasSleep { awakeReasons.append(awakeEvidenceUnavailable) }
             if !hasWear { awakeReasons.append(wearEvidenceUnavailable) }
             if !awakeReasons.isEmpty { awakeState = .unavailable }
-            if !input.sleepSessions.isEmpty { awakeReasons.append(sleepDetectorUsesHeartRate) }
+            if !input.sleepSessions.isEmpty {
+                awakeReasons.append(sleepDetectorUsesHeartRate)
+                awakeReasons.append(gateSleepDetectorHrConfirmation)
+            }
             if o.wearEvents.isEmpty && hasHR { awakeReasons.append(wearFromHeartRateSignal) }
             rows.append(AvailabilityEntry(metric: nil, assessment: "stable_awake_eligibility", source: "context_layer",
                                           state: awakeState, comparability: "not_applicable", reasons: awakeReasons))
             var sleepReasons: [ReasonCode] = []
             if input.sleepSessions.isEmpty { sleepReasons.append(sleepEvidenceUnavailable) }
-            else { sleepReasons.append(sleepDetectorUsesHeartRate) }
+            else { sleepReasons += [sleepDetectorUsesHeartRate, gateSleepDetectorHrConfirmation] }
             rows.append(AvailabilityEntry(metric: nil, assessment: "sleep_measurement_eligibility",
                                           source: "detected_sleep_sessions",
                                           state: input.sleepSessions.isEmpty ? .unavailable : .partial,
@@ -1451,6 +1496,18 @@ extension PhysiologyContext {
             var out: [Int] = []
             out.reserveCapacity(all.count)
             for t in all where out.last != t { out.append(t) }
+            return out
+        }
+
+        /// `interval` minus the sorted, merged `holes`.
+        static func subtract(_ holes: [Interval], from interval: Interval) -> [Interval] {
+            var out: [Interval] = []
+            var cursor = interval.start
+            for h in holes where h.end > cursor && h.start < interval.end {
+                if h.start > cursor { out.append(Interval(cursor, h.start)) }
+                cursor = max(cursor, h.end)
+            }
+            if cursor < interval.end { out.append(Interval(cursor, interval.end)) }
             return out
         }
 
