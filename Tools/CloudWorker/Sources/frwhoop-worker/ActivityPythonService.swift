@@ -622,14 +622,15 @@ final class ActivityPythonService {
 
     // MARK: - Parsing
 
-    /// Model statuses that mean "nothing usable is loaded" even when the ping itself succeeded.
+    /// Ping statuses that mean "no model to infer with", even when the ping itself succeeded. serve.py answers
+    /// ping `ok:true` with `hart_unavailable` when a HART manifest is present but the model failed to load (torch
+    /// missing, bad checkpoint digest), and the Inertia service answers `inertia_unavailable`; every infer would
+    /// then return `model_missing`, so the lane must back off before claiming instead of failing (and eventually
+    /// dead-lettering) every job.
     ///
-    /// Fix (ping-parse bug): only `model_missing` / `missing` used to count as unavailable, but the real
-    /// `activity_context.serve` answers a HART manifest whose checkpoint does not load with `ok: true,
-    /// model_status: "hart_unavailable"` (and the Inertia service with `inertia_unavailable`). The lane then
-    /// believed the model was up, claimed jobs and failed every one of them on `model_missing` instead of
-    /// failing soft before claiming. An explicit `model_available: false` also counts as unavailable, and
-    /// neither signal can be overridden by the other.
+    /// (Ping-parse bug: only `model_missing` / `missing` used to count as unavailable, so the lane believed the
+    /// model was up, claimed jobs and failed every one of them.) An explicit `model_available: false` also
+    /// counts as unavailable, and neither signal can override the other into "available".
     static let unavailableModelStatuses: Set<String> = ["model_missing", "missing", "hart_unavailable",
                                                         "inertia_unavailable"]
 

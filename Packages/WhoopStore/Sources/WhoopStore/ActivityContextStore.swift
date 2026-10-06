@@ -31,6 +31,11 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
     public var hrSlope: Double?
     public var rmssd: Double?
     public var rrBeats: Int
+    /// Sum of squared successive NN differences behind `rmssd` (ms²), UNROUNDED; 0 when `rmssd` is nil or
+    /// the row predates this column (v49). See `ActivityContextInterval.rrDiffSqSumMs2`.
+    public var rrDiffSqSumMs2: Double
+    /// Successive-difference pairs behind `rrDiffSqSumMs2`; 0 when `rmssd` is nil or the row predates v49.
+    public var rrDiffCount: Int
     public var respRateBpm: Double?
     public var respBreaths: Int
 
@@ -41,6 +46,7 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
                 intensity: Double? = nil, stepTicks: Int = 0, cadenceSpm: Double? = nil,
                 hrSamples: Int = 0, hrMean: Double? = nil, hrMin: Int? = nil, hrMax: Int? = nil,
                 hrSlope: Double? = nil, rmssd: Double? = nil, rrBeats: Int = 0,
+                rrDiffSqSumMs2: Double = 0, rrDiffCount: Int = 0,
                 respRateBpm: Double? = nil, respBreaths: Int = 0) {
         self.startTs = startTs
         self.endTs = endTs
@@ -64,6 +70,8 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
         self.hrSlope = hrSlope
         self.rmssd = rmssd
         self.rrBeats = rrBeats
+        self.rrDiffSqSumMs2 = rrDiffSqSumMs2
+        self.rrDiffCount = rrDiffCount
         self.respRateBpm = respRateBpm
         self.respBreaths = respBreaths
     }
@@ -329,22 +337,23 @@ extension WhoopStore {
     private static let intervalColumns = """
         startTs, endTs, activityClass, confidence, runnerUp, runnerUpConfidence, evidenceQuality, posture, \
         locomotion, armBehavior, sleepState, wearState, intensity, stepTicks, cadenceSpm, hrSamples, hrMean, \
-        hrMin, hrMax, hrSlope, rmssd, rrBeats, respRateBpm, respBreaths
+        hrMin, hrMax, hrSlope, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount, respRateBpm, respBreaths
         """
 
     private static let insertIntervalSQL = """
         INSERT INTO activityContextInterval
             (deviceId, startTs, endTs, activityClass, confidence, runnerUp, runnerUpConfidence, evidenceQuality,
              posture, locomotion, armBehavior, sleepState, wearState, intensity, stepTicks, cadenceSpm,
-             hrSamples, hrMean, hrMin, hrMax, hrSlope, rmssd, rrBeats, respRateBpm, respBreaths)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             hrSamples, hrMean, hrMin, hrMax, hrSlope, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount,
+             respRateBpm, respBreaths)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
     private static func arguments(deviceId: String, row r: ActivityContextIntervalRow) -> StatementArguments {
         [deviceId, r.startTs, r.endTs, r.activityClass, r.confidence, r.runnerUp, r.runnerUpConfidence,
          r.evidenceQuality, r.posture, r.locomotion, r.armBehavior, r.sleepState, r.wearState, r.intensity,
          r.stepTicks, r.cadenceSpm, r.hrSamples, r.hrMean, r.hrMin, r.hrMax, r.hrSlope, r.rmssd, r.rrBeats,
-         r.respRateBpm, r.respBreaths]
+         r.rrDiffSqSumMs2, r.rrDiffCount, r.respRateBpm, r.respBreaths]
     }
 
     private static func intervalRow(from row: Row) -> ActivityContextIntervalRow {
@@ -356,8 +365,9 @@ extension WhoopStore {
             sleepState: row["sleepState"], wearState: row["wearState"], intensity: row["intensity"],
             stepTicks: row["stepTicks"], cadenceSpm: row["cadenceSpm"], hrSamples: row["hrSamples"],
             hrMean: row["hrMean"], hrMin: row["hrMin"], hrMax: row["hrMax"], hrSlope: row["hrSlope"],
-            rmssd: row["rmssd"], rrBeats: row["rrBeats"], respRateBpm: row["respRateBpm"],
-            respBreaths: row["respBreaths"])
+            rmssd: row["rmssd"], rrBeats: row["rrBeats"],
+            rrDiffSqSumMs2: row["rrDiffSqSumMs2"] ?? 0, rrDiffCount: row["rrDiffCount"] ?? 0,
+            respRateBpm: row["respRateBpm"], respBreaths: row["respBreaths"])
     }
 
     private static func dayRow(from row: Row) -> ActivityContextDayRow {

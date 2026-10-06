@@ -4,12 +4,19 @@ import XCTest
 final class ActivityContextAggregateTests: XCTestCase {
     private let t0 = 1_760_000_000
 
+    /// `diffSqSum`/`diffCount` default to nil, which leaves the interval's `rrDiffSqSumMs2`/`rrDiffCount`
+    /// at 0 — exactly what a row persisted before those columns existed looks like — so a test that omits
+    /// them exercises `ActivityContextAggregator`'s legacy-row fallback (approximated from `rmssd`/`beats`
+    /// assuming full contiguity), while a test that supplies them exercises the exact modern path.
     private func iv(_ s: Int, _ e: Int, _ c: ActivityClass, conf: Double = 0.8, hr: Double? = nil, hrN: Int = 0,
-                    rmssd: Double? = nil, beats: Int = 0, resp: Double? = nil, breaths: Int = 0,
+                    rmssd: Double? = nil, beats: Int = 0, diffSqSum: Double? = nil, diffCount: Int? = nil,
+                    resp: Double? = nil, breaths: Int = 0,
                     ticks: Int = 0, cadence: Double? = nil, hrMin: Int? = nil, hrMax: Int? = nil) -> ActivityContextInterval {
         ActivityContextInterval(start: t0 + s, end: t0 + e, activityClass: c, confidence: conf,
                                 stepTicks: ticks, cadenceSpm: cadence, hrSamples: hrN, hrMean: hr, hrMin: hrMin, hrMax: hrMax,
-                                rmssd: rmssd, rrBeats: beats, respRateBpm: resp, respBreaths: breaths)
+                                rmssd: rmssd, rrBeats: beats,
+                                rrDiffSqSumMs2: diffSqSum ?? 0, rrDiffCount: diffCount ?? 0,
+                                respRateBpm: resp, respBreaths: breaths)
     }
 
     func testTotalsByClassAreOrderedByTimeThenCode() {
@@ -34,10 +41,40 @@ final class ActivityContextAggregateTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(a.hrMean), 67.5, accuracy: 1e-9, "(60*300 + 90*100) / 400")
         XCTAssertEqual(a.hrMin, 55)
         XCTAssertEqual(a.hrMax, 98)
-        XCTAssertEqual(try XCTUnwrap(a.rmssd), 50, accuracy: 1e-9, "(60*300 + 20*100) / 400, beat-weighted")
+        // RMSSD does NOT average: sqrt(Σ ΔNN² / Σ count), recovered here from the legacy rmssd/beats pair
+        // (assuming full contiguity: count = beats − 1), NOT (60*300 + 20*100) / 400 = 50 — that beat-weighted
+        // average of two already-square-rooted numbers is the bug this aggregator used to have.
+        XCTAssertEqual(try XCTUnwrap(a.rmssd), 52.953, accuracy: 0.001,
+                       "sqrt((60²×299 + 20²×99) / (299 + 99)), not a beat-weighted average of rmssd")
         XCTAssertEqual(a.rmssdIntervals, 2)
         XCTAssertEqual(try XCTUnwrap(a.respRateBpm), 14, accuracy: 1e-9, "(12*60 + 20*20) / 80")
         XCTAssertEqual(a.hrSamples, 400)
+    }
+
+    func testRMSSDRecombinesSuccessiveDifferenceComponentsNotAWeightedAverage() {
+        // Exact components this time (not the legacy approximation): 10 diffs averaging 60² and 90 diffs
+        // averaging 20². A beat-weighted average of the two RMSSD VALUES would read 50 (as the old,
+        // mathematically wrong implementation did); the correct recombination reads far lower, because
+        // the 90 small diffs dominate the sum of squares, not just the count.
+        let s = ActivityContextAggregator.summarize([
+            iv(0, 300, .sitting, rmssd: 60, beats: 11, diffSqSum: 10 * 60 * 60, diffCount: 10),
+            iv(300, 400, .sitting, rmssd: 20, beats: 91, diffSqSum: 90 * 20 * 20, diffCount: 90),
+        ], from: t0, to: t0 + 400)
+        let a = try! XCTUnwrap(s.aggregate(for: .sitting))
+        XCTAssertEqual(try XCTUnwrap(a.rmssd), 26.833, accuracy: 0.001)
+        XCTAssertNotEqual(try XCTUnwrap(a.rmssd), 50, accuracy: 1, "must not read the beat-weighted average")
+    }
+
+    func testAnIntervalCrossingTheWindowEdgeScalesItsDiffComponentsByTheSameShare() {
+        // Half of the first interval's duration is inside the window: its diff components (and therefore
+        // its contribution to the combined sum of squares and count) are scaled by that same 0.5 share,
+        // exactly like every other evidence-weighted field above.
+        let s = ActivityContextAggregator.summarize([
+            iv(0, 400, .sitting, rmssd: 40, beats: 41, diffSqSum: 40 * 40 * 40, diffCount: 40),
+        ], from: t0 + 200, to: t0 + 400)
+        let a = try! XCTUnwrap(s.aggregate(for: .sitting))
+        // Halving both the sum of squares and the count leaves the ratio — and so the RMSSD — unchanged.
+        XCTAssertEqual(try XCTUnwrap(a.rmssd), 40, accuracy: 1e-9)
     }
 
     func testAClassWithNoHrvGradeIntervalReportsNoHrv() {

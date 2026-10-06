@@ -261,6 +261,57 @@ public actor ServerScoreRepository {
         status == 409 && (body?.contains("device_registration_pending") ?? false)
     }
 
+    // MARK: - activity encoder windows
+
+    /// One UTC day of `GET scores/activity-windows`: the server's HART windows, or `unchanged` when the day
+    /// was listed in `known` at its current revision (the windows are then left out).
+    public struct ActivityWindowsDay: Equatable, Sendable {
+        public var day: String
+        public var resultRevision: String
+        public var encoderId: String
+        public var modelVersion: String
+        /// The `hart-windows-1` object re-serialized as JSON text; nil when `unchanged`.
+        public var windowsJSON: String?
+        public var unchanged: Bool { windowsJSON == nil }
+    }
+
+    /// HART's per-window output for up to three UTC days, skipping the windows of any day whose revision the
+    /// caller already holds (`known`: day → result revision). A day the server has nothing for is absent.
+    public func activityWindows(days: [String], deviceId: String,
+                                known: [String: String] = [:]) async throws -> [ActivityWindowsDay] {
+        guard let endpoint else { throw ReadError.notConfigured }
+        guard let identity = identity() else { throw ReadError.missingIdentity }
+        guard !days.isEmpty else { return [] }
+        var components = URLComponents(url: endpoint.appendingPathComponent("activity-windows"),
+                                       resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "deviceId", value: deviceId),
+                     URLQueryItem(name: "days", value: days.joined(separator: ","))]
+        let held = days.compactMap { day in known[day].map { "\(day):\($0)" } }
+        if !held.isEmpty { items.append(URLQueryItem(name: "known", value: held.joined(separator: ","))) }
+        components?.queryItems = items
+        guard let url = components?.url else { throw ReadError.malformed("activity-windows endpoint") }
+        let body = try await get(url: url, identity: identity)
+        return Self.activityWindowsDays(from: body)
+    }
+
+    static func activityWindowsDays(from body: [String: Any]) -> [ActivityWindowsDay] {
+        ((body["days"] as? [[String: Any]]) ?? []).compactMap { entry in
+            guard let day = entry["day"] as? String,
+                  let revision = (entry["result_revision"] as? String)
+                    ?? (entry["result_revision"] as? NSNumber)?.stringValue else { return nil }
+            var json: String?
+            if (entry["unchanged"] as? Bool) != true {
+                guard let windows = entry["windows"] as? [String: Any],
+                      let data = try? JSONSerialization.data(withJSONObject: windows) else { return nil }
+                json = String(data: data, encoding: .utf8)
+            }
+            return ActivityWindowsDay(day: day, resultRevision: revision,
+                                      encoderId: entry["encoder_id"] as? String ?? "hart",
+                                      modelVersion: entry["model_version"] as? String ?? "unknown",
+                                      windowsJSON: json)
+        }
+    }
+
     // MARK: - intraday series
 
     /// The dense intraday series between two instants (`GET scores/series`), cached under `cacheKey`.

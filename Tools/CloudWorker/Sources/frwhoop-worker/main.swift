@@ -119,6 +119,7 @@ struct WorkerConfig {
     let activityImu: Bool
     let activityStreams: Bool
     let activityStreamBudget: Int
+    let activityCacheDir: String
     let inertia: InertiaSettings
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
@@ -173,6 +174,9 @@ struct WorkerConfig {
         self.activityImu = (environment["FRWHOOP_ACTIVITY_IMU"] ?? "1") != "0"
         self.activityStreams = (environment["FRWHOOP_ACTIVITY_STREAMS"] ?? "1") != "0"
         self.activityStreamBudget = max(1, Int(environment["FRWHOOP_ACTIVITY_STREAM_BUDGET"] ?? "4") ?? 4)
+        // On-host cache of downloaded raw-IMU objects and model answers (ActivityLocalCache). Under
+        // /var/lib/frwhoop by default, which the unit already lets the worker write; "" turns it off.
+        self.activityCacheDir = environment["FRWHOOP_ACTIVITY_CACHE_DIR"] ?? "/var/lib/frwhoop/activity-cache"
         self.inertia = InertiaSettings.fromEnvironment(environment, activityPython: self.activityPython,
                                                        leaseSeconds: self.activityLeaseSeconds)
         self.disabledLanes = Set(
@@ -420,7 +424,8 @@ var activity = ActivityLane(
     inertia: config.inertia.serviceConfig(activityHome: config.activityHome).map {
         InertiaStage(service: ActivityPythonService(config: $0), mode: config.inertia.mode,
                      expectedBundleSHA256: config.inertia.bundleSHA256)
-    })
+    },
+    cache: config.activityEnabled && config.activityImu ? ActivityLocalCache(path: config.activityCacheDir) : nil)
 for warning in config.inertia.warnings {
     FileHandle.standardError.write("frwhoop-worker: inertia: \(warning)\n".data(using: .utf8)!)
 }
@@ -599,6 +604,10 @@ if activityState.read().enabled {
                     "failures_unsettled": activity.stats.failuresUnsettled,
                     "model_unavailable": activity.stats.modelUnavailable,
                     "windows_inferred": activity.stats.windowsInferred,
+                    "windows_reused": activity.stats.windowsReused,
+                    "window_sets_published": activity.stats.windowSetsPublished,
+                    "window_set_failures": activity.stats.windowSetFailures,
+                    "objects_reused": activity.stats.objectsReused,
                     "context_days_published": activity.stats.contextDaysPublished,
                     "context_day_failures": activity.stats.contextDayFailures,
                     "stream_days_enqueued": activity.stats.streamDaysEnqueued,

@@ -650,6 +650,67 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertEqual(ActivityMotionHeadsDays.percent(1e300), 100, "clamped before conversion: never a trap")
     }
 
+    // MARK: - The on-host HART cache never makes the shadow row partial
+
+    /// A chunk whose HART answer comes from the on-host cache is not sent to HART again (no lease renewal, no
+    /// model call, counted as reused) — but Inertia is still asked for it, with its own lease renewal first.
+    /// With Inertia off the cached pass is exactly main's: no renewal, no call.
+    func testACachedHartChunkIsStillInferredByInertia() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("activity-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = try XCTUnwrap(ActivityLocalCache(path: directory.path))
+        let hart = try hartService()
+        _ = try hart.ping()                                      // the child reports its versions: answers are cacheable
+        func versions() -> (model: String, preprocessing: String) {
+            ActivityLane.resolvedVersions(reportedModel: hart.reportedModelVersion,
+                                          reportedPreprocessing: hart.reportedPreprocessingVersion)
+        }
+        // Pass 1 fills the cache (HART inferred for all three chunks).
+        var first = ActivityLane.Stats()
+        var renewals = 0
+        let filled = try ActivityLane.inferChunks(requests(), service: hart, inertia: nil, versions: versions(),
+                                                  cache: cache, stats: &first, renew: { renewals += 1; return true })
+        XCTAssertEqual(first.windowsInferred, 3)
+        XCTAssertEqual(first.windowsReused, 0)
+        XCTAssertEqual(renewals, 3)
+
+        // Pass 2, Inertia on: HART comes from the cache, Inertia is still asked for every chunk.
+        var second = ActivityLane.Stats()
+        renewals = 0
+        let cached = try ActivityLane.inferChunks(requests(), service: hart, inertia: try inertia("ok"),
+                                                  versions: versions(), cache: cache, stats: &second,
+                                                  renew: { renewals += 1; return true })
+        XCTAssertEqual(second.windowsInferred, 0, "HART is not re-inferred")
+        XCTAssertEqual(second.windowsReused, 3)
+        XCTAssertEqual(second.inertiaChunks, 3, "Inertia still runs on every cached chunk")
+        XCTAssertEqual(cached.motionHeads.responses.count, 3)
+        XCTAssertEqual(cached.motionHeads.trackInput?.windows.count, 3 * 19, "the shadow row is complete")
+        XCTAssertEqual(renewals, 3, "one renewal before each Inertia call, none for the cached HART answers")
+        let a = try hartPayloads(filled), b = try hartPayloads(cached)
+        XCTAssertEqual(a.v1, b.v1, "the cached HART windows publish exactly what the inferred ones did")
+        XCTAssertEqual(a.v2, b.v2)
+
+        // Pass 3, Inertia off: main's cached pass, untouched.
+        var third = ActivityLane.Stats()
+        renewals = 0
+        let plain = try ActivityLane.inferChunks(requests(), service: hart, inertia: nil, versions: versions(),
+                                                 cache: cache, stats: &third, renew: { renewals += 1; return true })
+        XCTAssertEqual(renewals, 0)
+        XCTAssertEqual(third.windowsReused, 3)
+        XCTAssertEqual(third.inertiaChunks, 0)
+        XCTAssertEqual(try hartPayloads(plain).v1, a.v1)
+
+        // A lost lease before the Inertia call of a cached chunk ends the job exactly like one before HART.
+        var lost = ActivityLane.Stats()
+        XCTAssertThrowsError(try ActivityLane.inferChunks(requests(), service: hart, inertia: try inertia("ok"),
+                                                          versions: versions(), cache: cache, stats: &lost,
+                                                          renew: { false })) { error in
+            XCTAssertEqual((error as? PostgresClient.Error)?.kind, .stale)
+        }
+        XCTAssertEqual(lost.inertiaChunks, 0)
+    }
+
     func testNothingValidMeansNoShadowRow() throws {
         var stats = ActivityLane.Stats()
         let inferred = try infer(try inertia("schema"), stats: &stats)

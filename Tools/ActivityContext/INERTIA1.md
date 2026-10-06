@@ -363,7 +363,9 @@ Second `ActivityPythonService` instance (own process, timeout, restart cap) runn
 
 Inertia is never part of the readiness gate and its failures never fail a job: logged with kind,
 counted, the HART path continues. The job lease is renewed before every Inertia call exactly as before every
-HART call (a lost lease ends the job the same way). Shadow output is stored in its own table, never in
+HART call (a lost lease ends the job the same way). The worker's on-host cache (`ActivityLocalCache`) holds
+HART answers only: a chunk whose HART answer is reused from it is still sent to Inertia (with its own lease
+renewal), so a day's shadow row is never partial because HART was cached. Shadow output is stored in its own table, never in
 `activity_context_epochs` / `activity_context_days`. Candidate mode additionally decodes the day a
 second time with Inertia evidence (pinned bundle only) and stores that comparison document beside the shadow
 output; the published HART document is unchanged. Stage 3 (production evidence) needs a pinned official

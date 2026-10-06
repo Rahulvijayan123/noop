@@ -27,6 +27,14 @@ struct ImuRetentionPolicy: Equatable {
     /// roughly a week of fully dense capture plus compression slack.
     static let `default` = ImuRetentionPolicy(maxAgeDays: 30, maxTotalBytes: 1_073_741_824)
 
+    /// The age rule for the always-on activity capture (`ActivityImuCapture`). It records far more than a
+    /// Raw Data session (up to ~50 MB a day on disk when continuous) and is only kept until the object lane
+    /// has uploaded it, which normally takes minutes, so it gets a week of grace instead of a month. The size
+    /// cap is the shared one.
+    var activityCapture: ImuRetentionPolicy {
+        ImuRetentionPolicy(maxAgeDays: min(maxAgeDays, 7), maxTotalBytes: maxTotalBytes)
+    }
+
     enum Decision: Equatable {
         case keep
         case evict(reason: String)

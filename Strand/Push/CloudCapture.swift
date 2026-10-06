@@ -438,6 +438,8 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private var _objectSource: ImuObjectSource?
     private var _objectLoopTask: Task<Void, Never>?
     private var _objectCapabilities: PushCapabilities?
+    /// Cloud id → the local id the IMU store files that strap's seconds under, refreshed every lane pass.
+    private var _objectStoreIds: [String: String] = [:]
     private var _objectCapabilitiesAt: Int = 0
     /// The D2 retry: restarts the cloud path when protected data becomes available after a locked
     /// launch. Cancelled on `stop()` so a disabled/signed-out runtime never re-activates.
@@ -587,6 +589,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
         let objectTransport = ImuObjectTransport(endpoint: endpoint, identity: provider)
         let objectSource = ImuObjectSource(store: ImuSessionFileStoreReader(),
                                            deviceId: { [weak self] in self?.deviceIdValue },
+                                           storeDeviceId: { [weak self] cloudId in
+                                               self?.objectStoreDeviceId(forCloudId: cloudId) ?? cloudId
+                                           },
                                            uploadAllowed: {
                                                CloudPushSettings.isEnabled
                                                    && CloudLocalDataBinding.isOwner(scope.ownerId)
@@ -655,12 +660,18 @@ public final class CloudPushRuntime: @unchecked Sendable {
         _objectSource = nil
         _objectCapabilities = nil
         _objectCapabilitiesAt = 0
+        _objectStoreIds = [:]
         return loop
     }
 
     private var deviceIdValue: String? {
         lock.lock(); defer { lock.unlock() }
         return _deviceId
+    }
+
+    private func objectStoreDeviceId(forCloudId cloudId: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return _objectStoreIds[cloudId]
     }
 
     private func abandon(coordinator: CloudTransportCoordinator, scope: CloudDataScope) async {
@@ -875,10 +886,17 @@ public final class CloudPushRuntime: @unchecked Sendable {
         let transport = _objectTransport
         let progress = _objectProgress
         let source = _objectSource
-        let deviceId = _deviceId
         lock.unlock()
-        guard let transport, let progress, let source, let deviceId, let scope = runningScope,
+        guard let transport, let progress, let source, let scope = runningScope,
               let identity = Self.credentialProvider(for: scope, store: identityStore)() else { return }
+        // Every strap the IMU store holds seconds for, under the id the cloud knows it by. The store is keyed
+        // by the BLE layer's local id (the registry's active device), which is not the runtime's account-level
+        // fallback id; reading under that one found nothing, so no raw motion ever left the phone.
+        let devices = await Self.objectLaneDevices()
+        guard !devices.isEmpty else { return }
+        lock.lock()
+        _objectStoreIds = Dictionary(devices.map { ($0.cloudId, $0.localId) }, uniquingKeysWith: { first, _ in first })
+        lock.unlock()
 
         let caps = await negotiatedObjectCapabilities(transport: transport)
         guard let caps, PushProtocol.isObjectVersion(caps.protocolVersion),
@@ -901,13 +919,22 @@ public final class CloudPushRuntime: @unchecked Sendable {
             associateReceipt: { _, _, _ in },
             wakeBudget: PushWakeBudget(duration: 20)
         )
-        var result = await coordinator.pushObjects(.rawImuSession, deviceId: deviceId, lane: lane)
         var drained = 0
-        while case .accepted(_, _, let hasMore, _) = result, hasMore,
-              drained < ObjectLaneCadence.maxObjectsPerPass {
-            result = await coordinator.pushObjects(.rawImuSession, deviceId: deviceId, lane: lane)
-            drained += 1
+        for device in devices {
+            var result = await coordinator.pushObjects(.rawImuSession, deviceId: device.cloudId, lane: lane)
+            while case .accepted(_, _, let hasMore, _) = result, hasMore,
+                  drained < ObjectLaneCadence.maxObjectsPerPass {
+                result = await coordinator.pushObjects(.rawImuSession, deviceId: device.cloudId, lane: lane)
+                drained += 1
+            }
         }
+    }
+
+    /// The straps with raw IMU on this phone: the store's local id and the cloud id its rows go out under
+    /// (`CloudStrapSerialStore`, the same mapping the heart-rate and gravity journal uses).
+    static func objectLaneDevices() async -> [(localId: String, cloudId: String)] {
+        let localIds = await MainActor.run { ImuSessionFileStore.shared.deviceIds() }
+        return localIds.map { (localId: $0, cloudId: CloudStrapSerialStore.shared.cloudId(forLocalId: $0)) }
     }
 
     /// Cached capability negotiation for the object lane: refreshed at most every
