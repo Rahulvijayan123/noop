@@ -27,6 +27,10 @@ MAX_TEMP_SAMPLES = 60_000
 MAX_RR_BEATS = 120_000
 MAX_BREATH_INTERVALS = 20_000
 MAX_HISTORY_DAYS = 31
+#: Body cap for POST /v1/sleep-features. The shared 8 MiB cap of /v1/infer is below what the
+#: sample caps above admit (60k HR + 60k temp + 120k RR + 20k breaths + 31 history days is
+#: ~19 MB of JSON, and an ordinary 10 h night with its history already passes 8 MiB).
+MAX_BODY_BYTES = 32 * 1024 * 1024
 #: A local day is 1440 minutes except on DST fall-back days (1500); the cap
 #: admits both so an honest 25 h grid is not refused.
 MAX_HISTORY_MINUTES_PER_DAY = 1500
