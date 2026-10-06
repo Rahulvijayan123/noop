@@ -183,8 +183,18 @@ def night_minutes(night_start: int, night_end: int):
         yield m, s, e
 
 
-def _distinct_seconds(samples, s: int, e: int) -> int:
-    return len({sm.ts for sm in samples if s <= sm.ts < e})
+def _bucket(items: Sequence[Any], width: int, origin: int = 0) -> dict[int, list[Any]]:
+    """Group ``items`` by ``(ts - origin) // width`` once, keeping their order.
+
+    The per-minute and per-window scans below used to filter the whole night's
+    samples for every minute/window (480 x 28,800 rows): ~4 s on the 4 vCPU
+    Droplet against the 3 s budget. Each caller still re-applies its exact
+    half-open ``[t0, t1)`` bounds to the (tiny) bucket, so results are identical.
+    """
+    out: dict[int, list[Any]] = {}
+    for item in items:
+        out.setdefault((item.ts - origin) // width, []).append(item)
+    return out
 
 
 def minute_stage(tl: Timeline, s: int, e: int) -> str | None:
@@ -311,11 +321,16 @@ def compute_night(req: SleepFeaturesRequest, tl: Timeline,
     stage_windows: dict[str, list[dict[str, Any]]] = {s: [] for s in KNOWN_STAGES}
     excluded_mixed_min: dict[str, float] = {s: 0.0 for s in KNOWN_STAGES}
 
-    for t0, t1 in tumbling_windows(start, end, cfg.stage_window_s):
+    window_s = cfg.stage_window_s
+    run_buckets = [_bucket(run, window_s, start) for run in runs]
+    breath_buckets = _bucket(req.breaths, window_s, start)
+    temp_buckets = _bucket(req.temp, window_s, start)
+
+    for k, (t0, t1) in enumerate(tumbling_windows(start, end, window_s)):
         win_s = t1 - t0
         run_segments: list[list[float]] = []
-        for run in runs:
-            vals = [b.rr_ms for b in run if t0 <= b.ts < t1]
+        for buckets in run_buckets:
+            vals = [b.rr_ms for b in buckets.get(k, ()) if t0 <= b.ts < t1]
             if vals:
                 run_segments.append(vals)
         if not run_segments:
@@ -341,7 +356,7 @@ def compute_night(req: SleepFeaturesRequest, tl: Timeline,
             "coverage": outcome["coverage"],
             "rejected_fraction": outcome["rejected_fraction"],
         }
-        breaths = [b for b in req.breaths if t0 <= b.ts < t1]
+        breaths = [b for b in breath_buckets.get(k, ()) if t0 <= b.ts < t1]
         if len(breaths) >= 2:
             ds = sorted(b.seconds for b in breaths)
             med = statistics.median(ds)
@@ -351,7 +366,7 @@ def compute_night(req: SleepFeaturesRequest, tl: Timeline,
                 info["resp_median_bpm"] = 60.0 / med
             if mean > 0:
                 info["resp_cv"] = sd / mean
-        temp_vals = [s.celsius for s in req.temp if t0 <= s.ts < t1]
+        temp_vals = [s.celsius for s in temp_buckets.get(k, ()) if t0 <= s.ts < t1]
         if temp_vals:
             info["temp_median"] = statistics.median(temp_vals)
         stage_windows[stage].append(info)
@@ -359,17 +374,21 @@ def compute_night(req: SleepFeaturesRequest, tl: Timeline,
     # Minute-level HR / temperature per stage (time support, not rows).
     hr_minutes: dict[str, list[float]] = {s: [] for s in KNOWN_STAGES}
     temp_minutes: dict[str, list[float]] = {s: [] for s in KNOWN_STAGES}
-    for _m, ms, me in night_minutes(start, end):
-        if _distinct_seconds(req.hr, ms, me) >= cfg.minute_valid_seconds:
+    hr_by_minute = _bucket(req.hr, 60)
+    temp_by_minute = _bucket(req.temp, 60)
+    for m, ms, me in night_minutes(start, end):
+        hr_in = [s for s in hr_by_minute.get(m, ()) if ms <= s.ts < me]
+        if len({s.ts for s in hr_in}) >= cfg.minute_valid_seconds:
             stage = minute_stage(tl, ms, me)
             if stage is not None:
-                vals = [s.bpm for s in req.hr if ms <= s.ts < me]
+                vals = [s.bpm for s in hr_in]
                 if vals:
                     hr_minutes[stage].append(float(statistics.median(vals)))
-        if _distinct_seconds(req.temp, ms, me) >= cfg.minute_valid_seconds:
+        temp_in = [s for s in temp_by_minute.get(m, ()) if ms <= s.ts < me]
+        if len({s.ts for s in temp_in}) >= cfg.minute_valid_seconds:
             stage = minute_stage(tl, ms, me)
             if stage is not None:
-                vals = [s.celsius for s in req.temp if ms <= s.ts < me]
+                vals = [s.celsius for s in temp_in]
                 if vals:
                     temp_minutes[stage].append(float(statistics.median(vals)))
 
