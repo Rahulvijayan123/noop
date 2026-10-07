@@ -168,11 +168,20 @@ public enum BaselineStandard {
     /// `BaselineStore.dayLogsKey`, which is owned by the baseline workstream and cannot import this file).
     public static let dayLogsDefaultsKey = "noop.baseline.daylog.v1"
 
-    /// The persisted morning logs, keyed by `yyyy-MM-dd`. Empty when none were ever saved.
+    /// The persisted morning logs, keyed by `yyyy-MM-dd`. Empty when none were ever saved. Surfaces call this
+    /// from view bodies, so the decode is memoised on the stored bytes (a changed log re-decodes).
     public static func loadDayLogs(_ defaults: UserDefaults = .standard) -> [String: LBDayLog] {
         guard let data = defaults.data(forKey: dayLogsDefaultsKey) else { return [:] }
-        return (try? JSONDecoder().decode([String: LBDayLog].self, from: data)) ?? [:]
+        dayLogsLock.lock()
+        defer { dayLogsLock.unlock() }
+        if let cached = dayLogsCache, cached.data == data { return cached.logs }
+        let logs = (try? JSONDecoder().decode([String: LBDayLog].self, from: data)) ?? [:]
+        dayLogsCache = (data, logs)
+        return logs
     }
+
+    private static let dayLogsLock = NSLock()
+    private static var dayLogsCache: (data: Data, logs: [String: LBDayLog])?
 
     /// True when the day carries a logged confounder. Same semantics (and the same day key) as
     /// `LongitudinalBaseline.nightIsClean`, the rule Layer 1 trains its usuals with.

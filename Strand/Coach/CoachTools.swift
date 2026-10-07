@@ -34,7 +34,7 @@ struct CoachToolExecutor {
 
     static let definitions: [[String: Any]] = [
         tool("get_health_overview",
-             "Last 14 days of charge, effort, sleep, HRV and resting HR, 30-day averages, recent workouts. For broad 'how am I doing?' questions."),
+             "Last 14 days of charge, effort, sleep, HRV and resting HR, 28-day usuals, recent workouts. For broad 'how am I doing?' questions."),
         tool("get_daily_metrics",
              "Day-by-day charge, effort, sleep, HRV, resting HR over a longer window. For weekly and trend questions.",
              ["days": ("integer", "Days back (default 14, max 60)")]),
@@ -149,16 +149,25 @@ struct CoachToolExecutor {
     private func readiness() async -> String {
         let all = repo.days
         guard let latest = all.last(where: { $0.recovery != nil }) ?? all.last else { return "No wearable data is available yet." }
-        let last30 = Array(all.suffix(30)), last7 = Array(all.suffix(7)), last28 = Array(all.suffix(28))
+        // BaselineStandard fix I (audit 2026-10-07): windows are CALENDAR days ending on `latest.day` (were the
+        // last N ROWS, which stretch across any wear gap and ran past `latest` when newer rows existed), and the
+        // HRV / resting-HR comparison is `PersonalUsual`: the causal 28-day median of the days BEFORE `latest`
+        // (ln for HRV), with the night count stated.
+        func window(_ n: Int) -> [DailyMetric] {
+            let start = BaselineStandard.shift(latest.day, by: -n) ?? ""
+            return all.filter { $0.day > start && $0.day <= latest.day }
+        }
+        let last30 = window(30), last7 = window(7), last28 = window(28)
+        let context = BaselineStandard.Context.app()
 
         func mean(_ days: [DailyMetric], _ pick: (DailyMetric) -> Double?) -> Double? {
             let xs = days.compactMap(pick)
             return xs.isEmpty ? nil : xs.reduce(0, +) / Double(xs.count)
         }
         func fmt(_ v: Double?, _ digits: Int = 0) -> String { v.map { String(format: "%.\(digits)f", $0) } ?? "—" }
-        func delta(_ now: Double?, _ base: Double?, _ digits: Int = 0) -> String {
-            guard let now, let base else { return "—" }
-            return String(format: "%+.\(digits)f", now - base)
+        func delta(_ now: Double?, _ ref: BaselineStandard.Reference, _ digits: Int = 0) -> String {
+            guard let now, ref.usable else { return "—" }
+            return String(format: "%+.\(digits)f", now - ref.centerNative)
         }
 
         var lines = ["READINESS (as of \(latest.day)):"]
@@ -168,10 +177,10 @@ struct CoachToolExecutor {
         } else {
             lines.append("• Charge not measured for \(latest.day).")
         }
-        let hrvBase = mean(last30) { $0.avgHrv }
-        lines.append("• HRV \(fmt(latest.avgHrv)) ms vs 30-day \(fmt(hrvBase)) ms (\(delta(latest.avgHrv, hrvBase)) ms); 7-day \(fmt(mean(last7) { $0.avgHrv })) ms")
-        let rhrBase = mean(last30) { $0.restingHr.map(Double.init) }
-        lines.append("• Resting HR \(latest.restingHr.map(String.init) ?? "—") bpm vs 30-day \(fmt(rhrBase)) bpm (\(delta(latest.restingHr.map(Double.init), rhrBase)) bpm); 7-day \(fmt(mean(last7) { $0.restingHr.map(Double.init) })) bpm")
+        let hrvUsual = PersonalUsual.usual(days: all, metric: .hrvRmssd, asOf: latest.day, context: context)
+        lines.append("• HRV \(fmt(latest.avgHrv)) ms vs \(PersonalUsual.phrase(hrvUsual, unit: " ms")) (\(delta(latest.avgHrv, hrvUsual)) ms); 7-day \(fmt(mean(last7) { $0.avgHrv })) ms")
+        let rhrUsual = PersonalUsual.usual(days: all, metric: .restingHR, asOf: latest.day, context: context)
+        lines.append("• Resting HR \(latest.restingHr.map(String.init) ?? "—") bpm vs \(PersonalUsual.phrase(rhrUsual, unit: " bpm")) (\(delta(latest.restingHr.map(Double.init), rhrUsual)) bpm); 7-day \(fmt(mean(last7) { $0.restingHr.map(Double.init) })) bpm")
 
         let acute = mean(last7) { $0.strain }, chronic = mean(last28) { $0.strain }
         if let acute, let chronic, chronic > 0 {
