@@ -121,3 +121,5 @@ def test_a_citation_must_be_about_something_the_explanation_says():
     assert validate.check(text, EVIDENCE, retrieved).ok
     off_topic = answer(interpretation=["Alcohol can raise heart rate in the hours after drinking."], citations=["pmid:1"])
     assert "citations" in validate.check(off_topic, EVIDENCE, retrieved).codes
+    absent = answer(interpretation=["No alcohol was recorded, and nights vary."], citations=["pmid:2"])
+    assert "citations" in validate.check(absent, EVIDENCE, retrieved).codes  # research about what did not happen

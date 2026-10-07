@@ -44,8 +44,11 @@ try:
     probe['global_harness_write'] = 'allowed'
 except Exception as exc:
     probe['global_harness_write'] = 'blocked:' + type(exc).__name__
-state = json.load(open(os.path.join(os.environ['PRIME_AGENT_CODING_AGENT_DIR'], 'harness', 'harness_state.json')))
-probe['harness_ids_on_disk'] = sorted(i for kind in state['entries'].values() for i in kind)
+try:
+    state = json.load(open(os.path.join(os.environ['PRIME_AGENT_CODING_AGENT_DIR'], 'harness', 'harness_state.json')))
+    probe['harness_ids_on_disk'] = sorted(i for kind in state['entries'].values() for i in kind)
+except FileNotFoundError:
+    probe['harness_ids_on_disk'] = []
 
 print('EVIDENCE=' + json.dumps({'summary': summary, 'quality': quality,
                                 'lit': [r['id'] for r in (lit.get('results') or [])], 'probe': probe}, default=str))

@@ -5,8 +5,11 @@ The whole tree is confined, not just the kernel: model-written code can ask the 
 are the job's LLM proxy and the job's tool broker; the only writable path is the job's run directory; the
 environment is exactly what prime.py builds (no secrets).
 
-* macOS (development): sandbox-exec. Network: IP egress denied except loopback to the proxy port; DNS denied.
-  Writes denied outside the run directory and to the agent's global harness; reads of secret paths denied.
+* macOS (development only): sandbox-exec. Network: IP egress denied except loopback to the proxy port; DNS
+  denied. Writes denied outside the run directory and to the job's settings, provider config, curated harness and
+  cwd; reads of secret paths denied. It
+  cannot hide other same-uid processes (their launch environment is readable through KERN_PROCARGS2), so never
+  run it with real users' data or with secrets in any of your own processes' environments.
 * Linux (production): bubblewrap with every namespace unshared (no network route at all, own PID namespace,
   dies with its parent), read-only binds of the system, the Prime binary and the kernel Python, and the run
   directory. A forwarder inside the namespace turns the proxy's Unix socket into the loopback port Prime calls.
@@ -78,8 +81,11 @@ def macos_profile(plan: Plan) -> str:
                f'(allow network-outbound (remote ip "localhost:{int(plan.proxy_port)}"))',
                '(deny file-write* (subpath "/"))',
                f'(allow file-write* (subpath "/dev") (subpath "{run}"))',
-               # Prime's global Continual Harness is the curated, user-free copy: read-only to the whole tree.
-               f'(deny file-write* (subpath "{run}/agent/harness"))']
+               # Read-only to the whole tree: the job's settings, provider config and curated harness, and the cwd
+               # (project settings there would override them). Prime keeps its own MCP/runtime state elsewhere in
+               # the agent dir, so that stays writable, as do HOME and TMPDIR.
+               f'(deny file-write* (literal "{run}/agent/settings.json") (literal "{run}/agent/models.json")'
+               f' (subpath "{run}/agent/harness") (subpath "{run}/work"))']
     for path in plan.deny_read:
         if os.path.exists(path):
             profile.append(f'(deny file-read* (subpath "{_sbpl_path(path)}"))')
@@ -94,8 +100,10 @@ def linux_argv(plan: Plan, argv: list[str], env: dict[str, str], kernel_python: 
         out += ["--ro-bind-try", path, path]
     for path in plan.readable:
         out += ["--ro-bind", path, path]
-    out += ["--bind", run, run, "--ro-bind", f"{run}/agent/harness", f"{run}/agent/harness",
-            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", f"{run}/work"]
+    out += ["--bind", run, run]
+    for path in (f"{run}/agent/settings.json", f"{run}/agent/models.json", f"{run}/agent/harness", f"{run}/work"):
+        out += ["--ro-bind", path, path]
+    out += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", f"{run}/work"]
     for key, value in sorted(env.items()):
         out += ["--setenv", key, value]
     assert plan.proxy_unix

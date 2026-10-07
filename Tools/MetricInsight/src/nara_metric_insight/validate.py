@@ -57,6 +57,7 @@ _CLOCK = re.compile(r"\b\d{1,2}:\d{2}\b")
 _NUMBER = re.compile(r"(?<![\w.])[-+−]?\d+(?:[.,]\d+)?(?![\w])")
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
 _PERSONAL = re.compile(r"\b(you|your|you're|you've)\b", re.I)
+_NEGATION = re.compile(r"\b(no|not|none|nothing|without|never|neither|nor)\b|n't\b", re.I)
 
 # A cited finding must be about something the explanation says (by the curated entry's topic).
 TOPIC_WORDS: dict[str, tuple[str, ...]] = {
@@ -272,10 +273,13 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     unknown = [c for c in citations if c not in retrieved]
     if unknown:
         errors.append(f"citations:{', '.join(unknown[:3])} were not returned by search_literature in this session")
-    said = " ".join(sentences).lower()
+    # A citation supports an interpretation of something present: an interpretation sentence that names its
+    # topic without negating it ("no alcohol was recorded" is not a reason to cite alcohol research).
+    supported = " ".join(s for s in sections["interpretation"] if not _NEGATION.search(s)).lower()
     for cited in (c for c in citations if c in retrieved):
         words = TOPIC_WORDS.get(str(retrieved[cited].get("topic")))
-        if words and not any(word in said for word in words):
-            errors.append(f"citations:{cited} is about {retrieved[cited].get('topic')}, which the explanation does not mention")
+        if words and not any(word in supported for word in words):
+            errors.append(f"citations:{cited} is about {retrieved[cited].get('topic')}, which no interpretation "
+                          "sentence says is present for this person")
     answer = {"headline": headline.strip(), **sections, "citations": list(dict.fromkeys(citations))}
     return Result(not errors, answer, list(dict.fromkeys(errors)))

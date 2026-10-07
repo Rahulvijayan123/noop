@@ -207,6 +207,10 @@ def test_macos_sandbox_blocks_egress_secret_reads_and_writes(short_dir):
         "except Exception:\n"
         "    out['write_run'] = False\n"
         "try:\n"
+        "    open(sys.argv[5], 'w').write('x'); out['write_agent'] = True\n"
+        "except Exception:\n"
+        "    out['write_agent'] = False\n"
+        "try:\n"
         "    open(os.path.expanduser('~/nara-sandbox-probe'), 'w'); out['write_home'] = True\n"
         "except Exception:\n"
         "    out['write_home'] = False\n"
@@ -214,12 +218,13 @@ def test_macos_sandbox_blocks_egress_secret_reads_and_writes(short_dir):
     plan = sandbox.Plan(mode="macos", run_dir=str(run), proxy_port=allowed.getsockname()[1], proxy_unix=None,
                         readable=(), deny_read=(str(secret),))
     argv, env = sandbox.wrap(plan, [sys.executable, "-c", probe, str(allowed.getsockname()[1]),
-                                    str(other.getsockname()[1]), str(secret / "db_url"), str(run / "work" / "ok")],
+                                    str(other.getsockname()[1]), str(secret / "db_url"), str(run / "tmp" / "ok"),
+                                    str(run / "agent" / "settings.json")],
                              {"PATH": "/usr/bin:/bin", "HOME": "/Users/nobody-here"}, sys.executable)
     done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
     result = json.loads(done.stdout.strip().splitlines()[-1])
     assert result == {"proxy": True, "other": False, "internet": False, "secret": False, "write_run": True,
-                      "write_home": False}
+                      "write_agent": False, "write_home": False}
     allowed.close()
     other.close()
 
@@ -234,8 +239,10 @@ def test_linux_plan_unshares_everything_and_passes_no_secrets(tmp_path):
     assert argv[:5] == ["bwrap", "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
     assert "--share-net" not in argv
     assert ["--bind", str(run.resolve()), str(run.resolve())] == argv[argv.index("--bind"):argv.index("--bind") + 3]
-    harness = f"{run.resolve()}/agent/harness"
-    assert argv[argv.index("--bind") + 3:argv.index("--bind") + 6] == ["--ro-bind", harness, harness]
+    root = run.resolve()
+    locked = [p for i, a in enumerate(argv) if a == "--ro-bind" for p in [argv[i + 1]]]
+    assert {f"{root}/agent/settings.json", f"{root}/agent/models.json", f"{root}/agent/harness", f"{root}/work"} <= set(locked)
+    assert argv.index("--bind") < min(i for i, a in enumerate(argv) if a == "--ro-bind" and argv[i + 1].startswith(str(root)))
     assert argv[argv.index("--") + 1:argv.index("--") + 3] == ["/opt/prime-venv/bin/python", f"{run.resolve()}/agent/forwarder.py"]
     assert argv[-3:] == ["/opt/prime/bin/prime-agent", "--mode", "rpc"]
     assert (run / "agent" / "forwarder.py").exists()

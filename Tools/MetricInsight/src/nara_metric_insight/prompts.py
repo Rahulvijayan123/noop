@@ -51,7 +51,8 @@ The latest measured night is {latest_day}: {latest_value} {units}. Load everythi
    {ANSWER_SHAPE}
    headline: at most 90 characters. observed: 1-3 sentences of facts from the tools. interpretation: 0-3 hedged
    sentences ("may", "can", "is consistent with"). uncertainty: 1-3 sentences. citations: ids returned by
-   search_literature (their "id" field) that support a sentence you wrote (at most 2), or []. Keep the whole explanation under
+   search_literature (their "id" field) that support an interpretation sentence about something present in
+   this person's data (at most 2), or [] — never cite research about something that did not happen. Keep the whole explanation under
    900 characters: short, plain sentences. At most 3 literature searches.
 
 Rules the reply is checked against:

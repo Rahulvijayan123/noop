@@ -410,7 +410,6 @@ def data_quality(scores: dict[date, dict[str, Any]], metric: InsightMetric, anch
     tracked = _tracked(series)
     measured = [d for d, v in tracked if v is not None]
     out: dict[str, Any] = {
-        "window_nights": len(series),
         "tracked_nights": len(tracked),
         "measured_nights": len(measured),
         "missing_nights": len(tracked) - len(measured),

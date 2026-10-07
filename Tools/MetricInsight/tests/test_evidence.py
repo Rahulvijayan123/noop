@@ -127,5 +127,4 @@ def test_sleep_events_and_quality():
     assert events["unrecorded_categories"] == ["alcohol"]
     quality = ev.data_quality(rows, RHR, ANCHOR, 90, None, None)
     assert quality["measured_nights"] == 7 and quality["tracked_nights"] == 7 and quality["missing_nights"] == 0
-    assert quality["window_nights"] == 90
     assert quality["first_measured"] == "2026-09-30" and quality["longest_gap_nights"] == 0

@@ -196,6 +196,8 @@ class PrimeSession:
         (agent / "settings.json").write_text(json.dumps({
             "enableBuiltinSkills": False, "bundledSkills": {"websearch": False}, "rlmMaxDepth": 0, "packages": [],
             "telemetry": {"enabled": False},
+            # No host-side model calls the model's code can start: compaction and harness refinement.
+            "compaction": {"agentCallable": False}, "autoRefine": {"enabled": False},
             "mcpServers": {"nara": {"type": "stdio", "command": cfg.kernel_python,
                                     "args": [str(agent / "mcp_shim.py"), "--socket", str(run / "b.sock"),
                                              "--token", tool_token]}}}))
