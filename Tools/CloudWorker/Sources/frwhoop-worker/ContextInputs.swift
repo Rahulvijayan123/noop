@@ -507,9 +507,10 @@ enum ContextInputs {
         guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? ""), e > s,
               let revision = Int(r["revision"] ?? "") else { return nil }
         let confidence = Double(r["confidence"] ?? "").map { min(1, max(0, $0)) } ?? 0
-        // `in_bed` is written only when true (`ActivityContextRun`), so its absence is "not in bed" on a document
-        // that has the field at all; older decoders never wrote it, and the engine treats false as no evidence.
-        let inBed: Bool? = r["in_bed"].map { $0 == "true" }
+        // `in_bed` is written only when true (`ActivityContextRun`), so its absence is "not in bed" only on a
+        // document that writes the field (`ContextSQL.chosenActivityDocuments.says_in_bed`): there the query sends
+        // `true` / `false`. On an older document it sends "", which is nil (the document did not say).
+        let inBed: Bool? = nonEmpty(r["in_bed"]).map { $0 == "true" }
         return PC.ActivityIntervalInput(interval: PC.Interval(s, e), activityClass: nonEmpty(r["class"]) ?? "unknown",
                                         confidence: confidence, sleep: nonEmpty(r["sleep"]),
                                         wear: nonEmpty(r["wear"]), revision: revision,

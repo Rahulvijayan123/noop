@@ -44,6 +44,14 @@ final class ContextLaneActivityContextTests: XCTestCase {
             "revision": "12", "at": "500"]))
         XCTAssertEqual(run.inBed, true)
         XCTAssertEqual(run.provenance, "streams-activity-1/hsmm-1.7")
+        // A document that writes `in_bed` sends "false" for a run without it; an older document (decoder before
+        // hsmm-1.3) sends "": the document did not say, never "observed out of bed".
+        var row = ["s": "100", "e": "400", "class": "sitting", "confidence": "0.7", "revision": "3", "in_bed": "false"]
+        XCTAssertEqual(ContextInputs.parseRun(row)?.inBed, false)
+        row["in_bed"] = ""
+        XCTAssertNil(ContextInputs.parseRun(row)?.inBed)
+        row["in_bed"] = nil
+        XCTAssertNil(ContextInputs.parseRun(row)?.inBed)
         let ev = try XCTUnwrap(ContextInputs.parseTransition([
             "ts": "250", "kind": "sit_to_stand_like", "probability": "0.62", "algorithm_version": "streams-activity-1",
             "decoder_version": "hsmm-1.7", "revision": "12", "at": "500"]))
@@ -61,8 +69,14 @@ final class ContextLaneActivityContextTests: XCTestCase {
         XCTAssertTrue(epochs.contains("wear_signal") && epochs.contains("model_version"))
         for sql in [ContextSQL.activityRuns, ContextSQL.activityTransitions] {
             XCTAssertTrue(sql.hasPrefix(ContextSQL.chosenActivityDocuments))
-            let rank = "order by d.day, (d.decoder_version = $7::text) desc, d.data_through desc nulls last,"
-            XCTAssertTrue(sql.contains(rank), "current decoder first, then data_through")
+            let rank = "order by d.day, (d.decoder_version = $7::text) desc,"
+            XCTAssertTrue(sql.contains(rank), "current decoder first")
+            let newer = sql.range(of: "(regexp_match(d.decoder_version, '^hsmm-([0-9]+)[.]([0-9]+)$'))::int[] desc nulls last,")
+            let through = sql.range(of: "d.data_through desc nulls last,")
+            XCTAssertNotNil(newer)
+            XCTAssertTrue(newer.map { n in through.map { n.upperBound <= $0.lowerBound } ?? false } ?? false,
+                          "then the newer decoder (numeric), then data_through")
+            XCTAssertTrue(sql.contains("as says_in_bed"))
             XCTAssertTrue(sql.contains("d.computed_at <= to_timestamp(nullif($8, '')::bigint)"))
             XCTAssertTrue(sql.contains("user_id = $1::uuid and d.device_id = $2::uuid"))
             for forbidden in ["insert ", "update ", "delete ", "truncate "] {

@@ -181,7 +181,7 @@ enum ContextSQL {
     /// at or before the cutoff — what a reader at the cutoff would have read. Older lineages are never merged in:
     /// the publish keeps every fingerprint's rows, and an older lineage would fill seconds the newest one dropped
     /// (D3-02). This is per UTC day, never one revision across the whole read window (each day is its own publish).
-    /// The per-day probe walks `activity_context_epochs_day_revision` (20261007130000) when it exists; without
+    /// The per-day probe walks `activity_context_epochs_day_revision_rows` (20261007130000) when it exists; without
     /// that index the query is still correct, only slower. Reading one revision instead of every lineage removes
     /// the ~85x row amplification measured in production.
     static let activityEpochs = """
@@ -207,21 +207,30 @@ enum ContextSQL {
         """
 
     /// The ONE v2 decoder document per UTC day `$5`…`$6` the lane reads (D5-04), ranked:
-    ///  1. decoded by the worker's current decoder (`$7`, `ActivityContextVersions.decoder`) before an older one;
-    ///  2. data through later (a document rebuilt from newer uploads first; unknown last);
-    ///  3. raw-IMU (HART, `source_rank` 1) before measurement-stream documents;
-    ///  4. computed later, then the higher result revision.
+    ///  1. decoded by the worker's current decoder (`$7`, `ActivityContextVersions.decoder`) before another one;
+    ///  2. the newer decoder (`hsmm-X.Y` compared numerically, so 1.10 is after 1.9; unparseable last), so an
+    ///     older-decoder document never wins on a few seconds of `data_through` when neither is current;
+    ///  3. data through later (a document rebuilt from newer uploads first; unknown last);
+    ///  4. raw-IMU (HART, `source_rank` 1) before measurement-stream documents;
+    ///  5. computed later, then the higher result revision.
+    /// `says_in_bed`: the document's runs carry `in_bed` (written only when true, by decoder hsmm-1.3 and later,
+    /// ccd5f0dca). On an older document a run without it is "not said", never "not in bed".
     /// A causal job (`$8` = cutoff) ranks only documents computed at or before its cutoff (documents are updated
     /// in place, so a later one never stands in for what the decision could see). Runs and transition events are
     /// read from the same chosen document, so they never disagree.
     static let chosenActivityDocuments = """
         with chosen as (
           select distinct on (d.day) d.day, d.algorithm_version, d.decoder_version, d.result_revision,
-                 d.computed_at, d.document
+                 d.computed_at, d.document,
+                 (coalesce((regexp_match(d.decoder_version, '^hsmm-([0-9]+)[.]([0-9]+)$'))::int[] >= array[1, 3],
+                           false)
+                  or jsonb_path_exists(d.document, '$.runs[*].in_bed')) as says_in_bed
             from public.activity_context_days d
            where d.user_id = $1::uuid and d.device_id = $2::uuid and d.day >= $5::date and d.day <= $6::date
              and (nullif($8, '') is null or d.computed_at <= to_timestamp(nullif($8, '')::bigint))
-           order by d.day, (d.decoder_version = $7::text) desc, d.data_through desc nulls last,
+           order by d.day, (d.decoder_version = $7::text) desc,
+                    (regexp_match(d.decoder_version, '^hsmm-([0-9]+)[.]([0-9]+)$'))::int[] desc nulls last,
+                    d.data_through desc nulls last,
                     (case d.algorithm_version when 'hart-activity-1' then 1 else 2 end),
                     d.computed_at desc, d.result_revision desc
         )
@@ -234,7 +243,7 @@ enum ContextSQL {
                coalesce((r.value ->> 'class_confidence')::real, (r.value ->> 'overall_confidence')::real, 0)::text
                  as confidence,
                coalesce(r.value ->> 'sleep', '') as sleep, coalesce(r.value ->> 'wear', '') as wear,
-               coalesce(r.value ->> 'in_bed', '') as in_bed,
+               case when c.says_in_bed then coalesce(r.value ->> 'in_bed', 'false') else '' end as in_bed,
                c.algorithm_version, c.decoder_version, c.day::text as doc_day,
                c.result_revision::text as revision,
                ceil(extract(epoch from c.computed_at))::bigint::text as at

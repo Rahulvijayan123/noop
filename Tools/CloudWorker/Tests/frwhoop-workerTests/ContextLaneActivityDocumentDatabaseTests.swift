@@ -51,10 +51,11 @@ final class ContextLaneActivityDocumentDatabaseTests: XCTestCase {
 
     private func publishDocument(_ o: (user: String, device: String), algorithm: String, decoder: String,
                                  dataThrough: Int?, revision: Int, computedAt: Int, runClass: String,
-                                 eventKind: String) throws {
+                                 eventKind: String, inBed: Bool = true) throws {
+        let bed = inBed ? ",\"in_bed\":true" : ""
         let doc = """
             {"runs":[{"s":\(dayStart + 3600),"e":\(dayStart + 7200),"activity_class":"\(runClass)",\
-            "class_confidence":0.7,"overall_confidence":0.6,"sleep":"awake","wear":"on_wrist","in_bed":true}],\
+            "class_confidence":0.7,"overall_confidence":0.6,"sleep":"awake","wear":"on_wrist"\(bed)}],\
             "events":[{"ts":\(dayStart + 5000),"kind":"\(eventKind)","probability":0.66}]}
             """
         _ = try db.query("""
@@ -124,5 +125,50 @@ final class ContextLaneActivityDocumentDatabaseTests: XCTestCase {
         XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [String(dayStart + 75_000)])
                         .compactMap(ContextInputs.parseRun).map(\.activityClass), ["sitting"])
         XCTAssertTrue(try read(ContextSQL.activityTransitions, o, params + [String(dayStart + 1_000)]).isEmpty)
+    }
+
+    func testNeitherDocumentCurrentTheNewerDecoderWinsComparedNumerically() throws {
+        let o = try owner()
+        let current = ActivityContextVersions.decoder
+        // Neither document is on the worker's decoder. The HART one (1.3) is a few seconds ahead on data_through;
+        // the stream one has the newer decoder (1.5) and wins.
+        try publishDocument(o, algorithm: "hart-activity-1", decoder: "hsmm-1.3", dataThrough: dayStart + 70_300,
+                            revision: 10, computedAt: dayStart + 70_400, runClass: "standing", eventKind: "walk_start")
+        try publishDocument(o, algorithm: "streams-activity-1", decoder: "hsmm-1.5", dataThrough: dayStart + 70_000,
+                            revision: 20, computedAt: dayStart + 70_100, runClass: "sitting",
+                            eventKind: "sit_to_stand_like")
+        let params = [day, day, current]
+        XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
+                        .map(\.activityClass), ["sitting"])
+        // Numeric, not lexical: hsmm-1.10 is after hsmm-1.9.
+        try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.10' where user_id = '\(o.user)' and algorithm_version = 'hart-activity-1'")
+        try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.9' where user_id = '\(o.user)' and algorithm_version = 'streams-activity-1'")
+        XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
+                        .map(\.activityClass), ["standing"])
+        // An unparseable decoder version ranks last among non-current ones.
+        try db.exec("update public.activity_context_days set decoder_version = 'custom' where user_id = '\(o.user)' and algorithm_version = 'hart-activity-1'")
+        XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
+                        .map(\.activityClass), ["sitting"])
+    }
+
+    func testInBedIsUnsaidOnDocumentsThatPredateTheField() throws {
+        let o = try owner()
+        let current = ActivityContextVersions.decoder
+        // An hsmm-1.1 document (before in_bed was written): its run says nothing about bed.
+        try publishDocument(o, algorithm: "streams-activity-1", decoder: "hsmm-1.1", dataThrough: dayStart + 70_000,
+                            revision: 20, computedAt: dayStart + 70_100, runClass: "sitting",
+                            eventKind: "sit_to_stand_like", inBed: false)
+        let params = [day, day, current]
+        let old = try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
+        XCTAssertEqual(old.count, 1)
+        XCTAssertNil(old.first?.inBed, "not said, never observed out of bed")
+        // A current document writes the field only when true: a run without it is out of bed.
+        try db.exec("update public.activity_context_days set decoder_version = '\(current)' where user_id = '\(o.user)'")
+        XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
+                        .first?.inBed, false)
+        // An old-version document whose runs do carry the field writes it too.
+        try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.1', document = jsonb_set(document, '{runs,0,in_bed}', 'true') where user_id = '\(o.user)'")
+        XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
+                        .first?.inBed, true)
     }
 }
