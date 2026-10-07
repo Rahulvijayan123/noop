@@ -279,12 +279,19 @@ final class AppModel: ObservableObject {
     private var activityWindowsSyncedAt: Date?
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
+    /// When each day last got an answer from the server, so yesterday and today are read again only when the
+    /// change feed announces them or `hostedUnannouncedReadSeconds` has passed.
+    private var hostedLastReadAt: [String: Date] = [:]
     /// Days the change feed announced whose read failed for a reason that can clear; asked for again next pass.
     private var hostedRetry = HostedRetryLedger()
     private var hostedCatchUpDone = false
     /// The last sync summary written to the strap log, so an unchanged state is said once, not every 30 s.
     private var lastHostedSyncLine: String?
     private static let hostedCatchUpSpan = 14
+    /// The worker republishes a day whenever its inputs change, and every republish is announced on the change
+    /// feed, so a day the feed did not announce has not changed. It is still read this often, as a backstop
+    /// for a feed page that was lost (the cursor advances as soon as a page is served).
+    static let hostedUnannouncedReadSeconds: TimeInterval = 600
     private static let hostedChangedDaysCap = 32
     /// Pages of the server's change feed read per pass. A fresh install, a new phone or a recovered account
     /// starts the feed at zero, and one page of 32 days is not the whole history of a long-worn strap.
@@ -333,18 +340,41 @@ final class AppModel: ObservableObject {
         CloudPushRuntime.shared.startIfEnabled(fallbackDeviceId: deviceId)
         applyPowerSaving()   // cloud mode may have been enabled since launch; the minute cadence follows it
         await CloudPushRuntime.shared.flushAndKick()
-        Task { await profileSync.reconcile() }
-        StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
-        Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
-        Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved while offline
-        Task { await refitActivityPersonalProfile() }   // no-op unless labels or their windows changed
-        await confirmWearableLinkIfNeeded()
+        // `cloudAccountReady` runs this same set, and the account reconcile started above calls it again on
+        // every foreground; whichever comes second inside `cloudJobsWindow` leaves it to the first.
+        let runJobs = claimCloudJobs(for: CloudPushRuntime.shared.runningScope)
+        if runJobs {
+            Task { await profileSync.reconcile() }
+            StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
+            Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
+            Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved while offline
+            Task { await refitActivityPersonalProfile() }   // no-op unless labels or their windows changed
+            await confirmWearableLinkIfNeeded()
+        }
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
         guard cloudScoringIsAuthoritative, CloudPushRuntime.shared.runningScope != nil else { return }
         startHistorySeedIfNeeded()
-        await syncHostedResults()
+        if runJobs { await syncHostedResults() }
         startHostedRefreshLoop()
+    }
+
+    /// When the per-foreground cloud jobs last ran, and for which account.
+    private var cloudJobsRan: (scope: CloudDataScope, at: Date)?
+    /// See `claimCloudJobs`.
+    private static let cloudJobsWindow: TimeInterval = 30
+
+    /// Whether the cloud jobs that `cloudBecameActive` and `cloudAccountReady` share (profile, offline queues,
+    /// wearable confirmation, a hosted sync) should run now for `scope`, noting that they did. At launch and on
+    /// every foreground both paths ran them back to back: two profile reads, two exposure reads, two confirms,
+    /// two syncs. nil (no running account) always runs, as before.
+    private func claimCloudJobs(for scope: CloudDataScope?) -> Bool {
+        guard let scope else { return true }
+        if let ran = cloudJobsRan, ran.scope == scope, Date().timeIntervalSince(ran.at) < Self.cloudJobsWindow {
+            return false
+        }
+        cloudJobsRan = (scope, Date())
+        return true
     }
 
     /// Wire the Nara account layer into the app. It owns "who is signed in" and "is the upload path linked
@@ -359,14 +389,24 @@ final class AppModel: ObservableObject {
 
     /// The cloud path is up for `identity`'s account: bring the screens and the one-time jobs along.
     func cloudAccountReady(_ identity: CloudPushIdentity) async {
-        if hostedAccountScope != identity.scope {
+        let newAccount = hostedAccountScope != identity.scope
+        if newAccount {
             hostedWrittenRevision = [:]
+            hostedLastReadAt = [:]
             hostedRetry = HostedRetryLedger()
             hostedAccountScope = identity.scope
+            cloudJobsRan = nil
         }
         applyPowerSaving()
         historyGate?.evaluateSoon()
         await CloudPushRuntime.shared.flushAndKick()
+        // The account layer calls this on every reconcile pass (each foreground, each session refresh), not only
+        // when the account changes. The same account again runs the jobs below only on screen and only when
+        // `cloudBecameActive` has not just run them; off screen the next foreground does.
+        guard (newAccount || Self.appIsOnScreen) && claimCloudJobs(for: identity.scope) else {
+            startHostedRefreshLoop()
+            return
+        }
         Task { await profileSync.reconcile() }
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
         Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
@@ -387,6 +427,7 @@ final class AppModel: ObservableObject {
         historySeedTask?.cancel()
         historySeedTask = nil
         hostedWrittenRevision = [:]
+        hostedLastReadAt = [:]
         hostedRetry = HostedRetryLedger()
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
@@ -465,6 +506,7 @@ final class AppModel: ObservableObject {
         historySeedTask = nil
         hostedCatchUpDone = false
         hostedWrittenRevision = [:]
+        hostedLastReadAt = [:]
         Task { @MainActor [weak self] in
             guard let self else { return }
             self.startHistorySeedIfNeeded()
@@ -502,7 +544,13 @@ final class AppModel: ObservableObject {
                 ?? now.addingTimeInterval(-Double(daysBack) * 86_400)
             return Repository.localDayKey(date)
         }
-        var days = [dayKey(daysBack: 1), Repository.localDayKey(now)]
+        let today = Repository.localDayKey(now)
+        // Yesterday and today are re-read when the change feed below announces them; otherwise only once
+        // `hostedUnannouncedReadSeconds` has passed. Re-reading both every half minute downloaded the same
+        // 100–150 KB results again on every pass.
+        var days = [dayKey(daysBack: 1), today].filter { day in
+            hostedLastReadAt[day].map { now.timeIntervalSince($0) >= Self.hostedUnannouncedReadSeconds } ?? true
+        }
         // Once per launch, also re-read the last week. The change cursor advances as soon as it is polled, so a
         // day the server rescored while the app was closed (or beyond the per-poll cap) was never fetched again
         // and stayed a stale stub, which left the baseline a night short.
@@ -513,6 +561,7 @@ final class AppModel: ObservableObject {
         // under the installation id both need re-reading. Each feed is paged until it runs dry (bounded), so a
         // feed that starts at zero on a fresh install reaches the whole history, not just its first page.
         var feedFailures: [String] = []
+        var announced: Set<String> = []
         for candidate in candidates {
             for _ in 0..<Self.hostedChangedPagesPerSync {
                 let page: [ServerScoreChange]
@@ -522,8 +571,11 @@ final class AppModel: ObservableObject {
                     feedFailures.append(HostedDayRead.failureToken(for: error))
                     break
                 }
-                for change in page.prefix(Self.hostedChangedDaysCap) where !days.contains(change.day) {
-                    days.append(change.day)
+                // A day after today has nothing to show yet (the server keeps tomorrow current for a night that
+                // may start tonight); it is read once it becomes today.
+                for change in page.prefix(Self.hostedChangedDaysCap) where change.day <= today {
+                    announced.insert(change.day)
+                    if !days.contains(change.day) { days.append(change.day) }
                 }
                 if page.count < Self.hostedChangedDaysCap { break }
             }
@@ -533,10 +585,14 @@ final class AppModel: ObservableObject {
         var outcomes: [HostedDayRead.Outcome] = []
         var unstoredDays: [String] = []
         for day in days {
+            // An announced day was just republished, so it is always asked for; any other day may be answered by
+            // a read another screen made a moment ago.
+            let maxAgeMs = announced.contains(day) ? 0 : ServerScoreRepository.sharedReadWindowMs
             let outcome = await HostedDayRead.read(day: day, candidates: candidates) { id in
-                try await scores.refresh(day: day, deviceId: id).hostedResult
+                try await scores.refresh(day: day, deviceId: id, maxAgeMs: maxAgeMs).hostedResult
             }
             outcomes.append(outcome)
+            if !outcome.failedTransiently { hostedLastReadAt[day] = now }
             guard let result = outcome.result,
                   hostedWrittenRevision[day] != result.resultRevision else { continue }
             // The account may have changed while this read was in flight; its result is not the new
@@ -671,14 +727,33 @@ final class AppModel: ObservableObject {
     static let hostedRefreshSeconds: UInt64 = 30
 
     private func startHostedRefreshLoop() {
-        guard cloudScoringIsAuthoritative, hostedRefreshTask == nil else { return }
+        // On screen only. Both callers reach here after a sync pass that can outlast the scene: a quick open and
+        // close (active → background within a second) went to the background first, so the loop started after
+        // `cloudWillResignActive` had already cancelled it and then polled the server every half minute for as
+        // long as the strap kept the app alive.
+        guard cloudScoringIsAuthoritative, hostedRefreshTask == nil, Self.appIsOnScreen else { return }
         hostedRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: AppModel.hostedRefreshSeconds * 1_000_000_000)
                 guard !Task.isCancelled, let self else { return }
+                guard Self.appIsOnScreen else {
+                    // Missed the cancel (see above). The next `cloudBecameActive` starts a fresh loop.
+                    self.hostedRefreshTask = nil
+                    return
+                }
                 await self.syncHostedResults()
             }
         }
+    }
+
+    /// Whether the app is in the foreground. Read from UIKit rather than the cloud runtime's flag, which is only
+    /// set by scene-phase changes and so stays at its default (active) through a Bluetooth relaunch.
+    static var appIsOnScreen: Bool {
+        #if os(iOS)
+        UIApplication.shared.applicationState == .active
+        #else
+        true
+        #endif
     }
 
     /// Upload the strap history this install banked before its offload was journaled (one-time, resumable).
@@ -739,6 +814,7 @@ final class AppModel: ObservableObject {
     func cloudWillResignActive() async {
         hostedRefreshTask?.cancel()
         hostedRefreshTask = nil
+        applyPowerSaving()   // off screen: the 15-minute offload cadence, not the minute one
         CloudPushRuntime.shared.setAppIsActive(false)
         await CloudPushRuntime.shared.flushAndKick()
     }
@@ -1096,8 +1172,13 @@ final class AppModel: ObservableObject {
         let on = PuffinExperiment.powerSavingEnabled
         // Sub-option: only in effect while the Power-saving master is on, like the HRV-pause lever below.
         ble.setLowRefreshMode(on && PuffinExperiment.lowRefreshEnabled)
-        // The minute cadence only matters when the server is what reads the strap's history back.
-        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative)
+        // The minute cadence only matters when the server is what reads the strap's history back, and only
+        // while the app is on screen. Off screen it meant two offloads a minute around the clock, each followed
+        // by a re-derivation of the day on the phone, for numbers nobody was looking at. The strap banks to
+        // flash either way; off screen it hands over on the 15-minute cadence, and opening the app asks for a
+        // sync at once (`requestSync(.foreground)`). Re-applied on every scene change (`cloudBecameActive`,
+        // `cloudWillResignActive`).
+        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative && Self.appIsOnScreen)
         ble.setLowBatteryOffloadThrottle(on ? PuffinExperiment.powerSavingBatteryPct : 0)
         // HRV pause is battery-%-aware like the offload lever — pass the same threshold.
         ble.setPauseCaptureOnPowerSave(on && PuffinExperiment.pauseHrvOnPowerSaveEnabled,
@@ -1295,8 +1376,14 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshAfterCompletedBackfill() async {
-        live.append(log: "Backfill: refreshing dashboard cache from completed sync")
-        await repo.refresh(days: 120)
+        // In cloud mode an offload writes only the stream tables, and nothing `refresh` reads comes from them: the
+        // day's numbers arrive through `syncHostedResults`, which refreshes when it writes one. A 120-day refresh
+        // here only swapped the cached history between 120 and 4,000 days with the full refreshes around it, and
+        // every swap reloaded each screen keyed on `refreshSeq`, once a minute with the fresh-data cadence.
+        if !cloudScoringIsAuthoritative {
+            live.append(log: "Backfill: refreshing dashboard cache from completed sync")
+            await repo.refresh(days: 120)
+        }
         // The stand reminder is judged on the data that just landed, before any scoring: it reads the activity
         // classifier, not the scores, and it is the one thing here that is useful only if it is prompt. It runs
         // in cloud mode too (a reminder is a local decision).

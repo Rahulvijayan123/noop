@@ -411,7 +411,8 @@ struct BackfillContinuation {
     }
 
     /// `stillConnected`: link up + command channel usable. `strapNewestTs`: newest record the strap holds
-    /// (GET_DATA_RANGE). `ourFrontierTs`: newest record WE'VE persisted (max HR ts). `wallNowUnix`: the
+    /// (GET_DATA_RANGE). `ourFrontierTs`: newest record WE'VE persisted (max HR ts, live rows included).
+    /// `sessionNewestPersistedTs`: newest row the just-ended session itself persisted. `wallNowUnix`: the
     /// REAL wall clock at decision time (#928 future-clock plausibility check; passed in so the predicate
     /// stays pure). `lastTrimAdvanced`: the just-ended session moved the trim cursor. `consecutiveCount`:
     /// auto-continues already done this connection. Returns true to immediately re-kick beginBackfill;
@@ -421,6 +422,7 @@ struct BackfillContinuation {
                                    ourFrontierTs: Int?,
                                    wallNowUnix: Int,
                                    persistedSensorRows: Bool = false,
+                                   sessionNewestPersistedTs: Int? = nil,
                                    lastTrimAdvanced: Bool,
                                    consecutiveCount: Int,
                                    maxAutoContinues: Int = defaultMaxAutoContinues,
@@ -450,6 +452,15 @@ struct BackfillContinuation {
         let futureDated = isFutureDatedNewest(strapNewestTs, wallNowUnix: wallNowUnix,
                                               futureSkewSeconds: futureSkewSeconds)
         let plausibleNewest = futureDated ? nil : strapNewestTs
+        // 3c: the pass reached the present. A strap that is worn keeps banking, so every pass of a caught-up
+        // strap persists its last few seconds and 2b below re-kicked it: at the minute cadence that was one to
+        // five extra offloads after nearly every sync, around the clock. When the newest row this pass
+        // persisted is within `behindGapSeconds` of the wall clock there is no backlog behind it, whatever the
+        // trim did. A deep oldest-first backlog persists OLD rows until its last pass, so it still drains back
+        // to back. nil (not known, or nothing timestamped) keeps the rules below.
+        if !futureDated, let reached = sessionNewestPersistedTs, wallNowUnix - reached <= behindGapSeconds {
+            return false
+        }
         // 2a: the strap reports newer data than we hold — reliable WHEN its clock epoch is sane.
         if let newest = plausibleNewest, let frontier = ourFrontierTs, (newest - frontier) > behindGapSeconds {
             return true
@@ -1550,7 +1561,7 @@ public final class BLEManager: NSObject, ObservableObject {
                                 enableRawCapture: enableRawCapture,
                                 log: { [weak self] s in self?.log(s) },
                                 rejectedSink: { [weak self] frames, trim, family in
-                                    self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
+                                    await self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
                                 },
                                 onChunk: { [weak self] decoded, console in
                                     if decoded { self?.state.decodedChunksThisSession += 1 }
@@ -2982,6 +2993,8 @@ public final class BLEManager: NSObject, ObservableObject {
         // A session that only drained a previous owner's records counts too: the strap's trim advanced and more
         // may remain, and without this the drain would stop after one pass and then back off as if empty.
         let persistedSensorRows = (backfiller?.sessionRowsPersisted ?? 0) > 0 || drainedRecords > 0
+        // Snapshotted with it, for the same reason: how far this session's own rows reached.
+        let sessionNewestPersistedTs = backfiller?.sessionNewestPersistedTs
         if persistedSensorRows { consecutiveEmptyOffloads = 0 }
         else if consecutiveAutoContinues == 0 { consecutiveEmptyOffloads += 1 }
         if reason == "HISTORY_COMPLETE" {
@@ -3176,7 +3189,8 @@ public final class BLEManager: NSObject, ObservableObject {
             // Snapshotting `> 0` = the auto-continue can't disagree with the empty verdict, and a dup-only
             // re-offload (0 new rows) stops instead of spinning on already-synced data.
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
-                                      persistedSensorRows: persistedSensorRows)
+                                      persistedSensorRows: persistedSensorRows,
+                                      sessionNewestPersistedTs: sessionNewestPersistedTs)
         }
     }
 
@@ -3191,7 +3205,8 @@ public final class BLEManager: NSObject, ObservableObject {
     /// `trimAdvanced` is the spin-detector signal computed in exitBackfilling (did this session move the
     /// trim cursor vs the previous one) — passed in because exitBackfilling has already advanced
     /// `lastSessionEndTrim` past the comparison point by the time this Task runs.
-    private func maybeAutoContinueBackfill(trimAdvanced: Bool, persistedSensorRows: Bool) {
+    private func maybeAutoContinueBackfill(trimAdvanced: Bool, persistedSensorRows: Bool,
+                                           sessionNewestPersistedTs: Int?) {
         // Cheap pre-checks first (no Task if we already know we won't continue): still connected, under
         // the cap, and the trim moved. The frontier read only happens when those already hold.
         guard state.connected, state.bonded else { return }
@@ -3239,6 +3254,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 ourFrontierTs: frontier,
                 wallNowUnix: wallNow,
                 persistedSensorRows: persistedSensorRows,
+                sessionNewestPersistedTs: sessionNewestPersistedTs,
                 lastTrimAdvanced: trimAdvanced,
                 consecutiveCount: count) else {
                 // #1012: name the stop honestly when the future-clock gate is what ended the chain —
@@ -3286,8 +3302,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// counters that drive the honest sync status. Returns false ONLY on a genuine write failure,
     /// which makes the Backfiller hold the cursor/ack so the strap re-sends the chunk (no data loss
     /// either way). Frames carry sensor payloads, not identifiers — no serials/MACs are archived.
-    private func archiveRejectedFrames(_ frames: [[UInt8]], trim: UInt32, family: DeviceFamily) -> Bool {
-        switch rejectedHistoryArchive.archive(frames, trim: trim, family: family) {
+    ///
+    /// The file work runs off the main actor and is awaited, so the Backfiller still acks only after it. A full
+    /// archive is read, re-evicted and atomically rewritten (about 5 MB), and every append is fsynced; both used
+    /// to happen on the main thread inside the offload.
+    private func archiveRejectedFrames(_ frames: [[UInt8]], trim: UInt32, family: DeviceFamily) async -> Bool {
+        let archive = rejectedHistoryArchive
+        let outcome = await Task.detached(priority: .utility) {
+            archive.archive(frames, trim: trim, family: family)
+        }.value
+        switch outcome {
         case .written(let count):
             state.rejectedFramesThisSession += count
             return true

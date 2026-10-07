@@ -166,7 +166,8 @@ struct RootTabView: View {
             .simultaneousGesture(tabSwipeGesture,
                                  including: tabPaths[selectedTab].isEmpty ? .all : .subviews)
         .task {
-            await repo.refresh()
+            // No `repo.refresh()` here: the app model refreshes at launch and every foreground refreshes again
+            // (`refreshAfterAppleHealthSync`), and a third overlapping pass at launch only delayed the first.
             // Backup & Sync: on-launch catch-up (see RootView). Detached + utility priority so a
             // 100MB+ whole-DB ZIP never blocks startup; gated on the auto toggle (default OFF). (Must-fix #4.)
             let backupRepo = repo

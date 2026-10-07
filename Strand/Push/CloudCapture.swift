@@ -679,10 +679,16 @@ public final class CloudPushRuntime: @unchecked Sendable {
         await coordinator.stop()
     }
 
-    /// How long records may wait in the journal before they are sealed into a file. Two seconds while
-    /// the scene is on screen; ten while it is not, which still lands every record on the server within
-    /// about a quarter of a minute but wakes the radio a fifth as often.
-    static func sealTargetSeconds(sceneActive: Bool) -> Double { sceneActive ? 2 : 10 }
+    /// How long records may wait in the journal before they are sealed into a file.
+    ///
+    /// Each stream seals into its own file and each file is one `POST /push`, and the receiver re-dirties the
+    /// day's score on every one. At two seconds on screen and ten off it, a phone on a streaming strap sent
+    /// about 780 batches an hour of 16–75 records (~0.5 KB each), and every one cost the receiver 5–9 s.
+    /// Ten seconds on screen is still well inside the worker's roughly once-a-minute republish of the current
+    /// day, so nothing the scene shows arrives later. Off screen nobody is reading the server's numbers, so
+    /// records wait five minutes and go up as one file per stream; they are durable in the journal meanwhile,
+    /// and the next foreground flushes them (`cloudBecameActive`).
+    static func sealTargetSeconds(sceneActive: Bool) -> Double { sceneActive ? 10 : 300 }
 
     /// Scene phase, pushed by the app layer. It sets how often the journal seals; uploads use the
     /// in-process lane in either state (see `CloudTransportCoordinator.lane`).

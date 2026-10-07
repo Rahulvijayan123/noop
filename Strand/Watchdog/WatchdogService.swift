@@ -171,8 +171,11 @@ final class WatchdogService {
         let eventLists = (try? await store.events(deviceId: id, from: from, to: now, limit: 400)) ?? []
         let stepLists = (try? await store.stepSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
         var hr = hrStored
+        // A set, not `hr.contains` per ring sample: both hold about 1,800 seconds, and the quadratic scan ran on
+        // the main actor every tick.
+        let storedSeconds = Set(hrStored.map(\.ts))
         hr.append(contentsOf: liveHRRing.filter { sample in
-            sample.ts >= from && sample.ts <= now && !hr.contains(where: { $0.ts == sample.ts })
+            sample.ts >= from && sample.ts <= now && !storedSeconds.contains(sample.ts)
         })
         var rr = rrStored
         rr.append(contentsOf: liveRRRing.filter { beat in
@@ -287,9 +290,14 @@ final class WatchdogService {
         return .empty
     }
 
+    /// What was last written for each device, so a tick that changed nothing does not encode and write it again.
+    private var persistedCarry: [String: WatchdogCarry] = [:]
+
     private func persistCarry(deviceId: String) {
+        guard persistedCarry[deviceId] != carry else { return }
         if let data = try? JSONEncoder().encode(carry) {
             UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: deviceId))
+            persistedCarry[deviceId] = carry
         }
     }
 
@@ -352,8 +360,21 @@ final class WatchdogService {
         return Self.asleepIntervals(from: samples)
     }
 
+    /// One `PlacementStore` per database. Its initializer writes (`CREATE TABLE IF NOT EXISTS`), and building one
+    /// every tick put a synchronous write on the shared writer on the main actor, where it waited behind any
+    /// offload insert or activity-context rewrite in flight.
+    private static var placementStore: (writer: ObjectIdentifier, store: PlacementStore)?
+
+    private static func placementStore(for store: WhoopStore) -> PlacementStore? {
+        let writer = ObjectIdentifier(store.registryWriter as AnyObject)
+        if let cached = placementStore, cached.writer == writer { return cached.store }
+        guard let created = try? PlacementStore(dbQueue: store.registryWriter) else { return nil }
+        placementStore = (writer, created)
+        return created
+    }
+
     private static func placementDropsWristImu(store: WhoopStore, deviceId: String, now: Int) -> Bool {
-        guard let placementStore = try? PlacementStore(dbQueue: store.registryWriter),
+        guard let placementStore = placementStore(for: store),
               let interval = try? placementStore.activePlacement(
                 at: Date(timeIntervalSince1970: TimeInterval(now)), deviceId: deviceId)
         else { return false }
@@ -363,9 +384,24 @@ final class WatchdogService {
         }
     }
 
+    /// The note's last answer, reused for `noteRefreshSeconds`: reading it means decompressing and decoding the
+    /// day's document from disk, up to three times, on the main actor. The label is display only.
+    private var noteCache: (key: String, at: Int, note: String?)?
+    private static let noteRefreshSeconds = 60
+
     /// The heart-rate page already decodes today's activity context onto disk. Read that
     /// cache only. A miss does not start a decode, and the label never enters scoring.
     private func activityContextNote(model: AppModel, now: Int) async -> String? {
+        let cacheKey = model.repo.importedReadIds.joined(separator: "+")
+        if let cached = noteCache, cached.key == cacheKey, now - cached.at < Self.noteRefreshSeconds {
+            return cached.note
+        }
+        let note = await readActivityContextNote(model: model, now: now)
+        noteCache = (cacheKey, now, note)
+        return note
+    }
+
+    private func readActivityContextNote(model: AppModel, now: Int) async -> String? {
         let dayStart = Int(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(now)))
             .timeIntervalSince1970)
         let joined = model.repo.importedReadIds.joined(separator: "+")

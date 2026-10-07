@@ -660,13 +660,16 @@ public actor CloudTransportCoordinator {
     /// eligible state so the next pass re-sends it — the receiver deduplicates by batch id, so a
     /// re-send after a lost response is harmless.
     private func reconcileTasksAtLaunch() async throws {
-        let outstanding = await session.outstandingTasks()
-        let liveTaskIds = Set(outstanding.map { String($0.taskIdentifier) })
-        let liveBatchIds = Set(outstanding.compactMap { $0.batchId })
+        // Only a reserved batch can lose its task, and asking the OS session for its tasks is a round trip to
+        // the transfer daemon. Every pass reconciles, and a pass runs after each journal commit (about once a
+        // second while the strap streams), so the round trip is skipped when nothing is reserved, which is
+        // every pass unless the background lane is in use.
         let reserved = try await journal.batches(states: [.reserved], dueBeforeMs: nil, limit: 256)
+        guard !reserved.isEmpty else { return }
+        let outstanding = await session.outstandingTasks()
+        let liveBatchIds = Set(outstanding.compactMap { $0.batchId })
         for batch in reserved {
             if liveBatchIds.contains(batch.batchId) { continue }
-            _ = liveTaskIds
             try await journal.markFailed(batchId: batch.batchId,
                                          error: "task no longer present; re-sending", nextAttemptAtMs: now() * 1000)
         }

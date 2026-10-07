@@ -41,6 +41,12 @@ final class SyncLiveActivityController {
     /// How long the final "Synced · N chunks" / "Sync interrupted" state stays before dismissing.
     private static let finalShownFor: TimeInterval = 8
     private static let chunkMinInterval: TimeInterval = 2
+    /// When a foreground sync last started a banner. With the minute "fresh data" cadence a foreground sync
+    /// starts every half minute or so, and each one brought the Dynamic Island up for its few seconds plus
+    /// `finalShownFor`, so the island was hardly ever still while the app was open. A new banner now waits this
+    /// long after the last one. A long recovery is one sync, so its banner still stays up for all of it.
+    private var lastForegroundStart: Date = .distantPast
+    private static let foregroundStartMinInterval: TimeInterval = 600
 
     /// Asked before a foreground sync STARTS a banner; true holds it back. The Lift Log sets it for the
     /// length of a gym session, whose own banner is the one on the Lock Screen. A banner the Sync Strap
@@ -113,6 +119,8 @@ final class SyncLiveActivityController {
         }
         // Only the foreground may start one. A background automatic sync stays silent, honestly.
         guard UIApplication.shared.applicationState == .active, !holdsBackNewBanner() else { return }
+        guard Date().timeIntervalSince(lastForegroundStart) >= Self.foregroundStartMinInterval else { return }
+        lastForegroundStart = Date()
         startedAt = Date()
         request(state: state(syncing(live)))
     }

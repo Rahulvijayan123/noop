@@ -1028,7 +1028,45 @@ final class Repository: ObservableObject {
     var loadFireCounts: [String: Int] = [:]
     #endif
 
+    /// The refresh pass running now, and the one queued behind it with the widest window any caller asked for.
+    private var refreshRunning: Task<Void, Never>?
+    private var refreshQueued: (task: Task<Void, Never>, days: Int)?
+
+    /// Re-read the dashboard caches from the store and publish them when anything changed.
+    ///
+    /// At most one pass runs at a time, plus one queued behind it that every caller arriving meanwhile shares, so
+    /// a caller still returns only after a pass that started after it was called. Overlapping calls (three at
+    /// launch, more after a sync) each used to read every day from the store, and only the newest published:
+    /// the first screenful waited for the last read. A queued pass reads the widest window asked for.
     func refresh(days nDays: Int = 4000) async {
+        if let queued = refreshQueued {
+            refreshQueued = (queued.task, max(queued.days, nDays))
+            await queued.task.value
+            return
+        }
+        if let running = refreshRunning {
+            let next = Task { [weak self] in
+                await running.value
+                guard let self else { return }
+                let days = self.refreshQueued?.days ?? nDays
+                self.refreshQueued = nil
+                await self.runRefreshPass(days: days)
+            }
+            refreshQueued = (next, nDays)
+            await next.value
+            return
+        }
+        await runRefreshPass(days: nDays)
+    }
+
+    private func runRefreshPass(days nDays: Int) async {
+        let pass = Task { [weak self] in await self?.refreshPass(days: nDays) }
+        refreshRunning = pass
+        await pass.value
+        if refreshRunning == pass { refreshRunning = nil }
+    }
+
+    private func refreshPass(days nDays: Int) async {
         guard let store = await ensureStore() else { return }
         refreshGen &+= 1
         let myGen = refreshGen

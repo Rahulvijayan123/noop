@@ -116,6 +116,10 @@ final class Backfiller {
 
     /// "persisted N rows (M with motion) across K night(s)". Nights are day-keys (ts / 86400).
     private(set) var sessionRowsPersisted = 0
+    /// Newest timestamp among the heart-rate and gravity rows this session persisted. Tells a pass that reached
+    /// the present (a caught-up strap handing over its last few seconds) from one still draining old backlog,
+    /// which the auto-continue decision needs (`BackfillContinuation.shouldAutoContinue`).
+    private(set) var sessionNewestPersistedTs: Int?
     /// #42: set by `begin` when this session continues an auto-continue burst (#364) that already banked
     /// rows in an earlier session, so a trim=0xFFFFFFFF END here reads as "caught up", not "no history".
     /// Without it the fresh session's `sessionRowsPersisted` is 0 and the scary "charge to 100%" line
@@ -270,7 +274,7 @@ final class Backfiller {
     /// the bytes are safe (written OR cap-reached — either way the chunk may be acked) and false on a
     /// genuine write failure, in which case `finishChunk` holds the cursor/ack so the strap re-sends.
     /// nil in non-production inits (tests/preview) → archiving is skipped and acks proceed as before.
-    private let rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) -> Bool)?
+    private let rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)?
     /// Per-chunk outcome hook (#77 family): (didDecodeSensorRows, wasConsoleOnly). Lets BLEManager
     /// tally a session so a COMPLETED-but-empty offload (all console, no sensor records) can tell the
     /// user their strap isn't banking, without false-positiving a normal caught-up sync.
@@ -297,7 +301,7 @@ final class Backfiller {
                                                 gravity: Int)) -> Void = { _ in },
          enableRawCapture: Bool = false,
          log: ((String) -> Void)? = nil,
-         rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) -> Bool)? = nil,
+         rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)? = nil,
          onChunk: ((_ decoded: Bool, _ console: Bool) -> Void)? = nil,
          connectionActive: @escaping () -> Bool = { false },
          connectionLog: ((String) -> Void)? = nil,
@@ -342,6 +346,7 @@ final class Backfiller {
         chunk.removeAll(keepingCapacity: true)
         chunkOpen = true
         sessionRowsPersisted = 0
+        sessionNewestPersistedTs = nil
         sessionDiscarded = HistoryFenceReport()
         sessionRrOffered = 0
         sessionRrInserted = 0
@@ -938,8 +943,13 @@ final class Backfiller {
             }
             // Success-side observability (#150): tally what actually persisted so the session can emit
             // "persisted N rows (M with motion) across K night(s)" — the win-rate signal a log never had.
-            let tally = Backfiller.chunkTally(counts: counts, timestamps: decoded.gravity.map(\.ts) + decoded.hr.map(\.ts))
+            let persistedTimestamps = decoded.gravity.map(\.ts) + decoded.hr.map(\.ts)
+            let tally = Backfiller.chunkTally(counts: counts, timestamps: persistedTimestamps)
             sessionRowsPersisted += tally.rows
+            // R-R too: a 5/MG layout can bank intervals with no per-second heart rate or motion.
+            if tally.rows > 0, let newest = (persistedTimestamps + decoded.rr.map(\.ts)).max() {
+                sessionNewestPersistedTs = max(sessionNewestPersistedTs ?? newest, newest)
+            }
             // #1008/#1118 census accumulation (pre-storage `offered` vs post-key `inserted`).
             sessionRrOffered += rrCensus.intervals
             sessionRrInserted += counts.rr
@@ -968,7 +978,7 @@ final class Backfiller {
             // chunk (no setCursor, no ack) so the strap re-sends it next session — no data loss
             // either way. (A full archive is reported as success by the sink; we still ack.)
             if !rejected.isEmpty, let rejectedSink {
-                guard rejectedSink(rejected, trim, family) else {
+                guard await rejectedSink(rejected, trim, family) else {
                     log?("Backfill: rejected-frame archive failed (trim=\(trim)) — holding ack so the strap re-sends.")
                     persistStalled = true   // #57
                     return

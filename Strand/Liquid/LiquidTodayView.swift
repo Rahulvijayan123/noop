@@ -408,10 +408,10 @@ struct LiquidTodayView: View {
                     // Also static until the first data load settles, so launch isn't fighting a live sky too.
                     // "Sky behind cards" (opt-in): fill the whole backdrop with a softer settle so the sky
                     // reads under every card, instead of the default 340 top band that dissolves to canvas.
-                    Group {
-                        if poseStill || !dataLoaded { LiquidSkyStatic(hour: liveHour, settleStrength: skyBehindCards ? 0.78 : 1) }
-                        else { LiquidSky(hour: liveHour, settleStrength: skyBehindCards ? 0.78 : 1) }
-                    }
+                    // One view either way: swapping `LiquidSkyStatic` for `LiquidSky` when the load settled
+                    // cross-faded two full-screen canvases while the hero rings started their fill.
+                    LiquidSky(hour: liveHour, settleStrength: skyBehindCards ? 0.78 : 1,
+                              holdsStill: poseStill || !dataLoaded)
                     .frame(maxWidth: .infinity)
                     .frame(height: skyBehindCards ? nil : 340, alignment: .top)
                     .allowsHitTesting(false)
