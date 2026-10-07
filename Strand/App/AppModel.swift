@@ -2777,34 +2777,20 @@ final class AppModel: ObservableObject {
     /// Gated behind the opt-in flag; clears the published result the moment it's turned off.
     private func computeCyclePhase() async {
         guard cycleAwarenessEnabled else { cyclePhase = nil; cycleCurve = []; return }
-        let days = repo.days
-        guard let tempCfg = Baselines.metricCfg["skin_temp"],
-              let rhrCfg = Baselines.metricCfg["resting_hr"],
-              let hrvCfg = Baselines.metricCfg["hrv"] else { return }
-
-        // The nightly absolute skin-temp mean isn't in repo.days (only the °C DEVIATION is), so z-score
-        // the deviation against its own folded spread , a zero-centred personal baseline. RHR + HRV
-        // z-score their raw columns. Oldest→newest.
-        let sorted = days.sorted { $0.day < $1.day }
-        let skinState = Baselines.foldHistory(sorted.map { $0.skinTempDevC }, cfg: tempCfg)
-        let rhrState = Baselines.foldHistory(sorted.map { $0.restingHr.map(Double.init) }, cfg: rhrCfg)
-        let hrvState = Baselines.foldHistory(sorted.map { $0.avgHrv }, cfg: hrvCfg)
-
-        var nights: [CyclePhaseEngine.Night] = []
-        var curve: [Double] = []
-        for d in sorted {
-            let tempZ = d.skinTempDevC.map { skinState.usable ? Baselines.deviation($0, state: skinState).z : $0 / 0.3 }
-            let rhrZ = (rhrState.usable ? d.restingHr.map { Baselines.deviation(Double($0), state: rhrState).z } : nil)
-            let hrvZ = (hrvState.usable ? d.avgHrv.map { Baselines.deviation($0, state: hrvState).z } : nil)
-            nights.append(CyclePhaseEngine.Night(day: d.day, tempZ: tempZ, rhrZ: rhrZ, hrvZ: hrvZ))
-            if let fused = CyclePhaseEngine.fusedIndex(tempZ: tempZ, rhrZ: rhrZ, hrvZ: hrvZ) { curve.append(fused) }
-        }
+        // BaselineStandard fix D (audit 2026-10-07): the skin DEVIATION column used to be folded through the
+        // ABSOLUTE skin_temp config (min 20 °C), so every value was rejected and the phase stayed `.learning`
+        // forever. `CyclePhaseEngine.nights(from:context:)` z-scores each night against the causal fold of the
+        // nights before it: deviation rows with `skinTempDeviationCfg`, resting HR, ln HRV, confounded nights
+        // out of the folds, no z below 4 nights.
+        let built = CyclePhaseEngine.nights(from: repo.days, context: baselineStandardContext())
+        let nights = built.nights
+        let curve = nights.compactMap { CyclePhaseEngine.fusedIndex(tempZ: $0.tempZ, rhrZ: $0.rhrZ, hrvZ: $0.hrvZ) }
         // Optional user-entered cycle-day-1 anchors live under the isolated `noop-cycle` source.
         // The pure engine cross-validates them against the temperature shift rather than trusting a
         // mistimed log blindly.
         let loggedPeriodStarts = await repo.periodStarts()
         cyclePhase = CyclePhaseEngine.classify(nights,
-                                               baselineUsable: skinState.usable,
+                                               baselineUsable: built.skinBaselineUsable,
                                                loggedPeriodStarts: loggedPeriodStarts)
         cycleCurve = curve
     }

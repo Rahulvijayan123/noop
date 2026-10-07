@@ -1,4 +1,5 @@
 import Foundation
+import WhoopStore
 
 // CyclePhaseEngine.swift — on-device menstrual-cycle PHASE AWARENESS from the nightly skin-temperature
 // series, corroborated by the luteal resting-HR rise and the luteal HRV drop. Pure, deterministic, DB-free.
@@ -44,6 +45,14 @@ public enum CyclePhaseEngine {
     /// Half-width (days) of the peri-ovulatory band around the estimated elevation onset — the days
     /// straddling the follicular→luteal temperature shift.
     public static let periOvulatoryHalfWidth: Int = 2
+
+    /// Floor on the fused index's MAD (z units), replacing 1e-9 (BaselineStandard rule 5). The fused index is
+    /// dominated by the temperature z, whose σ is at least `1.253 × skinTempDeviationCfg.floorSpread`
+    /// (0.376 °C); the standard skin-temperature floor (0.1 °C) in that z scale is ≈ 0.27.
+    public static var fusedSpreadFloor: Double {
+        BaselineStandard.scaleFloor(.skinTempDeviation)
+            / BaselineStandard.impliedSigmaFloor(VitalBands.skinTempDeviationCfg)
+    }
 
     // MARK: - Inputs
 
@@ -154,7 +163,9 @@ public enum CyclePhaseEngine {
         }
 
         let center = median(values)
-        let spread = max(1e-9, medianAbsoluteDeviation(values, center: center))
+        // BaselineStandard rule 5: floored at `fusedSpreadFloor` (was 1e-9, which let a flat series flag any
+        // rounding-level rise as a luteal shift).
+        let spread = max(fusedSpreadFloor, medianAbsoluteDeviation(values, center: center))
 
         // Per-night elevated flag (luteal-ward run detection).
         let elevated: [Bool] = fused.map { row in
@@ -259,6 +270,44 @@ public enum CyclePhaseEngine {
                       cycleDayLow: cycleDayLow, cycleDayHigh: cycleDayHigh,
                       cycleLengthDays: cycleLength, nextPeriodWindow: window,
                       shiftMarkers: shiftMarkers, note: note)
+    }
+
+    // MARK: - Nightly z-scores (BaselineStandard fix D)
+
+    /// The per-night inputs `classify` reads, built by the standard from the merged daily history.
+    ///
+    /// Audit 2026-10-07: the app folded the skin DEVIATION column through the ABSOLUTE `skin_temp` config
+    /// (min 20 °C), so every deviation was rejected, the baseline never became usable and the phase stayed
+    /// `.learning` forever; RHR and HRV were folded once over the whole history (look-ahead) on raw ms.
+    /// Now each night is z-scored against the causal fold of the nights BEFORE it (rule 2): skin from
+    /// deviation rows only (absolute imported rows are not deviations) with `VitalBands.skinTempDeviationCfg`
+    /// (σ floor 0.376 °C ≥ the standard 0.1), resting HR on bpm, HRV on ln (rule 1), confounded nights out of
+    /// the folds (rule 3), no z below 4 nights (rule 4), calendar-padded (rule 7). Only days with a row are
+    /// returned, so a missing night never splits a luteal run into two onsets.
+    ///
+    /// - Returns: oldest→newest nights and whether the skin baseline (end state) is usable.
+    public static func nights(from days: [DailyMetric],
+                              context: BaselineStandard.Context = BaselineStandard.Context())
+        -> (nights: [Night], skinBaselineUsable: Bool) {
+        let sorted = days.sorted { $0.day < $1.day }
+        guard let newest = sorted.last?.day else { return ([], false) }
+        let skin = BaselineStandard.series(sorted, day: \.day) { BaselineStandard.skinDeviation($0.skinTempDevC) }
+        let rhr = BaselineStandard.series(sorted, day: \.day) { $0.restingHr.map(Double.init) }
+        let hrv = BaselineStandard.series(sorted, day: \.day, value: \.avgHrv)
+        let skinFold = BaselineStandard.causalFold(skin, metric: .skinTempDeviation, through: newest, context: context)
+        let rhrFold = BaselineStandard.causalFold(rhr, metric: .restingHR, through: newest, context: context)
+        let hrvFold = BaselineStandard.causalFold(hrv, metric: .hrvRmssd, through: newest, context: context)
+        func z(_ v: Double?, _ fold: AsOfFold, _ m: BaselineStandard.Metric, _ day: String) -> Double? {
+            guard let v, context.comparable(day, metric: m), let s = fold.before[day] else { return nil }
+            return BaselineStandard.z(v, metric: m, state: s)
+        }
+        let nights = sorted.map { d in
+            Night(day: d.day,
+                  tempZ: z(skin[d.day], skinFold, .skinTempDeviation, d.day),
+                  rhrZ: z(rhr[d.day], rhrFold, .restingHR, d.day),
+                  hrvZ: z(hrv[d.day], hrvFold, .hrvRmssd, d.day))
+        }
+        return (nights, skinFold.end.usable)
     }
 
     // MARK: - Fusion
