@@ -19,28 +19,41 @@ this worker ──claim──▶ job (owner, metric, anchor night, fingerprint)
 
 ## What the agent can see
 
-Only the tools in `tools.py`, all bound by the host to one owner, one metric and one anchor night (no tool
-accepts a user, device or date):
+The root agent's data is a fixed set of Python variables (`tools.VARIABLES`). The prompt's first cell loads every
+one of them for every analysis, then prints a small digest of their key computed facts; the validator refuses an
+answer until all of them were loaded and the literature was searched. Every tool is bound by the host to one
+owner, one metric and one analysis night (no tool accepts a user, device or date).
 
-| tool | source |
-| --- | --- |
-| `get_metric_series`, `get_metric_summary`, `get_related_metrics`, `get_sleep_context`, `get_data_quality` | `server_daily_scores` (RLS as the owner) + the context document |
-| `get_workout_context`, `get_activity_context` | `physiology_context_days` (RLS as the owner) |
-| `get_recent_events` | `exposure_events` (RLS as the owner) + the document's unrecorded categories |
-| `get_user_context` | `coach_memory_items` (service-only table, explicit owner filter) |
-| `get_previous_insight` | `metric_insights` (RLS as the owner) |
-| `search_literature` | curated, PubMed-verified corpus (`data/literature_seed.json`); PubMed / Europe PMC only if `NARA_LITERATURE_REMOTE` is set |
+| variable | source | what it holds |
+| --- | --- | --- |
+| `manifest` | — | every source, whether it is connected |
+| `metric_summary` | `server_daily_scores` + context document | latest night, previous night, the person's usual (below), the assessment |
+| `metric_series` | `server_daily_scores` | the nightly values, missing nights as null |
+| `state_breakdown` | scores, context documents, hosted snapshots | the metric during sleep, at calm awake rest and around movement, by time of day, each against its own usual; HRV through the night's two days by activity (15-minute slots) |
+| `movement_patterns` | `activity_context_runs`, context bouts | movement the day and evening before the night and on the day, minutes by kind, how long before sleep the last one ended |
+| `related_metrics` | scores + context availability | HRV / resting HR / breathing / skin temperature / sleep against their usual, marked measured or estimated |
+| `sleep_context`, `workout_context`, `activity_context` | scores, context documents | sleep timing and duration, exertion windows, daily activity |
+| `recent_events` | `exposure_events` | what the person logged (medications are never named) |
+| `data_quality` | scores + context | tracked, measured and missing nights |
+| `user_context` | `coach_memory_items` (explicit owner filter) | notes the person gave the coach |
+| `chat_history` | placeholder | not connected (coach transcripts exist in `coach_messages`; connecting them is a product decision) |
+| `health_records` | placeholder | not connected (no EHR, conditions or labs on the server) |
+| `previous_insight` | `metric_insights` | the previous explanation's headline |
+| `research_evidence` | `search_literature` | peer-reviewed findings: the curated, PubMed-verified corpus first, then PubMed / Europe PMC journal articles (no preprints, no retractions) |
 
 Every owner read is a READ ONLY transaction as `authenticated` with the owner's JWT claims, after asserting
-`auth.uid()`; RLS decides which rows exist. The windows match the fingerprint
-(`internal.metric_insight_inputs`), so the cache key covers exactly what an analysis reads.
+`auth.uid()`; RLS decides which rows exist (the hosted snapshots come through the owner's own
+`get_server_score_snapshot_v2`). The inputs fingerprint (`internal.metric_insight_inputs`) covers everything these
+read, so an unchanged night is served from the cache and a changed one is re-analysed.
 
-The numbers come from `evidence.py` (deterministic). The context layer's own judgments are used first, chosen
-with the app's rules (`MeasurementContextSelection.headlineReference` / `.episode`); while that layer has no
-ready reference (new accounts), a labelled personal-range fallback is used.
+**The person's usual** follows the phone Baseline's Layer 1 rules (`LongitudinalBaseline`, v1.review), applied to
+the server's nightly values: the 60-day copy (median of nights T-60..T-8, spread floor 2 bpm / 0.08 ln, outliers
+trimmed, band k spreads wide with k fitted to the person once 14 nights are in, shown at 4 nights) and the 7-night
+weighted copy. Layer 1's own snapshots stay on the phone by design (docs/PORT_LAYER1_WATCHDOG.md §7), so the two can
+differ slightly. The context layer's change detection (episodes, |z| >= 2.5) is used when its reference is ready.
 
-Adding a source (labs, medications, EHR, genomics, conversation memory) = a loader in `sources.py` + a tool in
-`tools.py` (and the table in the fingerprint). The prompt contract, the validator and Prime do not change.
+Adding a source (labs, medications, EHR, genomics, conversation memory) = a loader in `sources.py`, a tool and a
+variable in `tools.py`, and its table in the fingerprint. The prompt contract, the validator and Prime do not change.
 
 ## Memory and isolation
 
@@ -72,7 +85,8 @@ is killed and the run directory deleted; leftovers from a crash are purged at st
 
 ## What is published
 
-`validate.py` is the gate: a fixed shape; NFKC text with no invisible or non-Latin characters; none of the app's
+`validate.py` is the gate: every variable loaded; a fixed shape; at least one peer-reviewed citation retrieved in the
+job that backs an interpretation sentence; "because" only when hedged ("likely because"); NFKC text with no invisible or non-Latin characters; none of the app's
 forbidden terms (kept identical to `PhysiologyContextWording.forbiddenTerms`, inflections included) and no causal,
 diagnostic or certainty wording; absolute dates only; every number checked by unit against the tool results the
 model received (a value "on Oct 6" must be Oct 6's value, a direction word must match the sign of the change, zero
