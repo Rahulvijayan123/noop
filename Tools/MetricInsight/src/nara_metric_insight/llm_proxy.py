@@ -3,6 +3,9 @@
 * Prime holds only a random per-job token; the provider key lives in this process (read from a credential file)
   and is never written to the job's directory or environment.
 * Fixed model, capped max_tokens, a request budget per job; streaming (SSE) passes through unchanged.
+* Provider quirks are the operator's, pinned like the model: the token-limit field a provider requires
+  (NARA_LLM_MAX_TOKENS_FIELD, e.g. max_completion_tokens for OpenAI's GPT-5+ models) and a reasoning effort
+  (NARA_LLM_REASONING_EFFORT, e.g. none: those models take function tools on chat completions only without it).
 * Listens on loopback TCP (macOS sandbox) or a Unix socket that an in-sandbox forwarder exposes as loopback TCP
   (Linux: the sandbox has no network namespace route to the host).
 
@@ -47,7 +50,8 @@ class _TCPServer(_Quiet, ThreadingHTTPServer):
     daemon_threads = True
 
 
-def clean_request(body: dict[str, Any], model: str, max_tokens: int) -> dict[str, Any]:
+def clean_request(body: dict[str, Any], model: str, max_tokens: int, *, token_field: str | None = None,
+                  reasoning_effort: str | None = None) -> dict[str, Any]:
     out = {k: v for k, v in body.items() if k in FORWARDED}
     out["model"] = model
     if isinstance(out.get("tools"), list):
@@ -62,12 +66,17 @@ def clean_request(body: dict[str, Any], model: str, max_tokens: int) -> dict[str
                 else max_tokens
     if "max_tokens" not in out and "max_completion_tokens" not in out:
         out["max_tokens"] = max_tokens
+    if token_field:  # one limit, under the name the provider takes
+        out[token_field] = min(out.pop(key) for key in ("max_tokens", "max_completion_tokens") if key in out)
+    if reasoning_effort:  # never the client's: a model's reasoning is the operator's choice, like the model
+        out["reasoning_effort"] = reasoning_effort
     return out
 
 
 class LlmProxy:
     def __init__(self, *, upstream: str, api_key: str, model: str, token: str, max_requests: int,
-                 max_tokens: int, unix_path: str | None = None) -> None:
+                 max_tokens: int, unix_path: str | None = None, token_field: str | None = None,
+                 reasoning_effort: str | None = None) -> None:
         parts = urlsplit(upstream)
         if parts.scheme not in ("http", "https") or not parts.hostname:
             raise ValueError("upstream must be an http(s) URL")
@@ -76,6 +85,7 @@ class LlmProxy:
         self.base_path = parts.path.rstrip("/")
         self.api_key, self.model, self.token = api_key, model, token
         self.max_requests, self.max_tokens = max_requests, max_tokens
+        self.token_field, self.reasoning_effort = token_field, reasoning_effort
         self.requests = 0
         self.completion_tokens = 0
         self.prompt_tokens = 0
@@ -143,7 +153,9 @@ class LlmProxy:
                     return self._json(400, {"error": {"message": "invalid JSON"}})
                 if not isinstance(body, dict):
                     return self._json(400, {"error": {"message": "invalid request"}})
-                proxy._forward(self, json.dumps(clean_request(body, proxy.model, proxy.max_tokens)).encode())
+                proxy._forward(self, json.dumps(clean_request(
+                    body, proxy.model, proxy.max_tokens, token_field=proxy.token_field,
+                    reasoning_effort=proxy.reasoning_effort)).encode())
 
         if unix_path:
             if os.path.exists(unix_path):

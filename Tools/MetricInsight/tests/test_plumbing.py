@@ -303,6 +303,13 @@ def test_llm_proxy_forwards_only_allowlisted_fields():
     assert cleaned == {"model": "pinned", "messages": [], "max_tokens": 256, "stream": True,
                        "tools": [{"type": "function", "function": {"name": "ipython"}}]}
     assert clean_request({"messages": [], "max_completion_tokens": 10}, "pinned", 256)["max_completion_tokens"] == 10
+    # A provider that takes only max_completion_tokens and a pinned reasoning effort (OpenAI's GPT-5+ models):
+    # one limit under its name, capped, and the client's own effort never reaches the provider.
+    openai = clean_request({"messages": [], "max_tokens": 9000, "reasoning_effort": "high"}, "pinned", 256,
+                           token_field="max_completion_tokens", reasoning_effort="none")
+    assert openai == {"model": "pinned", "messages": [], "max_completion_tokens": 256, "reasoning_effort": "none"}
+    assert clean_request({"messages": []}, "pinned", 256, token_field="max_completion_tokens") == {
+        "model": "pinned", "messages": [], "max_completion_tokens": 256}
 
 
 def test_a_token_starting_with_a_dash_reaches_the_shim(short_dir):

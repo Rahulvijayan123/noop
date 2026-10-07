@@ -46,6 +46,13 @@ def _paths(raw: str | None) -> tuple[str, ...]:
     return tuple(p for p in (raw or "").split(os.pathsep) if p)
 
 
+def _choice(env: dict[str, str], name: str, allowed: tuple[str, ...]) -> str | None:
+    value = (env.get(name) or "").strip()
+    if value and value not in allowed:
+        raise ValueError(f"{name} must be one of: {', '.join(allowed)}")
+    return value or None
+
+
 @dataclass(frozen=True)
 class Config:
     db_url: str = field(repr=False)
@@ -68,6 +75,9 @@ class Config:
     max_turns: int = 16
     max_llm_requests: int = 24
     max_completion_tokens: int = 2048
+    # Provider quirks (llm_proxy): the token-limit field it requires and a pinned reasoning effort. Unset: as sent.
+    llm_max_tokens_field: str | None = None
+    llm_reasoning_effort: str | None = None
     secret_paths: tuple[str, ...] = ()
 
     @classmethod
@@ -103,5 +113,8 @@ class Config:
             max_turns=int(env.get("NARA_MAX_TURNS", "16")),
             max_llm_requests=int(env.get("NARA_MAX_LLM_REQUESTS", "24")),
             max_completion_tokens=int(env.get("NARA_MAX_COMPLETION_TOKENS", "2048")),
+            llm_max_tokens_field=_choice(env, "NARA_LLM_MAX_TOKENS_FIELD", ("max_tokens", "max_completion_tokens")),
+            llm_reasoning_effort=_choice(env, "NARA_LLM_REASONING_EFFORT",
+                                         ("none", "minimal", "low", "medium", "high", "xhigh")),
             secret_paths=secret_paths,
         )

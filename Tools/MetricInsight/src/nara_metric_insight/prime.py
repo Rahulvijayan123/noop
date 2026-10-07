@@ -211,19 +211,24 @@ class PrimeSession:
         if self.mode == "linux":
             self.proxy = LlmProxy(upstream=cfg.llm_base_url, api_key=cfg.llm_api_key, model=cfg.llm_model,
                                   token=llm_token, max_requests=cfg.max_llm_requests,
-                                  max_tokens=cfg.max_completion_tokens, unix_path=str(run / "p.sock")).__enter__()
+                                  max_tokens=cfg.max_completion_tokens, unix_path=str(run / "p.sock"),
+                                  token_field=cfg.llm_max_tokens_field,
+                                  reasoning_effort=cfg.llm_reasoning_effort).__enter__()
             port = LINUX_PROXY_PORT
         else:
             self.proxy = LlmProxy(upstream=cfg.llm_base_url, api_key=cfg.llm_api_key, model=cfg.llm_model,
                                   token=llm_token, max_requests=cfg.max_llm_requests,
-                                  max_tokens=cfg.max_completion_tokens).__enter__()
+                                  max_tokens=cfg.max_completion_tokens, token_field=cfg.llm_max_tokens_field,
+                                  reasoning_effort=cfg.llm_reasoning_effort).__enter__()
             port = int(self.proxy.listen_port or 0)
 
         shutil.copy(SHIM, agent / "mcp_shim.py")
         (agent / "models.json").write_text(json.dumps({"providers": {"nara-llm": {
             "api": "openai-completions", "baseUrl": f"http://127.0.0.1:{port}/v1", "apiKey": llm_token,
             "models": [{"id": cfg.llm_model, "name": "Nara metric insight", "api": "openai-completions",
-                        "reasoning": False, "contextWindow": 131072, "maxTokens": cfg.max_completion_tokens}]}}}))
+                        "reasoning": False, "contextWindow": 131072, "maxTokens": cfg.max_completion_tokens,
+                        **({"compat": {"maxTokensField": cfg.llm_max_tokens_field}}
+                           if cfg.llm_max_tokens_field else {})}]}}}))
         (agent / "settings.json").write_text(json.dumps({
             "enableBuiltinSkills": False, "bundledSkills": {"websearch": False}, "rlmMaxDepth": 0, "packages": [],
             "telemetry": {"enabled": False},
