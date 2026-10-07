@@ -1105,20 +1105,20 @@ public final class LiveState: ObservableObject {
     // The rules below, compiled once. `String.replacingOccurrences(of:with:options: .regularExpression)` builds a
     // new expression on every call, and every log line went through eight of them on the main actor. Same
     // patterns and templates; `.caseInsensitive` where the call passed it.
-    private static let macRegex = try? NSRegularExpression(
+    nonisolated private static let macRegex = try? NSRegularExpression(
         pattern: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})")
-    private static let whoopSerialRegex = try? NSRegularExpression(
+    nonisolated private static let whoopSerialRegex = try? NSRegularExpression(
         pattern: "WHOOP (?=[0-9A-Za-z]{6,})[0-9A-Za-z]*[0-9][0-9A-Za-z]*")
-    private static let peripheralUuidRegex = try? NSRegularExpression(
+    nonisolated private static let peripheralUuidRegex = try? NSRegularExpression(
         pattern: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
         options: [.caseInsensitive])
-    private static let whoopIdComputedRegex = try? NSRegularExpression(
+    nonisolated private static let whoopIdComputedRegex = try? NSRegularExpression(
         pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)")
-    private static let whoopIdRegex = try? NSRegularExpression(pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
-    private static let ouraIdComputedRegex = try? NSRegularExpression(
+    nonisolated private static let whoopIdRegex = try? NSRegularExpression(pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
+    nonisolated private static let ouraIdComputedRegex = try? NSRegularExpression(
         pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)")
-    private static let ouraIdRegex = try? NSRegularExpression(pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
-    private static let deviceNameRegex = try? NSRegularExpression(
+    nonisolated private static let ouraIdRegex = try? NSRegularExpression(pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
+    nonisolated private static let deviceNameRegex = try? NSRegularExpression(
         pattern: "[\\p{L}\\p{N}_.\\-]+(['\u{2019}]s\\s+(?i:whoop))")
 
     /// `regex` replaced throughout `text` with `template` (`$n` refers to a group), as

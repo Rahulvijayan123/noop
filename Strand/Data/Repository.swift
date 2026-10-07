@@ -411,7 +411,9 @@ final class Repository: ObservableObject {
         for id in rawPhysiologyReadIds(store: store) {   // active strap FIRST → it wins any shared timestamp
             lists.append((try? await store.gravitySamples(deviceId: id, from: from, to: to, limit: limit)) ?? [])
         }
-        return Self.mergeGravityByTs(lists)
+        guard lists.count > 1 else { return lists.first ?? [] }
+        // Off the main actor: a day is up to 86,400 rows per id (see `mergeHRByTs`).
+        return await Task.detached(priority: .userInitiated) { [lists] in Self.mergeGravityByTs(lists) }.value
     }
 
     /// Merge gravity lists into one time-ordered stream, deduped by timestamp with the FIRST list (the
@@ -420,6 +422,20 @@ final class Repository: ObservableObject {
     ///
     /// Byte-identical rule to Kotlin `mergeGravityByTs`. Pure + static so the dedup is unit-tested
     /// without a store — the property that actually matters here is "active wins, nothing double-counts".
+    /// Heart-rate twin of `mergeGravityByTs`: deduped by timestamp, the first list winning, ascending.
+    ///
+    /// Callers run it off the main actor. A whole day is up to 86,400 samples per id, and building this
+    /// dictionary and sorting it on the main actor ran on every Today load, widget publish, stress curve and
+    /// activity-context pass once the strap had its own `whoop-<serial>` id beside the canonical one.
+    nonisolated static func mergeHRByTs(_ lists: [[HRSample]]) -> [HRSample] {
+        if lists.count == 1 { return lists[0] }
+        var byTs: [Int: HRSample] = [:]
+        for list in lists {
+            for s in list where byTs[s.ts] == nil { byTs[s.ts] = s }
+        }
+        return byTs.values.sorted { $0.ts < $1.ts }
+    }
+
     nonisolated static func mergeGravityByTs(_ lists: [[GravitySample]]) -> [GravitySample] {
         if lists.count == 1 { return lists[0] }
         var byTs: [Int: GravitySample] = [:]
@@ -1305,14 +1321,11 @@ final class Repository: ObservableObject {
             return (try? await store.hrSamples(deviceId: deviceIds[0], from: from, to: to,
                                                limit: limit)) ?? []
         }
-        var byTs: [Int: HRSample] = [:]
+        var lists: [[HRSample]] = []
         for id in deviceIds {
-            for s in (try? await store.hrSamples(deviceId: id, from: from, to: to,
-                                                 limit: limit)) ?? [] where byTs[s.ts] == nil {
-                byTs[s.ts] = s
-            }
+            lists.append((try? await store.hrSamples(deviceId: id, from: from, to: to, limit: limit)) ?? [])
         }
-        return byTs.values.sorted { $0.ts < $1.ts }
+        return await Task.detached(priority: .userInitiated) { [lists] in Self.mergeHRByTs(lists) }.value
     }
 
     /// The most recent banked battery reading, for the stale-battery warning (#2556).
@@ -1356,13 +1369,11 @@ final class Repository: ObservableObject {
         guard ids.count != 1 else {
             return (try? await store.hrSamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
         }
-        var byTs: [Int: HRSample] = [:]
+        var lists: [[HRSample]] = []
         for id in ids {
-            for s in (try? await store.hrSamples(deviceId: id, from: from, to: to, limit: limit)) ?? [] where byTs[s.ts] == nil {
-                byTs[s.ts] = s
-            }
+            lists.append((try? await store.hrSamples(deviceId: id, from: from, to: to, limit: limit)) ?? [])
         }
-        return byTs.values.sorted { $0.ts < $1.ts }
+        return await Task.detached(priority: .userInitiated) { [lists] in Self.mergeHRByTs(lists) }.value
     }
 
     /// Cheap change-detector over a window of heart rate: a COUNT and a MAX on an indexed column, no
@@ -1400,7 +1411,8 @@ final class Repository: ObservableObject {
             lists.append((try? await store.rrIntervals(deviceId: id, from: from, to: to, limit: limit,
                 unlabelledAliasOfWhoop5: activeWhoop5 && id == Self.whoopSource)) ?? [])
         }
-        return Self.mergeRRByIdentity(lists)
+        // Off the main actor, like the heart-rate merge: a day can hold 250,000 beats.
+        return await Task.detached(priority: .userInitiated) { [lists] in Self.mergeRRByIdentity(lists) }.value
     }
 
     /// Logical day-start of the most recent day the active device has HR data for, or nil when the store is
