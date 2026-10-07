@@ -307,6 +307,7 @@ enum CoachSafety {
         "absolute safety rules", "never violate these", "remembered context (from previous",
         "do not say \"based on the data provided\"", "here is my system prompt",
         "my system prompt is", "my instructions are:", "my initial instructions",
+        "context library (queryable", "earlier in this conversation (summary",
     ]
 
     private static let medicalAuthorityClaims = [
