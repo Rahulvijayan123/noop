@@ -50,12 +50,24 @@ public enum NoopVisualStyle {
     public static let sectionGap: CGFloat = 24
 }
 
-/// Shared card/panel treatment: a quiet vertical gradient, a top-lit rim, and deep soft elevation.
-/// `tint` is intentionally faint so metric identity never turns the whole card into a coloured tile.
+/// The card fill: flat `surfaceRaised` behind a 1 pt `hairline`, at `cornerRadius`.
+///
+/// No gradient and no tint: domain colour belongs to the data marks and icons inside a card, not its
+/// fill (docs/DESIGN_SYSTEM.md, Canvas and surfaces). `tint` and `surfaceOpacity` are accepted so the
+/// direct call sites keep compiling, and ignored, the same way `FrostedCardSurface` ignores them, which
+/// flattens every tinted or translucent panel in one place. The fill stays `NoopVisualStyle.surface`:
+/// the sleep-ramp contrast tests measure against it.
+///
+/// Light mode keeps one shared soft shadow so a white card still separates from the lavender canvas;
+/// dark mode has none, because a shadow on a deep indigo canvas reads as a smudge rather than a lift and
+/// the hairline already does the work. `elevated` is for things that float over other content (tooltips,
+/// popovers, a sheet's pinned control) and gets a slightly stronger shadow in both schemes.
 public struct NoopPanelSurface: View {
+    /// Ignored: cards carry no tint.
     public var tint: Color?
     public var cornerRadius: CGFloat
     public var elevated: Bool
+    /// Ignored: cards are opaque.
     public var surfaceOpacity: Double
     @Environment(\.colorScheme) private var scheme
 
@@ -73,62 +85,60 @@ public struct NoopPanelSurface: View {
 
     public var body: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let shadow = NoopSurfaceShadow.resolve(elevated: elevated, dark: scheme == .dark)
         shape
-            .fill(
-                LinearGradient(
-                    colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surfaceBottom],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .overlay {
-                if let tint {
-                    shape.fill(
-                        LinearGradient(
-                            colors: [tint.opacity(0.055), tint.opacity(0.012), .clear],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                }
-            }
-            .overlay(
-                shape.strokeBorder(
-                    LinearGradient(
-                        colors: [NoopVisualStyle.borderHighlight.opacity(0.72), NoopVisualStyle.border.opacity(0.52)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    ),
-                    lineWidth: 0.8
-                )
-            )
-            .shadow(
-                color: scheme == .dark ? .black.opacity(elevated ? 0.30 : 0.14)
-                                       : NaraBrand.deepIndigo.opacity(elevated ? 0.10 : 0.05),
-                radius: elevated ? 18 : 12,
-                x: 0,
-                y: elevated ? 8 : 4
-            )
-            .opacity(surfaceOpacity)
+            .fill(NoopVisualStyle.surface)
+            .overlay(shape.strokeBorder(NoopVisualStyle.border, lineWidth: NoopMetrics.hairlineWidth))
+            .shadow(color: shadow.color, radius: shadow.radius, x: 0, y: shadow.y)
     }
 }
 
-/// Shared edge-to-edge chrome for sheet and split-view headers. Unlike a card it has no
-/// rounded outline or elevation, but it uses the same top-lit surface ramp and divider token.
+/// The one shared card shadow, decided in one place so every surface lifts by the same amount.
+enum NoopSurfaceShadow {
+    struct Value { let color: Color; let radius: CGFloat; let y: CGFloat }
+
+    static func resolve(elevated: Bool, dark: Bool) -> Value {
+        switch (elevated, dark) {
+        case (false, false): return Value(color: NaraBrand.deepIndigo.opacity(0.05), radius: 8, y: 2)
+        case (false, true):  return Value(color: .clear, radius: 0, y: 0)
+        case (true, false):  return Value(color: NaraBrand.deepIndigo.opacity(0.08), radius: 12, y: 4)
+        case (true, true):   return Value(color: .black.opacity(0.28), radius: 12, y: 4)
+        }
+    }
+}
+
+/// A surface nested inside a card: a stat cell, a chip row, an inset list. `surfaceInset` at
+/// `NoopMetrics.insetRadius`, with no border and no shadow, so it reads as a well in the card rather
+/// than a second card stacked on the first.
+///
+/// ```swift
+/// Text("62 ms").padding(12).background(NoopInsetSurface())
+/// ```
+public struct NoopInsetSurface: View {
+    public var cornerRadius: CGFloat
+
+    public init(cornerRadius: CGFloat = NoopMetrics.insetRadius) {
+        self.cornerRadius = cornerRadius
+    }
+
+    public var body: some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .fill(NoopVisualStyle.inset)
+    }
+}
+
+/// Shared edge-to-edge chrome for sheet and split-view headers: the flat card fill with a hairline
+/// divider along the bottom edge, no outline and no elevation.
 public struct NoopChromeSurface: View {
     public init() {}
 
     public var body: some View {
-        LinearGradient(
-            colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surfaceBottom],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(NoopVisualStyle.divider)
-                .frame(height: 0.5)
-        }
+        NoopVisualStyle.surface
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(NoopVisualStyle.divider)
+                    .frame(height: 0.5)
+            }
     }
 }
 
@@ -149,3 +159,49 @@ public extension View {
         }
     }
 }
+
+#if DEBUG
+private struct SurfacesPreview: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("Card").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+                HStack(spacing: NoopMetrics.space2) {
+                    ForEach(["Average", "Low", "High"], id: \.self) { label in
+                        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                            Text(label).strandLabel()
+                            Text("61 ms").font(StrandFont.number(20)).foregroundStyle(StrandPalette.textPrimary)
+                        }
+                        .padding(NoopMetrics.space3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(NoopInsetSurface())
+                    }
+                }
+            }
+            .padding(NoopMetrics.cardPadding)
+            .background(NoopPanelSurface(tint: StrandPalette.metricRose, surfaceOpacity: 0.4))
+            Text("Elevated (tooltips, popovers)")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .padding(NoopMetrics.space3)
+                .background(NoopPanelSurface(cornerRadius: NoopMetrics.insetRadius, elevated: true))
+            Text("Chrome")
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(NoopChromeSurface())
+        }
+        .padding(NoopMetrics.screenHPadding)
+        .frame(width: 390)
+        .background(StrandPalette.surfaceBase)
+    }
+}
+
+#Preview("Surfaces — light") {
+    SurfacesPreview().preferredColorScheme(.light)
+}
+
+#Preview("Surfaces — dark") {
+    SurfacesPreview().preferredColorScheme(.dark)
+}
+#endif

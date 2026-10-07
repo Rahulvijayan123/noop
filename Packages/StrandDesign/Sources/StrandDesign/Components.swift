@@ -97,6 +97,37 @@ public enum NoopMetrics {
     /// Minimum desktop size for a navigation-based customization sheet.
     public static let editorSheetMinWidth: CGFloat = 440
     public static let editorSheetMinHeight: CGFloat = 600
+
+    // MARK: Kit component sizes
+    //
+    // Heights here are FLOORS for components whose every line is reserved and single-line, so the
+    // natural height never depends on the values shown (scrubbing, loading and empty states all keep
+    // the same frame). The floor is what the component measures at the default text size; larger
+    // Dynamic Type sizes grow every instance by the same amount, so a row of them still lines up.
+
+    /// `ValueReadout`: date line, hero value + unit, one context line.
+    public static let readoutHeight: CGFloat = 88
+    /// `MetricTile` without a trend slot (icon + label, value + unit, state line, card padding). A tile
+    /// that reserves its trend slot adds `metricTileTrendSlot`. Separate from `tileHeight` and
+    /// `keyMetricTileHeight`, which older screens size their own tiles with.
+    public static let metricTileHeight: CGFloat = 116
+    /// Height a `MetricTile` adds when it shows (or reserves) its sparkline: 22 pt line + 6 pt gap.
+    public static let metricTileTrendSlot: CGFloat = 28
+    /// The segmented control's segment height (`SegmentedPillControl`, `RangeControl`).
+    public static let segmentedHeight: CGFloat = 32
+    /// Inset between the segmented track and its selected segment.
+    public static let segmentedTrackPadding: CGFloat = 3
+    /// Corner radius of the selected segment: the track's `insetRadius` minus `segmentedTrackPadding`,
+    /// so the two curves stay concentric.
+    public static let segmentRadius: CGFloat = 9
+    /// `NoopListRow` minimum height (a single-line row; a subtitle grows it).
+    public static let listRowMinHeight: CGFloat = 52
+    /// The smallest tap target a control may have (Human Interface Guidelines).
+    public static let minimumHitTarget: CGFloat = 44
+    /// Page margin on the Mac, where the window is wider than a phone and the content column has room.
+    public static let desktopScreenPadding: CGFloat = 28
+    /// Widest the page column grows on iPad, so lines of text stay readable in landscape.
+    public static let readableColumnWidth: CGFloat = 700
 }
 
 // MARK: - Screen padding
@@ -182,19 +213,22 @@ public struct NoopCard<Content: View>: View {
 
 // MARK: - Section header
 
-/// The one section title: a single `title2` line with an optional trailing note.
+/// The one section title: a single `title2` line with an optional trailing note and an optional action.
 ///
 /// ```swift
 /// SectionHeader("Trends")
 /// SectionHeader("Readings", trailing: "Last 7")
+/// SectionHeader("Events", action: .link(label: "See all", value: TabRoute.events))
+/// SectionHeader("Key metrics", action: .button(label: "Edit") { editing = true })
 /// ```
 ///
 /// `overline` is accepted so the existing call sites keep compiling, and ignored: content screens no longer
 /// carry spaced-capital overlines above their section titles (docs/DESIGN_SYSTEM.md, Type).
 public struct SectionHeader: View {
-    let title: LocalizedStringKey; let trailing: String?
-    public init(_ title: LocalizedStringKey, overline: LocalizedStringKey? = nil, trailing: String? = nil) {
-        self.title = title; self.trailing = trailing
+    let title: LocalizedStringKey; let trailing: String?; let action: SectionHeaderAction?
+    public init(_ title: LocalizedStringKey, overline: LocalizedStringKey? = nil, trailing: String? = nil,
+                action: SectionHeaderAction? = nil) {
+        self.title = title; self.trailing = trailing; self.action = action
     }
     public var body: some View {
         HStack(alignment: .firstTextBaseline) {
@@ -209,12 +243,74 @@ public struct SectionHeader: View {
                 Text(trailing).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                     .lineLimit(1)
             }
+            if let action {
+                action.control
+            }
         }
     }
 }
 
-// MARK: - Metric tile (UNIFORM fixed height)
+/// The trailing action of a `SectionHeader`: a short label in the accent colour (links and actions are
+/// the only things drawn in accent; never a data colour). Its tap area is grown to the 44 pt minimum
+/// without making the header row any taller.
+public struct SectionHeaderAction {
+    fileprivate let control: AnyView
 
+    /// Pushes `value` on the enclosing `NavigationStack` (resolved by its `navigationDestination(for:)`).
+    /// Built here, where `V` is still concrete, so the stack matches the destination by its real type.
+    public static func link<V: Hashable>(label: LocalizedStringKey, value: V) -> SectionHeaderAction {
+        SectionHeaderAction(control: AnyView(
+            NavigationLink(value: value) { SectionHeaderActionLabel(label: label) }
+                .buttonStyle(.plain)
+        ))
+    }
+
+    /// Pushes a destination built in place, for a stack that has no `navigationDestination` for a value
+    /// type (for example a Mac sidebar pane).
+    public static func link<Destination: View>(label: LocalizedStringKey,
+                                               @ViewBuilder destination: @escaping () -> Destination) -> SectionHeaderAction {
+        SectionHeaderAction(control: AnyView(
+            NavigationLink { destination() } label: { SectionHeaderActionLabel(label: label) }
+                .buttonStyle(.plain)
+        ))
+    }
+
+    /// Runs `action` (open a sheet, enter an edit mode).
+    public static func button(label: LocalizedStringKey, action: @escaping () -> Void) -> SectionHeaderAction {
+        SectionHeaderAction(control: AnyView(
+            Button(action: action) { SectionHeaderActionLabel(label: label) }
+                .buttonStyle(.plain)
+        ))
+    }
+}
+
+private struct SectionHeaderActionLabel: View {
+    let label: LocalizedStringKey
+    var body: some View {
+        // The visible label stays one subhead line; the hit area is padded out to 44 pt and the padding
+        // is then given back, so the header row is no taller with an action than without one.
+        let grow = max(0, (NoopMetrics.minimumHitTarget - 20) / 2)
+        Text(label)
+            .font(StrandFont.subhead.weight(.medium))
+            .foregroundStyle(StrandPalette.accent)
+            .lineLimit(1)
+            .padding(.vertical, grow)
+            .padding(.leading, NoopMetrics.space2)
+            .contentShape(Rectangle())
+            .padding(.vertical, -grow)
+    }
+}
+
+// MARK: - Stat tile (older value tile)
+
+/// A value tile: label, value with an optional trend chip, optional sparkline and caption.
+///
+/// New top-level tiles use `MetricTile` and detail-page statistics use `StatGrid`; this one stays for the
+/// existing call sites. The label is the Label role (subhead, `textSecondary`) and the value is always
+/// `textPrimary`: `accent` is accepted for source compatibility and no longer colours the number, the
+/// metric's colour lives on the sparkline (`sparkColor`). Every line is single-line and the caption line
+/// is reserved even when empty, so tiles with and without a caption are the same height and their labels
+/// and values line up across a row.
 public struct StatTile<Accessory: View>: View {
     let label: LocalizedStringKey, value: String
     var caption: String? = nil
@@ -239,20 +335,26 @@ public struct StatTile<Accessory: View>: View {
     }
 
     public var body: some View {
-        // The tile borrows its accent as a faint card wash, so each metric tile reads as
-        // part of its colour world while staying legible on the deep blue-black.
-        NoopCard(padding: 16, tint: accent) {
+        NoopCard(padding: NoopMetrics.cardPadding) {
             VStack(alignment: .leading, spacing: 0) {
                 // Header row: the metric label, and (right-aligned) the optional accessory laid out in
                 // flow so it reserves its own space rather than floating over the value below (#495).
-                HStack(alignment: .top, spacing: 4) {
-                    Text(label).strandOverline()
+                HStack(alignment: .top, spacing: NoopMetrics.space1) {
+                    Text(label)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                     Spacer(minLength: 0)
                     accessory()
                 }
-                Spacer(minLength: 4)
+                Spacer(minLength: NoopMetrics.space1)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(value).font(StrandFont.number(24, weight: .medium)).foregroundStyle(accent).lineLimit(1).minimumScaleFactor(0.6)
+                    Text(value)
+                        .font(StrandFont.number(24, weight: .medium))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
                     Spacer(minLength: 0)
                     // Trend chip — the delta as a tinted pill with a direction arrow.
                     if let delta { TrendChip(text: delta, color: deltaColor) }
@@ -261,15 +363,22 @@ public struct StatTile<Accessory: View>: View {
                 // doesn't use StatTile, but guard the reference so the file still compiles there.
                 #if !os(watchOS)
                 if let sparkline, sparkline.count > 1 {
-                    Sparkline(values: sparkline, gradient: Gradient(colors: [sparkColor.opacity(0.5), sparkColor]))
-                        .frame(height: 22).padding(.top, 4)
+                    Sparkline(values: sparkline,
+                              gradient: Gradient(colors: [sparkColor.opacity(0.5), sparkColor]),
+                              showsHover: false)
+                        .frame(height: 22).padding(.top, NoopMetrics.space1)
                         .accessibilityHidden(true)
                 }
                 #endif
-                if let caption {
-                    Text(caption).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary).lineLimit(1)
-                        .padding(.top, 2)
-                }
+                // Reserved even when there is no caption, so a captioned tile is not taller than its
+                // neighbour and the values in a row sit on one line.
+                Text(caption ?? " ")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .lineLimit(1)
+                    .padding(.top, NoopMetrics.spaceHalf)
+                    .opacity(caption == nil ? 0 : 1)
+                    .accessibilityHidden(caption == nil)
             }
         }
         // A FLOOR, not a fixed height: a sparkline tile's content exceeds the 96pt base and must be
@@ -300,9 +409,12 @@ public extension StatTile where Accessory == EmptyView {
 
 // MARK: - Trend chip — a small tinted delta pill with a direction arrow.
 
-/// A compact trend pill: an up/down/flat arrow + the delta text, tinted to `color`.
-/// Inferred direction comes from a leading +/− in the text (else flat). Sits in the
-/// corner of a StatTile or beside a metric value.
+/// A compact trend pill: an up/down arrow + the delta text, tinted to `color`.
+/// Inferred direction comes from a leading +/− in the text (else no arrow). Sits beside a value.
+///
+/// The chip is laid out at its ideal width and never truncates: a cut-off number ("+2 v…", "-14.…")
+/// is worse than no chip, so the value beside it scales down instead. Pass the number and its unit only
+/// ("+4 bpm"), not a sentence. (The Android twin still ellipsizes, #934.)
 public struct TrendChip: View {
     let text: String
     var color: Color = StrandPalette.textTertiary
@@ -319,14 +431,13 @@ public struct TrendChip: View {
     }
     public var body: some View {
         HStack(spacing: 3) {
-            if let symbol { Image(systemName: symbol).font(.system(size: 9, weight: .semibold)) }
-            // One line, always: a long chip (e.g. a workout's kcal) truncates rather than wraps, so
-            // the pill never grows a tile past its floor. Matches Android's unconditional ellipsize (#934).
+            if let symbol { Image(systemName: symbol).font(StrandFont.icon(.inline)) }
             Text(text).font(StrandFont.captionNumber).lineLimit(1)
         }
         .foregroundStyle(color)
         .padding(.horizontal, 6).padding(.vertical, 2)
         .background(color.opacity(0.14), in: Capsule(style: .continuous))
+        .fixedSize()
         .accessibilityHidden(true)
     }
 }
@@ -514,29 +625,29 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         .background {
                             if sel {
                                 // Flat: the raised surface with a hairline edge, no gradient or shadow.
-                                let selectedShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                let selectedShape = RoundedRectangle(cornerRadius: NoopMetrics.segmentRadius,
+                                                                     style: .continuous)
                                 selectedShape
                                     .fill(StrandPalette.surfaceRaised)
-                                    .overlay(selectedShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                                    .overlay(selectedShape.strokeBorder(StrandPalette.hairline,
+                                                                        lineWidth: NoopMetrics.hairlineWidth))
                             }
                         }
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: NoopMetrics.segmentRadius, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .frame(maxWidth: equalWidth ? .infinity : nil)
-                .frame(height: 32)   // segment height; the pill fills it for an even inset
+                .frame(height: NoopMetrics.segmentedHeight)   // the pill fills it for an even inset
                 .disabled(!enabled)
                 // Announce the active range to VoiceOver and give a non-colour cue.
                 .accessibilityAddTraits(sel ? .isSelected : [])
             }
         }
-        .padding(3)
+        .padding(NoopMetrics.segmentedTrackPadding)
         .frame(maxWidth: equalWidth ? .infinity : nil)
-        .background {
-            // A solid inset well; the selected segment sits on it as a raised tile.
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(StrandPalette.surfaceInset)
-        }
+        // A solid inset well; the selected segment sits on it as a raised tile. Track radius minus the
+        // track padding is the segment radius, so the corners are concentric.
+        .background(NoopInsetSurface(cornerRadius: NoopMetrics.insetRadius))
     }
 }
 
@@ -766,3 +877,41 @@ private struct PulseDot: View {
         .accessibilityHidden(true)
     }
 }
+
+#if DEBUG
+private struct ComponentsPreview: View {
+    @State private var range = "M"
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    SectionHeader("Readings", trailing: "Last 7")
+                    SectionHeader("Events", action: .button(label: "See all") {})
+                    SegmentedPillControl(["W", "M", "3M", "6M", "Y", "All"], selection: $range,
+                                         fillsAvailableWidth: true) { $0 }
+                }
+                HStack(alignment: .top, spacing: NoopMetrics.gap) {
+                    StatTile(label: "Stress", value: "1.4", caption: "low-stress days · 30d",
+                             delta: "+0.2", deltaColor: StrandPalette.statusWarning)
+                    StatTile(label: "Resting HR", value: "54 bpm", accent: StrandPalette.metricRose,
+                             delta: "−14.5 bpm", deltaColor: StrandPalette.statusPositive)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+                StatTile(label: "Average", value: "61 ms", sparkline: [58, 61, 60, 64, 62, 59, 63],
+                         sparkColor: StrandPalette.metricPurple)
+            }
+            .padding(NoopMetrics.screenHPadding)
+        }
+        .frame(width: 390, height: 560)
+        .background(StrandPalette.surfaceBase)
+    }
+}
+
+#Preview("Components — light") {
+    ComponentsPreview().preferredColorScheme(.light)
+}
+
+#Preview("Components — dark") {
+    ComponentsPreview().preferredColorScheme(.dark)
+}
+#endif
