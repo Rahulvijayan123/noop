@@ -21,7 +21,8 @@ from ..features import COVARIATES, TARGETS
 class TimesFMScorer:
   name = "timesfm-3.0"
 
-  def __init__(self, cfg, context: int | None = None, lag: int = 360, horizon: int = 30, batch: int = 4):
+  def __init__(self, cfg, context: int | None = None, lag: int = 360, horizon: int = 30, batch: int = 2):
+    # batch 2: scoring RSS ≈ 2.0 GB with the low-memory loader (2.5 GB at 4) — the unit's MemoryHigh is 2.8 GB.
     if cfg.timesfm_src:
       os.environ.setdefault("TIMESFM_SRC", cfg.timesfm_src)
     os.environ.setdefault("TIMESFM_WEIGHTS", cfg.timesfm_weights)

@@ -35,8 +35,11 @@ ReadWritePaths=/var/lib/frwhoop-anomaly
 # Share 4 vCPU / 8 GB with the Swift worker and the inference sidecar without starving them.
 CPUQuota=100%
 CPUWeight=30
-MemoryHigh=2300M
-MemoryMax=2800M
+# TimesFM 3.0 fp32 (low-memory loader) scores at ~2.0 GB RSS; UniTS prompt-tuning adds a few hundred MB for minutes.
+MemoryHigh=2800M
+MemoryMax=3300M
+# No swap on this host and other sessions build Swift here: under global pressure this unit is killed first.
+OOMScoreAdjust=500
 MemorySwapMax=0
 TasksMax=64
 IOWeight=30
