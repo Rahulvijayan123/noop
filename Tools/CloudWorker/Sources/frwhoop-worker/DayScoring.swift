@@ -1278,7 +1278,8 @@ struct DayScorer {
                                                       sourceKind: deviceRow?.sourceKind)
 
         let profile = try loadProfile(userId: claim.userId)
-        let baselines = try loadBaselines(userId: claim.userId, deviceId: claim.deviceId, before: claim.day)
+        let (baselines, baselinesHeld) = Self.scoringBaselines(
+            try loadBaselines(userId: claim.userId, deviceId: claim.deviceId, before: claim.day))
 
         let computedAt = isoNow()
         let now = Int(Date().timeIntervalSince1970)
@@ -1390,8 +1391,10 @@ struct DayScorer {
 
         let status = Self.classifyStatus(hrCount: hr.count, rrCount: rr.count, respCount: resp.count,
                                          gravityCount: gravity.count, detectedSessionCount: result.sleepSessions.count)
-        let daily = legacyDaily(from: result, claim: claim, computedAt: computedAt)
+        var daily = legacyDaily(from: result, claim: claim, computedAt: computedAt)
         var snapshotDaily = self.snapshotDaily(from: result, claim: claim, computedAt: computedAt)
+        Self.recordHeldBaselines(baselinesHeld, in: &daily)
+        Self.recordHeldBaselines(baselinesHeld, in: &snapshotDaily)
         // Free-form snapshot jsonb only: the legacy daily row has no slot for it.
         let slots = Self.hrvSlots(rr: rr, from: dayStart, to: dayEnd)
         if !slots.isEmpty {
@@ -2223,6 +2226,38 @@ struct DayScorer {
             resp: try fold("resp", "resp"),
             skinTemp: try fold("skin_temp", "st")
         )
+    }
+
+    /// The baselines the day scores with, and the metrics among them that were held stale. The calendar fold
+    /// marks a baseline whose last contributing night is more than `Baselines.staleDays` nights back `.stale`
+    /// (audit D4-12), and `.stale` is not `usable`, so the first day back from a long absence would publish no
+    /// recovery at all while the phone (whose fold never sees the gap) scores it. Instead the held centre is
+    /// the fallback: a stale baseline with enough nights scores as `.provisional`, so the recovery is there
+    /// but its charge confidence is `.building`, never `.solid`, and `recordHeldBaselines` names every held
+    /// metric with its nights since update. The next scored night refreshes the baseline as usual.
+    static func scoringBaselines(_ folded: AnalyticsEngine.ProfileBaselines)
+        -> (baselines: AnalyticsEngine.ProfileBaselines, held: [String: Int]) {
+        var held: [String: Int] = [:]
+        func hold(_ state: BaselineState?, _ key: String) -> BaselineState? {
+            guard let state, state.status == .stale else { return state }
+            held[key] = state.nightsSinceUpdate
+            return BaselineState(baseline: state.baseline, spread: state.spread, nValid: state.nValid,
+                                 nightsSinceUpdate: state.nightsSinceUpdate, status: .provisional)
+        }
+        let baselines = AnalyticsEngine.ProfileBaselines(
+            hrv: hold(folded.hrv, "hrv"), restingHR: hold(folded.restingHR, "resting_hr"),
+            resp: hold(folded.resp, "resp"), skinTemp: hold(folded.skinTemp, "skin_temp"))
+        return (baselines, held)
+    }
+
+    /// Additive provenance on a daily object: `baseline_fallback` = "held_stale" and
+    /// `baseline_nights_since_update` per held metric, only when a stale baseline was held.
+    static func recordHeldBaselines(_ held: [String: Int], in daily: inout [String: Any]) {
+        guard !held.isEmpty else { return }
+        var provenance = daily["provenance"] as? [String: Any] ?? [:]
+        provenance["baseline_fallback"] = "held_stale"
+        provenance["baseline_nights_since_update"] = held
+        daily["provenance"] = provenance
     }
 
     // MARK: - Time helpers

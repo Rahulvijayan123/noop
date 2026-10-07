@@ -404,6 +404,54 @@ final class DayScoringAdapterTests: XCTestCase {
                        "skip-and-hold leaves the centre where the last night put it")
     }
 
+    /// The day back from a 40-night absence still publishes a recovery (the phone scores it too), but with
+    /// `.building` confidence instead of `.solid`, and its provenance names the held baselines.
+    func testTheDayBackFromALongAbsenceScoresOnTheHeldBaselineAndSaysSo() throws {
+        let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: "2026-06-01"))
+        let rows: [[String: String]] = keys.prefix(80).suffix(40).enumerated().map { i, d in
+            ["d": d, "hrv": String(50 + i % 5), "rhr": "55", "resp": "14.5", "st": "33.4"]
+        }
+        let folded = try DayScorer.foldBaselines(rows: rows, before: "2026-06-01")
+        let stale = try XCTUnwrap(folded.hrv)
+        XCTAssertEqual(stale.status, .stale)
+        XCTAssertFalse(stale.usable, "scoring straight off the fold would withhold the recovery")
+        XCTAssertNil(RecoveryScorer.recovery(hrv: 52, rhr: 55, resp: 14.5, hrvBaseline: RecoveryScorer.DriverBaseline(stale),
+                                             rhrBaseline: nil, respBaseline: nil, sleepPerf: 0.85,
+                                             hrvBaselineUsable: stale.usable))
+
+        let (scoring, held) = DayScorer.scoringBaselines(folded)
+        let hrv = try XCTUnwrap(scoring.hrv)
+        XCTAssertEqual(hrv.status, .provisional)
+        XCTAssertEqual(hrv.baseline, stale.baseline, "the centre is held, not re-estimated")
+        XCTAssertEqual(hrv.spread, stale.spread)
+        XCTAssertEqual(hrv.nightsSinceUpdate, 40)
+        XCTAssertEqual(held, ["hrv": 40, "resting_hr": 40, "resp": 40, "skin_temp": 40])
+        let recovery = RecoveryScorer.recovery(hrv: 52, rhr: 55, resp: 14.5, hrvBaseline: RecoveryScorer.DriverBaseline(hrv),
+                                               rhrBaseline: nil, respBaseline: nil, sleepPerf: 0.85,
+                                               hrvBaselineUsable: hrv.usable)
+        XCTAssertNotNil(recovery, "the day back is scored")
+        XCTAssertEqual(ScoreConfidence.charge(recovery: recovery, hrvBaseline: scoring.hrv), .building,
+                       "with a downgraded confidence")
+
+        var daily: [String: Any] = ["provenance": ["scope": "hrv_sleep"]]
+        DayScorer.recordHeldBaselines(held, in: &daily)
+        let provenance = try XCTUnwrap(daily["provenance"] as? [String: Any])
+        XCTAssertEqual(provenance["scope"] as? String, "hrv_sleep", "existing provenance is kept")
+        XCTAssertEqual(provenance["baseline_fallback"] as? String, "held_stale")
+        XCTAssertEqual(provenance["baseline_nights_since_update"] as? [String: Int], held)
+
+        // An unbroken history holds nothing and publishes exactly what it did.
+        let fresh = try DayScorer.foldBaselines(rows: keys.suffix(30).map {
+            ["d": $0, "hrv": "50", "rhr": "55", "resp": "14.5", "st": "33.4"]
+        }, before: "2026-06-01")
+        let unchanged = DayScorer.scoringBaselines(fresh)
+        XCTAssertTrue(unchanged.held.isEmpty)
+        XCTAssertEqual(unchanged.baselines.hrv, fresh.hrv)
+        var plain: [String: Any] = ["provenance": ["scope": "hrv_sleep"]]
+        DayScorer.recordHeldBaselines(unchanged.held, in: &plain)
+        XCTAssertNil((plain["provenance"] as? [String: Any])?["baseline_fallback"])
+    }
+
     func testBaselineFoldOfAnUnbrokenHistoryIsUnchanged() throws {
         let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: "2026-06-01"))
         let rows: [[String: String]] = keys.suffix(30).enumerated().map { i, d in
