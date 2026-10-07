@@ -68,11 +68,11 @@ def related_items(evidence: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         units = signal.get("units", "")
         summary = f"{_with_units(latest['value'], units)} on {short_day(latest['day'])}"
-        if signal.get("change_vs_median") is not None and signal.get("baseline_nights", 0) >= 3:
+        if signal.get("change_vs_usual") is not None and signal.get("usual_nights", 0) >= 3:
             if signal.get("direction") == "flat":
-                summary += ", about your median"
+                summary += ", about your usual"
             else:
-                summary += f", {_signed(signal['change_vs_median'], units)} vs your median"
+                summary += f", {_signed(signal['change_vs_usual'], units)} vs your usual"
         items.append({"metric": signal["metric"], "label": signal["label"], "summary": summary,
                       "direction": signal.get("direction", "unknown"), "estimated": bool(signal.get("estimated"))})
         if len(items) >= MAX_RELATED:

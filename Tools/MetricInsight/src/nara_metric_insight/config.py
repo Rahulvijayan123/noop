@@ -65,7 +65,7 @@ class Config:
     lease_seconds: int = 300
     poll_seconds: float = 5.0
     turn_timeout_s: float = 120.0
-    max_turns: int = 10
+    max_turns: int = 16
     max_llm_requests: int = 24
     max_completion_tokens: int = 2048
     secret_paths: tuple[str, ...] = ()
@@ -100,7 +100,7 @@ class Config:
             lease_seconds=int(env.get("NARA_LEASE_SECONDS", "300")),
             poll_seconds=float(env.get("NARA_POLL_SECONDS", "5")),
             turn_timeout_s=float(env.get("NARA_TURN_TIMEOUT_S", "120")),
-            max_turns=int(env.get("NARA_MAX_TURNS", "10")),
+            max_turns=int(env.get("NARA_MAX_TURNS", "16")),
             max_llm_requests=int(env.get("NARA_MAX_LLM_REQUESTS", "24")),
             max_completion_tokens=int(env.get("NARA_MAX_COMPLETION_TOKENS", "2048")),
             secret_paths=secret_paths,

@@ -21,9 +21,7 @@ from zoneinfo import ZoneInfo
 from .metrics import (BASELINE_NIGHTS, EPISODE_RANK, INSIGHT_METRICS, REFERENCE_ORDER, SIGNALS, WINDOW_DAYS,
                       InsightMetric, Signal, plausible)
 
-MIN_RANGE_NIGHTS = 7          # nights before the latest needed for a personal usual range
 RECENT_NIGHTS = 7             # the "last 7 nights" window
-UNUSUAL_Z = 2.0               # robust distance at which a night reads as unusual for this person
 
 
 def _day(value: Any) -> date:
@@ -304,53 +302,49 @@ def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, an
         prev_day, prev = measured[-2]
         out["previous"] = {"day": prev_day.isoformat(), "value": rounded(prev, d),
                            "change": shown_difference(latest, prev, d)}
-    prior = measured[:-1][-BASELINE_NIGHTS:]
-    stats = robust([v for _, v in prior])
-    if stats:
-        change = shown_difference(latest, stats["median"], d)
-        out["baseline"] = {
-            "nights": stats["n"], "from": prior[0][0].isoformat(), "to": prior[-1][0].isoformat(),
-            "median": rounded(stats["median"], d),
-            "change_vs_median": change,
-            "direction": _direction(change, signal.flat),
-            "method": f"median of up to {BASELINE_NIGHTS} measured nights before the latest",
-        }
-        if stats["n"] >= MIN_RANGE_NIGHTS:
-            out["baseline"]["usual_range"] = {"low": rounded(stats["p25"], d), "high": rounded(stats["p75"], d),
-                                              "method": "middle half (25th-75th percentile) of those nights"}
+    # The person's usual, by Layer 1's rules (the phone Baseline's): the 60-day copy once it is shown, else the
+    # 7-night copy. One definition everywhere, so an explanation never shows two different "usual ranges".
+    layer1 = layer1_baseline({day: v for day, v in measured if day < latest_day}, latest_day, series=metric.key,
+                             decimals=d)
+    long, week = layer1.get("long"), layer1.get("week")
+    chosen = ("long", long) if long and long.get("shown") else ("week", week) if week and week.get("shown") else None
+    baseline: dict[str, Any] = {"week": week, "long": long, "rules": layer1["rules"]}
+    if chosen:
+        name, copy = chosen
+        change = shown_difference(latest, copy["center"], d)
+        baseline.update(usual=name, usual_value=copy["center"], change_vs_usual=change,
+                        direction=_direction(change, signal.flat))
+        if name == "long":
+            baseline.update(usual_low=long["low"], usual_high=long["high"])
+    out["baseline"] = baseline
     recent = [v for day, v in measured if day > anchor - timedelta(days=RECENT_NIGHTS)]
     if recent:
         out["last_7_nights"] = {"measured": len(recent), "median": rounded(median(recent), d),
                                 "low": rounded(min(recent), d), "high": rounded(max(recent), d)}
     context = context_judgment(document, metric)
     out["context_layer"] = context
-    out["assessment"] = _assessment(latest, stats, context, signal)
+    out["assessment"] = _assessment(rounded(latest, d), baseline, context)
     return out
 
 
-def _assessment(latest: float, stats: dict[str, float] | None, context: dict[str, Any],
-                signal: Signal) -> dict[str, Any]:
-    """Whether the latest night is unusual for this person, and on what basis."""
+def _assessment(latest: float | int | None, baseline: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Whether the latest night is unusual for this person, and on what basis: the context layer's own change
+    detection when its reference is ready, else Layer 1's usual band, else the 7-night usual alone."""
     reference = context.get("reference") or {}
     episode = context.get("episode") or {}
     if reference.get("status") == "ready" and reference.get("difference") is not None:
         return {"basis": "context_layer", "state": episode.get("state") or "no_change_episode",
                 "robust_distance": reference.get("robust_distance"),
                 "note": "the app's own change detection against its personal reference"}
-    if not stats or stats["n"] < MIN_RANGE_NIGHTS:
-        return {"basis": "insufficient_history", "nights_available": stats["n"] if stats else 0,
-                "nights_needed": MIN_RANGE_NIGHTS,
-                "note": "too few earlier measured nights to say what is usual for this person"}
-    scale = 1.4826 * stats["mad"]
-    distance = (latest - stats["median"]) / scale if scale > 0 else None
-    if stats["p25"] <= latest <= stats["p75"]:
-        state = "within_usual_range"
-    elif distance is not None and abs(distance) >= UNUSUAL_Z:
-        state = "unusual_for_this_person"
-    else:
-        state = "near_usual_range"
-    return {"basis": "personal_range", "state": state, "robust_distance": rounded(distance, 1),
-            "note": "fallback while the app's personal reference is not ready: position within the measured nights"}
+    long = baseline.get("long") or {}
+    if long.get("shown"):
+        return {"basis": "usual_band", "state": position(latest, long), "established": bool(long.get("established")),
+                "note": "the 60-day usual band (Layer 1); before 14 older nights it is provisional"}
+    if baseline.get("usual") == "week":
+        return {"basis": "week_usual", "state": "compared_with_recent_nights",
+                "note": "only the 7-night usual exists yet; a usual band needs older nights"}
+    return {"basis": "insufficient_history", "nights_needed": L1_WEEK_MIN_NIGHTS,
+            "note": "too few earlier measured nights to say what is usual for this person"}
 
 
 def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date, window_days: int,
@@ -370,15 +364,22 @@ def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
             out.append(entry)
             continue
         latest_day, latest = measured[-1]
-        stats = robust([v for _, v in measured[:-1][-BASELINE_NIGHTS:]])
         entry["latest"] = {"day": latest_day.isoformat(), "value": rounded(latest, signal.decimals)}
         entry["same_night_as_metric"] = latest_day == anchor
-        if stats:
-            delta = shown_difference(latest, stats["median"], signal.decimals)
-            entry["median"] = rounded(stats["median"], signal.decimals)
-            entry["change_vs_median"] = delta
-            entry["baseline_nights"] = stats["n"]
-            entry["direction"] = _direction(delta, signal.flat)
+        usual, nights_used = None, 0
+        if key in L1_SERIES:  # resting HR and HRV: the same Layer 1 usual as the metric itself
+            layer1 = layer1_baseline({d: v for d, v in measured[:-1]}, latest_day, series=key, decimals=signal.decimals)
+            copy = next((c for c in (layer1.get("long"), layer1.get("week")) if c and c.get("shown")), None)
+            if copy:
+                usual, nights_used = copy["center"], copy["nights"]
+        else:  # the other nightly signals: the median of their recent nights
+            stats = robust([v for _, v in measured[:-1][-BASELINE_NIGHTS:]])
+            if stats:
+                usual, nights_used = rounded(stats["median"], signal.decimals), stats["n"]
+        if usual is not None:
+            delta = shown_difference(latest, float(usual), signal.decimals)
+            entry.update(usual=usual, change_vs_usual=delta, usual_nights=nights_used,
+                         direction=_direction(delta, signal.flat))
         else:
             entry["direction"] = "unknown"
         out.append(entry)
@@ -479,7 +480,7 @@ def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
     for the others. A state the server does not measure is listed as such, never filled in."""
     signal, d = metric.signal, metric.signal.decimals
     nightly = {day: v for day, v in nights(scores, signal, anchor - timedelta(days=WINDOW_DAYS), anchor) if v is not None}
-    states = []
+    states, unavailable = [], []
     for state, label, key in STATE_SERIES.get(metric.key, ()):
         entry: dict[str, Any] = {"state": state, "label": label}
         if state == "sleep":
@@ -492,6 +493,9 @@ def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         else:
             daily = _daily_value(document, key)
             value = _num((daily or {}).get("value"))
+            if value is None:  # not measured in this state today: listed apart, never next to measured states
+                unavailable.append({"state": state, "label": label, "reason": "not_measured_in_this_state"})
+                continue
             comparisons = [c for c in (document or {}).get("comparisons") or [] if isinstance(c, dict)
                            and (c.get("series_key") == (daily or {}).get("series_key", key))]
             usual = _reference_band(comparisons, d)
@@ -508,9 +512,10 @@ def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
     through_the_day = hrv_slot_states(snapshots or {}, zone) if metric.key == "hrv_rmssd" and zone else None
     if metric.key in NOT_ON_SERVER and not any(s["state"] == "while_moving" for s in
                                                (through_the_day or {}).get("states") or []):
-        states.append(dict(NOT_ON_SERVER[metric.key]))
-    out = {"metric": metric.key, "night": anchor.isoformat(), "states": states,
-           "note": "each state has its own usual; compare a state only with its own usual, never across states"}
+        unavailable.append(dict(NOT_ON_SERVER[metric.key]))
+    out = {"metric": metric.key, "night": anchor.isoformat(), "states": states, "not_measured": unavailable,
+           "note": "each state has its own usual; compare a state only with its own usual, never across states; "
+                   "states under not_measured were not measured, so say nothing about them"}
     if through_the_day and through_the_day["states"]:
         out["through_the_day"] = through_the_day
     return out

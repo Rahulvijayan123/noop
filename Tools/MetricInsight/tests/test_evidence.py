@@ -44,11 +44,13 @@ def test_summary_without_context_uses_the_labelled_fallback_and_says_history_is_
     summary = ev.metric_summary(week(), RHR, ANCHOR, 90, None)
     assert summary["latest"] == {"day": "2026-10-06", "value": 45}
     assert summary["previous"] == {"day": "2026-10-05", "value": 48, "change": -3}
-    # median of 47, 48, 50, 51, 51, 53 is 50.5: shown as 51, and the shown change is 45 - 51
-    assert summary["baseline"]["nights"] == 6 and summary["baseline"]["median"] == 51
-    assert summary["baseline"]["change_vs_median"] == -6 and summary["baseline"]["direction"] == "down"
-    assert "usual_range" not in summary["baseline"]  # 6 earlier nights: no usual range yet
-    assert summary["assessment"]["basis"] == "insufficient_history"
+    # Six earlier nights, all in the last week: Layer 1's 7-night usual (weighted, newest most) is the usual,
+    # 50 bpm, so the shown change is 45 - 50; there is no 60-day band yet (it needs nights 8+ days old).
+    baseline = summary["baseline"]
+    assert baseline["usual"] == "week" and baseline["week"]["nights"] == 6 and baseline["usual_value"] == 50
+    assert baseline["change_vs_usual"] == -5 and baseline["direction"] == "down"
+    assert baseline["long"] is None and "usual_low" not in baseline
+    assert summary["assessment"]["basis"] == "week_usual"
     assert summary["context_layer"] == {"available": False, "reason": "no_context_document"}
     assert summary["last_7_nights"] == {"measured": 7, "median": 50, "low": 45, "high": 53}
     assert ev.rounded(50.5, 0) == 51 and ev.rounded(-5.5, 0) == -6 and ev.rounded(0.05, 1) == 0.1
@@ -60,11 +62,13 @@ def test_personal_range_fallback_with_enough_nights():
         rows[ANCHOR - timedelta(days=20 - i)] = {"resting_hr_bpm": 50 + (i % 3)}
     rows[ANCHOR] = {"resting_hr_bpm": 60}
     summary = ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)
-    assert summary["baseline"]["usual_range"]["low"] == 50 and summary["baseline"]["usual_range"]["high"] == 52
-    assert summary["assessment"]["basis"] == "personal_range"
-    assert summary["assessment"]["state"] == "unusual_for_this_person"
+    # 13 nights 8-20 days old: the 60-day band is shown (not yet established); spread floored at 2 bpm, k = 2
+    assert summary["baseline"]["usual"] == "long"
+    assert (summary["baseline"]["usual_low"], summary["baseline"]["usual_high"]) == (47, 55)
+    assert summary["assessment"] == {"basis": "usual_band", "state": "above_usual_band", "established": False,
+                                     "note": summary["assessment"]["note"]}
     rows[ANCHOR] = {"resting_hr_bpm": 51}
-    assert ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)["assessment"]["state"] == "within_usual_range"
+    assert ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)["assessment"]["state"] == "within_usual_band"
 
 
 def test_context_layer_rules_match_the_app():

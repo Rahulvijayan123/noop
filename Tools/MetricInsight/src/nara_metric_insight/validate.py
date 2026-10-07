@@ -62,16 +62,24 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "resp_rate": ("respiratory rate", "breathing rate", "breaths per minute", "breaths/min", "breathing"),
     "spo2": ("blood oxygen", "oxygen saturation", "oxygen level", "spo2", "oxygen"),
     "skin_temp_dev": ("skin temperature", "skin temp"),
-    "sleep": ("sleep duration", "sleep efficiency", "sleep timing", "sleep", "slept", "asleep", "bedtime",
-              "wake time", "woke"),
+    # An estimated sleep MEASURE (not "during sleep", which names the state an HRV or heart-rate reading was in).
+    "sleep": ("sleep duration", "sleep efficiency", "sleep timing", "sleep length", "sleep was", "sleep is",
+              "shorter sleep", "longer sleep", "less sleep", "more sleep", "hours of sleep", "slept", "bedtime",
+              "wake time", "woke", "fell asleep", "deep sleep", "rem sleep", "light sleep", "sleep stage"),
     "activity": ("training load", "locomotion", "movement", "workout", "exercise", "activity", "active minutes",
                  "steps", "training"),
 }
 SIGNAL_GROUP = {"sleep_total": "sleep", "sleep_efficiency": "sleep"}
+# Phrases that only state the person's own value after "your" ("your sleep was short"); a number near them is
+# usually some other reading taken during sleep ("the 51 ms during sleep was below ...").
+YOUR_ONLY = frozenset({"sleep was", "sleep is", "shorter sleep", "longer sleep", "less sleep", "more sleep",
+                       "movement", "activity", "training", "exercise", "breathing", "oxygen"})
 # A cited finding must be about something the explanation says (by the curated entry's topic).
 TOPIC_WORDS: dict[str, tuple[str, ...]] = {
     "alcohol": ("alcohol", "drink", "wine", "beer"), "caffeine": ("caffeine", "coffee"),
-    "sleep_restriction": ("sleep",), "training_load": ("training", "exercise", "workout", "exertion", "load"),
+    "sleep_restriction": ("sleep",),
+    "training_load": ("training", "exercise", "workout", "exertion", "load", "cycling", "cycled", "ride", "running",
+                      "ran", "walk", "bout", "session"),
     "detraining": ("training", "exercise", "fitness"), "aerobic_fitness": ("fitness", "training", "exercise"),
     "heat": ("heat", "hot", "warm", "temperature"), "altitude": ("altitude", "elevation"),
     "hydration": ("hydration", "fluid", "water"), "menstrual_cycle": ("cycle", "menstrual", "period"),
@@ -301,15 +309,16 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
         for path in (("latest",), ("previous",)):
             node = _get(summary, *path) or {}
             f.dated(unit, node.get("day"), node.get("value"))
-        for path in (("latest", "value"), ("previous", "value"), ("baseline", "median"),
-                     ("baseline", "usual_range", "low"), ("baseline", "usual_range", "high"),
+        for path in (("latest", "value"), ("previous", "value"), ("baseline", "usual_value"),
+                     ("baseline", "usual_low"), ("baseline", "usual_high"), ("baseline", "week", "center"),
+                     ("baseline", "long", "center"), ("baseline", "long", "low"), ("baseline", "long", "high"),
                      ("last_7_nights", "median"), ("last_7_nights", "low"), ("last_7_nights", "high"),
                      ("context_layer", "reference", "center")):
             f.add(unit, _get(summary, *path))
-        for path in (("previous", "change"), ("baseline", "change_vs_median"), ("context_layer", "reference", "difference")):
+        for path in (("previous", "change"), ("baseline", "change_vs_usual"), ("context_layer", "reference", "difference")):
             f.change(unit, _get(summary, *path))
-        for path in (("measured_nights",), ("baseline", "nights"), ("last_7_nights", "measured"),
-                     ("assessment", "nights_available"), ("assessment", "nights_needed"),
+        for path in (("measured_nights",), ("baseline", "week", "nights"), ("baseline", "long", "nights"),
+                     ("last_7_nights", "measured"), ("assessment", "nights_needed"),
                      ("context_layer", "reference", "support_nights")):
             f.count(_get(summary, *path))
         if summary.get("estimated"):
@@ -325,10 +334,10 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
             unit = signal.get("units") or ""
             f.add(unit, _get(signal, "latest", "value"))
             f.dated(unit, _get(signal, "latest", "day"), _get(signal, "latest", "value"))
-            f.add(unit, signal.get("median"))
-            f.change(unit, signal.get("change_vs_median"))
+            f.add(unit, signal.get("usual"))
+            f.change(unit, signal.get("change_vs_usual"))
             f.count(signal.get("measured_nights"))
-            f.count(signal.get("baseline_nights"))
+            f.count(signal.get("usual_nights"))
             if signal.get("estimated"):
                 f.estimated.add(SIGNAL_GROUP.get(str(signal.get("metric")), str(signal.get("metric"))))
     for breakdown in _listed(evidence.get("get_state_breakdown")):
@@ -448,6 +457,8 @@ def _direction_errors(token: str, unit_word: str | None, word: str, f: Facts) ->
     unit = UNITS.get((unit_word or "").lower())
     if unit_word and unit not in CHANGE_UNITS:
         return []  # "3 nights more" is a count, not a change
+    if unit and _matches(token, f.by_unit.get(unit, set())):
+        return []  # "51 ms sat below your usual band": a value compared with a band, not the size of a change
     sign = 1 if word.lower() in UP_WORDS else -1
     changes = f.signed.get(unit, set()) if unit else {v for values in f.signed.values() for v in values}
     if any(v * sign > 0 and _matches(token, {abs(v)}) for v in changes):
@@ -523,7 +534,7 @@ def _estimated_errors(sentence: str, f: Facts) -> list[str]:
         for alias in ALIASES.get(group, ()):
             a = re.escape(alias)
             if (re.search(rf"\byour\s+(?:\w+\s+){{0,2}}{a}\b", lowered)
-                    or re.search(rf"\b{a}\b\W+(?:\w+\W+){{0,6}}?\d", lowered)):
+                    or (alias not in YOUR_ONLY and re.search(rf"\b{a}\b\W+(?:\w+\W+){{0,6}}?\d", lowered))):
                 return [f"estimated:a sentence stating your {alias} must say it is estimated"]
     return []
 

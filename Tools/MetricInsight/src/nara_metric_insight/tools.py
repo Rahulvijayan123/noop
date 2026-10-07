@@ -144,6 +144,36 @@ class JobTools:
                              "connected": connected.get(v.tool, True)} for v in VARIABLES],
                 "note": "load every variable before answering; a source that is not connected stays empty"}
 
+    def evidence_digest(self, args: dict[str, Any]) -> dict[str, Any]:
+        """The key computed facts of every variable in one small object, so the root agent can reason from
+        computed evidence at once and open a full variable only when it needs more."""
+        e = self.evidence()
+        summary, states = e.get("get_metric_summary") or {}, e.get("get_state_breakdown") or {}
+        movement, quality = e.get("get_movement_patterns") or {}, e.get("get_data_quality") or {}
+        base = summary.get("baseline") or {}
+        return {
+            "metric": summary.get("label"), "units": summary.get("units"), "latest": summary.get("latest"),
+            "previous": summary.get("previous"),
+            "usual": {k: base.get(k) for k in ("usual", "usual_value", "usual_low", "usual_high", "change_vs_usual",
+                                               "direction") if base.get(k) is not None},
+            "assessment": summary.get("assessment"),
+            "states": [{k: s.get(k) for k in ("state", "label", "value", "units", "position", "available")}
+                       | ({"usual": {k: (s.get("usual") or {}).get(k) for k in ("center", "low", "high")}}
+                          if s.get("usual") else {}) for s in states.get("states") or []],
+            "through_the_day": [{k: s.get(k) for k in ("label", "median_ms", "readings", "from_local", "to_local")}
+                                for s in (states.get("through_the_day") or {}).get("states") or []],
+            "movement_before_the_night": movement.get("before_the_night"),
+            "last_movement_before_sleep_min": movement.get("last_movement_before_sleep_min"),
+            "related": [{k: r.get(k) for k in ("label", "latest", "usual", "change_vs_usual", "direction", "estimated")}
+                        for r in (e.get("get_related_metrics") or {}).get("signals") or [] if r.get("latest")],
+            "recorded_events": [{k: v for k, v in ev_.items() if k in ("kind", "label", "local_day", "local_time")}
+                                for ev_ in (e.get("get_recent_events") or {}).get("events") or []],
+            "notes_from_the_person": len((e.get("get_user_context") or {}).get("items") or []),
+            "not_connected": [v.name for v in VARIABLES if v.tool in ("get_chat_history", "get_health_records")
+                              and not (e.get(v.tool) or {}).get("available")],
+            "data": {k: quality.get(k) for k in ("measured_nights", "tracked_nights", "missing_nights")},
+        }
+
     def missing_required(self) -> list[str]:
         """Variables the root agent has not loaded yet (the answer is refused until it has)."""
         return sorted(REQUIRED - set(self.calls))
@@ -198,6 +228,8 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
          "not connected yet).", _object(), JobTools.health_records),
     Tool("get_context_manifest", "Every source this analysis can use and whether it is connected.",
          _object(), JobTools.context_manifest, data=False),
+    Tool("get_evidence_digest", "The key computed facts of all the variables in one small object.",
+         _object(), JobTools.evidence_digest, data=False),
     Tool("search_literature", "Peer-reviewed findings: a curated, verified corpus first, then PubMed / Europe PMC "
          "journal articles. Query with generic scientific keywords only (e.g. 'heart rate variability sleep "
          "evening exercise'); never personal details.",

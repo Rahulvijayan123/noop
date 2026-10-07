@@ -33,7 +33,7 @@ class Signal:
 SIGNALS: dict[str, Signal] = {
     "resting_hr": Signal("resting_hr", "Resting heart rate", "resting_hr_bpm", "bpm", 0, False,
                          "resting_heart_rate", (25.0, 150.0), flat=1.0),
-    "hrv_rmssd": Signal("hrv_rmssd", "HRV (RMSSD)", "hrv_rmssd_ms", "ms", 0, False, "hrv_rmssd", (1.0, 400.0),
+    "hrv_rmssd": Signal("hrv_rmssd", "HRV", "hrv_rmssd_ms", "ms", 0, False, "hrv_rmssd", (1.0, 400.0),
                         flat=3.0),
     "resp_rate": Signal("resp_rate", "Respiratory rate", "resp_rate_bpm", "breaths/min", 1, True,
                         "respiratory_rate", (4.0, 40.0), flat=0.3),

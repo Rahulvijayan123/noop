@@ -10,7 +10,8 @@ from .validate import CLAIM_TERMS, FORBIDDEN_TERMS, RELATIVE_TIME
 GUIDANCE = """\
 You are Nara's explanation writer. You explain one person's own wearable data back to them in plain, warm,
 everyday words, like a knowledgeable friend: short sentences, no jargon, no lecturing, nothing alarming. Say
-"heart rate variability (HRV)" the first time, then "HRV".
+"heart rate variability (HRV)" the first time, then "HRV"; say "your usual", never "median", "RMSSD",
+"baseline copy" or other technical words.
 
 You state facts from their data and what those facts may mean. You never give medical advice: no treatments,
 no tests, no "see a doctor", no instructions. You never diagnose and never name an illness or a medication. You
@@ -32,8 +33,10 @@ ANSWER_SHAPE = ('{"headline": "...", "observed": ["..."], "interpretation": ["..
 
 def bootstrap() -> str:
     """The fixed first cell: every source into its variable, connected or not (an unconnected one comes back
-    empty with available=false)."""
-    return "\n".join(f"{v.name} = await mcp.call_tool('nara', '{v.tool}', {{}})" for v in VARIABLES)
+    empty with available=false), then the digest of their key computed facts, printed."""
+    loads = [f"{v.name} = await mcp.call_tool('nara', '{v.tool}', {{}})" for v in VARIABLES]
+    return "\n".join(loads + ["digest = await mcp.call_tool('nara', 'get_evidence_digest', {})",
+                               "import json; print(json.dumps(digest, default=str))"])
 
 
 def task(label: str, units: str, latest_day: str, latest_value: object) -> str:
@@ -46,10 +49,12 @@ their latest value and its history. The latest measured night is {latest_day}: {
 1. Run this first cell exactly as written. It loads every source into a variable; some are not connected yet
    and come back empty (`available: false`) — then say nothing about them.
 {cell}
-   Look at every variable ({names}).
+   The printed digest holds the key computed facts of every variable ({names}); open a full variable in
+   Python only when you need more detail. Write your answer from those facts.
 2. Find the story in the data, using only those variables:
-   - what changed: the latest value against the person's usual value and usual range (metric_summary.baseline:
-     the range is the threshold for "higher or lower than usual") and against the previous night;
+   - what changed: the latest value against the person's usual (metric_summary.baseline, the same rules as the
+     app's Baseline: usual_low-usual_high is the 60-day usual band, the threshold for "higher or lower than
+     usual"; before it exists, usual_value is the 7-night usual) and against the previous night;
    - in which state: state_breakdown gives the value during sleep, at calm awake rest and around movement, and by
      time of day, each with its own usual value and usual band (the threshold). Compare a state only with its own
      usual, and say which states are higher, lower or as usual; skip states that are not available.
@@ -69,7 +74,7 @@ their latest value and its history. The latest measured night is {latest_day}: {
    headline: one short, plain sentence (at most 90 characters) saying what happened.
    observed: 1-3 sentences with the facts: the value, when or in which state, and the usual value or range.
    interpretation: 1-3 gentle, hedged sentences on what in the data may explain it ("likely because", "can").
-   uncertainty: 1-3 sentences on what cannot be known from this data.
+   uncertainty: 1-2 short sentences on what cannot be known from this data.
    citations: 1-2 ids from search_literature. Keep the whole explanation under 900 characters.
 
 Rules the reply is checked against:

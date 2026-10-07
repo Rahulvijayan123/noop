@@ -10,8 +10,9 @@ SWIFT = Path(__file__).resolve().parents[3] / "Strand" / "Screens" / "Measuremen
 EVIDENCE = {
     "get_metric_summary": {"metric": "resting_hr", "units": "bpm", "estimated": False,
                            "latest": {"day": "2026-10-06", "value": 45}, "previous": {"day": "2026-10-05", "value": 48, "change": -3},
-                           "baseline": {"nights": 6, "median": 51, "change_vs_median": -6},
-                           "assessment": {"basis": "insufficient_history", "nights_available": 6, "nights_needed": 7}},
+                           "baseline": {"usual": "week", "usual_value": 51, "change_vs_usual": -6,
+                                        "week": {"center": 51, "nights": 6, "shown": True}, "long": None},
+                           "assessment": {"basis": "week_usual"}},
     "get_data_quality": {"measured_nights": 7, "missing_nights": 0, "tracked_nights": 7},
     "get_related_metrics": {"signals": [
         {"metric": "hrv_rmssd", "units": "ms", "estimated": False, "latest": {"day": "2026-10-06", "value": 85}},
@@ -140,15 +141,16 @@ def test_a_citation_must_be_about_something_the_explanation_says():
 REVIEW = {
     "get_metric_summary": {"metric": "resting_hr", "units": "bpm", "estimated": False,
                            "latest": {"day": "2026-10-06", "value": 59}, "previous": {"day": "2026-10-05", "value": 58, "change": 1},
-                           "baseline": {"nights": 30, "median": 52, "change_vs_median": 7,
-                                        "usual_range": {"low": 51, "high": 53}}},
+                           "baseline": {"usual": "long", "usual_value": 52, "usual_low": 51, "usual_high": 53,
+                                        "change_vs_usual": 7,
+                                        "long": {"center": 52, "low": 51, "high": 53, "nights": 30, "shown": True}}},
     "get_metric_series": {"units": "bpm", "nights": [{"day": "2026-10-04", "value": 58}, {"day": "2026-10-05", "value": 58},
                                                      {"day": "2026-10-06", "value": 59}]},
     "get_data_quality": {"measured_nights": 38, "missing_nights": 2, "tracked_nights": 40},
     "get_sleep_context": {"nights": [{"day": "2026-10-06", "duration_h": 6.2, "efficiency_pct": 90,
                                       "onset_local": "23:40", "wake_local": "06:12"}], "estimated": True},
     "get_related_metrics": {"signals": [{"metric": "hrv_rmssd", "units": "ms", "estimated": True,
-                                         "latest": {"day": "2026-10-06", "value": 85}, "median": 69, "change_vs_median": 16}]},
+                                         "latest": {"day": "2026-10-06", "value": 85}, "usual": 69, "change_vs_usual": 16}]},
 }
 
 
@@ -219,3 +221,28 @@ def test_the_root_agent_must_have_loaded_every_required_variable():
     result = validate.check(answer(), EVIDENCE, RETRIEVED, called={"get_metric_summary"}, required=required)
     assert any(e.startswith("context:load these first: get_chat_history, get_health_records") for e in result.errors)
     assert validate.check(answer(), EVIDENCE, RETRIEVED, called=set(required), required=required).ok
+
+
+def test_sentences_a_real_model_wrote_that_are_correct_are_accepted():
+    evidence = {
+        "get_metric_summary": {"metric": "hrv_rmssd", "units": "ms", "latest": {"day": "2026-10-06", "value": 51},
+                               "previous": {"day": "2026-10-05", "value": 66, "change": -15},
+                               "baseline": {"usual": "long", "usual_value": 66, "usual_low": 58, "usual_high": 74,
+                                            "change_vs_usual": -15,
+                                            "long": {"center": 66, "low": 58, "high": 74, "nights": 31, "shown": True}}},
+        "get_state_breakdown": {"night": "2026-10-06", "states": [
+            {"state": "sleep", "units": "ms", "value": 51, "usual": {"center": 66, "low": 58, "high": 74, "nights": 31}}]},
+    }
+    lit = {"lit:hrv-evening-exercise": {"id": "lit:hrv-evening-exercise", "topic": "training_load",
+                                        "peer_reviewed": True, "finding": ""}}
+    text = json.dumps({
+        "headline": "Your HRV was lower than usual during sleep on Oct 6",
+        "observed": ["The 51 ms during sleep was below your usual sleep band of 58-74 ms."],
+        "interpretation": ["A late training session can likely keep HRV lower that night."],
+        "uncertainty": ["One night says little on its own."], "citations": ["lit:hrv-evening-exercise"]})
+    result = validate.check(text, evidence, lit)
+    assert result.ok, result.errors
+    # and the size of a change still has to match: 15 lower, not 15 higher
+    flipped = text.replace("The 51 ms during sleep was below your usual sleep band of 58-74 ms.",
+                           "It was 15 ms higher than your usual.")
+    assert "direction" in validate.check(flipped, evidence, lit).codes
