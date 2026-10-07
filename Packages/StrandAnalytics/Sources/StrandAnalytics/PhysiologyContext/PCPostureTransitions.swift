@@ -341,7 +341,7 @@ extension PhysiologyContext {
         /// The wear-signal track of the epochs that carry one (resolved by revision, like the motion track).
         public static func track(_ epochs: [ActivityEpochInput], availableBy: Int? = nil) -> ResolvedTrack {
             let records = epochs.compactMap { e -> LabelRecord? in
-                guard let w = e.wearSignal, !w.isEmpty else { return nil }
+                guard let w = e.epoch.wearSignal?.rawValue else { return nil }
                 return LabelRecord(interval: Interval(e.epoch.startTs, e.epoch.endTs), label: w, revision: e.revision,
                                    availableAt: e.availableAt,
                                    tieBreak: "wear_signal:\(e.revision):\(e.epoch.startTs):\(e.epoch.endTs):\(w)")

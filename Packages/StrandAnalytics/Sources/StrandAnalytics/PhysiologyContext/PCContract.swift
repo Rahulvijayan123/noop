@@ -375,18 +375,14 @@ extension PhysiologyContext {
         public var epoch: ActivityEpoch
         public var revision: Int
         public var availableAt: Int?
-        /// The epoch's six-state wear-signal quality (`activity_context_epochs.wear_signal`, a `WearSignalState`
-        /// raw value) when the publishing lane computed one; nil = not computed (never "good"). It is fused from
-        /// optical signal quality, so it is declared a target-dependent gate where it decides a verdict.
-        public var wearSignal: String? = nil
         /// Producing model and preprocessing versions (provenance; `activity_context_epochs.model_version`).
+        /// The epoch's own `wearSignal` (`activity_context_epochs.wear_signal`) carries the wear-signal quality.
         public var modelVersion: String? = nil
         public var preprocessingVersion: String? = nil
-        public init(epoch: ActivityEpoch, revision: Int, availableAt: Int? = nil, wearSignal: String? = nil,
+        public init(epoch: ActivityEpoch, revision: Int, availableAt: Int? = nil,
                     modelVersion: String? = nil, preprocessingVersion: String? = nil) {
             self.epoch = epoch; self.revision = revision; self.availableAt = availableAt
-            self.wearSignal = wearSignal; self.modelVersion = modelVersion
-            self.preprocessingVersion = preprocessingVersion
+            self.modelVersion = modelVersion; self.preprocessingVersion = preprocessingVersion
         }
 
         /// `model@preprocessing` (provenance key), nil when the model is unknown.

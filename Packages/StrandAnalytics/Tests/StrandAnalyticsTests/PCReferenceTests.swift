@@ -562,3 +562,118 @@ final class PCReferenceTests: XCTestCase {
         for n in [-1, 0, 20_000, 20_513, 30_000] { XCTAssertEqual(Ref.dayNumber(Ref.dayKey(n)), n) }
     }
 }
+
+/// Posture strata of the stable-awake references (D3-07, D4-09, D4-11, D8-05): a heart-rate free recumbent /
+/// upright child of the all-day parent, shrunk toward it, never sitting vs standing.
+final class PCReferencePostureTests: XCTestCase {
+    typealias PC = PhysiologyContext
+    typealias Ref = PhysiologyContext.ContextReferences
+    typealias T = PCReferenceTests
+
+    static let parent = "heart_rate.stable_awake_5min"
+    static let recumbent = parent + ".posture_recumbent_likely"
+    static let upright = parent + ".posture_upright_likely"
+
+    static func posture(_ s: PC.PostureStratum) -> PC.PostureContext {
+        PC.PostureContext(version: "pc-posture-1", stratum: s, basis: s == .unknown ? [] : ["forearm_gravity"],
+                          gravityS: 300, forearmFlatShare: s == .recumbentLikely ? 1 : 0, inBedS: nil,
+                          heartRateDependent: false, reasons: [])
+    }
+
+    /// HR windows of one day: `recumbent` windows at 60 bpm, `upright` at 75, `unknown` at 68, every half hour.
+    static func day(_ day: String, recumbent: Int, upright: Int, unknown: Int = 0,
+                    config: PC.ReferenceConfig = .init()) -> [PC.DailyValue] {
+        let identity = PC.DayIdentity(deviceScope: "dev-1", day: day, timezoneId: "UTC",
+                                      dayWindow: PC.Engine.dayInterval(day, timezoneId: "UTC"))
+        var envs: [PC.MeasurementEnvelope] = []
+        var h = 0.0
+        func add(_ n: Int, _ v: Double, _ s: PC.PostureStratum) {
+            for _ in 0..<n {
+                let start = identity.dayWindow.start + Int((8 + h) * 3600)
+                var e = T.envelope(.heartRate, method: "context.heart_rate.5min_mean", units: "bpm", value: v,
+                                   support: .init(start, start + 300), verdicts: [(.stableAwakeRest, .eligible)])
+                e.posture = posture(s)
+                envs.append(e)
+                h += 0.5
+            }
+        }
+        add(recumbent, 60, .recumbentLikely)
+        add(upright, 75, .uprightLikely)
+        add(unknown, 68, .unknown)
+        return Ref.dailyValues(envelopes: envs, identity: identity, mode: .retrospective, finality: .final,
+                               config: config)
+    }
+
+    func testEqualPerPostureHeartRateGivesEqualStrataWhileTheParentFlagsTheMix() throws {
+        // Day A is mostly lying-awake, day B mostly upright; per posture the heart rate is identical.
+        let a = Self.day("2026-03-08", recumbent: 6, upright: 3)
+        let b = Self.day("2026-03-09", recumbent: 3, upright: 6)
+        func v(_ d: [PC.DailyValue], _ key: String) -> PC.DailyValue? { d.first { $0.seriesKey == key } }
+        XCTAssertEqual(v(a, Self.recumbent)?.value, 60)
+        XCTAssertEqual(v(b, Self.recumbent)?.value, 60)
+        XCTAssertEqual(v(a, Self.upright)?.value, 75)
+        XCTAssertEqual(v(b, Self.upright)?.value, 75)
+        // The pooled parent moves with the mix alone, and says so.
+        let pa = try XCTUnwrap(v(a, Self.parent)), pb = try XCTUnwrap(v(b, Self.parent))
+        XCTAssertEqual(pa.value, 60)
+        XCTAssertEqual(pb.value, 75)
+        XCTAssertTrue(pa.reasons.contains(Ref.postureRegimesPooled))
+        XCTAssertTrue(pb.reasons.contains(Ref.postureRegimesPooled))
+        XCTAssertEqual(pa.postureWindows, [PC.Diagnostic("recumbent_likely", 6), PC.Diagnostic("upright_likely", 3)])
+        XCTAssertEqual(pb.postureWindows, [PC.Diagnostic("recumbent_likely", 3), PC.Diagnostic("upright_likely", 6)])
+        // Strata carry their likelihood caveat; the upright one says sitting and standing are not separated.
+        XCTAssertTrue(v(a, Self.recumbent)!.reasons.contains(PC.PostureEvidence.likelihoodNotConfirmed))
+        XCTAssertTrue(v(a, Self.upright)!.reasons.contains(PC.PostureEvidence.sittingStandingNotSeparated))
+        XCTAssertEqual(Ref.parentSeries(of: Self.upright), Self.parent)
+        XCTAssertTrue(Ref.isStratum(Self.upright))
+    }
+
+    func testUnknownPostureStaysInTheParentAndStrataNeedTheirOwnMinimum() {
+        let d = Self.day("2026-03-09", recumbent: 2, upright: 0, unknown: 4)
+        XCTAssertNil(d.first { $0.seriesKey == Self.recumbent }, "two windows are below the minimum of three")
+        XCTAssertFalse(d.contains { $0.seriesKey.hasSuffix(".posture_unknown") }, "unknown is never a stratum")
+        let parent = d.first { $0.seriesKey == Self.parent }
+        XCTAssertEqual(parent?.supportCount, 6)
+        XCTAssertEqual(parent?.postureWindows, [PC.Diagnostic("recumbent_likely", 2), PC.Diagnostic("unknown", 4)])
+        // A day of one posture only pools nothing.
+        let single = Self.day("2026-03-09", recumbent: 0, upright: 4)
+        XCTAssertFalse(single.first { $0.seriesKey == Self.parent }!.reasons.contains(Ref.postureRegimesPooled))
+        // Stratification can be switched off.
+        var off = PC.ReferenceConfig()
+        off.stratifyStableAwakeByPosture = false
+        XCTAssertNotNil(Self.day("2026-03-09", recumbent: 4, upright: 0).first { $0.seriesKey == Self.recumbent })
+        XCTAssertFalse(Self.day("2026-03-09", recumbent: 4, upright: 0, config: off)
+                        .contains { Ref.isPostureStratum($0.seriesKey) })
+    }
+
+    func testPostureStratumShrinksTowardTheParentAndFallsBackWithoutSupport() throws {
+        // 20 parent days at 68 bpm (a mix), 10 recumbent days at 60 bpm.
+        let parent = T.history(20, series: Self.parent) { _ in 68 }
+        let child = T.history(10, series: Self.recumbent) { _ in 60 }
+        let today = T.value(T.day, 61, series: Self.recumbent)
+        let cs = T.compare([today], parent + child).comparisons
+        let c = try XCTUnwrap(T.view(cs, .conditioned, series: Self.recumbent))
+        let w = 10.0 / (10.0 + 7.0)
+        XCTAssertEqual(c.pooledContribution, 1 - w, accuracy: 1e-12)
+        XCTAssertEqual(try XCTUnwrap(c.center), w * 60 + (1 - w) * 68, accuracy: 1e-9)
+        XCTAssertEqual(c.supportDays, 10)
+        XCTAssertEqual(c.parentSupportDays, 20)
+        XCTAssertTrue(c.reasons.contains(Ref.pooledTowardParent))
+        XCTAssertTrue(c.reasons.contains(Ref.postureStratum))
+        XCTAssertTrue(c.reasons.contains(PC.PostureEvidence.likelihoodNotConfirmed))
+        XCTAssertNil(T.view(cs, .rolling, series: Self.recumbent), "strata get the conditioned view only")
+        // A child with no history of its own: the parent alone, contribution 1, stated.
+        let none = try XCTUnwrap(T.view(T.compare([today], parent).comparisons, .conditioned, series: Self.recumbent))
+        XCTAssertEqual(none.pooledContribution, 1)
+        XCTAssertEqual(try XCTUnwrap(none.center), 68, accuracy: 1e-9)
+        XCTAssertTrue(none.reasons.contains(Ref.contextUnsupportedParentOnly))
+        // Causal partial day: a posture stratum covers only the hours seen so far, like its parent: no distance.
+        let live = T.compare([T.value(T.day, 61, series: Self.recumbent, mode: .causalLive)],
+                             T.history(20, series: Self.parent, mode: .causalLive) { _ in 68 }
+                                + T.history(10, series: Self.recumbent, mode: .causalLive) { _ in 60 }).comparisons
+        let l = try XCTUnwrap(T.view(live, .conditioned, series: Self.recumbent))
+        XCTAssertNil(l.robustZ)
+        XCTAssertTrue(l.reasons.contains(Ref.partialDayComposition))
+        XCTAssertNotNil(l.center)
+    }
+}
