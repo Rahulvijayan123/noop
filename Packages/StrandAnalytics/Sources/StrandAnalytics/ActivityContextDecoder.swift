@@ -128,6 +128,8 @@ struct DecoderTracking: Codable, Equatable {
     var noPulseStillS: Int?
     /// The last second inside the night's in-bed window: a burst just after it is getting up.
     var lastInBedTs: Int?
+    /// A postural event whose excursion ended before any published state showed it: shown next.
+    var showNext: ActivityTransitionEvent?
 }
 
 // MARK: - Layout of the Erlang-expanded state space
@@ -222,6 +224,8 @@ public struct ActivityContextDecoder: Sendable {
 
     /// A transition mode needs at least this much posterior mass to be flagged as an event.
     private static let posturalEventFloor = 0.20
+    /// Seconds a postural event may settle its direction before a published state shows it (hsmm-1.8).
+    static let posturalEventSettleS = 3
 
     /// Gaps longer than this (and up to `gapResetS`) flatten the belief toward the re-acquisition prior in
     /// proportion to their length: a posture is not carried with confidence across a 30–120 s dropout (D2-13).
@@ -855,7 +859,12 @@ public struct ActivityContextDecoder: Sendable {
                 tracking.activePostural = active
                 if let i { tracking.events[i].probability = mass }
             }
-            if transitionTotal < Self.posturalEventFloor / 2 { tracking.activePostural = nil }
+            if transitionTotal < Self.posturalEventFloor / 2 {
+                if active.shown != true, let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
+                    tracking.showNext = tracking.events[i]
+                }
+                tracking.activePostural = nil
+            }
         } else if let hit = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
                   // hsmm-1.8: the floor is on the transition modes' summed mass. A burst whose direction is
                   // still open now spreads over the kinds, and a change of position must not vanish because no
@@ -984,11 +993,28 @@ public struct ActivityContextDecoder: Sendable {
                                          confidence: confidence)
         let label = applyHysteresis(raw: raw, ts: ts)
 
-        // The event field shows only fresh events.
-        let fresh = tracking.events.last { ts - $0.ts <= config.eventHoldS && ts >= $0.ts }
-        if let fresh, let active = tracking.activePostural, fresh.ts == active.ts, fresh.kind == active.kind {
-            tracking.activePostural?.shown = true
+        // The event field shows only fresh events. hsmm-1.8: a postural event is held back for its first
+        // `posturalEventSettleS` seconds (its direction may still resolve), and then shown even if a later event
+        // arrived meanwhile, so the one-event-per-state field never drops a change of position.
+        let hold = config.eventHoldS
+        let isFresh = { (e: ActivityTransitionEvent) in ts - e.ts <= hold && ts >= e.ts }
+        var fresh: ActivityTransitionEvent?
+        var decided = false
+        if let next = tracking.showNext {
+            tracking.showNext = nil
+            if isFresh(next) { fresh = next; decided = true }
         }
+        if !decided, let active = tracking.activePostural, active.shown != true {
+            let isActive = { (e: ActivityTransitionEvent) in e.kind == active.kind && e.ts == active.ts }
+            if ts - active.ts >= Self.posturalEventSettleS, let event = tracking.events.last(where: isActive) {
+                fresh = event
+                tracking.activePostural?.shown = true
+            } else {
+                fresh = tracking.events.last { isFresh($0) && !isActive($0) }
+            }
+            decided = true
+        }
+        if !decided { fresh = tracking.events.last(where: isFresh) }
 
         let wearValidity: Double
         switch tracking.lastWear {

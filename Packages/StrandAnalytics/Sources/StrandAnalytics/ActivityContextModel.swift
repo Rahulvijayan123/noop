@@ -603,12 +603,12 @@ enum ActivityContextModel {
         /// leaves the published heads hedged; a shift whose direction the forearm shows, or a learned head,
         /// may commit. The seated / upright total is capped again by the decoder (higher with an adopted
         /// personal profile).
-        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(8.0), log(25.0), log(4.0), log(200.0)]
+        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(8.0), log(25.0), log(12.0), log(200.0)]
         /// The lower (upright / not recumbent) side of each cap, where it differs. A stand-up's direction
         /// carries less than a sit-down's: in free living standing still is about a tenth of still time and
         /// most stand-ups lead straight into walking, so "standing" after a stand-up is committed at a lower
         /// confidence than "sitting" after a sit-down.
-        static let lowerCaps: [Double] = [log(1.6), log(1.4), log(3.0), log(8.0), log(25.0), log(4.0), 0]
+        static let lowerCaps: [Double] = [log(1.6), log(1.4), log(3.0), log(8.0), log(25.0), log(12.0), 0]
         /// A shift is one event spread over a few seconds of tempered evidence: its direction is remembered at
         /// this gain so that one clear, direction-resolved change of posture can carry the split on its own
         /// (FORTH: 33 of 33 detected sit / stand shifts in the right direction once the forearm axis is read).
@@ -1122,9 +1122,10 @@ enum ActivityContextModel {
         // stillness or gait without it, so the unknown mode earns a standing bonus.
         if !hasMotion { logL[unknownIdx] += wMotion * log(1 / uMotion) * 0.8 }
         if channels < minChannels { logL[unknownIdx] += Double(minChannels - channels) * missingChannelBonus }
-        // A strap stiller than a resting wrist with no pulse is no evidence anyone is there (D1-05).
+        // A strap stiller than a resting wrist with no pulse is no evidence anyone is there (D1-05): the unknown
+        // mode's bonus outweighs what the still channels say for a seated wearer (about 4 nats per second).
         if f.noPulseStillS > noPulseStillOnsetS {
-            logL[unknownIdx] += 2.0 * min(1, Double(f.noPulseStillS - noPulseStillOnsetS) / 180)
+            logL[unknownIdx] += 8.0 * min(1, Double(f.noPulseStillS - noPulseStillOnsetS) / 180)
         }
 
         // Posture evidence (before temperature): seated over upright from every channel that tells them apart
