@@ -111,7 +111,7 @@ struct CoupledView: View {
     /// scored day today's own key wins, so Coupled's pill can't diverge from Today's onto yesterday (#787).
     private var readinessLevel: ReadinessEngine.Level {
         let anchor = (isCarryingRecovery ? carriedRecoveryDay?.day : day?.day) ?? Repository.logicalDayKey(Date())
-        return ReadinessEngine.evaluate(days: repo.days, today: anchor).level
+        return ReadinessEngine.evaluate(days: repo.days, today: anchor, context: .app()).level
     }
 
     var body: some View {
@@ -534,7 +534,9 @@ struct CoupledView: View {
     private func chargeBreakdown() -> (drivers: [ChargeDriver], confidence: ScoreConfidence)? {
         guard let row = breakdownRow else { return nil }
         return ChargeBreakdownWiring.breakdown(days: repo.days, row: row, sleepPerfPercent: sleepPerformance,
-                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch())
+                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch(),
+                                               recoveryBaselineEpoch: Baselines.recoveryBaselineEpoch(),
+                                               dayLogs: BaselineStandard.loadDayLogs())
     }
 
     @ViewBuilder

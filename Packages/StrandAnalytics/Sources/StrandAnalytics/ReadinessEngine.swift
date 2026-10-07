@@ -80,7 +80,7 @@ public enum ReadinessEngine {
 
     // MARK: Tunables (named so the thresholds are auditable)
 
-    private static let baselineWindow = 30   // days for HRV / RHR / RR baselines
+    private static let baselineWindow = 30   // CALENDAR days for HRV / RHR / RR baselines (BaselineStandard rule 7)
     private static let minBaseline    = 7    // need at least this many baseline nights
     private static let acuteWindow    = 7
     private static let chronicWindow  = 28
@@ -90,7 +90,12 @@ public enum ReadinessEngine {
 
     /// Evaluate readiness from daily metrics. `days` may be in any order; the most recent day is
     /// treated as "today" unless `today` (a YYYY-MM-DD string) is given.
-    public static func evaluate(days: [DailyMetric], today: String? = nil) -> Readiness {
+    ///
+    /// `context` (BaselineStandard): confounded days and SDNN days stay out of the baselines, days before the
+    /// metric's reference epoch (Recalibrate / device era) are dropped and a regime change ends the window.
+    /// The default context knows none of these, so a context-free caller only gets the calendar windows.
+    public static func evaluate(days: [DailyMetric], today: String? = nil,
+                                context: BaselineStandard.Context = BaselineStandard.Context()) -> Readiness {
         // v7.0.2 perf (#707): `evaluate` SORTS the entire daily history and walks trailing windows every
         // call, and it is read from a SwiftUI computed property — so a `body` re-evaluation (the iOS twin of
         // a Compose recompose) re-runs the full-history sort on each ~1 Hz live-HR tick. The Today view also
@@ -98,11 +103,30 @@ public enum ReadinessEngine {
         // every OTHER caller and the first/uncached read. Key = `today` + a fingerprint over ONLY the row
         // fields the synthesis reads (day + avgHrv/restingHr/respRateBpm/strain), so a new sync re-keys but a
         // cosmetic reorder does not. Result is a small `Readiness`; no row arrays are retained.
-        let key = ReadinessKey(today: today, rows: Self.rowsFingerprint(days))
-        return evaluateCache.value(key) { evaluateUncached(days: days, today: today) }
+        let key = ReadinessKey(today: today, rows: Self.rowsFingerprint(days),
+                               context: Self.contextFingerprint(days, context))
+        return evaluateCache.value(key) { evaluateUncached(days: days, today: today, context: context) }
     }
 
-    private struct ReadinessKey: Hashable { let today: String?; let rows: StreamFingerprint }
+    private struct ReadinessKey: Hashable {
+        let today: String?; let rows: StreamFingerprint; let context: Int
+    }
+
+    /// The context facts that can change a read: which of these rows are excluded per metric, plus the
+    /// epochs and regime tags. Order-independent like `rowsFingerprint`.
+    private static func contextFingerprint(_ days: [DailyMetric], _ context: BaselineStandard.Context) -> Int {
+        var h = Hasher()
+        var excluded = 0
+        for d in days {
+            if context.excludedFromReference(d.day, metric: .restingHR) { excluded ^= d.day.hashValue }
+            if context.excludedFromReference(d.day, metric: .hrvRmssd) { excluded ^= d.day.hashValue &* 31 }
+        }
+        h.combine(excluded)
+        for m in BaselineStandard.Metric.allCases { h.combine(context.epoch(m)) }
+        h.combine(context.regimeByDay.count)
+        for d in days { if let r = context.regime(of: d.day) { h.combine(d.day); h.combine(r) } }
+        return h.finalize()
+    }
     private static let evaluateCache = AnalyticsMemoCache<ReadinessKey, Readiness>(capacity: 16)
 
     /// Fingerprint the readiness-relevant columns of the daily rows without re-sorting or copying them.
@@ -126,7 +150,8 @@ public enum ReadinessEngine {
         return StreamFingerprint(count: days.count, firstTs: minDayHash, lastTs: maxDayHash, checksum: sum)
     }
 
-    private static func evaluateUncached(days: [DailyMetric], today: String?) -> Readiness {
+    private static func evaluateUncached(days: [DailyMetric], today: String?,
+                                         context: BaselineStandard.Context) -> Readiness {
         let sorted = days.sorted { $0.day < $1.day }
         // When an explicit `today` is given (the dashboard passes the device's real local day key), use
         // the row for THAT day and nothing else: a stale historical import has no row for today, so the
@@ -142,13 +167,32 @@ public enum ReadinessEngine {
                              signals: [], acwr: nil, monotony: nil)
         }
         let history = sorted.filter { $0.day < latest.day }   // everything before today
+        // BaselineStandard rule 7: the baseline window is the 30 CALENDAR days before today (was the last 30
+        // ROWS, which stretched over any wear gap). Rules 1/3/6: per metric, SDNN and confounded days, days
+        // before the reference epoch, and days of another device regime stay out.
+        let windowStart = BaselineStandard.shift(latest.day, by: -baselineWindow) ?? ""
+        let todayRegime = context.regime(of: latest.day)
+        func window(_ metric: BaselineStandard.Metric, _ pick: (DailyMetric) -> Double?) -> [Double] {
+            // A regime change inside the window ends it: only the days after the newest boundary count.
+            var out: [Double] = []
+            for d in history.reversed() where d.day >= windowStart {
+                if let r = todayRegime, let rd = context.regime(of: d.day), rd != r { break }
+                guard !context.preEpoch(d.day, metric: metric),
+                      !context.excludedFromReference(d.day, metric: metric), let v = pick(d) else { continue }
+                out.append(v)
+            }
+            return out.reversed()
+        }
+        let hrvWindow = window(.hrvRmssd) { $0.avgHrv }
+        let rhrWindow = window(.restingHR) { $0.restingHr.map(Double.init) }
 
         var signals: [Signal] = []
 
         // HRV readiness ------------------------------------------------------
+        // An SDNN night is not comparable with the RMSSD baseline (rule 1).
         let hrvSignal = zSignal(
-            value: latest.avgHrv,
-            baseline: history.suffix(baselineWindow).compactMap { $0.avgHrv },
+            value: context.comparable(latest.day, metric: .hrvRmssd) ? latest.avgHrv : nil,
+            baseline: hrvWindow,
             key: "hrv", label: "HRV",
             unit: "ms",
             decimals: 0,
@@ -164,7 +208,7 @@ public enum ReadinessEngine {
         // Resting-HR drift ---------------------------------------------------
         let rhrSignal = zSignal(
             value: latest.restingHr.map(Double.init),
-            baseline: history.suffix(baselineWindow).compactMap { $0.restingHr.map(Double.init) },
+            baseline: rhrWindow,
             key: "rhr", label: "Resting HR",
             unit: "bpm",
             decimals: 0,
@@ -181,11 +225,18 @@ public enum ReadinessEngine {
         // BOTH the latest value and the baseline mean to the plausible sleeping-RR band (8–25 bpm) and
         // use wider resp-only z thresholds (WATCH 1.5 / BAD 2.0) than HRV/RHR so a single noisy night
         // can't flip RUNDOWN. Mirrors the Kotlin reference (#78) for cross-platform parity.
+        //
+        // BaselineStandard (audit 2026-10-07): the baseline was a plain mean ± sample SD with no floor, so a
+        // steady sleeper's 0.05-bpm SD turned a 0.2-bpm night into "up vs baseline". It is now the robust
+        // median / 1.4826·MAD (small-sample factor) of the same 30 calendar days, floored at the standard
+        // 0.3 breaths/min, confounded days out.
         if let rr = latest.respRateBpm, SleepStager.respPlausibleRangeBpm.contains(rr) {
-            let base = history.suffix(baselineWindow).compactMap { $0.respRateBpm }
-            if base.count >= minBaseline, let m = mean(base),
-               SleepStager.respPlausibleRangeBpm.contains(m), let sd = sampleSD(base), sd > 0 {
-                let z = (rr - m) / sd
+            let series = BaselineStandard.series(history.filter { SleepStager.respPlausibleRangeBpm.contains($0.respRateBpm ?? -1) },
+                                                 day: \.day, value: \.respRateBpm)
+            let ref = BaselineStandard.windowReference(series, metric: .respiration, asOf: latest.day,
+                                                       windowDays: baselineWindow, context: context)
+            let m = ref.centerNative
+            if ref.n >= minBaseline, SleepStager.respPlausibleRangeBpm.contains(m), let z = ref.z(rr) {
                 if z >= 2.0 {
                     signals.append(Signal(key: "respRate", label: "Respiratory rate",
                         evidence: evidence(value: rr, baseline: m, unit: "rpm", decimals: 1),
@@ -201,19 +252,25 @@ public enum ReadinessEngine {
         }
 
         // Training Stress Balance (ACWR) + monotony --------------------------
-        let strainSeries = sorted.compactMap { $0.strain }
+        // BaselineStandard rules 2 and 7: acute = the 7 CALENDAR days ending today, chronic = the 28 ending
+        // today, and nothing after today (the row windows read the newest rows even when `today` was an
+        // earlier day, and stretched across wear gaps). The history gate is unchanged: ≥ 14 strain days.
+        let strainUpToToday = sorted.filter { $0.day <= latest.day }.compactMap { d in d.strain.map { (d.day, $0) } }
+        func strainWindow(_ n: Int) -> [Double] {
+            let start = BaselineStandard.shift(latest.day, by: -n) ?? ""
+            return strainUpToToday.filter { $0.0 > start }.map { $0.1 }
+        }
         var acwr: Double? = nil
         var monotony: Double? = nil
-        if strainSeries.count >= minChronic {
-            let acute = mean(Array(strainSeries.suffix(acuteWindow)))!
-            let chronic = mean(Array(strainSeries.suffix(chronicWindow)))!
+        if strainUpToToday.count >= minChronic,
+           let acute = mean(strainWindow(acuteWindow)), let chronic = mean(strainWindow(chronicWindow)) {
             if chronic > 0 {
                 let ratio = acute / chronic
                 acwr = ratio
                 signals.append(acwrSignal(ratio, acute: acute, chronic: chronic))
             }
             // Foster monotony over the last week of strain.
-            let week = Array(strainSeries.suffix(acuteWindow))
+            let week = strainWindow(acuteWindow)
             if week.count >= 4, let sd = sampleSD(week), sd > 0, let m = mean(week) {
                 let mono = m / sd
                 monotony = mono
@@ -231,7 +288,7 @@ public enum ReadinessEngine {
         // RD-confidence: surface how much history backs the read (HRV baseline density, the primary
         // readiness driver). A read off a 7-night baseline must not look as certain as one off the full
         // 30-night window. Insufficient reads carry .calibrating.
-        let hrvBaselineNights = history.suffix(baselineWindow).compactMap { $0.avgHrv }.count
+        let hrvBaselineNights = hrvWindow.count
         let confidence = ScoreConfidence.readiness(hasRead: level != .insufficient,
                                                    baselineNights: hrvBaselineNights,
                                                    fullWindow: baselineWindow)

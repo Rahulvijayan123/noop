@@ -47,23 +47,27 @@ public enum VitalBands {
     ///   - populationRange: the fixed typical-adult range used as the cold-start / stale fallback.
     ///   - cfg: nil disables the personal path entirely (SpO2 stays population-only — there is
     ///     no SpO2 `MetricCfg` and an absolute floor is meaningful regardless of personal history).
+    ///   - logScale: BaselineStandard rule 1 — fold and z-score on ln (HRV). `cfg` is then an ln-space config
+    ///     (`Baselines.readinessHRVLnCfg`); `populationRange` stays in native units.
     public static func band(value: Double?,
                             history: [Double?],
                             populationRange: ClosedRange<Double>,
-                            cfg: MetricCfg?) -> Result {
+                            cfg: MetricCfg?,
+                            logScale: Bool = false) -> Result {
         guard let value else { return Result(band: .noData, basis: .population, nights: 0) }
         guard let cfg else {
             return Result(band: populationRange.contains(value) ? .inRange : .outOfRange,
                           basis: .population, nights: 0)
         }
-        let state = Baselines.foldHistory(history, cfg: cfg)
+        func model(_ v: Double) -> Double? { logScale ? (v > 0 ? log(v) : nil) : v }
+        let state = Baselines.foldHistory(history.map { $0.flatMap(model) }, cfg: cfg)
         // Absolute-plausibility outer guard: a value outside the physiological bounds is
         // out-of-range no matter how wide the personal spread happens to be.
-        guard cfg.minVal <= value && value <= cfg.maxVal else {
+        guard let mv = model(value), cfg.minVal <= mv && mv <= cfg.maxVal else {
             return Result(band: .outOfRange, basis: .population, nights: state.nValid)
         }
         if state.trusted {   // >= 14 valid nights and not stale
-            let z = Baselines.deviation(value, state: state).z
+            let z = Baselines.deviation(mv, state: state).z
             return Result(band: abs(z) <= sigmaK ? .inRange : .outOfRange,
                           basis: .personal, nights: state.nValid)
         }

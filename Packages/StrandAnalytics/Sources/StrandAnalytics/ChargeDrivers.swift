@@ -126,7 +126,8 @@ extension RecoveryScorer {
                                      rhrBaseline: BaselineState?,
                                      respBaseline: BaselineState?,
                                      sleepPerf: Double?,
-                                     skinTempDev: Double? = nil) -> [ChargeDriver] {
+                                     skinTempDev: Double? = nil,
+                                     hrvScale: HRVScale = .ms) -> [ChargeDriver] {
 
         // No score => no real contributions to attribute (cold-start). recovery(...) enforces
         // the usable gate; mirror it so a nil headline never yields fabricated driver rows.
@@ -134,7 +135,20 @@ extension RecoveryScorer {
         // through recovery(...), so gating the scorer alone would emit an RHR row scored against the
         // synthetic midpoint while the headline excluded it. Normalised once here so every use below,
         // score and row alike, sees the same thing. Twin of the Kotlin `rhrB`.
-        let rhrB = rhrBaseline.flatMap { $0.usable ? $0 : nil }
+        let rhrB = usableOrNil(rhrBaseline)
+        // Audit 2026-10-07: the score drops an unusable respiration baseline, so the row must too.
+        let respBaseline = usableOrNil(respBaseline)
+        // The HRV baseline centre in milliseconds: neutral re-scores and the row's text read it, so an
+        // ln-scale baseline (BaselineStandard rule 1) displays and neutralises in ms exactly like a raw one.
+        let hrvBaselineMs = hrvScale.ms(hrvBaseline.baseline)
+        // Every re-score below goes through the BaselineState overload with the SAME scale.
+        func recovery(hrv: Double, rhr: Double, resp: Double?, hrvBaseline: BaselineState,
+                      rhrBaseline: BaselineState?, respBaseline: BaselineState?, sleepPerf: Double?,
+                      skinTempDev: Double?) -> Double? {
+            RecoveryScorer.recovery(hrv: hrv, rhr: rhr, resp: resp, hrvBaseline: hrvBaseline,
+                                    rhrBaseline: rhrBaseline, respBaseline: respBaseline, sleepPerf: sleepPerf,
+                                    skinTempDev: skinTempDev, hrvScale: hrvScale)
+        }
         guard let full = recovery(hrv: hrv, rhr: rhr, resp: resp,
                                   hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                   respBaseline: respBaseline, sleepPerf: sleepPerf,
@@ -164,13 +178,13 @@ extension RecoveryScorer {
         // low, decoupled resting HR)? Detection ONLY: the guard's easing is not applied, so deltaPoints
         // below is the full, unguarded HRV penalty. The verdict merely NAMES the detected pattern so the
         // UI can surface it while real firings accumulate. See the MARK header in RecoveryScorer.swift.
-        let hrvZFull = zScore(hrv, mean: hrvBaseline.baseline, spread: hrvBaseline.spread)
+        let hrvZFull = zScore(hrvScale.model(hrv), mean: hrvBaseline.baseline, spread: hrvBaseline.spread)
         let rhrZFull: Double? = rhrB.map { zScore($0.baseline, mean: rhr, spread: $0.spread) }
         let hrvSaturationDetected = parasympatheticSaturation(hrvZ: hrvZFull, rhrZ: rhrZFull).active
 
         // ── HRV (dominant driver; always present once the score exists) ──────────
         // Higher HRV vs baseline supports recovery. Neutral = HRV at the baseline mean.
-        let hrvPoints = points(recovery(hrv: hrvBaseline.baseline, rhr: rhr, resp: resp,
+        let hrvPoints = points(recovery(hrv: hrvBaselineMs, rhr: rhr, resp: resp,
                                         hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                         respBaseline: respBaseline, sleepPerf: sleepPerf,
                                         skinTempDev: skinTempDev))
@@ -178,8 +192,8 @@ extension RecoveryScorer {
             label: "Heart rate variability",
             deltaPoints: hrvPoints,
             valueText: "\(Int(hrv.rounded())) ms",
-            baselineText: "\(Int(hrvBaseline.baseline.rounded())) ms baseline",
-            verdict: hrvVerdict(value: hrv, baseline: hrvBaseline.baseline,
+            baselineText: "\(Int(hrvBaselineMs.rounded())) ms baseline",
+            verdict: hrvVerdict(value: hrv, baseline: hrvBaselineMs,
                                 deltaPoints: hrvPoints,
                                 saturationDetected: hrvSaturationDetected)))
 

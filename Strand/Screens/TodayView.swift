@@ -1074,7 +1074,9 @@ struct TodayView: View {
     private func chargeBreakdown() -> (drivers: [ChargeDriver], confidence: ScoreConfidence)? {
         guard let row = chargeBreakdownRow else { return nil }
         return ChargeBreakdownWiring.breakdown(days: repo.days, row: row, sleepPerfPercent: restScore,
-                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch())
+                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch(),
+                                               recoveryBaselineEpoch: Baselines.recoveryBaselineEpoch(),
+                                               dayLogs: BaselineStandard.loadDayLogs())
     }
 
     /// The night's relative skin-temp marker for the displayed row (A5), or nil. Surfaced verbatim from
@@ -1364,7 +1366,7 @@ struct TodayView: View {
         // key instead (the section header then stamps "Last night · <date>"). Honest: it's the real prior
         // read, not a fabricated today's, and today's own readiness wins the instant tonight is scored.
         let anchor = lastScoredRecoveryDay?.day ?? Repository.logicalDayKey(Date())
-        return ReadinessEngine.evaluate(days: repo.days, today: anchor)
+        return ReadinessEngine.evaluate(days: repo.days, today: anchor, context: .app())
     }
 
     private func computeCalibration() -> Int? {
@@ -3322,52 +3324,32 @@ struct TodayView: View {
         return lead + ". " + synthesisDetail(d)
     }
 
-    /// Today's HRV as a percentage above/below the learned baseline (mean of prior nights' avgHrv),
-    /// rounded to a whole percent. nil until there are enough banked HRV nights to form a stable
-    /// baseline (mirrors the recovery seed gate), the insight then falls back to the state word.
+    /// Today's HRV as a percentage above/below the learned baseline, rounded to a whole percent. nil until
+    /// there are enough banked HRV nights to form a stable baseline (mirrors the recovery seed gate), the
+    /// insight then falls back to the state word.
+    ///
+    /// BaselineStandard fix H (audit 2026-10-07): the baseline was the plain MEAN of every other row's
+    /// avgHrv (whole history, raw ms, any method, including rows AFTER a carried day). It is now
+    /// `PersonalUsual`: the ln median of the 28 calendar days strictly before the row's OWN day (so a carried
+    /// prior-day synthesis (#543) is compared with what came before it), RMSSD only, confounded and
+    /// pre-Recalibrate days out, at least 4 nights.
     private func hrvBaselineDeltaPct(_ d: DailyMetric?) -> Int? {
         guard let today = d?.avgHrv, today > 0 else { return nil }
-        // Baseline = mean of the prior nights' HRV, excluding the row being read so "vs baseline"
-        // compares it against the rest of history. Excludes the row's OWN day (not always the selected
-        // day) so a carried prior-day synthesis (#543) isn't compared against a baseline that includes
-        // itself. Needs the same seed depth recovery uses to be honest.
-        let excludeDay = d?.day ?? selectedDayKey
-        let prior = repo.days
-            .filter { $0.day != excludeDay }
-            .compactMap(\.avgHrv)
-            .filter { $0 > 0 }
-        return Self.hrvBaselineDeltaPct(today: today, priorHrvs: prior)
+        return PersonalUsual.hrvDeltaPercent(todayMs: today, day: d?.day ?? selectedDayKey, days: repo.days,
+                                             context: .app())
     }
 
-    /// Pure core of the HRV-vs-baseline delta: today's HRV against the mean of the prior nights' HRV,
-    /// rounded to a whole percent. nil until there are enough banked HRV nights to form a stable
-    /// baseline (mirrors the recovery seed gate), the insight then falls back to the state word.
+    /// Pure core of the HRV-vs-baseline delta when the prior nights are already in hand: today's HRV against
+    /// the ln median of the prior RMSSD values (`PersonalUsual`), rounded to a whole percent; nil below
+    /// `Baselines.minNightsSeed` values.
     ///
-    /// STOPGAP (#696): NOOP mixes HRV measurement methods on the shared `avgHrv` field,     /// strap/WHOOP-CSV HRV is RMSSD (~20-100 ms) while Apple-Health-imported HRV is SDNN
-    /// (~100-200 ms). With no method awareness, an SDNN reading (e.g. an Oura ring's 176 ms)
-    /// compared against an RMSSD baseline (~57 ms) yields a physiologically-impossible delta
-    /// (+209%) and renders the alarming "210% over baseline" headline. Genuine night-to-night
-    /// HRV variation essentially never exceeds ~±80-100%, so a magnitude beyond that is almost
-    /// always a units/method artifact rather than a real swing. We suppress the misleading
-    /// percentage comparison (return nil → callers fall back to the qualitative recovery-state
-    /// word) when the delta is implausibly large. The raw HRV tile value stays honest; only the
-    /// "X% over baseline" comparison is hidden. Proper fix = tag HRV provenance/method per row
-    /// and isolate baselines (separate follow-up).
+    /// STOPGAP (#696), kept inside `PersonalUsual.percent`: NOOP has mixed HRV methods on the shared `avgHrv`
+    /// field (strap/WHOOP-CSV RMSSD ~20-100 ms vs Apple-Health SDNN ~100-200 ms). BaselineStandard now keeps
+    /// SDNN days out of RMSSD baselines when a caller can tag them, and the guard still drops a delta outside
+    /// [−50 %, +100 %] (a real night-to-night move never doubles or halves HRV), so an untagged method
+    /// mismatch never renders "210% over baseline".
     static func hrvBaselineDeltaPct(today: Double, priorHrvs prior: [Double]) -> Int? {
-        guard today > 0 else { return nil }
-        guard prior.count >= Baselines.minNightsSeed else { return nil }
-        let baseline = prior.reduce(0, +) / Double(prior.count)
-        guard baseline > 0 else { return nil }
-        let pct = ((today - baseline) / baseline * 100).rounded()
-        // Stopgap method-mismatch guard (#696): a real night-to-night HRV move never doubles or halves
-        // the value, so a reading outside [0.5x, 2x] of the baseline is almost always a units/method
-        // artifact (SDNN reads ~2-3x RMSSD) rather than a genuine swing. Drop the comparison in that case
-        // so the alarming "X% over/under baseline" headline never renders (the insight falls back to the
-        // qualitative recovery word). Gated on the RATIO, not abs(pct): the percentage is bounded at -100%
-        // on the low side but unbounded high, so a symmetric abs() threshold can't catch a near-zero
-        // reading. Proper fix tags HRV provenance/method per row and isolates baselines (follow-up).
-        guard today <= 2.0 * baseline, today >= 0.5 * baseline else { return nil }
-        return Int(pct)
+        PersonalUsual.hrvDeltaPercent(todayMs: today, priorRmssdMs: prior)
     }
 
     /// The three score rings over a scenic hero background, WHOOP-style, with the Charge (recovery)
