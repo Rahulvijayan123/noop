@@ -55,11 +55,36 @@ Adding a source (labs, medications, EHR, genomics, conversation memory) = a load
 ## Sandbox
 
 The whole Prime process tree is confined (`sandbox.py`), because model code can ask the Prime host to act for
-it: no network except the job's LLM proxy, no writes outside the run directory, no reads of secrets, an
-environment without secrets. Linux uses bubblewrap (`apt install bubblewrap`; every namespace unshared, a
-forwarder turns the proxy's Unix socket into the loopback port Prime calls); macOS uses `sandbox-exec`.
-`nara-metric-insight self-test` proves it on the host and runs as `ExecStartPre`. `NARA_SANDBOX=none` exists
-only for protocol tests and must be set explicitly.
+it: no network except the job's LLM proxy, no writes outside the run directory (and none to the job's settings,
+provider config, auth file, curated harness or cwd), no reads of secrets, an environment without secrets. The
+provider key never enters the tree: Prime gets a per-job token for the loopback LLM proxy, which pins the model,
+caps tokens and requests, and forwards an allowlist of request fields only. After each job the whole process tree
+is killed and the run directory deleted; leftovers from a crash are purged at start.
+
+- Linux (production): bubblewrap (`apt install bubblewrap`), every namespace unshared, `--cap-drop ALL`, its own
+  PID namespace that dies with the job; a forwarder turns the proxy's Unix socket into the loopback port Prime
+  calls. Nothing of the host (sockets, /run, other processes, the worker's state) is visible inside.
+- macOS (development only, `NARA_SANDBOX=macos` must be set explicitly): `sandbox-exec`. It cannot hide other
+  processes' launch environments or filter Unix-domain sockets reliably; never run it with real users' data.
+- `nara-metric-insight self-test` proves the confinement on the host (internet, the real credentials directory,
+  the worker's state dir, writes outside, the environment) and runs as `ExecStartPre`.
+- `NARA_SANDBOX=none` exists only for protocol tests and must be set explicitly.
+
+## What is published
+
+`validate.py` is the gate: a fixed shape; NFKC text with no invisible or non-Latin characters; none of the app's
+forbidden terms (kept identical to `PhysiologyContextWording.forbiddenTerms`, inflections included) and no causal,
+diagnostic or certainty wording; absolute dates only; every number checked by unit against the tool results the
+model received (a value "on Oct 6" must be Oct 6's value, a direction word must match the sign of the change, zero
+is never a measurement, number words and clock times count); "estimated" wherever a person's estimated signal is
+stated; citations only from this job's retrieval, each backing an interpretation of something present. One retry
+with the reasons, then the job fails (backoff, dead letter at 3). The app re-checks wording before rendering.
+
+## Changing the analysis
+
+Cached analyses are keyed by their inputs, not by this code. When the prompt, the tools, the evidence or the
+validator change what would be published, bump `internal.metric_insight_version()` in a new migration: every
+cached analysis then counts as changed and is redone on the next visit (within the daily bound).
 
 ## Configuration
 
@@ -71,10 +96,13 @@ environment: `db_url` (a direct Postgres URL; the role must be able to `SET ROLE
 
 ```
 uv sync
-uv run pytest                       # unit tests (+ PostgreSQL tests when initdb is available)
+uv run pytest                       # unit, plumbing, PostgreSQL and end-to-end tests (34)
 NARA_TEST_PRIME_BIN=... NARA_TEST_KERNEL_PYTHON=... uv run pytest -m prime   # end to end with Prime Agent
 ```
 
 The PostgreSQL tests build a throwaway cluster from the full migration chain (`/opt/homebrew/bin` or
-`NARA_TEST_PG_BIN`). The end-to-end test drives a real `prime-agent` against a scripted OpenAI-compatible stub
-(`tests/stub_llm.py`), so it needs no API key and sends nothing anywhere.
+`NARA_TEST_PG_BIN`). The end-to-end test drives a real, sandboxed `prime-agent` against a scripted
+OpenAI-compatible stub (`tests/stub_llm.py`), so it needs no API key and sends nothing anywhere; its first tool
+cell also probes isolation from inside the kernel (cross-user call refused, no internet, no secret in the
+environment, the global harness read-only). `scripts/smoke_real_model.py` runs one analysis with a real provider
+on invented data.
