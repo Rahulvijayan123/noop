@@ -209,6 +209,10 @@ struct ActivityLane {
         var eldernetRowsPruned = 0
         var eldernetPruneFailures = 0
         var lastElderNetPruneError: String?
+        /// Days re-queued because another decoder / ontology / feature schema wrote them, and failed calls.
+        var versionRederived = 0
+        var versionReconcileFailures = 0
+        var lastVersionReconcileError: String?
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -232,6 +236,12 @@ struct ActivityLane {
     static let streamBackfillPerCall = 25
     static let streamMinRebuildInterval = "10 minutes"
     static let streamEnqueueSQL = "SELECT public.enqueue_activity_stream_days($1::interval,$2::integer,$3::interval)::text"
+    /// Version registration and the bounded re-derivation of days another decoder wrote. Raw-IMU days are
+    /// expensive (download + inference), so fewer of them are re-derived at a time than stream days.
+    static let versionReconcileSQL =
+        "SELECT public.reconcile_activity_context_versions($1::text,$2::jsonb,$3::integer)::text"
+    static let versionReconcileImuLimit = 2
+    static let versionReconcileStreamLimit = 8
     /// A stream-day source that errors at claim time (the migration is not applied yet, say) is left
     /// alone for this long, without affecting the raw-IMU path.
     var streamBackoffUntil: Date?
@@ -385,6 +395,14 @@ struct ActivityLane {
                Date().timeIntervalSince(last) < Self.reconcileIntervalSeconds {
             } else {
                 lastReconcileAt = Date()
+                // Register what this build runs (the HART model / preprocessing the service reported) before
+                // the reconcile folds it into the day fingerprints, then re-derive a few stale days.
+                let resolved = Self.resolvedVersions(reportedModel: service.reportedModelVersion,
+                                                     reportedPreprocessing: service.reportedPreprocessingVersion)
+                reconcileVersions(algorithm: "hart-activity-1",
+                                  versions: ActivityContextDays.lanesVersions(model: resolved.model,
+                                                                              preprocessing: resolved.preprocessing),
+                                  limit: Self.versionReconcileImuLimit)
                 _ = try? db.callFunctionForJSON(Self.reconcileSQL, [Self.reconcileLookback])
             }
             do {
@@ -483,6 +501,8 @@ struct ActivityLane {
         if let last = lastStreamEnqueueAt,
            Date().timeIntervalSince(last) < Self.streamEnqueueIntervalSeconds { return }
         lastStreamEnqueueAt = Date()
+        reconcileVersions(algorithm: ActivityContextDays.streamsAlgorithmVersion,
+                          versions: ActivityContextDays.lanesVersions(), limit: Self.versionReconcileStreamLimit)
         do {
             let out = try db.callFunctionForJSON(
                 Self.streamEnqueueSQL,
@@ -492,6 +512,28 @@ struct ActivityLane {
             record(e)
         } catch {
             noteStreamDayFailure(ActivityContextDays.safeReason(error))
+        }
+    }
+
+    /// Register this build's versions for a lane and re-derive, bounded, the days another decoder wrote
+    /// (`reconcile_activity_context_versions`, audit D5-03). Best effort: a database without the migration, or a
+    /// transient failure, is counted and retried on the next interval; claiming is never held back.
+    mutating func reconcileVersions(algorithm: String, versions: [String: String], limit: Int) {
+        do {
+            let out = try db.callFunctionForJSON(Self.versionReconcileSQL,
+                                                 [algorithm, try ActivityContextDays.versionsJSON(versions), String(limit)])
+            stats.versionRederived += Int(out ?? "") ?? 0
+            stats.lastVersionReconcileError = nil
+        } catch let e as PostgresClient.Error where e.kind == .connectionLost {
+            record(e)
+        } catch {
+            stats.versionReconcileFailures += 1
+            let why = ActivityContextDays.safeReason(error)
+            if stats.lastVersionReconcileError != why {
+                FileHandle.standardError.write(
+                    ("frwhoop-worker: activity version reconcile (\(algorithm)): \(why)\n").data(using: .utf8)!)
+            }
+            stats.lastVersionReconcileError = why
         }
     }
 
@@ -561,13 +603,14 @@ struct ActivityLane {
                                         dayStart: dayBounds.start, dayEnd: dayBounds.end)
         let streams = try ActivityContextDays.loadStreams(
             db: db, userId: job.userId, deviceId: job.deviceId,
-            dayStart: dayBounds.start, dayEnd: dayBounds.end)
+            dayStart: dayBounds.start, dayEnd: dayBounds.end, lookback: true)
         let encoder = try ActivityEncoderWindowsStore.load(db: db, userId: job.userId, deviceId: job.deviceId,
                                                            day: job.day)
+        let reference = ActivityContextDays.loadDecoderReference(db: db, userId: job.userId, day: job.day)
         let built = try ActivityContextDays.buildStreamDay(
             day: job.day, dayBounds: dayBounds, streams: streams,
             sleep: ActivityContextDays.asleepSpans(nights), inBed: nights.map { (start: $0.start, end: $0.end) },
-            exercise: exercise, now: Int(Date().timeIntervalSince1970), encoder: encoder)
+            exercise: exercise, now: Int(Date().timeIntervalSince1970), encoder: encoder, reference: reference)
         guard try renewLease(job: job) else {
             throw PostgresClient.Error(message: "activity lease lost before the stream day completion",
                                        sqlstate: "55000", kind: .stale)
@@ -1262,6 +1305,10 @@ struct ActivityLane {
         var built: ActivityContextDays.Built?
         var input: ActivityContextTrackInput?
         var generatedAt: Int
+        /// The decoder config the published document was decoded with (the wearer's reference as of the day)
+        /// and the lookback input that warmed it up, so a comparison decode can start from the same place.
+        var config: ActivityDecoderConfig = ActivityDecoderConfig()
+        var lookback: ActivityContextTrackInput? = nil
     }
 
     mutating func buildContextDayAndInput(
@@ -1282,25 +1329,39 @@ struct ActivityLane {
                 throw PostgresClient.Error(message: "activity lease lost before the context decode",
                                            sqlstate: "55000", kind: .stale)
             }
-            let streams = try ActivityContextDays.loadStreams(
+            // The half hour before the day comes along to warm the decoder up (audit D2-11).
+            let loaded = try ActivityContextDays.loadStreams(
                 db: db, userId: job.userId, deviceId: job.deviceId,
-                dayStart: dayBounds.start, dayEnd: dayBounds.end)
+                dayStart: dayBounds.start, dayEnd: dayBounds.end, lookback: true)
+            let (streams, before) = ActivityContextDays.split(loaded, at: dayBounds.start)
             let now = Int(Date().timeIntervalSince1970)
+            // A finished day's waking hours are awake, exactly as the stream day decodes them (audit D1-02).
+            let known = ActivityContextDays.sleepKnown(now: now, dayEnd: dayBounds.end)
             let input = ActivityContextDays.trackInput(
                 windows: windows, streams: streams, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
-                // A finished day's waking hours are awake, exactly as the stream day decodes them (audit D1-02).
-                sleepKnownOutsideSessions: ActivityContextDays.sleepKnown(now: now, dayEnd: dayBounds.end),
+                sleepKnownOutsideSessions: known,
                 encoderVersion: versions.model,
                 transitionVersion: transitionVersion,
                 transitionPreprocessingVersion: versions.preprocessing,
                 gaitWindows: gaitWindows)
+            let lookback = ActivityContextDays.lookbackInput(
+                windows: windows, streams: before, sleep: asleep, inBed: inBed, exercise: exercise,
+                dayStart: dayBounds.start, sleepKnownOutsideSessions: known, encoderVersion: versions.model,
+                transitionVersion: transitionVersion, transitionPreprocessingVersion: versions.preprocessing,
+                gaitWindows: gaitWindows)
+            // The wearer's heart-rate reference as of the day, the way the phone personalizes its decode
+            // (audit D1-01 / D5-12), recorded in the document.
+            let reference = ActivityContextDays.loadDecoderReference(db: db, userId: job.userId, day: job.day)
             builtInput = input
             generatedAt = now
             let built = try ActivityContextDays.build(
                 input: input, day: job.day, modelVersion: versions.model,
-                preprocessingVersion: versions.preprocessing, generatedAt: now)
-            return ContextDayBuild(built: built, input: input, generatedAt: now)
+                preprocessingVersion: versions.preprocessing, generatedAt: now,
+                config: reference.config, provenance: reference.provenance(gaitWindows: gaitWindows.count),
+                lookback: lookback)
+            return ContextDayBuild(built: built, input: input, generatedAt: now, config: reference.config,
+                                   lookback: lookback)
         } catch let e as PostgresClient.Error where e.kind == .connectionLost || e.kind == .stale {
             throw e
         } catch {
