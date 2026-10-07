@@ -49,7 +49,13 @@ enum ActivityImuCapture {
         defaults.object(forKey: leanRawCaptureKey) == nil ? true : defaults.bool(forKey: leanRawCaptureKey)
     }
 
-    /// The writes that make a raw session lean, in order. Revision-1 boolean bodies `[1, 0]`.
+    /// How long the IMU-only arm (105 + 106, no raw start) has to produce a live IMU frame before the
+    /// capture falls back to the shared raw start for the rest of the process.
+    static let imuOnlyVerifySeconds: TimeInterval = 6
+
+    /// The OFF writes sent after a shared raw start, in order. Revision-1 boolean bodies `[1, 0]`. On a 5/MG
+    /// the strap acknowledges 107 and 105 but keeps banking while the raw start holds its own request, so
+    /// what these still buy there is 108: no live optical stream that nothing reads.
     static let leanRawCaptureCommands: [(command: WhoopCommand, payload: [UInt8])] = [
         (.enableOpticalData, [0x01, 0x00]),   // 107 optical session saving off
         (.toggleOpticalLive, [0x01, 0x00]),   // 108 optical live transport off

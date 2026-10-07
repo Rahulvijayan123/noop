@@ -2374,9 +2374,67 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// True only while `stopUnexpectedRealtimeImu` is issuing its two stop writes, so `send()` admits them.
     private var imuFailSafeStopInFlight = false
-    /// True only while `reconcileActivityImu` is issuing the lean raw-capture OFF writes (105/107/108).
+    /// True only while the activity capture is issuing its lean writes (105/107/108), so `send()` admits them.
     private var leanRawCaptureInFlight = false
     private var leanRawCaptureLogged = false
+    /// When the last LIVE (non-offload) raw-IMU frame arrived; the IMU-only arm is verified against it.
+    private var lastLiveImuFrameAt: Date?
+    /// The IMU-only arm awaiting verification, keyed by when it was sent.
+    private var imuOnlyArmPendingSince: Date?
+    /// Set when an IMU-only arm produced no live IMU: this process falls back to the shared raw start.
+    private var imuOnlyArmFailed = false
+    private var imuOnlyArmVerifiedLogged = false
+
+    /// Shared raw start (81) + live IMU (106): the hardware-verified arm. Raw collection holds its own
+    /// request, so the strap banks BOTH raw optical (v20) and raw IMU (v21) to flash whatever per-sensor
+    /// saving says (confirmed on a 5/MG 2026-10-07: 107/105 off were acknowledged and banking continued).
+    /// Live optical (108) is still switched off, since nothing reads it.
+    private func armSharedRaw() {
+        send(.startRawData, payload: [0x01], writeType: .withResponse)
+        send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+        if ActivityImuCapture.leanRawCapture() {
+            leanRawCaptureInFlight = true
+            for w in ActivityImuCapture.leanRawCaptureCommands {
+                send(w.command, payload: w.payload, writeType: .withResponse)
+            }
+            leanRawCaptureInFlight = false
+        }
+    }
+
+    /// IMU-only arm: the per-sensor IMU collection request (105 on) + live IMU (106), with NO shared raw
+    /// start, so optical collection is never requested and its 2140 B per second never reaches flash. The
+    /// IMU itself is still banked (105 is collection-with-saving), which is the gap-filler for link drops.
+    /// Unproven on hardware, so it verifies itself: no live IMU frame within `imuOnlyVerifySeconds` and this
+    /// process falls back to `armSharedRaw` for good.
+    private func armImuOnly(now: Date) {
+        leanRawCaptureInFlight = true
+        send(.toggleIMUSaving, payload: [0x01, 0x01], writeType: .withResponse)
+        leanRawCaptureInFlight = false
+        send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+        if !leanRawCaptureLogged {
+            leanRawCaptureLogged = true
+            log("Activity motion: IMU-only arm (105 IMU collection + 106 live IMU, no raw start) so the strap does not collect raw optical")
+        }
+        imuOnlyArmPendingSince = now
+        DispatchQueue.main.asyncAfter(deadline: .now() + ActivityImuCapture.imuOnlyVerifySeconds) { [weak self] in
+            self?.verifyImuOnlyArm(armedAt: now)
+        }
+    }
+
+    private func verifyImuOnlyArm(armedAt: Date) {
+        guard imuOnlyArmPendingSince == armedAt, activityImuInFlight, state.connected else { return }
+        imuOnlyArmPendingSince = nil
+        if let last = lastLiveImuFrameAt, last >= armedAt {
+            if !imuOnlyArmVerifiedLogged {
+                imuOnlyArmVerifiedLogged = true
+                log("Activity motion: IMU-only arm verified - live IMU is flowing without the raw start")
+            }
+            return
+        }
+        imuOnlyArmFailed = true
+        log("Activity motion: IMU-only arm produced no live IMU in \(Int(ActivityImuCapture.imuOnlyVerifySeconds))s - falling back to the raw start (81) for this session")
+        armSharedRaw()
+    }
 
     /// Stop a realtime IMU producer left armed after a crash, lost stop write, or another client.
     private func stopUnexpectedRealtimeImu(_ frame: [UInt8], isOffload: Bool, now: Date = Date()) {
@@ -2439,27 +2497,24 @@ public final class BLEManager: NSObject, ObservableObject {
         if want && !activityImuInFlight {
             // Same hardware-verified arm as a Raw Data session: START_RAW_DATA, then the IMU selector.
             activityImuInFlight = true
-            send(.startRawData, payload: [0x01], writeType: .withResponse)
-            send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
-            if ActivityImuCapture.leanRawCapture() {
-                // Keep the live IMU the activity models read; stop the strap banking raw optical + IMU to
-                // flash and streaming optical nobody reads (see `ActivityImuCapture.leanRawCapture`).
-                leanRawCaptureInFlight = true
-                for w in ActivityImuCapture.leanRawCaptureCommands {
-                    send(w.command, payload: w.payload, writeType: .withResponse)
-                }
-                leanRawCaptureInFlight = false
-                if !leanRawCaptureLogged {
-                    leanRawCaptureLogged = true
-                    log("Activity motion: lean raw capture - optical saving off (107), optical live off (108), IMU saving off (105); live IMU stays on")
-                }
+            if ActivityImuCapture.leanRawCapture() && !imuOnlyArmFailed {
+                armImuOnly(now: now)
+            } else {
+                armSharedRaw()
             }
         } else if !want && activityImuInFlight {
             // Stop while the flag still admits the writes, then release it.
             if !UserDefaults.standard.bool(forKey: "enableRawCapture") {
                 send(.stopRawData, payload: [0x01], writeType: .withResponse)
                 send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
+                if ActivityImuCapture.leanRawCapture() {
+                    // 82 clears the per-sensor requests too; this makes the IMU-only arm's own request explicit.
+                    leanRawCaptureInFlight = true
+                    send(.toggleIMUSaving, payload: [0x01, 0x00], writeType: .withResponse)
+                    leanRawCaptureInFlight = false
+                }
             }
+            imuOnlyArmPendingSince = nil
             activityImuInFlight = false
             rawCaptureStoppedAt = now
         }
@@ -2561,6 +2616,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 || (leanRawCaptureInFlight && payload == [0x01, 0x00]
                     && (command == .enableOpticalData || command == .toggleOpticalLive
                         || command == .toggleIMUSaving))
+                || (leanRawCaptureInFlight && command == .toggleIMUSaving && payload == [0x01, 0x01])
                 // The raw-IMU fail-safe's STOP only (never a start): see `stopUnexpectedRealtimeImu`.
                 || (imuFailSafeStopInFlight && (command == .stopRawData
                     || (command == .toggleIMUMode && payload.last == 0x00)))
@@ -7893,6 +7949,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     // append; the store gates on the exact 1244-byte shape, so this is a no-op for any
                     // non-IMU frame). Mirror of Android's `recordGroundTruthImuFrame`
                     // (WhoopBleClient.kt:8019), which also records every completed live frame.
+                    if !isOffload, Whoop5RawImu.rawColumns(frame) != nil { lastLiveImuFrameAt = Date() }
                     collector?.recordGroundTruthImu(frame)
                     // NOTE: we deliberately do NOT feed live 5/MG REALTIME_DATA into the Collector's
                     // full ingest (HR/RR ingestion) here — the rationale above stands: for a 5/MG the
