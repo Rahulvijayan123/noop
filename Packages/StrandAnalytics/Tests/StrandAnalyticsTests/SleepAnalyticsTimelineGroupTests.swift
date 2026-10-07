@@ -345,8 +345,18 @@ final class SleepAnalyticsTimelineGroupTests: XCTestCase {
             deviceFamily: .whoop5, stageSourceVersion: "import", inputRevision: 1)
         let timeline = SleepAnalyticsV1.normalize(input: input, config: .v1)
         let c = SleepAnalyticsV1.continuityGroup(timeline: timeline, input: input, config: .v1)
-        XCTAssertEqual(c.quality.status, .unavailable)
-        XCTAssertEqual(c.observedAsleepSeconds.reason, .noObservedSleep)
+        // Label summaries from the totals (PARTIAL, the source's own face value — spec 4.5,
+        // review P2-1); every bout/transition/latency metric is unsupported_source.
+        XCTAssertEqual(c.quality.status, .partial)
+        XCTAssertEqual(c.observedAsleepSeconds.status, .partial)
+        XCTAssertEqual(c.observedAsleepSeconds.value, 360 * 60)   // 180+90+90 minutes
+        XCTAssertEqual(c.observedWasoSeconds.reason, .unsupportedSource)
+        XCTAssertEqual(c.longestObservedSleepBoutSeconds.reason, .unsupportedSource)
+        XCTAssertEqual(c.awakeningBoutCount.reason, .unsupportedSource)
+        XCTAssertEqual(c.sleepToWakeTransitionCount.reason, .unsupportedSource)
+        XCTAssertEqual(c.remLatencyFromSleepOnsetSeconds.reason, .unsupportedSource)
+        XCTAssertEqual(c.onsetDelayFromWindowSeconds.reason, .unsupportedSource)
+        XCTAssertEqual(c.sleepToWakeTransitionsPerAsleepHour.reason, .unsupportedSource)
         let d = SleepAnalyticsV1.stageDynamicsGroup(timeline: timeline, input: input, config: .v1)
         let byLabel = Dictionary(uniqueKeysWithValues: d.stageSeconds.map { ($0.label, $0.seconds) })
         // Label summaries from the totals, PARTIAL (totals-only provenance).
@@ -359,8 +369,13 @@ final class SleepAnalyticsTimelineGroupTests: XCTestCase {
         XCTAssertNil(d.epochTransitions)
         XCTAssertEqual(d.quality.streamCounts["totals_only_fragments"], 1)
         for bouts in d.stageBouts {
-            XCTAssertEqual(bouts.boutCount.value, 0)
-            XCTAssertEqual(bouts.medianCompleteBoutSeconds.status, .unavailable)
+            // Bout metrics are unsupported_source for a totals-only import (review P1-3):
+            // never a fabricated zero count.
+            XCTAssertEqual(bouts.boutCount.reason, .unsupportedSource)
+            XCTAssertEqual(bouts.completeBoutCount.reason, .unsupportedSource)
+            XCTAssertEqual(bouts.censoredBoutCount.reason, .unsupportedSource)
+            XCTAssertEqual(bouts.longestObservedSeconds.reason, .unsupportedSource)
+            XCTAssertEqual(bouts.medianCompleteBoutSeconds.reason, .unsupportedSource)
         }
     }
 }

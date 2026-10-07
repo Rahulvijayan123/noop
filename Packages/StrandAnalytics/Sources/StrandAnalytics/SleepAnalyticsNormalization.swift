@@ -299,17 +299,27 @@ extension SleepAnalyticsV1 {
 
         // 4.4/4.9: the native epoch grid. The stager's resolution and alignment are
         // established for native fragments when every retained segment boundary is a
-        // multiple of the epoch length from the fragment start (the stager grids at the
-        // session start; an edit that moved the effective start to a non-epoch boundary
-        // breaks that identity). Misalignment is REPORTED (`epochAlignmentEstablished`
-        // false): the epoch transition matrix is withheld as unsupported_source while
-        // duration metrics stay computed from the intervals (review P2-3).
+        // multiple of the epoch length from the STAGER'S OWN grid anchor — the original
+        // session start, which an edit can move the EFFECTIVE start away from (review
+        // P2-4: a fragment-start-relative check would be satisfied trivially by the
+        // left-clipping itself and silently shift the grid). The grid is anchored at
+        // the same anchor, clipped into the fragment; the first epoch can be clipped
+        // (the same ≥50% support rule handles it). Misalignment is REPORTED
+        // (`epochAlignmentEstablished` false): the epoch transition matrix is withheld
+        // as unsupported_source while duration metrics stay computed from the intervals.
         let epochSeconds = fragment.sourceEpochSeconds ?? config.nativeEpochSeconds
+        let gridAnchor = fragment.gridAnchor
         let aligned = deduped.allSatisfy {
-            ($0.start - fragment.start) % epochSeconds == 0 && ($0.end - fragment.start) % epochSeconds == 0
+            ($0.start - gridAnchor) % epochSeconds == 0 && ($0.end - gridAnchor) % epochSeconds == 0
         }
         epochAlignment = epochAlignment && aligned
-        let epochStarts = stride(from: fragment.start, to: fragment.end, by: epochSeconds)
+        var epochStarts: [Int] = []
+        var gridPoint = gridAnchor
+        while gridPoint < fragment.start { gridPoint += epochSeconds }
+        while gridPoint < fragment.end {
+            epochStarts.append(gridPoint)
+            gridPoint += epochSeconds
+        }
 
         // Slices with resolved labels (conflicts → unknown), used by the epoch majority rule.
         func sliceLabel(_ from: Int, _ to: Int) -> SleepAnalyticsLabel {

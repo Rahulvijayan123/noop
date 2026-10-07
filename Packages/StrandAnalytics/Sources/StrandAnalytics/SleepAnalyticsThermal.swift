@@ -213,7 +213,9 @@ extension SleepAnalyticsV1 {
             inputSupportedFraction: fragmentSpan > 0 ? timeline.totalInputSupportedSeconds / fragmentSpan : nil,
             labelSupportedFraction: fragmentSpan > 0 ? timeline.totalLabelSupportedSeconds / fragmentSpan : nil,
             sourceResolutionSeconds: nil,
-            streamCounts: mergedStreamCounts)
+            streamCounts: mergedStreamCounts,
+            duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
+            fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
         return SleepAnalyticsThermalGroup(
             quality: quality,
@@ -246,9 +248,19 @@ extension SleepAnalyticsV1 {
         let valid = inWindow.count
         let coverage = eligibleMinutes > 0 ? Double(valid) / Double(eligibleMinutes) : nil
 
-        // Missing-run bound: the longest gap between consecutive valid minutes
-        // inside the window (edges do not count — the window edges are boundaries).
+        // Missing-run bound: the longest run of missing minutes ANYWHERE inside the
+        // window — between consecutive valid minutes AND from both window edges to
+        // their nearest valid minute (review P2-6: a hole at the window start or end
+        // is a missing run just the same; the gate is "no missing run > 5 min").
         var longestMissing = 0
+        if let first = inWindow.first {
+            longestMissing = max(longestMissing, first.minute - windowStart)
+        } else {
+            longestMissing = max(longestMissing, windowEnd - windowStart)
+        }
+        if let last = inWindow.last {
+            longestMissing = max(longestMissing, windowEnd - last.minute - 60)
+        }
         if inWindow.count >= 2 {
             for k in 1..<inWindow.count {
                 longestMissing = max(longestMissing, inWindow[k].minute - inWindow[k - 1].minute - 60)

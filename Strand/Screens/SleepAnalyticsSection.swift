@@ -90,6 +90,12 @@ struct SleepAnalyticsSection: View {
 /// every document fragment must correspond to a current-night session (id pattern
 /// `sleep-<deviceId>-<start>`, effective bounds, edited lineage) and the document's effective
 /// group bounds must align with the current group's bounds.
+///
+/// Known limit (review P3-5): an edit that only re-STAGES a night without moving its bounds (or a
+/// second edit with identical bounds) is not detectable client-side — the session model carries no
+/// edit revision to compare against the document's `edit_revision`. The guard therefore also relies
+/// on the refresh path: an edited day re-dirties its score and the hosted refresh replaces the
+/// document; until it arrives, the section shows the last matching document (bounded staleness).
 enum SleepAnalyticsStaleness {
 
     /// One current-night fragment descriptor, derived from a stored sleep session.

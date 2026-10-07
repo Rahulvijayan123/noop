@@ -26,6 +26,22 @@ extension SleepAnalyticsV1 {
             + timeline.supportedSeconds(of: .deep) + timeline.supportedSeconds(of: .rem)
         let supportedWake = timeline.supportedSeconds(of: .wake)
 
+        // Totals-only fragments carry label MINUTES with no timeline (spec 4.5, review
+        // P2-1): their label summaries join as PARTIAL values (the source's own totals
+        // at face value) — observed asleep/wake seconds — while every bout/transition/
+        // latency metric below answers `unsupported_source` (a totals-only import
+        // cannot support them; the timeline-manufacturing ban is spec 4.5).
+        let totalsOnlyFragments = timeline.fragments.filter { $0.totalsMinutes != nil }
+        var totalsOnlyAsleep = 0.0
+        var totalsOnlyWake = 0.0
+        for fragment in totalsOnlyFragments {
+            guard let minutes = fragment.totalsMinutes else { continue }
+            totalsOnlyAsleep += (minutes.light + minutes.deep + minutes.rem) * 60
+            totalsOnlyWake += minutes.wake * 60
+        }
+        let asleepSeconds = supportedAsleep + totalsOnlyAsleep
+        let wakeSeconds = supportedWake + totalsOnlyWake
+
         // ── The sleep period and observed WASO ────────────────────────────────────
         // WASO is supported wake STRICTLY between the first and last observed asleep
         // bounds; initial/terminal wake, unknown time and inter-fragment gaps are all
@@ -65,42 +81,60 @@ extension SleepAnalyticsV1 {
         let inputGate = !nativeOnly
             || (inputFraction.map { $0 >= config.stageSummaryMinInputSupportedFraction } ?? false)
         let completeStageGate = labelGate && inputGate
-        let hasSleep = supportedAsleep > 0 && onset != nil
+        // Label summaries are PARTIAL when any totals-only fragment contributed (the
+        // source's own totals at face value) or when the complete-stage gate is down.
+        let labelSummariesPartial = !totalsOnlyFragments.isEmpty || !completeStageGate
+        // Bout/transition/latency metrics need a TIMELINE: a totals-only import answers
+        // `unsupported_source` for all of them (review P1-3/P2-1).
+        let timelineMetricsSupported = totalsOnlyFragments.isEmpty
+        // Label summaries need SLEEP SECONDS (timeline or totals); the timeline-only
+        // metrics below gate on the onset themselves.
+        let hasSleep = asleepSeconds > 0
+        let hasTimelineSleep = asleepSeconds > 0 && onset != nil
 
         // ── Metric-by-metric (spec section 5 table) ──────────────────────────────
         let observedAsleep: SleepAnalyticsMetric = hasSleep
-            ? (completeStageGate ? .available(supportedAsleep, unit: "s")
-                                : .partial(supportedAsleep, unit: "s"))
-            : .unavailable(.noObservedSleep)
+            ? (labelSummariesPartial ? .partial(asleepSeconds, unit: "s")
+                                    : .available(asleepSeconds, unit: "s"))
+            : .unavailable(totalsOnlyFragments.isEmpty ? .noObservedSleep : .unsupportedSource)
+        // (A totals-only night reports its label summaries WITHOUT an onset; the onset-
+        // gated metrics below answer unsupported_source for it.)
 
-        let observedWaso: SleepAnalyticsMetric = hasSleep
-            ? (completeStageGate ? .available(wasoSeconds(), unit: "s")
-                                : .partial(wasoSeconds(), unit: "s"))
-            : .unavailable(.noObservedSleep)
+        let observedWaso: SleepAnalyticsMetric = hasTimelineSleep
+            ? (timelineMetricsSupported
+                ? (completeStageGate ? .available(wasoSeconds(), unit: "s")
+                                     : .partial(wasoSeconds(), unit: "s"))
+                : .unavailable(.unsupportedSource))
+            : .unavailable(totalsOnlyFragments.isEmpty ? .noObservedSleep : .unsupportedSource)
 
-        let inferredGapAwake: SleepAnalyticsMetric = hasSleep
-            ? .available(inferredGapAwakeWithinPeriod(), unit: "s")
-            : .unavailable(.noObservedSleep)
+        let inferredGapAwake: SleepAnalyticsMetric = hasTimelineSleep
+            ? (timelineMetricsSupported ? .available(inferredGapAwakeWithinPeriod(), unit: "s")
+                                        : .unavailable(.unsupportedSource))
+            : .unavailable(totalsOnlyFragments.isEmpty ? .noObservedSleep : .unsupportedSource)
 
         // The combined estimate is explicitly an ESTIMATE (name + partial status): it
         // includes the existing canonical gap assumption, and the canonical daily
         // totals are unchanged by it.
-        let estimatedWaso: SleepAnalyticsMetric = hasSleep
-            ? .partial(wasoSeconds() + inferredGapAwakeWithinPeriod(), unit: "s")
-            : .unavailable(.noObservedSleep)
+        let estimatedWaso: SleepAnalyticsMetric = hasTimelineSleep
+            ? (timelineMetricsSupported
+                ? .partial(wasoSeconds() + inferredGapAwakeWithinPeriod(), unit: "s")
+                : .unavailable(.unsupportedSource))
+            : .unavailable(totalsOnlyFragments.isEmpty ? .noObservedSleep : .unsupportedSource)
 
         // Onset delay from the effective detected-window start: available only when
         // the prefix is OBSERVED; otherwise the value is still reported but partial
         // (a boundary estimate — the true onset could precede the window).
         let onsetDelay: SleepAnalyticsMetric
-        if let o = onset {
+        if !timelineMetricsSupported {
+            onsetDelay = .unavailable(.unsupportedSource)
+        } else if let o = onset {
             let delay = Double(o - timeline.windowStart)
             onsetDelay = timeline.onsetPrefixObserved
                 ? .available(delay, unit: "s")
                 : SleepAnalyticsMetric(value: delay, unit: "s", status: .partial,
                                        reason: .onsetNotObserved)
         } else {
-            onsetDelay = .unavailable(.noObservedSleep)
+            onsetDelay = .unavailable(timeline.fragments.isEmpty ? .noObservedSleep : .unsupportedSource)
         }
 
         // Marker-based SOL: Phase 1 wires NO marker (no verified semantics exist), so
@@ -127,6 +161,7 @@ extension SleepAnalyticsV1 {
         // could conceal it; `no_observed_rem`/`no_observed_deep` when none exists.
         func stageLatency(_ label: SleepAnalyticsLabel,
                           noneReason: SleepAnalyticsReason) -> SleepAnalyticsMetric {
+            guard timelineMetricsSupported else { return .unavailable(.unsupportedSource) }
             guard let o = onset else { return .unavailable(.noObservedSleep) }
             guard timeline.onsetPrefixObserved else { return .unavailable(.onsetNotObserved) }
             guard let first = timeline.intervals.first(where: {
@@ -202,7 +237,7 @@ extension SleepAnalyticsV1 {
 
         let longestBoutMetric: SleepAnalyticsMetric = longestBout.map {
             completeStageGate ? .available($0, unit: "s") : .partial($0, unit: "s")
-        } ?? .unavailable(.noObservedSleep)
+        } ?? .unavailable(timelineMetricsSupported ? .noObservedSleep : .unsupportedSource)
 
         // ── Awakenings: wake bouts inside the sleep period ───────────────────────
         // A COMPLETE awakening has an observed sleep→wake entry AND an observed return
@@ -262,7 +297,7 @@ extension SleepAnalyticsV1 {
         }
 
         let quality = SleepAnalyticsQuality(
-            status: hasSleep ? (completeStageGate ? .available : .partial) : .unavailable,
+            status: asleepSeconds > 0 ? (labelSummariesPartial ? .partial : .available) : .unavailable,
             fragmentSpanSeconds: fragmentSpan,
             groupSpanSeconds: Double(max(0, timeline.windowEnd - timeline.windowStart)),
             observedLabeledSeconds: timeline.totalLabelSupportedSeconds,
@@ -274,8 +309,13 @@ extension SleepAnalyticsV1 {
             inputSupportedFraction: inputFraction,
             labelSupportedFraction: labelFraction,
             sourceResolutionSeconds: timeline.fragments.first?.sourceEpochSeconds,
-            streamCounts: timeline.streamCounts)
+            streamCounts: timeline.streamCounts,
+            duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
+            fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
+        func timelineCount(_ value: Int) -> SleepAnalyticsCount {
+            timelineMetricsSupported ? .available(value) : .unavailable(.unsupportedSource)
+        }
         return SleepAnalyticsContinuityGroup(
             quality: quality,
             observedAsleepSeconds: observedAsleep,
@@ -288,10 +328,11 @@ extension SleepAnalyticsV1 {
             deepLatencyFromSleepOnsetSeconds: deepLatency,
             longestObservedSleepBoutSeconds: longestBoutMetric,
             longestBoutCensored: longestCensored,
-            awakeningBoutCount: .available(awakeningCount),
-            censoredWakeStretchCount: .available(censoredWakeStretches),
-            sleepToWakeTransitionCount: .available(sleepToWakeTransitions),
-            sleepToWakeTransitionsPerAsleepHour: rate)
+            awakeningBoutCount: timelineCount(awakeningCount),
+            censoredWakeStretchCount: timelineCount(censoredWakeStretches),
+            sleepToWakeTransitionCount: timelineCount(sleepToWakeTransitions),
+            sleepToWakeTransitionsPerAsleepHour: timelineMetricsSupported
+                ? rate : .unavailable(.unsupportedSource, unit: "per_h"))
     }
 }
 

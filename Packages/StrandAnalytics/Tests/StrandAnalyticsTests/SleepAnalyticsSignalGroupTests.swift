@@ -630,7 +630,7 @@ final class SleepAnalyticsPrvGroupTests: XCTestCase {
                                                  config: .v1),
             input: input(start: start, end: start + 300, beats: beats),
             config: .v1)
-        XCTAssertEqual(a.quality.streamCounts["rr_received"], 273)
+        XCTAssertEqual(a.quality.streamCounts["rr_received_deduped"], 273)
         XCTAssertEqual(a.quality.streamCounts["rr_deduped"], 272)
         XCTAssertEqual(a.validPairs.value, b.validPairs.value)
     }
@@ -724,8 +724,11 @@ final class SleepAnalyticsPrvGroupTests: XCTestCase {
             timeline: SleepAnalyticsV1.normalize(input: shortInput, config: .v1),
             input: shortInput, config: .v1)
         XCTAssertEqual(short.eligibleWindowCount.value, 0)
-        XCTAssertEqual(short.withheldWindowCount.value, 0)   // clipped: no window at all
+        // The clipped tail window is WITHHELD as insufficient_duration (review P2-5),
+        // never silently skipped.
+        XCTAssertEqual(short.withheldWindowCount.value, 1)
         XCTAssertEqual(short.nightlySd1Ms.status, .unavailable)
+        XCTAssertEqual(short.nightlySd1Ms.reason, .insufficientDuration)
     }
 
     /// Disabled config → the whole group is disabled, no numbers.
@@ -759,12 +762,20 @@ final class SleepAnalyticsPrvGroupTests: XCTestCase {
         }
         let rmssd = (sumSq / Double(count)).squareRoot()
         XCTAssertEqual(rmssd, 92.4662, accuracy: 0.001)
-        // The PRV group's gap-aware parity helper matches cleanRRGapAware exactly.
+        // The PRV group pairs cleaned values with their original observations through the
+        // cleaner's OWN kept-original indices (review P1-1: the previous re-derivation
+        // mirrored Malik with a different median and could silently flip borderline
+        // beats). Parity is structural now: the indices the cleaner returns ARE the
+        // survivors' positions in the original series, and `nn` equals the original
+        // series at exactly those positions.
         let gapAware = HRVAnalyzer.cleanRRGapAware(series)
-        let flags = SleepAnalyticsPrv.ectopicKeepFlags(series.filter { $0 >= HRVAnalyzer.rrMinMs && $0 <= HRVAnalyzer.rrMaxMs })
-        XCTAssertEqual(gapAware.nn, series.filter { $0 >= HRVAnalyzer.rrMinMs && $0 <= HRVAnalyzer.rrMaxMs }.filter { v in
-            let idx = series.filter { $0 >= HRVAnalyzer.rrMinMs && $0 <= HRVAnalyzer.rrMaxMs }.firstIndex(of: v)!
-            return flags[idx]
-        })
+        XCTAssertEqual(gapAware.nn, gapAware.keptOriginalIndices.map { series[$0] })
+        XCTAssertEqual(gapAware.contiguous.count, gapAware.nn.count)
+        // A borderline fixture pins the exact-median behaviour the old mirror got
+        // wrong: neighbours [700, 700, 705, 705] around a 845 ms beat — HRVAnalyzer's
+        // median (mean of the two middles, 702.5) drops it (0.203 > 0.20).
+        let borderlineNeighbours = [700.0, 700.0, 705.0, 705.0]
+        XCTAssertEqual(HRVAnalyzer.median(borderlineNeighbours), 702.5)
+        XCTAssertFalse(abs(845.0 - 702.5) / 702.5 <= HRVAnalyzer.ectopicThreshold)
     }
 }

@@ -199,6 +199,13 @@ public struct SleepAnalyticsInput: Equatable {
         /// The source's own epoch resolution in seconds (30 for native; the real resolution for
         /// a timed external hypnogram; nil for totals-only).
         public let sourceEpochSeconds: Int?
+        /// The stager's OWN grid anchor for this fragment (the original session start the
+        /// stager gridded its 30-second epochs at), when it differs from the effective
+        /// start (an edit that moved the effective bounds). The extractor verifies epoch
+        /// alignment against THIS anchor (spec 4.9 / review P2-4: left-clipping to an
+        /// edited start would otherwise trivially satisfy a fragment-start-relative
+        /// check and silently shift the grid). nil = the effective start is the anchor.
+        public let stageGridAnchorSeconds: Int?
         /// A user edit was applied to this fragment's effective bounds or stages.
         public let edited: Bool
         /// Stage-minute totals for a totals-only import fragment (no timestamps). Non-nil only
@@ -213,12 +220,14 @@ public struct SleepAnalyticsInput: Equatable {
                     sourceKind: SleepAnalyticsStageSourceKind,
                     sourceEpochSeconds: Int? = nil,
                     edited: Bool = false, editRevision: Int64? = nil,
+                    stageGridAnchorSeconds: Int? = nil,
                     totalsMinutes: SleepAnalyticsStageMinutes? = nil,
                     stages: [StageSegment]) {
             self.id = id; self.start = start; self.end = end
             self.sourceKind = sourceKind
             self.sourceEpochSeconds = sourceEpochSeconds
             self.edited = edited; self.editRevision = editRevision
+            self.stageGridAnchorSeconds = stageGridAnchorSeconds
             self.totalsMinutes = totalsMinutes
             self.stages = stages
         }
@@ -349,15 +358,23 @@ public struct SleepAnalyticsTimeline: Equatable, Sendable {
         public let end: Int
         public let sourceKind: SleepAnalyticsStageSourceKind
         public let sourceEpochSeconds: Int?
+        /// The stager's own grid anchor when it differs from the effective start
+        /// (spec 4.9 / review P2-4); nil = the effective start is the anchor.
+        public let stageGridAnchorSeconds: Int?
         /// Stage-minute totals for a totals-only fragment, when the input carried them.
         public let totalsMinutes: SleepAnalyticsStageMinutes?
         public init(id: String, start: Int, end: Int,
                     sourceKind: SleepAnalyticsStageSourceKind, sourceEpochSeconds: Int?,
+                    stageGridAnchorSeconds: Int? = nil,
                     totalsMinutes: SleepAnalyticsStageMinutes? = nil) {
             self.id = id; self.start = start; self.end = end
             self.sourceKind = sourceKind; self.sourceEpochSeconds = sourceEpochSeconds
+            self.stageGridAnchorSeconds = stageGridAnchorSeconds
             self.totalsMinutes = totalsMinutes
         }
+        /// The epoch-grid anchor: the stager's own anchor when supplied, else the
+        /// effective start.
+        public var gridAnchor: Int { stageGridAnchorSeconds ?? start }
     }
 
     /// The whole group's span (earliest fragment start, latest fragment end).
@@ -465,6 +482,13 @@ public struct SleepAnalyticsQuality: Codable, Equatable, Sendable {
     /// Stream diagnostics for the group's own inputs (received/valid/duplicate/rejected/
     /// supported-duration where the group reads a raw stream); keys are closed-vocabulary.
     public let streamCounts: [String: Int]
+    /// Adapter input carried repeated fragment ids (exact duplicates dropped; spec 4.1,
+    /// review P2-3): surfaced here instead of staying internal-only.
+    public let duplicateFragmentCount: Int?
+    /// Adapter input carried overlapping fragments (clipped for containment; a resolved
+    /// main-night group is disjoint by construction, so > 0 is an adapter contract
+    /// violation; spec 4.1, review P2-3/P2-5): surfaced in seconds.
+    public let fragmentOverlapSeconds: Double?
 
     private enum CodingKeys: String, CodingKey {
         case status
@@ -478,6 +502,8 @@ public struct SleepAnalyticsQuality: Codable, Equatable, Sendable {
         case labelSupportedFraction = "label_supported_fraction"
         case sourceResolutionSeconds = "source_resolution_seconds"
         case streamCounts = "stream_counts"
+        case duplicateFragmentCount = "duplicate_fragment_count"
+        case fragmentOverlapSeconds = "fragment_overlap_seconds"
     }
 
     public init(status: SleepAnalyticsStatus, fragmentSpanSeconds: Double,
@@ -485,7 +511,9 @@ public struct SleepAnalyticsQuality: Codable, Equatable, Sendable {
                 unknownSeconds: Double, inferredGapAwakeSeconds: Double,
                 inputSupportedSeconds: Double, inputSupportedFraction: Double?,
                 labelSupportedFraction: Double?, sourceResolutionSeconds: Int?,
-                streamCounts: [String: Int] = [:]) {
+                streamCounts: [String: Int] = [:],
+                duplicateFragmentCount: Int? = nil,
+                fragmentOverlapSeconds: Double? = nil) {
         self.status = status
         self.fragmentSpanSeconds = fragmentSpanSeconds
         self.groupSpanSeconds = groupSpanSeconds
@@ -497,6 +525,8 @@ public struct SleepAnalyticsQuality: Codable, Equatable, Sendable {
         self.labelSupportedFraction = labelSupportedFraction
         self.sourceResolutionSeconds = sourceResolutionSeconds
         self.streamCounts = streamCounts
+        self.duplicateFragmentCount = duplicateFragmentCount
+        self.fragmentOverlapSeconds = fragmentOverlapSeconds
     }
 }
 

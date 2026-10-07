@@ -171,7 +171,9 @@ extension SleepAnalyticsV1 {
             inputSupportedFraction: fragmentSpan > 0 ? timeline.totalInputSupportedSeconds / fragmentSpan : nil,
             labelSupportedFraction: fragmentSpan > 0 ? timeline.totalLabelSupportedSeconds / fragmentSpan : nil,
             sourceResolutionSeconds: nil,
-            streamCounts: mergedStreamCounts)
+            streamCounts: mergedStreamCounts,
+            duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
+            fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
         return SleepAnalyticsMovementGroup(
             quality: quality,

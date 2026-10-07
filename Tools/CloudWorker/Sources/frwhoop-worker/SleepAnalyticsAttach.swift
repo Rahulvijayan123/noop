@@ -68,9 +68,12 @@ extension DayScorer {
                 id: "sleep-\(claim.deviceId)-\(session.start)",
                 start: session.start, end: session.end,
                 // SleepStagerV2 native 30-second epochs; the extractor's native support mask
-                // grids at this resolution (spec 4.4, 4.9).
+                // grids at this resolution (spec 4.4, 4.9). The stager's grid anchor IS the
+                // session start (sessions are never reshaped server-side), passed explicitly
+                // so alignment is verified against the stager's own grid (review P2-4).
                 sourceKind: .nativeWhoop, sourceEpochSeconds: 30,
                 edited: overlappingRevision != nil, editRevision: overlappingRevision,
+                stageGridAnchorSeconds: session.start,
                 stages: session.stages))
         }
         fragments.sort { $0.start < $1.start }
@@ -167,8 +170,11 @@ extension DayScorer {
                                   fragmentCount: input.fragments.count, bytes: data.count, statuses: nil)
                 return nil
             }
+            // The wire keys are snake_case (the shared contract's CodingKeys); the
+            // log reads them by the SAME names so no group ever logs ":?"
+            // (review P3-1).
             let statuses = [
-                "continuity", "stageDynamics", "movement", "thermal", "prvDiagnostics",
+                "continuity", "stage_dynamics", "movement", "thermal", "prv_diagnostics",
             ].map { key -> String in
                 guard let group = json[key] as? [String: Any],
                       let quality = group["quality"] as? [String: Any],

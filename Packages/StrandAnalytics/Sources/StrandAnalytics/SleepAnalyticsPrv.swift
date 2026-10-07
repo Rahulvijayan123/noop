@@ -105,10 +105,23 @@ extension SleepAnalyticsV1 {
         var originalPairs: [OriginalPair] = []
         originalPairs.reserveCapacity(ordered.count)
         var unresolved = 0
+        func fragmentsIndex(of ts: Int) -> Int? {
+            timeline.fragments.firstIndex { $0.start <= ts && ts < $0.end }
+        }
         for k in 1..<max(ordered.count, 1) {
             let a = ordered[k - 1], b = ordered[k]
+            // Adjacency never crosses a fragment boundary even when timestamps touch
+            // (review P3-3: a cross-fragment pair would only inflate the
+            // rr_original_pairs diagnostic, but it is not an adjacency at all).
+            guard let fragmentA = fragmentsIndex(of: a.ts), fragmentsIndex(of: b.ts) == fragmentA else {
+                unresolved += 1
+                continue
+            }
             if a.ts == b.ts {
-                let chainOK = a.seq != b.seq || (a.ord != nil && b.ord != nil)
+                // Same-second chaining needs a DISTINCT seq or ord (review P3-4): two
+                // beats with equal ords in one second leave the order ambiguous.
+                let chainOK = a.seq != b.seq
+                    || (a.ord != nil && b.ord != nil && a.ord! != b.ord!)
                 if chainOK { originalPairs.append(OriginalPair(a: a, b: b, indexA: k - 1)) }
                 else { unresolved += 1 }
                 continue
@@ -133,36 +146,11 @@ extension SleepAnalyticsV1 {
         let cleanValues = cleaned.nn
         let contiguous = cleaned.contiguous
 
-        // Map cleaned positions back to `ordered` positions: the gap-aware cleaner
-        // preserves order, so cleaned[i] corresponds to the i-th SURVIVOR; rebuild
-        // survivor positions by re-running the same filters' membership test:
-        // simpler and exact — walk both filters the same way cleanRR does.
-        // (Range filter: rrMinMs...rrMaxMs; ectopic: Malik over survivors.)
-        // To avoid duplicating the cleaner's internals, survivor identity is
-        // re-derived with the same public predicate pieces:
-        var survivorPositions: [Int] = []
-        survivorPositions.reserveCapacity(cleanValues.count)
-        do {
-            var rangedPositions: [Int] = []
-            for (idx, value) in series.enumerated()
-            where value >= HRVAnalyzer.rrMinMs && value <= HRVAnalyzer.rrMaxMs {
-                rangedPositions.append(idx)
-            }
-            // Malik survivors among range survivors: mirror rejectEctopic.
-            // cleanRRGapAware already computed it; the count matches cleanValues.
-            // The ectopic filter is deterministic over ranged values, so the
-            // survivor set can be recovered by checking each range survivor's
-            // kept status through the same public function:
-            // cleanRRGapAware(rejectEctopic(rangeFilter)) — kept indices align with
-            // cleanValues in order.
-            let rangedValues = rangedPositions.map { series[$0] }
-            let keptFlags = SleepAnalyticsPrv.ectopicKeepFlags(rangedValues)
-            for (i, keep) in keptFlags.enumerated() where keep {
-                survivorPositions.append(rangedPositions[i])
-            }
-        }
-        precondition(survivorPositions.count == cleanValues.count,
-                     "PRV cleaner parity: survivor reconstruction must match cleanRRGapAware")
+        // The cleaner's OWN survivor identity (review P1-1): `keptOriginalIndices`
+        // carries each survivor's position in `ordered`, so the pairing can never
+        // drift from the canonical cleaning (the previous re-derivation mirrored
+        // Malik with a different median and could silently flip borderline beats).
+        let survivorPositions = cleaned.keptOriginalIndices
 
         // A cleaned pair (i-1, i) is TRUE when contiguous[i] (original adjacency
         // of the survivors) AND the survivors' original adjacency was a TRUE
@@ -182,15 +170,20 @@ extension SleepAnalyticsV1 {
         let windowSeconds = config.prvWindowSeconds
         var windows: [SleepAnalyticsPrvWindow] = []
         var withheld = 0
+        var withheldByDuration = 0      // review P2-5: clipped tails are withheld AS duration
         var totalValidPairs = 0
         var totalRejected = 0
         var totalOriginalObservations = 0
 
         for fragment in timeline.fragments {
             // UTC-aligned window starts inside [fragment.start, fragment.end - window).
-            // A clipped window (shorter than 300 s at the fragment end) is withheld
-            // as insufficient_duration (never counted eligible).
             var w = fragment.start - fragment.start % windowSeconds + (fragment.start % windowSeconds == 0 ? 0 : windowSeconds)
+            // A clipped TAIL window (the fragment ends before a full window fits) is
+            // withheld as insufficient_duration (review P2-5), never silently skipped.
+            if w < fragment.end, w + windowSeconds > fragment.end, w >= fragment.start {
+                withheld += 1
+                withheldByDuration += 1
+            }
             while w + windowSeconds <= fragment.end {
                 let wEnd = w + windowSeconds
                 // Window pairs: TRUE pairs whose two beats lie inside the window.
@@ -214,9 +207,11 @@ extension SleepAnalyticsV1 {
                     ordered[$0].ts >= w && ordered[$0].ts < wEnd
                 }.count
                 let rejectedInWindow = originalInWindow - survivorsInWindow
-                // Coverage: the union of trustworthy original beat-duration spans
-                // clipped to the window ÷ window duration.
-                let coverage = SleepAnalyticsPrv.windowCoverage(ordered: ordered,
+                // Coverage: the union of TRUSTWORTHY original beat-duration spans —
+                // the CLEANED SURVIVORS only (review P3-2: a rejected beat's span is
+                // not trustworthy coverage), clipped to the window ÷ window duration.
+                let survivors = survivorPositions.map { ordered[$0] }
+                let coverage = SleepAnalyticsPrv.windowCoverage(ordered: survivors,
                                                                  wStart: w, wEnd: wEnd)
                 let gatesPass = u.count >= config.prvMinValidPairs
                     && coverage >= config.prvMinCoverageFraction
@@ -242,7 +237,10 @@ extension SleepAnalyticsV1 {
         let ratioMetric: SleepAnalyticsMetric
         if windows.isEmpty {
             let reason: SleepAnalyticsReason = timeline.fragments.isEmpty ? .noSamples
-                : (unresolved > 0 ? .unresolvedAdjacency : .insufficientCoverage)
+                : (unresolved > 0 ? .unresolvedAdjacency
+                    : (withheldByDuration > 0 && withheld == withheldByDuration
+                        ? .insufficientDuration     // only clipped tails: the night is too short
+                        : .insufficientCoverage))
             sd1Metric = .unavailable(reason, unit: "ms")
             sd2Metric = .unavailable(reason, unit: "ms")
             ratioMetric = .unavailable(reason, unit: "")
@@ -263,7 +261,7 @@ extension SleepAnalyticsV1 {
         }
 
         let mergedStreamCounts = timeline.streamCounts.merging([
-                "rr_received": input.beats.count,
+                "rr_received_deduped": input.beats.count,
                 "rr_deduped": deduped.count,
                 "rr_in_fragments": inFragments.count,
                 "rr_original_pairs": originalPairs.count,
@@ -284,7 +282,9 @@ extension SleepAnalyticsV1 {
             labelSupportedFraction: timeline.fragmentSpanSeconds > 0
                 ? timeline.totalLabelSupportedSeconds / timeline.fragmentSpanSeconds : nil,
             sourceResolutionSeconds: nil,
-            streamCounts: mergedStreamCounts)
+            streamCounts: mergedStreamCounts,
+            duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
+            fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
         return SleepAnalyticsPrvDiagnosticsGroup(
             quality: quality,
@@ -338,37 +338,7 @@ enum SleepAnalyticsPrv {
         return out
     }
 
-    /// Malik ectopic keep-flags over the RANGE-FILTERED series, mirroring
-    /// `HRVAnalyzer.rejectEctopic` exactly (same window, same median, same
-    /// threshold) so the survivor reconstruction matches `cleanRRGapAware`.
-    /// Kept internal-only: parity is pinned by a test that compares the two
-    /// functions' outputs on the same series.
-    static func ectopicKeepFlags(_ ranged: [Double]) -> [Bool] {
-        let radius = HRVAnalyzer.ectopicWindowRadius
-        if ranged.count <= radius {
-            return ranged.map { _ in true }
-        }
-        var flags: [Bool] = []
-        flags.reserveCapacity(ranged.count)
-        for i in 0..<ranged.count {
-            let lo = max(0, i - radius)
-            let hi = min(ranged.count - 1, i + radius)
-            var neighbours: [Double] = []
-            neighbours.reserveCapacity(hi - lo)
-            for j in lo...hi where j != i { neighbours.append(ranged[j]) }
-            let keep: Bool
-            if neighbours.count < 2 {
-                keep = true
-            } else {
-                let med = neighbours.sorted()[neighbours.count / 2]
-                keep = med <= 0 ? true : abs(ranged[i] - med) / med <= HRVAnalyzer.ectopicThreshold
-            }
-            flags.append(keep)
-        }
-        return flags
-    }
-
-    /// Supported interval-duration coverage of a window: the union of the
+/// Supported interval-duration coverage of a window: the union of the
     /// original (deduped) beats' own duration spans `[ts, ts + rr/1000)`,
     /// clipped to the window, ÷ window duration. Summed RR values can overcount
     /// overlapping durations, so the union is computed over second-clipped

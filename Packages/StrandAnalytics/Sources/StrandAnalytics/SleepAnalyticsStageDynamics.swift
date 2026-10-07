@@ -67,9 +67,20 @@ extension SleepAnalyticsV1 {
                 }
                 return SleepAnalyticsStageSeconds(label: label, seconds: metric)
             case .unknown:
+                // Unknown time is a TIMELINE quantity: a totals-only group has no
+                // timeline, so it is unsupported (review P3-7 alignment); an empty
+                // group has no samples.
                 let unknown = max(0, fragmentSpan - timeline.totalLabelSupportedSeconds)
-                let metric: SleepAnalyticsMetric = unknown > 0
-                    ? .available(unknown, unit: "s") : .available(0, unit: "s")
+                let metric: SleepAnalyticsMetric
+                if !totalsOnlyFragments.isEmpty {
+                    metric = .unavailable(.unsupportedSource)
+                } else if unknown > 0 {
+                    metric = .available(unknown, unit: "s")
+                } else if timeline.fragments.isEmpty {
+                    metric = .unavailable(.noSamples)
+                } else {
+                    metric = .available(0, unit: "s")
+                }
                 return SleepAnalyticsStageSeconds(label: .unknown, seconds: metric)
             }
         }
@@ -126,20 +137,36 @@ extension SleepAnalyticsV1 {
             let count = completeDurations.count + censoredCount
             let quantiles = SleepAnalyticsV1.boutQuantiles(complete: completeDurations,
                                                            minBouts: config.minCompleteBoutsForQuantiles)
+            // Bout metrics need a TIMELINE: a totals-only import answers
+            // `unsupported_source` for every bout metric (review P1-3) — a zero count
+            // without qualifying observed exposure would be a fabricated zero.
             func countMetric(_ v: Int) -> SleepAnalyticsCount {
-                totalsOnlyFragments.isEmpty && timeline.fragments.isEmpty
-                    ? .unavailable(.noSamples) : .available(v)
+                if !totalsOnlyFragments.isEmpty { return .unavailable(.unsupportedSource) }
+                return timeline.fragments.isEmpty ? .unavailable(.noSamples) : .available(v)
+            }
+            let durationMetric: SleepAnalyticsMetric
+            if !totalsOnlyFragments.isEmpty {
+                durationMetric = .unavailable(.unsupportedSource)
+            } else if count > 0 {
+                durationMetric = completeStageGate ? .available(longest, unit: "s") : .partial(longest, unit: "s")
+            } else {
+                durationMetric = .unavailable(.noSamples)
+            }
+            let quantileMetrics: (median: SleepAnalyticsMetric, p90: SleepAnalyticsMetric)
+            if !totalsOnlyFragments.isEmpty {
+                quantileMetrics = (.unavailable(.unsupportedSource, unit: "s"),
+                                   .unavailable(.unsupportedSource, unit: "s"))
+            } else {
+                quantileMetrics = quantiles
             }
             return SleepAnalyticsStageBouts(
                 label: label,
                 boutCount: countMetric(count),
-                completeBoutCount: .available(completeDurations.count),
-                censoredBoutCount: .available(censoredCount),
-                longestObservedSeconds: count > 0
-                    ? (completeStageGate ? .available(longest, unit: "s") : .partial(longest, unit: "s"))
-                    : .unavailable(.noSamples),
-                medianCompleteBoutSeconds: quantiles.median,
-                p90CompleteBoutSeconds: quantiles.p90)
+                completeBoutCount: countMetric(completeDurations.count),
+                censoredBoutCount: countMetric(censoredCount),
+                longestObservedSeconds: durationMetric,
+                medianCompleteBoutSeconds: quantileMetrics.median,
+                p90CompleteBoutSeconds: quantileMetrics.p90)
         }
         let stageBoutsList: [SleepAnalyticsStageBouts] = [
             stageBouts(.wake), stageBouts(.light), stageBouts(.deep), stageBouts(.rem),
@@ -254,7 +281,9 @@ extension SleepAnalyticsV1 {
             inputSupportedFraction: inputFraction,
             labelSupportedFraction: labelFraction,
             sourceResolutionSeconds: timeline.fragments.first?.sourceEpochSeconds,
-            streamCounts: streamCounts)
+            streamCounts: streamCounts,
+            duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
+            fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
         return SleepAnalyticsStageDynamicsGroup(
             quality: quality,
