@@ -1327,8 +1327,7 @@ struct MetricDetailView: View {
         guard Self.activityMetrics.contains(metric.key) else { return }
         guard let latestDay = series.last?.day else { return }
         guard CloudPushIdentityStore.current() != nil,
-              let repository = CloudPushRuntime.shared.scoreRepository(),
-              let dayWindow = ActivityContextSelection.dayWindow(day: latestDay) else { return }
+              let repository = CloudPushRuntime.shared.scoreRepository() else { return }
         // Cache-first, exactly like TodayView (TodayView.swift:350): the awaited read is stored to a
         // local before chaining, so the actor isolation boundary is explicit.
         let deviceIds = await IntradaySeriesStore.shared.readCandidates
@@ -1339,8 +1338,13 @@ struct MetricDetailView: View {
         let loadKey = "\(latestDay)|\(cached.resultRevision ?? "")"
         guard loadKey != activityLoadedKey else { return }
         guard let hosted = cached.hostedResult, let document = hosted.activityContext else { return }
+        // The hosted day is a LOCAL calendar day in the zone the worker scored it in (D6-07), never UTC.
+        let zone = ActivityContextSelection.timeZone(hostedSnapshot: cached.rawObject?["hosted_snapshot"] as? [String: Any])
+        guard let dayWindow = ActivityContextSelection.dayWindow(day: latestDay, timeZone: zone) else { return }
         let sessions = hosted.sleep.map { (start: $0.startTs, end: $0.endTs) }
         activityContext = document
+        // Nightly heroes (HRV, resp rate, SpO2) join on the night; nil hides the line rather than
+        // describing a daytime slot under a nightly value (D3-01).
         activityInterval = ActivityContextSelection.interval(metricKey: metric.key,
                                                              document: document,
                                                              dayWindow: dayWindow,

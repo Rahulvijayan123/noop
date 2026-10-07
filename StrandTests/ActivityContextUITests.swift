@@ -359,41 +359,103 @@ final class ActivityContextUITests: XCTestCase {
 
     // MARK: - Selection (support interval + day window)
 
-    func testSelectionPicksTheHrvSlotForHrvMetrics() {
-        let doc = document(epochs: [epoch(base, motion: .walking)],
-                           hrvSlots: [HrvSlotContext(slotS: base + 900, shares: ["walking": 1.0],
-                                                     unknownShare: 0, recentActivityS: nil,
-                                                     postActivity: false)])
-        let day = ActivityContextSelection.dayWindow(day: "2026-09-30")!
-        let interval = ActivityContextSelection.interval(metricKey: "hrv", document: doc,
-                                                         dayWindow: day, sleepSessions: [])
-        XCTAssertEqual(interval, [base + 900, base + 1800], "the last 15-min slot is the HRV support interval")
+    private let utc = TimeZone(identifier: "UTC")!
+    private let pacific = TimeZone(identifier: "America/Los_Angeles")!
+    private let tokyo = TimeZone(identifier: "Asia/Tokyo")!
+
+    /// Unix seconds for a local wall-clock time.
+    private func local(_ day: String, _ hour: Int, _ minute: Int = 0, _ tz: TimeZone) -> Int {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = tz
+        let parts = day.split(separator: "-").map { Int($0)! }
+        let date = calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2],
+                                                      hour: hour, minute: minute))!
+        return Int(date.timeIntervalSince1970)
     }
 
-    func testSelectionPicksTheSleepSessionForNightlyMetrics() {
-        let doc = document(epochs: [])
-        let day = ActivityContextSelection.dayWindow(day: "2026-09-30")!
-        let night = (start: base, end: base + 7 * 3600)
-        let resp = ActivityContextSelection.interval(metricKey: "resp_rate", document: doc,
-                                                     dayWindow: day, sleepSessions: [night])
-        XCTAssertEqual(resp, [base, base + 7 * 3600])
-        let spo2 = ActivityContextSelection.interval(metricKey: "spo2", document: doc,
-                                                     dayWindow: day, sleepSessions: [night])
-        XCTAssertEqual(spo2, [base, base + 7 * 3600])
+    func testNightlyHrvJoinsTheNightNotTheLastDaytimeSlot() throws {
+        // D3-01: sleep 23:00-07:00 Pacific, intraday slots at 03:00 and 16:00. The nightly HRV hero must
+        // describe the night, never the 16:00 slot that `hrvSlots.last` used to return.
+        let day = "2026-10-07"
+        let night = (start: local("2026-10-06", 23, 0, pacific), end: local(day, 7, 0, pacific))
+        let slot3 = local(day, 3, 0, pacific), slot16 = local(day, 16, 0, pacific)
+        let doc = document(epochs: [], hrvSlots: [
+            HrvSlotContext(slotS: slot3, shares: ["stationary": 1.0], unknownShare: 0,
+                           recentActivityS: nil, postActivity: false),
+            HrvSlotContext(slotS: slot16, shares: ["walking": 1.0], unknownShare: 0,
+                           recentActivityS: 0, postActivity: false),
+        ])
+        let window = try XCTUnwrap(ActivityContextSelection.dayWindow(day: day, timeZone: pacific))
+        let interval = ActivityContextSelection.interval(metricKey: "hrv", document: doc, dayWindow: window,
+                                                         sleepSessions: [night])
+        XCTAssertEqual(interval, [night.start, night.end])
+        for key in ["rhr", "resp_rate", "spo2", "skin_temp"] {
+            XCTAssertEqual(ActivityContextSelection.interval(metricKey: key, document: doc, dayWindow: window,
+                                                             sleepSessions: [night]),
+                           [night.start, night.end], key)
+        }
+        // A slot the user selects on the intraday chart still joins on its own 15-min bucket.
+        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "hrv", document: doc, dayWindow: window,
+                                                         sleepSessions: [night], selectedSlotStart: slot16),
+                       [slot16, slot16 + 900])
     }
 
-    func testSelectionFallsBackToTheWholeDay() {
+    func testDayWindowIsTheLocalDayNotUtcMidnight() throws {
+        // Pacific (PDT, UTC-7): 2026-10-07 starts at 07:00Z.
+        let pdt = try XCTUnwrap(ActivityContextSelection.dayWindow(day: "2026-10-07", timeZone: pacific))
+        XCTAssertEqual(pdt[0], local("2026-10-07", 7, 0, utc))
+        XCTAssertEqual(pdt[1] - pdt[0], 86_400)
+        // UTC+9: 2026-10-07 starts at 15:00Z on the 6th.
+        let jst = try XCTUnwrap(ActivityContextSelection.dayWindow(day: "2026-10-07", timeZone: tokyo))
+        XCTAssertEqual(jst[0], local("2026-10-06", 15, 0, utc))
+        // A DST fall-back day is 25 h long, not 24.
+        let fallBack = try XCTUnwrap(ActivityContextSelection.dayWindow(day: "2026-11-01", timeZone: pacific))
+        XCTAssertEqual(fallBack[1] - fallBack[0], 25 * 3600)
+        XCTAssertNil(ActivityContextSelection.dayWindow(day: "not-a-day", timeZone: pacific))
+    }
+
+    func testUtcPlusNineUserGetsTheirOwnNight() throws {
+        // A Tokyo user sleeps 23:00-07:00 JST (14:00Z-22:00Z the previous UTC day). Under the old UTC
+        // window for "2026-10-07" this night (ending 22:00Z on the 6th) did not overlap at all.
+        let day = "2026-10-07"
+        let night = (start: local("2026-10-06", 23, 0, tokyo), end: local(day, 7, 0, tokyo))
+        let nextNight = (start: local(day, 23, 0, tokyo), end: local("2026-10-08", 7, 0, tokyo))
+        let window = try XCTUnwrap(ActivityContextSelection.dayWindow(day: day, timeZone: tokyo))
         let doc = document(epochs: [])
-        let day = ActivityContextSelection.dayWindow(day: "2026-09-30")!
-        // No slot, no overlapping sleep session -> the whole UTC day.
-        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "hrv", document: doc,
-                                                         dayWindow: day, sleepSessions: []), day)
-        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "steps", document: doc,
-                                                         dayWindow: day, sleepSessions: []), day)
+        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "hrv", document: doc, dayWindow: window,
+                                                         sleepSessions: [nextNight, night]),
+                       [night.start, night.end],
+                       "the night that ENDS on the day wins over the one that starts late that evening")
+    }
+
+    func testTimeZoneComesFromTheHostedSnapshot() {
+        XCTAssertEqual(ActivityContextSelection.timeZone(hostedSnapshot: ["timezone": "Asia/Tokyo"]).identifier,
+                       "Asia/Tokyo")
+        XCTAssertEqual(ActivityContextSelection.timeZone(hostedSnapshot: ["timezone": "Not/AZone"]),
+                       TimeZone.current, "an invalid zone falls back to the device zone, never UTC")
+        XCTAssertEqual(ActivityContextSelection.timeZone(hostedSnapshot: nil), TimeZone.current)
+    }
+
+    func testNightlyMetricFallsBackToTheDocumentsSleepSessionThenHides() throws {
+        let window = try XCTUnwrap(ActivityContextSelection.dayWindow(day: "2026-09-30", timeZone: utc))
+        let docNight = SleepSessionContext(start: window[0] + 3600, end: window[0] + 8 * 3600,
+                                           shares: [:], unknownShare: 1)
+        let doc = document(epochs: [], sleepSessions: [docNight])
+        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "resp_rate", document: doc, dayWindow: window,
+                                                         sleepSessions: []),
+                       [docNight.start, docNight.end])
+        // No night anywhere: a nightly hero gets no read-out rather than the whole day's activity.
+        XCTAssertNil(ActivityContextSelection.interval(metricKey: "hrv", document: document(epochs: []),
+                                                       dayWindow: window, sleepSessions: []))
         // A session entirely outside the day does not count.
-        let otherNight = (start: base - 3 * 86_400, end: base - 3 * 86_400 + 3600)
-        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "resp_rate", document: doc,
-                                                         dayWindow: day, sleepSessions: [otherNight]), day)
-        XCTAssertNil(ActivityContextSelection.dayWindow(day: "not-a-day"))
+        let otherNight = (start: window[0] - 3 * 86_400, end: window[0] - 3 * 86_400 + 3600)
+        XCTAssertNil(ActivityContextSelection.interval(metricKey: "spo2", document: document(epochs: []),
+                                                       dayWindow: window, sleepSessions: [otherNight]))
+    }
+
+    func testNonNightlyMetricsUseTheWholeLocalDay() throws {
+        let window = try XCTUnwrap(ActivityContextSelection.dayWindow(day: "2026-09-30", timeZone: pacific))
+        XCTAssertEqual(ActivityContextSelection.interval(metricKey: "steps", document: document(epochs: []),
+                                                         dayWindow: window, sleepSessions: []), window)
     }
 }
