@@ -30,7 +30,14 @@ public enum ActivityContextVersions {
     /// heuristic is discounted while the learned transition expert speaks. An in-process ElderNet gait
     /// channel (`f.gait`) exists for hosts that run ElderNet inside the activity service; it stands down
     /// whenever the gait-quality channel (`f.gaitQuality`) is present, so ElderNet is never counted twice.
-    public static let decoder = "hsmm-1.7"
+    /// 1.8: posture honesty. The seated / upright / recumbent split is bounded by a decaying memory of real
+    /// posture evidence (the dwell prior governs persistence only, so a quiet wrist reads "stationary" rather
+    /// than confident sitting or standing); a held absolute forearm-orientation channel; direction-aware
+    /// transition modes; in-bed awake favours recumbent rest; the transition expert no longer loses to a quiet
+    /// heuristic or erases a seen shift with a weak "none"; abstained encoder windows never open a specialist
+    /// gate; a logged workout counts once; data gaps of 20–120 s flatten the belief; a pulseless, implausibly
+    /// still strap reads unknown.
+    public static let decoder = "hsmm-1.8"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
     /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump

@@ -146,6 +146,9 @@ public enum ActivityDisplay {
             default: return "Stationary"
             }
         }
-        return unclear
+        // Clearly stationary (the guard above) but the posture is split between lying and sitting / standing,
+        // or unresolved: the coarse fact still holds. Publishing "Unclear" threw away the one thing the
+        // evidence did say, and joined the physiology to `unknown` (D1-11).
+        return "Stationary"
     }
 }

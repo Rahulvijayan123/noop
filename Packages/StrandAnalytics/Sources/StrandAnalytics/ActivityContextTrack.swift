@@ -331,6 +331,17 @@ public enum ActivityContextTrackBuilder {
 
         var hrAt: [Int: Int] = [:]
         for s in input.hr where s.ts >= lo && s.ts < hi && (30...220).contains(s.bpm) { hrAt[s.ts] = s.bpm }
+        // Valid pulse seconds (including the look-back before the day) for the wear evidence, ascending. A pulse
+        // this recent is contact evidence.
+        let wearPulseWindowS = 60
+        let pulseTs = input.hr.filter { $0.ts < hi && $0.ts >= lo - wearPulseWindowS
+            && (30...220).contains($0.bpm) }.map(\.ts).sorted()
+        var pulseCursor = 0
+        func lastPulseTs(atOrBefore ts: Int) -> Int? {
+            while pulseCursor + 1 < pulseTs.count, pulseTs[pulseCursor + 1] <= ts { pulseCursor += 1 }
+            guard pulseCursor < pulseTs.count, pulseTs[pulseCursor] <= ts else { return nil }
+            return pulseTs[pulseCursor]
+        }
 
         var gravAt: [Int: GravitySample] = [:]
         for s in input.gravity where s.ts >= lo && s.ts < hi { gravAt[s.ts] = s }
@@ -392,7 +403,14 @@ public enum ActivityContextTrackBuilder {
                 out.append(o)
                 continue
             }
-            o.wear = .onWrist
+            // On the wrist only with contact evidence: a valid pulse in the last `wearPulseWindowS` (causal, so
+            // a progressive decode agrees with a whole-day one). Gravity, steps or IMU alone are no evidence
+            // anyone is wearing the strap: a strap on a table has them too (D1-05, D1V-03).
+            if let last = lastPulseTs(atOrBefore: ts), ts - last <= wearPulseWindowS {
+                o.wear = .onWrist
+            } else {
+                o.wear = .unknown
+            }
             if let g = gravAt[ts] {
                 o.gravity = [g.x, g.y, g.z]
                 o.dynAccelG = g.dynAccel

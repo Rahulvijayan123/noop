@@ -342,6 +342,16 @@ struct ActivityFeatures: Equatable {
     /// nil unless the wrist is currently still and both ends have data. A reach that returns to where it
     /// started scores ~0; a posture change that leaves the wrist somewhere new keeps scoring.
     var shiftNet: Double?
+    /// Forearm-axis (+x) gravity component at both ends of the shift `shiftNet` measures (from, to); nil
+    /// whenever `shiftNet` is. Signed: +1 is the forearm pointing down (arm hanging), −1 the hand above the
+    /// elbow. Lets the transition modes say which way a shift went instead of inheriting it from the belief.
+    var shiftFromUx: Double? = nil
+    var shiftToUx: Double? = nil
+    /// Forearm-axis gravity component of the orientation HELD over the last 30 s: nil unless at least 20 of
+    /// those seconds have gravity, the direction barely moved (resultant length ≥ 0.96, about ±15°) and the
+    /// wrist is not moving about. Absolute orientation, not a change: the one cue that bears on lying
+    /// (forearm flat or hand raised) and, weakly, on standing (arm hanging).
+    var heldUx: Double? = nil
     // Physiology.
     var hr: Double?
     var hrRel: Double?
@@ -376,6 +386,9 @@ struct ActivityFeatures: Equatable {
     /// The ElderNet window that applies at this second (held for the model's hop), only while the gait channel
     /// is active.
     var gaitQuality: GaitQualityWindow?
+    /// Seconds in a row the strap has been implausibly still (below a resting wrist's micro-motion, no
+    /// rotation) with no pulse and no wear evidence. Set by the decoder, which keeps the count across seconds.
+    var noPulseStillS = 0
 }
 
 /// Causal ring of recent seconds. Codable so a decoder restart resumes with its context intact.
@@ -679,16 +692,44 @@ struct ActivityFeatureWindow: Codable, Equatable {
             guard norm > 1e-6 else { return nil }
             return ([sx / norm, sy / norm, sz / norm], n)
         }
-        var shiftNet: Double? = nil
-        if let cur = meanDirection(0, 3), cur.n >= 2, let base = meanDirection(14, 32), base.n >= 6 {
+        func between(_ a: [Double], _ b: [Double]) -> Double {
+            acos(min(1, max(-1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180 / .pi
+        }
+        var shiftNet: Double? = nil, shiftFromUx: Double? = nil, shiftToUx: Double? = nil
+        if let cur = meanDirection(0, 3), cur.n >= 2 {
             // The current end must be settled: the last 3 s may not have rotated much among themselves.
             let recent = samples.filter { $0.ts > now - 3 && $0.ux != nil }
             var settled = true
             if let first = recent.first, let last = recent.last, let a = angle(first, last), a > 20 { settled = false }
-            if settled {
-                let d = min(1, max(-1, cur.v[0] * base.v[0] + cur.v[1] * base.v[1] + cur.v[2] * base.v[2]))
-                shiftNet = acos(d) * 180 / .pi
+            if settled, let base = meanDirection(14, 32), base.n >= 6 {
+                shiftNet = between(cur.v, base.v)
+                shiftFromUx = base.v[0]; shiftToUx = cur.v[0]
             }
+            // A RETURN shift (stand up, then sit straight back down within ~14 s) ends where the 14–32 s
+            // baseline already was, so it scores ~0 there. Measure it against the orientation held 5–12 s ago
+            // too, but only when that orientation was itself held and was reached by a real shift away from
+            // the baseline: a reach that comes straight back is not held anywhere (D2-02).
+            if settled, let held = meanDirection(5, 12), held.n >= 5,
+               let base = meanDirection(14, 32), base.n >= 6, between(held.v, base.v) >= 40 {
+                let span = samples.filter { $0.ts > now - 12 && $0.ts <= now - 5 && $0.ux != nil }
+                var heldStill = true
+                if let first = span.first, let last = span.last, let a = angle(first, last), a > 20 { heldStill = false }
+                let back = between(cur.v, held.v)
+                if heldStill, back > (shiftNet ?? 0) {
+                    shiftNet = back
+                    shiftFromUx = held.v[0]; shiftToUx = cur.v[0]
+                }
+            }
+        }
+
+        // Held absolute orientation over the last 30 s (low dynamics only).
+        var heldUx: Double? = nil
+        do {
+            var sx = 0.0, sy = 0.0, sz = 0.0, n = 0
+            for s in w30 { if let x = s.ux, let y = s.uy, let z = s.uz { sx += x; sy += y; sz += z; n += 1 } }
+            let norm = (sx * sx + sy * sy + sz * sz).squareRoot()
+            let quiet = (med.map(ActivityIntensity.scale(g:)) ?? 1) <= 0.40
+            if n >= 20, norm / Double(n) >= 0.96, quiet { heldUx = sx / norm }
         }
 
         // Heart rate.
@@ -736,7 +777,8 @@ struct ActivityFeatureWindow: Codable, Equatable {
         let slope: Double? = (hr != nil) ? hrSlope(at: now) : nil
         return ActivityFeatures(ts: now, m4: m4, m10: m10, m30: m30, mMed30: scaled(med), mBurst10: scaled(burstG), cv30: cv,
                                 gaitPresence: gait, cadenceSpm: cadence, runShare6: runShare, rhythm: rhythm,
-                                orientPath10: path, net5: net5, net30: net30, shiftNet: shiftNet, hr: hr, hrRel: hrRel,
+                                orientPath10: path, net5: net5, net30: net30, shiftNet: shiftNet,
+                                shiftFromUx: shiftFromUx, shiftToUx: shiftToUx, heldUx: heldUx, hr: hr, hrRel: hrRel,
                                 hrSlope: slope,
                                 wear: lastWear, sleep: lastSleep, loggedWorkout: workout,
                                 workoutKind: workout ? lastWorkoutKind : .unspecified,
