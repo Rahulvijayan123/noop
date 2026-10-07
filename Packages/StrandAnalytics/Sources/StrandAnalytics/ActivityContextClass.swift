@@ -13,16 +13,18 @@ import Foundation
 //
 //   • Sitting vs standing is NOT observable from a wrist. The wrist cannot see body height, so a still
 //     awake wearer stays `stationary` ("sitting or standing") until the heads lean clearly one way —
-//     and every committed `sitting` / `standing` is a likelihood the decoder already hedged.
+//     and every committed `sitting` / `standing` is a likelihood the decoder already hedged. Since hsmm-1.8
+//     the lean is bounded by real posture evidence (a sit-down / stand-up whose direction the forearm axis
+//     shows, desk-like hands with a resting forearm, a learned head), never by how long the stillness lasted.
 //   • Cycling is only claimed when something *names* it: the motion encoder (HART) says so, or a cycling
 //     workout covers the time. Pedalling leaves almost no wrist signature and no steps, and HR alone
 //     cannot tell it from a desk under stress — so it is never inferred from HR + stillness.
 //   • Higher-intensity activity is the honest name for "vigorous effort without a gait" (strength
 //     circuits, rowing, HIIT …): sustained high heart rate *with* vigorous arm movement and no stride.
-//   • No absolute wrist-orientation cue is used for lying down: how a strap sits on a wrist differs per
-//     person, per wrist and per day, and there is no labelled data to calibrate it. Lying is therefore
-//     the detected night (asleep on its sleep epochs, in bed on its wake ones), or a recumbent reading the
-//     decoder reaches through a lying-down movement signature.
+//   • Lying down is the detected night (asleep on its sleep epochs, in bed on its wake ones), a lie-down
+//     the forearm axis shows (it ends flat or with the hand above the elbow), or — slowly, over several
+//     minutes — a forearm held flat or raised and quiet (hsmm-1.8). That held-orientation cue is deliberately
+//     weak: a forearm resting flat on a lap or desk looks the same, and how a strap sits differs per person.
 //
 // `displayContext` strings ("Desk sitting", "Brisk walking" …) stay a *view* for people; this taxonomy is
 // what code may branch on. It is derived from the heads by the same rules as the display label
@@ -161,19 +163,19 @@ extension ActivityClass {
             evidence: "a sleep epoch of a detected night (the sleep stager's call) + stillness",
             limitation: "naps outside a detected session read as lying down; lying awake in bed is lying down, not sleeping"),
         ActivityClassCapability(activityClass: .lyingDown, basis: .sessionContext,
-            evidence: "awake inside a detected night's in-bed window, or a recumbent mode reached through a lying-down movement signature",
-            limitation: "no absolute wrist-orientation cue is used, so a daytime lie-down without a movement signature is not seen"),
+            evidence: "awake inside a detected night's in-bed window, a lie-down the forearm axis shows, or minutes of a held flat / raised quiet forearm",
+            limitation: "the held-orientation cue is weak and slow (a forearm resting flat on a lap looks the same), so a short daytime lie-down may read as stationary"),
         ActivityClassCapability(activityClass: .sitting, basis: .hedged,
-            evidence: "stationary wrist whose posture head leans seated (reached after sitting-down movement, long quiet spells)",
+            evidence: "stationary wrist whose posture head leans seated (a sit-down whose direction the forearm shows, desk-like hands)",
             limitation: "a wrist cannot see body height: sitting vs standing is a likelihood, never a measurement"),
         ActivityClassCapability(activityClass: .sittingDesk, basis: .hedged,
             evidence: "seated lean + desk-like arm behaviour (low, steady, orientation-stable movement)",
             limitation: "typing at a standing desk looks the same; the posture lean is still only a likelihood"),
         ActivityClassCapability(activityClass: .standing, basis: .hedged,
-            evidence: "stationary wrist whose posture head leans upright (typically right after walking or standing up)",
+            evidence: "stationary wrist whose posture head leans upright (a stand-up whose direction the forearm shows, an arm left hanging)",
             limitation: "needs a committed upright lean; otherwise the state stays `stationary`"),
         ActivityClassCapability(activityClass: .stationary, basis: .hedged,
-            evidence: "awake, on the wrist, no movement",
+            evidence: "awake, still, posture not resolved (including a stationary second split between lying and sitting)",
             limitation: "deliberately unresolved between sitting and standing"),
         ActivityClassCapability(activityClass: .fidgeting, basis: .streams,
             evidence: "bursty low-amplitude movement without gait, high burst-to-mean ratio",

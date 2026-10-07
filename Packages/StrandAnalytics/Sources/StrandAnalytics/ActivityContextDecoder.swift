@@ -504,11 +504,9 @@ public struct ActivityContextDecoder: Sendable {
         var moving = 0.0
         for m in 0..<BodyMode.count where !(BodyMode(rawValue: m)!.isStationary || BodyMode(rawValue: m)!.isTransition
                                             || m == BodyMode.unknown.rawValue) { moving += post[m] }
-        // So does a movement burst whose direction the forearm did not resolve (a transition the shift
-        // heuristic missed must not leave the old posture asserted for minutes); a resolved shift speaks
-        // through its direction evidence instead.
-        // A burst well above the wearer's own background (desk work and fidgets are not bursts here) that left
-        // the wrist somewhere else over the last 30 s.
+        // So does a movement burst the shift heuristic did not resolve (a transition it missed must not leave the
+        // old posture asserted for minutes): a burst well above the wearer's own background (desk work and
+        // fidgets are not bursts here) that left the wrist somewhere else over the last 30 s.
         let burstBar = max(0.5, (f.mMed30 ?? 0) + 0.2)
         let burst = acSigmoid(((f.mBurst10 ?? 0) - burstBar) / 0.05) * (1 - min(1, f.gaitPresence ?? 0))
             * acSigmoid(((f.net30 ?? 0) - 25) / 5)
