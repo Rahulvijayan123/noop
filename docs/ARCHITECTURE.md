@@ -181,6 +181,27 @@ heads, transitions) for the heart-rate day page. The worker produces the same do
 decoder and stores it per UTC day, but nothing serves it to the phone yet; the app still draws its
 local result.
 
+An optional second motion expert, Inertia-1 (`Tools/ActivityContext/INERTIA1.md`), can run beside HART on
+the worker. It is off by default and shadow-first: its head outputs are stored in their own table and,
+in candidate mode, compared against a second decode of the day, but the published documents never change.
+In the decoder its heads are separate, tempered channels (never an average with HART) that stay off unless
+`ActivityDecoderConfig.motionHeads` accepts a real Inertia-1 bundle (the pinned one, when a digest is pinned)
+and the day's windows come from that bundle; with them off the decoder's output is byte-identical to before.
+Its pull on any mode is bounded per second by its budget, specialist modes included, and its posture term
+steps aside while the band says asleep or in bed.
+
+A third optional expert, ElderNet gait quality (`Tools/ActivityContext/ELDERNET.md`: a public, fine-tuned wrist
+model for gait detection, speed, cadence, stride length, regularity and steps), runs the same way: off by default,
+shadow-first, its own table, never part of the published documents. In the decoder its gait probability is one
+more distinct, tempered channel (a likelihood ratio against π, the mean served gait probability, so an
+uninformative window changes nothing and the channel is neutral on average), discounted where HART and Inertia's
+locomotion head already speak (all three read the same wrist accelerometer; the discounts are floors at or above
+the measured overlap) and sharing one per-second, per-mode budget with the Inertia terms (HART's encoder channel
+and the strap channels are outside that budget, and two modes' log-odds can move by up to twice it); it stays off
+unless `ActivityDecoderConfig.gaitQuality` accepts the windows' model, and off it is byte-identical. The quality
+metrics are reported, not evidence: a published state, its runs and the intervals built from them carry an
+optional `gait` block only while the posterior is on walking and ElderNet detects gait.
+
 That decoding also leaves a durable record. Each run carries a canonical activity class (a closed
 vocabulary, with a confidence) beside the display wording. On the phone, each local day's runs are saved
 as timestamp-aligned intervals in the on-device store (`activityContextInterval`), and the per-sample

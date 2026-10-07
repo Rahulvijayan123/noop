@@ -58,8 +58,8 @@ struct ArchiveLane {
                 return
             }
             do {
-                if try archiveOneSnapshot() { consecutiveFailures = 0; continue }
-                if try archiveOneOutbox() { consecutiveFailures = 0; continue }
+                if try archiveOneSnapshot() { consecutiveFailures = 0; clearError(); continue }
+                if try archiveOneOutbox() { consecutiveFailures = 0; clearError(); continue }
                 return
             } catch let e as PostgresClient.Error where e.kind == .connectionLost {
                 record(e)
@@ -76,6 +76,13 @@ struct ArchiveLane {
     private mutating func record(_ error: Error) {
         stats.lastError = String(describing: error).prefix(2000).description
         stats.lastErrorKind = (error as? PostgresClient.Error)?.kind ?? .other
+    }
+
+    /// The heartbeat logs `lastError` on every beat; a success must retire it, or one transient
+    /// storage 5xx reads as a lane failing forever.
+    private mutating func clearError() {
+        stats.lastError = nil
+        stats.lastErrorKind = nil
     }
 
     // MARK: - v2 snapshot archives

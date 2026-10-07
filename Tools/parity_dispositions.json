@@ -267,6 +267,1446 @@
       "platform": "kotlin",
       "rationale": "This Kotlin extension dispatches a computed window to repository persistence. The corresponding persistComputedScores dispatch is inline in the excluded Swift app-layer analyzeRecent; this records its architectural role.",
       "twin_path": "Strand/Data/IntelligenceEngine.swift"
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::allowedHopS",
+      "identity_sha256": "6f00d7970af304af0e1e97d8a1c3e9471d585118226e1358a4e7634d3a891640",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::allowedWindowS",
+      "identity_sha256": "d278e754b981ede1d9eb453cc5e55ad4114f4392432f4bd2108af5ad204f02bb",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::defaultArmBudget",
+      "identity_sha256": "78b16e3566532273402c571ddbed124b23a1eb0d0a587a38576b6d28e98d0ee5",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::defaultArmWeight",
+      "identity_sha256": "e4a7ecfc756202fe1adfce8e5d956a4a6686287e4d6b8cba720755465ea4e6ae",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::defaultBodyBudget",
+      "identity_sha256": "94bbef5d6b5399bd9faefec156cbec6791067f5d6346c87c7d211daa4aee78a6",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::defaultHartRedundancy",
+      "identity_sha256": "2abec977ba9ed3f05ea465b14fac125de9e5200b2b33cb7073df9702bfff052b",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::defaultLocomotionWeight",
+      "identity_sha256": "a4a70b6ad9f174efae6350038a67ed62a9209c456a8b3cc205c9429b06899289",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::defaultPostureWeight",
+      "identity_sha256": "79d96b4dc9209e38e2f3be5a350362dbdd4f788972cb298f3b2d849aa576170f",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::hardCeiling",
+      "identity_sha256": "3c58a39771e0b7f393f7eb832f77556640aed227d4d37f5dabef54dd314ac238",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::preprocessingVersion",
+      "identity_sha256": "4e854854b4cc80bf41062511a459ea5e822ecb24dd8420156005acda63443182",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::priorSumTolerance",
+      "identity_sha256": "a87ed5d2a0b56fc7877b7cf4506bd229109e5ef48e835d61299906d768bc87d0",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::probabilitySumTolerance",
+      "identity_sha256": "95a0eded4b54f0794eaf008e9fe40611fe3f285170e09d6cddcdc30dab10389b",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::schema",
+      "identity_sha256": "793aece5afebf65c38f93399334d874cd24293bd23b59a18d813fb82a59fa47c",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::windowKeys",
+      "identity_sha256": "0e8e78002a494ac3703b8e3c306b0446493150345ce91ba9b555b7e4466ac904",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::epsilon",
+      "identity_sha256": "cd1d117a79cb8c37a0c1ab21e7691a69fc44681dc496ba33b3bc17f4d6ee46d5",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::lrClip",
+      "identity_sha256": "acbdafb9124077c0222b05779f5cecff5d4a2443da388dde1b21b83d48e431ff",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::postureSet",
+      "identity_sha256": "9ee6ad7b763d043005287d0fd8ccf9e4e24f5fdab94b32124358e46ae7c0616a",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::postureSetIndices",
+      "identity_sha256": "b74071038ce62914dc0ec886289c81972359b40ea1d3eb0de59fed5d8c25f247",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::specialistClass",
+      "identity_sha256": "ed334c3fc5392d1500c5254f8b7f2f014ba2483088c9504562f734dba35095a1",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-file",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift",
+      "identity_sha256": "c7d81def17e98e7e3aef01a02508c264b5cdeff32b3c2b39c4fb8c83889d81d6",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-file",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift",
+      "identity_sha256": "a2e66f5ed17ea452f16d09d8f1e87534156592c1174fc288edf7e5ea71b09640",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextDecoder.swift::applyArm/2#1",
+      "identity_sha256": "522c1ac66dd44f666e50278879efa84db5b91b09c1cbdb644e0e3bbc4f017c62",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::</2#1",
+      "identity_sha256": "89cf50cc2455522d26b850f788d1e9fa1bf1a81f7f6838711db2802b5dc5dabb",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::decode/1#1",
+      "identity_sha256": "3f4672433ec8beb494cdc1edc00b2389be2e4d7605f9d0f4ab12a5a1efc79e2f",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::encode/1#1",
+      "identity_sha256": "aac8b10299f0c5e5b23bac758302917f7c7f667ab89f5e88551cb7b0aa14959a",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::integer/2#1",
+      "identity_sha256": "6b64a6cff622f98ed64616c60e45e42faaa86a29a42046345c0380f98486ead2",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::isHex64/1#1",
+      "identity_sha256": "bdd1ecf9955504d1bd0d63b2fd8c3fd52f71283bde19375e3b6e525e47ec9b04",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::merged/1#1",
+      "identity_sha256": "d2e24ae7cf0e7730876ba874649c480190fa5197b7bd72f3e84717788f5321a5",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::number/2#1",
+      "identity_sha256": "7c15837dfd10b2a4acc88754e61c7a7cec8fb3e68af89486b452cac5872661d2",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::parse/1#1",
+      "identity_sha256": "c808bf75d5ddd93fbad5ebd063eb48f49448f1809ca9c1d43a2c47add13893ba",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::parseBundle/1#1",
+      "identity_sha256": "2578d64872d49666bf38661581818af8a9749752f88bcdb8117ef1ccf0fc2dca",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::parseSpec/2#1",
+      "identity_sha256": "6784ef8a324a4b06c14ae7464ff0364bd5d75e23d57068a312fc6892fd4b198c",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::parseWindow/3#1",
+      "identity_sha256": "9cc4dbbd99f89cfec1a82cc86b856472ae02bd5e6d1d4cab3840394a16a7523e",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::parseWindowStructure/2#1",
+      "identity_sha256": "805dcf6387c2c3704d461744dc2a91c880411b491bc1d0856397a1cc510a436b",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::probabilities/1#1",
+      "identity_sha256": "9ec706946ff2881dca4d86b0f7aa98b0e26aa46f6081a7f0e0eb0de0b1e301bb",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::setProbabilities/2#1",
+      "identity_sha256": "2cae7c95384d4ddb240c7bef6a4e2765e78eebd5a1ee2565c3255388fe233cee",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::string/2#1",
+      "identity_sha256": "0db810c82dd7c0d0baff9aa4bb07688174b32b5234e38f63643af334825f28ff",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::stringMap/2#1",
+      "identity_sha256": "69daade3b3af9427ad363c68bc0e2c1d972ed6b272ef1e8c2bab951cc6a30f9e",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::validate/0#1",
+      "identity_sha256": "9b1f99de91d7700b9440cb2946a224c6d7db3f0568f72c57d00c3fe0e4e73b84",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::validate/2#1",
+      "identity_sha256": "b883589510280f10dbcfd44347a60564c46da69b2afa031c1236c0b01a07ad10",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::bodyPull/1#1",
+      "identity_sha256": "0d28c7dfe0cfc88e9e85a937eba66e3e06783c24e360efc11b7b5a17fe7ff5eb",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::effectiveWeights/1#1",
+      "identity_sha256": "f5f38a711c2c67b7543d2934ee649367f73ba54762660cdce84051509e1c7e51",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::evaluate/1#1",
+      "identity_sha256": "7cc5cbec25616766f60b7d48986f441ff1ba6311207f200723a020d7fd14aeb9",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::namesSpecialist/2#1",
+      "identity_sha256": "804c579861b3871c6013f2ddd7f0bfd1f4b145400a8b4f8eb2989ceef3aa32fe",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::openedSupport/2#1",
+      "identity_sha256": "3e8dfda4fe89aea3476bc8f5aa98d19fb9b6b4023d18c1af8a090e47703dcfdd",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::prepare/1#1",
+      "identity_sha256": "5ee66b25d83efabbccee1f9062cc8a87ab35ed144df6aa233321787382cace47",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::prepare/5#1",
+      "identity_sha256": "655567d1351a9cf3844e2919330224dce3bf2fe2d22cb3857701d208d1674f68",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::root/1#1",
+      "identity_sha256": "40543fe710895fd81b1b1d7488867a29fd93b5d072e38836e746595de2d1c4bb",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::terms/3#1",
+      "identity_sha256": "4c7e7cccd225db137f3d682101c01f19ddc878a7072f16c8cd1d3cafddbab4f2",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::acceptsMotionHeads/2#1",
+      "identity_sha256": "7236c23be9deb8e4b6265975d041bd87941a1c6f71d64c657c33f44a1153f368",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::attachMotionHeads/5#1",
+      "identity_sha256": "df31fa28335bd823d54a26098543ac8a3a0c8f5f5b282c714f128a71b3ed38ae",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::attachmentReport/2#1",
+      "identity_sha256": "73e91e6a91fde9aa43f35a9cb03e710307d05f775001b6b80734c7b4d793d064",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::effectiveConfig/2#1",
+      "identity_sha256": "d8fb38a0f10cb43426466855784797ef2aa70d431c9db0e43ce4b97a46ff9926",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::observations/2#1",
+      "identity_sha256": "6c52a169dd870a77719a667f77d445c1245053bd39c8471a7e489be760977e31",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextDecoder.swift::motionHeadsStamp@property#1",
+      "identity_sha256": "b54568b6a217a155b75128e2067224381a3ddd5d9d681eb2c18e3270a33d689d",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::bundle12@property#1",
+      "identity_sha256": "8da164c5342ff0d2d7bf69c2c79a63152f9bc7c91aed5b2f26b301931be3d353",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::classOrder@property#1",
+      "identity_sha256": "4ba796971c480cf5b0ef0c08ec1f77d27fe799f1a20dcc34fdb566e116491583",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::configTag@property#1",
+      "identity_sha256": "10e341d0920aa309920d083925d53c3be6f9a2499ca0d18db1c4aefdf3e0fb55",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::description@property#1",
+      "identity_sha256": "865fe9e87f60137189b665b777c3d7803b6896f14d40a690814d36cd1a6be929",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::description@property#2",
+      "identity_sha256": "849c676201bbec42f17f5e5ff55cdb41e1e9048873e5ea7c476be5c39466cada",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::dropped@property#1",
+      "identity_sha256": "cde615764ad65ebf9d095939ec42841eb69b8e7945c2543719b231d65a635136",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::effectiveHartRedundancy@property#1",
+      "identity_sha256": "6034df24c1cb2e760162923d15449829ca11e2222c84df361eb979ea50e30f5c",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::evidenceRefusal@property#1",
+      "identity_sha256": "8fa0fbeeff7aad2e29057e3c4df6b59df2201ec5df349ea6278c9dd5338f7ec2",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::isCategorical@property#1",
+      "identity_sha256": "b30bd4ec01d71daa0ac7c17764da7256a3b24f9460609471ab403703a29804ae",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::kind@property#1",
+      "identity_sha256": "3945d52f263a2aaf5791c56f90140edf877b464bd91c7865c8584d13f6931312",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::provenanceStamp@property#1",
+      "identity_sha256": "1edff00dafa3c41cf5ed75899a598a341ae1410d5768718dbc7bad59537e0d34",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::rank@property#1",
+      "identity_sha256": "92972369e4e14650391608cdef264259f11b522976973946b9748ca61cddcf5c",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeads.swift::supportedClasses@property#1",
+      "identity_sha256": "7ba5ac6822aef57af9164bd4b9c9c10db1b199fe77287488ed26c5de1be40202",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift::isEmpty@property#1",
+      "identity_sha256": "088470ff7d010f859c0e216464fb2152abca0edcf993943739a730bd6c67a6f6",
+      "platform": "swift",
+      "rationale": "Inertia-1 motion-heads evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/INERTIA1.md section 7). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::allowedHopS",
+      "identity_sha256": "ab7f62d7f16cd9799a6c07d5e06e15713439db55e8b0f278bf17272a3b08a724",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::briskCadenceBounds",
+      "identity_sha256": "bfd10a3b60adfc17a8715e479747e8c07aad91da452e679ea60c51e82924ef1f",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::briskSpeedBounds",
+      "identity_sha256": "80c83d9717b73e67e429569f3ee27d02fe354d9052311b1596bb9e968fe3628f",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::cadenceRange",
+      "identity_sha256": "8ce1e1acd9f4ae0f8244bd09f49a920856e6d95e5363164c5f550ee52226ae32",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::calibratedOutputs",
+      "identity_sha256": "d2747a60abf87af9c5749abcdd8a2adcfc52a74edac8672d33a30f7fd62cf3e2",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultAccelerometerBudget",
+      "identity_sha256": "0d26aa4525851d52989c707967b763194def12a917ae9ffcb7ad24e625652595",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultBriskCadenceSpm",
+      "identity_sha256": "3cb4fa695297bdece97358d5578bdb36ccf1981189beddbeffcb829c5b1a6757",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultBriskSpeedMps",
+      "identity_sha256": "fa5c86b9f614e0464f7e5db7344d48bc3be9f2e0035fdb4fe8b4b0428979dbcf",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultGaitWeight",
+      "identity_sha256": "b9fe764dcbb7d9b37beff37c58f650dc34cf5374dc3c340cbb85ebd94a202f87",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultHartRedundancy",
+      "identity_sha256": "6616357b8ff60914bf2ae4b54218db1dce8ba282456566ac66d6b361086feed7",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultInertiaRedundancy",
+      "identity_sha256": "c403eb376928d53951ebe9d4de8c36305fa610289b0ecf2445ec52c0efd96fba",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::gaitPriorBounds",
+      "identity_sha256": "820429d8c521a870aa092c2b15615eec5e1d9d323bf63e2eece0aabc72fad19f",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::hardCeiling",
+      "identity_sha256": "01c4187a640ba6bfec9f081bbe1e46f205fc6d600b2615468fa04f15f87d9682",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::k",
+      "identity_sha256": "c020832876d6c55ef80bfb64f0e1e8e10639ecedafcae399c25548d9a1e2ab66",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::metricKeys",
+      "identity_sha256": "aa11bbb5aeb5fa7d77dc9d32222d029bd6db53bcae1b92a5d6c7c68c07c1ac09",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::modelId",
+      "identity_sha256": "dd84c2c90252d093c9cc37e3c43b422f3190a71b562d64dd16a12aba160e115b",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::preprocessingVersion",
+      "identity_sha256": "6402c73c0cf037ee2a4f491aba1999a383460bdcdcecf074e323fc0827a0cb60",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::regularityRange",
+      "identity_sha256": "15ef4e7cc5f3ddf9cadb42ae6986d03f8e6f4d4db4904642dfaf008c3505af30",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::schema",
+      "identity_sha256": "d9b689db3ad3aa96cb49b7806cd363092e7dbe51fa16487341058bed371b14f5",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::speedRange",
+      "identity_sha256": "aedc0f15fb5d54984d75fb74a6981d6e496ac404f88eae49dd9c6f4d388e7165",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::stepsRange",
+      "identity_sha256": "d214b9eb4ae19ba825e018785ea0f9b8882eb8224e41617fbc8df5cbdce6a891",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::strideRange",
+      "identity_sha256": "8f05c498ed2f717b3977ed7c05bed775558a07ad88497d1bb865d6feec49588c",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::thresholdTolerance",
+      "identity_sha256": "a9b705d8b4cdfd4f81fef4f0e816e12de32b70a35d51ed69a5327f2598cb580b",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::weightNames",
+      "identity_sha256": "fc4a702d89f68514b6a32df3f1dd52311add0e757f9bf68819c975a7554c3dbb",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::weightsDigestPrefix",
+      "identity_sha256": "087de483d0f7246777d0d31877b17b0810303a9aa5ba59ab937fe5c10605fa3e",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::windowKeys",
+      "identity_sha256": "195db3b83e0d287bde7fdbff423b8d214888ed0a272885dc62d983a4b15c1d69",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::windowS",
+      "identity_sha256": "18dd14ab851c645af781bf9dbd52c46f86315c5cf0332f76b026539231aa5ebf",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::briskCadenceScale",
+      "identity_sha256": "468c7251c105ff4fe5abf8dddaff141b4c1c8514179307b7cc94cf4ebd8fac81",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::briskPair",
+      "identity_sha256": "09471286d5164ec7594369618b3bf2c055b7cc452bde5a633213e88176e192cd",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::briskSpeedScale",
+      "identity_sha256": "a3583dce1a548c8a37a8ab78d7fe3970407199214540625e2b1b14f85737f1d5",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::epsilon",
+      "identity_sha256": "bf2e64c6b608dbd373ad16278d6293fa147a67372be714c4551341a9889360ae",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::gaitModes",
+      "identity_sha256": "6556cabae388fd24f89800bf79d91ccb20862ddaa07bf0695b790bb46c8bdf0f",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::lrClip",
+      "identity_sha256": "9731c25e0ed4290d942a8cf19428cd7cd400098800a498308100caa4aab214a0",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::nonGaitModes",
+      "identity_sha256": "f8e03100babe30a7e937cd55cef16b2c4271aeb1ee6f4e8812e7c243d70e017f",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::onOutcome",
+      "identity_sha256": "6e81ba0be149cd1712e312df9b728a9dc9b4e606281ef1bead95be47b8d918d9",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::posteriorGaitFloor",
+      "identity_sha256": "7c7c778679f9fe62a74504359585e95f59658daaee66b68caeee8d43859f8f29",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-file",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift",
+      "identity_sha256": "7e5094080c0b12224348ebf85f2a4e7364273c6ad358f98a8f69f94076c75553",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-file",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift",
+      "identity_sha256": "e9a2b535af145a5216127a82fafb9b0ef1bec649123a02a78665c5ea16ede36d",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextDecoder.swift::applyBodyWithPosture/5#1",
+      "identity_sha256": "c523df6a7557283a18cbfc62f78dea67d2d962047bab42ba8d145d5f3ddd5fce",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextDecoder.swift::renormalise/3#1",
+      "identity_sha256": "c59320d71284b0de92954eb0ff5ed9f9f4aeea971b2dca269d1b04f0a968e15f",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextDecoder.swift::updateGaitStretch/4#1",
+      "identity_sha256": "3a7d9e6ace95fdb8d0d0f7f65a6965852ce6c2797222e98041730488b5f4e127",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextEvidence.swift::push/5#1",
+      "identity_sha256": "74d4396451926b93cf75b19cd16164895b80707b003a77eaa92216a20174a72a",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::alnum/1#1",
+      "identity_sha256": "1b2a371314f2385b82ca989612aa8a9cd74c5198c311c30d1b6098c7d3d276fc",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::continued/1#1",
+      "identity_sha256": "7da840ab7c04a9946200c1965b7ff06ece33d212c06dc8b8d188719df95786ca",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::encode/1#1",
+      "identity_sha256": "80b82b840303ff244c0f2846faac3510f16475ff7c572f78c6799fa93e6daa95",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::encode/1#2",
+      "identity_sha256": "6e161e9a1decef19eca73eb1eddb7001d1c431f6210157109bf0631faf0cde87",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::hex/1#1",
+      "identity_sha256": "fbfdddcfb24d51bca4f8138a93e2140f9ab78f6630cf0cf46cc0abd51597bace",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::integer/2#1",
+      "identity_sha256": "b4537db79b72aa52b7e3ebf4551ccb6d5228afa8633c5aafc493644ee88e9bda",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::isHex/2#1",
+      "identity_sha256": "7e14070497b267b708f477a109c1bd55c2110472c3651215787f12588351e02a",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::isIdentifier/1#1",
+      "identity_sha256": "ae0b2373cb7f6bfa41883b302740fb466ef26e99419313b637446262c1694c9e",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::number/2#1",
+      "identity_sha256": "95f6a1dfbfe908dd832841ee944571b4c3abd6c539ad9391cb5d0b7b9869e3ae",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::parse/1#1",
+      "identity_sha256": "2c0683bdc15ab937684517c71012841b7e1e10956878efc509708f523db75926",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::parseModel/1#1",
+      "identity_sha256": "d2a2f41bfba35d245f6b5dff3d342e5e1c049553c9d6767c715441aefd02f95c",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::parseWindowStructure/2#1",
+      "identity_sha256": "5d90cd7a360e1e20fdb008130077f34a540755e6c30314616e51421a7ab2a010",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::rotr/2#1",
+      "identity_sha256": "4155d6141885a631297cce536a56b68dfceec06b345fd81928c0e6d97c3e3ce4",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::string/2#1",
+      "identity_sha256": "98a9ca7484c44cb139fe4045f077d8aa96d5b8dc19b6b28184e3246bde0bdbca",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::validate/0#1",
+      "identity_sha256": "d871eb99edabcacebef57ba5ad188406904a8fc2b3f845f1fcf65e02d7853525",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::validate/2#1",
+      "identity_sha256": "86de5ac62568bde76d484e76eb9a5f875a481e9a02035729d9772f37d4ef70d7",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::add/1#1",
+      "identity_sha256": "c3c06befc2398d386c9254c42284ac5b3a6b2e9d6d2b1fce64f76573280e2c91",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::add/1#2",
+      "identity_sha256": "33ac2252c4fd829afd7458bc62aeec5d56f71aee3e685e424bd4ee2add33e765",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::add/2#1",
+      "identity_sha256": "396efebba8702e2d31fa6dd3ac87e742b03178bf6687fbbd86ae4f952de038ab",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::briskLikelihood/1#1",
+      "identity_sha256": "890d1781bd004a8e5b37aaf0e53237bbac919b0fa3eda02fdcaf8e431a20d0f1",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::clip/1#1",
+      "identity_sha256": "5737df16d57725d2a984823898d63ad4f11fb21ac1ca1f8dc6726fe41ce5a235",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::combine/2#1",
+      "identity_sha256": "dcc4bf4e5dd1ce1a984d617b3eb89e3f5ab33b22ab81df4368f5a590d3e105db",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::combined/1#1",
+      "identity_sha256": "e1812d26e5a4c502e965eca3b752eabc589a67d5508c309f6069df12a3e601cf",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::count/2#1",
+      "identity_sha256": "fbd7f80133f50daeb4a583e0ed3ed5f5a2e15b7e4bb25c953faba58a4e360b71",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::effectiveWeights/2#1",
+      "identity_sha256": "55ad16d2b97e95165420d0ebef18f96b6ad903e79cdef7bac9f2990163e59482",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::encode/1#1",
+      "identity_sha256": "f6f02f184446bf6ba671b55ad1d3f78f9b3ae9435612dd9f4ced836d040fa190",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::gaitTerms/3#1",
+      "identity_sha256": "67554466fad35d4aee4f8f845d937546d6f51b9c5d451e7c8926e4909dca620b",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::likelihood/1#1",
+      "identity_sha256": "dc7390b26dd69d98f87b2f2653c5a995be661e410b2bf36b75f391c2a93e1827",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::minus/1#1",
+      "identity_sha256": "c72e5daa53281d4e612373e2bf4aaf01ae6f2a6eefdf977b63e1fced8791c56a",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::n/1#1",
+      "identity_sha256": "eba21a2169f645a3585cf58994a104d4fabefe74163043fec1aaf089adf1aa55",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::prepare/1#1",
+      "identity_sha256": "5e67048e9d565430a565948e433773cd22b1d831dd5224d2bea71e943099ec39",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::r/2#1",
+      "identity_sha256": "9de6e32dd586399e752cb34b332bf9d86be2c6f0e6b89da4ee07d69fbedc4dcc",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::scaled/1#1",
+      "identity_sha256": "df9eb0e70b1e25a5810ce7bd3934afcf88468d4225a51253bc2a56330e1cc3bc",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::sum/2#1",
+      "identity_sha256": "91d5693d6bb333399c5770352d30aac670caa06bd8b5d6d2337ad74cf9fd91a0",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextInterval.swift::addGait/1#1",
+      "identity_sha256": "4a84b4d5eaf9cf892a85ba8a6245c22d08842dcd65cb8148a00722b2cd8e0b52",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextModel.swift::score/4#1",
+      "identity_sha256": "f26c01c21cb164587b7cf4f96ad88306056c3befc0448aa1998822a05cb728ff",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::acceptsGaitQuality/2#1",
+      "identity_sha256": "1ae0acd1d2a0617cde7c842106e35ed5196c956e90a5d303fceee01df387e407",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::add/2#1",
+      "identity_sha256": "c61887cf6467ba4dedb0a5c592ade0093fc8fa4b84796120e73d1c4724311353",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::attachGaitQuality/5#1",
+      "identity_sha256": "6d848e63ca4e5296be0a93d6dd1d26e1fa834edfc4b3a6fb8e2b7f0870dd5979",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextTrack.swift::observationsWithReports/2#1",
+      "identity_sha256": "734e88a3f726b8bf732855429d01b14025607ba3cbcfb4c87fae2a516293a41d",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextDecoder.swift::gaitQualityStamp@property#1",
+      "identity_sha256": "aa6fdb16c72caedf020239b75e8d05b73a1c7459d60a87ac5ab54dd6ab3aca8e",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::configTag@property#1",
+      "identity_sha256": "2cd983cc8d68e05115a29084574c0a14bfe515cbb468c94192e92e70bbd5386c",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::description@property#1",
+      "identity_sha256": "c6bb769676ab37d15cb6575fa2544f65bf94eacdc43d6371c260d5a0b14f7eb6",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::description@property#2",
+      "identity_sha256": "5c3df15c290da55ab045eb4e0b1699cae2db2ece5dfcee144a3fa67c760409c7",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::dropped@property#1",
+      "identity_sha256": "74ce8b75da4cd65c81d6513ea0a450152dc4ad0129e388042a3ac388f3be0c4b",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::evidenceRefusal@property#1",
+      "identity_sha256": "33cdb1b5cb31c50e884b653ed1b5cae83ae63108afc92be99226e5de132d96e9",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::hasMetrics@property#1",
+      "identity_sha256": "5c1651ce8714d17ba13b246e3a9c5cbbbd82832279e94e9526b794b00e9cc19c",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::intValue@property#1",
+      "identity_sha256": "dda3998209fe489c08e30201ff4e0ccdab81734938721ea322099594a1b88574",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::kind@property#1",
+      "identity_sha256": "397e207017ef3a9f82a7b7e2ee3e7004c7d2de899d31439f60edeb93ca80f5c8",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::provenanceStamp@property#1",
+      "identity_sha256": "17cc7b3192039f10c7e4e18928d574761657fbc0910a4782ac802db5e34a92c9",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::weights12@property#1",
+      "identity_sha256": "75510d784ad4b5275b8c9d3187361762e8cc9eafdb3c323598485756c25040dd",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::weightsCanonicalText@property#1",
+      "identity_sha256": "cf0dbc084ace5d802c22f15c51ef3d4d12104c771dcb35a58cac76a0f410ef84",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::weightsDigest@property#1",
+      "identity_sha256": "24f22fa2da75f00ffdbb3d1f59ee39aee2d66c720ea1315449ff2eb8ec3bdc5c",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::isEmpty@property#1",
+      "identity_sha256": "389f6edd8d90750200c7039806997ea698df355231aeb82d7fd2b45e84cdbd86",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::mean@property#1",
+      "identity_sha256": "d954b8b07251406cdea7f44241923cce67186ab1f0db716e4d8ae32e039716ea",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQualityFusion.swift::summary@property#1",
+      "identity_sha256": "cea23663f26d9ce041e74e7f218e30bcfd8a241bf6b4b1f67a0438c65f86f1b6",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::defaultGaitPrior",
+      "identity_sha256": "c6c9280c67adbd47f77196bafd9f5d2eae1f4d58ef0445056bab04e09357979d",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::measuredHartRedundancy",
+      "identity_sha256": "46511c77786930aa786599cad62010ecae7bca237106c1d5e145affc63059e18",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::measuredInertiaRedundancy",
+      "identity_sha256": "e9f3605329bcf1801041e53b8c749dbe86d28a59a1f90e31ae320c4c2abc1004",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::modelInfoKeys",
+      "identity_sha256": "00d9dde09722f5c10d578de4dd7bd54526e9fca996cad95238b2fdc6a7fdf5a3",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::responseKeys",
+      "identity_sha256": "f0e416c16121c00b36f0b50952f138c88cccbcb440f059f9478b56a2b0ced831",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::temperatureParameter",
+      "identity_sha256": "14c4ce160ce9cf3adbf2706d172c3b00191952a97abb82698130a6cd938032e4",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-constant",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::thresholdParameter",
+      "identity_sha256": "3461f5d636c33c592e3059ac1ef2a746e1eb34803087b9f41c5da22a2eb40938",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::checkKeys/2#1",
+      "identity_sha256": "96f8226833372fe7bff11d91bddc5edf3402e49b7849b2db441117e7436c9d4b",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::checkSchema/2#1",
+      "identity_sha256": "2f16e0ff6934011d3412b5a930cc19830df6bab2e66085f881d6a4cee1fdf267",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::effectiveRedundancy/2#1",
+      "identity_sha256": "c8c88c2c53422cdd57068a30f401f3227d1058e9d7c1f26bcff0c3a95439859a",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-function",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::parseModelInfo/1#1",
+      "identity_sha256": "d6365bc2d7040191c4d50419aeb4bbd70ae5e52c893a99505618db41bf04ea34",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::effectiveHartRedundancy@property#1",
+      "identity_sha256": "4659e17078af3a583b81b69c215ba78f93c9ba30d752e7e31e788db7dd62ad03",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
+    },
+    {
+      "type": "platform_specific",
+      "kind": "add-unpaired-property",
+      "identity": "swift\u0000Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextGaitQuality.swift::effectiveInertiaRedundancy@property#1",
+      "identity_sha256": "4900a0f134dafd3682fe90d4dc3ac21b57fe90b91df1da5ff469b76b7c23b9fd",
+      "platform": "swift",
+      "rationale": "ElderNet gait-quality evidence channel of the Swift ActivityContext decoder (off by default; shadow/candidate in the worker only; Tools/ActivityContext/ELDERNET.md section 5). The ActivityContext decoder has no Kotlin twin: Android never decodes ActivityContext (it only extracts and stores IMU features in ImuFeatureExtractor.kt, Whoop5RawImu.kt and ImuSessionFileStore.kt), and this Swift package is what the cloud worker and the offline replay run."
     }
   ]
 }

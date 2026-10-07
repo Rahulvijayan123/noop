@@ -560,18 +560,26 @@ final class InferenceClient {
     /// never extend it, and the semaphore backstop follows the shortened value, so
     /// a hung sidecar still cannot pin the caller past its own deadline.
     func infer(_ request: InferenceRequest, timeoutMSOverride: Int? = nil) throws -> InferenceResponse {
+        let body: Data
+        do {
+            body = try request.canonicalJSON()
+        } catch {
+            throw InferenceClientError.malformed("request encoding failed: \(error)")
+        }
+        return try infer(body: body, metric: request.metric, timeoutMSOverride: timeoutMSOverride)
+    }
+
+    /// `POST /v1/infer` with an already-encoded request body (a caller that writes a large
+    /// numeric input itself).
+    func infer(body: Data, metric: String, timeoutMSOverride: Int? = nil) throws -> InferenceResponse {
         var urlRequest = URLRequest(url: endpoint("/v1/infer"))
         urlRequest.httpMethod = "POST"
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
-        do {
-            urlRequest.httpBody = try request.canonicalJSON()
-        } catch {
-            throw InferenceClientError.malformed("request encoding failed: \(error)")
-        }
+        urlRequest.httpBody = body
         let budget = timeoutMSOverride.map { max(1, min($0, timeoutMS)) } ?? timeoutMS
         let (data, http) = try send(urlRequest, timeoutMS: budget)
-        return try Self.decodeInferenceResponse(data, http: http, expectedMetric: request.metric)
+        return try Self.decodeInferenceResponse(data, http: http, expectedMetric: metric)
     }
 
     /// GET /healthz. Readiness polling uses a shorter deadline than inference so a

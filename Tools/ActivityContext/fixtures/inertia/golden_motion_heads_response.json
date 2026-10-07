@@ -1,0 +1,662 @@
+{
+  "bundle": {
+    "heads": {
+      "arm_behavior": {
+        "class_order": [
+          "quiet",
+          "desk_like",
+          "fidgeting",
+          "repetitive_hand_motion",
+          "active_gesturing",
+          "exercise_motion",
+          "other"
+        ],
+        "covers": {},
+        "decoder_evidence": true,
+        "merge_into": {},
+        "prior": {
+          "active_gesturing": 0.2,
+          "desk_like": 0.2,
+          "exercise_motion": 0.2,
+          "fidgeting": 0.2,
+          "quiet": 0.2
+        },
+        "status": {
+          "active_gesturing": "strong",
+          "desk_like": "weak",
+          "exercise_motion": "weak",
+          "fidgeting": "weak",
+          "quiet": "strong"
+        },
+        "tau": {
+          "active_gesturing": 0.85,
+          "desk_like": 0.7,
+          "exercise_motion": 0.7,
+          "fidgeting": 0.7,
+          "quiet": 0.85
+        }
+      },
+      "locomotion": {
+        "class_order": [
+          "stationary",
+          "walking",
+          "brisk_walking",
+          "running",
+          "stairs",
+          "cycling",
+          "vehicle_motion",
+          "other"
+        ],
+        "covers": {
+          "walking": [
+            "walking",
+            "brisk_walking"
+          ]
+        },
+        "decoder_evidence": true,
+        "merge_into": {},
+        "prior": {
+          "cycling": 0.2,
+          "other": 0.2,
+          "running": 0.2,
+          "stationary": 0.2,
+          "walking": 0.2
+        },
+        "status": {
+          "cycling": "strong",
+          "other": "weak",
+          "running": "weak",
+          "stationary": "strong",
+          "walking": "weak"
+        },
+        "tau": {
+          "cycling": 0.85,
+          "other": 0.7,
+          "running": 0.7,
+          "stationary": 0.85,
+          "walking": 0.7
+        }
+      },
+      "posture": {
+        "class_order": [
+          "recumbent",
+          "seated_likely",
+          "upright_stationary",
+          "postural_transition"
+        ],
+        "covers": {},
+        "decoder_evidence": true,
+        "merge_into": {
+          "postural_transition": "upright_stationary"
+        },
+        "prior": {
+          "postural_transition": 0.25,
+          "recumbent": 0.25,
+          "seated_likely": 0.25,
+          "upright_stationary": 0.25
+        },
+        "status": {
+          "postural_transition": "abstain",
+          "recumbent": "strong",
+          "seated_likely": "weak",
+          "upright_stationary": "weak"
+        },
+        "tau": {
+          "postural_transition": 0.7,
+          "recumbent": 0.85,
+          "seated_likely": 0.7,
+          "upright_stationary": 0.7
+        }
+      },
+      "transition": {
+        "class_order": [
+          "sit_to_stand_like",
+          "stand_to_sit_like",
+          "lying_down_like",
+          "getting_up_like",
+          "walk_start",
+          "walk_stop",
+          "run_start",
+          "run_stop"
+        ],
+        "covers": {},
+        "merge_into": {},
+        "prior": {
+          "sit_to_stand_like": 0.05,
+          "stand_to_sit_like": 0.05,
+          "walk_start": 0.05,
+          "walk_stop": 0.05
+        },
+        "status": {
+          "sit_to_stand_like": "strong",
+          "stand_to_sit_like": "weak",
+          "walk_start": "weak",
+          "walk_stop": "strong"
+        },
+        "tau": {
+          "sit_to_stand_like": 0.85,
+          "stand_to_sit_like": 0.7,
+          "walk_start": 0.7,
+          "walk_stop": 0.85
+        }
+      }
+    },
+    "ood": {
+      "method": "knn",
+      "threshold": 0.763968
+    }
+  },
+  "bundle_sha256": "03eb56f279bc599fc4568778afea037291024d45ef6363e9b7a80979a5952df6",
+  "checkpoint_sha256": "7a1677c8b74de3ac97b637e24d686133ad397fc6de5433accd4b3ff343ce7dad",
+  "duration_ms": 0,
+  "encoder_id": "standin:inertia-arch-random-init/ar_transformer-tiny/seed0",
+  "encoder_kind": "standin",
+  "encoder_version": "ar_transformer-tiny+cfg.610c1b2301a5+ckpt.7a1677c8b74d",
+  "evidence_tier_max": "shadow",
+  "heads_version": "fixture-heads-tiny-art-seed0",
+  "hop_s": 5,
+  "id": "golden-motion-heads-1",
+  "n_dropped_nonfinite": 0,
+  "ok": true,
+  "op": "infer",
+  "preprocessing_version": "inertia-prep-1",
+  "schema": "motion-heads-1",
+  "window_s": 30,
+  "windows": [
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.006926,
+        "desk_like": 0.80278,
+        "exercise_motion": 0.005752,
+        "fidgeting": 0.182617,
+        "quiet": 0.001926
+      },
+      "e": 1758000030,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.16655,
+        "other": 0.238876,
+        "running": 0.095049,
+        "stationary": 0.058776,
+        "walking": 0.440749
+      },
+      "movement_intensity": 0.425525,
+      "ood_score": 0.0021,
+      "posture": {
+        "postural_transition": 0.658806,
+        "recumbent": 0.007577,
+        "seated_likely": 0.261937,
+        "upright_stationary": 0.07168
+      },
+      "s": 1758000000,
+      "transition": {
+        "sit_to_stand_like": 0.12625,
+        "stand_to_sit_like": 0.041612,
+        "walk_start": 0.073275,
+        "walk_stop": 0.266541
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.0069,
+        "desk_like": 0.803611,
+        "exercise_motion": 0.005773,
+        "fidgeting": 0.181777,
+        "quiet": 0.001938
+      },
+      "e": 1758000035,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.1664,
+        "other": 0.239009,
+        "running": 0.095096,
+        "stationary": 0.058595,
+        "walking": 0.440899
+      },
+      "movement_intensity": 0.426494,
+      "ood_score": 0.004858,
+      "posture": {
+        "postural_transition": 0.658265,
+        "recumbent": 0.007615,
+        "seated_likely": 0.262257,
+        "upright_stationary": 0.071863
+      },
+      "s": 1758000005,
+      "transition": {
+        "sit_to_stand_like": 0.126048,
+        "stand_to_sit_like": 0.041606,
+        "walk_start": 0.073276,
+        "walk_stop": 0.268457
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.050813,
+        "desk_like": 0.616718,
+        "exercise_motion": 0.041568,
+        "fidgeting": 0.266591,
+        "quiet": 0.024311
+      },
+      "e": 1758000040,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.162051,
+        "other": 0.247255,
+        "running": 0.103534,
+        "stationary": 0.070721,
+        "walking": 0.416439
+      },
+      "movement_intensity": 0.455695,
+      "ood_score": 0.301606,
+      "posture": {
+        "postural_transition": 0.477957,
+        "recumbent": 0.033077,
+        "seated_likely": 0.324862,
+        "upright_stationary": 0.164104
+      },
+      "s": 1758000010,
+      "transition": {
+        "sit_to_stand_like": 0.157125,
+        "stand_to_sit_like": 0.079369,
+        "walk_start": 0.207128,
+        "walk_stop": 0.336422
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.308764,
+        "desk_like": 0.315741,
+        "exercise_motion": 0.048618,
+        "fidgeting": 0.240631,
+        "quiet": 0.086246
+      },
+      "e": 1758000045,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.17006,
+        "other": 0.254204,
+        "running": 0.115886,
+        "stationary": 0.113253,
+        "walking": 0.346596
+      },
+      "movement_intensity": 0.436708,
+      "ood_score": 0.480018,
+      "posture": {
+        "postural_transition": 0.368476,
+        "recumbent": 0.11422,
+        "seated_likely": 0.371072,
+        "upright_stationary": 0.146233
+      },
+      "s": 1758000015,
+      "transition": {
+        "sit_to_stand_like": 0.163366,
+        "stand_to_sit_like": 0.111589,
+        "walk_start": 0.316859,
+        "walk_stop": 0.279195
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.613005,
+        "desk_like": 0.071804,
+        "exercise_motion": 0.036429,
+        "fidgeting": 0.090341,
+        "quiet": 0.188422
+      },
+      "e": 1758000050,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.156235,
+        "other": 0.287263,
+        "running": 0.126651,
+        "stationary": 0.145331,
+        "walking": 0.28452
+      },
+      "movement_intensity": 0.454022,
+      "ood_score": 0.485024,
+      "posture": {
+        "postural_transition": 0.198742,
+        "recumbent": 0.34827,
+        "seated_likely": 0.326995,
+        "upright_stationary": 0.125992
+      },
+      "s": 1758000020,
+      "transition": {
+        "sit_to_stand_like": 0.178533,
+        "stand_to_sit_like": 0.163453,
+        "walk_start": 0.498204,
+        "walk_stop": 0.338831
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.763421,
+        "desk_like": 0.020179,
+        "exercise_motion": 0.005293,
+        "fidgeting": 0.0365,
+        "quiet": 0.174607
+      },
+      "e": 1758000055,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.153618,
+        "other": 0.297535,
+        "running": 0.13143,
+        "stationary": 0.156036,
+        "walking": 0.261382
+      },
+      "movement_intensity": 0.445296,
+      "ood_score": 0.503933,
+      "posture": {
+        "postural_transition": 0.088794,
+        "recumbent": 0.61405,
+        "seated_likely": 0.220212,
+        "upright_stationary": 0.076944
+      },
+      "s": 1758000025,
+      "transition": {
+        "sit_to_stand_like": 0.189193,
+        "stand_to_sit_like": 0.230942,
+        "walk_start": 0.567097,
+        "walk_stop": 0.412863
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.590731,
+        "desk_like": 0.004125,
+        "exercise_motion": 0.004951,
+        "fidgeting": 0.014755,
+        "quiet": 0.385437
+      },
+      "e": 1758000060,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.152287,
+        "other": 0.299847,
+        "running": 0.133336,
+        "stationary": 0.175339,
+        "walking": 0.239191
+      },
+      "movement_intensity": 0.447017,
+      "ood_score": 0.524294,
+      "posture": {
+        "postural_transition": 0.024522,
+        "recumbent": 0.790108,
+        "seated_likely": 0.097381,
+        "upright_stationary": 0.087989
+      },
+      "s": 1758000030,
+      "transition": {
+        "sit_to_stand_like": 0.257786,
+        "stand_to_sit_like": 0.395747,
+        "walk_start": 0.797679,
+        "walk_stop": 0.637297
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.244044,
+        "desk_like": 0.000887,
+        "exercise_motion": 0.00302,
+        "fidgeting": 0.007447,
+        "quiet": 0.744602
+      },
+      "e": 1758000065,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.161191,
+        "other": 0.274779,
+        "running": 0.13408,
+        "stationary": 0.202387,
+        "walking": 0.227563
+      },
+      "movement_intensity": 0.437399,
+      "ood_score": 0.006167,
+      "posture": {
+        "postural_transition": 0.005458,
+        "recumbent": 0.77839,
+        "seated_likely": 0.030902,
+        "upright_stationary": 0.185249
+      },
+      "s": 1758000035,
+      "transition": {
+        "sit_to_stand_like": 0.395796,
+        "stand_to_sit_like": 0.656147,
+        "walk_start": 0.924657,
+        "walk_stop": 0.870048
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.371848,
+        "desk_like": 0.005245,
+        "exercise_motion": 0.008211,
+        "fidgeting": 0.026018,
+        "quiet": 0.588679
+      },
+      "e": 1758000070,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.170164,
+        "other": 0.253011,
+        "running": 0.137502,
+        "stationary": 0.230789,
+        "walking": 0.208533
+      },
+      "movement_intensity": 0.324592,
+      "ood_score": 0.230236,
+      "posture": {
+        "postural_transition": 0.017361,
+        "recumbent": 0.776183,
+        "seated_likely": 0.059093,
+        "upright_stationary": 0.147363
+      },
+      "s": 1758000040,
+      "transition": {
+        "sit_to_stand_like": 0.475409,
+        "stand_to_sit_like": 0.680169,
+        "walk_start": 0.826538,
+        "walk_stop": 0.771825
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.275331,
+        "desk_like": 0.024288,
+        "exercise_motion": 0.035206,
+        "fidgeting": 0.073064,
+        "quiet": 0.592111
+      },
+      "e": 1758000075,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.182131,
+        "other": 0.215041,
+        "running": 0.138482,
+        "stationary": 0.278473,
+        "walking": 0.185873
+      },
+      "movement_intensity": 0.256042,
+      "ood_score": 0.49834,
+      "posture": {
+        "postural_transition": 0.045138,
+        "recumbent": 0.57626,
+        "seated_likely": 0.092404,
+        "upright_stationary": 0.286199
+      },
+      "s": 1758000045,
+      "transition": {
+        "sit_to_stand_like": 0.609382,
+        "stand_to_sit_like": 0.751338,
+        "walk_start": 0.762363,
+        "walk_stop": 0.785868
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.206169,
+        "desk_like": 0.08775,
+        "exercise_motion": 0.122143,
+        "fidgeting": 0.156941,
+        "quiet": 0.426997
+      },
+      "e": 1758000080,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.184968,
+        "other": 0.19068,
+        "running": 0.138982,
+        "stationary": 0.325178,
+        "walking": 0.160192
+      },
+      "movement_intensity": 0.18044,
+      "ood_score": 0.615047,
+      "posture": {
+        "postural_transition": 0.11441,
+        "recumbent": 0.380527,
+        "seated_likely": 0.131015,
+        "upright_stationary": 0.374048
+      },
+      "s": 1758000050,
+      "transition": {
+        "sit_to_stand_like": 0.718045,
+        "stand_to_sit_like": 0.815413,
+        "walk_start": 0.662965,
+        "walk_stop": 0.717891
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.055846,
+        "desk_like": 0.070219,
+        "exercise_motion": 0.549894,
+        "fidgeting": 0.090295,
+        "quiet": 0.233746
+      },
+      "e": 1758000085,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.18324,
+        "other": 0.206195,
+        "running": 0.149156,
+        "stationary": 0.292071,
+        "walking": 0.169339
+      },
+      "movement_intensity": 0.146225,
+      "ood_score": 0.515947,
+      "posture": {
+        "postural_transition": 0.154988,
+        "recumbent": 0.217959,
+        "seated_likely": 0.107615,
+        "upright_stationary": 0.519438
+      },
+      "s": 1758000055,
+      "transition": {
+        "sit_to_stand_like": 0.829408,
+        "stand_to_sit_like": 0.877286,
+        "walk_start": 0.685553,
+        "walk_stop": 0.717811
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.023404,
+        "desk_like": 0.052344,
+        "exercise_motion": 0.821995,
+        "fidgeting": 0.039162,
+        "quiet": 0.063095
+      },
+      "e": 1758000090,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.167433,
+        "other": 0.287983,
+        "running": 0.141352,
+        "stationary": 0.184719,
+        "walking": 0.218514
+      },
+      "movement_intensity": 0.110624,
+      "ood_score": 0.385052,
+      "posture": {
+        "postural_transition": 0.338525,
+        "recumbent": 0.201978,
+        "seated_likely": 0.140809,
+        "upright_stationary": 0.318688
+      },
+      "s": 1758000060,
+      "transition": {
+        "sit_to_stand_like": 0.868845,
+        "stand_to_sit_like": 0.888592,
+        "walk_start": 0.55148,
+        "walk_stop": 0.540684
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.008359,
+        "desk_like": 0.023431,
+        "exercise_motion": 0.945104,
+        "fidgeting": 0.010533,
+        "quiet": 0.012572
+      },
+      "e": 1758000095,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.149709,
+        "other": 0.340826,
+        "running": 0.116554,
+        "stationary": 0.102002,
+        "walking": 0.29091
+      },
+      "movement_intensity": 0.090354,
+      "ood_score": 0.03634,
+      "posture": {
+        "postural_transition": 0.52975,
+        "recumbent": 0.176166,
+        "seated_likely": 0.167147,
+        "upright_stationary": 0.126938
+      },
+      "s": 1758000065,
+      "transition": {
+        "sit_to_stand_like": 0.897827,
+        "stand_to_sit_like": 0.886781,
+        "walk_start": 0.41321,
+        "walk_stop": 0.337804
+      }
+    },
+    {
+      "arm_behavior": {
+        "active_gesturing": 0.007624,
+        "desk_like": 0.022101,
+        "exercise_motion": 0.94838,
+        "fidgeting": 0.009785,
+        "quiet": 0.012109
+      },
+      "e": 1758000100,
+      "is_ood": false,
+      "locomotion": {
+        "cycling": 0.149397,
+        "other": 0.34216,
+        "running": 0.118035,
+        "stationary": 0.101647,
+        "walking": 0.288761
+      },
+      "movement_intensity": 0.090897,
+      "ood_score": 0.024299,
+      "posture": {
+        "postural_transition": 0.533215,
+        "recumbent": 0.172457,
+        "seated_likely": 0.166873,
+        "upright_stationary": 0.127455
+      },
+      "s": 1758000070,
+      "transition": {
+        "sit_to_stand_like": 0.897523,
+        "stand_to_sit_like": 0.884289,
+        "walk_start": 0.415617,
+        "walk_stop": 0.350576
+      }
+    }
+  ]
+}

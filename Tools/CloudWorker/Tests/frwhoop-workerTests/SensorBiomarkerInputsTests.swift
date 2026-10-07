@@ -441,6 +441,26 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertEqual(s0.t, Double(firstSegment.startUnix), accuracy: 1e-9)
     }
 
+    func testSegmentSeamsLandOnTwentySecondBoundaries() throws {
+        // A run starting off-grid: inner seams snap down to UTC multiples of 20 s so no 5 s epoch
+        // or 4 s window straddles two requests; the run's own edges are kept.
+        let cols = [Int16](repeating: 0, count: 600)
+        let records = (103..<1001).map { Npb1ImuDecoder.Record(rowId: Int64($0), ts: Int64($0), columns: cols) }
+        let timeline = try SensorBiomarkerInputs.imuTimeline(records)
+        let segments = SensorBiomarkerInputs.imuSegments(
+            run: ActivityLane.Run(start: 103, end: 1001), timeline: timeline, maxDuration: 300)
+        XCTAssertEqual(segments.map(\.startUnix), [103, 400, 700, 1000])
+        XCTAssertEqual(segments.map(\.durationS), [297, 300, 300, 1])
+    }
+
+    func testClipSlicesRunsToAnHour() {
+        let runs = [ActivityLane.Run(start: 3_000, end: 4_000), ActivityLane.Run(start: 7_300, end: 7_400)]
+        XCTAssertEqual(SensorBiomarkerInputs.clip(runs, from: 3_600, to: 7_200),
+                       [ActivityLane.Run(start: 3_600, end: 4_000)])
+        XCTAssertEqual(SensorBiomarkerInputs.clip(runs, from: 0, to: 3_600),
+                       [ActivityLane.Run(start: 3_000, end: 3_600)])
+    }
+
     // MARK: - PPG reconstruction (independent expected values)
 
     private func refAbsolute(base: Int, deltas: [Int]) -> [Int] {

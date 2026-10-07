@@ -95,6 +95,21 @@ final class DayStretchLayoutTests: XCTestCase {
         XCTAssertEqual(result.recent.map(\.start), [at(9)])
     }
 
+    func testAShortStandIsListedButAShortWalkOrSitIsNot() {
+        func short(_ label: String, at start: Int, seconds: Int) -> ActivityEpisode {
+            ActivityEpisode(start: start, end: start + seconds, label: label,
+                            posture: HeadProbabilities(), locomotion: HeadProbabilities(), armBehavior: HeadProbabilities(),
+                            intensity: nil, confidence: 0.6, uncertainty: 0.4, sleep: .awake, wear: .onWrist)
+        }
+        let result = layout([
+            short("Standing quietly", at: at(10), seconds: 15),
+            short("Standing, hands busy", at: at(10, 5), seconds: 5),
+            short("Sitting quietly", at: at(10, 10), seconds: 20),
+            short("Walking", at: at(10, 15), seconds: 30),
+        ])
+        XCTAssertEqual(result.recent.map(\.start), [at(10)])
+    }
+
     func testAStretchBelongsToThePartItStartedIn() {
         // Starts at 11:50 and runs well into the midday.
         let result = layout([episode(from: at(11, 50), minutes: 90)], recent: 0)

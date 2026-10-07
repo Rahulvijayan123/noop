@@ -6,10 +6,28 @@ extension Repository {
     /// The heart-rate reference the activity decoder judges effort against for this wearer: their typical
     /// resting rate (median of recent nights) and maximum, each used only when plausible. The Heart rate
     /// page and the persisted context both decode with it, so a day is the same day wherever it is read.
+    ///
+    /// ElderNet's gait evidence joins once the server has sent any (pinned to `GaitWindowStore.Pins`). A day without
+    /// its windows decodes exactly as without the entry (`ActivityContextTrackBuilder.effectiveConfig`).
+    ///
+    /// The wearer's personal profile joins once a fit from their guided calibration runs beat the defaults on
+    /// held-out runs (`ActivityPersonalProfileStore`); its tag is part of `cacheTag`, so cached days re-decode.
     var activityDecoderConfig: ActivityDecoderConfig {
-        ActivityDecoderConfig.personalized(
+        var config = activityBaseDecoderConfig
+        config.personalProfile = ActivityPersonalProfileStore.shared.adoptedProfile
+        return config
+    }
+
+    /// `activityDecoderConfig` without the personal profile: what a personal fit is replayed with and has to beat.
+    var activityBaseDecoderConfig: ActivityDecoderConfig {
+        var config = ActivityDecoderConfig.personalized(
             restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: days.map(\.restingHr)),
             maxHeartRate: activityMaxHeartRate)
+        if let model = GaitWindowStore.shared.latestModel {
+            let evidence = GaitWindowStore.evidenceConfig(model: model)
+            if evidence.evidenceRefusal == nil { config.gaitQuality = evidence }
+        }
+        return config
     }
 
     /// The cache key carries the heart-rate reference: a decoder resumed from state built against another
@@ -70,8 +88,14 @@ extension Repository {
             input.imuWindows = encoder.features
             input.encoderId = encoder.encoderId
             input.encoderVersion = encoder.encoderVersion
+            input.transitionWindows = encoder.transitions
         }
         let config = activityDecoderConfig
+        // ElderNet's gait windows for the same seconds: walking or not, and how (cadence, speed), at 5 s steps.
+        if let gait = config.gaitQuality,
+           let windows = GaitWindowStore.shared.trackInput(from: s.start, to: s.end, model: gait.model) {
+            input.gaitQuality = windows
+        }
         return await ActivityContextWorker.shared.document(
             source: "\(s.sourceKey)@\(config.cacheTag)", input: input, config: config,
             lane: lane, progress: progress)

@@ -201,6 +201,61 @@ export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
   return days.map((d) => byDay.get(d)).filter((r): r is Record<string, unknown> => r != null);
 }
 
+const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
+  + 'result_revision,computed_at';
+
+/**
+ * `GET /gait-windows?days=<YYYY-MM-DD>[,…][&known=<YYYY-MM-DD>:<revision>,…]`: ElderNet's per-window gait
+ * detection and gait quality (`gait-windows-1`) plus its own day summary, for up to three UTC days. Same query
+ * and `known` rule as `/activity-windows`. A day can hold a shadow and a candidate row (and rows of an older
+ * model); the newest computed one is returned. The candidate decode document is never sent.
+ */
+export async function readGaitWindows({ rest, userId, deviceId, days, known }: {
+  rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
+}) {
+  const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}`;
+  const rows = await rest.select('activity_gait_windows_days',
+    `${owner}&day=in.(${days.join(',')})&select=${GAIT_WINDOWS_HEAD}&order=computed_at.desc`) ?? [];
+  const newest = new Map<string, any>();
+  for (const row of rows) if (!newest.has(row.day)) newest.set(row.day, row);
+  const out = [];
+  for (const head of newest.values()) {
+    const revision = String(head.result_revision);
+    if (known.get(head.day) === revision) {
+      out.push({ ...head, result_revision: revision, unchanged: true });
+      continue;
+    }
+    const body = (await rest.select('activity_gait_windows_days',
+      `${owner}&day=eq.${head.day}&mode=eq.${encodeURIComponent(head.mode)}`
+      + `&model_version=eq.${encodeURIComponent(head.model_version)}`
+      + '&select=result_revision,summary,windows,model_id,weights,weights_digest,upstream_commit,preprocessing_version'))?.[0];
+    if (!body) continue;
+    out.push({
+      ...head,
+      result_revision: String(body.result_revision),
+      // Enough for a client to rebuild the model the windows came from and pin it (`GaitQualityModelInfo`).
+      model: {
+        model_id: body.model_id,
+        model_version: head.model_version,
+        weights: body.weights,
+        weights_digest: body.weights_digest,
+        upstream_commit: body.upstream_commit,
+        preprocessing_version: body.preprocessing_version,
+        window_s: head.window_s,
+        hop_s: head.hop_s,
+        gait_threshold: head.gait_threshold,
+      },
+      summary: {
+        gait: body.summary?.gait ?? null,
+        mean_gait_prob: body.summary?.mean_gait_prob ?? null,
+        windows_omitted: body.summary?.windows_omitted === true,
+      },
+      windows: body.windows ?? null,
+    });
+  }
+  return out;
+}
+
 async function boundedBody(req: Request, maxBytes = 8192): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
   if (bytes.length > maxBytes) throw fail('payload_too_large', 413);
@@ -268,6 +323,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isDays = req.method === 'GET' && route === '/days';
   const isSeries = req.method === 'GET' && route === '/series';
   const isActivityWindows = req.method === 'GET' && route === '/activity-windows';
+  const isGaitWindows = req.method === 'GET' && route === '/gait-windows';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
   const isRegister = req.method === 'POST' && route === '/devices';
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
@@ -284,7 +340,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isExposureGet = req.method === 'GET' && route === '/exposures';
   const isGroundTruthLabels = req.method === 'POST' && route === '/ground-truth-labels';
   const isSensorBiomarkers = req.method === 'GET' && route === '/sensor-biomarkers';
-  if (!isRead && !isDays && !isSeries && !isActivityWindows && !isDiagnostics && !isRegister && !isOverride
+  if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
       && !isSensorBiomarkers) {
@@ -322,12 +378,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
     }
-    const requestBody = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
+    const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
         : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES : undefined);
-    const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isDiagnostics || isComputeRead
+    const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isContext || isContextHistory || isSensorBiomarkers
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels) ? null
@@ -383,6 +439,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       const days = await readSensorBiomarkers({ rest, userId: user.id, deviceId, ...query });
       // No stored document for any requested day: 404 (the contract's explicit absent answer).
       if (days.length === 0) throw fail('not_found', 404);
+      return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isGaitWindows) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseActivityWindowsQuery(url.searchParams);
+      const days = await readGaitWindows({ rest, userId: user.id, deviceId, ...query });
       return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isComputeSubmit || isComputeRead) {

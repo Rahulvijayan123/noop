@@ -19,6 +19,9 @@ let package = Package(
         // WhoopStore is declared on the TEST target as well as the library: the Oura respiration
         // scoring-exclusion tests assert on `OuraRespScale` (the seam that keeps the ring's 0x6A rows
         // out of the stager), and a transitively-visible module is not something a test should rely on.
-        .testTarget(name: "StrandAnalyticsTests", dependencies: ["StrandAnalytics", "WhoopStore"]),
+        // `Goldens/` holds JSON goldens the tests read through `#filePath` (byte-for-byte decoder outputs), not
+        // bundle resources. (Not `Fixtures/`: the repository ignores that name to keep real exports out.)
+        .testTarget(name: "StrandAnalyticsTests", dependencies: ["StrandAnalytics", "WhoopStore"],
+                    exclude: ["Goldens"]),
     ]
 )

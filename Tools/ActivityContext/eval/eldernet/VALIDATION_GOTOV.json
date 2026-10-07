@@ -1,0 +1,527 @@
+{
+ "auroc": {
+  "auroc": 0.9992595289384285,
+  "ci95": [
+   0.9982497214077352,
+   0.9999187933964253
+  ],
+  "n_boot": 300,
+  "warning": null
+ },
+ "cadence_ordinal": {
+  "frac_strictly_ordered": 0.9523809523809523,
+  "n_participants_all_paces": 21,
+  "n_strictly_ordered": 20,
+  "per_participant": {
+   "gotov:GOTOV02": {
+    "walkingFast": 119.8049545288086,
+    "walkingNormal": 114.50585556030273,
+    "walkingSlow": 104.69878768920898
+   },
+   "gotov:GOTOV03": {
+    "walkingFast": 115.78987884521484,
+    "walkingNormal": 110.11912536621094,
+    "walkingSlow": 105.36817932128906
+   },
+   "gotov:GOTOV04": {
+    "walkingFast": 129.34173583984375,
+    "walkingNormal": 125.72370147705078,
+    "walkingSlow": 90.99693298339844
+   },
+   "gotov:GOTOV05": {
+    "walkingFast": 124.7186393737793,
+    "walkingNormal": 118.1025276184082,
+    "walkingSlow": 109.27650451660156
+   },
+   "gotov:GOTOV06": {
+    "walkingFast": 133.24777221679688,
+    "walkingNormal": 118.92394256591797,
+    "walkingSlow": 113.37476348876953
+   },
+   "gotov:GOTOV07": {
+    "walkingFast": 122.68043518066406,
+    "walkingNormal": 117.31272888183594,
+    "walkingSlow": 110.62119674682617
+   },
+   "gotov:GOTOV08": {
+    "walkingFast": 122.50835418701172,
+    "walkingNormal": 111.13880920410156,
+    "walkingSlow": 104.73170471191406
+   },
+   "gotov:GOTOV09": {
+    "walkingFast": 125.76052474975586,
+    "walkingNormal": 115.7269172668457,
+    "walkingSlow": 111.1108169555664
+   },
+   "gotov:GOTOV10": {
+    "walkingFast": 126.47937774658203,
+    "walkingNormal": 114.85128021240234,
+    "walkingSlow": 103.07080459594727
+   },
+   "gotov:GOTOV11": {
+    "walkingFast": 116.59923553466797,
+    "walkingNormal": 108.18116760253906,
+    "walkingSlow": 101.10675048828125
+   },
+   "gotov:GOTOV12": {
+    "walkingFast": 116.0738525390625,
+    "walkingNormal": 113.78054809570312,
+    "walkingSlow": 105.80277252197266
+   },
+   "gotov:GOTOV13": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV14": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV15": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV16": {
+    "walkingFast": 117.20013046264648,
+    "walkingNormal": 116.14107513427734,
+    "walkingSlow": 107.39021301269531
+   },
+   "gotov:GOTOV17": {
+    "walkingFast": 125.91951751708984,
+    "walkingNormal": 121.75975036621094,
+    "walkingSlow": 115.76764678955078
+   },
+   "gotov:GOTOV18": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV19": {
+    "walkingFast": 115.50900268554688,
+    "walkingNormal": 108.98257446289062,
+    "walkingSlow": 102.16605377197266
+   },
+   "gotov:GOTOV20": {
+    "walkingFast": 107.87382507324219,
+    "walkingNormal": 102.04041290283203,
+    "walkingSlow": 94.71863555908203
+   },
+   "gotov:GOTOV21": {
+    "walkingFast": 121.26445770263672,
+    "walkingNormal": 113.65956115722656,
+    "walkingSlow": 104.02079772949219
+   },
+   "gotov:GOTOV22": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV23": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV24": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV25": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV26": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV27": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV28": {
+    "walkingFast": 124.79277801513672,
+    "walkingNormal": 119.60770416259766,
+    "walkingSlow": 110.21295928955078
+   },
+   "gotov:GOTOV29": {
+    "walkingFast": 115.38761520385742,
+    "walkingNormal": 112.20655059814453,
+    "walkingSlow": 106.71890258789062
+   },
+   "gotov:GOTOV30": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV31": {
+    "walkingFast": 133.32711791992188,
+    "walkingNormal": 128.90684509277344,
+    "walkingSlow": 116.77416229248047
+   },
+   "gotov:GOTOV32": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV33": {
+    "walkingFast": 113.46488952636719,
+    "walkingNormal": 111.10909271240234,
+    "walkingSlow": 107.248291015625
+   },
+   "gotov:GOTOV34": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV35": {
+    "walkingFast": 115.48480987548828,
+    "walkingNormal": 115.56307220458984,
+    "walkingSlow": 102.02677917480469
+   },
+   "gotov:GOTOV36": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   }
+  },
+  "pooled_median": {
+   "walkingFast": 121.26445770263672,
+   "walkingNormal": 114.85128021240234,
+   "walkingSlow": 105.80277252197266
+  },
+  "walkingFast_minus_walkingNormal": {
+   "frac_positive": 0.9523809523809523,
+   "median": 5.367706298828125,
+   "wilcoxon_p_one_sided": 9.5367431640625e-07
+  },
+  "walkingNormal_minus_walkingSlow": {
+   "frac_positive": 1.0,
+   "median": 7.32177734375,
+   "wilcoxon_p_one_sided": 4.76837158203125e-07
+  }
+ },
+ "calibrated_operating_point": {
+  "balanced_accuracy": 0.9760094417625679,
+  "ci95": {
+   "balanced_accuracy": [
+    0.9634795964123072,
+    0.9846892381391474
+   ],
+   "f1": [
+    0.9614859600839393,
+    0.9841285635315485
+   ],
+   "precision": [
+    0.9950993150314806,
+    1.0
+   ],
+   "recall": [
+    0.9274417904285206,
+    0.9701550070705511
+   ],
+   "specificity": [
+    0.9982047128542961,
+    1.0
+   ]
+  },
+  "f1": 0.9749480968858131,
+  "n_gait": 3697,
+  "n_non_gait": 9296,
+  "n_predicted_gait": 3528,
+  "n_subjects": 35,
+  "n_windows": 12993,
+  "precision": 0.9982993197278912,
+  "recall": 0.9526643224235867,
+  "small_sample": false,
+  "specificity": 0.9993545611015491,
+  "threshold": 0.93
+ },
+ "calibration": {
+  "calibration_id": "eldernet-val-T1.0473-tau0.930",
+  "gait_prob": {
+   "T": 1.047343,
+   "fit": "val",
+   "method": "temperature"
+  },
+  "gait_threshold": 0.93
+ },
+ "ece_calibrated": 0.0441016992729861,
+ "ece_uncalibrated": 0.04063862770468615,
+ "integrity": {
+  "bundle_sha256": "eldernet-437a38b+cal:16191350862fb8de",
+  "experiment": "eldernet_gotov_external_v1",
+  "n_evaluations_of_experiment_any_split": 1,
+  "n_evaluations_on_this_test_split": 1,
+  "n_test_evaluations": 1,
+  "rerun_detail": null,
+  "rerun_reason": null,
+  "rerun_reason_text": null,
+  "test_sha256": "465a59a91e7e7f4e2cdaa20b3a45d4ace66f73d3336ee323a976d97e637b55ff",
+  "time": 1791310774
+ },
+ "model_version": "eldernet-437a38b",
+ "n_participants": 35,
+ "n_windows_total": 36069,
+ "preprocessing_version": "eldernet-prep-1",
+ "recall_by_label": {
+  "walkingFast": {
+   "n": 1165,
+   "recall_default": 0.9982832618025751,
+   "recall_operating": 0.9708154506437768
+  },
+  "walkingNormal": {
+   "n": 1229,
+   "recall_default": 0.9934906427990235,
+   "recall_operating": 0.9576891781936534
+  },
+  "walkingSlow": {
+   "n": 1226,
+   "recall_default": 0.9991843393148451,
+   "recall_operating": 0.9567699836867863
+  },
+  "walkingStairsUp": {
+   "n": 77,
+   "recall_default": 0.935064935064935,
+   "recall_operating": 0.5324675324675324
+  }
+ },
+ "speed_ordinal": {
+  "frac_strictly_ordered": 0.9047619047619048,
+  "n_participants_all_paces": 21,
+  "n_strictly_ordered": 19,
+  "per_participant": {
+   "gotov:GOTOV02": {
+    "walkingFast": 1.4818482398986816,
+    "walkingNormal": 1.3890870809555054,
+    "walkingSlow": 1.137717843055725
+   },
+   "gotov:GOTOV03": {
+    "walkingFast": 1.546533465385437,
+    "walkingNormal": 1.480898380279541,
+    "walkingSlow": 1.3547694683074951
+   },
+   "gotov:GOTOV04": {
+    "walkingFast": 1.5299476385116577,
+    "walkingNormal": 1.516352891921997,
+    "walkingSlow": 0.8916999101638794
+   },
+   "gotov:GOTOV05": {
+    "walkingFast": 1.4463017582893372,
+    "walkingNormal": 1.419978380203247,
+    "walkingSlow": 1.264017939567566
+   },
+   "gotov:GOTOV06": {
+    "walkingFast": 1.5874710083007812,
+    "walkingNormal": 1.4764714241027832,
+    "walkingSlow": 1.3604656457901
+   },
+   "gotov:GOTOV07": {
+    "walkingFast": 1.4979758262634277,
+    "walkingNormal": 1.4334098100662231,
+    "walkingSlow": 1.324941098690033
+   },
+   "gotov:GOTOV08": {
+    "walkingFast": 1.5245394706726074,
+    "walkingNormal": 1.4099132418632507,
+    "walkingSlow": 1.259692132472992
+   },
+   "gotov:GOTOV09": {
+    "walkingFast": 1.5726425051689148,
+    "walkingNormal": 1.4439053535461426,
+    "walkingSlow": 1.3436078429222107
+   },
+   "gotov:GOTOV10": {
+    "walkingFast": 1.542143702507019,
+    "walkingNormal": 1.3484042882919312,
+    "walkingSlow": 1.1944878697395325
+   },
+   "gotov:GOTOV11": {
+    "walkingFast": 1.4685986042022705,
+    "walkingNormal": 1.3246659636497498,
+    "walkingSlow": 1.068783164024353
+   },
+   "gotov:GOTOV12": {
+    "walkingFast": 1.53092622756958,
+    "walkingNormal": 1.4733949899673462,
+    "walkingSlow": 1.2898976802825928
+   },
+   "gotov:GOTOV13": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV14": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV15": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV16": {
+    "walkingFast": 1.4727691411972046,
+    "walkingNormal": 1.4466038942337036,
+    "walkingSlow": 1.2157957553863525
+   },
+   "gotov:GOTOV17": {
+    "walkingFast": 1.4674142599105835,
+    "walkingNormal": 1.5230442881584167,
+    "walkingSlow": 1.4625424146652222
+   },
+   "gotov:GOTOV18": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV19": {
+    "walkingFast": 1.4850093126296997,
+    "walkingNormal": 1.3812482357025146,
+    "walkingSlow": 1.1934782266616821
+   },
+   "gotov:GOTOV20": {
+    "walkingFast": 1.4287387132644653,
+    "walkingNormal": 1.3190579414367676,
+    "walkingSlow": 1.2113372087478638
+   },
+   "gotov:GOTOV21": {
+    "walkingFast": 1.5427354574203491,
+    "walkingNormal": 1.4382725954055786,
+    "walkingSlow": 1.2777907848358154
+   },
+   "gotov:GOTOV22": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV23": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV24": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV25": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV26": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV27": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV28": {
+    "walkingFast": 1.527174711227417,
+    "walkingNormal": 1.4799507856369019,
+    "walkingSlow": 1.3074634075164795
+   },
+   "gotov:GOTOV29": {
+    "walkingFast": 1.4171802401542664,
+    "walkingNormal": 1.3854111433029175,
+    "walkingSlow": 1.263171672821045
+   },
+   "gotov:GOTOV30": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV31": {
+    "walkingFast": 1.5709850788116455,
+    "walkingNormal": 1.5424164533615112,
+    "walkingSlow": 1.4132392406463623
+   },
+   "gotov:GOTOV32": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV33": {
+    "walkingFast": 1.4376025199890137,
+    "walkingNormal": 1.375635027885437,
+    "walkingSlow": 1.2532458305358887
+   },
+   "gotov:GOTOV34": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   },
+   "gotov:GOTOV35": {
+    "walkingFast": 1.4188870191574097,
+    "walkingNormal": 1.511102557182312,
+    "walkingSlow": 1.2607672214508057
+   },
+   "gotov:GOTOV36": {
+    "walkingFast": null,
+    "walkingNormal": null,
+    "walkingSlow": null
+   }
+  },
+  "pooled_median": {
+   "walkingFast": 1.4979758262634277,
+   "walkingNormal": 1.4382725954055786,
+   "walkingSlow": 1.263171672821045
+  },
+  "walkingFast_minus_walkingNormal": {
+   "frac_positive": 0.9047619047619048,
+   "median": 0.06456601619720459,
+   "wilcoxon_p_one_sided": 0.00014638900756835938
+  },
+  "walkingNormal_minus_walkingSlow": {
+   "frac_positive": 1.0,
+   "median": 0.15391641855239868,
+   "wilcoxon_p_one_sided": 4.76837158203125e-07
+  }
+ },
+ "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23",
+ "upstream_default": {
+  "balanced_accuracy": 0.9909514017273158,
+  "ci95": {
+   "balanced_accuracy": [
+    0.9855832635064496,
+    0.9950278918754872
+   ],
+   "f1": [
+    0.9667411438420526,
+    0.9898497320576223
+   ],
+   "precision": [
+    0.9405712213008268,
+    0.9825619495713304
+   ],
+   "recall": [
+    0.9915690132182147,
+    0.998801532536168
+   ],
+   "specificity": [
+    0.9763475938785844,
+    0.9927476992779272
+   ]
+  },
+  "f1": 0.9808153477218226,
+  "n_gait": 3697,
+  "n_non_gait": 9296,
+  "n_predicted_gait": 3809,
+  "n_subjects": 35,
+  "n_windows": 12993,
+  "precision": 0.9663953793646627,
+  "recall": 0.9956721666215851,
+  "small_sample": false,
+  "specificity": 0.9862306368330465,
+  "threshold": 0.5
+ }
+}

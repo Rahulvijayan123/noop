@@ -22,7 +22,7 @@ Sources and rationale:
   split into sessions on timestamp gaps > 1 s. Event ts is the native timestamp of the first
   sample of the new state, minus the session t0.
 * WISDM v2 watch (20 Hz, CC BY 4.0): per-subject contiguous activity-letter runs (``Block``s,
-  already split on > 1 s gaps by activity_context.train.blocks_for_subject — REUSED here, no
+  already split on > 1 s gaps by activity_context.wisdm_raw.blocks_for_subject — REUSED here, no
   logic duplication). Only D (sitting) <-> E (standing) boundaries become events. The watch
   version has NO lying letter (the vocabulary is A-S: walking, jogging, stairs, sitting,
   standing, typing, teeth, soup, chips, pasta, drinking, sandwich, kicking, catch, dribbling,
@@ -59,8 +59,8 @@ from typing import Iterator, List, Optional, Tuple
 import numpy as np
 
 from .preprocess import resample_poly_nd
-from .train import (SESSION_GAP_NS, WISDM_HZ, Block,
-                      blocks_for_subject, parse_raw_file)
+from .wisdm_raw import (SESSION_GAP_NS, WISDM_HZ, Block,
+                        blocks_for_subject, parse_raw_file)
 
 # ---------------------------------------------------------------------------
 # Canonical ontology and units
@@ -275,7 +275,7 @@ _WISDM_BOUNDARY_EVENTS = {("D", "E"): "sit_to_stand", ("E", "D"): "stand_to_sit"
 
 def _wisdm_block_starts(ts_sec: np.ndarray, acts: List[str]) -> List[int]:
     """First sample index of each activity block, using the SAME boundary rule as
-    train.blocks_for_subject (activity change OR timestamp gap > 1 s). This is index
+    wisdm_raw.blocks_for_subject (activity change OR timestamp gap > 1 s). This is index
     bookkeeping only — the block samples themselves come from blocks_for_subject (reused, not
     duplicated); a length mismatch with blocks_for_subject raises loudly instead of misaligning.
     """
@@ -307,11 +307,11 @@ def load_wisdm(root: str) -> List[TransitionSession]:
         gyro_path = os.path.join(gyro_dir, f"data_{subject}_gyro_watch.txt")
         if not os.path.exists(gyro_path):
             raise ValueError(f"WISDM subject {subject}: missing {os.path.basename(gyro_path)}")
-        acc = parse_raw_file(accel_path)                      # reused helper (train.py)
+        acc = parse_raw_file(accel_path)                      # reused helper (wisdm_raw.py)
         ts_sec = np.array([int(r[2]) for r in acc], dtype=np.float64) / 1e9
         acts = [str(r[1]) for r in acc]
         starts = _wisdm_block_starts(ts_sec, acts)
-        blocks: List[Block] = blocks_for_subject(accel_path, gyro_path)  # reused helper (train.py)
+        blocks: List[Block] = blocks_for_subject(accel_path, gyro_path)  # reused helper (wisdm_raw.py)
         if len(starts) != len(blocks):
             raise ValueError(
                 f"WISDM subject {subject}: block bookkeeping mismatch "

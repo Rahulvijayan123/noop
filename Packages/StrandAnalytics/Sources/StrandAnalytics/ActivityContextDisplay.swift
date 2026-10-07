@@ -35,6 +35,8 @@ public enum ActivityDisplay {
     }
 
     /// Coarse kind of a label, used so display hysteresis treats wording changes inside a kind as one.
+    /// Sitting and standing are separate kinds: getting up is a change of what the body is doing, not of
+    /// wording, and must not wait out the refinement hold (hsmm-1.6).
     static func group(_ label: String) -> String {
         switch label {
         case offWrist: return "off_wrist"
@@ -43,7 +45,22 @@ public enum ActivityDisplay {
             return "moving"
         case "Asleep", "Resting in bed", "Lying down": return "lying"
         case "Changing position": return "transition"
-        default: return "stationary"
+        default:
+            if label.hasPrefix("Sitting") || label == "Desk sitting" { return "seated" }
+            if label.hasPrefix("Standing") { return "upright" }
+            return "stationary"
+        }
+    }
+
+    /// The kind of label a posture change ends in, so a fresh, confident event can confirm the new label
+    /// without the display hold.
+    static func groups(after kind: ActivityTransitionKind) -> Set<String> {
+        switch kind {
+        case .sitToStandLike: return ["upright", "transition"]
+        case .standToSitLike: return ["seated", "transition"]
+        case .lyingDownLike: return ["lying", "transition"]
+        case .gettingUpLike: return ["seated", "upright", "transition"]
+        case .walkStart, .walkStop, .runStart, .runStop: return []
         }
     }
 

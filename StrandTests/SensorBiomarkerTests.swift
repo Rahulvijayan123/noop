@@ -30,6 +30,16 @@ final class SensorBiomarkerTests: XCTestCase {
         SensorBiomarkerFeature.setEnabled(false)
     }
 
+    // MARK: - Settings page days
+
+    func testSettingsPageStepsUtcDays() {
+        // 2026-10-07 02:30 UTC is still Oct 6 in the US; the server's day key is the UTC one.
+        let now = Date(timeIntervalSince1970: 1_791_340_200)
+        XCTAssertEqual(SensorBiomarkersView.day(daysBack: 0, now: now), "2026-10-07")
+        XCTAssertEqual(SensorBiomarkersView.day(daysBack: 1, now: now), "2026-10-06")
+        XCTAssertEqual(SensorBiomarkersView.day(daysBack: 7, now: now), "2026-09-30")
+    }
+
     // MARK: - Fixtures
 
     private func identity(owner: String? = nil) -> CloudPushIdentity {

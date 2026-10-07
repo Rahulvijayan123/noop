@@ -47,12 +47,55 @@ import FoundationNetworking
 //   FRWHOOP_CONTEXT_BUDGET       context jobs per wake (default 2)
 //   FRWHOOP_CONTEXT_LEASE_SECONDS     context job lease length (default 300)
 //   FRWHOOP_CONTEXT_ENQUEUE_INTERVAL_SECONDS  seconds between enqueue_physiology_context_days_v1 calls (default 120)
+//   FRWHOOP_INERTIA_ENABLED      1/true/yes/on also asks a SECOND Python child (`activity_context.inertia.serve`)
+//                                for Inertia-1 motion heads on every raw-IMU chunk (default OFF; an unrecognised
+//                                value keeps it off and is logged). Never gates claiming; any failure is counted
+//                                and the HART path continues
+//   FRWHOOP_INERTIA_MODE         shadow (default: store the heads in activity_motion_heads_days) | candidate
+//                                (also store a second, Inertia-evidence decode of the day beside them; never
+//                                published)
+//   FRWHOOP_INERTIA_BUNDLE_DIR   head bundle directory (required when enabled)
+//   FRWHOOP_INERTIA_BUNDLE_SHA256 the pinned bundle_sha256 (required in candidate mode; enforced in shadow mode
+//                                when set): a child serving any other bundle is refused for the job, and it is
+//                                passed to the child as --expect-bundle-sha256
+//   FRWHOOP_INERTIA_CHECKPOINT   encoder checkpoint, passed as --checkpoint and INERTIA1_CKPT_PATH (optional)
+//   FRWHOOP_INERTIA_PYTHON       interpreter for the Inertia child (default: FRWHOOP_ACTIVITY_PYTHON)
+//   FRWHOOP_INERTIA_TIMEOUT_SECONDS per-request timeout of the Inertia child (default 60, clamped to a third of
+//                                FRWHOOP_ACTIVITY_LEASE_SECONDS); the child gets --timeout 5 s below it
+//   FRWHOOP_INERTIA_JOB_BUDGET_SECONDS wall time Inertia may spend per job, readiness check and chunks together
+//                                (default 600); once used, Inertia is stopped for that job (job_time_budget)
+//   FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW 1/true/yes/on passes --allow-standin-shadow (default OFF; shadow mode
+//                                only): exercises the shadow lane on real data with a stand-in encoder, whose
+//                                rows are stored as encoder_kind standin and never feed the decoder
+//   FRWHOOP_ELDERNET_ENABLED     1/true/yes/on also asks a THIRD Python child (`activity_context.eldernet.serve`)
+//                                for ElderNet gait quality on every raw-IMU chunk (default OFF; an unrecognised
+//                                value keeps it off and is logged). Never gates claiming; any failure is counted
+//                                and the HART path continues (Tools/ActivityContext/ELDERNET.md §6)
+//   FRWHOOP_ELDERNET_MODE        shadow (default: store the gait windows in activity_gait_windows_days) |
+//                                candidate (also store a second decode of the day with the gait channel beside
+//                                them; never published)
+//   FRWHOOP_ELDERNET_WEIGHTS_DIR fetched ElderNet weights, passed as --weights-dir (required when enabled)
+//   FRWHOOP_ELDERNET_UPSTREAM_DIR the sha-verified upstream ElderNet source checkout (`python -m
+//                                activity_context.eldernet.upstream fetch --dest DIR`), passed as --upstream-dir
+//                                (required when enabled; without it the child reports model_missing)
+//   FRWHOOP_ELDERNET_MODEL_VERSION / FRWHOOP_ELDERNET_WEIGHTS_SHA256 the pinned model_version and weights digest
+//                                (required in candidate mode; enforced in shadow mode when set): a child serving
+//                                any other model is refused for the job
+//   FRWHOOP_ELDERNET_GAIT_PRIOR  π, the mean served gait_prob over the VAL windows the decoder sees (required in
+//                                candidate mode; 0.085 for the served defaults, GaitQualityEvidenceConfig.defaultGaitPrior)
+//   FRWHOOP_ELDERNET_PYTHON      interpreter for the ElderNet child (default: FRWHOOP_ACTIVITY_PYTHON)
+//   FRWHOOP_ELDERNET_TIMEOUT_SECONDS per-request timeout of the ElderNet child (default 60, clamped to a third of
+//                                FRWHOOP_ACTIVITY_LEASE_SECONDS); the child gets --timeout 5 s below it
+//   FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS wall time ElderNet may spend per job, readiness check and chunks together
+//                                (default 600); once used, ElderNet is stopped for that job (job_time_budget)
 //   FRWHOOP_SENSOR_BIOMARKERS_ENABLED  "1" runs the sensor-biomarker lane (default OFF; exactly "1", and
 //                                the lane only runs when enabled, "sensor" is not in DISABLE_LANES, AND
 //                                FRWHOOP_INFERENCE_URL is set). Needs 20261007140000_sensor_biomarkers.sql;
 //                                without it the lane idles and reports sensor_tables_missing
 //   FRWHOOP_SENSOR_BIOMARKERS_BUDGET  sensor-biomarker jobs per wake (default 2)
 //   FRWHOOP_SENSOR_BIOMARKERS_LEASE_SECONDS  sensor-biomarker job lease length (default 300)
+//   FRWHOOP_SENSOR_PPG_ENABLED   "1" adds ppg_quality + pulse_shape (default OFF: the ppgWaveformSample upload
+//                                carries no optical anchor yet, so both would only ever be withheld)
 //   FRWHOOP_PARADIGMA_ENABLED    "1" adds tremor + arm_swing to the sensor families (research)
 //   FRWHOOP_DEEPBEAT_SHADOW_ENABLED "1" adds rhythm_shadow to the sensor families (shadow, never user-facing)
 //   FRWHOOP_SIAMAF_SHADOW_ENABLED    "1" lets the sidecar attach the optional SiamAF shadow adapter to
@@ -131,6 +174,8 @@ struct WorkerConfig {
     let sensorFamilies: [String]
     let sensorBudget: Int
     let sensorLeaseSeconds: Int
+    let inertia: InertiaSettings
+    let eldernet: ElderNetSettings
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -204,7 +249,11 @@ struct WorkerConfig {
         self.sensorBiomarkersEnabled = (environment["FRWHOOP_SENSOR_BIOMARKERS_ENABLED"] ?? "") == "1"
         var sensorFamilies: [String] = []
         if self.sensorBiomarkersEnabled {
-            sensorFamilies = ["movement", "oscillation", "ppg_quality", "pulse_shape"]
+            sensorFamilies = ["movement", "oscillation"]
+            if (environment["FRWHOOP_SENSOR_PPG_ENABLED"] ?? "") == "1" {
+                sensorFamilies.append("ppg_quality")
+                sensorFamilies.append("pulse_shape")
+            }
             if (environment["FRWHOOP_PERFUSION_RESEARCH_ENABLED"] ?? "") == "1" {
                 sensorFamilies.append("perfusion_research")
             }
@@ -223,6 +272,10 @@ struct WorkerConfig {
         // On-host cache of downloaded raw-IMU objects and model answers (ActivityLocalCache). Under
         // /var/lib/frwhoop by default, which the unit already lets the worker write; "" turns it off.
         self.activityCacheDir = environment["FRWHOOP_ACTIVITY_CACHE_DIR"] ?? "/var/lib/frwhoop/activity-cache"
+        self.inertia = InertiaSettings.fromEnvironment(environment, activityPython: self.activityPython,
+                                                       leaseSeconds: self.activityLeaseSeconds)
+        self.eldernet = ElderNetSettings.fromEnvironment(environment, activityPython: self.activityPython,
+                                                         leaseSeconds: self.activityLeaseSeconds)
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
                 .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
@@ -508,7 +561,41 @@ var activity = ActivityLane(
     contextDaysEnabled: config.activityContextV2,
     streamDaysEnabled: config.activityStreams,
     streamDayBudget: config.activityStreamBudget,
+    inertia: config.inertia.serviceConfig(activityHome: config.activityHome).map {
+        InertiaStage(service: ActivityPythonService(config: $0), mode: config.inertia.mode,
+                     expectedBundleSHA256: config.inertia.bundleSHA256,
+                     jobBudgetSeconds: config.inertia.jobBudgetSeconds)
+    },
+    eldernet: config.eldernet.serviceConfig(activityHome: config.activityHome).map {
+        ElderNetStage(service: ActivityPythonService(config: $0), mode: config.eldernet.mode,
+                      expectedModelVersion: config.eldernet.modelVersion,
+                      expectedWeightsDigest: config.eldernet.weightsSHA256, gaitPrior: config.eldernet.gaitPrior,
+                      jobBudgetSeconds: config.eldernet.jobBudgetSeconds)
+    },
     cache: config.activityEnabled && config.activityImu ? ActivityLocalCache(path: config.activityCacheDir) : nil)
+for warning in config.inertia.warnings {
+    FileHandle.standardError.write("frwhoop-worker: inertia: \(warning)\n".data(using: .utf8)!)
+}
+if let why = config.inertia.configurationError {
+    FileHandle.standardError.write("frwhoop-worker: inertia stays off: \(why)\n".data(using: .utf8)!)
+} else if config.inertia.enabled {
+    FileHandle.standardError.write(
+        ("frwhoop-worker: inertia \(config.inertia.mode.rawValue) enabled (bundle \(config.inertia.bundleDir ?? "-"), "
+            + "pinned \(config.inertia.bundleSHA256 ?? "no")\(config.inertia.allowStandInShadow ? ", stand-in shadow" : ""), "
+            + "timeout \(config.inertia.timeoutSeconds) s, job budget \(config.inertia.jobBudgetSeconds) s)\n").data(using: .utf8)!)
+}
+for warning in config.eldernet.warnings {
+    FileHandle.standardError.write("frwhoop-worker: eldernet: \(warning)\n".data(using: .utf8)!)
+}
+if let why = config.eldernet.configurationError {
+    FileHandle.standardError.write("frwhoop-worker: eldernet stays off: \(why)\n".data(using: .utf8)!)
+} else if config.eldernet.enabled {
+    FileHandle.standardError.write(
+        ("frwhoop-worker: eldernet \(config.eldernet.mode.rawValue) enabled (weights \(config.eldernet.weightsDir ?? "-"), "
+            + "upstream \(config.eldernet.upstreamDir ?? "-"), "
+            + "pinned \(config.eldernet.modelVersion ?? "no") / \(config.eldernet.weightsSHA256 ?? "no"), "
+            + "timeout \(config.eldernet.timeoutSeconds) s, job budget \(config.eldernet.jobBudgetSeconds) s)\n").data(using: .utf8)!)
+}
 
 // MARK: - Candidate (shadow/active) inference lane wiring
 //
@@ -694,6 +781,46 @@ if activityState.read().enabled {
                     "stream_days_superseded": activity.stats.streamDaysSuperseded,
                     "stream_day_failures": activity.stats.streamDayFailures,
                 ]
+                // Only with Inertia on, so the heartbeat of a worker without it is unchanged.
+                if activity.inertia != nil {
+                    $0.counters["inertia_jobs"] = activity.stats.inertiaJobs
+                    $0.counters["inertia_chunks"] = activity.stats.inertiaChunks
+                    $0.counters["inertia_windows"] = activity.stats.inertiaWindows
+                    $0.counters["inertia_failures"] = activity.stats.inertiaFailures
+                    $0.counters["inertia_unavailable"] = activity.stats.inertiaUnavailable
+                    $0.counters["inertia_shadow_stored"] = activity.stats.inertiaShadowStored
+                    $0.counters["inertia_shadow_failures"] = activity.stats.inertiaShadowFailures
+                    $0.counters["inertia_candidate_documents"] = activity.stats.inertiaCandidateDocuments
+                    $0.counters["inertia_candidate_withheld"] = activity.stats.inertiaCandidateWithheld
+                    $0.counters["inertia_shadow_fenced"] = activity.stats.inertiaShadowFenced
+                    $0.counters["inertia_bundle_refused"] = activity.stats.inertiaBundleRefused
+                    $0.counters["inertia_budget_exhausted"] = activity.stats.inertiaBudgetExhausted
+                    $0.counters["inertia_windows_attached"] = activity.stats.inertiaWindowsAttached
+                    $0.counters["inertia_windows_dropped"] = activity.stats.inertiaWindowsDropped
+                    $0.counters["inertia_posture_omitted"] = activity.stats.inertiaPostureOmitted
+                    $0.counters["inertia_rows_pruned"] = activity.stats.inertiaRowsPruned
+                    $0.counters["inertia_prune_failures"] = activity.stats.inertiaPruneFailures
+                }
+                // Only with ElderNet on, likewise.
+                if activity.eldernet != nil {
+                    $0.counters["eldernet_jobs"] = activity.stats.eldernetJobs
+                    $0.counters["eldernet_chunks"] = activity.stats.eldernetChunks
+                    $0.counters["eldernet_chunks_reused"] = activity.stats.eldernetChunksReused
+                    $0.counters["eldernet_windows"] = activity.stats.eldernetWindows
+                    $0.counters["eldernet_failures"] = activity.stats.eldernetFailures
+                    $0.counters["eldernet_unavailable"] = activity.stats.eldernetUnavailable
+                    $0.counters["eldernet_pin_refused"] = activity.stats.eldernetPinRefused
+                    $0.counters["eldernet_budget_exhausted"] = activity.stats.eldernetBudgetExhausted
+                    $0.counters["eldernet_shadow_stored"] = activity.stats.eldernetShadowStored
+                    $0.counters["eldernet_shadow_failures"] = activity.stats.eldernetShadowFailures
+                    $0.counters["eldernet_shadow_fenced"] = activity.stats.eldernetShadowFenced
+                    $0.counters["eldernet_candidate_documents"] = activity.stats.eldernetCandidateDocuments
+                    $0.counters["eldernet_candidate_withheld"] = activity.stats.eldernetCandidateWithheld
+                    $0.counters["eldernet_windows_attached"] = activity.stats.eldernetWindowsAttached
+                    $0.counters["eldernet_windows_dropped"] = activity.stats.eldernetWindowsDropped
+                    $0.counters["eldernet_rows_pruned"] = activity.stats.eldernetRowsPruned
+                    $0.counters["eldernet_prune_failures"] = activity.stats.eldernetPruneFailures
+                }
                 $0.lastError = activity.stats.lastError
                 $0.lastErrorKind = activity.stats.lastErrorKind
                 $0.lastActivityAt = activity.stats.lastActivityAt

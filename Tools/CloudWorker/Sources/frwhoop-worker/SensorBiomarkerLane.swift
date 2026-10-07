@@ -360,7 +360,6 @@ struct SensorBiomarkerLane {
         let rows = try db.query(Self.claim, [String(leaseSeconds)])
         guard let r = rows.first else { return .empty }
         guard let job = Self.parseJob(r) else {
-            stats.failed += 1
             if let token = r["lease_token"], !token.isEmpty, let rev = Int64(r["input_revision"] ?? "") {
                 try settleFailure(token: token, revision: rev, error: SensorBiomarkerError.deterministic("malformed_job_row"))
             }
@@ -379,7 +378,6 @@ struct SensorBiomarkerLane {
                 // a failure against this job.
                 return .superseded
             }
-            stats.failed += 1
             let reason = Self.sanitize(error)
             note("sensor job failed: \(reason)")
             stats.lastError = reason
@@ -463,52 +461,61 @@ struct SensorBiomarkerLane {
         let imuRuns = SensorBiomarkerInputs.imuRuns(timeline)
         let ppgReconstruction = SensorBiomarkerInputs.reconstructPPG(records: ppgInputs)
         let ppgSecondsByTs = Dictionary(uniqueKeysWithValues: ppgReconstruction.seconds.map { ($0.ts, $0) })
-        let requests = try SensorBiomarkerInputs.buildRequests(
-            imuRuns: imuRuns, ppgRuns: ppgReconstruction.runs, imuTimeline: timeline,
-            ppgSecondsByTs: ppgSecondsByTs, objects: resolved.all, deviceID: job.deviceId,
-            dayUTC: job.day, watchSide: "unknown", deviceOrientation: "unknown",
-            families: job.families)
-        if requests.isEmpty {
+
+        // 5. Per UTC hour, build the CONTRACTS.md §4 requests and call the sidecar. Only one
+        //    hour's decoded samples are resident at a time. A family the responses never report
+        //    becomes an explicit `artifact_unavailable` withheld result.
+        var stagesByFamily: [String: [SensorBiomarkerFamilyStage]] = [:]
+        var sentAny = false
+        for hourStart in stride(from: dayBounds.start, to: dayBounds.end, by: 3600) {
+            let hourEnd = min(hourStart + 3600, dayBounds.end)
+            let hourImu = SensorBiomarkerInputs.clip(imuRuns, from: hourStart, to: hourEnd)
+            let hourPpg = SensorBiomarkerInputs.clip(ppgReconstruction.runs, from: hourStart, to: hourEnd)
+            if hourImu.isEmpty && hourPpg.isEmpty { continue }
+            let requests = try SensorBiomarkerInputs.buildRequests(
+                imuRuns: hourImu, ppgRuns: hourPpg, imuTimeline: timeline,
+                ppgSecondsByTs: ppgSecondsByTs, objects: resolved.all, deviceID: job.deviceId,
+                dayUTC: job.day, watchSide: "unknown", deviceOrientation: "unknown",
+                families: job.families)
+            for built in requests {
+                sentAny = true
+                guard try renewLease(job: job) else {
+                    throw PostgresClient.Error(message: "sensor lease lost before inference", sqlstate: "55000", kind: .stale)
+                }
+                let body = try Self.inferenceBody(job: job, built: built)
+                let response: InferenceResponse
+                do {
+                    response = try inference.infer(body: body, metric: "sensor_biomarkers")
+                } catch {
+                    stats.sidecarFailures += 1
+                    throw error  // transport/timeout: bounded retry via settleFailure
+                }
+                stats.sidecarRequests += 1
+                let stages = try Self.parseEnvelope(response, families: job.families)
+                for (family, stage) in stages {
+                    stagesByFamily[family, default: []].append(stage)
+                }
+            }
+        }
+        if !sentAny {
             return try publishDocument(job: job, dayBounds: dayBounds, started: started,
                                        inputRevision: inputRevision,
                                        families: allWithheldFamilies(job.families))
         }
 
-        // 5. Per request: build the CONTRACTS.md §4 input and call the sidecar. A family the
-        //    response does not report becomes an explicit `artifact_unavailable` withheld result.
-        var stagesByFamily: [String: [SensorBiomarkerFamilyStage]] = [:]
-        for built in requests {
-            guard try renewLease(job: job) else {
-                throw PostgresClient.Error(message: "sensor lease lost before inference", sqlstate: "55000", kind: .stale)
-            }
-            let request = InferenceRequest(
-                metric: "sensor_biomarkers",
-                context: InferenceRequest.Context(
-                    userId: job.userId, deviceId: job.deviceId,
-                    intervalStartUTC: built.intervalStartUTC, intervalEndUTC: built.intervalEndUTC,
-                    ianaTimezone: "UTC"),
-                input: JSONValue(any: built.input.jsonObject()),
-                provider: InferenceRequest.Provider(providerId: Self.providerId))
-            let response: InferenceResponse
-            do {
-                response = try inference.infer(request)
-            } catch {
-                stats.sidecarFailures += 1
-                throw error  // transport/timeout: bounded retry via settleFailure
-            }
-            stats.sidecarRequests += 1
-            let stages = try Self.parseEnvelope(response, families: job.families)
-            for (family, stage) in stages {
-                if stage.status != "ok" { stats.familiesWithheld += 1 }
-                stagesByFamily[family, default: []].append(stage)
-            }
-        }
-
-        // 6. Merge the per-family stages across requests and assemble the day document.
+        // 6. Merge the per-family stages across requests and assemble the day document. Movement
+        //    bouts are re-classified once over the day's epoch series so a bout spanning a request
+        //    seam is one bout, not two continuations.
         var familiesDoc: [String: JSONValue] = [:]
         for family in job.families {
             if let stages = stagesByFamily[family], !stages.isEmpty {
-                familiesDoc[family] = try SensorBiomarkerFamilyStage.merge(stages).jsonValue
+                var merged = try SensorBiomarkerFamilyStage.merge(stages)
+                if family == "movement" {
+                    merged = merged.withDayLowMovement(stages: stages, dayStart: Double(dayBounds.start),
+                                                       dayEnd: Double(dayBounds.end))
+                }
+                if merged.status != "ok" { stats.familiesWithheld += 1 }
+                familiesDoc[family] = merged.withoutInternalFields().jsonValue
             } else {
                 // No request reported this family: explicit withheld with a precise reason.
                 familiesDoc[family] = SensorBiomarkerFamilyStage.withheld(family: family, reason: "artifact_unavailable").jsonValue
@@ -520,6 +527,27 @@ struct SensorBiomarkerLane {
         //    is released through the renew+fail pair.
         return try publishDocument(job: job, dayBounds: dayBounds, started: started,
                                    inputRevision: inputRevision, families: familiesDoc)
+    }
+
+    /// The sidecar requires every context version to be a non-empty string. Sensor biomarkers
+    /// read no user profile and no corrections, so those are pinned to "none".
+    static func inferenceBody(job: SensorBiomarkerJob,
+                              built: SensorBiomarkerInputs.BuiltRequest) throws -> Data {
+        let context = InferenceRequest.Context(
+            userId: job.userId, deviceId: job.deviceId,
+            intervalStartUTC: built.intervalStartUTC, intervalEndUTC: built.intervalEndUTC,
+            ianaTimezone: "UTC", profileVersion: "none",
+            configVersion: analysisVersion, correctionsVersion: "none")
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        var body = Data("{\"context\":".utf8)
+        body.append(try encoder.encode(context))
+        body.append(Data(",\"input\":".utf8))
+        body.append(built.inputJSON)
+        body.append(Data(",\"metric\":\"sensor_biomarkers\",\"provider\":".utf8))
+        body.append(try encoder.encode(InferenceRequest.Provider(providerId: providerId)))
+        body.append(Data("}".utf8))
+        return body
     }
 
     /// Build all-withheld families for a day with no usable input.
@@ -566,6 +594,10 @@ struct SensorBiomarkerLane {
     /// retries a verdict. A family the response did not report becomes `artifact_unavailable`.
     static func parseEnvelope(_ response: InferenceResponse, families: [String]) throws -> [String: SensorBiomarkerFamilyStage] {
         var out: [String: SensorBiomarkerFamilyStage] = [:]
+        if response.status == "withheld", response.withheldReason == "timeout" {
+            // A blown request budget is load, not a verdict on the data.
+            throw SensorBiomarkerError.retryable("sidecar_timeout")
+        }
         if response.status == "withheld" || response.status == "error" {
             let reason = response.withheldReason ?? (response.status == "withheld" ? "provider_withheld" : "provider_error")
             for family in families {
@@ -576,7 +608,20 @@ struct SensorBiomarkerLane {
         guard response.status == "ok" else {
             throw SensorBiomarkerError.deterministic("unknown_response_status: \(response.status)")
         }
-        guard case .object(let stages)? = response.result?.stages else {
+        // The sidecar's envelope carries `stages` as a list of family documents, each naming its
+        // `family`; an object keyed by family is accepted too.
+        var stages: [(String, JSONValue)] = []
+        switch response.result?.stages {
+        case .array(let list)?:
+            for stageJSON in list {
+                guard case .object(let obj) = stageJSON, let family = obj["family"]?.stringValue else {
+                    throw SensorBiomarkerError.deterministic("stage_missing_family")
+                }
+                stages.append((family, stageJSON))
+            }
+        case .object(let keyed)?:
+            stages = keyed.map { ($0.key, $0.value) }
+        default:
             throw SensorBiomarkerError.deterministic("missing_result_stages")
         }
         for (family, stageJSON) in stages {
@@ -764,16 +809,30 @@ struct SensorBiomarkerFamilyStage {
             }
         }
         for key in keys {
-            if isAdditiveMeasurement(key) {
-                var sum = 0.0
-                var any = false
+            if isAdditiveMeasurement(key) || isMaximumMeasurement(key) {
+                let additive = isAdditiveMeasurement(key)
+                var merged: Double? = nil
+                var countSum = 0
+                var anyCount = false
+                var template: [String: JSONValue]? = nil
                 for s in stages {
-                    if case .object(let m) = s.measurements, let v = m[key]?.doubleValue {
-                        sum += v
-                        any = true
+                    guard case .object(let m) = s.measurements, let entry = m[key] else { continue }
+                    let fields: [String: JSONValue]
+                    if case .object(let f) = entry { fields = f } else { fields = ["value": entry] }
+                    if template == nil { template = fields }
+                    if let n = fields["count"]?.doubleValue, n.isFinite, abs(n) < 1e15 {
+                        countSum += Int(n)
+                        anyCount = true
                     }
+                    guard let v = fields["value"]?.doubleValue, v.isFinite else { continue }
+                    merged = additive ? (merged ?? 0) + v : max(merged ?? v, v)
                 }
-                if any { mergedMeasurements[key] = .double(sum) }
+                if var fields = template {
+                    fields["value"] = merged.map { .double($0) } ?? .null
+                    if additive && anyCount { fields["count"] = .int(countSum) }
+                    fields["aggregation"] = .string(additive ? "summed-day" : "max-day")
+                    mergedMeasurements[key] = .object(fields)
+                }
             } else if let pooled = pooledDayQuantile(key: key, stages: stages) {
                 // Day-level quantile from the POOLED bounded-bin distribution
                 // across every request (spec section 8: day quantiles aggregate
@@ -807,11 +866,177 @@ struct SensorBiomarkerFamilyStage {
             measurements: .object(mergedMeasurements), extra: extra)
     }
 
+    /// Request-internal stage fields consumed by the merge; never published.
+    static let internalExtraKeys: Set<String> = ["enmo_epochs", "distributions"]
+
+    func withoutInternalFields() -> SensorBiomarkerFamilyStage {
+        SensorBiomarkerFamilyStage(family: family, status: status, releaseTier: releaseTier,
+            providerRevision: providerRevision, observedSeconds: observedSeconds,
+            eligibleSeconds: eligibleSeconds, contactState: contactState, reason: reason,
+            reasonCounts: reasonCounts, measurements: measurements,
+            extra: extra.filter { !Self.internalExtraKeys.contains($0.key) })
+    }
+
+    static let enmoEpochSeconds = 5.0
+    static let lowMovementEnterMg = 30.0
+    static let lowMovementLeaveMg = 50.0
+
+    struct DayLowMovement: Equatable {
+        var lowSeconds = 0.0
+        var lowEpochs = 0
+        var classifiedSeconds = 0.0
+        var unknownEpochs = 0
+        var boutDurations: [Double] = []
+        var censored = 0
+        var continuations = 0
+        var transitions = 0
+    }
+
+    /// The sidecar's hysteresis and bout rules (`imu.classify_bouts`) over the whole UTC day:
+    /// enter < 30 mg, leave >= 50 mg, the middle band keeps the prior state, and any epoch that
+    /// does not directly follow its predecessor starts a new run (state unknown, open bout
+    /// censored, no transition). A bout touching a day edge is a continuation.
+    static func classifyDayLowMovement(epochs: [(start: Double, mg: Double)],
+                                       dayStart: Double, dayEnd: Double) -> DayLowMovement {
+        var out = DayLowMovement()
+        var state = "unknown"
+        var prevState: String? = nil
+        var prevStart: Double? = nil
+        var openBout: Double? = nil
+        for (start, mg) in epochs {
+            if let p = prevStart, start - p > enmoEpochSeconds + 1e-6 {
+                if let bout = openBout {
+                    out.boutDurations.append(bout)
+                    out.censored += 1
+                    openBout = nil
+                }
+                prevState = nil
+                state = "unknown"
+            }
+            if mg < lowMovementEnterMg { state = "low" } else if mg >= lowMovementLeaveMg { state = "moving" }
+            if state == "low" {
+                if openBout == nil {
+                    openBout = 0
+                    if start <= dayStart + 1e-9 { out.continuations += 1 }
+                }
+                openBout! += enmoEpochSeconds
+                out.lowSeconds += enmoEpochSeconds
+                out.lowEpochs += 1
+            } else {
+                if let bout = openBout {
+                    out.boutDurations.append(bout)
+                    if start + enmoEpochSeconds >= dayEnd - 1e-9 { out.continuations += 1 }
+                    openBout = nil
+                }
+                if prevState == "low" && state == "moving" { out.transitions += 1 }
+            }
+            if state == "unknown" { out.unknownEpochs += 1 } else { out.classifiedSeconds += enmoEpochSeconds }
+            prevState = state
+            prevStart = start
+        }
+        if let bout = openBout {
+            out.boutDurations.append(bout)
+            if let last = prevStart, last + enmoEpochSeconds >= dayEnd - 1e-9 {
+                out.continuations += 1
+            } else {
+                out.censored += 1
+            }
+        }
+        return out
+    }
+
+    /// The merged movement stage with its low-movement summaries re-derived from the day's
+    /// concatenated epoch series, so a bout spanning a request seam is one bout and the
+    /// fraction/rates cover the whole day. Unchanged when no request was gravity-calibrated.
+    func withDayLowMovement(stages: [SensorBiomarkerFamilyStage], dayStart: Double,
+                            dayEnd: Double) -> SensorBiomarkerFamilyStage {
+        var byStart: [Double: Double] = [:]
+        for s in stages where s.status == "ok" && s.extra["calibrated"] == .bool(true) {
+            guard case .array(let rows)? = s.extra["enmo_epochs"] else { continue }
+            for row in rows {
+                guard case .array(let pair) = row, pair.count == 2,
+                      let start = pair[0].doubleValue, let mg = pair[1].doubleValue,
+                      start.isFinite, mg.isFinite,
+                      start >= dayStart, start + Self.enmoEpochSeconds <= dayEnd else { continue }
+                byStart[start] = mg
+            }
+        }
+        guard !byStart.isEmpty else { return self }
+        let epochs = byStart.sorted { $0.key < $1.key }.map { (start: $0.key, mg: $0.value) }
+        let day = Self.classifyDayLowMovement(epochs: epochs, dayStart: dayStart, dayEnd: dayEnd)
+
+        var m: [String: JSONValue] = [:]
+        if case .object(let existing) = measurements { m = existing }
+        for key in m.keys where key.hasPrefix("low_movement_") || key.hasPrefix("low_to_moving_") {
+            m[key] = nil
+        }
+        func entry(_ value: Double, _ unit: String, count: Int, method: String,
+                   denominator: String? = nil) -> JSONValue {
+            var fields: [String: JSONValue] = [
+                "value": .double(value), "unit": .string(unit), "count": .int(count),
+                "method": .string(method), "aggregation": .string("day-classified"),
+            ]
+            if let denominator { fields["denominator"] = .string(denominator) }
+            return .object(fields)
+        }
+        let bouts = day.boutDurations.count
+        if day.classifiedSeconds > 0 {
+            let hours = day.classifiedSeconds / 3600
+            m["low_movement_seconds"] = entry(day.lowSeconds, "s", count: day.lowEpochs,
+                method: "hysteretic low state per epoch", denominator: "classified observed seconds")
+            m["low_movement_fraction"] = entry(day.lowSeconds / day.classifiedSeconds, "fraction",
+                count: day.lowEpochs, method: "low seconds / classified seconds",
+                denominator: "classified observed seconds")
+            m["low_movement_bout_count"] = entry(Double(bouts), "count", count: bouts,
+                method: "maximal low-state runs across epochs")
+            if !day.boutDurations.isEmpty {
+                let sorted = day.boutDurations.sorted()
+                let mid = sorted.count / 2
+                let median = sorted.count % 2 == 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+                m["low_movement_bout_median_seconds"] = entry(median, "s", count: bouts,
+                    method: "median bout duration")
+                m["low_movement_bout_max_seconds"] = entry(sorted.last!, "s", count: bouts,
+                    method: "maximum bout duration")
+            }
+            m["low_to_moving_transition_count"] = entry(Double(day.transitions), "count",
+                count: day.transitions, method: "low->moving hysteresis crossings, none across gaps")
+            m["low_to_moving_transitions_per_observed_hour"] = entry(Double(day.transitions) / hours,
+                "transitions/hour", count: day.transitions,
+                method: "transitions / classified observed hours", denominator: "classified observed hours")
+            m["low_movement_bouts_per_observed_hour"] = entry(Double(bouts) / hours, "bouts/hour",
+                count: bouts,
+                method: "DESCRIPTIVE simple count per classified observed hour; NOT a validated GGIR fragmentation score",
+                denominator: "classified observed hours")
+        }
+        var counts = reasonCounts
+        counts["censored_bouts"] = day.censored
+        counts["continuation_bouts"] = day.continuations
+        counts["unknown_state_epochs"] = day.unknownEpochs
+        var ext = extra
+        ext["low_movement_censored_bout_count"] = .int(day.censored)
+        ext["low_movement_continuation_count"] = .int(day.continuations)
+        ext["calibrated"] = .bool(true)
+        return SensorBiomarkerFamilyStage(family: family, status: status, releaseTier: releaseTier,
+            providerRevision: providerRevision, observedSeconds: observedSeconds,
+            eligibleSeconds: day.classifiedSeconds, contactState: contactState, reason: reason,
+            reasonCounts: counts, measurements: .object(m), extra: ext)
+    }
+
     /// Keys whose values are additive across the day's requests (counts and seconds). Quantile and
     /// rate keys are NOT additive and are pooled from the day's bounded-bin distributions instead
     /// (falling back to the best-coverage request when a stage carries no consistent distribution).
     static func isAdditiveMeasurement(_ key: String) -> Bool {
-        key.hasSuffix("_seconds") || key.hasSuffix("_count")
+        (key.hasSuffix("_seconds") || key.hasSuffix("_count")) && !isQuantileOrExtremeMeasurement(key)
+    }
+
+    /// Keys that are a per-request maximum (`low_movement_bout_max_seconds`): the day value is the
+    /// largest of the requests' values, never their sum.
+    static func isMaximumMeasurement(_ key: String) -> Bool {
+        key.contains("_max_") || key.hasSuffix("_max")
+    }
+
+    private static func isQuantileOrExtremeMeasurement(_ key: String) -> Bool {
+        ["_median", "_p25", "_p75", "_p95", "_iqr", "_max", "_min", "_mean"].contains { key.contains($0) }
     }
 
     /// A mergeable bounded-bin distribution from one stage (`extra.distributions[]`).
@@ -925,7 +1150,7 @@ extension JSONValue {
     var intValue: Int? {
         switch self {
         case .int(let v): return v
-        case .double(let v) where v.rounded() == v: return Int(v)
+        case .double(let v) where v.rounded() == v && abs(v) < 9e15: return Int(v)
         default: return nil
         }
     }

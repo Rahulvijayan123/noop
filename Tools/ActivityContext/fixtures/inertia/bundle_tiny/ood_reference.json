@@ -1,0 +1,11 @@
+{
+  "content_sha256": "6d1102eeafb53f8fcbc4a6e69de57208621419f2639bd32a6fdcad3034e9152c",
+  "fit": {
+    "note": "FIXTURE: fixed seeded random head weights; NOT trained; NOT Inertia-1; shadow only",
+    "split": "val"
+  },
+  "k": 3,
+  "method": "knn",
+  "schema": "nara.inertia.ood/1",
+  "threshold": 0.763968
+}

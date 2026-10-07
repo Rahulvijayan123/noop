@@ -31,6 +31,31 @@ model = [
 dev = [
     "pytest>=8.0,<10",
 ]
+# Inertia-1 motion heads (activity_context.inertia): encoder + preprocessing + serve.
+inertia = [
+    "torch==2.8.0",          # CPU fp32 inference of the vendored encoders
+    "scipy==1.17.1",         # Butterworth/filtfilt + resample_poly (inertia-prep-1), erf GELU in heads
+]
+# ElderNet gait quality (activity_context.eldernet): six pinned upstream heads, CPU inference. numpy-only
+# preprocessing (nearest-neighbour 30 Hz, upstream-identical), so no scipy/pandas/actipy at serve time.
+# Weights AND the upstream source (models.py, gait_quality/*) are University of Oxford Academic Use Licence
+# material, fetched by sha256 by the operator (eldernet.weights / eldernet.upstream fetch) and never committed;
+# use is limited to internal academic, non-commercial research (ELDERNET.md "Licence").
+eldernet = [
+    "torch==2.8.0",
+]
+# Offline ElderNet run CLI (activity_context.eldernet.run): upstream gait_quality/quality.py needs pandas for the
+# bout summaries. Never imported by the serve process.
+eldernet-offline = [
+    "torch==2.8.0",
+    "pandas==3.0.6",
+]
+# Offline head training / evaluation (never needed by the serve process).
+inertia-train = [
+    "scikit-learn==1.9.1",
+    "pandas==3.0.6",
+    "pyarrow==25.0.1",
+]
 
 [project.scripts]
 activity-serve = "activity_context.serve:main"
@@ -38,9 +63,15 @@ activity-infer = "activity_context.infer:main"
 activity-train = "activity_context.train:main"
 activity-evaluate = "activity_context.evaluate:main"
 activity-fetch = "activity_context.fetch_artifacts:main"
+activity-inertia-serve = "activity_context.inertia.serve:main"
+activity-eldernet-serve = "activity_context.eldernet.serve:main"
+activity-eldernet-run = "activity_context.eldernet.run:main"
 
 [tool.setuptools.packages.find]
 include = ["activity_context*"]
+
+[tool.setuptools.package-data]
+"activity_context.inertia" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

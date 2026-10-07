@@ -57,8 +57,27 @@ GYRO_ABS_BOUND_DPS = 4000.0
 #: outside this band the device's gravity offset is unresolved: ENMO stays
 #: publishable but labelled uncalibrated, and the low-movement CLASSIFIED
 #: summaries are withheld (spec 6.1: never fit a new calibration silently).
+#: The check uses still 1 s windows (every axis std below STILL_AXIS_STD_G),
+#: where |a| is gravity alone; an offset of even 0.1 g would swamp the 30 mg
+#: low-movement threshold. With no still window the overall median is held to
+#: the looser band.
 GRAVITY_NOMINAL_G = 1.0
-GRAVITY_TOLERANCE_G = 0.3
+GRAVITY_TOLERANCE_G = 0.05
+GRAVITY_TOLERANCE_NO_STILL_G = 0.1
+STILL_AXIS_STD_G = 0.013
+
+
+def still_gravity_magnitude(accel: np.ndarray, rate_hz: float) -> float | None:
+    """Median |a| over still 1 s sample blocks, or None when none is still."""
+    n = max(1, int(round(rate_hz)))
+    k = accel.shape[0] // n
+    if k == 0:
+        return None
+    blocks = accel[:k * n].reshape(k, n, 3)
+    still = blocks.std(axis=1).max(axis=1) < STILL_AXIS_STD_G
+    if not still.any():
+        return None
+    return float(np.median(np.linalg.norm(blocks[still], axis=2)))
 
 
 class ImuValidationError(ValueError):
@@ -136,8 +155,8 @@ def _complete_epoch_bounds(t: np.ndarray, rate_hz: float, epoch_seconds: int):
     epoch = first_epoch
     while epoch <= last_t:
         lo = np.searchsorted(t, epoch - 1e-9, side="left")
-        hi = np.searchsorted(t, epoch + step + 1e-9, side="left")
         # a sample exactly on the next epoch boundary belongs to the next epoch
+        hi = np.searchsorted(t, epoch + step - 1e-9, side="left")
         if hi - lo + 1 >= int(round(step * rate_hz)):
             yield epoch, (lo, hi)
         epoch += step
@@ -187,7 +206,21 @@ def classify_bouts(
     the interval end, is a continuation across the day boundary, not a new bout
     created by the date change.
     """
-    states = low_movement_state_sequence(epoch_values)
+    # Any epoch that does not directly follow its predecessor starts a new run:
+    # the hysteresis restarts unknown and the open bout is censored. ``gaps`` is
+    # kept for callers; consecutive epoch starts are authoritative because a run
+    # that starts mid-epoch loses its partial first epoch.
+    del gaps
+    run_breaks = [i == 0 or epoch_starts[i] - epoch_starts[i - 1] > ENMO_EPOCH_SECONDS + 1e-6
+                  for i in range(len(epoch_starts))]
+    states: list[str] = []
+    run_values: list[float] = []
+    for value, is_break in zip(epoch_values, run_breaks):
+        if is_break and run_values:
+            states.extend(low_movement_state_sequence(run_values))
+            run_values = []
+        run_values.append(value)
+    states.extend(low_movement_state_sequence(run_values))
     epochs_low = [v for v, s in zip(epoch_values, states) if s == "low"]
     bout_seconds = 0.0
     bout_durations: list[float] = []
@@ -196,12 +229,10 @@ def classify_bouts(
     transitions = 0
     open_bout: float | None = None
     prev_state: str | None = None
-    # A gap whose end coincides with this epoch's start separates runs.
-    gap_end_times = {round(g_end, 6) for _, g_end in gaps}
     for i, (value, state) in enumerate(zip(epoch_values, states)):
         start = epoch_starts[i]
         end = start + ENMO_EPOCH_SECONDS
-        if prev_state is not None and round(start, 6) in gap_end_times:
+        if prev_state is not None and run_breaks[i]:
             # A gap precedes this epoch: close any open bout as censored, and
             # never count a transition across the gap.
             if open_bout is not None:
@@ -258,10 +289,15 @@ def compute_movement(grid: dict[str, Any], rate_hz: float,
                      interval_start: float, interval_end: float) -> dict[str, Any]:
     """The movement family document (spec 6.1)."""
     t, accel = grid["t"], grid["accel"]
-    observed_seconds = float(t[-1] - t[0]) + 1.0 / rate_hz
+    observed_seconds = float(len(t)) / rate_hz
     mag = np.linalg.norm(accel, axis=1)
     median_mag = float(np.median(mag))
-    calibrated = abs(median_mag - GRAVITY_NOMINAL_G) <= GRAVITY_TOLERANCE_G
+    still_mag = still_gravity_magnitude(accel, rate_hz)
+    if still_mag is not None:
+        median_mag = still_mag
+        calibrated = abs(still_mag - GRAVITY_NOMINAL_G) <= GRAVITY_TOLERANCE_G
+    else:
+        calibrated = abs(median_mag - GRAVITY_NOMINAL_G) <= GRAVITY_TOLERANCE_NO_STILL_G
 
     epoch_values = enmo_epoch_values(t, accel, rate_hz)
     epoch_starts = [e for e, _ in _complete_epoch_bounds(t, rate_hz, ENMO_EPOCH_SECONDS)]
@@ -332,6 +368,12 @@ def compute_movement(grid: dict[str, Any], rate_hz: float,
             "threshold_version": MOVEMENT_THRESHOLD_VERSION,
             "partial_epoch_seconds": _partial_epoch_seconds(t, rate_hz),
             "calibrated": True,
+            "median_gravity_magnitude_g": median_mag,
+            # [epoch_start_unix, enmo_mg] for every complete epoch: the day lane
+            # re-runs the bout classification over the whole day so a bout that
+            # spans a request seam stays one bout. Stripped before publish.
+            "enmo_epochs": [[float(s), round(float(v), 4)]
+                            for s, v in zip(epoch_starts, epoch_values)],
         }
         # Mergeable bounded bins: the day lane pools the ENMO epoch distribution
         # across the day's chunk requests and recomputes the day median/p95
@@ -400,7 +442,7 @@ def compute_oscillation(grid: dict[str, Any], rate_hz: float) -> dict[str, Any]:
     from scipy.signal import welch
 
     t, gyro = grid["t"], grid["gyro"]
-    observed_seconds = float(t[-1] - t[0]) + 1.0 / rate_hz
+    observed_seconds = float(len(t)) / rate_hz
     values = oscillation_power_window_values(t, gyro, rate_hz)
     if not values:
         return family_document(

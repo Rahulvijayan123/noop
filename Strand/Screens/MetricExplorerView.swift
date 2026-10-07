@@ -1014,14 +1014,6 @@ struct MetricDetailView: View {
                         MeasurementContextCard(metric: contextMetric, day: contextDay)
                     }
                     intradaySection
-                    // Sensor biomarkers (spec-31 §9): per-day descriptive measurements from the strap's
-                    // raw sensors, behind the disabled-by-default `noop.sensorBiomarkersEnabled` flag.
-                    // When the flag is off, no route is called and nothing renders.
-                    if SensorBiomarkerFeature.isEnabled,
-                       metric.key == "hrv",
-                       let sensorDay = latest(in: win)?.day {
-                        SensorBiomarkersSection(day: sensorDay)
-                    }
                     if let dual = hrvDualPoints(windowed: win) {
                         hrvDualHeroChart(points: dual, effectiveRange: effRange, windowFellBack: fellBack)
                     } else {
@@ -1045,6 +1037,9 @@ struct MetricDetailView: View {
                         }
                     }
                     statRow(effectiveRange: effRange, windowed: win)
+                    if isStepsDetail, let latestDay = rawWin.last?.day ?? series.last?.day {
+                        WalkingInsightsSection(day: latestDay)
+                    }
                     // Steps chart summaries are bucketed, but the provenance table deliberately remains
                     // one row per underlying observed day.
                     readingsTable(windowed: isStepsDetail ? rawWin : win)

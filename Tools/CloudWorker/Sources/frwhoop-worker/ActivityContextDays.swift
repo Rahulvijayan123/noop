@@ -195,6 +195,47 @@ enum ActivityContextDays {
     static func build(input: ActivityContextTrackInput, day: String, modelVersion: String,
                       preprocessingVersion: String, generatedAt: Int,
                       config: ActivityDecoderConfig = ActivityDecoderConfig()) throws -> Built {
+        let document = dayDocument(input: input, generatedAt: generatedAt, config: config)
+        let envelope = Envelope(day: day, modelVersion: modelVersion,
+                                preprocessingVersion: preprocessingVersion, document: document)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(envelope)
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw WorkerError.malformed("activity day document encoding failed")
+        }
+        return Built(payloadText: text, runs: document.runs.count, events: document.events.count,
+                     observedSeconds: document.observedSeconds)
+    }
+
+    /// The day document for `input` (no snapshot), runs clipped to the day. Shared by the published v2
+    /// document and the Inertia candidate comparison (`ActivityMotionHeadsDays`), which differ only in config.
+    static func dayDocument(input: ActivityContextTrackInput, generatedAt: Int,
+                            config: ActivityDecoderConfig = ActivityDecoderConfig()) -> ActivityContextDayDocument {
+        dayDocumentAndReport(input: input, generatedAt: generatedAt, config: config).document
+    }
+
+    /// `dayDocument` plus the decode's motion-heads report (nil without a motion-heads config): how the Inertia
+    /// windows were attached, dropped and used.
+    static func dayDocumentAndReport(input: ActivityContextTrackInput, generatedAt: Int,
+                                     config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (document: ActivityContextDayDocument, report: MotionHeadsTrackReport?) {
+        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config)
+        return (built.document, built.track.motionHeads)
+    }
+
+    /// `dayDocument` plus the decode's gait-quality report (nil without a gait config): how the ElderNet windows were
+    /// attached, dropped and used (the ElderNet candidate comparison, `ActivityGaitWindowsDays`).
+    static func dayDocumentAndGaitReport(input: ActivityContextTrackInput, generatedAt: Int,
+                                         config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (document: ActivityContextDayDocument, report: GaitQualityTrackReport?) {
+        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config)
+        return (built.document, built.track.gaitQuality)
+    }
+
+    static func dayDocumentAndTrack(input: ActivityContextTrackInput, generatedAt: Int,
+                                    config: ActivityDecoderConfig = ActivityDecoderConfig())
+        -> (document: ActivityContextDayDocument, track: ActivityContextTrack) {
         let track = ActivityContextTrackBuilder.build(input, config: config)
         var document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
                                                   config: config, includeSnapshot: false)
@@ -207,16 +248,7 @@ enum ActivityContextDays {
             return clipped.end > clipped.start ? clipped : nil
         }
         document.summary = ActivityContextDaySummary(runs: document.runs)
-        let envelope = Envelope(day: day, modelVersion: modelVersion,
-                                preprocessingVersion: preprocessingVersion, document: document)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(envelope)
-        guard let text = String(data: data, encoding: .utf8) else {
-            throw WorkerError.malformed("activity day document encoding failed")
-        }
-        return Built(payloadText: text, runs: document.runs.count, events: document.events.count,
-                     observedSeconds: document.observedSeconds)
+        return (document, track)
     }
 
     // MARK: - Stream days

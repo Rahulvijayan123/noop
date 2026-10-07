@@ -29,8 +29,12 @@ FIXTURES = os.path.join(os.path.dirname(__file__), "..", "fixtures")
 PKG = os.path.join(os.path.dirname(__file__), "..")
 
 
+_ENV_ALLOW = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONPATH", "VIRTUAL_ENV")
+
+
 def _env():
-    env = dict(os.environ)
+    """Explicit allowlist for the serve subprocess (never the full os.environ)."""
+    env = {k: os.environ[k] for k in _ENV_ALLOW if k in os.environ}
     env["PYTHONPATH"] = PKG + os.pathsep + env.get("PYTHONPATH", "")
     return env
 

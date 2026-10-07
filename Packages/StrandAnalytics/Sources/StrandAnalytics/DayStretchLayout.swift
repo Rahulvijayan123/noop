@@ -40,6 +40,15 @@ public struct DayStretchLayout: Equatable, Sendable {
     public static let recentCount = 5
     /// Shorter stretches are blips between two longer ones, and are left off the lists.
     public static let minimumSeconds = 60
+    /// Getting up for a few seconds is the event people look for, not a blip, so a standing stretch is listed from
+    /// this long.
+    public static let minimumStandingSeconds = 10
+
+    /// Whether `episode` belongs on the lists (`minimumSeconds` is the floor for everything else).
+    public static func isListed(_ episode: ActivityEpisode, minimumSeconds: Int = DayStretchLayout.minimumSeconds) -> Bool {
+        if episode.durationSeconds >= minimumSeconds { return true }
+        return episode.durationSeconds >= minimumStandingSeconds && ActivityDisplay.group(episode.label) == "upright"
+    }
 
     /// The newest stretches, newest first.
     public let recent: [ActivityEpisode]
@@ -51,7 +60,7 @@ public struct DayStretchLayout: Equatable, Sendable {
     public init(episodes: [ActivityEpisode], recentCount: Int = DayStretchLayout.recentCount,
                 minimumSeconds: Int = DayStretchLayout.minimumSeconds, calendar: Calendar = .current) {
         let ordered = episodes
-            .filter { $0.durationSeconds >= minimumSeconds }
+            .filter { Self.isListed($0, minimumSeconds: minimumSeconds) }
             .sorted { $0.start != $1.start ? $0.start > $1.start : $0.end > $1.end }
         recent = Array(ordered.prefix(max(0, recentCount)))
         let rest = ordered.dropFirst(max(0, recentCount))

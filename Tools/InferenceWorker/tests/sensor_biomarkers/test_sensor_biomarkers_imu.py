@@ -44,6 +44,18 @@ _LOW = 1.0    # stationary: ENMO 0 mg (< 30 enter threshold)
 _MOVING = 1.1  # ENMO 100 mg (>= 50 leave threshold)
 
 
+def _moving_run(start: float, seconds: float, rate: float = 100.0) -> dict:
+    """Physically moving: |a| = 1.1 g + a 2 Hz 0.05 g wobble. Every 5 s epoch
+    holds whole wobble periods, so its ENMO is still exactly 100 mg, but no
+    1 s window is still (a still strap reads gravity alone)."""
+    run = _mag_run(start, seconds, _MOVING, rate)
+    t = np.arange(int(seconds * rate)) / rate
+    accel = np.asarray(run["accel_g"])
+    accel[:, 0] += 0.05 * np.sin(2 * np.pi * 2.0 * t)
+    run["accel_g"] = accel.tolist()
+    return run
+
+
 def _grid(segments, rate=100.0):
     return sbimu.build_epoch_grid(segments, rate)
 
@@ -96,6 +108,13 @@ class TestEnmo:
         assert "low_movement_fraction" not in doc["measurements"]
         assert doc["reason_counts"]["uncalibrated_gravity_offset"] == 1
 
+    def test_still_strap_reading_a_tenth_g_off_is_uncalibrated(self):
+        # Still at 1.1 g is an offset (a still strap reads gravity alone): it
+        # would otherwise classify every still epoch as moving.
+        doc = sbimu.compute_movement(_grid([_mag_run(0.0, 60.0, 1.1)]), 100.0, 0.0, 60.0)
+        assert doc["calibrated"] is False
+        assert doc["median_gravity_magnitude_g"] == pytest.approx(1.1)
+
 
 class TestLowMovementHysteresis:
     def test_state_machine(self):
@@ -108,7 +127,7 @@ class TestLowMovementHysteresis:
     def test_gap_creates_no_transition_and_censors_the_bout(self):
         # Two runs separated by a real gap: the open low bout is censored and
         # NO low->moving transition is counted across the gap.
-        segs = [_mag_run(0.0, 10.0, _LOW), _mag_run(20.0, 10.0, _MOVING)]
+        segs = [_mag_run(0.0, 10.0, _LOW), _moving_run(20.0, 10.0)]
         grid = _grid(segs)
         doc = sbimu.compute_movement(grid, 100.0, 0.0, 30.0)
         assert doc["measurements"]["low_to_moving_transition_count"]["value"] == 0
@@ -126,20 +145,42 @@ class TestLowMovementHysteresis:
     def test_day_boundary_is_a_continuation(self):
         # A bout whose first epoch starts at the interval start is a
         # continuation, not a new bout created by the date change.
-        segs = [_mag_run(0.0, 10.0, _LOW), _mag_run(10.0, 10.0, _MOVING)]
+        segs = [_mag_run(0.0, 10.0, _LOW), _moving_run(10.0, 10.0)]
         grid = _grid(segs)
         doc = sbimu.compute_movement(grid, 100.0, 0.0, 20.0)
         assert doc["low_movement_continuation_count"] == 1
         # same run ending exactly at the interval end:
-        segs2 = [_mag_run(0.0, 10.0, _MOVING), _mag_run(10.0, 10.0, _LOW)]
+        segs2 = [_moving_run(0.0, 10.0), _mag_run(10.0, 10.0, _LOW)]
         grid2 = _grid(segs2)
         doc2 = sbimu.compute_movement(grid2, 100.0, 0.0, 20.0)
         assert doc2["low_movement_continuation_count"] == 1
 
+    def test_gap_is_seen_when_the_next_run_starts_mid_epoch(self):
+        # The second run starts at 22.5 s: its first complete epoch is 25 s, so
+        # the gap end never coincides with an epoch start. It is still a gap.
+        segs = [_mag_run(0.0, 10.0, _LOW), _moving_run(22.5, 12.5)]
+        doc = sbimu.compute_movement(_grid(segs), 100.0, 0.0, 40.0)
+        assert doc["measurements"]["low_to_moving_transition_count"]["value"] == 0
+        assert doc["low_movement_censored_bout_count"] == 1
+
+    def test_hysteresis_restarts_unknown_after_a_gap(self):
+        # A run that starts in the 30-50 mg middle band after a gap is unknown,
+        # not a continuation of the pre-gap low state.
+        segs = [_mag_run(0.0, 10.0, _LOW), _mag_run(20.0, 10.0, 1.04)]
+        doc = sbimu.compute_movement(_grid(segs), 100.0, 0.0, 30.0)
+        assert doc["reason_counts"]["unknown_state_epochs"] == 2
+        assert doc["measurements"]["low_movement_seconds"]["value"] == 10.0
+
+    def test_epoch_series_is_emitted_for_the_day_lane(self):
+        segs = [_mag_run(0.0, 10.0, _LOW), _moving_run(10.0, 10.0)]
+        doc = sbimu.compute_movement(_grid(segs), 100.0, 0.0, 20.0)
+        assert [s for s, _ in doc["enmo_epochs"]] == [0.0, 5.0, 10.0, 15.0]
+        assert [v for _, v in doc["enmo_epochs"]] == pytest.approx([0.0, 0.0, 100.0, 100.0], abs=1e-3)
+
     def test_transition_counting(self):
         # low -> moving -> low -> moving = 2 transitions; 20 classified s.
-        segs = [_mag_run(0.0, 10.0, _LOW), _mag_run(10.0, 10.0, _MOVING),
-                _mag_run(20.0, 10.0, 0.0), _mag_run(30.0, 10.0, _MOVING)]
+        segs = [_mag_run(0.0, 10.0, _LOW), _moving_run(10.0, 10.0),
+                _mag_run(20.0, 10.0, _LOW), _moving_run(30.0, 10.0)]
         grid = _grid(segs)
         doc = sbimu.compute_movement(grid, 100.0, 0.0, 40.0)
         assert doc["measurements"]["low_to_moving_transition_count"]["value"] == 2

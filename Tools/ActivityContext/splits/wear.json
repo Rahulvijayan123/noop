@@ -1,0 +1,39 @@
+{
+  "dataset": "wear",
+  "method": "Agent C split(): numpy default_rng(42).permutation of the sorted subject ids; first 20% test, next 20% val, rest train",
+  "note": "24 subjects sbj_0..23 (frozen 2026-10-06 for the NC-SA licence decision)",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "efa3bd862c37b045d72c5eed49791a8e9ff484410256a33244ddb9bb5d469f3e",
+  "source": "Agent C split_manifests.json (wear)",
+  "test_subjects": [
+    "sbj_17",
+    "sbj_22",
+    "sbj_23",
+    "sbj_4",
+    "sbj_5"
+  ],
+  "train_subjects": [
+    "sbj_0",
+    "sbj_1",
+    "sbj_10",
+    "sbj_11",
+    "sbj_12",
+    "sbj_13",
+    "sbj_16",
+    "sbj_19",
+    "sbj_2",
+    "sbj_20",
+    "sbj_21",
+    "sbj_6",
+    "sbj_7",
+    "sbj_8"
+  ],
+  "val_subjects": [
+    "sbj_14",
+    "sbj_15",
+    "sbj_18",
+    "sbj_3",
+    "sbj_9"
+  ]
+}

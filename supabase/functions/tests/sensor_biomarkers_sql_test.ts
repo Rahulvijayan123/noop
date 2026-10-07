@@ -90,6 +90,7 @@ Deno.test('sensor biomarkers: schema, fingerprint, enqueue, claim/publish fencin
     // not apply; add it the way activity_context_contract.sql expects.
     await db.sql('alter table public.devices add constraint devices_owner_identity unique(user_id,id);');
     await applyMigration(db, '20261007140000_sensor_biomarkers.sql');
+    await applyMigration(db, '20261007150000_sensor_biomarkers_claim_throttle.sql');
     // PostgREST caches the schema at startup; the new tables/RPCs are not visible until a reload.
     await db.sql("notify pgrst, 'reload schema';");
     await new Promise((resolve) => setTimeout(resolve, 700));
@@ -312,6 +313,29 @@ Deno.test('sensor biomarkers: schema, fingerprint, enqueue, claim/publish fencin
       assert.equal((await countDays()).trim(), '0', 'the stale publish must not write the day');
     });
 
+    await t.step('claim throttle: a published current UTC day is re-claimable only after an hour', async () => {
+      const T = new Date().toISOString().slice(0, 10);
+      const fp = await fingerprintOf(db, ['e'.repeat(64)], T);
+      // One transaction, rolled back: every other job is parked so the claims can only see T's.
+      const out = await db.sql(`
+        begin;
+        select public.enqueue_sensor_biomarker_day('${U}'::uuid, '${DEV}'::uuid, '${T}'::date,
+          array['a1000000-0000-4000-8000-0000000000f1'::uuid], array['${'e'.repeat(64)}'], '${fp}',
+          array['movement','oscillation']);
+        update public.sensor_biomarker_jobs set dead_letter = true where day <> '${T}'::date;
+        update public.sensor_biomarker_jobs set input_revision = input_revision + 1,
+          completed_revision = input_revision, last_completed_at = clock_timestamp(),
+          lease_token = null, lease_until = null, not_before = clock_timestamp(), dead_letter = false
+          where day = '${T}'::date;
+        select 'recent:' || count(*) from public.claim_sensor_biomarker_day(300);
+        update public.sensor_biomarker_jobs set last_completed_at = clock_timestamp() - interval '2 hours'
+          where day = '${T}'::date;
+        select 'stale:' || count(*) from public.claim_sensor_biomarker_day(300);
+        rollback;`);
+      assert.ok(out.includes('recent:0'), `a day published minutes ago must not be re-claimed: ${out}`);
+      assert.ok(out.includes('stale:1'), `a day published over an hour ago must be claimable: ${out}`);
+    });
+
     await t.step('publish: valid publish writes the day row, completes the job, republish replaces', async () => {
       const D = '2026-10-11';
       const fp = await fingerprintOf(db, ['g'.repeat(64)], D);
@@ -481,12 +505,17 @@ Deno.test('sensor biomarkers: schema, fingerprint, enqueue, claim/publish fencin
       'movement,tremor', 'reconcile must pass the worker family set');
       assert.equal((await db.sql(
         `select cardinality(input_object_ids)::text from public.sensor_biomarker_jobs where user_id='${UR}' and device_id='${DEVR}' and day='${DAYR}';`)).trim(),
-      '2', 'reconcile must aggregate BOTH IMU and PPG objects');
-      // Idempotent re-run: no revision bump.
+      '1', 'an IMU-only family set must not pull PPG objects into the job');
+      // Idempotent re-run: no revision bump, and the row is not even rewritten.
+      const xminBefore = (await db.sql(
+        `select xmin::text from public.sensor_biomarker_jobs where user_id='${UR}' and device_id='${DEVR}' and day='${DAYR}';`)).trim();
       await db.sql(`select public.reconcile_sensor_biomarkers('30 days'::interval, array['movement','tremor']);`);
       assert.ok((await db.sql(
         `select input_revision::text from public.sensor_biomarker_jobs where user_id='${UR}' and device_id='${DEVR}' and day='${DAYR}';`)).trim() === '1',
       'an identical reconcile must be a no-op');
+      assert.equal((await db.sql(
+        `select xmin::text from public.sensor_biomarker_jobs where user_id='${UR}' and device_id='${DEVR}' and day='${DAYR}';`)).trim(),
+      xminBefore, 'an identical reconcile must not rewrite the job row');
       // A late object (new digest) bumps the revision.
       await db.sql(`
         insert into public.object_manifests(id,user_id,device_id,object_class,object_kind,object_key,
@@ -503,6 +532,11 @@ Deno.test('sensor biomarkers: schema, fingerprint, enqueue, claim/publish fencin
       assert.ok((await db.sql(
         `select input_revision::text from public.sensor_biomarker_jobs where user_id='${UR}' and device_id='${DEVR}' and day='${DAYR}';`)).trim() === '3',
       'a family-set change must bump the revision');
+      // A PPG-consuming family brings the PPG objects into the job.
+      await db.sql(`select public.reconcile_sensor_biomarkers('30 days'::interval, array['movement','oscillation','ppg_quality','tremor']);`);
+      assert.equal((await db.sql(
+        `select input_revision::text || ':' || cardinality(input_object_ids)::text from public.sensor_biomarker_jobs where user_id='${UR}' and device_id='${DEVR}' and day='${DAYR}';`)).trim(),
+      '4:3', 'a PPG family must aggregate BOTH IMU and PPG objects');
     });
 
     await t.step('deletion cascade: device and account deletion remove jobs and days', async () => {

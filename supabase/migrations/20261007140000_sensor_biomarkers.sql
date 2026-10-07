@@ -186,7 +186,11 @@ begin
     last_error = case when sensor_biomarker_jobs.fingerprint is distinct from excluded.fingerprint
       or sensor_biomarker_jobs.enabled_families is distinct from excluded.enabled_families
       then null else sensor_biomarker_jobs.last_error end,
-    reason = 'input';
+    reason = 'input'
+  -- The minute reconcile re-offers every day in its window; an unchanged day must not rewrite
+  -- its row (dead tuples, WAL) or disturb a running lease.
+  where sensor_biomarker_jobs.fingerprint is distinct from excluded.fingerprint
+     or sensor_biomarker_jobs.enabled_families is distinct from excluded.enabled_families;
 end $$;
 
 -- FOR UPDATE SKIP LOCKED claim with token grant; the eligibility gates mirror
@@ -387,12 +391,13 @@ end $$;
 -- family set, no revision bump), a job whose object was missed by a racing reconcile is repaired
 -- by the enqueue merge, and no day documents are ever written here. `p_enabled_families` is the
 -- worker's current family set; a toggled flag shows up here as a family-set change and recomputes
--- the day.
+-- the day. ppgWaveformSample objects are scanned only when a PPG-consuming family is enabled, so an
+-- IMU-only worker never recomputes a day because a PPG object arrived.
 create function public.reconcile_sensor_biomarkers(p_lookback interval default '7 days',
   p_enabled_families text[] default '{}'::text[])
 returns void language plpgsql security definer set search_path='' as $$
 declare r record; d date; lo bigint; hi bigint; f text; ids uuid[]; digests text[];
-  families text[];
+  families text[]; kinds text[];
 begin
   if p_lookback is null or p_lookback < interval '0' then raise exception 'invalid_lookback'; end if;
   if p_enabled_families is not null and exists(
@@ -402,12 +407,14 @@ begin
   end if;
   families := (select coalesce(array_agg(distinct x order by x), '{}'::text[])
     from unnest(coalesce(p_enabled_families, '{}'::text[])) as t(x));
+  kinds := case when families && array['ppg_quality','pulse_shape','perfusion_research','rhythm_shadow']::text[]
+    then array['rawImuSession','ppgWaveformSample']::text[] else array['rawImuSession']::text[] end;
   for r in
     select distinct m.user_id, m.device_id,
       greatest((m.start_at at time zone 'UTC')::date, (clock_timestamp() - p_lookback)::date) as first_day,
       (m.end_at at time zone 'UTC')::date as last_day
     from public.object_manifests m
-    where m.object_kind in ('rawImuSession','ppgWaveformSample') and m.status = 'ready'
+    where m.object_kind = any(kinds) and m.status = 'ready'
       and m.verified_at is not null and m.sha256 is not null
       and m.start_at is not null and m.end_at is not null
       and m.end_at > clock_timestamp() - p_lookback
@@ -415,13 +422,13 @@ begin
   loop
     for d in select generate_series(r.first_day, r.last_day, interval '1 day')::date loop
       -- Same aggregation the lane's own enqueue uses so fingerprints converge: every ready
-      -- object of BOTH modalities overlapping the UTC day, digest-sorted.
+      -- object of the scanned modalities overlapping the UTC day, digest-sorted.
       select array_agg(x.id order by x.start_at, x.id),
              array_agg(lower(x.sha256) order by x.start_at, x.id)
         into ids, digests
       from public.object_manifests x
       where x.user_id = r.user_id and x.device_id = r.device_id
-        and x.object_kind in ('rawImuSession','ppgWaveformSample') and x.status = 'ready'
+        and x.object_kind = any(kinds) and x.status = 'ready' and x.verified_at is not null
         and x.sha256 is not null and x.start_at is not null and x.end_at is not null
         and x.start_at < ((d + 1)::timestamp at time zone 'UTC')
         and x.end_at > (d::timestamp at time zone 'UTC')

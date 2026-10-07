@@ -113,6 +113,27 @@ final class SensorBiomarkerLaneTests: XCTestCase {
             objectIds: [], digests: [])
     }
 
+    // MARK: - Configuration
+
+    private func configEnv(_ extra: [String: String]) -> [String: String] {
+        ["FRWHOOP_DB_URL": "postgres://u:p@host:5432/postgres", "FRWHOOP_B2_KEY_ID": "key",
+         "FRWHOOP_B2_APPLICATION_KEY": "secret", "FRWHOOP_INGEST_SECRET": "ingest"].merging(extra) { $1 }
+    }
+
+    func testFamilySetIsImuOnlyUnlessPpgIsEnabled() throws {
+        let off = try WorkerConfig(environment: configEnv([:]))
+        XCTAssertFalse(off.sensorLaneRuns)
+        XCTAssertEqual(off.sensorFamilies, [])
+        let imu = try WorkerConfig(environment: configEnv(["FRWHOOP_SENSOR_BIOMARKERS_ENABLED": "1"]))
+        XCTAssertTrue(imu.sensorLaneRuns)
+        XCTAssertEqual(imu.sensorFamilies, ["movement", "oscillation"])
+        let ppg = try WorkerConfig(environment: configEnv([
+            "FRWHOOP_SENSOR_BIOMARKERS_ENABLED": "1", "FRWHOOP_SENSOR_PPG_ENABLED": "1"]))
+        XCTAssertEqual(ppg.sensorFamilies, ["movement", "oscillation", "ppg_quality", "pulse_shape"])
+        let ppgAlone = try WorkerConfig(environment: configEnv(["FRWHOOP_SENSOR_PPG_ENABLED": "1"]))
+        XCTAssertEqual(ppgAlone.sensorFamilies, [])
+    }
+
     // MARK: - Job-row parsing
 
     func testParseJob() {
@@ -167,6 +188,25 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(parsed["movement"]?.observedSeconds, 600)
         XCTAssertEqual(parsed["tremor"]?.status, "withheld")
         XCTAssertEqual(parsed["tremor"]?.reason, "unknown_wrist_placement")
+    }
+
+    func testParseEnvelopeAcceptsTheSidecarStageList() throws {
+        // The sidecar's real wire: `result.stages` is a list of family documents naming `family`.
+        let body = """
+        {"status":"ok","metric":"sensor_biomarkers","provider_id":"sensor.biomarkers.v1",
+         "result":{"label_space":"sensor_biomarkers.families/1","stages":[
+           {"family":"movement","status":"ok","release_tier":"descriptive","provider_revision":"imu-biomarkers/1.0.0",
+            "observed_seconds":300,"eligible_seconds":280,
+            "measurements":{"enmo_median_mg":{"value":12.5,"unit":"mg","count":56}},"reason_counts":{}},
+           {"family":"oscillation","status":"withheld","release_tier":"descriptive",
+            "provider_revision":"imu-biomarkers/1.0.0","measurements":{},"reason":"not_enough_valid_data"}]}}
+        """
+        let response = try InferenceClient.decodeInferenceResponse(
+            Data(body.utf8), http: Self.http(200), expectedMetric: "sensor_biomarkers")
+        let parsed = try SensorBiomarkerLane.parseEnvelope(response, families: ["movement", "oscillation"])
+        XCTAssertEqual(parsed["movement"]?.status, "ok")
+        XCTAssertEqual(parsed["movement"]?.observedSeconds, 300)
+        XCTAssertEqual(parsed["oscillation"]?.reason, "not_enough_valid_data")
     }
 
     func testParseEnvelopeTopLevelVerdicts() throws {
@@ -292,13 +332,19 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         let a = try SensorBiomarkerFamilyStage.parse(
             family: "movement",
             stageJSON(family: "movement", status: "ok", observed: 300, measurements: [
-                "low_movement_seconds": 120.0, "low_movement_bout_count": 4.0,
+                "low_movement_seconds": ["value": 120.0, "unit": "s", "count": 24],
+                "low_movement_bout_count": ["value": 4.0, "unit": "count"],
+                "low_movement_bout_max_seconds": ["value": 60.0, "unit": "s"],
+                "low_movement_bout_median_seconds": ["value": 30.0, "unit": "s"],
                 "enmo_median_mg": ["value": 10.0],
             ], reasonCounts: ["no_wear": 2]))
         let b = try SensorBiomarkerFamilyStage.parse(
             family: "movement",
             stageJSON(family: "movement", status: "ok", observed: 700, measurements: [
-                "low_movement_seconds": 480.0, "low_movement_bout_count": 9.0,
+                "low_movement_seconds": ["value": 480.0, "unit": "s", "count": 96],
+                "low_movement_bout_count": ["value": 9.0, "unit": "count"],
+                "low_movement_bout_max_seconds": ["value": 45.0, "unit": "s"],
+                "low_movement_bout_median_seconds": ["value": 20.0, "unit": "s"],
                 "enmo_median_mg": ["value": 25.0],
             ], reasonCounts: ["no_wear": 5]))
         let merged = try SensorBiomarkerFamilyStage.merge([a, b])
@@ -308,8 +354,14 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         // Additive keys (seconds/count) sum; the quantile (median) comes from the best-coverage request.
         let measurements = merged.measurements
         guard case .object(let m) = measurements else { return XCTFail("measurements object expected") }
-        XCTAssertEqual(m["low_movement_seconds"]?.doubleValue ?? 0, 600, accuracy: 0.001)
-        XCTAssertEqual(m["low_movement_bout_count"]?.doubleValue ?? 0, 13, accuracy: 0.001)
+        XCTAssertEqual(m["low_movement_seconds"]?.member("value")?.doubleValue ?? 0, 600, accuracy: 0.001)
+        XCTAssertEqual(m["low_movement_seconds"]?.member("count")?.intValue, 120)
+        XCTAssertEqual(m["low_movement_seconds"]?.member("unit")?.stringValue, "s")
+        XCTAssertEqual(m["low_movement_bout_count"]?.member("value")?.doubleValue ?? 0, 13, accuracy: 0.001)
+        XCTAssertEqual(m["low_movement_bout_max_seconds"]?.member("value")?.doubleValue ?? 0, 60, accuracy: 0.001,
+                       "a per-request maximum merges as the day maximum, never a sum")
+        XCTAssertEqual(m["low_movement_bout_median_seconds"]?.member("value")?.doubleValue ?? 0, 20, accuracy: 0.001,
+                       "a median is never summed")
         XCTAssertEqual(m["enmo_median_mg"]?.member("value")?.doubleValue ?? 0, 25.0,
                        "the quantile must come from the largest-observed request (b)")
     }
@@ -432,7 +484,123 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(merged.observedSeconds ?? 0, 3_600, accuracy: 0.001,
                        "merged coverage must equal the contiguous coverage (no double count)")
         guard case .object(let m) = merged.measurements else { return XCTFail("measurements object expected") }
-        XCTAssertEqual(m["low_movement_seconds"]?.doubleValue ?? 0, 1_500, accuracy: 0.001)
+        XCTAssertEqual(m["low_movement_seconds"]?.member("value")?.doubleValue ?? 0, 1_500, accuracy: 0.001)
+    }
+
+    // MARK: - Day-level low-movement classification
+
+    private static let seamDayStart = 1_791_244_800.0  // 2026-10-06T00:00:00Z
+
+    /// A calibrated movement stage carrying its per-epoch ENMO series, as the sidecar emits it.
+    private func movementStage(epochs: [(Double, Double)], boutCount: Double) throws -> SensorBiomarkerFamilyStage {
+        guard case .object(var obj) = stageJSON(
+            family: "movement", status: "ok", observed: Double(epochs.count) * 5,
+            measurements: ["low_movement_bout_count": ["value": boutCount, "unit": "count"]]) else {
+            throw XCTSkip("stage fixture")
+        }
+        obj["calibrated"] = .bool(true)
+        obj["enmo_epochs"] = .array(epochs.map { .array([.double($0.0), .double($0.1)]) })
+        obj["distributions"] = .array([])
+        return try SensorBiomarkerFamilyStage.parse(family: "movement", .object(obj))
+    }
+
+    private func epochs(from: Double, to: Double, mg: Double) -> [(Double, Double)] {
+        stride(from: Self.seamDayStart + from, to: Self.seamDayStart + to, by: 5).map { ($0, mg) }
+    }
+
+    func testDayLowMovementJoinsABoutAcrossARequestSeam() throws {
+        // Request A ends low at 3600 s; request B starts low and then moves. Per request that is
+        // two bouts (one trailing, one leading); over the day it is ONE 150 s bout.
+        let a = try movementStage(epochs: epochs(from: 3000, to: 3500, mg: 80) + epochs(from: 3500, to: 3600, mg: 5),
+                                  boutCount: 1)
+        let b = try movementStage(epochs: epochs(from: 3600, to: 3650, mg: 5) + epochs(from: 3650, to: 3700, mg: 80),
+                                  boutCount: 1)
+        let merged = try SensorBiomarkerFamilyStage.merge([a, b])
+            .withDayLowMovement(stages: [a, b], dayStart: Self.seamDayStart, dayEnd: Self.seamDayStart + 86_400)
+        let m = merged.measurements
+        XCTAssertEqual(m.member("low_movement_bout_count")?.member("value")?.doubleValue, 1)
+        XCTAssertEqual(m.member("low_movement_bout_max_seconds")?.member("value")?.doubleValue, 150)
+        XCTAssertEqual(m.member("low_movement_seconds")?.member("value")?.doubleValue, 150)
+        XCTAssertEqual(m.member("low_to_moving_transition_count")?.member("value")?.doubleValue, 1)
+        XCTAssertEqual(m.member("low_movement_fraction")?.member("value")?.doubleValue ?? 0, 150.0 / 700, accuracy: 1e-9)
+        XCTAssertEqual(merged.extra["low_movement_censored_bout_count"], JSONValue.int(0))
+        XCTAssertEqual(merged.extra["low_movement_continuation_count"], JSONValue.int(0))
+        XCTAssertEqual(merged.eligibleSeconds, 700)
+    }
+
+    func testDayLowMovementGapCensorsAndRestartsUnknown() {
+        // low, then a 20 s gap, then a middle-band epoch (unknown after a gap), then moving.
+        let series = epochs(from: 0, to: 20, mg: 5) + epochs(from: 40, to: 45, mg: 40) + epochs(from: 45, to: 60, mg: 80)
+        let day = SensorBiomarkerFamilyStage.classifyDayLowMovement(
+            epochs: series.map { (start: $0.0, mg: $0.1) },
+            dayStart: Self.seamDayStart, dayEnd: Self.seamDayStart + 86_400)
+        XCTAssertEqual(day.boutDurations, [20])
+        XCTAssertEqual(day.censored, 1)
+        XCTAssertEqual(day.continuations, 1, "the bout starts at the day start")
+        XCTAssertEqual(day.transitions, 0, "never a transition across a gap")
+        XCTAssertEqual(day.unknownEpochs, 1)
+        XCTAssertEqual(day.classifiedSeconds, 35)
+    }
+
+    func testPublishedStageCarriesNoRequestInternalFields() throws {
+        let a = try movementStage(epochs: epochs(from: 0, to: 60, mg: 5), boutCount: 1)
+        let published = try SensorBiomarkerFamilyStage.merge([a])
+            .withDayLowMovement(stages: [a], dayStart: Self.seamDayStart, dayEnd: Self.seamDayStart + 86_400)
+            .withoutInternalFields().jsonValue
+        XCTAssertNil(published.member("enmo_epochs"))
+        XCTAssertNil(published.member("distributions"))
+        XCTAssertEqual(published.member("calibrated"), JSONValue.bool(true))
+    }
+
+    func testSidecarTimeoutIsRetryableNotPublished() throws {
+        let body = """
+        {"status":"withheld","metric":"sensor_biomarkers","withheld_reason":"timeout",
+         "diagnostics":{"budget_ms":20000}}
+        """
+        let response = try InferenceClient.decodeInferenceResponse(
+            Data(body.utf8), http: Self.http(200), expectedMetric: "sensor_biomarkers")
+        XCTAssertThrowsError(try SensorBiomarkerLane.parseEnvelope(response, families: ["movement"])) { error in
+            guard case SensorBiomarkerLane.SensorBiomarkerError.retryable = error else {
+                return XCTFail("timeout must be retryable, got \(error)")
+            }
+        }
+    }
+
+    func testInferenceContextCarriesEveryVersionTheSidecarRequires() throws {
+        let cols = [Int16](repeating: 0, count: 600)
+        let records = (0..<60).map { Npb1ImuDecoder.Record(rowId: Int64($0), ts: Self.dayStart + Int64($0), columns: cols) }
+        let timeline = try SensorBiomarkerInputs.imuTimeline(records)
+        let built = try XCTUnwrap(SensorBiomarkerInputs.buildRequests(
+            imuRuns: SensorBiomarkerInputs.imuRuns(timeline), ppgRuns: [], imuTimeline: timeline,
+            ppgSecondsByTs: [:], objects: [], deviceID: "22222222-2222-4222-8222-222222222222",
+            dayUTC: Self.day, families: ["movement"]).first)
+        let body = try SensorBiomarkerLane.inferenceBody(job: makeJob(), built: built)
+        let json = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        let context = try XCTUnwrap(json?["context"] as? [String: Any])
+        for key in ["profile_version", "config_version", "corrections_version"] {
+            let value = context[key] as? String
+            XCTAssertFalse(value?.isEmpty ?? true, "\(key) must be a non-empty string or the sidecar answers 400")
+        }
+        XCTAssertEqual(json?["metric"] as? String, "sensor_biomarkers")
+        XCTAssertEqual((json?["provider"] as? [String: Any])?["provider_id"] as? String, "sensor.biomarkers.v1")
+        let input = try XCTUnwrap(json?["input"] as? NSDictionary)
+        XCTAssertEqual(input, built.input.jsonObject() as NSDictionary,
+                       "the written input must be the same JSON as the object form")
+    }
+
+    func testWrittenInputMatchesObjectFormWithRealScaledSamples() throws {
+        // Non-zero i16 columns exercise the scaled decimals (and negative values) the writer prints.
+        var cols = [Int16](repeating: 0, count: 600)
+        for i in 0..<600 { cols[i] = Int16(truncatingIfNeeded: (i * 7919) % 8191 - 4095) }
+        let records = (0..<30).map { Npb1ImuDecoder.Record(rowId: Int64($0), ts: Self.dayStart + Int64($0), columns: cols) }
+        let timeline = try SensorBiomarkerInputs.imuTimeline(records)
+        let built = try XCTUnwrap(SensorBiomarkerInputs.buildRequests(
+            imuRuns: SensorBiomarkerInputs.imuRuns(timeline), ppgRuns: [], imuTimeline: timeline,
+            ppgSecondsByTs: [:], objects: [], deviceID: "d\"quoted", dayUTC: Self.day,
+            families: ["movement", "oscillation"]).first)
+        let written = try XCTUnwrap(JSONSerialization.jsonObject(with: built.inputJSON) as? NSDictionary)
+        XCTAssertEqual(written, built.input.jsonObject() as NSDictionary)
+        XCTAssertEqual(built.serializedSizeBytes, built.inputJSON.count)
     }
 
     // MARK: - Sidecar request shape

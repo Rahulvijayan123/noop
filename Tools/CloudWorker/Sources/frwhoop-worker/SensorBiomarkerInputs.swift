@@ -362,11 +362,38 @@ enum SensorBiomarkerInputs {
         var segments: [ImuSegment] = []
         var chunkStart = run.start
         while chunkStart < run.end {
-            let chunkEnd = min(chunkStart + Int64(maxDuration), run.end)
+            let chunkEnd = segmentEnd(start: chunkStart, maxDuration: maxDuration, runEnd: run.end)
             segments.append(imuSegment(from: chunkStart, to: chunkEnd, timeline: timeline))
             chunkStart = chunkEnd
         }
         return segments
+    }
+
+    /// Segment (and therefore request) seams inside a run fall on UTC multiples of this many
+    /// seconds, a common multiple of the 5 s movement epoch and the 4 s oscillation window, so no
+    /// analysis window ever straddles two sidecar requests.
+    static let seamAlignmentSeconds: Int64 = 20
+
+    static func segmentEnd(start: Int64, maxDuration: Int, runEnd: Int64) -> Int64 {
+        let limit = start + Int64(maxDuration)
+        let aligned = limit - ((limit % seamAlignmentSeconds) + seamAlignmentSeconds) % seamAlignmentSeconds
+        return min(aligned > start ? aligned : limit, runEnd)
+    }
+
+    /// Runs clipped to `[from, to)`; the lane feeds the sidecar one UTC hour at a time so a full
+    /// day's decoded samples are never resident at once.
+    static func clip(_ runs: [ActivityLane.Run], from: Int64, to: Int64) -> [ActivityLane.Run] {
+        runs.compactMap { run in
+            let start = max(run.start, from), end = min(run.end, to)
+            return start < end ? ActivityLane.Run(start: start, end: end) : nil
+        }
+    }
+
+    static func clip(_ runs: [PpgRun], from: Int64, to: Int64) -> [PpgRun] {
+        runs.compactMap { run in
+            let start = max(run.start, from), end = min(run.end, to)
+            return start < end ? PpgRun(start: start, end: end, configIdentity: run.configIdentity) : nil
+        }
     }
 
     private static func imuSegment(from start: Int64, to end: Int64,
@@ -835,7 +862,7 @@ enum SensorBiomarkerInputs {
         var segments: [PpgSegment] = []
         var chunkStart = run.start
         while chunkStart < run.end {
-            let chunkEnd = min(chunkStart + Int64(maxDuration), run.end)
+            let chunkEnd = segmentEnd(start: chunkStart, maxDuration: maxDuration, runEnd: run.end)
             var samples: [Int32] = []
             for t in chunkStart..<chunkEnd {
                 if let second = secondsByTs[t], second.withheldReason == nil {
@@ -882,15 +909,7 @@ enum SensorBiomarkerInputs {
         /// The CONTRACTS §4 JSON object (no `imu`/`ppg` keys when a modality
         /// has no verified/emitted data).
         func jsonObject() -> [String: Any] {
-            var input: [String: Any] = [
-                "schema_version": schemaVersion,
-                "device": ["id": deviceID, "family": deviceFamily],
-                "input_revision": inputRevision,
-                "day_utc": dayUTC,
-                "watch_side": watchSide,
-                "device_orientation": deviceOrientation,
-                "families": families,
-            ]
+            var input = metadataObject()
             if let imu {
                 input["imu"] = [
                     "sampling_rate_hz": imu.samplingRateHz,
@@ -916,6 +935,45 @@ enum SensorBiomarkerInputs {
             return input
         }
 
+        /// Every key except the sample-bearing `imu` / `ppg` sections.
+        func metadataObject() -> [String: Any] {
+            [
+                "schema_version": schemaVersion,
+                "device": ["id": deviceID, "family": deviceFamily],
+                "input_revision": inputRevision,
+                "day_utc": dayUTC,
+                "watch_side": watchSide,
+                "device_orientation": deviceOrientation,
+                "families": families,
+            ]
+        }
+
+        /// The same JSON as `jsonObject()`, written directly. The metadata (the only strings) goes
+        /// through JSONSerialization; the numeric segment arrays, pre-written once by
+        /// `segmentJSON`, are spliced in. Boxing ~360k samples per request into `Any`/`JSONValue`
+        /// and encoding them twice cost tens of seconds per request on the worker host.
+        func writeJSON(imuSegmentsJSON: [String], ppgSegmentsJSON: [String]) throws -> Data {
+            var out = String(decoding: try JSONSerialization.data(withJSONObject: metadataObject(),
+                                                                  options: [.sortedKeys]), as: UTF8.self)
+            out.removeLast()  // the metadata object's closing brace
+            if let imu {
+                let units = String(decoding: try JSONSerialization.data(withJSONObject: imu.units,
+                                                                        options: [.sortedKeys]), as: UTF8.self)
+                out += ",\"imu\":{\"sampling_rate_hz\":\(imu.samplingRateHz),\"units\":\(units),\"segments\":["
+                out += imuSegmentsJSON.joined(separator: ",")
+                out += "]}"
+            }
+            if let ppg {
+                let units = String(decoding: try JSONSerialization.data(withJSONObject: ppg.units,
+                                                                        options: [.fragmentsAllowed]), as: UTF8.self)
+                out += ",\"ppg\":{\"native_rate_hz\":\(ppg.nativeRateHz),\"units\":\(units),\"segments\":["
+                out += ppgSegmentsJSON.joined(separator: ",")
+                out += "]}"
+            }
+            out += "}"
+            return Data(out.utf8)
+        }
+
         /// The `context` member of the request (CONTRACTS §4).
         func contextJSON(intervalStartUTC: String, intervalEndUTC: String) -> [String: Any] {
             ["interval_start_utc": intervalStartUTC,
@@ -938,15 +996,52 @@ enum SensorBiomarkerInputs {
         let intervalStartUTC: String
         let intervalEndUTC: String
         let serializedSizeBytes: Int
+        /// The input's JSON, written once; the lane posts it verbatim.
+        let inputJSON: Data
     }
 
-    private static func serializedData(_ input: SensorBiomarkerInput) throws -> Data {
-        try JSONSerialization.data(withJSONObject: input.jsonObject(), options: [.sortedKeys])
+    /// A finite Double's `description` is its shortest round-trip decimal and valid JSON
+    /// ("1.0", "-0.000244140625", "1e-05").
+    private static func appendRows(_ rows: [[Double]], to out: inout String) {
+        out.append("[")
+        for (i, row) in rows.enumerated() {
+            if i > 0 { out.append(",") }
+            out.append("[")
+            for (j, v) in row.enumerated() {
+                if j > 0 { out.append(",") }
+                out.append(v.description)
+            }
+            out.append("]")
+        }
+        out.append("]")
+    }
+
+    static func segmentJSON(_ segment: ImuSegment) -> String {
+        var out = "{\"accel_g\":"
+        out.reserveCapacity(segment.accelG.count * 80 + 64)
+        appendRows(segment.accelG, to: &out)
+        out += ",\"duration_s\":\(segment.durationS),\"gyro_dps\":"
+        appendRows(segment.gyroDps, to: &out)
+        out += ",\"start_unix\":\(segment.startUnix)}"
+        return out
+    }
+
+    static func segmentJSON(_ segment: PpgSegment) -> String {
+        var out = "{\"config\":{\"stable\":\(segment.configStable)},\"duration_s\":\(segment.durationS),"
+            + "\"sample_count_per_second\":\(ppgNativeRateHz),\"samples\":["
+        out.reserveCapacity(segment.samples.count * 8 + 128)
+        for (i, v) in segment.samples.enumerated() {
+            if i > 0 { out.append(",") }
+            out.append(String(v))
+        }
+        out += "],\"start_unix\":\(segment.startUnix)}"
+        return out
     }
 
     /// Measured serialized size of a request input.
     static func serializedSize(_ input: SensorBiomarkerInput) throws -> Int {
-        try serializedData(input).count
+        try input.writeJSON(imuSegmentsJSON: input.imu?.segments.map(segmentJSON) ?? [],
+                            ppgSegmentsJSON: input.ppg?.segments.map(segmentJSON) ?? []).count
     }
 
     /// Build the request(s) for a run set (one or more IMU runs and/or PPG
@@ -993,66 +1088,76 @@ enum SensorBiomarkerInputs {
             for run in ppgRuns { ppgSegs.append(contentsOf: ppgSegments(run: run, secondsByTs: ppgSecondsByTs, maxDuration: duration)) }
         }
 
-        // Pack segments greedily in time order into budget-bounded requests.
-        typealias Kinded = (kind: String, start: Int64, end: Int64, imu: ImuSegment?, ppg: PpgSegment?)
+        // Pack segments greedily in time order into budget-bounded requests. Each segment's JSON
+        // is written once; a request's size is the metadata skeleton plus its segments' bytes.
+        typealias Kinded = (kind: String, start: Int64, end: Int64, imu: ImuSegment?, ppg: PpgSegment?, json: String)
         var kinded: [Kinded] = []
         for segment in imuSegs {
-            kinded.append(("imu", segment.startUnix, segment.startUnix + Int64(segment.durationS), segment, nil))
+            kinded.append(("imu", segment.startUnix, segment.startUnix + Int64(segment.durationS), segment, nil,
+                           segmentJSON(segment)))
         }
         for segment in ppgSegs {
-            kinded.append(("ppg", segment.startUnix, segment.startUnix + Int64(segment.durationS), nil, segment))
+            kinded.append(("ppg", segment.startUnix, segment.startUnix + Int64(segment.durationS), nil, segment,
+                           segmentJSON(segment)))
         }
         kinded.sort { ($0.start, $0.kind) < ($1.start, $1.kind) }
+
+        func makeInput(imu: [ImuSegment], ppg: [PpgSegment], emptySections: Bool = false) -> SensorBiomarkerInput {
+            SensorBiomarkerInput(
+                schemaVersion: 1, deviceID: deviceID, deviceFamily: deviceFamily,
+                inputRevision: revision, dayUTC: dayUTC,
+                imu: imu.isEmpty && !emptySections ? nil : SensorBiomarkerInput.ImuSection(
+                    samplingRateHz: imuNativeRateHz,
+                    units: ["accel": "g", "gyro": "deg/s"],
+                    segments: imu),
+                ppg: ppg.isEmpty && !emptySections ? nil : SensorBiomarkerInput.PpgSection(
+                    nativeRateHz: ppgNativeRateHz, units: "adc_counts", segments: ppg),
+                watchSide: watchSide, deviceOrientation: deviceOrientation, families: families)
+        }
+        // Both section headers present: an upper bound on any request's non-segment bytes.
+        let skeletonBytes = try makeInput(imu: [], ppg: [], emptySections: true)
+            .writeJSON(imuSegmentsJSON: [], ppgSegmentsJSON: []).count
 
         var requests: [BuiltRequest] = []
         var pendingImu: [ImuSegment] = []
         var pendingPpg: [PpgSegment] = []
+        var pendingImuJSON: [String] = []
+        var pendingPpgJSON: [String] = []
+        var pendingBytes = 0
         var requestStart: Int64? = nil
         var requestEnd: Int64? = nil
 
         func closeRequest() throws {
             guard let start = requestStart, let end = requestEnd else { return }
-            let input = SensorBiomarkerInput(
-                schemaVersion: 1, deviceID: deviceID, deviceFamily: deviceFamily,
-                inputRevision: revision, dayUTC: dayUTC,
-                imu: pendingImu.isEmpty ? nil : SensorBiomarkerInput.ImuSection(
-                    samplingRateHz: imuNativeRateHz,
-                    units: ["accel": "g", "gyro": "deg/s"],
-                    segments: pendingImu),
-                ppg: pendingPpg.isEmpty ? nil : SensorBiomarkerInput.PpgSection(
-                    nativeRateHz: ppgNativeRateHz, units: "adc_counts", segments: pendingPpg),
-                watchSide: watchSide, deviceOrientation: deviceOrientation, families: families)
+            let input = makeInput(imu: pendingImu, ppg: pendingPpg)
+            let json = try input.writeJSON(imuSegmentsJSON: pendingImuJSON, ppgSegmentsJSON: pendingPpgJSON)
             let interval = isoInterval(start: start, end: end)
-            let size = try serializedSize(input)
             requests.append(BuiltRequest(input: input, intervalStartUTC: interval.start,
-                                         intervalEndUTC: interval.end, serializedSizeBytes: size))
+                                         intervalEndUTC: interval.end, serializedSizeBytes: json.count,
+                                         inputJSON: json))
             pendingImu = []
             pendingPpg = []
+            pendingImuJSON = []
+            pendingPpgJSON = []
+            pendingBytes = 0
             requestStart = nil
             requestEnd = nil
         }
 
         for item in kinded {
-            // Measure the candidate request with this segment added.
-            let candidateImu = item.kind == "imu" ? pendingImu + [item.imu!] : pendingImu
-            let candidatePpg = item.kind == "ppg" ? pendingPpg + [item.ppg!] : pendingPpg
-            let candidate = SensorBiomarkerInput(
-                schemaVersion: 1, deviceID: deviceID, deviceFamily: deviceFamily,
-                inputRevision: revision, dayUTC: dayUTC,
-                imu: candidateImu.isEmpty ? nil : SensorBiomarkerInput.ImuSection(
-                    samplingRateHz: imuNativeRateHz,
-                    units: ["accel": "g", "gyro": "deg/s"],
-                    segments: candidateImu),
-                ppg: candidatePpg.isEmpty ? nil : SensorBiomarkerInput.PpgSection(
-                    nativeRateHz: ppgNativeRateHz, units: "adc_counts", segments: candidatePpg),
-                watchSide: watchSide, deviceOrientation: deviceOrientation, families: families)
-            let size = try serializedSize(candidate)
-            if !pendingImu.isEmpty || !pendingPpg.isEmpty {
-                if size > maxBodyBytes {
-                    try closeRequest()
-                }
+            let itemBytes = item.json.utf8.count + 1  // its separating comma
+            if !pendingImu.isEmpty || !pendingPpg.isEmpty,
+               skeletonBytes + pendingBytes + itemBytes > maxBodyBytes {
+                try closeRequest()
             }
-            if item.kind == "imu" { pendingImu.append(item.imu!) } else { pendingPpg.append(item.ppg!) }
+            if item.kind == "imu" {
+                pendingImu.append(item.imu!)
+                pendingImuJSON.append(item.json)
+            } else {
+                pendingPpg.append(item.ppg!)
+                pendingPpgJSON.append(item.json)
+            }
+            pendingBytes += itemBytes
             requestStart = min(requestStart ?? item.start, item.start)
             requestEnd = max(requestEnd ?? item.end, item.end)
         }

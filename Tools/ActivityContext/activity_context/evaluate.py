@@ -21,16 +21,23 @@ model, applies the manifest abstention thresholds (max_prob 0.80 / margin
     reports the per-window classifier's raw delay AND the Python vote mirror
     (smooth_predictions) delay for comparison. smooth_predictions is an
     APPROXIMATION of the Swift policy, never a certificate (spec A04).
+  * ``transition_delay_censored_s`` stops the recovery search at the next truth
+    change and counts those transitions as missed.
+  * calibration of the window probabilities over the four supported classes
+    (NLL, Brier, top-label ECE) — HART's raw softmax is consumed as if it were
+    calibrated; these numbers say whether it is. ``fit_temperature`` fits a
+    temperature on held-out logits for reporting (nothing in serve changes).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from collections import Counter
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -74,6 +81,100 @@ def _as_window(x):
     return Window(s=0.0, e=4.0, data=np.asarray(x, dtype=np.float64))
 
 
+SUPPORTED = ("stationary", "walking", "running", "other_movement")
+
+
+def supported_probs(probs: Dict[str, float]) -> np.ndarray:
+    """(4,) probabilities over SUPPORTED, renormalized (mass on 'unknown' is dropped).
+
+    HART's ontology probs already sum to 1 over the four classes. The baseline's
+    heuristic one-hot may put its mass on 'unknown'; that row becomes uniform."""
+    v = np.asarray([float(probs.get(c, 0.0)) for c in SUPPORTED], dtype=np.float64)
+    tot = v.sum()
+    return v / tot if tot > 0 else np.full(len(SUPPORTED), 1.0 / len(SUPPORTED))
+
+
+def calibration_metrics(p: np.ndarray, y: np.ndarray, n_bins: int = 15) -> Dict[str, float]:
+    """NLL, Brier and top-label ECE of probability rows ``p`` (N, C) against labels ``y`` (N,).
+
+    NLL = mean -log p[y] (p clipped at 1e-12); Brier = mean sum_c (p_c - 1[y=c])^2; ECE =
+    sum over ``n_bins`` equal-width confidence bins of (bin share) * |accuracy - mean confidence|
+    of the top label. Rows whose label is outside 0..C-1 are ignored."""
+    p = np.asarray(p, dtype=np.float64)
+    y = np.asarray(y, dtype=np.int64)
+    ok = (y >= 0) & (y < p.shape[1])
+    p, y = p[ok], y[ok]
+    n = len(y)
+    if n == 0:
+        return {"n": 0}
+    pt = np.clip(p[np.arange(n), y], 1e-12, 1.0)
+    onehot = np.zeros_like(p)
+    onehot[np.arange(n), y] = 1.0
+    conf = p.max(axis=1)
+    pred = p.argmax(axis=1)
+    correct = (pred == y).astype(np.float64)
+    edges = np.linspace(0.0, 1.0, n_bins + 1)
+    idx = np.clip(np.digitize(conf, edges[1:-1], right=True), 0, n_bins - 1)
+    ece = 0.0
+    bins = []
+    for b in range(n_bins):
+        m = idx == b
+        if not m.any():
+            continue
+        gap = abs(correct[m].mean() - conf[m].mean())
+        ece += m.mean() * gap
+        bins.append({"lo": round(float(edges[b]), 4), "hi": round(float(edges[b + 1]), 4),
+                     "n": int(m.sum()), "accuracy": round(float(correct[m].mean()), 4),
+                     "confidence": round(float(conf[m].mean()), 4)})
+    return {"n": int(n), "nll": round(float(-np.log(pt).mean()), 4),
+            "brier": round(float(((p - onehot) ** 2).sum(axis=1).mean()), 4),
+            "ece": round(float(ece), 4), "accuracy_top1": round(float(correct.mean()), 4),
+            "mean_confidence": round(float(conf.mean()), 4), "n_bins": n_bins,
+            "reliability": bins}
+
+
+def aggregate_softmax(logits: np.ndarray, groups: np.ndarray, n_groups: int,
+                      temperature: float = 1.0) -> np.ndarray:
+    """softmax(logits / T) summed into ``n_groups`` classes: column k of logits -> groups[k]."""
+    z = np.asarray(logits, dtype=np.float64) / float(temperature)
+    z = z - z.max(axis=1, keepdims=True)
+    e = np.exp(z)
+    sm = e / e.sum(axis=1, keepdims=True)
+    out = np.zeros((sm.shape[0], n_groups), dtype=np.float64)
+    for k, g in enumerate(groups):
+        out[:, int(g)] += sm[:, k]
+    return out
+
+
+def fit_temperature(logits: np.ndarray, y: np.ndarray, groups: np.ndarray, n_groups: int,
+                    lo: float = 0.05, hi: float = 20.0, iters: int = 100) -> float:
+    """Temperature minimizing the NLL of the aggregated (grouped) softmax, by golden-section
+    search on log T (the NLL of a temperature-scaled softmax is unimodal in practice)."""
+    y = np.asarray(y, dtype=np.int64)
+    rows = np.arange(len(y))
+
+    def nll(log_t: float) -> float:
+        q = aggregate_softmax(logits, groups, n_groups, math.exp(log_t))
+        return float(-np.log(np.clip(q[rows, y], 1e-12, 1.0)).mean())
+
+    a, b = math.log(lo), math.log(hi)
+    g = (math.sqrt(5.0) - 1.0) / 2.0
+    c, d = b - g * (b - a), a + g * (b - a)
+    fc, fd = nll(c), nll(d)
+    for _ in range(iters):
+        if fc < fd:
+            b, d, fd = d, c, fc
+            c = b - g * (b - a)
+            fc = nll(c)
+        else:
+            a, c, fc = c, d, fd
+            d = a + g * (b - a)
+            fd = nll(d)
+        if b - a < 1e-6:
+            break
+    return float(math.exp((a + b) / 2.0))
+
+
 def _f1(p: float, r: float) -> float:
     return 0.0 if (p + r) == 0 else 2 * p * r / (p + r)
 
@@ -100,10 +201,12 @@ def evaluate(x: np.ndarray, y_ontology: np.ndarray, predictor,
     labels = list(MOTION_LABELS)
     conf = {t: {u: 0 for u in labels} for t in labels}
     preds: List[str] = []
+    prob_rows: List[np.ndarray] = []
     accepted = 0
     for i in range(len(x)):
-        label, _probs = predictor(x[i])
+        label, probs = predictor(x[i])
         preds.append(label)
+        prob_rows.append(supported_probs(probs))
         conf[y_ontology[i]][label] += 1
         if label != "unknown":
             accepted += 1
@@ -126,6 +229,8 @@ def evaluate(x: np.ndarray, y_ontology: np.ndarray, predictor,
                                          sessions=sessions, starts=starts)
     transition_delay_policy = _transition_delay(y_ontology, preds, smoothed,
                                                 sessions=sessions, starts=starts)
+    y_idx = np.asarray([SUPPORTED.index(str(t)) if str(t) in SUPPORTED else -1
+                        for t in y_ontology], dtype=np.int64)
     report = {
         "n_windows": int(len(x)),
         "n_accepted": accepted,
@@ -136,6 +241,11 @@ def evaluate(x: np.ndarray, y_ontology: np.ndarray, predictor,
         "confusion": conf,
         "transition_delay_s": transition_delay,
         "transition_delay_policy_s": transition_delay_policy,
+        "transition_delay_censored_s": transition_delay_censored(y_ontology, preds),
+        "transition_delay_censored_policy_s": transition_delay_censored(y_ontology, smoothed),
+        "accepted_precision": accepted_precision(conf),
+        "calibration": calibration_metrics(np.stack(prob_rows) if prob_rows
+                                           else np.zeros((0, len(SUPPORTED))), y_idx),
         "prediction_counts": dict(Counter(preds)),
     }
 
@@ -357,39 +467,84 @@ def _transition_delay(y: np.ndarray, preds: List[str],
     return report
 
 
+def transition_delay_censored(y: Sequence, preds: Sequence[str]) -> Dict:
+    """Delay (s) to the first window predicting the new truth after each truth change, searched
+    only until the next truth change; transitions never recovered in that span count as missed."""
+    y = [str(v) for v in y]
+    delays: List[float] = []
+    missed = 0
+    change = [i for i in range(1, len(y)) if y[i] != y[i - 1]]
+    for n, i in enumerate(change):
+        end = change[n + 1] if n + 1 < len(change) else len(y)
+        hit = next((j for j in range(i, end) if preds[j] == y[i]), None)
+        if hit is None:
+            missed += 1
+        else:
+            delays.append((hit - i) * HOP_SECONDS)
+    out: Dict[str, Any] = {"n_transitions": len(change), "n_missed": missed}
+    if delays:
+        out.update({"mean_s": round(float(np.mean(delays)), 3),
+                    "median_s": round(float(np.median(delays)), 3),
+                    "p90_s": round(float(np.percentile(delays, 90)), 3)})
+    return out
+
+
+def accepted_precision(conf: Dict[str, Dict[str, int]]) -> Optional[float]:
+    """Share of accepted (non-unknown) predictions that are correct (all classes pooled)."""
+    acc = sum(conf[t][p] for t in conf for p in conf[t] if p != "unknown")
+    ok = sum(conf[t][t] for t in conf if t != "unknown")
+    return round(ok / acc, 4) if acc else None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Nara held-out activity evaluation")
     ap.add_argument("--manifest", required=True)
     ap.add_argument("--data", required=True, help="eval_data.npz from activity-train")
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--out", default=None, help="write JSON report to file")
+    ap.add_argument("--ledger", default=None,
+                    help="test ledger: evaluate through inertia.integrity.TestVault (use eval/hart/test_ledger.jsonl "
+                         "whenever --data holds the HART TEST subjects; audit G2 E-2)")
+    ap.add_argument("--rerun-reason", default=None)
+    ap.add_argument("--rerun-detail", default=None)
     args = ap.parse_args(argv)
 
     manifest = load_manifest(args.manifest)
     if not os.path.isfile(args.data):
         raise SystemExit(f"eval data not found: {args.data}")
-    z = np.load(args.data, allow_pickle=True)
-    x = z["X"]
-    y = z["y_ontology"]
-    letters = z["letters"] if "letters" in z else None
-    subjects = z["subjects"] if "subjects" in z else None
-    sessions = z["sessions"] if "sessions" in z else None
-    starts = z["starts"] if "starts" in z else None
-    if starts is None:
-        # Legacy artifact produced before activity-train persisted timestamps
-        # (audit WS-07-F03): keep old behavior but say so explicitly — the
-        # transition report uses fabricated i*HOP_SECONDS spacing.
-        print("warning: eval_data.npz has no per-window timestamps ('starts' "
-              "key missing — pre-fix artifact); transition metrics use "
-              "fabricated i*HOP_SECONDS spacing and flag timestamps="
-              "fabricated. Regenerate with activity-train to measure real "
-              "latency/gaps.", file=sys.stderr)
-    predictor = build_predictor(manifest, args.checkpoint)
-    report = evaluate(x, y, predictor, manifest.thresholds,
-                      letters=letters, subjects=subjects, sessions=sessions,
-                      starts=starts)
-    report["model_version"] = manifest.model_version
-    report["model_kind"] = manifest.model_kind
+    def run(_payload=None) -> Dict:
+        z = np.load(args.data, allow_pickle=True)
+        x = z["X"]
+        y = z["y_ontology"]
+        letters = z["letters"] if "letters" in z else None
+        subjects = z["subjects"] if "subjects" in z else None
+        sessions = z["sessions"] if "sessions" in z else None
+        starts = z["starts"] if "starts" in z else None
+        if starts is None:
+            # Legacy artifact produced before activity-train persisted timestamps
+            # (audit WS-07-F03): keep old behavior but say so explicitly — the
+            # transition report uses fabricated i*HOP_SECONDS spacing.
+            print("warning: eval_data.npz has no per-window timestamps ('starts' "
+                  "key missing — pre-fix artifact); transition metrics use "
+                  "fabricated i*HOP_SECONDS spacing and flag timestamps="
+                  "fabricated. Regenerate with activity-train to measure real "
+                  "latency/gaps.", file=sys.stderr)
+        predictor = build_predictor(manifest, args.checkpoint)
+        rep = evaluate(x, y, predictor, manifest.thresholds,
+                       letters=letters, subjects=subjects, sessions=sessions,
+                       starts=starts)
+        rep["model_version"] = manifest.model_version
+        rep["model_kind"] = manifest.model_kind
+        return rep
+
+    if args.ledger:
+        from .hart_wisdm_eval import (HART_DECLARED, HART_EXPERIMENT, _ledger_history, _vault, dataset_splits)
+        sha = manifest.checkpoint["files"]["model.safetensors"]["sha256"] if manifest.checkpoint else "none"
+        report = _vault(args.data, args.ledger).evaluate_once(
+            HART_EXPERIMENT, f"{manifest.model_version}:{sha}", run, HART_DECLARED, args.rerun_reason,
+            args.rerun_detail, dataset_splits=dataset_splits(), history=_ledger_history)
+    else:
+        report = run()
 
     text = json.dumps(report, indent=2)
     if args.out:

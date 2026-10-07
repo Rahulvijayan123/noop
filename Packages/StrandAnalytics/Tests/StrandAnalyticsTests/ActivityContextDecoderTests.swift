@@ -87,7 +87,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         // tables or the feature layout change behaviour.
         XCTAssertEqual(ActivityContextVersions.schema, 2)
         XCTAssertEqual(ActivityContextVersions.ontology, "v2.0")
-        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.5")
+        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.6")
         XCTAssertEqual(ActivityContextVersions.featureSchema, "imu-feat-2")  // bumped by I4 (true gyro RMS, per-second jerk)
     }
 
@@ -125,7 +125,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(loco["walking"]), 0.5)
         let versions = try XCTUnwrap(json["versions"] as? [String: Any])
         XCTAssertEqual(versions["ontology"] as? String, "v2.0")
-        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.5")
+        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.6")
         XCTAssertEqual(versions["feature_schema"] as? String, "imu-feat-2")  // I4 bumped the feature contract
         XCTAssertEqual(versions["schema"] as? Int, 2)
         let intensity = try XCTUnwrap(json["intensity"] as? Double)
@@ -372,6 +372,25 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertFalse(flagged.isEmpty, "sit-to-stand-like should be flagged")
         XCTAssertLessThanOrEqual(try XCTUnwrap(flagged.first).ts - shiftTs, 15)
         XCTAssertEqual(try XCTUnwrap(published.last).locomotion.top?.0, .walking)
+    }
+
+    func testAFifteenSecondStandShowsAsStandingAndSettlesBackToSitting() throws {
+        var sim = ActivitySim()
+        sim.desk(300)
+        let up = sim.ts
+        sim.postureShift(netDegrees: -75, seconds: 3)
+        sim.still(15)
+        sim.postureShift(netDegrees: 75, seconds: 3)
+        sim.desk(120)
+        let (_, published) = decode(sim)
+        let stand = states(in: published, from: up, to: up + 45)
+        XCTAssertTrue(stand.contains { ActivityDisplay.group($0.displayContext ?? "") == "upright" },
+                      "a short stand between two flagged position changes should be shown")
+        let settled = try XCTUnwrap(states(in: published, from: up + 60, to: up + 120).last)
+        XCTAssertEqual(ActivityDisplay.group(settled.displayContext ?? ""), "seated")
+        let shown = published.filter { $0.ts >= up - 5 }.compactMap(\.displayContext)
+        XCTAssertLessThanOrEqual(labelChanges(states(in: published, from: up - 5, to: up + 120)), 4,
+                                 "sit → changing → stand → (changing) → sit, no flicker: \(shown)")
     }
 
     func testReachingAndReturningIsNotAPostureChange() {
