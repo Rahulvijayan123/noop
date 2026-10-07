@@ -583,6 +583,69 @@ A low-HRV + low-RHR pattern is detected as a possible parasympathetic-saturation
 
 ---
 
+
+## 11. Sleep analytics (descriptive night detail)
+
+Additive descriptive document (`daily.sleep_analytics_v1` in the v2 hosted snapshot) over the day's
+resolved MAIN-NIGHT group — the same fragments the sleep aggregates use (`DayResult.mainNightBlocks`),
+never a re-picked longest session. Spec: `docs/sleep-analytics/spec.md` (the implementation
+authority). **Estimates and observations only**: a stage-derived number is the existing stager's
+estimate, "observed" means observed in the supported input/label record — never an independently
+observed PSG state. No clinical SOL, abnormality or risk is computed. Canonical sleep detection,
+staging, Rest/Charge, canonical RMSSD and recovery are UNCHANGED.
+
+### Versions
+
+`schema_version` 1, `algorithm_version` `nara-sleep-analytics-1`, `config_version` `v1`
+(versioned engineering gates in `SleepAnalyticsConfig`; fingerprint = SHA-256 over fragment
+ids/bounds/sources/edit lineage + stage source version + config gates + input revision).
+
+### Normalization (one pass; every group derives from it)
+
+Half-open `[start, end)` intervals, elapsed UTC seconds, clipped to each effective fragment.
+Invalid spans discarded and counted; exact duplicates collapsed; same-label overlaps unioned;
+**conflicting overlaps become `unknown` over the conflict** (a partially-conflicted native epoch is
+unknown as a whole — never absorbed by the epoch majority). Labels map through the shared
+vocabulary; nothing unmapped is invented (no N1/N2 from light, no light/deep from NREM). Native
+30-second epochs carry an input-support mask: an epoch is label-supported with ≥15 distinct
+seconds of valid HR-or-gravity evidence (≥50% for a clipped final epoch), and explicit off-wrist
+intervals override support; unsupported native epochs are `unknown`. Timed external hypnograms keep
+their real resolution with `sensor_support_unknown`; totals-only imports carry minutes and
+manufacture no timeline. Inter-fragment gaps stay `inferred_inter_fragment_awake` — never sensor
+coverage, bouts or transitions. No transition or bout joins across fragment boundaries even when
+timestamps touch. The epoch transition matrix is reconstructed only where the native grid
+alignment is established (`epochAlignmentEstablished`); a misaligned (edited) start withholds it.
+
+### Groups
+
+| Group | What it reports | Primary gates |
+|---|---|---|
+| `continuity` | Observed asleep/WASO (strictly inside the sleep period), the canonical inferred gap-awake contribution (reported separately) + the combined estimate (explicitly partial), onset delay from the window start (boundary estimate when the prefix is unobserved), REM/deep latency FROM SLEEP ONSET (YASA's recording-start convention documented; null `onset_not_observed`/`no_observed_rem`), longest observed sleep bout with censoring flags, complete awakenings vs censored wake stretches, all sleep→wake transitions incl. terminal wake | Complete stage: ≥95% label-supported; native also ≥95% input-supported. Primary per-hour rate also needs ≥30 min observed asleep; counts always exist below gates |
+| `stage_dynamics` | Per-label union seconds (totals-only fragments join as partial label summaries), per-label bouts (complete vs censored; median + nearest-rank p90 of complete bouts), the 4×4 native epoch transition matrix (rows origin/cols destination `[wake, light, deep, rem]`, self-transitions included, NULL probability rows for absent origins, eligible pairs, stage changes) | Quantiles need ≥3 complete bouts; matrix only for native, aligned sources; coarse sources expose real-resolution bout changes instead |
+| `movement` | Wrist movement from 1 Hz gravity adjacencies (same fragment, valid samples, consecutive seconds, not off-wrist): moving seconds/percentage, movement bouts, immobility bouts (complete vs censored), longest/median/p90 immobility | Primary rate: ≥80% eligible coverage + ≥30 observed minutes. Threshold = the shared stager stillness threshold (0.01 g). A device-specific movement proxy — never sleep/PLMI/posture, and NOT kRA/kAR/SFI |
+| `thermal` | Nightly minute-median temperature (median/IQR/p95−p05), pre-onset OLS slope `[onset−60 min, onset)` and post-wake slope `[end, end+30 min)` against elapsed unix time (DST-immune), equilibration exclusion after a verified re-wear event | ≥30 valid minutes + ≥80% eligible-minute coverage for the summary; slopes need ≥45/60 and ≥20/30 valid minutes, no missing run > 5 min; pre-onset needs an OBSERVED onset. Approximate wrist temperature — no core temperature/DLMO/circadian phase |
+| `prv_diagnostics` | Poincaré SD1/SD2 (direct pair space, ddof=1) per UTC-aligned 300-second window entirely inside one fragment; nightly values are the MEDIANS of eligible windows; ratio = ratio of the two summaries (null on zero SD2) | ≥200 valid adjacent pairs, ≥90% union interval-duration coverage (from beat-duration spans, not summed RR), ≤5% rejection over original deduped observations, resolved (ts, seq, ord) timing. PRV from an optical source — never ECG-equivalent; SD1 is usually redundant with RMSSD |
+
+### Missing data
+
+Every metric is `value`/`unit`/`status`/`reason`: `available`/`partial`/`unavailable`/`disabled`
+with the closed reason vocabulary (spec §8). JSON null is explicit and never a fabricated zero;
+NaN/Infinity never reach the wire (finite-by-sanitization). Counts can be zero with qualifying
+observed exposure. An unavailable group carries its own reason and never blocks the others or the
+canonical score (the worker attaches the document in a bounded do/catch; a failure withholds only
+this document). Per-group quality carries fragment span, observed/unknown seconds, input- and
+label-supported fractions, inferred gap seconds, source resolution and stream counts
+(received/valid/duplicate/rejected).
+
+### Freshness and app readback
+
+The worker records the claim's `input_revision` and the deterministic fingerprint; the outer hosted
+`inputRevision`/`resultRevision` own freshness. The app decodes `daily.sleep_analytics_v1`
+non-fatally (absent/unsupported version → old behavior preserved; rides the raw snapshot disk
+cache, per-owner isolated) and renders the Sleep details section only when the document's
+fragments still match the current main-night group (staleness guard; a stale pre-edit document is
+withheld and the existing invalidated hosted refresh is requested).
+
 ## Where the code lives
 
 | Algorithm | File |
@@ -608,4 +671,7 @@ A low-HRV + low-RHR pattern is detected as a possible parasympathetic-saturation
 | When a day is written | `ActivityContextMaterialization.swift`, `Strand/Data/ActivityContextCoordinator.swift`, `Strand/Data/Repository+ActivityContextStore.swift` |
 | Stored context (tables, views) | `Packages/WhoopStore/Sources/WhoopStore/ActivityContextStore.swift`, `ActivityContextViews.swift`, migration `v48-activity-context` |
 | Stand reminder | `StandReminderEngine.swift`, `Strand/Data/InactivityPrefs.swift` |
+| Sleep analytics (document, groups, gates) | `SleepAnalyticsV1.swift` (contract), `SleepAnalyticsNormalization.swift`, `SleepAnalyticsContinuity.swift`, `SleepAnalyticsStageDynamics.swift`, `SleepAnalyticsMovement.swift`, `SleepAnalyticsThermal.swift`, `SleepAnalyticsPrv.swift`, `SleepAnalyticsComputation.swift` |
+| Sleep analytics worker attach | `Tools/CloudWorker/Sources/frwhoop-worker/SleepAnalyticsAttach.swift`, `DayScoring.swift` |
+| Sleep analytics app decode + section | `Strand/Push/ServerScoreRepository.swift` (`HostedDayResult.sleepAnalytics`), `Strand/Screens/SleepAnalyticsSection.swift` |
 | Coach access to the context | `Strand/Coach/CoachActivityContext.swift` (`get_activity_context`) |
