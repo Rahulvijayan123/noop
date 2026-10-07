@@ -194,15 +194,21 @@ extension SleepAnalyticsV1 {
             var stageChanges = 0
 
             // Per fragment: rebuild the epoch labels, then count adjacent pairs.
-            for fragment in timeline.fragments {
-                // Epoch grid anchored at the fragment start (the stager's own anchor).
+            for (fragmentIndex, fragment) in timeline.fragments.enumerated() {
+                // Epoch grid anchored at the STAGER'S OWN grid anchor (review P2-4: the
+                // same anchor the normalization verified alignment against — an edited
+                // effective start that sits off-grid must not re-anchor the matrix grid),
+                // clipped into the fragment; the first epoch can be clipped.
                 var epochLabels: [SleepAnalyticsLabel] = []
-                var t = fragment.start
+                var t = max(fragment.start, fragment.gridAnchor)
+                // Snap to the anchor's grid: the anchor itself is a grid point.
+                while t < fragment.start { t += epochSeconds }
                 while t < fragment.end {
                     let epochEnd = min(t + epochSeconds, fragment.end)
+                    let epochStart = max(t, fragment.start)
                     let covering = timeline.intervals.first {
-                        $0.fragmentIndex == timeline.fragments.firstIndex(of: fragment)
-                            && $0.start <= t && $0.end >= epochEnd
+                        $0.fragmentIndex == fragmentIndex
+                            && $0.start <= epochStart && $0.end >= epochEnd
                     }
                     // A valid epoch: fully covered by one SUPPORTED non-unknown label
                     // interval of this fragment (native intervals are epoch-aligned

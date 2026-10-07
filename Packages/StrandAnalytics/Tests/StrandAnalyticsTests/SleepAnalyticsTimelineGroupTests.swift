@@ -379,3 +379,105 @@ final class SleepAnalyticsTimelineGroupTests: XCTestCase {
         }
     }
 }
+
+
+// Anchor + clipped-window follow-ups (review P2-4 re-verification + P2-5 residual):
+// an edited effective start OFF the stager's grid must withhold the epoch matrix
+// (unsupported_source) while duration metrics stay computed, and a fragment too
+// short for any PRV window reports insufficient_duration.
+final class SleepAnalyticsAnchorFollowUpTests: XCTestCase {
+
+    private let t0 = 1_789_000_000
+
+    /// An edited fragment whose EFFECTIVE start sits off the stager's grid (the
+    /// anchor is the original session start): the epoch matrix is withheld; the
+    /// interval duration metrics stay computed (spec 4.9, review P2-4).
+    func testOffGridEditedStartWithholdsEpochMatrix() {
+        let sessionStart = t0
+        let effectiveStart = t0 + 17          // off the 30 s grid (an edited start)
+        let end = effectiveStart + 330        // on the EDITED start's grid (17 + 11×30),
+                                              // off the stager's grid
+        let input = SleepAnalyticsInput(
+            fragments: [SleepAnalyticsInput.Fragment(
+                id: "sleep-test-\(sessionStart)", start: effectiveStart, end: end,
+                sourceKind: .nativeWhoop, sourceEpochSeconds: 30,
+                edited: true, editRevision: 5,
+                stageGridAnchorSeconds: sessionStart,
+                stages: [StageSegment(start: sessionStart, end: end, stage: "light")])],
+            timezoneId: "Etc/UTC",
+            hr: (effectiveStart..<end).map { HRSample(ts: $0, bpm: 58) },
+            gravity: [], skinTemp: [], beats: [], deviceFamily: .whoop5,
+            stageSourceVersion: "s", inputRevision: 1)
+        let timeline = SleepAnalyticsV1.normalize(input: input, config: .v1)
+        // The anchor is threaded: the timeline fragment carries it and the grid
+        // anchors there (P2-4 plumbing).
+        XCTAssertEqual(timeline.fragments.first?.stageGridAnchorSeconds, sessionStart)
+        XCTAssertEqual(timeline.fragments.first?.gridAnchor, sessionStart)
+        // With the anchor, the off-grid EDITED start is DETECTED: the clipped
+        // segment's first boundary (the effective start, 17 s off the stager's
+        // grid) fails the anchor-relative alignment check → the epoch matrix is
+        // withheld as unsupported_source (spec 4.9: the stager never produced
+        // epochs on this grid), while duration metrics stay computed.
+        XCTAssertFalse(timeline.epochAlignmentEstablished)
+        let d = SleepAnalyticsV1.stageDynamicsGroup(timeline: timeline, input: input, config: .v1)
+        XCTAssertNil(d.epochTransitions)
+        // Duration metrics stay computed from the epoch-derived intervals (the
+        // matrix alone is withheld): label-supported light = the anchor-grid epochs
+        // inside the edited fragment — 10 full epochs + the 17 s clipped tail the
+        // ≥50% rule supports = 317 s of the 343 s span (the 17 s before the first
+        // grid point stay unknown, never forward-filled).
+        XCTAssertEqual(d.stageSeconds.first { $0.label == .light }?.seconds.value, 317)
+
+        // Now the SAME fragment WITHOUT the anchor (an adapter that did not pass
+        // it): the effective start re-anchors the grid; the retained segment
+        // boundaries sit OFF that grid → misalignment reported → matrix withheld.
+        let input2 = SleepAnalyticsInput(
+            fragments: [SleepAnalyticsInput.Fragment(
+                id: "sleep-test-\(sessionStart)", start: effectiveStart, end: end,
+                sourceKind: .nativeWhoop, sourceEpochSeconds: 30,
+                edited: true, editRevision: 5,
+                stages: [StageSegment(start: sessionStart, end: end, stage: "light")])],
+            timezoneId: "Etc/UTC",
+            hr: (effectiveStart..<end).map { HRSample(ts: $0, bpm: 58) },
+            gravity: [], skinTemp: [], beats: [], deviceFamily: .whoop5,
+            stageSourceVersion: "s", inputRevision: 1)
+        let timeline2 = SleepAnalyticsV1.normalize(input: input2, config: .v1)
+        XCTAssertNil(timeline2.fragments.first?.stageGridAnchorSeconds)
+        XCTAssertEqual(timeline2.fragments.first?.gridAnchor, effectiveStart)
+        // WITHOUT the anchor this is the exact left-clipping defeat (review P2-4): the
+        // clipped segment boundaries sit trivially on the EDITED start's grid, so
+        // alignment "passes" and the matrix is built on a SHIFTED grid the stager
+        // never used — the off-grid edit is silently accepted. This is why the worker
+        // adapter passes the stager's session start as the anchor: the adapter
+        // contract (exact source lineage), not the extractor alone, closes this hole.
+        XCTAssertTrue(timeline2.epochAlignmentEstablished)
+        let d2 = SleepAnalyticsV1.stageDynamicsGroup(timeline: timeline2, input: input2, config: .v1)
+        XCTAssertNotNil(d2.epochTransitions)                  // built — on the shifted grid
+        XCTAssertEqual(d2.epochTransitions?.epochSeconds, 30)
+        XCTAssertEqual(d2.epochTransitions?.counts.reduce(0) { $0 + $1.reduce(0, +) }, 10)  // 11 epochs → 10 pairs
+    }
+
+    /// A fragment too short for any PRV window (mid-window start, end exactly at
+    /// the next window start) reports insufficient_duration, not
+    /// insufficient_coverage (review P2-5 residual).
+    func testFragmentTooShortForAnyPrvWindowReportsInsufficientDuration() {
+        let start = t0 - t0 % 300 + 100          // mid-window start
+        let end = start + 200                    // ends exactly at the next window start
+        let input = SleepAnalyticsInput(
+            fragments: [SleepAnalyticsInput.Fragment(
+                id: "short-\(start)", start: start, end: end,
+                sourceKind: .nativeWhoop, sourceEpochSeconds: 30,
+                stages: [StageSegment(start: start, end: end, stage: "light")])],
+            timezoneId: "Etc/UTC",
+            hr: (start..<end).map { HRSample(ts: $0, bpm: 58) },
+            gravity: [], skinTemp: [],
+            beats: (start..<end).map { RRInterval(ts: $0, rrMs: 1000, srcChannel: nil, ord: $0 - start, seq: $0 - start) },
+            deviceFamily: .whoop5, stageSourceVersion: "s", inputRevision: 1)
+        let timeline = SleepAnalyticsV1.normalize(input: input, config: .v1)
+        let group = SleepAnalyticsV1.prvGroup(timeline: timeline, input: input, config: .v1)
+        XCTAssertEqual(group.eligibleWindowCount.value, 0)
+        XCTAssertEqual(group.withheldWindowCount.value, 1)   // too short for any window
+        XCTAssertEqual(group.nightlySd1Ms.status, .unavailable)
+        XCTAssertEqual(group.nightlySd1Ms.reason, .insufficientDuration)
+    }
+}

@@ -92,6 +92,10 @@ extension SleepAnalyticsV1 {
             fragments.append(SleepAnalyticsTimeline.FragmentSpan(
                 id: f.id, start: f.start, end: f.end,
                 sourceKind: f.sourceKind, sourceEpochSeconds: f.sourceEpochSeconds,
+                // The stager's own grid anchor, threaded for the epoch grid + the
+                // alignment check (review P2-4: left-clipping to an edited start
+                // must not silently re-anchor the grid).
+                stageGridAnchorSeconds: f.stageGridAnchorSeconds,
                 totalsMinutes: f.totalsMinutes))
         }
         fragments.sort { $0.start < $1.start }
@@ -106,6 +110,7 @@ extension SleepAnalyticsV1 {
                 id: fragments[i].id, start: fragments[i - 1].end, end: fragments[i].end,
                 sourceKind: fragments[i].sourceKind,
                 sourceEpochSeconds: fragments[i].sourceEpochSeconds,
+                stageGridAnchorSeconds: fragments[i].stageGridAnchorSeconds,
                 totalsMinutes: fragments[i].totalsMinutes)
         }
 

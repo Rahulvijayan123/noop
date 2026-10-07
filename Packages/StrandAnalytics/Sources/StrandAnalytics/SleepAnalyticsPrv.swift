@@ -180,7 +180,17 @@ extension SleepAnalyticsV1 {
             var w = fragment.start - fragment.start % windowSeconds + (fragment.start % windowSeconds == 0 ? 0 : windowSeconds)
             // A clipped TAIL window (the fragment ends before a full window fits) is
             // withheld as insufficient_duration (review P2-5), never silently skipped.
+            var clippedTailCounted = false
             if w < fragment.end, w + windowSeconds > fragment.end, w >= fragment.start {
+                withheld += 1
+                withheldByDuration += 1
+                clippedTailCounted = true
+            }
+            // A fragment TOO SHORT for any window at all (its whole span is under one
+            // window, so neither a full nor a clipped window fits — e.g. a mid-window
+            // start with the end exactly at the next window start) is ALSO withheld
+            // as insufficient_duration, not silently skipped (review P2-5 residual).
+            if !clippedTailCounted, fragment.end - fragment.start < windowSeconds {
                 withheld += 1
                 withheldByDuration += 1
             }
