@@ -500,15 +500,30 @@ public struct ActivityContextDecoder: Sendable {
         // So does a movement burst whose direction the forearm did not resolve (a transition the shift
         // heuristic missed must not leave the old posture asserted for minutes); a resolved shift speaks
         // through its direction evidence instead.
-        let burst = acSigmoid(((f.mBurst10 ?? 0) - 0.38) / 0.05) * (1 - min(1, f.gaitPresence ?? 0))
-        let resolved = ActivityContextModel.shiftStrength(f)
-        let fade = (1 - 0.3 * min(1, max(0, moving))) * (1 - 0.15 * burst * (1 - resolved))
+        // A burst well above the wearer's own background (desk work and fidgets are not bursts here) that left
+        // the wrist somewhere else over the last 30 s.
+        let burstBar = max(0.5, (f.mMed30 ?? 0) + 0.2)
+        let burst = acSigmoid(((f.mBurst10 ?? 0) - burstBar) / 0.05) * (1 - min(1, f.gaitPresence ?? 0))
+            * acSigmoid(((f.net30 ?? 0) - 25) / 5)
+        let shift = ActivityContextModel.shiftStrength(f)
+        // A posture shift whose direction the forearm axis cannot tell (a roll about the forearm) may have
+        // changed the posture either way: what was known before it fades too, and the transition modes decide.
+        var clarity = 0.0
+        if let a = f.shiftFromUx, let b = f.shiftToUx {
+            let v = ActivityContextModel.shiftDirection(from: a, to: b)
+            clarity = min(1, abs(log(v[BodyMode.standToSit.rawValue] / v[BodyMode.sitToStand.rawValue])) / log(4))
+        }
+        let movingFade = 1 - 0.3 * min(1, max(0, moving))
+        let shiftFade = (1 - 0.15 * burst * (1 - shift)) * (1 - 0.25 * shift * (1 - clarity))
         for i in memory.indices {
+            // Bursts fade the sitting / standing memory only: turning over or getting out of bed is the
+            // transition modes' call, and the night stays recumbent evidence until then.
+            let fade = i < Evidence.recumbentStart ? movingFade * shiftFade : movingFade
             memory[i] = min(Evidence.caps[i], max(-Evidence.lowerCaps[i], memory[i] * exp(-1 / Evidence.taus[i]) * fade + fresh[i]))
         }
         // The staged night (asleep, or awake inside its in-bed window) is recumbent evidence in full.
         let night = sleep == .asleep || inBed
-        if night { memory[Evidence.recumbentStart] = Evidence.caps[Evidence.recumbentStart] }
+        if night { memory[Evidence.night] = Evidence.caps[Evidence.night] }
         tracking.postureEvidence = memory
         let (eSU, eRec) = postureEvidenceTotals
 
@@ -523,9 +538,9 @@ public struct ActivityContextDecoder: Sendable {
             for j in 0..<bodyLayout.phases[m.rawValue] { body[start + j] *= k }
         }
         var seated = mass(.seated), upright = mass(.upright)
-        let slack = ActivityContextModel.postureNeutralSlack
+        let slack = ActivityContextModel.postureNeutralSlack, c0 = ActivityContextModel.postureNeutralLean
         if seated > 0, upright > 0 {
-            let lean = log(seated / upright)
+            let lean = log(seated / upright) - c0
             // The split follows the evidence: never past it (or past the slack when there is none), and the
             // dwell prior may pull it back toward neutral only by the slack.
             let hi = eSU >= 0 ? max(eSU, slack) : eSU + slack
@@ -533,18 +548,30 @@ public struct ActivityContextDecoder: Sendable {
             let target = min(hi, max(lo, lean))
             if target != lean {
                 let total = seated + upright
-                let s = total / (1 + exp(-target))
+                let s = total / (1 + exp(-(target + c0)))
                 scale(.seated, s / seated); scale(.upright, (total - s) / upright)
                 seated = s; upright = total - s
             }
         }
         guard !night else { return }
         let bed = mass(.bedRest), su = seated + upright
-        let ceiling = ActivityContextModel.recumbentShareFloor * exp(max(0, eRec)) * su
-        if bed > ceiling, su > 0 {
+        let ratio = ActivityContextModel.recumbentShareFloor * exp(max(0, eRec))
+        let ceiling = (bed + su) * ratio / (1 + ratio)
+        if bed > ceiling {
             let excess = bed - ceiling
             scale(.bedRest, ceiling / bed)
-            scale(.seated, 1 + excess / su); scale(.upright, 1 + excess / su)
+            // The excess goes to sitting / standing in their current split (an even posture head when there
+            // is none yet, e.g. straight out of a night spent in bed rest).
+            let share = su > 1e-9 ? seated / su : 1 / (1 + exp(-ActivityContextModel.postureNeutralLean))
+            func add(_ m: BodyMode, _ amount: Double) {
+                let start = bodyLayout.start[m.rawValue]
+                let k = bodyLayout.phases[m.rawValue]
+                var t = 0.0
+                for j in 0..<k { t += body[start + j] }
+                if t > 1e-12 { for j in 0..<k { body[start + j] += amount * body[start + j] / t } }
+                else { body[start] += amount }
+            }
+            add(.seated, excess * share); add(.upright, excess * (1 - share))
         }
     }
 
@@ -799,18 +826,32 @@ public struct ActivityContextDecoder: Sendable {
             (.sitToStand, .sitToStandLike), (.standToSit, .standToSitLike),
             (.lyingDown, .lyingDownLike), (.gettingUp, .gettingUpLike),
         ]
+        let transitionTotal = kinds.reduce(0.0) { $0 + post[$1.0.rawValue] }
         if var active = tracking.activePostural {
-            let mass = post[kinds.first { $0.1 == active.kind }!.0.rawValue]
+            var mass = post[kinds.first { $0.1 == active.kind }!.0.rawValue]
+            let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts })
+            // While the excursion lasts its direction may still resolve (hsmm-1.8: the burst is no longer
+            // assigned a direction up front): the event follows the kind that now leads it.
+            if let best = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }), best.1 != active.kind,
+               post[best.0.rawValue] > mass {
+                active.kind = best.1
+                mass = post[best.0.rawValue]
+                active.probability = mass
+                tracking.activePostural = active
+                if let i { tracking.events[i].kind = best.1; tracking.events[i].probability = mass }
+            }
             if mass > active.probability {
                 active.probability = mass
                 tracking.activePostural = active
-                if let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
-                    tracking.events[i].probability = mass
-                }
+                if let i { tracking.events[i].probability = mass }
             }
-            if mass < Self.posturalEventFloor / 2 { tracking.activePostural = nil }
+            if transitionTotal < Self.posturalEventFloor / 2 { tracking.activePostural = nil }
         } else if let hit = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
-                  post[hit.0.rawValue] >= Self.posturalEventFloor {
+                  // hsmm-1.8: the floor is on the transition modes' summed mass. A burst whose direction is
+                  // still open now spreads over the kinds (it is no longer diverted only "from where the mass
+                  // is"), and a change of position must not vanish because no single direction reached the
+                  // floor; the event names the most likely kind at that kind's own probability.
+                  transitionTotal >= Self.posturalEventFloor {
             tracking.activePostural = PosturalEventTrack(kind: hit.1, ts: ts, probability: post[hit.0.rawValue])
             record(hit.1, p: post[hit.0.rawValue], ts: ts)
         }

@@ -443,13 +443,25 @@ enum ActivityContextModel {
     /// Seated-vs-upright evidence a wearer's adopted personal profile is allowed to carry (log-odds); the
     /// population cap is `postureEvidenceCapSU`.
     static let postureEvidenceCapSU = log(8.0), postureEvidenceCapSUPersonal = log(12.0)
-    /// Recumbent evidence cap (log-odds over the no-evidence ceiling `recumbentShareFloor`).
-    static let postureEvidenceCapRecumbent = log(25.0)
+    /// Recumbent evidence cap (log-odds over the no-evidence ceiling `recumbentShareFloor`). Held orientation
+    /// alone reaches at most its own source cap (ln 25, recumbent ≤ 75 % of the stationary mass); the
+    /// staged night may go further.
+    static let postureEvidenceCapRecumbent = log(100.0)
     /// Without recumbent evidence, recumbent rest may hold at most this share relative to seated + upright.
     static let recumbentShareFloor = 0.12
     /// Slack (log-odds) the seated / upright split may lean without any posture evidence: small enough that
     /// the published heads stay hedged ("Still, sitting or standing").
     static let postureNeutralSlack = log(1.25)
+    /// ln(seated / upright) at which the published posture head is even (seated_likely = upright_stationary):
+    /// the seated mode puts more of its mass on its own posture than the upright mode does, so an even split
+    /// of the modes would read as a seated lean. Evidence is measured from here.
+    static let postureNeutralLean: Double = {
+        let s = profiles[BodyMode.seated.rawValue].posture, u = profiles[BodyMode.upright.rawValue].posture
+        let ds = (s[.seatedLikely] ?? 0) - (s[.uprightStationary] ?? 0)
+        let du = (u[.uprightStationary] ?? 0) - (u[.seatedLikely] ?? 0)
+        let share = du / (ds + du)
+        return log(share / (1 - share))
+    }()
 
     /// The learned transition expert's confident, non-abstained reading: the share of its mass that names a
     /// posture change (1 − P(none)) and the four class probabilities, weighted by its age decay. nil when it
@@ -566,26 +578,32 @@ enum ActivityContextModel {
     struct PostureEvidence: Equatable {
         var arm = 0.0, orientation = 0.0, direction = 0.0, learned = 0.0
         var recumbentOrientation = 0.0, recumbentDirection = 0.0
+        /// The staged night (asleep, or awake in its in-bed window): set to its cap by the decoder, never by a
+        /// second's score, and remembered for a while after the night ends.
+        var recumbentNight = 0.0
 
-        var values: [Double] { [arm, orientation, direction, learned, recumbentOrientation, recumbentDirection] }
+        var values: [Double] { [arm, orientation, direction, learned, recumbentOrientation, recumbentDirection,
+                                recumbentNight] }
         /// Index of the first recumbent source in `values`.
         static let recumbentStart = 4
         /// Per-source caps (log-odds), in `values` order. On its own the arm pattern or the held orientation
         /// leaves the published heads hedged; a shift whose direction the forearm shows, or a learned head,
         /// may commit. The seated / upright total is capped again by the decoder (higher with an adopted
         /// personal profile).
-        static let caps: [Double] = [log(1.3), log(1.4), log(8.0), log(8.0), log(25.0), log(4.0)]
+        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(8.0), log(25.0), log(4.0), log(100.0)]
         /// The lower (upright / not recumbent) side of each cap, where it differs. A stand-up's direction
         /// alone may not commit "standing": in free living standing still is about a tenth of still time and
         /// Capture-24 standing claims after a detected stand-up were right 10 % of the time, so standing needs
         /// the stand-up AND a hanging arm (or a learned head).
-        static let lowerCaps: [Double] = [log(1.3), log(1.4), log(3.0), log(8.0), log(25.0), log(4.0)]
+        static let lowerCaps: [Double] = [log(1.6), log(1.4), log(2.0), log(8.0), log(25.0), log(4.0), 0]
         /// A shift is one event spread over a few seconds of tempered evidence: its direction is remembered at
         /// this gain so that one clear, direction-resolved change of posture can carry the split on its own
         /// (FORTH: 33 of 33 detected sit / stand shifts in the right direction once the forearm axis is read).
         static let directionGain = 2.5
         /// Memory time constants (s), in `values` order.
-        static let taus: [Double] = [180, 180, 180, 180, 600, 600]
+        static let taus: [Double] = [180, 180, 180, 180, 600, 600, 600]
+        /// Index of the night source in `values`.
+        static let night = 6
     }
 
     /// Every term the shared accelerometer budget bounds at one second, term by term, as the tempered, signed log
@@ -882,7 +900,7 @@ enum ActivityContextModel {
         }
 
         // 5. Instantaneous arm pattern → body mode compat (couples desk-like motion to seated, etc.).
-        var armSeated = 0.0
+        var armSeated = 0.0, armDiff = 0.0
         if f.m10 != nil || f.m4 != nil {
             let q = armPattern(f, includeWorkout: false)
             let qs = q[0..<ArmState.unknown].reduce(0, +)
@@ -895,7 +913,12 @@ enum ActivityContextModel {
                     v[m] = min(1, max(0.01, s * 3.2))
                 }
                 add(v, unknownValue: uArm, weight: wArm)
-                armSeated = wArm * (log(v[seat]) - log(v[up]))
+                // Posture evidence only once the pattern is steady (4 s and 10 s means and the 30 s median agree):
+                // the seconds after a walk pass through a desk-like movement level on their way to still.
+                armDiff = wArm * (log(v[seat]) - log(v[up]))
+                if let m4 = f.m4, let m10 = f.m10, let med = f.mMed30, abs(m4 - m10) < 0.1, abs(m10 - med) < 0.1 {
+                    armSeated = armDiff
+                }
             }
         }
 
@@ -1112,7 +1135,7 @@ enum ActivityContextModel {
         evidence.orientation = temperature * orientSeated
         evidence.direction = PostureEvidence.directionGain * temperature * directionWeight * (1 - lieShare)
             * (trans(.standToSit) - trans(.sitToStand))
-        evidence.learned = temperature * (logL[seat] - logL[up] - notPostureEvidence - armSeated - orientSeated)
+        evidence.learned = temperature * (logL[seat] - logL[up] - notPostureEvidence - armDiff - orientSeated)
             + (postureShift.map { $0[seat] - $0[up] } ?? 0)
         evidence.recumbentOrientation = temperature * orientRecumbent
         evidence.recumbentDirection = PostureEvidence.directionGain * temperature * directionWeight
