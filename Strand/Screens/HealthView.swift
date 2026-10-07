@@ -1331,7 +1331,8 @@ private struct VitalsSection: View {
             temperatureUnit: temperatureUnit,
             spo2CandidateByDay: spo2CandidateByDay,
             hrvOverCountByDay: hrvOverCountByDay,
-            skinTempPreferred: SkinTempDisplay.Kind(rawValue: skinTempDisplayRaw) ?? .absolute   // #1846
+            skinTempPreferred: SkinTempDisplay.Kind(rawValue: skinTempDisplayRaw) ?? .absolute,   // #1846
+            epochs: BaselineStandard.referenceEpochs()   // fix J: Recalibrate reaches the vital tiles
         )
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Vital Signs", overline: "Latest", trailing: BodyVitalSigns.latestDayLabel(readings))

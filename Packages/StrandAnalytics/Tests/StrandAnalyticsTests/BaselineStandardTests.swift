@@ -108,6 +108,40 @@ final class BaselineStandardTests: XCTestCase {
         XCTAssertEqual(era, Double(BS.epochDay("2026-02-01")!) * 86_400)
     }
 
+    // MARK: fix J — one recalibration epoch reaches every app context
+
+    func testRecalibrateWritesTheEpochEveryAppContextReads() {
+        let d = UserDefaults(suiteName: "BaselineStandardTests-J-\(UUID().uuidString)")!
+        let now = Double(BS.epochDay("2026-09-10")!) * 86_400 + 3_600   // 01:00 UTC on the 10th
+        Baselines.recalibrateRecoveryBaselines(now: now, defaults: d)
+        let ctx = BS.Context.app(dayLogs: [:], defaults: d)
+        for m in BS.Metric.allCases {
+            XCTAssertEqual(ctx.epoch(m), now, "\(m) must honour the Recalibrate action")
+            XCTAssertEqual(BS.referenceEpochs(defaults: d)[m], now)
+        }
+        // The first day a reference may use: the 10th starts before the epoch, so the 11th.
+        XCTAssertEqual(BS.firstDayOnOrAfter(epoch: now), "2026-09-11")
+        XCTAssertEqual(BS.firstDayOnOrAfter(epoch: Double(BS.epochDay("2026-09-10")!) * 86_400), "2026-09-10")
+        XCTAssertNil(BS.firstDayOnOrAfter(epoch: 0))
+        // And a window reference drops the pre-epoch days.
+        var series: [String: Double] = [:]
+        for i in 0..<20 { series[BS.dayKey(BS.epochDay("2026-09-01")! + i)] = 55 }
+        XCTAssertEqual(BS.windowReference(series, metric: .restingHR, asOf: "2026-09-21", context: ctx).n, 10)
+    }
+
+    func testVitalBandsCanBandHRVOnLn() {
+        let history: [Double?] = (0..<20).map { _ in 60 }
+        let lnCfg = Baselines.readinessHRVLnCfg
+        // 60 ms every night: on ln the σ floor is 1.253·0.08 ≈ 0.1, so 72 ms (+18 %, ln +0.18) is ~1.8σ: in range;
+        // 80 ms (ln +0.29) is out.
+        XCTAssertEqual(VitalBands.band(value: 72, history: history, populationRange: 40...120, cfg: lnCfg,
+                                       logScale: true).band, .inRange)
+        XCTAssertEqual(VitalBands.band(value: 80, history: history, populationRange: 40...120, cfg: lnCfg,
+                                       logScale: true).band, .outOfRange)
+        XCTAssertEqual(VitalBands.band(value: 80, history: history, populationRange: 40...120, cfg: lnCfg,
+                                       logScale: true).basis, .personal)
+    }
+
     // MARK: rule 7 + the robust window reference
 
     func testWindowReferenceIsCausalCalendarAndFloored() {

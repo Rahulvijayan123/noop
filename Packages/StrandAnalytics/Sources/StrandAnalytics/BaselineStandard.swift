@@ -246,6 +246,22 @@ public enum BaselineStandard {
         return max(manual, Baselines.deviceEraEpoch(sourceDays))
     }
 
+    /// `referenceEpoch` for every metric, for a surface that only needs the epochs.
+    public static func referenceEpochs(sourceDays: [(day: String, sourceId: String)] = [],
+                                       defaults: UserDefaults = .standard) -> [Metric: Double] {
+        var epochs: [Metric: Double] = [:]
+        for m in Metric.allCases { epochs[m] = referenceEpoch(metric: m, sourceDays: sourceDays, defaults: defaults) }
+        return epochs
+    }
+
+    /// The first `yyyy-MM-dd` on or after `epoch` (seconds) that a reference may use, nil when no epoch.
+    /// Same strict rule as the folds: a day whose UTC start is before the epoch is dropped.
+    public static func firstDayOnOrAfter(epoch: Double) -> String? {
+        guard epoch > 0 else { return nil }
+        let d = Int((epoch / 86_400).rounded(.up))
+        return dayKey(d)
+    }
+
     // MARK: - Context
 
     /// Everything outside the series itself that decides which days a reference may use.
@@ -293,12 +309,8 @@ public enum BaselineStandard {
                                regimeByDay: [String: String] = [:],
                                sourceDays: [(day: String, sourceId: String)] = [],
                                defaults: UserDefaults = .standard) -> Context {
-            var epochs: [Metric: Double] = [:]
-            for m in Metric.allCases {
-                epochs[m] = referenceEpoch(metric: m, sourceDays: sourceDays, defaults: defaults)
-            }
-            return Context(dayLogs: dayLogs ?? loadDayLogs(defaults), sdnnDays: sdnnDays,
-                           regimeByDay: regimeByDay, epochs: epochs)
+            Context(dayLogs: dayLogs ?? loadDayLogs(defaults), sdnnDays: sdnnDays, regimeByDay: regimeByDay,
+                    epochs: referenceEpochs(sourceDays: sourceDays, defaults: defaults))
         }
 
         public func epoch(_ metric: Metric) -> Double { epochs[metric] ?? 0 }

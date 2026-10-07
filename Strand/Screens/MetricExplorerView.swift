@@ -909,16 +909,24 @@ struct MetricDetailView: View {
     ///
     /// Same fold `VitalBands` bands against, so a reading the grid calls out of range cannot sit on the
     /// comfortable side of the rule. Twin of Kotlin `vitalBaseline`.
+    ///
+    /// BaselineStandard (fixes J, rule 1, rule 7): calendar-padded like `VitalBands` (a wear gap is missing
+    /// nights, so a long-idle baseline goes stale instead of drawing a months-old rule), HRV on ln with the
+    /// centre drawn in ms, and only the nights since the Recalibrate epoch.
     private var personalBaseline: Double? {
-        let cfg: MetricCfg?
+        let standardMetric: BaselineStandard.Metric
         switch metric.key {
-        case "hrv": cfg = Baselines.hrvCfg
-        case "rhr": cfg = Baselines.restingHRCfg
-        default: cfg = nil
+        case "hrv": standardMetric = .hrvRmssd
+        case "rhr": standardMetric = .restingHR
+        default: return nil
         }
-        guard let cfg else { return nil }
-        let state = Baselines.foldHistory(series.map { $0.value }, cfg: cfg)
-        return state.trusted ? state.baseline : nil
+        let from = BaselineStandard.referenceEpochs()[standardMetric]
+            .flatMap { BaselineStandard.firstDayOnOrAfter(epoch: $0) }
+        let rows = series.filter { row in from.map { row.day >= $0 } ?? true }
+        let values = VitalBands.calendarSeries(rows.map { ($0.day, Optional($0.value)) })
+            .map { $0.flatMap { BaselineStandard.toModel($0, standardMetric) } }
+        let state = Baselines.foldHistory(values, cfg: BaselineStandard.cfg(standardMetric))
+        return state.trusted ? BaselineStandard.fromModel(state.baseline, standardMetric) : nil
     }
 
     /// Padded value range so the line never sits flush against an axis.
