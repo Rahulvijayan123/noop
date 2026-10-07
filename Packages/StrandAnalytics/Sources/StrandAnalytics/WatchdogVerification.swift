@@ -1,4 +1,5 @@
 import Foundation
+import WhoopStore
 
 // WatchdogVerification.swift — the alert-verification contract (docs/BASELINE_WATCHDOG_V2.md §4).
 //
@@ -22,7 +23,7 @@ public enum WDMotion: String, Equatable, Sendable, Codable { case still, moving,
 
 /// Per-window sensor metadata. Every array may be empty; an empty array means UNKNOWN for what it would have
 /// evidenced, never "fine".
-public struct WatchdogQualityFeed: Equatable, Sendable, Codable {
+public struct WatchdogQualityFeed: Equatable, Sendable {
     /// One v18 aux second (WHOOP 5/MG history record): `sentinel` = opticalAmpA/B == 128 OR hrQualityFlags
     /// bit 7 clear (bad optical second); `baselineZero` = opticalBaselineA == 0 && opticalBaselineB == 0
     /// (off-wrist optics); `spo2Pct` = aux byte @82 when 70…100.
@@ -78,6 +79,15 @@ public struct WatchdogQualityFeed: Equatable, Sendable, Codable {
     public var rrFillRejected: Int = 0
     /// Duplicate beats removed before HRV (same identity, or live twin of a stored beat).
     public var rrDuplicatesRemoved: Int = 0
+    /// Per window minute (key = minute start unix, aligned to the window grid `startUnix + i*60`): Σ R-R ms of
+    /// the merged, de-duplicated beats ÷ 60 000. ≈ 1 when every beat was captured; < 0.5 or > 1.3 is POOR.
+    /// Absent key = no beat information (UNKNOWN).
+    public var rrCoverageByMinute: [Int: Double] = [:]
+    /// Per window minute: number of seconds with a stored or live HR sample. Absent key = 0.
+    public var hrSecondsByMinute: [Int: Int] = [:]
+    /// Stored activity-context intervals (the phone's activity classification) overlapping the window, oldest
+    /// first; used for posture / sleep / locomotion context. Empty = UNKNOWN context.
+    public var contextIntervals: [ActivityContextIntervalRow] = []
 
     public init() {}
 
