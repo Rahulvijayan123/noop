@@ -17,8 +17,10 @@ EVIDENCE = {
         {"metric": "hrv_rmssd", "units": "ms", "estimated": False, "latest": {"day": "2026-10-06", "value": 85}},
         {"metric": "resp_rate", "units": "breaths/min", "estimated": True, "latest": {"day": "2026-10-06", "value": 14.2}}]},
 }
-RETRIEVED = {"pmid:32023264": {"id": "pmid:32023264", "topic": "day_to_day_variability",
+RETRIEVED = {"pmid:32023264": {"id": "pmid:32023264", "topic": "day_to_day_variability", "peer_reviewed": True,
                                "finding": "mean daily RHR was 65 bpm"}}
+# An interpretation sentence the default citation (day-to-day variability) supports.
+SUPPORT = "Night-to-night changes of a few bpm are common."
 
 
 def answer(**over):
@@ -55,7 +57,7 @@ def test_wording_claims_and_relative_days_are_rejected():
         result = validate.check(text, EVIDENCE, RETRIEVED)
         assert not result.ok and code in result.codes, (code, result.errors)
     # whole words only: "still" is not "ill", "stressing" is not in the list but "stress" is
-    assert validate.check(answer(interpretation=["It is still within a few bpm of Oct 5."], citations=[]),
+    assert validate.check(answer(interpretation=["It is still within a few bpm of Oct 5.", SUPPORT]),
                           EVIDENCE, RETRIEVED).ok
     assert validate.forbidden_term("Still calm") == "calm"
 
@@ -79,11 +81,11 @@ def test_numbers_and_dates_must_come_from_the_tools():
 def test_estimated_signals_must_be_called_estimated():
     bad = answer(interpretation=["Your respiratory rate was 14.2 breaths per minute, similar to before."])
     assert "estimated" in validate.check(bad, EVIDENCE, RETRIEVED).codes
-    good = answer(interpretation=["Your estimated respiratory rate was 14.2 breaths per minute."], citations=[])
+    good = answer(interpretation=["Your estimated respiratory rate was 14.2 breaths per minute.", SUPPORT])
     assert validate.check(good, EVIDENCE, RETRIEVED).ok
     sleep = answer(interpretation=["You slept less on Oct 5, which may matter."])
     assert "estimated" in validate.check(sleep, EVIDENCE, RETRIEVED).codes
-    general = answer(interpretation=["Changes of a few bpm may reflect sleep timing."], citations=[])
+    general = answer(interpretation=["Changes of a few bpm may reflect sleep timing.", SUPPORT])
     assert validate.check(general, EVIDENCE, RETRIEVED).ok
 
 
@@ -123,8 +125,8 @@ def test_literature_is_curated_first_and_excludes_topics_the_app_never_infers():
 
 
 def test_a_citation_must_be_about_something_the_explanation_says():
-    retrieved = {"pmid:1": {"id": "pmid:1", "topic": "menstrual_cycle", "finding": ""},
-                 "pmid:2": {"id": "pmid:2", "topic": "alcohol", "finding": ""}}
+    retrieved = {"pmid:1": {"id": "pmid:1", "topic": "menstrual_cycle", "finding": "", "peer_reviewed": True},
+                 "pmid:2": {"id": "pmid:2", "topic": "alcohol", "finding": "", "peer_reviewed": True}}
     text = answer(interpretation=["Alcohol can raise heart rate in the hours after drinking."], citations=["pmid:2"])
     assert validate.check(text, EVIDENCE, retrieved).ok
     off_topic = answer(interpretation=["Alcohol can raise heart rate in the hours after drinking."], citations=["pmid:1"])
@@ -150,16 +152,21 @@ REVIEW = {
 }
 
 
+REVIEW_LIT = {"lit:rhr-variability": {"id": "lit:rhr-variability", "topic": "day_to_day_variability",
+                                     "peer_reviewed": True, "finding": ""}}
+
+
 def review(**over):
     base = {"headline": "Resting heart rate 59 bpm on Oct 6, above your usual range",
             "observed": ["Your resting heart rate was 59 bpm on Oct 6, 7 bpm above your median of 52 bpm."],
-            "interpretation": [], "uncertainty": ["Two tracked nights have no measurement."], "citations": []}
+            "interpretation": [SUPPORT], "uncertainty": ["Two tracked nights have no measurement."],
+            "citations": ["lit:rhr-variability"]}
     base.update(over)
     return json.dumps(base)
 
 
 def test_the_review_bypasses_are_closed():
-    assert validate.check(review(), REVIEW, {}).ok, validate.check(review(), REVIEW, {}).errors
+    assert validate.check(review(), REVIEW, REVIEW_LIT).ok, validate.check(review(), REVIEW, REVIEW_LIT).errors
     rejected = {
         "Your resting heart rate was 51 bpm on Oct 6, 7 bpm below your median of 58 bpm.": "grounding",
         "It fell 6 bpm to 53 bpm.": "direction",
@@ -182,12 +189,33 @@ def test_the_review_bypasses_are_closed():
         "It was 59 bpm on 10/6.": "dates",
     }
     for sentence, code in rejected.items():
-        result = validate.check(review(observed=[sentence]), REVIEW, {})
+        result = validate.check(review(observed=[sentence]), REVIEW, REVIEW_LIT)
         assert code in result.codes, (sentence, result.errors)
     # and what must still pass
     for sentence in ("A change of 1 may be ordinary variation.", "Your estimated sleep was 6.2 h on Oct 6.",
                      "Your estimated bedtime was 23:40 on Oct 6.", "It was 1 bpm above Oct 5 and 59 bpm on Oct 6.",
                      "Your estimated HRV was 85 ms on Oct 6, 16 ms above your median of 69 ms.",
                      "Your resting heart rate stayed within 51-53 bpm over most of the last 30 nights."):
-        result = validate.check(review(observed=[sentence]), REVIEW, {})
+        result = validate.check(review(observed=[sentence]), REVIEW, REVIEW_LIT)
         assert result.ok, (sentence, result.errors)
+
+
+def test_every_explanation_cites_a_peer_reviewed_source():
+    assert "citations" in validate.check(answer(citations=[]), EVIDENCE, RETRIEVED).codes
+    preprint = {"pmid:32023264": dict(RETRIEVED["pmid:32023264"], peer_reviewed=False)}
+    result = validate.check(answer(), EVIDENCE, preprint)
+    assert any("not a peer-reviewed" in e for e in result.errors)
+
+
+def test_because_is_allowed_when_it_is_hedged_and_grounded():
+    hedged = answer(interpretation=["Your resting heart rate was likely lower because nights like Oct 5 vary.", SUPPORT])
+    assert validate.check(hedged, EVIDENCE, RETRIEVED).ok, validate.check(hedged, EVIDENCE, RETRIEVED).errors
+    certain = answer(interpretation=["Your resting heart rate was lower because nights vary.", SUPPORT])
+    assert "claim" in validate.check(certain, EVIDENCE, RETRIEVED).codes
+
+
+def test_the_root_agent_must_have_loaded_every_required_variable():
+    required = frozenset({"get_metric_summary", "get_chat_history", "get_health_records"})
+    result = validate.check(answer(), EVIDENCE, RETRIEVED, called={"get_metric_summary"}, required=required)
+    assert any(e.startswith("context:load these first: get_chat_history, get_health_records") for e in result.errors)
+    assert validate.check(answer(), EVIDENCE, RETRIEVED, called=set(required), required=required).ok

@@ -34,6 +34,14 @@ def _secret(name: str, file_var: str, env: dict[str, str]) -> str:
     return value
 
 
+def _remote(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not raw.strip():
+        return ("pubmed", "europepmc")
+    if raw.strip().lower() == "none":
+        return ()
+    return tuple(s.strip() for s in raw.split(",") if s.strip())
+
+
 def _paths(raw: str | None) -> tuple[str, ...]:
     return tuple(p for p in (raw or "").split(os.pathsep) if p)
 
@@ -51,7 +59,8 @@ class Config:
     sandbox: str = "auto"                      # auto | macos | linux | none (tests only, see README)
     sandbox_deny_read: tuple[str, ...] = ()
     curated_harness: str | None = None
-    literature_remote: tuple[str, ...] = ()    # () = curated corpus only; ("pubmed", "europepmc") enables fallback
+    # Peer-reviewed fallback when the curated corpus has no strong hit; NARA_LITERATURE_REMOTE=none turns it off.
+    literature_remote: tuple[str, ...] = ("pubmed", "europepmc")
     literature_cache: str | None = None
     lease_seconds: int = 300
     poll_seconds: float = 5.0
@@ -84,8 +93,10 @@ class Config:
             sandbox=env.get("NARA_SANDBOX", "auto"),
             sandbox_deny_read=_paths(env.get("NARA_SANDBOX_DENY_READ")),
             curated_harness=env.get("NARA_CURATED_HARNESS") or None,
-            literature_remote=tuple(s for s in (env.get("NARA_LITERATURE_REMOTE") or "").split(",") if s),
-            literature_cache=env.get("NARA_LITERATURE_CACHE") or None,
+            literature_remote=_remote(env.get("NARA_LITERATURE_REMOTE")),
+            # The cache holds only sanitized, user-free queries and public records: one per host is shared.
+            literature_cache=env.get("NARA_LITERATURE_CACHE")
+            or str(Path(required["NARA_WORK_ROOT"]).resolve().parent / "litsearch.sqlite3"),
             lease_seconds=int(env.get("NARA_LEASE_SECONDS", "300")),
             poll_seconds=float(env.get("NARA_POLL_SECONDS", "5")),
             turn_timeout_s=float(env.get("NARA_TURN_TIMEOUT_S", "120")),

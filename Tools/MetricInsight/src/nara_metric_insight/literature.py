@@ -8,6 +8,7 @@ effects) and background-only entries are not offered as explanations of a day-to
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ from . import litsearch
 from .validate import FORBIDDEN_TERMS, TOPIC_WORDS, forbidden_term
 
 CORPUS = Path(__file__).resolve().parent / "data" / "literature_seed.json"
+REMOTE = {"pubmed": litsearch.search_pubmed, "europepmc": litsearch.search_europepmc}
 EXCLUDED_TOPICS = frozenset({"acute_illness", "vaccination", "psychological_stress", "medication", "long_term_risk"})
 CORPUS_METRIC = {"resting_hr": "rhr", "hrv_rmssd": "hrv"}
 # Words every query shares ("resting heart rate"): they rank nothing, so a hit must match the query's topic words.
@@ -24,11 +26,28 @@ MIN_TOPIC_COVERAGE = 0.5   # share of the topic words' idf the entry matches
 MIN_RELATIVE_SCORE = 0.5   # and at least half the best hit's BM25 score
 
 
+def peer_reviewed(record: dict[str, Any]) -> bool:
+    """Only peer-reviewed journal articles are offered: the curated corpus (PubMed-verified journal articles),
+    PubMed journal articles that are neither preprints nor retracted (also filtered in the query), and Europe PMC
+    MEDLINE records (the query is restricted to SRC:MED)."""
+    source = record.get("source")
+    if source == "seed":
+        return True
+    if source == "pubmed":
+        kinds = {str(t).lower() for t in record.get("pub_types") or []}
+        return "journal article" in kinds and not kinds & {"preprint", "retracted publication"}
+    return source == "europepmc"
+
+
 def infer_topic(text: str) -> str | None:
-    """A remote record's topic from its own words, when exactly one curated topic fits (else none: not citable)."""
+    """A remote record's topic from its own words: the topic with the most distinct matching words, when one
+    clearly leads (a tie means no topic, and an untopiced record cannot be cited)."""
     lowered = text.lower()
-    fits = [topic for topic, words in TOPIC_WORDS.items() if any(word in lowered for word in words)]
-    return fits[0] if len(fits) == 1 else None
+    scores = sorted(((sum(word in lowered for word in words), topic) for topic, words in TOPIC_WORDS.items()),
+                    reverse=True)
+    if not scores or scores[0][0] == 0 or (len(scores) > 1 and scores[1][0] == scores[0][0]):
+        return None
+    return scores[0][1]
 
 
 class Literature:
@@ -42,7 +61,9 @@ class Literature:
         whether to go remote; locally they would drop sound short queries such as "resting heart rate sleep")."""
         entries, index = litsearch._seed_index(CORPUS)
         vocabulary = {t for e in entries for t in litsearch._entry_tokens(e)}
-        topic = [t for t in litsearch.tokenize(query) if t not in GENERIC]
+        # The metric's own name is not a topic ("heart rate variability" is in every HRV query).
+        named = re.sub(r"\b(resting\s+)?heart\s+rate(\s+variability)?\b", " ", query, flags=re.I)
+        topic = [t for t in litsearch.tokenize(named) if t not in GENERIC]
         if not topic:
             raise ValueError("query rejected: name a topic (e.g. sleep, alcohol, training load, heat)")
         topic = [t for t in topic if t in vocabulary]  # a word no entry uses cannot count against a hit
@@ -57,16 +78,21 @@ class Literature:
     def search(self, query: str, metric: str, limit: int = 3) -> list[dict[str, Any]]:
         try:
             safe = litsearch.sanitize_query(query, forbidden_terms=FORBIDDEN_TERMS)
-            if self.remote:  # curated first; remote only when no curated hit is strong (litsearch's cutoffs)
-                records = litsearch.find_evidence(safe, k=max(limit * 2, 5), metric=CORPUS_METRIC.get(metric),
-                                                  remote=self.remote, corpus_path=CORPUS, cache=self.cache,
-                                                  forbidden_terms=FORBIDDEN_TERMS).get("evidence") or []
-            else:
-                records = self._curated(safe, metric, max(limit * 2, 5))
+            # The curated, verified corpus first; PubMed / Europe PMC (peer-reviewed only) when it has nothing.
+            records = self._curated(safe, metric, max(limit * 2, 5))
+            for source in (self.remote if not records else ()):
+                try:
+                    records = REMOTE[source](safe, max(limit * 2, 5), cache=self.cache)
+                except litsearch.LitSearchError:
+                    continue
+                if records:
+                    break
         except litsearch.UnsafeQueryError as exc:
             raise ValueError(f"query rejected: {exc.code}") from None
         out, seen = [], set()
         for record in records:
+            if not peer_reviewed(record):
+                continue
             if record.get("source") != "seed":  # remote records: no curated topic, unvetted wording
                 text = f"{record.get('title') or ''} {record.get('abstract_snippet') or ''}"
                 if forbidden_term(text):
@@ -85,7 +111,7 @@ class Literature:
                 "title": record.get("title"), "year": record.get("year"), "journal": record.get("journal"),
                 "url": record.get("url"), "finding": record.get("claim") or record.get("abstract_snippet"),
                 "direction": record.get("direction"), "evidence_type": record.get("evidence_type"),
-                "topic": record.get("topic"), "source": record.get("source"),
+                "topic": record.get("topic"), "source": record.get("source"), "peer_reviewed": True,
             })
             if len(out) >= limit:
                 break

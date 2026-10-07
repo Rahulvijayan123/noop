@@ -744,7 +744,9 @@ def search_pubmed(query: str, k: int = 5, *, with_abstracts: bool = True, review
     if store is not None and (hit := store.get(key)) is not None:
         return [dict(r, cached=True) for r in hit[:k]]
     dl = deadline or Deadline()
-    term = f"({q}) AND hasabstract AND english[la]"
+    # Peer-reviewed journal articles only: no preprints, no retracted papers (Nara cites only peer-reviewed work).
+    term = (f"({q}) AND hasabstract AND english[la] AND journal article[pt] "
+            f"NOT preprint[pt] NOT retracted publication[pt]")
     if reviews_only:
         term += " AND (systematic[sb] OR meta-analysis[pt])"
     data = _json(_ncbi_get("esearch.fcgi", {"db": "pubmed", "term": term, "retmode": "json",

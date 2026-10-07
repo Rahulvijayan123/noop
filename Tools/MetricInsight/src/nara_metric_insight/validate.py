@@ -43,7 +43,7 @@ FORBIDDEN_FORMS: tuple[str, ...] = (
 )
 # Diagnosis, unsupported causation and false certainty.
 CLAIM_TERMS: tuple[str, ...] = (
-    "because", "cause", "causes", "caused", "causing", "due to", "led to", "leads to", "lead to", "leading to",
+    "cause", "causes", "caused", "causing", "due to", "led to", "leads to", "lead to", "leading to",
     "resulted in", "results in", "result of", "results from", "resulting from", "triggered", "triggers",
     "responsible for", "drove", "driven by", "proves", "proven", "disorder", "syndrome", "abnormal", "dangerous",
     "emergency", "treatment", "treat", "prescribe", "prescription", "cure", "definitely", "certainly",
@@ -79,6 +79,10 @@ TOPIC_WORDS: dict[str, tuple[str, ...]] = {
     "normal_range": ("usual", "range", "normal", "typical", "vary", "variation", "differ"),
     "day_to_day_variability": ("night-to-night", "day-to-day", "vary", "variation", "common", "usual"),
     "wearable_accuracy": ("measure", "measurement", "sensor", "device", "wear", "accuracy"),
+    "posture": ("posture", "standing", "lying", "supine", "upright", "sitting"),
+    "physical_activity": ("activity", "movement", "moving", "walk", "walking", "steps", "exercise"),
+    "sleep_architecture": ("deep sleep", "rem", "sleep stage", "slow-wave", "sleep"),
+    "circadian": ("circadian", "time of day", "night", "daytime", "evening", "morning"),
 }
 UNITS: dict[str, str] = {
     "bpm": "bpm", "beats per minute": "bpm", "ms": "ms", "millisecond": "ms", "milliseconds": "ms",
@@ -115,6 +119,11 @@ _DIRECTION_AFTER = re.compile(rf"(?<![\w.])(\d+(?:\.\d+)?)\s*({_UNIT_RE})(?![a-z
 _DIRECTION_BEFORE = re.compile(rf"\b({_DIRECTIONS})\s+(?:by\s+)?(\d+(?:\.\d+)?)\s*({_UNIT_RE})?(?![a-z])", re.I)
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
 _NEGATION = re.compile(r"\b(no|not|none|nothing|without|never|neither|nor)\b|n't\b", re.I)
+# "because" explains with the person's own data ("likely because you walked 40 minutes that evening"); it must be
+# hedged, since a pattern in the data is an association, not proof.
+_BECAUSE = re.compile(r"\bbecause\b", re.I)
+_HEDGE = re.compile(r"\b(likely|probably|possibly|may|might|can|could|often|typically|usually|tends?|"
+                    r"perhaps|partly)\b", re.I)
 _YOU_VERB = {"sleep": re.compile(r"\byou\s+(?:\w+\s+){0,2}(slept|woke|fell asleep)\b", re.I),
              "activity": re.compile(r"\byou\s+(?:\w+\s+){0,2}(trained|exercised|walked|ran|worked out)\b", re.I)}
 
@@ -122,6 +131,7 @@ MAX_HEADLINE = 120
 MAX_SENTENCE = 280
 MAX_TOTAL = 1200
 MAX_ITEMS = 3
+MIN_CITATIONS = 1  # every explanation carries at least one peer-reviewed source to check it against
 # Window lengths the tools state in words ("the last 7 nights", "up to 30 nights", "90 days").
 WINDOW_NUMBERS = (7, 14, 30, 90)
 
@@ -478,7 +488,8 @@ def _estimated_errors(sentence: str, f: Facts) -> list[str]:
     return []
 
 
-def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Result:
+def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]], *,
+          called: set[str] | None = None, required: frozenset[str] = frozenset()) -> Result:
     answer, error = parse(text)
     if error:
         return Result(False, None, [error])
@@ -525,6 +536,9 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
         for term, pattern in _RELATIVE:
             if pattern.search(sentence):
                 errors.append(f"dates:'{term}' is relative; use the absolute date (e.g. Oct 6)")
+        if _BECAUSE.search(sentence) and not _HEDGE.search(sentence):
+            errors.append("claim:'because' must be hedged ('likely because', 'may be because'): a pattern in "
+                          "the data is an association, not proof")
         if _SLASH_DAY.search(sentence):
             errors.append("dates:write dates like Oct 6, not with slashes")
         errors += _numbers_errors(sentence, f, interpretation=key == "interpretation")
@@ -536,6 +550,14 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
         if _PMID_OR_DOI.search(sentence):
             errors.append("citations:put literature ids only in the citations list, not in the text")
 
+    missing = sorted(required - (called or set()))
+    if missing:
+        errors.append(f"context:load these first: {', '.join(missing)}")
+    if len(citations) < MIN_CITATIONS:
+        errors.append("citations:cite at least one peer-reviewed finding returned by search_literature")
+    for cited in (c for c in citations if c in retrieved):
+        if not retrieved[cited].get("peer_reviewed"):
+            errors.append(f"citations:{cited} is not a peer-reviewed journal article")
     unknown = [c for c in citations if c not in retrieved]
     if unknown:
         errors.append(f"citations:{', '.join(unknown[:3])} were not returned by search_literature in this session")

@@ -81,7 +81,8 @@ def worker(pg, stub, secret_file, curated_harness):
     env = {"NARA_DB_URL_FILE": secret_file("db_url", pg.url), "NARA_LLM_API_KEY_FILE": secret_file("llm_api_key", API_KEY),
            "NARA_LLM_BASE_URL": stub.url, "NARA_LLM_MODEL": "fixture-model", "NARA_PRIME_BIN": PRIME_BIN,
            "NARA_KERNEL_PYTHON": KERNEL_PYTHON, "NARA_WORK_ROOT": str(work_root), "NARA_WORKER_ID": "pytest-e2e",
-           "NARA_SANDBOX": "macos", "NARA_TURN_TIMEOUT_S": "120", "NARA_CURATED_HARNESS": curated_harness}
+           "NARA_SANDBOX": "macos", "NARA_TURN_TIMEOUT_S": "120", "NARA_CURATED_HARNESS": curated_harness,
+           "NARA_LITERATURE_REMOTE": "none"}  # tests never reach the network
     instance = Worker(Config.from_env(env))
     instance.db = Database(connect(pg.url))
     yield instance
