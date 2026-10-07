@@ -114,7 +114,8 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
     }
 
     func testEverySeriesIsAccountedFor() {
-        XCTAssertEqual(LBSeries.allCases.count, 18)
+        // 18 condensed-plan series + 8 v2.clinical context strata (posture, steady walking, sleep HR).
+        XCTAssertEqual(LBSeries.allCases.count, 26)
         for s in LBSeries.allCases {
             let spec = LongitudinalBaseline.seriesSpec(s)
             XCTAssertGreaterThan(spec.maxVal, spec.minVal, s.rawValue)

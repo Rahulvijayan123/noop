@@ -867,10 +867,13 @@ public enum Watchdog {
             && (severity == .candidate || severity == .active || severity == .severe)
 
         let state = nextState(severity: severity, carry: &carry)
+        // Escalation keys on the VERIFIED alert level (3 safety · 2 multi-source · 1 single source + model ·
+        // 0 none), not on the on-device prior's residual energy (which no longer decides anything).
+        let alertLevel = Self.alertLevel(verdicts)
         let (notify, reason) = WatchdogNotifyPolicy.decision(severity: severity, openedEpisode: openedEpisode,
                                                             safety: safety, previousSafety: previousSafety,
-                                                            fused: reconJ, previousFused: previousFused,
-                                                            recon: reconJ, previousRecon: previousFused,
+                                                            fused: alertLevel, previousFused: previousFused,
+                                                            recon: alertLevel, previousRecon: previousFused,
                                                             eventLabel: eventHint,
                                                             episodeId: carry.episodeId,
                                                             notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
@@ -884,7 +887,7 @@ public enum Watchdog {
             carry.notifyDelivery = "queued"
             // notifiedSevereEpisodeId is stamped only after a successful send.
         }
-        carry.lastJointEnergy = reconJ
+        carry.lastJointEnergy = alertLevel   // notify-policy level (see alertLevel), not the prior's energy
         carry.lastReconEnergy = labelJ
         carry.lastSafety = safety
         if forecast.studentOk {
@@ -1229,6 +1232,13 @@ public enum Watchdog {
             physiologyOff: physiologyOff,
             verdicts: verdicts
         )
+    }
+
+    static func alertLevel(_ verdicts: [WatchdogVerdict]) -> Double {
+        let alerts = verdicts.filter { $0.decision == .alert }
+        if alerts.contains(where: { $0.candidate.kind == .safetyExtreme }) { return 3 }
+        if alerts.contains(where: { $0.independentGroups >= 2 }) { return 2 }
+        return alerts.isEmpty ? 0 : 1
     }
 
     /// Held leftover. Early uses `WatchdogForecastRuntime.pathScore` on the 6×5 cube.

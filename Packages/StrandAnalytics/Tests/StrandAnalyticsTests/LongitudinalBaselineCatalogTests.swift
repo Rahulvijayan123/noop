@@ -157,9 +157,10 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
     // MARK: - Every biometric is a series
 
     func testPlanListsExactlySeventeenBiometrics() {
-        XCTAssertEqual(LBSeries.allCases.count, 18, LongitudinalBaseline.planCatalogText())
+        // 18 condensed-plan series + 8 v2.clinical context strata (docs/BASELINE_WATCHDOG_V2.md §3).
+        XCTAssertEqual(LBSeries.allCases.count, 26, LongitudinalBaseline.planCatalogText())
         let ids = LBSeries.allCases.map(\.rawValue)
-        XCTAssertEqual(Set(ids).count, 18)
+        XCTAssertEqual(Set(ids).count, 26)
         let expected = [
             "sleep_rhr", "sleep_hrv_ln", "sleep_temp", "sleep_resp",
             "sleep_spo2_mean", "sleep_spo2_nadir",
@@ -167,13 +168,16 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
             "awake_active_hr", "awake_active_hrv_ln", "awake_active_spo2_mean",
             "continuous_hr", "continuous_hrv_ln", "continuous_spo2_mean",
             "waking_steps", "waking_active_min", "waking_imu_energy",
+            "awake_supine_hr", "awake_supine_hrv_ln", "awake_seated_hr", "awake_seated_hrv_ln",
+            "awake_upright_hr", "awake_upright_hrv_ln", "walking_hr", "sleep_hr",
         ]
         XCTAssertEqual(ids, expected, LongitudinalBaseline.planCatalogText())
     }
 
     func testWorkedWeeksCoverEverySeriesOnce() {
         let covered = Set(workedWeeks().map(\.series))
-        let missing = LBSeries.allCases.filter { !covered.contains($0) }
+        // v2 context strata have no condensed-plan §5 worked week (they are not plan rows).
+        let missing = LBSeries.allCases.filter { !covered.contains($0) && $0.planRow.condensedSection != "v2.3" }
         XCTAssertTrue(missing.isEmpty, "no condensed §5 tape for \(missing.map(\.rawValue))")
     }
 

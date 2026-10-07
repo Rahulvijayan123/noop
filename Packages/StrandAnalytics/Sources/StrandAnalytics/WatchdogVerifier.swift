@@ -421,9 +421,14 @@ public enum WatchdogDetectors {
         return out
     }
 
-    /// Server model windows that overlap the last 60 minutes become candidates of their own.
+    /// Server model windows still in reach of live verification (ended ≤ 30 min ago).
+    public static let serverFreshSeconds = 1800
+    /// A server window needs this many of its minutes inside the live 30-minute view to be verified at all.
+    public static let serverMinMinutesInView = 5
+
+    /// Server model windows that overlap the last 30 minutes become candidates of their own.
     public static func server(_ models: [WatchdogModelCandidate], nowUnix: Int) -> [WatchdogCandidate] {
-        models.filter { $0.status == "candidate" && $0.endUnix >= nowUnix - 3600 && $0.startUnix <= nowUnix }
+        models.filter { $0.status == "candidate" && $0.endUnix >= nowUnix - serverFreshSeconds && $0.startUnix <= nowUnix }
             .map { m in
                 WatchdogCandidate(kind: .serverModel, id: "sm-\(m.candidateKey)", channels: m.channels,
                                   startUnix: m.startUnix, lastUnix: m.endUnix, direction: m.direction,
@@ -476,6 +481,15 @@ public enum WatchdogAlertVerifier {
             return m + grid > c.startUnix && m <= c.lastUnix
         }
         var checks: [WatchdogCheckResult] = []
+        if c.kind == .serverModel, idx.count < WatchdogDetectors.serverMinMinutesInView {
+            // The model saw data the live window no longer (or not yet) holds: quality and activity cannot be
+            // checked here, so it is not an alert and not shown as Off.
+            let checks = WatchdogCheck.allCases.map {
+                WatchdogCheckResult(check: $0, outcome: .unknown, reason: "outside the live verification window")
+            }
+            return WatchdogVerdict(decision: .suppress, candidate: c, checks: checks, independentGroups: 0,
+                                   modelCorroboration: [], summary: "Not verifiable from the live window")
+        }
 
         // 1. Baseline.
         switch c.kind {
