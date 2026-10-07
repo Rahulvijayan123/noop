@@ -298,7 +298,23 @@ public enum WatchdogScores: Sendable {
 
 /// Wearer push: **extreme only**. Daily event testing over-sent when every cut / Early / Test
 /// Centre bell felt like a page. Forecast, workouts, and in-range events never notify.
+///
+/// Spacing (BW2): a safety edge used to page every time it re-crossed, so a vital flapping around a bound
+/// paged every 40 s. Now:
+/// - no two pushes ever land within `minPushGapSeconds` (10 min), even across episodes;
+/// - inside one episode a safety re-page waits `safetyRenotifySeconds` (60 min) after the last page;
+/// - an escalation waits `WatchdogConfig.notifyCooldownSeconds`;
+/// - the first severe of a NEW episode still pages (subject to the 10-minute gap).
+/// A push whose delivery never came back ("queued" older than `queuedStaleSeconds`) is treated as failed and
+/// retried after the cooldown, instead of reading "in-flight" forever.
 public enum WatchdogNotifyPolicy: Sendable {
+    /// A "queued" delivery older than this lost its callback (killed mid-post): treat it as failed.
+    public static let queuedStaleSeconds = 120
+    /// Same-episode safety re-page spacing.
+    public static let safetyRenotifySeconds = 60 * 60
+    /// Floor between any two pushes.
+    public static let minPushGapSeconds = 10 * 60
+
     public static func extremeFamily(_ label: WatchdogEventLabel) -> Bool {
         switch label {
         case .safetyBound, .abnormalStillTachycardia, .abnormalMultiDirection, .abnormalSpo2Still:
@@ -314,6 +330,15 @@ public enum WatchdogNotifyPolicy: Sendable {
         delivery == "failed" || delivery == "denied"
     }
 
+    /// `delivery` as it should be read at `nowUnix`: a "queued" push older than `queuedStaleSeconds` (by
+    /// `queuedAtUnix`) is "failed". A "queued" with no known time stays in flight.
+    public static func effectiveDelivery(_ delivery: String, queuedAtUnix: Int?, nowUnix: Int) -> String {
+        guard inFlight(delivery), let queuedAtUnix, nowUnix - queuedAtUnix > queuedStaleSeconds else {
+            return delivery
+        }
+        return "failed"
+    }
+
     public static func decision(severity: WatchdogSeverity, openedEpisode: Bool,
                                 safety: Bool, previousSafety: Bool,
                                 fused: Double, previousFused: Double,
@@ -323,27 +348,36 @@ public enum WatchdogNotifyPolicy: Sendable {
                                 notifiedSevereEpisodeId: String = "",
                                 lastNotifiedAt: Int? = nil,
                                 nowUnix: Int = 0,
-                                notifyDelivery: String = "") -> (Bool, String) {
+                                notifyDelivery: String = "",
+                                notifyQueuedAtUnix: Int? = nil) -> (Bool, String) {
         _ = fused
         _ = previousFused
         _ = openedEpisode
-        if inFlight(notifyDelivery) { return (false, "in-flight") }
+        // The queue time is stamped by the service; evaluate stamps `lastNotifiedAt` at the same moment.
+        let delivery = effectiveDelivery(notifyDelivery, queuedAtUnix: notifyQueuedAtUnix ?? lastNotifiedAt,
+                                         nowUnix: nowUnix)
+        if inFlight(delivery) { return (false, "in-flight") }
         let safetyEdge = safety && !previousSafety
         guard severity == .severe || safetyEdge else { return (false, "not-severe") }
+        let sinceLast = lastNotifiedAt.map { nowUnix - $0 }
+        func elapsed(_ seconds: Int) -> Bool { sinceLast.map { $0 >= seconds } ?? true }
         let eid = episodeId ?? ""
         let firstSevere = notifiedSevereEpisodeId.isEmpty
             || (!eid.isEmpty && notifiedSevereEpisodeId != eid)
-        if firstSevere, retryable(notifyDelivery) {
-            let cooled = lastNotifiedAt.map { nowUnix - $0 >= WatchdogConfig.notifyCooldownSeconds } ?? true
-            if !cooled { return (false, "retry-wait") }
+        if firstSevere, retryable(delivery) {
+            if !elapsed(WatchdogConfig.notifyCooldownSeconds) { return (false, "retry-wait") }
             return (true, "retry")
         }
         if firstSevere {
+            if !elapsed(minPushGapSeconds) { return (false, "min-gap") }
             return (true, safetyEdge ? "safety" : "first-severe")
         }
-        if safetyEdge { return (true, "safety") }
+        if safetyEdge {
+            if !elapsed(safetyRenotifySeconds) { return (false, "safety-cooldown") }
+            return (true, "safety")
+        }
         guard extremeFamily(eventLabel) else { return (false, "not-extreme-family") }
-        let cooled = lastNotifiedAt.map { nowUnix - $0 >= WatchdogConfig.notifyCooldownSeconds } ?? true
+        let cooled = elapsed(max(WatchdogConfig.notifyCooldownSeconds, minPushGapSeconds))
         if recon >= previousRecon + WatchdogCalibration.escalateDelta {
             if !cooled { return (false, "cooldown") }
             return (true, "escalate")

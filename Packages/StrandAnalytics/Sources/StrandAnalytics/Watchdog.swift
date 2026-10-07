@@ -153,6 +153,10 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     /// Last measurement civil minute that counted as a persist observation.
     public var lastPersistObsMinute: Int
     public var notifyDelivery: String
+    /// Unix second the current push was handed to the notifier (`notifyDelivery == "queued"`). A "queued" older
+    /// than `WatchdogNotifyPolicy.queuedStaleSeconds` never got its delivery callback persisted (the app was
+    /// killed mid-post) and counts as failed. nil = not stamped (falls back to `lastNotifiedAt`).
+    public var notifyQueuedAtUnix: Int?
     /// First unix the current safety extreme was seen. 0 = none. Survives thin / UniTS-fail ticks.
     public var safetyFirstUnix: Int
     public var safetyExtreme: Double
@@ -212,6 +216,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 lastPersistMinute: Int = 0,
                 lastPersistObsMinute: Int = 0,
                 notifyDelivery: String = "",
+                notifyQueuedAtUnix: Int? = nil,
                 safetyFirstUnix: Int = 0,
                 safetyExtreme: Double = 0,
                 safetyChannel: String = "") {
@@ -286,6 +291,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.lastPersistMinute = lastPersistMinute
         self.lastPersistObsMinute = lastPersistObsMinute
         self.notifyDelivery = notifyDelivery
+        self.notifyQueuedAtUnix = notifyQueuedAtUnix
         self.safetyFirstUnix = safetyFirstUnix
         self.safetyExtreme = safetyExtreme
         self.safetyChannel = safetyChannel
@@ -367,6 +373,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         lastPersistMinute = try c.decodeIfPresent(Int.self, forKey: .lastPersistMinute) ?? 0
         lastPersistObsMinute = try c.decodeIfPresent(Int.self, forKey: .lastPersistObsMinute) ?? 0
         notifyDelivery = try c.decodeIfPresent(String.self, forKey: .notifyDelivery) ?? ""
+        notifyQueuedAtUnix = try c.decodeIfPresent(Int.self, forKey: .notifyQueuedAtUnix)
         safetyFirstUnix = try c.decodeIfPresent(Int.self, forKey: .safetyFirstUnix) ?? 0
         safetyExtreme = try c.decodeIfPresent(Double.self, forKey: .safetyExtreme) ?? 0
         safetyChannel = try c.decodeIfPresent(String.self, forKey: .safetyChannel) ?? ""
