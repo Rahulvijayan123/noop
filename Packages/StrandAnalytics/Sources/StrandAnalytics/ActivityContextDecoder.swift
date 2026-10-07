@@ -846,8 +846,10 @@ public struct ActivityContextDecoder: Sendable {
             // Until a published state has shown it, the event follows the direction that comes to lead
             // (hsmm-1.8: a burst is no longer assigned a direction up front, so it may resolve a second or two
             // after the excursion began). Once shown it keeps its kind, so no reader ever sees two.
+            // (A kind takes over only by exceeding the current kind's PEAK, so the event names the direction
+            // whose mass rose highest, not whichever lingers last.)
             if active.shown != true, let best = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
-               best.1 != active.kind, post[best.0.rawValue] > mass {
+               best.1 != active.kind, post[best.0.rawValue] > active.probability {
                 active.kind = best.1
                 mass = post[best.0.rawValue]
                 active.probability = mass

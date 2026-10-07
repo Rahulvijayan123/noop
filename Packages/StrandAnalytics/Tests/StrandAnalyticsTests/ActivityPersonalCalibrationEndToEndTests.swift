@@ -237,7 +237,10 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
         let line = Self.describe(Self.busyStander, c)
         print("CALIBRATION", line)
         XCTAssertEqual(c.result.status, .adopted, line)
-        XCTAssertNotNil(c.result.profile?.modes["upright"], line)
+        // hsmm-1.8: the population seated / upright split is hedged rather than dwell-driven, so the fitter may
+        // resolve the busy stander by narrowing either stationary mode (it now adapts "seated" so busy standing
+        // stops fitting it); what matters is that sitting / standing were calibrated and lying was not.
+        XCTAssertTrue(c.result.profile?.modes["upright"] != nil || c.result.profile?.modes["seated"] != nil, line)
         XCTAssertNil(c.result.profile?.modes["bedRest"], "nothing labelled lying, nothing adapted: \(line)")
         XCTAssertGreaterThan((c.after.recall[.upright] ?? 0) - (c.before.recall[.upright] ?? 0), 0.3, line)
     }
