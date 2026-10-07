@@ -285,7 +285,9 @@ private struct WatchdogVitalSheet: View {
                 }
             }
         }
+        #if os(iOS)
         .noopSheetPresentation(largeFirst: false)
+        #endif
     }
 
     private var explanation: String {
@@ -1126,7 +1128,9 @@ private struct WatchdogEventSheet: View {
                 }
             }
         }
+        #if os(iOS)
         .noopSheetPresentation(largeFirst: true)
+        #endif
         .sheet(isPresented: $notePresented) {
             WatchdogEpisodeNoteSheet(deviceId: repo.deviceId) { notePresented = false }
                 .environmentObject(store)
