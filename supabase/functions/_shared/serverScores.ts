@@ -23,6 +23,9 @@ function fail(code: string, status: number): Error {
   return Object.assign(new Error(code), { code, status });
 }
 
+/** The metrics with an AI-written explanation (metric_insight_jobs.metric). */
+export const INSIGHT_METRICS: ReadonlySet<string> = new Set(['resting_hr', 'hrv_rmssd']);
+
 export async function readOwnerDayScores({ rest, userId, day, deviceId }: {
   rest: Pick<SupabaseRest, 'rpc'>; userId: string; day: string; deviceId: string | null;
 }) {
@@ -340,10 +343,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isExposureGet = req.method === 'GET' && route === '/exposures';
   const isGroundTruthLabels = req.method === 'POST' && route === '/ground-truth-labels';
   const isSensorBiomarkers = req.method === 'GET' && route === '/sensor-biomarkers';
+  // Metric explanations (20261008000000_metric_insights.sql): account-level, no device.
+  const isInsights = req.method === 'POST' && route === '/insights';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
-      && !isSensorBiomarkers) {
+      && !isSensorBiomarkers && !isInsights) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -386,7 +391,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isContext || isContextHistory || isSensorBiomarkers
       ? url.searchParams.get('deviceId')
-      : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels) ? null
+      : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels
+        || isInsights) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
@@ -394,7 +400,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     // carry a device per item, which is resolved leniently inside their handlers, so they have no
     // request-level device.
     if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet && !isGroundTruthLabels
-        && !(isPlacementPost && externalDeviceId == null)
+        && !isInsights && !(isPlacementPost && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
@@ -402,7 +408,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
       : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet
-        || isGroundTruthLabels) ? null
+        || isGroundTruthLabels || isInsights) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -535,6 +541,15 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         truncated: read?.truncated === true,
         identity,
       }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isInsights) {
+      // The cached explanation of one metric when its inputs are unchanged; otherwise the insight worker is
+      // queued and the previous explanation comes back marked stale. The owner comes from the credential. The
+      // app draws the value and the chart from its own data, so any failure here only hides the explanation.
+      const metric = requestBody?.metric;
+      if (typeof metric !== 'string' || !INSIGHT_METRICS.has(metric)) throw fail('invalid_metric', 400);
+      const outcome = await rest.rpc('metric_insight_request_v1', { p_user: user.id, p_metric: metric });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
     }
     if (isGroundTruthLabels) {
       // Ground-truth activity labels. The owner comes from the credential, never from the body; same
