@@ -171,6 +171,9 @@ public struct DeviceRegistryStore: Sendable {
         // deviceId-keyed and describe what the wearer was doing minute by minute — as sensitive as the
         // heart-rate stream they annotate, so "delete this device's data" must clear them too.
         "activityContextInterval", "activityContextDay",
+        // v50-activity-context-provenance: the decoder's transition events and the timestamped spot HRV
+        // readings are deviceId-keyed too, and as personal as the context they sit beside.
+        "activityContextTransition", "spotHrvReading",
     ]
 
     /// Permanently delete every recorded sample/derived row belonging to one device, across all
