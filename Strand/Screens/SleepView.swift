@@ -480,6 +480,15 @@ struct SleepView: View {
             // are byte-identical to before.
             let session = heroNight(model).session
             SleepFeatureSection(startTs: session.effectiveStartTs, endTs: session.endTs)
+            // Sleep analytics (docs/sleep-analytics/spec.md §8 app step 3): the Phase-1
+            // `daily.sleep_analytics_v1` document, rendered only when it exists for the CURRENT
+            // night AND passes the staleness guard (the current main-night GROUP is what the guard
+            // matches the document's fragments against). No payload, or a stale pre-edit document,
+            // renders nothing — builds without the payload are byte-identical to before.
+            let night = heroNight(model)
+            let group = Self.mainNightGroup(night.sourceBlocks, habitualMidsleepSec: night.habitualMidsleepSec)
+            SleepAnalyticsSection(startTs: night.session.effectiveStartTs, endTs: night.session.endTs,
+                                  currentSessions: group.isEmpty ? [night.session] : group)
         case .sleepDebt:       metricLink("sleep_debt_min") { SleepDebtLedgerCard(model: model) }
         case .stagesVsTypical: metricLink("restorative_pct") { StagesVsTypicalCard(model: model) }
         case .asleepDuration:  metricLink("sleep_total_min") { durationTrend(model) }
