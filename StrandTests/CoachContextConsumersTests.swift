@@ -79,6 +79,9 @@ final class CoachContextConsumersTests: XCTestCase {
         XCTAssertTrue(lines[0].contains("Heart rate: 104 bpm vs expected 72.0 ± 6.0 (trust 80%)"), lines[0])
         XCTAssertTrue(lines[0].contains("Walking"), lines[0])
         XCTAssertTrue(lines[0].contains("[walk]"), lines[0])
+        // Review fix: the label is the head's LATEST-minute output, not the whole scored window's activity.
+        XCTAssertTrue(lines[0].contains("activity in the latest minute: Walking [walk]"), lines[0])
+        XCTAssertFalse(lines[0].contains("measured while"), lines[0])
 
         let unknown = CoachWatchdogText.signalLines(signals, activityLabel: "unknown", activityDetail: "Unknown")
         XCTAssertTrue(unknown[0].contains("activity unknown"), unknown[0])
@@ -106,7 +109,8 @@ final class CoachContextConsumersTests: XCTestCase {
     }
 
     func testStressIndexUsesOnlyAwakeStillBeats() throws {
-        let still = beats(from: from)
+        // 400 still beats (~340 s of R-R): above the 5-min awake-still support floor.
+        let still = beats(from: from, count: 400)
         let asleep = beats(from: from + 1_000, base: 1_000)
         let running = beats(from: from + 2_000, base: 400)
         let context = [interval(from, from + 600, .sitting),
@@ -114,10 +118,26 @@ final class CoachContextConsumersTests: XCTestCase {
                        interval(from + 2_000, from + 2_600, .running)]
         let kept = AICoachEngine.stressIndexBeats(rr: still + asleep + running, context: context)
         XCTAssertEqual(kept, still)
-        let line = try XCTUnwrap(AICoachEngine.stressIndexLine(rr: still + asleep + running, context: context))
+        let line = try XCTUnwrap(AICoachEngine.stressIndexLine(rr: still + asleep + running, context: context,
+                                                               timeZone: utc))
         let expected = try XCTUnwrap(StressIndex.stressIndex(rr: still))
         XCTAssertTrue(line.hasPrefix("Stress (SI): \(Int(expected.rounded())) "), line)
-        XCTAssertTrue(line.contains("while awake and still"), line)
+        // Review fix: the support and the context horizon are stated (from + 2600 = 16:43 UTC).
+        XCTAssertTrue(line.contains("over 5 min of today's R-R while awake and still, activity context through 16:43"),
+                      line)
+    }
+
+    func testTooLittleAwakeStillRRFallsBackToPooled() throws {
+        // Review fix: 60 still beats (~50 s) clear the SI's 20-beat histogram floor but are far too little to
+        // stand for today's awake stress, so the line falls back to the labelled pooled value.
+        let still = beats(from: from)
+        let running = beats(from: from + 2_000, base: 400)
+        let context = [interval(from, from + 600, .sitting), interval(from + 2_000, from + 2_600, .running)]
+        XCTAssertNotNil(StressIndex.stressIndex(rr: AICoachEngine.stressIndexBeats(rr: still + running,
+                                                                                   context: context)))
+        let line = try XCTUnwrap(AICoachEngine.stressIndexLine(rr: still + running, context: context))
+        XCTAssertTrue(line.contains("pooled across sleep, rest and activity"), line)
+        XCTAssertFalse(line.contains("while awake and still"), line)
     }
 
     func testStressIndexWithoutContextIsLabelledPooled() throws {

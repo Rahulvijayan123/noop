@@ -234,6 +234,20 @@ final class ActivityContextUITests: XCTestCase {
         XCTAssertEqual(ActivityContextWording.text(for: s), "Recent activity")
     }
 
+    func testBriefWalkInsideTheNightDoesNotReadRecentActivityUnderTheNightlyHero() {
+        // Review fix: the nightly hero now joins the whole 8 h night, and a single 30-s supported walking
+        // epoch at 03:00 (a bathroom trip) used to set recentActivity 0, so the hero said "Recent activity".
+        let night = 8 * 3600
+        let walkAt = base + 4 * 3600
+        let epochs = stride(from: base, to: base + night, by: 30).map {
+            epoch($0, motion: $0 == walkAt ? .walking : .stationary)
+        }
+        XCTAssertTrue(epochs.contains { $0.motion == .walking && $0.isSupportedNonStationary })
+        let s = ActivityContextJoin.context(for: base, end: base + night, epochs: epochs)
+        XCTAssertNil(s.recentActivity)
+        XCTAssertEqual(ActivityContextWording.text(for: s), "Low movement; posture unknown")
+    }
+
     func testWordingRecentActivityRespectsTheTenMinuteWindow() {
         // Supported activity ended 20 minutes ago: past the post-activity window -> stillness again.
         let s = summary(shares: [.stationary: 0.95, .walking: 0.05],

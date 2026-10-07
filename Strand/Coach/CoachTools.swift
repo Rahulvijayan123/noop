@@ -24,8 +24,10 @@ enum CoachToolDisplayNames {
 /// The WATCHDOG signal lines of `get_baseline_status`, pure so they are testable without an executor.
 enum CoachWatchdogText {
     /// One line per observed signal, each carrying what the Watchdog's own activity head said the wearer was
-    /// doing over the scored window (D6-09): a heart rate of 104 vs an expected 72 reads very differently
-    /// while walking than while still, and the model must not mistake the first for stress.
+    /// doing (D6-09): a heart rate of 104 vs an expected 72 reads very differently while walking than while
+    /// still, and the model must not mistake the first for stress. `activityLabel` is the head's label for
+    /// the LATEST minute of the scored window (`WatchdogResult.activityLabel` is the last per-minute label),
+    /// not a summary of the whole 30 minutes, so the line says exactly that.
     static func signalLines(_ signals: [WatchdogSignalEvidence], activityLabel: String,
                             activityDetail: String) -> [String] {
         func fmt(_ v: Double) -> String { abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.1f", v) }
@@ -42,7 +44,7 @@ enum CoachWatchdogText {
             if s.trustPct > 0 { line += " (trust \(s.trustPct)%)" }
             line += label == WatchdogActivityClass.unknown.rawValue
                 ? "; activity unknown (the reading may be from movement)"
-                : "; measured while: \(doing)"
+                : "; activity in the latest minute: \(doing)"
             lines.append(line)
         }
         return lines
