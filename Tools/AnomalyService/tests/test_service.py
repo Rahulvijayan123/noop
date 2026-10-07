@@ -103,11 +103,13 @@ def test_sustained_shift_is_one_candidate_with_a_stable_key(tmp_path):
   assert last["context"]["windows"] >= 6     # the run grew across jobs under one key
 
 
-def test_steady_state_marks_recovery_after_exertion():
-  ctx = np.array(["active"] * 5 + ["still"] * 40 + ["walking"] * 3 + ["still"] * 20, dtype=object)
+def test_steady_state_marks_recovery_after_exertion_bouts():
+  ctx = np.array(["active"] * 5 + ["still"] * 40 + ["walking"] * 3 + ["still"] * 20 + ["active"] + ["still"] * 10,
+                 dtype=object)
   out = steady_state(ctx)
   assert list(out[5:35]) == ["recovery"] * 30 and out[35] == "still"
   assert list(out[48:58]) == ["recovery"] * 10 and out[58] == "still"
+  assert list(out[69:71]) == ["recovery"] * 2 and out[71] == "still"      # isolated gesture: 2-min settle only
 
 
 def test_epoch_context_uses_confident_epochs_and_cautious_merge():

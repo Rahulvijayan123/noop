@@ -28,6 +28,7 @@ WALK_STEPS = 20
 MIN_HR_SECONDS = 30
 RECOVERY_AFTER_ACTIVE_MIN = 30
 RECOVERY_AFTER_WALKING_MIN = 10
+RECOVERY_SETTLE_MIN = 2
 EPOCH_MIN_CONFIDENCE = 0.6
 
 
@@ -48,17 +49,31 @@ class MinuteFrame:
 
 def steady_state(context: np.ndarray, after_active: int = RECOVERY_AFTER_ACTIVE_MIN,
                  after_walking: int = RECOVERY_AFTER_WALKING_MIN) -> np.ndarray:
-  """Still minutes shortly after exertion are "recovery", not rest: HR and HRV are still returning to baseline (the
-  same steady-state rule as Layer 1's context strata: 30 min after vigorous, 10 min after walking)."""
+  """Still minutes shortly after exertion are "recovery", not rest: HR and HRV are still returning to baseline. Same
+  steady-state rule as Layer 1's context strata, which applies it to BOUTS: 30 min after a vigorous bout (≥ 3 active
+  minutes), 10 min after a walking bout (≥ 2 exertion minutes), and the 2-minute settle after any shorter movement
+  (an isolated arm gesture over the minute-level dyn threshold is not exercise)."""
   out = np.asarray(context, dtype=object).copy()
-  last_active = last_walk = -10 ** 9
-  for i, c in enumerate(out):
-    if c == "active":
-      last_active = i
-    elif c == "walking":
-      last_walk = i
-    elif c == "still" and (i - last_active <= after_active or i - last_walk <= after_walking):
-      out[i] = "recovery"
+  n = len(out)
+  exert = np.array([c in ("active", "walking") for c in out])
+  i = 0
+  while i < n:
+    if not exert[i]:
+      i += 1
+      continue
+    j = i
+    while j + 1 < n and (exert[j + 1] or (j + 2 < n and exert[j + 2])):   # bridge 1-minute gaps
+      j += 1
+    bout = out[i:j + 1]
+    n_active = int(np.sum(bout == "active"))
+    length = int(np.sum([c in ("active", "walking") for c in bout]))
+    hold = after_active if n_active >= 3 else (after_walking if length >= 2 else RECOVERY_SETTLE_MIN)
+    for k in range(j + 1, min(n, j + 1 + hold)):
+      if out[k] == "still":
+        out[k] = "recovery"
+      elif exert[k]:
+        break
+    i = j + 1
   return out
 
 

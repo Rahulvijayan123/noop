@@ -65,7 +65,9 @@ def synth_frame(path: str, user: int) -> tuple[MinuteFrame, dict]:
 def npz_frame(path: str) -> MinuteFrame:
   z = np.load(path, allow_pickle=False)
   data = {k[2:]: z[k] for k in z.files if k.startswith("d_")}
-  return MinuteFrame(minutes=z["minutes"], data=data, context=z["context"].astype(str).astype(object),
+  ctx = z["context"].astype(str).astype(object)
+  ctx = steady_state(np.where(ctx == "recovery", "still", ctx).astype(object))   # current steady-state rule
+  return MinuteFrame(minutes=z["minutes"], data=data, context=ctx,
                      family=str(z["family"]) if "family" in z.files else None, counters={})
 
 

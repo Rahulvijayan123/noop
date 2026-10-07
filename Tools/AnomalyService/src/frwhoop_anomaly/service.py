@@ -18,6 +18,7 @@ import socket
 import threading
 import time
 import traceback
+import uuid
 
 import numpy as np
 
@@ -87,7 +88,8 @@ class Service:
       sd_notify("WATCHDOG=1")
       try:
         n = self.db.rpc("enqueue_anomaly_jobs_v1", self.cfg.enqueue_limit,
-                        f"{self.cfg.min_interval_minutes} minutes")
+                        f"{self.cfg.min_interval_minutes} minutes",
+                        [uuid.UUID(u) for u in self.cfg.users] if self.cfg.users else None)
         log.info("enqueue: %s", n[0] if n else n)
         for _ in range(self.cfg.max_jobs_per_cycle):
           if self.stop.is_set() or not self.run_one():
@@ -220,7 +222,7 @@ class Service:
       out = []
       for w, z in raw:
         out.append(cand.ModelWindowResult(model=scorer.name, window=w, channel_scores=cand.directional(z),
-                                          signed_mean=np.nanmean(z, axis=1) if np.isfinite(z).any() else np.full(z.shape[0], np.nan)))
+                                          signed_mean=cand.nanmean_rows(z)))
       for bucket in ("rest", "sleep"):
         mine = [r for r in out if r.window.bucket == bucket]
         if not mine:

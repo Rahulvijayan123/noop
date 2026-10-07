@@ -9,7 +9,10 @@ values ('11111111-1111-1111-1111-111111111111', 'aaaaaaaa-0000-0000-0000-0000000
 do $$
 declare n integer; j public.anomaly_jobs; r bigint; c integer;
 begin
-  n := public.enqueue_anomaly_jobs_v1(10);
+  -- allowlist excluding the owner: nothing queued
+  n := public.enqueue_anomaly_jobs_v1(10, interval '10 minutes', array['22222222-2222-2222-2222-222222222222']::uuid[]);
+  if n <> 0 then raise exception 'allowlist expected 0 got %', n; end if;
+  n := public.enqueue_anomaly_jobs_v1(10, interval '10 minutes', array['11111111-1111-1111-1111-111111111111']::uuid[]);
   if n <> 1 then raise exception 'enqueue expected 1 got %', n; end if;
   -- same completion again: no bump
   n := public.enqueue_anomaly_jobs_v1(10);

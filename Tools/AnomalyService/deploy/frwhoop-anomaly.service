@@ -20,7 +20,8 @@ Environment=OPENBLAS_NUM_THREADS=2
 ExecStart=/opt/frwhoop-anomaly/venv/bin/python -m frwhoop_anomaly.service
 Restart=always
 RestartSec=10
-# A hung loop (no WATCHDOG=1 for 15 min) is killed and restarted. Model load is ~1 min; one job < 5 min.
+# A hung loop (no WATCHDOG=1 for 15 min) is killed and restarted. Model load is ~1 min. A running job feeds the
+# watchdog (and renews its lease) for at most 25 min — UniTS prompt-tuning can take several minutes on 1 core.
 WatchdogSec=900
 TimeoutStartSec=600
 TimeoutStopSec=60

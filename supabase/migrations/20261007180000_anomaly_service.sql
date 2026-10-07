@@ -135,8 +135,11 @@ grant usage, select on sequence public.anomaly_result_revision_seq to service_ro
 -- ---------------------------------------------------------------------------------------------------------
 -- Enqueue: a (user, device) is due when one of its last two days finished server scoring after the job was last
 -- marked, at most once per p_min_interval per job. Never touches noop_* or the scoring lock.
+-- p_users (optional) limits discovery to those owners: the staged rollout runs the models for the owner's account
+-- only (FRWHOOP_ANOMALY_USERS on the VPS); null = every scored owner.
 create or replace function public.enqueue_anomaly_jobs_v1(p_limit integer default 50,
-                                                         p_min_interval interval default interval '10 minutes')
+                                                         p_min_interval interval default interval '10 minutes',
+                                                         p_users uuid[] default null)
 returns integer language plpgsql security definer set search_path = '' as $$
 declare n integer := 0; r record;
 begin
@@ -147,6 +150,7 @@ begin
      where s.algorithm_version = 'frwhoop-server-1' and s.completed_revision > 0
        and s.day >= (pg_catalog.now() at time zone 'UTC')::date - 2
        and s.last_completed_at is not null
+       and (p_users is null or s.user_id = any(p_users))
        and not exists (select 1 from public.noop_account_retirements x where x.user_id = s.user_id)
        and exists (select 1 from public.devices d where d.id = s.device_id and d.user_id = s.user_id)
      group by s.user_id, s.device_id
@@ -315,7 +319,7 @@ do $$
 declare f text;
 begin
   foreach f in array array[
-    'public.enqueue_anomaly_jobs_v1(integer, interval)',
+    'public.enqueue_anomaly_jobs_v1(integer, interval, uuid[])',
     'public.claim_anomaly_job_v1(integer)',
     'public.renew_anomaly_job_v1(uuid, integer)',
     'public.fail_anomaly_job_v1(uuid, bigint, text)',

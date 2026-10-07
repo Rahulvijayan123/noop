@@ -33,6 +33,7 @@ class Config:
   score_lookback_hours: int
   max_jobs_per_cycle: int
   dry_run: bool
+  users: tuple[str, ...] = ()            # staged rollout: only these owners (empty = every scored owner)
 
   @staticmethod
   def from_env() -> "Config":
@@ -60,4 +61,5 @@ class Config:
       score_lookback_hours=int(_env("FRWHOOP_ANOMALY_LOOKBACK_HOURS", "6")),
       max_jobs_per_cycle=int(_env("FRWHOOP_ANOMALY_MAX_JOBS_PER_CYCLE", "4")),
       dry_run=_env("FRWHOOP_ANOMALY_DRY_RUN", "0") == "1",
+      users=tuple(u.strip() for u in (_env("FRWHOOP_ANOMALY_USERS", "") or "").split(",") if u.strip()),
     )

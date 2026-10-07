@@ -70,8 +70,14 @@ def windows(frame, lo: int, hi: int) -> list[Window]:
 def directional(z: np.ndarray) -> np.ndarray:
   """z: (U, H) per-minute standardized residuals → (U,) mean directional z (NaN where a channel has no data)."""
   zz = np.where(DIRECTION[:, None] == 0, np.abs(z), z * DIRECTION[:, None])
-  with np.errstate(all="ignore"):
-    return np.nanmean(zz, axis=1)
+  return nanmean_rows(zz)
+
+
+def nanmean_rows(z: np.ndarray) -> np.ndarray:
+  """Row means ignoring NaN; NaN (silently) for a channel with no data in the window."""
+  n = np.isfinite(z).sum(axis=1)
+  s = np.where(np.isfinite(z), z, 0.0).sum(axis=1)
+  return np.where(n > 0, s / np.maximum(n, 1), np.nan)
 
 
 @dataclasses.dataclass
