@@ -416,27 +416,8 @@ struct MonitorView: View {
     @State private var loading = false
 
     var body: some View {
-        ScreenScaffold(title: "Monitor", subtitle: "Nara pipeline diagnostics", trailing: { HeaderSettingsButton() }) {
+        ScreenScaffold(title: "Pipeline", subtitle: "Nara pipeline diagnostics", trailing: { HeaderSettingsButton() }) {
             VStack(alignment: .leading, spacing: 24) {
-                NavigationLink(value: TabRoute.layer1) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Day & night usuals")
-                                .font(StrandFont.subhead.weight(.semibold))
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Text("Layer 1. Separate from Charge.")
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    .padding(16)
-                    .naraCard()
-                }
-                .buttonStyle(.plain)
                 toolbar
                 if let diagnostics {
                     surface(diagnostics)

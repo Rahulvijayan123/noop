@@ -70,6 +70,9 @@ final class TimesFMStudentSession: @unchecked Sendable {
     }
 
     static func resourceURL() -> URL? {
+        if let url = Bundle.module.url(forResource: "TimesFM3_Student", withExtension: "mlmodelc") {
+            return url
+        }
         if let url = Bundle.module.url(forResource: "TimesFM3_Student", withExtension: "mlpackage") {
             return url
         }

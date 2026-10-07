@@ -331,7 +331,14 @@ struct LiquidTodayView: View {
                     // rows); the order persists under the byte-identical "today.sectionOrder" key Android uses.
                     ForEach(sectionOrder) { section in
                         switch section {
-                        case .hero: heroCard
+                        case .hero:
+                            heroCard
+                            // Layer 1 Baseline + live Watchdog, and the daily log that labels the day for them.
+                            // Riding with the hero keeps them out of the Android-shared section order.
+                            if selectedDayOffset == 0 {
+                                BaselineTodayPeek(liquid: true)
+                                DayLogTodayButton(liquid: true)
+                            }
                         case .synthesis: EmptyView()
                         case .keyMetrics: keyMetricsSection
                         case .workouts: lastWorkoutsSection

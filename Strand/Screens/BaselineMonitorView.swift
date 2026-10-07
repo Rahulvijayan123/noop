@@ -64,6 +64,7 @@ struct BaselineMonitorView: View {
                         subtitle: "Charge, effort, and the other vitals over weeks and months."
                     )
                     TrendsView(embedded: true)
+                    pipelineDiagnosticsLink
                 }
             }
         }
@@ -75,6 +76,36 @@ struct BaselineMonitorView: View {
             }
             store.rescore(days: tape)
         }
+        // A synced night has to move the usuals without leaving and re-entering the tab.
+        .onChangeCompat(of: repo.refreshSeq) { _ in store.rescore(days: days) }
+    }
+
+    private var pipelineDiagnosticsLink: some View {
+        NavigationLink(value: TabRoute.pipelineDiagnostics) {
+            HStack(spacing: 12) {
+                Image(systemName: "server.rack")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.accent)
+                    .frame(width: 22)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pipeline diagnostics")
+                        .font(StrandFont.subhead.weight(.semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Text("Hosted scoring health for today.")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .accessibilityHidden(true)
+            }
+            .padding(16)
+            .naraCard()
+        }
+        .buttonStyle(.plain)
     }
 
     private var usualsReady: Bool {
@@ -146,6 +177,7 @@ struct BaselineMonitorView: View {
                 } else {
                     notEnoughNightsBox
                 }
+                DayLogTodayButton()
                 treatmentBridge
                 Text("Not a diagnosis. Separate from Charge.")
                     .font(StrandFont.footnote)
@@ -692,6 +724,7 @@ struct BaselineCopyPlot: View {
 
 struct BaselineDayLogSheet: View {
     @EnvironmentObject var store: BaselineStore
+    @Environment(\.dismiss) private var dismiss
     var days: [DailyMetric]
     @State private var mood: LBDayMood = .okay
     @State private var activeWindow: LBActiveWindow = .spread
@@ -762,6 +795,7 @@ struct BaselineDayLogSheet: View {
                                            scheduledMed: scheduledMed, mood: mood,
                                            activeWindow: activeWindow, energy: energy, demand: demand)
                         store.setDayLog(log, on: store.loggingDay, days: days)
+                        dismiss()
                     }
                 }
                 .padding(NoopMetrics.cardInnerSpacing)
@@ -769,7 +803,10 @@ struct BaselineDayLogSheet: View {
             .navigationTitle("Daily log")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Not now") { store.showContextSheet = false }
+                    Button("Not now") {
+                        store.showContextSheet = false
+                        dismiss()
+                    }
                 }
             }
             .onAppear {
@@ -913,6 +950,18 @@ struct BaselineTodayPeek: View {
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let live = store.watchdogResult {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(Self.watchdogTone(live))
+                                .frame(width: 7, height: 7)
+                                .accessibilityHidden(true)
+                            Text("Watchdog · \(live.headline)")
+                                .font(StrandFont.caption.weight(.semibold))
+                                .foregroundStyle(StrandPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
                     Text("Open for right now and your usuals.")
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -939,6 +988,16 @@ struct BaselineTodayPeek: View {
         }
     }
 
+    static func watchdogTone(_ result: WatchdogResult) -> Color {
+        guard result.monitoringCurrent, result.unavailable == nil else { return StrandPalette.textTertiary }
+        switch result.severity {
+        case .withinLimits, .note: return StrandPalette.statusPositive
+        case .candidate: return StrandPalette.statusWarning
+        case .active, .severe: return StrandPalette.statusCritical
+        case .dataUnavailable: return StrandPalette.textTertiary
+        }
+    }
+
     @ViewBuilder private var surface: some View {
         if liquid {
             NoopPanelSurface(cornerRadius: 22)
@@ -959,11 +1018,16 @@ struct DayLogTodayButton: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var store: BaselineStore
 
+    /// Local, not `store.showContextSheet`: Today and Monitor stay mounted together in the tab bar, and two
+    /// sheets bound to one store flag would both try to present.
+    @State private var presented = false
+
     private var logged: Bool { store.calendarTodayLog != nil }
 
     var body: some View {
         Button {
             store.openDayLog(on: store.calendarTodayKey)
+            presented = true
         } label: {
             HStack(spacing: 12) {
                 Image(systemName: logged ? "checkmark.circle.fill" : "square.and.pencil")
@@ -1003,6 +1067,10 @@ struct DayLogTodayButton: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(logged ? "Change daily log" : "Open daily log")
+        .sheet(isPresented: $presented, onDismiss: { store.showContextSheet = false }) {
+            BaselineDayLogSheet(days: store.displayDays(from: repo.days))
+                .environmentObject(store)
+        }
     }
 }
 

@@ -206,8 +206,14 @@ struct RootTabView: View {
             case .devices:
                 showDevices = true
                 router.requestedDestination = nil
-            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms, .trends, .baseline, .treatment:
+            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms, .trends, .treatment:
                 routedPillar = dest
+                router.requestedDestination = nil
+            case .baseline:
+                // Baseline lives in the Monitor tab; land there at its root rather than stacking a sheet copy.
+                routedPillar = nil
+                tabPaths[1] = NavigationPath()
+                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 1 }
                 router.requestedDestination = nil
             case .coach:
                 // K3: Coach is now a top-level tab (tag 4) — switch to it directly instead of

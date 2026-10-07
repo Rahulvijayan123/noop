@@ -13,6 +13,7 @@ enum CoachToolDisplayNames {
         case "prepare_chart": return "Metric series"
         case "get_intraday_series": return "Readings through the day"
         case "get_activity_context": return "Activity context"
+        case "get_baseline_status": return "Personal baseline"
         case "save_memory": return "Saved note"
         case "get_memories": return "Past context"
         default: return tool.replacingOccurrences(of: "_", with: " ").capitalized
@@ -27,6 +28,7 @@ struct CoachToolExecutor {
     let repo: Repository
     let engine: AICoachEngine
     let api: CoachAPI
+    var baseline: BaselineStore? { engine.baseline }
 
     // MARK: Schemas
 
@@ -55,6 +57,8 @@ struct CoachToolExecutor {
              "What the wearer was doing (sitting at a desk, standing, walking, running, lying down, sleeping, fidgeting, strap off), from the activity classifier's saved output, with the heart rate, HRV, respiratory rate and steps measured during each activity. Use for questions about posture, movement or context: 'was my heart rate high while I was sitting?', 'how much did I walk today?', 'what was I doing when my HRV dropped?'. Sitting and standing cannot be told apart from a wrist, so a still stretch is often reported as 'Still (sitting or standing)'.",
              ["hours": ("integer", "Hours back from now (default 6, max 168)"),
               "activity": ("string", "Optional: list only one activity: " + CoachActivityContext.activityNames)]),
+        tool("get_baseline_status",
+             "The wearer's PERSONAL BASELINE: for each vital (resting HR, HRV, wrist temperature, respiration, SpO2, awake heart rate), their own 7-day usual and longer 60-day usual with the usual range and how last night compares, plus the live Watchdog check of the last 30 minutes against those usuals, today's daily log and whether a treatment course is logged. Use for 'is this normal for me?', 'am I getting sick?', 'is my HRV/RHR/temperature off?', 'what's my baseline?', or any question comparing now to their usual. Separate from Charge; never a diagnosis."),
         tool("save_memory",
              "Save a durable fact about the user (goal, injury, preference, routine), third person, e.g. 'User is training for a half marathon in March'. Not transient data.",
              ["content": ("string", "The fact, under 400 characters"),
@@ -80,10 +84,13 @@ struct CoachToolExecutor {
             extra = []
         } else if has(["remember", "preference", "about me"]) {
             extra = []
+        } else if has(["baseline", "usual", "normal for me", "watchdog", "sick", " ill", "unwell", "coming down",
+                       "fever", "temperature", "off today", "feel off"]) {
+            extra = ["get_baseline_status", "get_daily_metrics", "get_readiness_analysis"]
         } else if has(["should i train", "ready", "readiness", "overreach", "overtrain", "push", "rest day", "fatigue"]) {
-            extra = ["get_readiness_analysis", "get_daily_metrics"]
+            extra = ["get_readiness_analysis", "get_daily_metrics", "get_baseline_status"]
         } else if has(["sleep", "hrv", "recovery", "charge", "resting", "heart rate", "trend", "average", "week"]) {
-            extra = ["get_daily_metrics", "get_readiness_analysis"]
+            extra = ["get_daily_metrics", "get_readiness_analysis", "get_baseline_status"]
         } else {
             return definitions
         }
@@ -112,6 +119,7 @@ struct CoachToolExecutor {
         case "prepare_chart": return chart(args)
         case "get_intraday_series": return await intraday(args)
         case "get_activity_context": return await activityContext(args)
+        case "get_baseline_status": return baselineStatus()
         case "save_memory": return await saveMemory(args)
         case "get_memories": return await memories()
         default: return "Unknown tool: \(name)"
@@ -182,6 +190,63 @@ struct CoachToolExecutor {
             lines.append("• Sleep: 7-night average \(fmt(nights.reduce(0, +) / Double(nights.count), 1)) h over \(nights.count) nights with data; shortfall against an 8 h reference \(fmt(debt, 1)) h")
         }
         if let stress = await engine.stressIndexLine() { lines.append("• " + stress) }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Same evaluations Watchdog scores against and the Monitor tab draws, so a quoted usual matches the screen.
+    private func baselineStatus() -> String {
+        guard let baseline else { return "The personal baseline is not available in this context." }
+        guard !repo.days.isEmpty else { return "No wearable data is available yet, so there is no personal baseline." }
+        func fmt(_ v: Double) -> String { abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.1f", v) }
+        func signed(_ v: Double) -> String { (v >= 0 ? "+" : "") + fmt(v) }
+
+        var lines = ["PERSONAL BASELINE (on-device day-and-night usuals; separate from Charge; not a diagnosis):"]
+        for ev in baseline.watchdogPromptEvaluations(days: repo.days) {
+            let unit = ev.series.planRow.unit
+            var parts: [String] = []
+            if ev.show7, let c = ev.copy7 {
+                var part = "7-day usual \(fmt(c.centerDisplay)) \(unit) (range \(fmt(c.bandLoDisplay))–\(fmt(c.bandHiDisplay)), trust \(ev.usualTrustPct7)%)"
+                if let d = c.deltaDisplay { part += ", last night \(signed(d)) vs usual" }
+                parts.append(part)
+            }
+            if ev.showLong, let c = ev.copyLong {
+                parts.append("60-day usual \(fmt(c.centerDisplay)) \(unit) (range \(fmt(c.bandLoDisplay))–\(fmt(c.bandHiDisplay))\(ev.stale ? ", stale" : ""))")
+            }
+            if parts.isEmpty { parts.append("still learning (\(ev.n7) usable nights this week)") }
+            lines.append("• \(ev.series.planRow.planName): " + parts.joined(separator: "; "))
+        }
+
+        lines.append("")
+        if let r = baseline.watchdogResult {
+            let age = max(0, Int(Date().timeIntervalSince1970) - r.lastTickUnix) / 60
+            lines.append("WATCHDOG (last 30 minutes vs the usual; checked \(age == 0 ? "just now" : "\(age) min ago")):")
+            if let reason = r.unavailable {
+                lines.append("• Not scoring right now (\(reason.rawValue)). Do not infer a reading for this stretch.")
+            } else {
+                lines.append("• \(r.headline) \(r.episodeLine)")
+                for s in r.signals {
+                    guard let now = s.observed else { continue }
+                    var line = "  \(s.name): \(fmt(now)) \(s.unit)"
+                    if let usual = s.reconstructed ?? s.usual {
+                        line += " vs expected \(fmt(usual))"
+                        if s.rangeHalf > 0 { line += " ± \(fmt(s.rangeHalf))" }
+                    }
+                    if s.trustPct > 0 { line += " (trust \(s.trustPct)%)" }
+                    lines.append(line)
+                }
+                if !r.contributing.isEmpty { lines.append("• Moving away from usual: " + r.contributing.joined(separator: ", ")) }
+            }
+        } else {
+            lines.append("WATCHDOG: no live check yet this session (the strap may not be streaming).")
+        }
+
+        if let log = baseline.calendarTodayLog {
+            lines.append("")
+            lines.append("TODAY'S DAILY LOG: " + log.summaryLine)
+        }
+        if baseline.activeStart != nil {
+            lines.append("A treatment course is logged; the long usual restarted at its start. Do not guess which treatment.")
+        }
         return lines.joined(separator: "\n")
     }
 

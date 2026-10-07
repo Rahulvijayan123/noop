@@ -60,6 +60,10 @@ enum CoachPrompt {
     HRV or respiration differed by activity, call get_activity_context. Report its labels as given: sitting versus \
     standing is often unresolved from a wrist, and a value it does not list was not measured.
 
+    BASELINE: For "is this normal for me?", "am I getting sick?", or whether a vital is off, call get_baseline_status. \
+    It gives the user's own 7-day and 60-day usuals with ranges and the live 30-minute Watchdog check. Compare to those \
+    personal usuals rather than population norms, quote the range, and never present an Off reading as a diagnosis.
+
     VISUALS: Call get_daily_metrics, get_health_overview, get_workouts, or prepare_chart (for a day-by-day series of one \
     metric) whenever the question involves numbers or trends. The app draws any chart, table, timeline or card itself \
     beneath your finished answer, from the figures you state and the data you fetched. Never draw a visual, never use \

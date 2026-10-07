@@ -161,7 +161,7 @@ enum CoachVisualEvidence {
     /// Tools whose output is real user data the visual may be drawn from.
     static let dataTools: Set<String> = [
         "get_health_overview", "get_daily_metrics", "get_workouts", "get_readiness_analysis", "prepare_chart",
-        "get_intraday_series", "get_activity_context"
+        "get_intraday_series", "get_activity_context", "get_baseline_status"
     ]
 
     /// Removes hand-drawn text charts (box/block characters) the model sometimes emits;

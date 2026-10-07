@@ -82,6 +82,9 @@ final class UniTSCoreMLSession: @unchecked Sendable {
     }
 
     static func resourceURL() -> URL? {
+        if let url = Bundle.module.url(forResource: "UniTS_AD", withExtension: "mlmodelc") {
+            return url
+        }
         if let url = Bundle.module.url(forResource: "UniTS_AD", withExtension: "mlpackage") {
             return url
         }

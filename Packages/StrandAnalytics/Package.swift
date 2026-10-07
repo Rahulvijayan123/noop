@@ -16,9 +16,13 @@ let package = Package(
         // DEBUG define and `-enable-testing` are unaffected, so assertions and `@testable import` still work.
         .target(name: "StrandAnalytics",
                 dependencies: ["WhoopProtocol", "WhoopStore"],
+                // Pre-compiled from `Models/*.mlpackage` (`xcrun coremlc compile … --deployment-target 16.0`).
+                // Shipping the .mlpackage made Xcode run coremlc in the build, which fails on volumes with
+                // ownership disabled (the external SSD this repo lives on), and renamed the bundle entry to
+                // .mlmodelc where the loaders were looking for .mlpackage.
                 resources: [
-                    .copy("Resources/UniTS_AD.mlpackage"),
-                    .copy("Resources/TimesFM3_Student.mlpackage"),
+                    .copy("Resources/UniTS_AD.mlmodelc"),
+                    .copy("Resources/TimesFM3_Student.mlmodelc"),
                 ],
                 swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]),
         // WhoopStore is declared on the TEST target as well as the library: the Oura respiration

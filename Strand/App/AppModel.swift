@@ -754,6 +754,7 @@ final class AppModel: ObservableObject {
         // notifications + the visible-app midnight timer. No network, no data refresh.
         self.dayRollover = DayRolloverCoordinator(repo: self.repo)
         self.coach = AICoachEngine(repo: repo)
+        self.coach.baseline = baseline
         self.intelligence = IntelligenceEngine(repo: repo, profile: profile, deviceId: deviceId)
         // Route the engine's per-day scoring diagnostic into the SAME shareable strap log every other
         // subsystem writes to (PII-scrubbed by `live.append(log:)`), so a bug report ships proof of what

@@ -255,6 +255,8 @@ final class AICoachEngine: ObservableObject {
 
     private let repo: Repository
     private let session: URLSession
+    /// Layer 1 usuals + live Watchdog, read by the Coach's `get_baseline_status` tool. Not observed.
+    weak var baseline: BaselineStore?
 
     private static let providerKey = "ai.provider"
     private static let modelKey = "ai.model"
