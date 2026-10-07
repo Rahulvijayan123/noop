@@ -46,6 +46,10 @@ extension PhysiologyContext {
         /// conditioned view, shrunk toward the all-day parent like the time bands. Windows of unknown posture stay
         /// in the parent only; sitting and standing are never separated.
         public var stratifyStableAwakeByPosture = true
+        /// A stable-awake parent comparison whose day pools a recumbent-likely share (of the windows of known
+        /// posture) that differs from its history's mean share by at least this gets
+        /// `posture_mix_differs_from_history`: its distance mixes a posture regime change with physiology.
+        public var postureMixMaxShareDifference = 0.3
 
         /// Series never compared (coverage bookkeeping is not physiology).
         public var excludedSeriesPrefixes: [String] = ["coverage."]
@@ -363,8 +367,11 @@ extension PhysiologyContext {
         public static let parentInsufficientChildOnly: ReasonCode = "parent_insufficient_child_only"
         public static let noPopulationPrior: ReasonCode = "no_population_prior"
         public static let postureStratum: ReasonCode = "posture_stratum"
-        /// A stable-awake parent value pools windows of more than one posture stratum (unknown included).
+        /// A stable-awake parent value pools recumbent-likely and upright-likely windows (unknown windows are not
+        /// counted as a regime). Carried onto that value's recent / rolling / frozen comparisons.
         public static let postureRegimesPooled: ReasonCode = "posture_regimes_pooled"
+        /// A stable-awake parent comparison: today's recumbent-likely share differs materially from the history's.
+        public static let postureMixDiffersFromHistory: ReasonCode = "posture_mix_differs_from_history"
 
         public static let reasonCodes: [ReasonCode] = [
             nightlySnapshot, stableAwakeWindows, timeBandStratum, degradedValidityIncluded, multipleNightlyValues,
@@ -376,7 +383,7 @@ extension PhysiologyContext {
             frozenRegisteredThisRun, frozenNotRegistered, frozenRegistersInOtherMode, frozenScaleRefloored,
             pooledTowardParent, contextUnsupportedParentOnly, parentInsufficientChildOnly, noPopulationPrior,
             frozenWindowNotCompleteForDay, frozenCreatedAfterDayIgnored, scaleFloorDefault, partialDayComposition,
-            postureStratum, postureRegimesPooled,
+            postureStratum, postureRegimesPooled, postureMixDiffersFromHistory,
         ]
 
         /// Marker between a parent series key and its local-time-band stratum (`<parent>.band_06_12`).
@@ -443,14 +450,31 @@ extension PhysiologyContext {
                 let parts = key.components(separatedBy: sep)
                 let es = windows[key]!.sorted { ($0.support, $0.id) < ($1.support, $1.id) }
                 var byPosture: [PostureStratum: [MeasurementEnvelope]] = [:]
-                for e in es { byPosture[e.posture?.stratum ?? .unknown, default: []].append(e) }
+                var hrDependentLeftOut = false
+                for e in es {
+                    // A stratum decided by heart-rate dependent evidence never keys a heart-rate or HRV reference
+                    // (circular); that window stays in the parent only, like an unknown one.
+                    var p = e.posture?.stratum ?? .unknown
+                    if p != .unknown, e.posture?.heartRateDependent == true,
+                       Eligibility.opticalPulseMetrics.contains(e.metric) {
+                        p = .unknown
+                        hrDependentLeftOut = true
+                    }
+                    byPosture[p, default: []].append(e)
+                }
                 if var dv = windowValue(es, day: identity.day, seriesKey: parts[0], regimeKey: parts[1], mode: mode,
                                         finality: finality, extraReasons: [], config: config) {
-                    // The parent keeps every window and says which posture strata it pools.
+                    // The parent keeps every window and says which posture strata it pools. "Pooled" means both
+                    // known strata are present; unknown windows alone are not a second regime.
                     dv.postureWindows = PostureStratum.allCases.compactMap { p in
                         byPosture[p].map { Diagnostic(p.rawValue, Double($0.count)) }
                     }
-                    if byPosture.count > 1 { dv.reasons = (dv.reasons + [postureRegimesPooled]).sorted() }
+                    var extra: [ReasonCode] = []
+                    if byPosture[.recumbentLikely] != nil && byPosture[.uprightLikely] != nil {
+                        extra.append(postureRegimesPooled)
+                    }
+                    if hrDependentLeftOut { extra.append(PostureEvidence.heartRateDependentStratumNotUsed) }
+                    dv.reasons = (dv.reasons + extra).sorted()
                     out.append(dv)
                 }
                 if config.stratifyStableAwakeByPosture {
@@ -607,6 +631,7 @@ extension PhysiologyContext {
                                          policyFingerprint: policyFingerprint, config: config)
                 var views = [recentComparison(v, t: t, index: index, rolling: rolling.stats, config: config),
                              rolling.comparison, f.comparison]
+                views = views.map { postureMixReasons($0, v, t: t, index: index, config: config) }
                 if isCausalPartialDay(v.seriesKey, mode: v.mode, config: config) {
                     views = views.map(withoutDistance)
                 }
@@ -631,6 +656,9 @@ extension PhysiologyContext {
             var day: String
             var value: Double
             var x: Double
+            /// Stable-awake parent: recumbent-likely share of the day's windows of known posture
+            /// (`DailyValue.postureWindows`); nil when unknown or not recorded.
+            var recumbentShare: Double? = nil
         }
 
         /// Center and scale of a set of supported days, on the transformed scale.
@@ -686,7 +714,8 @@ extension PhysiologyContext {
                     for v in sorted {
                         if let last = pts.last, last.day == v.day { duplicates[k, default: 0] += 1; continue }
                         pts.append(RefPoint(dayNum: ContextReferences.dayNumber(v.day)!, day: v.day, value: v.value,
-                                            x: log ? Foundation.log(v.value) : v.value))
+                                            x: log ? Foundation.log(v.value) : v.value,
+                                            recumbentShare: ContextReferences.recumbentShare(v)))
                     }
                     points[k] = pts
                 }
@@ -700,6 +729,43 @@ extension PhysiologyContext {
                 guard let rs = regimesBySeries[Self.seriesKey(mode, series)] else { return false }
                 return rs.contains { $0 != regime }
             }
+        }
+
+        /// Recumbent-likely share of a stable-awake parent value's windows of known posture; nil without any.
+        static func recumbentShare(_ v: DailyValue) -> Double? {
+            guard let pw = v.postureWindows else { return nil }
+            let r = pw.first { $0.name == PostureStratum.recumbentLikely.rawValue }?.value ?? 0
+            let u = pw.first { $0.name == PostureStratum.uprightLikely.rawValue }?.value ?? 0
+            return r + u > 0 ? r / (r + u) : nil
+        }
+
+        /// The posture regime of a stable-awake parent comparison, which pools every posture stratum: today's
+        /// `posture_regimes_pooled` is carried onto the comparison, and `posture_mix_differs_from_history` is
+        /// added when today's recumbent-likely share differs from the mean share of the view's history days by
+        /// at least `postureMixMaxShareDifference`. The distance is kept (the posture strata are the like-for-like
+        /// comparison); the reasons say what it mixes.
+        static func postureMixReasons(_ c: ReferenceComparison, _ v: DailyValue, t: Int, index: HistoryIndex,
+                                      config: ReferenceConfig) -> ReferenceComparison {
+            guard v.postureWindows != nil else { return c }
+            var add: [ReasonCode] = v.reasons.contains(postureRegimesPooled) ? [postureRegimesPooled] : []
+            let days: Int?
+            switch c.view {
+            case .recent: days = config.recentWindowDays
+            case .rolling: days = config.rollingWindowDays
+            default: days = nil
+            }
+            if let days, let today = recumbentShare(v) {
+                let shares = index.window(v.mode, v.seriesKey, v.regimeKey, from: t - days, to: t - 1)
+                    .compactMap(\.recumbentShare)
+                if !shares.isEmpty {
+                    let mean = shares.reduce(0, +) / Double(shares.count)
+                    if abs(today - mean) >= config.postureMixMaxShareDifference { add.append(postureMixDiffersFromHistory) }
+                }
+            }
+            guard !add.isEmpty else { return c }
+            var c = c
+            c.reasons = Array(Set(c.reasons + add)).sorted()
+            return c
         }
 
         static func isExcluded(_ seriesKey: String, _ config: ReferenceConfig) -> Bool {

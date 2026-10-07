@@ -53,12 +53,15 @@ extension PhysiologyContext {
         /// every post-bout exclusion). The floor of the dose-scaled exclusion below.
         public var postBoutExclusionS = 600
         /// Dose-scaled post-bout exclusion (D8-06): the longest matching row applies, never below
-        /// `postBoutExclusionS`. Bouts carry no intensity (they are heart-rate free), so the kind stands in for it:
-        /// running is vigorous, a logged workout of unknown intensity is treated as moderate, walking as light
-        /// unless long. Supine HRV recovers in 5-10 min after light exercise, ~30 min after threshold work and
-        /// 90 min or more after hard or long work (Seiler 2007).
+        /// `postBoutExclusionS`. Bouts carry no intensity (they are heart-rate free), so the kind stands in for it.
+        /// Literature (Seiler 2007, supine HRV): back to baseline 5-10 min after up to 120 min below the first
+        /// ventilatory threshold, ~30 min after threshold work, 90 min or more after hard work in trained
+        /// athletes. Walking and stepping of any length are light: the 600 s floor (that source, which says
+        /// duration below the threshold does not lengthen recovery). Running stands in for threshold-or-harder
+        /// work: 30 min, and 60 / 90 min when long (the duration steps are conservative choices; the source
+        /// grades intensity, not duration). A logged workout of unknown intensity gets 30 min (60 min when it
+        /// lasted an hour or more): a conservative choice, not derived from that source.
         public var postBoutDoses: [PostBoutDose] = [
-            PostBoutDose(minDurationS: 3600, exclusionS: 1800),
             PostBoutDose(kind: ExertionBouts.kindWorkout, minDurationS: 0, exclusionS: 1800),
             PostBoutDose(kind: ExertionBouts.kindWorkout, minDurationS: 3600, exclusionS: 3600),
             PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 0, exclusionS: 1800),

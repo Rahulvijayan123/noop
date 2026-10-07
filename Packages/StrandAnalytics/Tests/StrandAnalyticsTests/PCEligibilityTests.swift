@@ -639,9 +639,10 @@ final class PCEligibilityContextTests: XCTestCase {
         // A short walk: the fixed 10-minute floor, as before.
         XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 9)]), .ineligible)
         XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 11)]), .eligible)
-        // A 70-minute walk: 30 minutes.
-        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 20)]), .ineligible)
-        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 31)]), .eligible)
+        // A 70-minute walk is still light (below the first threshold, recovery 5-10 min): the floor only.
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 9)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 11)]), .eligible)
+        XCTAssertEqual(B.postBoutExclusionS(bout("walking", minutes: 120, endedMinutesAgo: 0), .init()), 600)
         // A 40-minute run: 60 minutes; a 75-minute run: 90 minutes.
         XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 45)]), .ineligible)
         XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 61)]), .eligible)

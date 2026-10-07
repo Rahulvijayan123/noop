@@ -94,10 +94,15 @@ extension PhysiologyContext {
         public static let insufficientGravity: ReasonCode = "posture_gravity_insufficient"
         public static let ambiguous: ReasonCode = "posture_evidence_ambiguous"
         public static let partlyInBed: ReasonCode = "posture_partly_in_bed"
+        /// A heart-rate or HRV measurement: the in-bed window (heart-rate confirmed) was not read; gravity decided.
+        public static let inBedNotUsedForHeartRateTarget: ReasonCode = "in_bed_window_not_used_heart_rate_target"
+        /// A reference stratum value left out a window whose stratum was decided by heart-rate dependent evidence
+        /// (it stays in the parent).
+        public static let heartRateDependentStratumNotUsed: ReasonCode = "posture_stratum_heart_rate_dependent_not_used"
 
         public static let reasonCodes: [ReasonCode] = [
             likelihoodNotConfirmed, sittingStandingNotSeparated, inBedFromSleepDetector, insufficientGravity,
-            ambiguous, partlyInBed,
+            ambiguous, partlyInBed, inBedNotUsedForHeartRateTarget, heartRateDependentStratumNotUsed,
         ]
 
         /// The in-bed track of the decoder runs (`in_bed` / `not_in_bed`, resolved by revision); runs that did not
@@ -115,8 +120,19 @@ extension PhysiologyContext {
 
         /// Posture likelihood over `support` from `motion` (sorted by ts, one sample per second) and the in-bed
         /// track.
+        ///
+        /// `heartRateTarget`: the measurement is heart-rate or beat-interval derived. The in-bed window (heart-rate
+        /// confirmed sleep detector) is then never read, so the stratum is decided by gravity alone and is
+        /// heart-rate free (`in_bed_window_not_used_heart_rate_target`).
         public static func context(over support: Interval, motion: [MotionObservation], inBed: ResolvedTrack,
-                                   config: PostureConfig) -> PostureContext {
+                                   config: PostureConfig, heartRateTarget: Bool = false) -> PostureContext {
+            if heartRateTarget && config.useInBedWindow {
+                var gravityOnly = config
+                gravityOnly.useInBedWindow = false
+                var c = context(over: support, motion: motion, inBed: inBed, config: gravityOnly)
+                c.reasons = (c.reasons + [inBedNotUsedForHeartRateTarget]).sorted()
+                return c
+            }
             guard support.isValid else {
                 return PostureContext(version: config.version, stratum: .unknown, basis: [], gravityS: 0,
                                       forearmFlatShare: nil, inBedS: nil, heartRateDependent: false,

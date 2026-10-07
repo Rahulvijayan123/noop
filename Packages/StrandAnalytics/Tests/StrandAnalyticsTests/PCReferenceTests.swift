@@ -646,6 +646,70 @@ final class PCReferencePostureTests: XCTestCase {
                         .contains { Ref.isPostureStratum($0.seriesKey) })
     }
 
+    func testHeartRateDependentStratumNeverKeysAHeartRateReference() {
+        // Four HR windows whose recumbent stratum was decided by the heart-rate confirmed in-bed window (as an
+        // envelope written before the engine read gravity only for heart-rate targets would carry).
+        let identity = PC.DayIdentity(deviceScope: "dev-1", day: "2026-03-09", timezoneId: "UTC",
+                                      dayWindow: PC.Engine.dayInterval("2026-03-09", timezoneId: "UTC"))
+        let envs: [PC.MeasurementEnvelope] = (0..<4).map { i in
+            let start = identity.dayWindow.start + 8 * 3600 + i * 1800
+            var e = T.envelope(.heartRate, method: "context.heart_rate.5min_mean", units: "bpm", value: 58,
+                               support: .init(start, start + 300), verdicts: [(.stableAwakeRest, .eligible)])
+            e.posture = PC.PostureContext(version: "pc-posture-1", stratum: .recumbentLikely,
+                                          basis: [PC.PostureEvidence.basisInBedWindow], gravityS: 300,
+                                          forearmFlatShare: 0, inBedS: 300, heartRateDependent: true,
+                                          reasons: [PC.PostureEvidence.inBedFromSleepDetector])
+            return e
+        }
+        let d = Ref.dailyValues(envelopes: envs, identity: identity, mode: .retrospective, finality: .final,
+                                config: .init())
+        XCTAssertNil(d.first { $0.seriesKey == Self.recumbent }, "an HR-derived stratum never keys an HR reference")
+        let parent = d.first { $0.seriesKey == Self.parent }
+        XCTAssertEqual(parent?.supportCount, 4, "the windows stay in the parent")
+        XCTAssertEqual(parent?.postureWindows, [PC.Diagnostic("unknown", 4)])
+        XCTAssertTrue(parent?.reasons.contains(PC.PostureEvidence.heartRateDependentStratumNotUsed) == true)
+    }
+
+    func testParentComparisonsSayWhenTheyPoolADifferentPostureMix() throws {
+        // History: 20 mostly-upright days (recumbent share 0.25). Today: mostly recumbent (share 0.75).
+        func withMix(_ v: PC.DailyValue, recumbent: Int, upright: Int, unknown: Int = 0) -> PC.DailyValue {
+            var v = v
+            v.postureWindows = [PC.Diagnostic("recumbent_likely", Double(recumbent)),
+                                PC.Diagnostic("upright_likely", Double(upright)),
+                                PC.Diagnostic("unknown", Double(unknown))].filter { $0.value > 0 }
+            if recumbent > 0 && upright > 0 { v.reasons = [Ref.postureRegimesPooled] }
+            return v
+        }
+        let hist = T.history(20, series: Self.parent) { _ in 70 }.map { withMix($0, recumbent: 2, upright: 6) }
+        let shifted = withMix(T.value(T.day, 62, series: Self.parent), recumbent: 6, upright: 2)
+        let cs = T.compare([shifted], hist).comparisons
+        for view in [PC.ReferenceView.recent, .rolling] {
+            let c = try XCTUnwrap(T.view(cs, view, series: Self.parent))
+            XCTAssertTrue(c.reasons.contains(Ref.postureRegimesPooled), "\(view)")
+            XCTAssertTrue(c.reasons.contains(Ref.postureMixDiffersFromHistory), "\(view)")
+            XCTAssertNotNil(c.robustZ, "the distance is kept; the reasons say what it mixes")
+        }
+        XCTAssertTrue(try XCTUnwrap(T.view(cs, .frozen, series: Self.parent)).reasons.contains(Ref.postureRegimesPooled))
+        // The same mix as the history: pooled, but not a different mix.
+        let same = T.compare([withMix(T.value(T.day, 70, series: Self.parent), recumbent: 2, upright: 6)], hist)
+        let r = try XCTUnwrap(T.view(same.comparisons, .rolling, series: Self.parent))
+        XCTAssertTrue(r.reasons.contains(Ref.postureRegimesPooled))
+        XCTAssertFalse(r.reasons.contains(Ref.postureMixDiffersFromHistory))
+        // A value without posture bookkeeping (older history, nightly series) is untouched.
+        let plain = T.compare([T.value(T.day, 62, series: Self.parent)], hist)
+        let p = try XCTUnwrap(T.view(plain.comparisons, .rolling, series: Self.parent))
+        XCTAssertFalse(p.reasons.contains(Ref.postureRegimesPooled))
+        XCTAssertFalse(p.reasons.contains(Ref.postureMixDiffersFromHistory))
+    }
+
+    func testOnlyBothKnownPostureStrataCountAsPooled() {
+        // Recumbent plus unknown windows is one known regime, not a pooled mix.
+        let d = Self.day("2026-03-09", recumbent: 3, upright: 0, unknown: 3)
+        XCTAssertFalse(d.first { $0.seriesKey == Self.parent }!.reasons.contains(Ref.postureRegimesPooled))
+        let both = Self.day("2026-03-09", recumbent: 3, upright: 3)
+        XCTAssertTrue(both.first { $0.seriesKey == Self.parent }!.reasons.contains(Ref.postureRegimesPooled))
+    }
+
     func testPostureStratumShrinksTowardTheParentAndFallsBackWithoutSupport() throws {
         // 20 parent days at 68 bpm (a mix), 10 recumbent days at 60 bpm.
         let parent = T.history(20, series: Self.parent) { _ in 68 }

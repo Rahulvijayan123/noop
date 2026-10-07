@@ -208,15 +208,41 @@ final class PCEngineContextRecordTests: XCTestCase {
     }
 
     func testCausalDocumentNeverSeesAnEventPublishedAfterItsCutoff() throws {
-        // Cutoff 10:02: the 10:01 event was published at 10:03.
-        let cutoff = F.t0 + 120
-        let doc = PC.Engine.buildDay(Self.input(mode: .causalLive, cutoff: cutoff), history: .empty)
-        let w = try XCTUnwrap(doc.envelopes.first { $0.metric == .heartRate && $0.support.end <= cutoff })
-        XCTAssertEqual(w.activity.transitionEvents?.postural ?? 0, 0)
+        // A sit-to-stand at 10:04 inside the settling time of the [10:05, 10:10) window, published at 10:15. A
+        // causal job at 10:11:40 decides that window without it; one whose cutoff is after the publication (or a
+        // retrospective rebuild) sees it.
+        let eventTs = F.t0 + 240
+        func event(publishedAt: Int) -> [PC.TransitionEventInput] {
+            [PC.TransitionEventInput(ts: eventTs, kind: "sit_to_stand_like", probability: 0.8, revision: 11,
+                                     availableAt: publishedAt, decoderVersion: "hsmm-1.7",
+                                     algorithmVersion: "streams-activity-1")]
+        }
+        let start = F.t0 + 300
+        let cutoff = F.t0 + 700
+        let causal = PC.Engine.buildDay(Self.input(events: event(publishedAt: F.t0 + 900), mode: .causalLive,
+                                                   cutoff: cutoff), history: .empty)
+        let w = try XCTUnwrap(Self.hrWindow(causal, at: start), "the window is decided before the cutoff")
+        XCTAssertEqual(w.preceding.transitionEvents?.postural ?? 0, 0)
         XCTAssertNil(w.preceding.secondsSinceLastPosturalTransition)
-        // A retrospective rebuild sees it, and an added event changes the input fingerprint.
-        let retro = PC.Engine.buildDay(Self.input(events: []), history: .empty)
-        let withEvent = PC.Engine.buildDay(Self.input(), history: .empty)
-        XCTAssertNotEqual(retro.header.inputFingerprint, withEvent.header.inputFingerprint)
+        XCTAssertNil(w.preceding.lastPosturalTransitionKind)
+        XCTAssertFalse(try XCTUnwrap(w.verdict(.stableAwakeRest)).reasons.contains(B.recentPosturalTransition))
+
+        // Published before the cutoff: the same causal job sees it and gates the window.
+        let seen = PC.Engine.buildDay(Self.input(events: event(publishedAt: F.t0 + 650), mode: .causalLive,
+                                                 cutoff: cutoff), history: .empty)
+        let s = try XCTUnwrap(Self.hrWindow(seen, at: start))
+        XCTAssertEqual(s.preceding.secondsSinceLastPosturalTransition, 60)
+        XCTAssertTrue(try XCTUnwrap(s.verdict(.stableAwakeRest)).reasons.contains(B.recentPosturalTransition))
+
+        // A retrospective rebuild sees it whenever it was published.
+        let retro = PC.Engine.buildDay(Self.input(events: event(publishedAt: F.t0 + 900)), history: .empty)
+        let r = try XCTUnwrap(Self.hrWindow(retro, at: start))
+        XCTAssertEqual(r.preceding.secondsSinceLastPosturalTransition, 60)
+        XCTAssertEqual(r.preceding.lastPosturalTransitionKind, "sit_to_stand_like")
+        XCTAssertEqual(try XCTUnwrap(r.verdict(.stableAwakeRest)).state, .ineligible)
+        XCTAssertTrue(try XCTUnwrap(r.verdict(.stableAwakeRest)).reasons.contains(B.recentPosturalTransition))
+        // An added event changes the input fingerprint.
+        let none = PC.Engine.buildDay(Self.input(events: []), history: .empty)
+        XCTAssertNotEqual(none.header.inputFingerprint, retro.header.inputFingerprint)
     }
 }

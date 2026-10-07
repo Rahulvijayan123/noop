@@ -75,6 +75,26 @@ final class PCPostureTransitionsTests: XCTestCase {
         XCTAssertNil(gravityOnly.inBedS)
     }
 
+    func testHeartRateTargetNeverReadsTheHeartRateConfirmedInBedWindow() {
+        // In bed by the sleep detector, forearm raised (0.93): a heart-rate measurement's stratum is gravity only,
+        // so the window is upright, never recumbent, and heart-rate free.
+        let bed = PC.ActivityIntervalInput(interval: .init(F.t0 - 600, F.t0 + 900), activityClass: "lying_down",
+                                           confidence: 0.9, revision: 1, inBed: true)
+        let hr = P.context(over: support, motion: gravity(x: { _ in 0.93 }), inBed: P.inBedTrack([bed]),
+                           config: .init(), heartRateTarget: true)
+        XCTAssertEqual(hr.stratum, .uprightLikely)
+        XCTAssertFalse(hr.heartRateDependent)
+        XCTAssertNil(hr.inBedS)
+        XCTAssertEqual(hr.basis, [P.basisForearmGravity])
+        XCTAssertTrue(hr.reasons.contains(P.inBedNotUsedForHeartRateTarget))
+        XCTAssertFalse(hr.reasons.contains(P.inBedFromSleepDetector))
+        // The same window for a non-heart-rate target still reads the in-bed window (flagged).
+        let other = P.context(over: support, motion: gravity(x: { _ in 0.93 }), inBed: P.inBedTrack([bed]),
+                              config: .init())
+        XCTAssertEqual(other.stratum, .recumbentLikely)
+        XCTAssertTrue(other.heartRateDependent)
+    }
+
     func testTransitionSummaryCountsEventsByFamilyAndNilMeansUnobserved() {
         let coverage = F.track([(F.t0 - 600, F.t0 + 600, "sitting")], source: .decoderIntervals,
                                heartRateDependent: true)

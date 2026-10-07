@@ -132,8 +132,11 @@ extension PhysiologyContext {
                 let settling = TransitionEvents.summary(
                     transitions, over: Interval(m.support.start - max(0, policy.eligibility.posturalSettlingS),
                                                 m.support.end), coverage: decoder)
+                // A heart-rate or HRV measurement's posture stratum is gravity only: the in-bed window comes from the
+                // heart-rate confirmed sleep detector, so it would make that measurement's reference circular.
                 let posture = PostureEvidence.context(over: m.support, motion: gravity, inBed: inBed,
-                                                      config: policy.eligibility.posture)
+                                                      config: policy.eligibility.posture,
+                                                      heartRateTarget: Eligibility.opticalPulseMetrics.contains(m.metric))
                 let wear = WearSignal.summary(over: m.support, track: wearSignal)
                 let sleepWear = SleepRhythm.sleepWear(for: m.support, episodes: episodes,
                                                       observations: observations, config: policy.sleep,
