@@ -92,6 +92,33 @@ final class SensorBiomarkerTests: XCTestCase {
         ]
     }
 
+    /// The REAL edge-route envelope (serverScores.ts readSensorBiomarkers, pinned by
+    /// supabase/functions/tests/sensor_biomarkers_route_test.ts): one row per stored day,
+    /// the row's `document` is the day document, and the requested day absent is an HTTP 404.
+    private func routeBody(_ doc: [String: Any], day: String = "2026-10-06") -> [String: Any] {
+        [
+            "days": [[
+                "day": day,
+                "analysis_version": "sensor-biomarkers/1.0.0",
+                "input_revision": "sha256:\(String(repeating: "a", count: 64))",
+                "interval_start_utc": "\(day)T00:00:00Z",
+                "interval_end_utc": "2026-10-07T00:00:00Z",
+                "status": "completed",
+                "families_ok": ["movement", "oscillation"],
+                "withheld_reasons": [] as [String],
+                "run_ms": 1200,
+                "published_at": "\(day)T01:00:00Z",
+                "updated_at": "\(day)T01:00:00Z",
+                "document": doc,
+            ]],
+            "identity": [
+                "user_id": ownerA,
+                "source_id": source,
+                "device_ids": [ownerA: "my-whoop"],
+            ] as [String: Any],
+        ]
+    }
+
     /// The four descriptive families with representative values (independent of the implementation).
     private func fullDocument() -> [String: Any] {
         document(families: [
@@ -225,6 +252,76 @@ final class SensorBiomarkerTests: XCTestCase {
         XCTAssertNil(parsed.families["oscillation"])
     }
 
+    func testRefreshTreatsTheRoutes404AsNoDataNeverAnError() async throws {
+        // The route 404s when the requested day has no stored document (serverScores.ts):
+        // the refresh must settle as "no data" - one request, no retry, no failed state.
+        BiomarkerStub.status = 404
+        let repo = repository()
+        let fetched = try await repo.refresh(day: day, deviceId: "my-whoop")
+        XCTAssertNil(fetched)
+        XCTAssertEqual(BiomarkerStub.requests.count, 1, "a 404 is never retried")
+    }
+
+    func testParseAcceptsTheExactRouteWireFixture() throws {
+        // CROSS-LAYER FIXTURE: the exact row JSON the route test (supabase/functions/tests/
+        // sensor_biomarkers_route_test.ts docRow) serves, character-for-character in shape:
+        // { days: [ { day, analysis_version, ..., document: { ... } } ], identity }.
+        let documentJSON: [String: Any] = [
+            "schema_version": 1,
+            "analysis_version": "sensor-biomarkers/1.0.0",
+            "input_revision": "sha256:" + String(repeating: "a", count: 64),
+            "interval_start_utc": "2026-10-06T00:00:00Z",
+            "interval_end_utc": "2026-10-07T00:00:00Z",
+            "processed_at_utc": "2026-10-06T01:00:00Z",
+            "families": [
+                "movement": [
+                    "status": "ok", "release_tier": "descriptive",
+                    "provider_revision": "imu-biomarkers/1.0.0",
+                    "observed_seconds": 3600, "eligible_seconds": 3000,
+                    "contact_state": "on_wrist",
+                    "measurements": ["enmo_median_mg": ["value": 12.5, "unit": "mg"]],
+                    "reason_counts": [:],
+                ],
+                "tremor": [
+                    "status": "withheld", "release_tier": "research",
+                    "provider_revision": "paradigma/1.0.0",
+                    "reason": "unknown_wrist_placement",
+                    "measurements": [:], "reason_counts": [:],
+                ],
+            ],
+        ]
+        let row: [String: Any] = [
+            "day": "2026-10-06",
+            "analysis_version": "sensor-biomarkers/1.0.0",
+            "input_revision": "sha256:" + String(repeating: "a", count: 64),
+            "interval_start_utc": "2026-10-06T00:00:00Z",
+            "interval_end_utc": "2026-10-07T00:00:00Z",
+            "status": "completed",
+            "families_ok": ["movement"],
+            "withheld_reasons": [] as [String],
+            "run_ms": 1200,
+            "model_revisions": ["movement": "imu-biomarkers/1.0.0"],
+            "published_at": "2026-10-06T01:00:00Z",
+            "updated_at": "2026-10-06T01:00:00Z",
+            "document": documentJSON,
+        ]
+        let envelope: [String: Any] = ["days": [row], "identity": ["user_id": ownerA]]
+        let parsed = try XCTUnwrap(SensorBiomarkerRepository.parse(
+            day: "2026-10-06", deviceId: "my-whoop", envelope: envelope, fetchedAtMs: 0))
+        XCTAssertEqual(parsed.analysisVersion, "sensor-biomarkers/1.0.0")
+        XCTAssertEqual(parsed.families["movement"]?.measurements["enmo_median_mg"]?.value as? Double, 12.5)
+        XCTAssertEqual(parsed.families["tremor"]?.reason, "unknown_wrist_placement")
+
+        // A days envelope without the requested day is a no-data answer, not an error.
+        let otherDay = routeBody(documentJSON, day: "2026-10-05")
+        XCTAssertNil(try SensorBiomarkerRepository.parse(
+            day: "2026-10-06", deviceId: "my-whoop", envelope: otherDay, fetchedAtMs: 0))
+        // A days row without a document is malformed.
+        XCTAssertThrowsError(try SensorBiomarkerRepository.parse(
+            day: "2026-10-06", deviceId: "my-whoop",
+            envelope: ["days": [["day": "2026-10-06"]]], fetchedAtMs: 0))
+    }
+
     // MARK: - Fetch + cache
 
     func testRefreshBuildsTheRouteAuthenticatesParsesAndCaches() async throws {
@@ -261,7 +358,7 @@ final class SensorBiomarkerTests: XCTestCase {
     }
 
     func testCacheIsScopedToOwnerDeviceAndDay() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repoA = repository(owner: ownerA)
         _ = try await repoA.refresh(day: day, deviceId: "my-whoop")
 
@@ -282,7 +379,7 @@ final class SensorBiomarkerTests: XCTestCase {
     }
 
     func testNullDocumentIsNotCached() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": NSNull()]
+        BiomarkerStub.status = 404
         let repo = repository()
         let result = try await repo.refresh(day: day, deviceId: "my-whoop")
         XCTAssertNil(result, "an explicit no-data answer is nil, not an error")
@@ -297,7 +394,7 @@ final class SensorBiomarkerTests: XCTestCase {
                 "enmo_median_mg": measurement(12.5, unit: "mg", denominator: blob),
             ]),
         ])
-        BiomarkerStub.body = ["sensor_biomarkers": doc]
+        BiomarkerStub.body = routeBody(doc)
         let repo = repository()
         do {
             _ = try await repo.refresh(day: day, deviceId: "my-whoop")
@@ -310,7 +407,7 @@ final class SensorBiomarkerTests: XCTestCase {
     }
 
     func testInvalidateDropsOneDay() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository()
         _ = try await repo.refresh(day: day, deviceId: "my-whoop")
         let before = await repo.cachedDay(day: day, deviceId: "my-whoop")
@@ -324,7 +421,7 @@ final class SensorBiomarkerTests: XCTestCase {
 
     func testTransientErrorsAreRetriedAndRecover() async throws {
         BiomarkerStub.statuses = [500, 503, 200]
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository()
         let result = try await repo.refresh(day: day, deviceId: "my-whoop")
         XCTAssertNotNil(result)
@@ -333,7 +430,7 @@ final class SensorBiomarkerTests: XCTestCase {
 
     func testRetryGivesUpAfterTheBound() async throws {
         BiomarkerStub.statuses = [500, 500, 500, 200]
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository(maxRetries: 2)
         do {
             _ = try await repo.refresh(day: day, deviceId: "my-whoop")
@@ -346,14 +443,17 @@ final class SensorBiomarkerTests: XCTestCase {
     }
 
     func testClientErrorsAreNotRetried() async throws {
-        BiomarkerStub.status = 404
+        // A 404 is the route's explicit no-data answer (see
+        // testRefreshTreatsTheRoutes404AsNoDataNeverAnError), so the never-retried
+        // client-error case is pinned with a 403 instead.
+        BiomarkerStub.status = 403
         let repo = repository()
         do {
             _ = try await repo.refresh(day: day, deviceId: "my-whoop")
-            XCTFail("a 404 must fail")
+            XCTFail("a 403 must fail")
         } catch let error as SensorBiomarkerRepository.ReadError {
             guard case .http(let status, _) = error else { return XCTFail("expected http error, got \(error)") }
-            XCTAssertEqual(status, 404)
+            XCTAssertEqual(status, 403)
         }
         XCTAssertEqual(BiomarkerStub.requests.count, 1, "a 4xx is permanent and must not be retried")
     }
@@ -371,7 +471,7 @@ final class SensorBiomarkerTests: XCTestCase {
 
     @MainActor
     func testStoreFetchesAndShowsTheDocument() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository()
         let store = self.store(repository: repo)
         await store.load(day: day)
@@ -383,7 +483,7 @@ final class SensorBiomarkerTests: XCTestCase {
 
     @MainActor
     func testStoreNeverFetchesWhenTheFeatureFlagIsOff() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository()
         let store = self.store(repository: repo, featureEnabled: false)
         await store.load(day: day)
@@ -393,7 +493,7 @@ final class SensorBiomarkerTests: XCTestCase {
 
     @MainActor
     func testStoreSaysCloudOffWithoutFetching() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository()
         let store = self.store(repository: repo, cloudEnabled: false)
         await store.load(day: day)
@@ -405,7 +505,7 @@ final class SensorBiomarkerTests: XCTestCase {
 
     @MainActor
     func testStoreSignOutResetClearsInMemoryState() async throws {
-        BiomarkerStub.body = ["sensor_biomarkers": fullDocument()]
+        BiomarkerStub.body = routeBody(fullDocument())
         let repo = repository()
         let store = self.store(repository: repo)
         store.setReadCandidates(["whoop-1234", "my-whoop"])
@@ -579,6 +679,19 @@ final class SensorBiomarkerTests: XCTestCase {
         ])
         let model = try model(doc)
         XCTAssertEqual(model.items.first?.coverage, "Observed 11h · eligible 10h")
+    }
+
+    func testUncalibratedMovementNeverRendersEligibleZero() throws {
+        // An uncalibrated movement family (eligible 0, observed positive) must
+        // never render "eligible 0s": zero eligible is not coverage, it is the
+        // honest statement that nothing was classified.
+        let doc = document(families: [
+            "movement": family(status: "ok", observed: 21_600, eligible: 0, measurements: [
+                "enmo_median_mg": measurement(12.5, unit: "mg"),
+            ]),
+        ])
+        let model = try model(doc)
+        XCTAssertEqual(model.items.first?.coverage, "Observed 6h")
     }
 
     func testCaptureIntervalSpansTwoDaysWhenItMust() throws {

@@ -325,18 +325,22 @@ struct SensorBiomarkersViewModel: Equatable {
     // MARK: - Coverage and interval
 
     /// Observed / eligible coverage as one line, or nil when the server reported neither.
+    /// An eligible of 0 is NOT shown as "eligible 0s": it means nothing was eligible
+    /// (an uncalibrated movement family, an unresolved gate), and the honest line
+    /// is the observed time alone.
     static func coverage(family: SensorBiomarkerFamily) -> String? {
         switch (family.observedSeconds, family.eligibleSeconds) {
-        case (let observed?, let eligible?):
+        case (let observed?, let eligible?) where eligible > 0:
             if abs(observed - eligible) < 1 {
                 return String(localized: "Observed \(duration(observed))")
             }
             return String(localized: "Observed \(duration(observed)) · eligible \(duration(eligible))")
-        case (let observed?, nil):
+        case (let observed?, _):
+            // eligible missing or zero: the honest line is the observed time alone.
             return String(localized: "Observed \(duration(observed))")
-        case (nil, let eligible?):
+        case (nil, let eligible?) where eligible > 0:
             return String(localized: "Eligible \(duration(eligible))")
-        case (nil, nil):
+        case (nil, _):
             return nil
         }
     }

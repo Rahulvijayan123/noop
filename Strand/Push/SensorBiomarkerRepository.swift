@@ -234,13 +234,19 @@ public actor SensorBiomarkerRepository {
                                   URLQueryItem(name: "deviceId", value: deviceId)]
         guard let url = components?.url else { throw ReadError.malformed("endpoint") }
 
-        let body = try await get(url: url, identity: identity)
-        guard let document = try SensorBiomarkerRepository.parse(day: day, deviceId: deviceId,
-                                                                 envelope: body, fetchedAtMs: 0) else {
-            return nil   // server explicitly has no document for the day
+        do {
+            let body = try await get(url: url, identity: identity)
+            guard let document = try SensorBiomarkerRepository.parse(day: day, deviceId: deviceId,
+                                                                     envelope: body, fetchedAtMs: 0) else {
+                return nil   // the server explicitly has no document for the day
+            }
+            writeCache(document, ownerId: identity.ownerId, deviceId: deviceId)
+            return document
+        } catch ReadError.http(let status, _) where status == 404 {
+            // The route's explicit absent answer: no stored document for the day. That is
+            // "no data", never a failed refresh and never a retried error (CONTRACTS §6).
+            return nil
         }
-        writeCache(document, ownerId: identity.ownerId, deviceId: deviceId)
-        return document
     }
 
     /// The cached day for the CURRENT owner. A pure local read: no network, and no configuration
@@ -315,26 +321,34 @@ public actor SensorBiomarkerRepository {
 
     // MARK: - Parsing
 
-    /// Turn the edge envelope into a document. Returns nil for an explicit no-document answer
-    /// (`sensor_biomarkers: null`); throws for a 200 that does not speak the contract or that
-    /// exceeds the 256 KiB budget. Every member is optional and one bad family never costs the rest.
+    /// Turn the edge envelope into a document. The route's wire shape (serverScores.ts
+    /// `readSensorBiomarkers`, pinned by the route tests and mirrored by the cross-layer
+    /// fixture test) is `{ days: [ { day, document, ...row } ], identity }` with an HTTP 404
+    /// when no requested day has a stored document. Returns nil for an explicit no-document
+    /// answer (`days: []`); throws for a 200 that does not speak the contract or that exceeds
+    /// the 256 KiB budget. Every member is optional and one bad family never costs the rest.
     static func parse(day: String, deviceId: String, envelope: [String: Any],
                       fetchedAtMs: Int) throws -> SensorBiomarkerDocument? {
         let raw: [String: Any]
-        switch envelope["sensor_biomarkers"] {
-        case let object as [String: Any]:
-            raw = object
-        case nil:
-            // No member at all: either a server serving the document at the top level (tolerated),
-            // or one that does not speak this contract at all.
-            guard Self.looksLikeDocument(envelope) else {
-                throw ReadError.malformed("missing sensor_biomarkers")
+        if let days = envelope["days"] as? [[String: Any]] {
+            // The route shape: one row per stored day; the row's `document` is the day document.
+            guard let row = days.first(where: { ($0["day"] as? String) == day }) else {
+                return nil   // the requested day has no stored document
             }
+            guard let document = row["document"] as? [String: Any] else {
+                throw ReadError.malformed("days row without a document")
+            }
+            raw = document
+        } else if let object = envelope["sensor_biomarkers"] as? [String: Any] {
+            // Tolerated legacy/test shape: the document under a `sensor_biomarkers` key.
+            raw = object
+        } else if envelope["sensor_biomarkers"] == nil && Self.looksLikeDocument(envelope) {
+            // Tolerated: a bare top-level document.
             raw = envelope
-        case is NSNull:
+        } else if envelope["sensor_biomarkers"] is NSNull {
             return nil
-        default:
-            throw ReadError.malformed("sensor_biomarkers is not an object")
+        } else {
+            throw ReadError.malformed("neither a days envelope nor a document")
         }
 
         guard JSONSerialization.isValidJSONObject(raw),
