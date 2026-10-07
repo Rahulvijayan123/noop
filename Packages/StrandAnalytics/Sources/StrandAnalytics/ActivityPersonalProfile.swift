@@ -221,8 +221,9 @@ public enum ActivityPersonalProfileFitter {
         let usable = runs
             .filter { run in run.labels.contains { staticMode(of: $0) != nil } }
             .sorted { $0.sessionId < $1.sessionId }
-        guard usable.count >= minRuns else {
-            return ActivityPersonalFitResult(status: .needsMoreRuns, fittedAt: now, runs: usable.count, runsNeeded: minRuns)
+        let needed = runsNeeded(usable)
+        guard usable.count >= needed else {
+            return ActivityPersonalFitResult(status: .needsMoreRuns, fittedAt: now, runs: usable.count, runsNeeded: needed)
         }
 
         let baseline = usable.map { replay($0, config: base) }
@@ -232,6 +233,12 @@ public enum ActivityPersonalProfileFitter {
         // Only modes every fold adapted can be validated; the rest stay default even if the full fit could move them.
         let candidates = folds.dropFirst().reduce(Set(folds.first.map { Array($0.keys) } ?? [])) {
             $0.intersection($1.keys)
+        }
+        // No fold has enough of any one mode (short or partly skipped runs): that is missing data, not a
+        // profile that failed to help.
+        guard !candidates.isEmpty else {
+            return ActivityPersonalFitResult(status: .needsMoreRuns, fittedAt: now, runs: usable.count,
+                                             runsNeeded: max(needed, usable.count + 1))
         }
 
         func validate(_ keep: Set<String>) -> ActivityPersonalValidation {
@@ -288,6 +295,20 @@ public enum ActivityPersonalProfileFitter {
                                               validation: validation)
         return ActivityPersonalFitResult(status: .adopted, fittedAt: now, runs: usable.count, runsNeeded: minRuns,
                                          profile: profile, validation: validation)
+    }
+
+    /// Runs needed before a leave-one-run-out fold (all runs but one) can hold `minModeSeconds` of the best
+    /// covered mode, estimated from how many labelled seconds the runs so far carry per run. Never below
+    /// `minRuns`; `minRuns` when there are no runs to estimate from.
+    static func runsNeeded(_ runs: [ActivityCalibrationRun]) -> Int {
+        guard !runs.isEmpty else { return minRuns }
+        var seconds: [BodyMode: Int] = [:]
+        for run in runs {
+            for mode in truthBySecond(run.labels).values { seconds[mode, default: 0] += 1 }
+        }
+        let perRun = Double(seconds.values.max() ?? 0) / Double(runs.count)
+        guard perRun > 0 else { return max(minRuns, runs.count + 1) }
+        return max(minRuns, Int((Double(minModeSeconds) / perRun).rounded(.up)) + 1)
     }
 
     // MARK: Labels

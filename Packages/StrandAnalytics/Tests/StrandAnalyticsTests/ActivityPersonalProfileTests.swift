@@ -70,14 +70,56 @@ final class ActivityPersonalProfileTests: XCTestCase {
         XCTAssertEqual(result.validation?.runs, 2)
     }
 
-    /// One guided run's standing bout alone must clear the per-mode minimum, so standing can be adapted and
-    /// validated from the second run on (leave-one-out fits each fold on a single run).
-    func testTheGuidedStandingBoutClearsTheMinimumInOneRun() throws {
-        let stand = try XCTUnwrap(ActivityCalibrationProtocols.current.tasks.first { $0.id == "posture.standing-quietly" })
-        // The runner's label interval is [cue + guard, cue + duration - guard); the fitter trims it again.
-        let labelled = stand.durationSeconds - 2 * stand.guardSeconds - ActivityPersonalProfileFitter.settleSeconds
-            - ActivityPersonalProfileFitter.endGuardSeconds
-        XCTAssertGreaterThanOrEqual(labelled, ActivityPersonalProfileFitter.minModeSeconds)
+    /// Each activity alone holds every posture it covers long enough that the leave-one-out folds of
+    /// `runsToPersonalise` runs clear the per-mode minimum, so skipping the other activity never strands one.
+    func testEachActivityClearsTheMinimumForItsPosturesAcrossTheFold() {
+        let foldRuns = ActivityCalibrationProtocols.runsToPersonalise - 1
+        let fitter = ActivityPersonalProfileFitter.self
+        let main: [String: [String]] = [
+            "sit-stand": [PostureClass.seatedLikely.rawValue, PostureClass.uprightStationary.rawValue],
+            "lie-down": [PostureClass.recumbent.rawValue],
+        ]
+        for activity in ActivityCalibrationProtocols.current.activities {
+            var seconds: [String: Int] = [:]
+            for task in activity.tasks {
+                guard let posture = task.posture else { continue }
+                seconds[posture, default: 0] += task.durationSeconds - 2 * task.guardSeconds
+                    - fitter.settleSeconds - fitter.endGuardSeconds
+            }
+            for posture in main[activity.id] ?? [] {
+                XCTAssertGreaterThanOrEqual((seconds[posture] ?? 0) * foldRuns, fitter.minModeSeconds,
+                                            "\(activity.id): \(posture)")
+            }
+        }
+    }
+
+    func testShortRunsAskForTheRunsTheirDataNeeds() {
+        var w = Wearer()
+        w.labelSeconds = 25
+        let run = Self.run(w, session: "s", seed: 3, start: 1_760_000_000)
+        let seated = ActivityPersonalProfileFitter.truthBySecond(run.labels).values.filter { $0 == .seated }.count
+        XCTAssertTrue((30..<60).contains(seated), "one run's best-covered mode: \(seated) s")
+        let result = ActivityPersonalProfileFitter.fit(runs: [run], config: ActivityDecoderConfig(), now: 0)
+        XCTAssertEqual(result.outcome, .needsMoreRuns(have: 1, need: 3),
+                       "under 60 s of any mode per run: a fold needs two runs, so three in all")
+    }
+
+    /// Enough runs on average, but leaving out the one long run leaves no mode at the minimum: that is
+    /// missing data, reported as such, not a profile that was tried and refused.
+    func testFoldsWithoutEnoughOfAnyModeAreMissingDataNotARefusal() {
+        let long = Self.run(Wearer(), session: "session-0", seed: 11, start: 1_760_000_000)
+        var w = Wearer()
+        w.labelSeconds = 25
+        let short = (1...2).map { i -> ActivityCalibrationRun in
+            var run = Self.run(w, session: "session-\(i)", seed: UInt64(11 + 7 * i), start: 1_760_000_000 + i * 86_400)
+            run.labels = run.labels.filter { $0.locomotion != nil }
+            return run
+        }
+        let result = ActivityPersonalProfileFitter.fit(runs: [long] + short, config: ActivityDecoderConfig(), now: 0)
+        XCTAssertEqual(result.status, .needsMoreRuns)
+        XCTAssertEqual(result.runs, 3)
+        XCTAssertEqual(result.runsNeeded, 4)
+        XCTAssertNil(result.profile)
     }
 
     func testAPersonalProfileFixesTheWearersStandingOnHeldOutRuns() throws {

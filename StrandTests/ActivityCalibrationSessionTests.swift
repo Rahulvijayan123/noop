@@ -3,7 +3,7 @@ import XCTest
 @testable import StrandAnalytics
 
 /// Guided activity ground-truth capture: the durable restore marker plus the pure, closure-driven
-/// session state machine. No BLE anywhere — the gate, mode application, haptics and clock are all
+/// session state machine. No BLE anywhere: the gate, mode application, haptics and clock are all
 /// injected, so the full protocol runs here against a fake clock.
 final class ActivityCalibrationSessionTests: XCTestCase {
 
@@ -12,47 +12,39 @@ final class ActivityCalibrationSessionTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private func task(id: String = "sit-quiet",
-                      duration: Int = 10, reps: Int = 1, rest: Int = 2, guardSeconds: Int = 2,
-                      posture: String? = "seated_likely", locomotion: String? = nil,
-                      armBehavior: String? = nil, semanticTag: String? = nil,
-                      transitionKind: String? = nil, preState: Int? = nil,
-                      postState: Int? = nil) -> ActivityCalibrationTask {
-        ActivityCalibrationTask(id: id, title: id, instructions: "Follow the prompt", category: "posture",
-                                posture: posture, locomotion: locomotion, armBehavior: armBehavior,
-                                semanticTag: semanticTag, transitionKind: transitionKind,
-                                durationSeconds: duration, repetitions: reps, restSeconds: rest,
-                                preStateSeconds: preState, postStateSeconds: postState,
-                                guardSeconds: guardSeconds)
+    private func hold(_ id: String, seconds: Int = 10, posture: String = "seated_likely") -> ActivityCalibrationTask {
+        ActivityCalibrationTask(id: id, title: id, instructions: "Hold", posture: posture, durationSeconds: seconds)
     }
 
-    private func model(_ tasks: [ActivityCalibrationTask],
-                       version: String = "calibration-v1") -> ActivityCalibrationProtocolModel {
-        ActivityCalibrationProtocolModel(version: version, tasks: tasks)
+    private func move(_ id: String, seconds: Int = 10, cue: Int = 3) -> ActivityCalibrationTask {
+        ActivityCalibrationTask(id: id, title: id, instructions: "Move", transitionKind: "sit_to_stand",
+                                endPosture: "upright_stationary", durationSeconds: seconds, cueSeconds: cue)
+    }
+
+    /// Activity 0: hold 10, move 10 (buzz at +3), hold 10. Activity 1: hold 10.
+    private func twoActivities() -> ActivityCalibrationProtocolModel {
+        ActivityCalibrationProtocolModel(version: "calibration-test", activities: [
+            ActivityCalibrationActivity(id: "a", title: "A", setup: "Setup A",
+                                        tasks: [hold("a.hold-1"), move("a.move"), hold("a.hold-2", posture: "upright_stationary")]),
+            ActivityCalibrationActivity(id: "b", title: "B", setup: "Setup B", tasks: [hold("b.hold")]),
+        ])
     }
 
     @MainActor
-    private func makeHarness(_ tasks: [ActivityCalibrationTask],
-                             deviceId: String? = "whoop-MG-TEST") throws -> Harness {
+    private func makeHarness(_ model: ActivityCalibrationProtocolModel? = nil) throws -> Harness {
         let name = "activity-calibration-tests-\(UUID().uuidString)"
         let suite = try XCTUnwrap(UserDefaults(suiteName: name))
         addTeardownBlock { UserDefaults(suiteName: name)?.removePersistentDomain(forName: name) }
-        return Harness(model: model(tasks), deviceId: deviceId, defaults: suite)
+        return Harness(model: model ?? twoActivities(), defaults: suite)
     }
 
-    /// Mutable fake strap/clock state captured by the runner's injected closures. Kept as its
-    /// own box so the closures never capture `self` (which Swift forbids before a stored
-    /// property like `runner` is initialized).
     @MainActor
     private final class FakeStrap {
-        var clock: Date
+        var clock = Date(timeIntervalSince1970: 1_700_000_000)
         var appliedModes: [ActivityImuCaptureMode] = []
-        var hapticCount = 0
+        var cues: [ActivityCalibrationSessionRunner.Cue] = []
         var gateStatus: ActivityCalibrationSessionRunner.GateStatus = .ready
         var bouts: [ActivityCalibrationBout] = []
-        init() {
-            clock = Date(timeIntervalSince1970: 1_700_000_000)
-        }
     }
 
     /// Drives one runner with a fake clock. `advance` moves the clock and ticks the machine.
@@ -62,15 +54,15 @@ final class ActivityCalibrationSessionTests: XCTestCase {
         let runner: ActivityCalibrationSessionRunner
         let defaults: UserDefaults
 
-        init(model: ActivityCalibrationProtocolModel, deviceId: String?, defaults: UserDefaults) {
+        init(model: ActivityCalibrationProtocolModel, defaults: UserDefaults) {
             let strap = FakeStrap()
             self.strap = strap
             self.defaults = defaults
             runner = ActivityCalibrationSessionRunner(
-                protocol: model, deviceId: deviceId,
+                protocol: model, deviceId: "whoop-MG-TEST",
                 gate: { strap.gateStatus },
                 applyMode: { strap.appliedModes.append($0) },
-                haptic: { strap.hapticCount += 1 },
+                haptic: { strap.cues.append($0) },
                 now: { strap.clock },
                 defaults: defaults)
             runner.onBout = { strap.bouts.append($0) }
@@ -79,6 +71,13 @@ final class ActivityCalibrationSessionTests: XCTestCase {
         func advance(_ seconds: Double) {
             strap.clock = strap.clock.addingTimeInterval(seconds)
             runner.tick()
+        }
+
+        /// begin, start, and run the 5 s start countdown so step 0 of activity 0 is recording.
+        func startFirstActivity() {
+            runner.begin(previousMode: .partTime)
+            runner.start()
+            advance(Double(ActivityCalibrationProtocols.startCountdownSeconds))
         }
     }
 
@@ -128,135 +127,248 @@ final class ActivityCalibrationSessionTests: XCTestCase {
     // MARK: - Full protocol run
 
     @MainActor
-    func testBeginRunsASingleTaskProtocolEndToEnd() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 2, rest: 2)])
-        let runner = harness.runner
-        XCTAssertEqual(runner.phase, .idle)
+    func testBeginWaitsAtTheFirstActivityUntilStartIsTapped() throws {
+        let harness = try makeHarness()
+        XCTAssertEqual(harness.runner.phase, .idle)
+        harness.runner.begin(previousMode: .partTime)
 
-        runner.begin(previousMode: .partTime)
-        // Marker first, continuous forced, then the countdown.
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 0))
         XCTAssertEqual(harness.strap.appliedModes, [.continuous])
         XCTAssertEqual(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults), .partTime)
-        guard case .countdown(let taskIndex, let endsAt) = runner.phase else {
-            return XCTFail("expected countdown, got \(runner.phase)")
+        harness.advance(60)
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 0), "nothing starts on its own")
+
+        harness.runner.start()
+        guard case .countdown(let activity, let endsAt) = harness.runner.phase else {
+            return XCTFail("expected countdown, got \(harness.runner.phase)")
         }
-        XCTAssertEqual(taskIndex, 0)
-        XCTAssertEqual(endsAt.timeIntervalSince1970, TimeInterval(epoch + 3))
+        XCTAssertEqual(activity, 0)
+        XCTAssertEqual(endsAt.timeIntervalSince1970, harness.strap.clock.timeIntervalSince1970 + 5)
+    }
 
-        // A tick before the countdown ends stays in countdown.
-        harness.advance(2)
-        guard case .countdown = runner.phase else { return XCTFail("countdown ended early: \(runner.phase)") }
+    @MainActor
+    func testStepsChainBackToBackAndEveryActivityEndsWithDone() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        let t0 = epoch + 5
+        guard case .step(let first) = harness.runner.phase else { return XCTFail("expected step") }
+        XCTAssertEqual(first.task, 0)
+        XCTAssertNil(first.cueAt, "holds never buzz")
 
-        // Countdown ends -> start cue + active with the guarded interval recorded.
-        harness.advance(1)
-        guard case .active(let activeTask, let rep, let cueStart) = runner.phase else {
-            return XCTFail("expected active, got \(runner.phase)")
-        }
-        XCTAssertEqual(activeTask, 0)
-        XCTAssertEqual(rep, 0)
-        XCTAssertEqual(cueStart, epoch + 3)
-        XCTAssertEqual(harness.strap.hapticCount, 1)
-
-        // Mid-bout ticks stay active until the stop cue.
-        harness.advance(7)
-        guard case .active = runner.phase else { return XCTFail("active ended early: \(runner.phase)") }
-
-        // Stop cue -> bout (after cueStop, so timestamps are final) -> rest.
-        harness.advance(3)
-        guard case .rest(let restTask, let restRep, let restEndsAt) = runner.phase else {
-            return XCTFail("expected rest, got \(runner.phase)")
-        }
-        XCTAssertEqual(harness.strap.hapticCount, 2)
-        XCTAssertEqual(restTask, 0)
-        XCTAssertEqual(restRep, 0)
-        XCTAssertEqual(restEndsAt.timeIntervalSince1970, TimeInterval(epoch + 15))
+        harness.advance(10)   // hold 1 ends, move starts on the same deadline
+        guard case .step(let second) = harness.runner.phase else { return XCTFail("expected move step") }
+        XCTAssertEqual(second.task, 1)
+        XCTAssertEqual(second.startedAt.timeIntervalSince1970, TimeInterval(t0 + 10))
         XCTAssertEqual(harness.strap.bouts.count, 1)
-        let first = try XCTUnwrap(harness.strap.bouts.first)
-        XCTAssertEqual(first.repetition, 1)
-        XCTAssertEqual(first.taskId, "sit-quiet")
-        XCTAssertEqual(first.instructionTs, epoch)
-        XCTAssertEqual(first.countdownStartTs, epoch)
-        XCTAssertEqual(first.cueStartTs, epoch + 3)
-        XCTAssertEqual(first.cueStopTs, epoch + 13)
-        XCTAssertEqual(first.intervalStartTs, first.cueStartTs + 2, "interval starts after the guard")
-        XCTAssertEqual(first.intervalEndTs, first.cueStopTs - 2, "interval ends before the stop cue")
-        XCTAssertGreaterThan(first.intervalEndTs, first.intervalStartTs)
-        XCTAssertEqual(first.posture, "seated_likely")
-        XCTAssertEqual(first.protocolVersion, "calibration-v1")
 
-        // Rest over -> gate still ready -> second repetition's countdown and active.
-        harness.advance(2)
-        guard case .countdown = runner.phase else { return XCTFail("expected second countdown, got \(runner.phase)") }
-        harness.advance(3)
-        guard case .active(_, 1, let cue2) = runner.phase else {
-            return XCTFail("expected second active, got \(runner.phase)")
-        }
-        XCTAssertEqual(cue2, epoch + 18)
-
-        // Second bout is the last: the runner finishes, restores the previous mode and clears
-        // the marker so nothing stays forced.
         harness.advance(10)
-        XCTAssertEqual(runner.phase, .finished)
-        XCTAssertEqual(harness.strap.bouts.count, 2)
-        XCTAssertEqual(harness.strap.bouts[1].repetition, 2)
-        XCTAssertEqual(harness.strap.bouts[1].cueStartTs, epoch + 18)
-        XCTAssertEqual(harness.strap.bouts[1].cueStopTs, epoch + 28)
-        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime],
-                       "continuous was forced, then the previous mode was restored")
-        XCTAssertEqual(harness.strap.hapticCount, 4, "start + stop for each bout, no extra cues")
+        harness.advance(10)   // hold 2 ends -> activity 0 done
+        XCTAssertEqual(harness.strap.bouts.map(\.taskId), ["a.hold-1", "a.move", "a.hold-2"])
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 1), "the next activity waits for its own Start")
+        XCTAssertEqual(harness.strap.cues, [.move, .done])
+
+        harness.runner.start()
+        harness.advance(5)
+        harness.advance(10)
+        XCTAssertEqual(harness.runner.phase, .finished)
+        XCTAssertEqual(harness.strap.cues, [.move, .done, .done])
+        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
         XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
+        XCTAssertTrue(harness.runner.skipped.isEmpty)
+    }
+
+    @MainActor
+    func testAMoveBuzzesExactlyOnceAtItsCueAndTheScreenFlipsInTheSameTick() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        harness.advance(10)   // move starts at epoch+15, buzz due epoch+18
+        harness.advance(2.5)
+        guard case .step(let before) = harness.runner.phase else { return XCTFail("expected step") }
+        XCTAssertFalse(before.moved)
+        XCTAssertEqual(harness.strap.cues, [])
+
+        harness.advance(0.5)
+        guard case .step(let after) = harness.runner.phase else { return XCTFail("expected step") }
+        XCTAssertTrue(after.moved, "the published state says move in the tick the buzz fires")
+        XCTAssertEqual(harness.strap.cues, [.move])
+
+        harness.advance(3)
+        XCTAssertEqual(harness.strap.cues, [.move], "no repeat buzz")
+
+        harness.advance(4)    // move step over
+        let bout = try XCTUnwrap(harness.strap.bouts.first { $0.taskId == "a.move" })
+        let ts = try XCTUnwrap(bout.transitionTs)
+        XCTAssertEqual(bout.transitionKind, "sit_to_stand")
+        XCTAssertEqual(ts, epoch + 18)
+        XCTAssertGreaterThanOrEqual(ts, bout.intervalStartTs)
+        XCTAssertLessThanOrEqual(ts, bout.intervalEndTs)
+        XCTAssertEqual(bout.cueTs, epoch + 18)
+        XCTAssertEqual(bout.intervalStartTs, epoch + 17)
+        XCTAssertEqual(bout.intervalEndTs, epoch + 23)
+        XCTAssertNil(bout.posture)
+    }
+
+    @MainActor
+    func testHoldBoutsAreGuardedAndCarryNoTransition() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        harness.advance(10)
+        let bout = try XCTUnwrap(harness.strap.bouts.first)
+        XCTAssertEqual(bout.taskId, "a.hold-1")
+        XCTAssertEqual(bout.stepStartTs, epoch + 5)
+        XCTAssertEqual(bout.stepEndTs, epoch + 15)
+        XCTAssertEqual(bout.intervalStartTs, epoch + 7)
+        XCTAssertEqual(bout.intervalEndTs, epoch + 13)
+        XCTAssertEqual(bout.posture, "seated_likely")
+        XCTAssertNil(bout.transitionTs)
+        XCTAssertNil(bout.cueTs)
+        XCTAssertEqual(bout.protocolVersion, "calibration-test")
+    }
+
+    @MainActor
+    func testALateTickDoesNotShiftTheNextStepsCue() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        harness.advance(10.4)   // hold 1 noticed 0.4 s late
+        guard case .step(let step) = harness.runner.phase else { return XCTFail("expected step") }
+        XCTAssertEqual(step.startedAt.timeIntervalSince1970, TimeInterval(epoch + 15), "chains on the deadline")
+        XCTAssertEqual(step.cueAt?.timeIntervalSince1970, TimeInterval(epoch + 18))
+    }
+
+    func testAStallStartsTheNextStepNowInsteadOfFiringItsCueEarly() {
+        let deadline = Date(timeIntervalSince1970: 100)
+        XCTAssertEqual(ActivityCalibrationSessionRunner.chainStart(deadline: deadline, now: Date(timeIntervalSince1970: 100.9)), deadline)
+        let late = Date(timeIntervalSince1970: 105)
+        XCTAssertEqual(ActivityCalibrationSessionRunner.chainStart(deadline: deadline, now: late), late)
+    }
+
+    // MARK: - Skip
+
+    @MainActor
+    func testSkipFromReadyMovesOnWithoutCuesOrLabels() throws {
+        let harness = try makeHarness()
+        harness.runner.begin(previousMode: .partTime)
+        harness.runner.skip()
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 1))
+        XCTAssertEqual(harness.runner.skipped, [0])
+        XCTAssertTrue(harness.strap.cues.isEmpty)
+        XCTAssertTrue(harness.strap.bouts.isEmpty)
+        XCTAssertNotNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults),
+                        "skipping does not end the session")
+    }
+
+    @MainActor
+    func testSkipDuringTheCountdown() throws {
+        let harness = try makeHarness()
+        harness.runner.begin(previousMode: .partTime)
+        harness.runner.start()
+        harness.advance(2)
+        harness.runner.skip()
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 1))
+        harness.advance(10)
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 1), "the dropped countdown never starts a step")
+    }
+
+    @MainActor
+    func testSkipMidStepKeepsEarlierBoutsDropsTheOneInProgress() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        harness.advance(10)   // hold 1 saved, move running
+        harness.advance(5)    // move buzzed
+        XCTAssertEqual(harness.strap.cues, [.move])
+        harness.runner.skip()
+
+        XCTAssertEqual(harness.strap.bouts.map(\.taskId), ["a.hold-1"])
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 1))
+        XCTAssertEqual(harness.runner.skipped, [0])
+        XCTAssertEqual(harness.strap.cues, [.move], "no done cue for a skipped activity")
+
+        // The next activity is unaffected: its first step carries no stale transition time.
+        harness.runner.start()
+        harness.advance(5)
+        harness.advance(10)
+        XCTAssertEqual(harness.strap.bouts.last?.taskId, "b.hold")
+        XCTAssertNil(harness.strap.bouts.last?.transitionTs)
+        XCTAssertEqual(harness.runner.phase, .finished)
+    }
+
+    @MainActor
+    func testSkippingTheLastActivityFinishesAndRestores() throws {
+        let harness = try makeHarness()
+        harness.runner.begin(previousMode: .partTime)
+        harness.runner.skip()
+        harness.runner.skip()
+        XCTAssertEqual(harness.runner.phase, .finished)
+        XCTAssertEqual(harness.runner.skipped, [0, 1])
+        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
+        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
+    }
+
+    @MainActor
+    func testSkipAndStartAreNoOpsOutsideASession() throws {
+        let harness = try makeHarness()
+        harness.runner.skip()
+        harness.runner.start()
+        XCTAssertEqual(harness.runner.phase, .idle)
+        XCTAssertTrue(harness.runner.skipped.isEmpty)
     }
 
     // MARK: - Cancel / finish
 
     @MainActor
-    func testCancelMidActiveRestoresThePreviousModeAndClearsTheMarker() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)
-        guard case .active = harness.runner.phase else { return XCTFail("expected active") }
+    func testStopMidStepFinishesWithoutEmittingTheStepInProgress() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        harness.advance(4)
+        harness.runner.finish()
+        XCTAssertEqual(harness.runner.phase, .finished)
+        XCTAssertTrue(harness.strap.bouts.isEmpty)
+        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
+        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
+    }
 
+    @MainActor
+    func testCancelRestoresAndASecondCancelIsANoOp() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
         harness.runner.cancel()
         XCTAssertEqual(harness.runner.phase, .cancelled)
         XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
         XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
-        XCTAssertEqual(harness.strap.bouts.count, 0, "a mid-capture bout is not emitted")
-    }
-
-    @MainActor
-    func testCancelAfterCancelIsANoOp() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)
         harness.runner.cancel()
         XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
-
-        harness.runner.cancel()
-        XCTAssertEqual(harness.runner.phase, .cancelled)
-        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime], "a second cancel restores nothing again")
     }
 
     @MainActor
     func testBeginWhileRunningIsANoOp() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1)])
+        let harness = try makeHarness()
         harness.runner.begin(previousMode: .partTime)
-        let phaseAfterFirst = harness.runner.phase
-        XCTAssertEqual(harness.strap.appliedModes, [.continuous])
-
-        // A second begin mid-flight must not restart the countdown or force the mode again.
         harness.runner.begin(previousMode: .continuous)
-        XCTAssertEqual(harness.runner.phase, phaseAfterFirst)
+        XCTAssertEqual(harness.runner.phase, .ready(activity: 0))
         XCTAssertEqual(harness.strap.appliedModes, [.continuous])
-        XCTAssertEqual(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults), .partTime,
-                       "the first session's previous mode is still what the marker holds")
+        XCTAssertEqual(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults), .partTime)
     }
 
     @MainActor
     func testBeginWithAnEmptyProtocolEndsCleanly() throws {
-        let harness = try makeHarness([])
+        let harness = try makeHarness(ActivityCalibrationProtocolModel(version: "empty", activities: []))
         harness.runner.begin(previousMode: .partTime)
         XCTAssertEqual(harness.runner.phase, .finished)
         XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
+        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
+    }
+
+    @MainActor
+    func testOnBoutHandlerThatCancelsIsNotOverriddenByTheNextStep() throws {
+        let harness = try makeHarness()
+        harness.runner.onBout = { [weak harness] bout in
+            harness?.strap.bouts.append(bout)
+            harness?.runner.cancel()
+        }
+        harness.startFirstActivity()
+        harness.advance(10)
+        XCTAssertEqual(harness.runner.phase, .cancelled)
+        XCTAssertEqual(harness.strap.bouts.count, 1)
         XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
     }
 
@@ -264,177 +376,50 @@ final class ActivityCalibrationSessionTests: XCTestCase {
 
     @MainActor
     func testGateBlockedAtBeginRestoresAndClears() throws {
-        let harness = try makeHarness([task()])
+        let harness = try makeHarness()
         harness.strap.gateStatus = .blocked(.batteryLow(pct: 12))
         harness.runner.begin(previousMode: .partTime)
-
         XCTAssertEqual(harness.runner.phase, .gate(.batteryLow(pct: 12)))
-        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime],
-                       "continuous is applied, then the previous mode is put straight back")
-        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
-        XCTAssertEqual(harness.strap.hapticCount, 0)
-    }
-
-    @MainActor
-    func testGateBlockedMidSessionViaRefreshGateCancelsAndRestores() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)
-        guard case .active = harness.runner.phase else { return XCTFail("expected active") }
-        XCTAssertEqual(harness.strap.appliedModes, [.continuous])
-
-        harness.strap.gateStatus = .blocked(.rawSessionInFlight)
-        harness.runner.refreshGate()
-
-        XCTAssertEqual(harness.runner.phase, .gate(.rawSessionInFlight))
         XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
         XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
-        XCTAssertEqual(harness.strap.bouts.count, 0)
+        XCTAssertTrue(harness.strap.cues.isEmpty)
     }
 
     @MainActor
-    func testGateBlockedBetweenRepetitionsStopsBeforeTheNextBout() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 2, rest: 2)])
-        harness.runner.begin(previousMode: .off)
-        harness.advance(3)    // bout 1 active
-        harness.advance(10)   // bout 1 done -> rest
-        XCTAssertEqual(harness.strap.bouts.count, 1)
-
-        harness.strap.gateStatus = .blocked(.whoopNotConnected)
-        harness.advance(2)    // rest over -> the between-bouts gate check fails
-
-        XCTAssertEqual(harness.runner.phase, .gate(.whoopNotConnected))
-        XCTAssertEqual(harness.strap.bouts.count, 1, "the blocked session never started bout 2")
-        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .off])
-        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
-    }
-
-    // MARK: - Transitions
-
-    @MainActor
-    func testTransitionTaskEmitsATransitionWithinTheGuardedInterval() throws {
-        // pre 5 s hold + post 5 s hold, 2 s guard each side.
-        let harness = try makeHarness([task(duration: 10, reps: 1, guardSeconds: 2,
-                                           transitionKind: "sit_to_stand", preState: 5, postState: 5)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)    // active at epoch+3; cueStop = epoch+13
-        XCTAssertEqual(harness.strap.hapticCount, 0, "a held pre-state starts silently")
-
-        // Still inside the pre-state hold: no "do it now" cue.
-        harness.advance(4)    // epoch+7, one second before the pre-state ends
-        XCTAssertEqual(harness.strap.hapticCount, 0)
-        XCTAssertNil(harness.strap.bouts.last?.transitionTs)
-
-        // Pre-state over -> the runner auto-fires the "do it now" cue and records the moment.
-        harness.advance(1)    // epoch+8 = cueStart + pre
-        XCTAssertEqual(harness.strap.hapticCount, 1, "the only movement cue")
-        XCTAssertEqual(harness.strap.bouts.count, 0, "the bout is only emitted at the stop cue")
-
-        // Post-state hold runs to the stop cue; last bout finishes the session.
-        harness.advance(5)    // epoch+13
-        XCTAssertEqual(harness.runner.phase, .finished)
-        XCTAssertEqual(harness.strap.hapticCount, 2, "do-it-now + stop")
-        let bout = try XCTUnwrap(harness.strap.bouts.first)
-        XCTAssertEqual(bout.transitionKind, "sit_to_stand")
-        let transitionTs = try XCTUnwrap(bout.transitionTs)
-        XCTAssertGreaterThanOrEqual(transitionTs, bout.intervalStartTs)
-        XCTAssertLessThan(transitionTs, bout.intervalEndTs)
-        XCTAssertEqual(transitionTs - bout.cueStartTs, 5, "pre-state seconds held before the transition")
-        XCTAssertEqual(bout.cueStopTs - transitionTs, 5, "post-state seconds held after the transition")
-    }
-
-    @MainActor
-    func testMarkTransitionNowRecordsTheTapMoment() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1, guardSeconds: 2,
-                                           transitionKind: "stand_to_sit", preState: 5, postState: 5)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)    // active at epoch+3
-        harness.advance(2)    // epoch+5, two seconds before the auto-fire
-        harness.runner.markTransitionNow()
-        XCTAssertEqual(harness.strap.hapticCount, 1, "the tap fires the do-it-now cue immediately")
-
-        harness.advance(8)    // epoch+13, stop cue
-        XCTAssertEqual(harness.runner.phase, .finished)
-        let bout = try XCTUnwrap(harness.strap.bouts.first)
-        XCTAssertEqual(bout.transitionKind, "stand_to_sit")
-        XCTAssertEqual(bout.transitionTs, epoch + 5, "the recorded moment is the tap, not the deadline")
-        XCTAssertEqual(harness.strap.hapticCount, 2)
-    }
-
-    @MainActor
-    func testAnEarlyTransitionTapIsClampedToTheIntervalStart() throws {
-        let harness = try makeHarness([task(duration: 20, reps: 1, guardSeconds: 2,
-                                           transitionKind: "sit_to_stand", preState: 8, postState: 8)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)     // active at epoch+3, still inside the 2 s guard trim
-        harness.runner.markTransitionNow()
-        harness.advance(20)    // stop cue
-
-        let bout = try XCTUnwrap(harness.strap.bouts.first)
-        XCTAssertEqual(bout.transitionTs, bout.intervalStartTs)
-    }
-
-    @MainActor
-    func testALateTransitionTapIsClampedToTheIntervalEnd() throws {
-        // No pre-state, so nothing auto-fires and the tap is the only way to record the moment.
-        let harness = try makeHarness([task(duration: 20, reps: 1, guardSeconds: 2,
-                                           transitionKind: "sit_to_stand")])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)     // active at epoch+3; interval ends at epoch+21, stop cue at epoch+23
-        harness.advance(19)    // epoch+22, inside the trailing guard trim
-        harness.runner.markTransitionNow()
-        harness.advance(1)     // stop cue
-
-        let bout = try XCTUnwrap(harness.strap.bouts.first)
-        XCTAssertEqual(bout.transitionTs, bout.intervalEndTs)
-    }
-
-    @MainActor
-    func testMarkTransitionNowIsANoOpForNonTransitionTasks() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1)])
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)
-        harness.runner.markTransitionNow()
+    func testGateBlockedMidStepStopsTheSessionAndKeepsEarlierBouts() throws {
+        let harness = try makeHarness()
+        harness.startFirstActivity()
         harness.advance(10)
-
-        let bout = try XCTUnwrap(harness.strap.bouts.first)
-        XCTAssertNil(bout.transitionKind)
-        XCTAssertNil(bout.transitionTs)
-        XCTAssertEqual(harness.strap.hapticCount, 2, "no do-it-now cue for a static task")
+        harness.strap.gateStatus = .blocked(.rawSessionInFlight)
+        harness.runner.refreshGate()
+        XCTAssertEqual(harness.runner.phase, .gate(.rawSessionInFlight))
+        XCTAssertEqual(harness.strap.bouts.map(\.taskId), ["a.hold-1"])
+        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .partTime])
+        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
     }
 
     @MainActor
-    func testOnBoutHandlerThatCancelsIsNotOverriddenByARestPhase() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 2, rest: 2)])
-        // The UI's label path decides to stop the session at the moment a bout lands.
-        harness.runner.onBout = { [weak harness] bout in
-            harness?.strap.bouts.append(bout)
-            harness?.runner.cancel()
-        }
-        harness.runner.begin(previousMode: .partTime)
-        harness.advance(3)
-        harness.advance(10)   // bout 1 ends -> the handler cancels inside endActive
-
-        XCTAssertEqual(harness.runner.phase, .cancelled,
-                       "the handler's cancel wins over the rest phase the runner would enter next")
-        XCTAssertEqual(harness.strap.bouts.count, 1)
-        XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
+    func testGateIsAlsoCheckedWhileWaitingToStartAnActivity() throws {
+        let harness = try makeHarness()
+        harness.runner.begin(previousMode: .off)
+        harness.strap.gateStatus = .blocked(.notOnWrist)
+        harness.runner.refreshGate()
+        XCTAssertEqual(harness.runner.phase, .gate(.notOnWrist))
+        XCTAssertEqual(harness.strap.appliedModes, [.continuous, .off])
     }
 
     // MARK: - Relaunch recovery
 
     @MainActor
     func testMarkerSurvivesASimulatedRelaunch() throws {
-        let harness = try makeHarness([task(duration: 10, reps: 1)])
-        harness.runner.begin(previousMode: .off)
-        harness.advance(1)    // mid-countdown when the app dies
-
-        // A fresh runner over the same defaults (as after relaunch) sees the marker and restores.
-        XCTAssertEqual(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults), .off)
+        let harness = try makeHarness()
+        harness.startFirstActivity()
+        harness.advance(1)
+        XCTAssertEqual(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults), .partTime)
         var restored: [ActivityImuCaptureMode] = []
         XCTAssertTrue(ActivityCalibrationRestoreMarker.restoreIfPending(applyMode: { restored.append($0) },
                                                                         defaults: harness.defaults))
-        XCTAssertEqual(restored, [.off])
+        XCTAssertEqual(restored, [.partTime])
         XCTAssertNil(ActivityCalibrationRestoreMarker.pendingRestore(defaults: harness.defaults))
     }
 }

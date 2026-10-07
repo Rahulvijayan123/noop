@@ -5746,6 +5746,13 @@ public final class BLEManager: NSObject, ObservableObject {
         log("Buzz: one-shot fired (patternId=2 loops=3 + runAlarm, acked)")
     }
 
+    /// A timed cue the wearer acts on (guided calibration's "move now"): `loops` buzzes, written
+    /// ACKNOWLEDGED so a busy link (continuous raw IMU streaming) cannot silently drop it the way an
+    /// unacknowledged RUN_HAPTICS_PATTERN can. No RUN_ALARM: the cue must stay short and countable.
+    func buzzCue(loops: UInt8) {
+        send(.runHapticsPattern, payload: [2, loops, 0, 0, 0], writeType: .withResponse)
+    }
+
     /// Haptic Clock (#460): buzz the current wall-clock time out on the strap so the user can read it
     /// off their wrist without a screen. The pure, unit-tested `HapticClock` encoder turns now into an
     /// ordered pulse list (long = a "ten", short = a "unit", in HH-tens / HH-units / MM-tens / MM-units
