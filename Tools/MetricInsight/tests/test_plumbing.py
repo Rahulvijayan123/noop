@@ -242,3 +242,12 @@ def test_linux_plan_unshares_everything_and_passes_no_secrets(tmp_path):
     assert outer_env == {"PATH": "/usr/bin:/bin"}
     set_env = {argv[i + 1]: argv[i + 2] for i, a in enumerate(argv) if a == "--setenv"}
     assert set_env == env
+
+
+def test_literature_searches_are_capped_per_analysis():
+    tools = job_tools()
+    for _ in range(3):
+        tools.call("search_literature", {"query": "resting heart rate sleep"})
+    with pytest.raises(ToolError, match="at most 3"):
+        tools.call("search_literature", {"query": "resting heart rate training load"})
+    assert tools.retrieved and all(r["topic"] for r in tools.retrieved.values())

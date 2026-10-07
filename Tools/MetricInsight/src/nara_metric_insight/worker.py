@@ -49,8 +49,12 @@ def short_day(value: str | None) -> str:
     return f"{day:%b} {day.day}"
 
 
+def _with_units(value: Any, units: str) -> str:
+    return f"{value}{units}" if units == "%" else f"{value} {units}"
+
+
 def _signed(value: Any, units: str) -> str:
-    return f"{'+' if value > 0 else ''}{value} {units}"
+    return f"{'+' if value > 0 else ''}{_with_units(value, units)}"
 
 
 def related_items(evidence: dict[str, Any]) -> list[dict[str, Any]]:
@@ -61,9 +65,12 @@ def related_items(evidence: dict[str, Any]) -> list[dict[str, Any]]:
         if not latest or not signal.get("same_night_as_metric"):
             continue
         units = signal.get("units", "")
-        summary = f"{latest['value']} {units} on {short_day(latest['day'])}"
+        summary = f"{_with_units(latest['value'], units)} on {short_day(latest['day'])}"
         if signal.get("change_vs_median") is not None and signal.get("baseline_nights", 0) >= 3:
-            summary += f", {_signed(signal['change_vs_median'], units)} vs your median"
+            if signal.get("direction") == "flat":
+                summary += ", about your median"
+            else:
+                summary += f", {_signed(signal['change_vs_median'], units)} vs your median"
         items.append({"metric": signal["metric"], "label": signal["label"], "summary": summary,
                       "direction": signal.get("direction", "unknown"), "estimated": bool(signal.get("estimated"))})
         if len(items) >= MAX_RELATED:
@@ -137,7 +144,15 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
         raise AnalysisRejected(result.codes)
     evidence = tools.evidence()
     answer = result.answer
-    citations = [{k: tools.retrieved[c].get(k) for k in ("id", "title", "year", "url")} for c in answer["citations"]]
+    citations, papers = [], set()
+    for cited in answer["citations"]:  # one entry per paper, even when two of its claims were cited
+        record = tools.retrieved[cited]
+        # The app hides an explanation with a forbidden word anywhere on the card, titles included: a paper
+        # titled with one (possible from the remote fallback) is dropped rather than costing the explanation.
+        if record.get("url") in papers or validate.forbidden_term(str(record.get("title") or "")):
+            continue
+        papers.add(record.get("url"))
+        citations.append({k: record.get(k) for k in ("id", "title", "year", "url")})
     insight = {"headline": answer["headline"], "observed": answer["observed"],
                "interpretation": answer["interpretation"], "uncertainty": answer["uncertainty"],
                "related": related_items(evidence), "basis": basis(evidence, anchor)}

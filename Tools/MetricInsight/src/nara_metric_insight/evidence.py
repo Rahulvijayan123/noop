@@ -178,16 +178,23 @@ def availability_estimated(document: dict[str, Any] | None, signal: Signal) -> b
 # --------------------------------------------------------------------------- tool payloads
 
 
+def _tracked(series: list[tuple[date, float | None]]) -> list[tuple[date, float | None]]:
+    """The nights from the first measured one on: earlier nights are before tracking began, not gaps."""
+    first = next((i for i, (_, v) in enumerate(series) if v is not None), len(series))
+    return series[first:]
+
+
 def metric_series(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date, days: int) -> dict[str, Any]:
     signal = metric.signal
     series = nights(scores, signal, anchor - timedelta(days=days - 1), anchor)
-    measured = [v for _, v in series if v is not None]
+    tracked = _tracked(series)
+    measured = [v for _, v in tracked if v is not None]
     return {
         "metric": metric.key, "label": signal.label, "units": signal.units,
         "from": series[0][0].isoformat(), "to": anchor.isoformat(),
-        "nights": [{"day": d.isoformat(), "value": rounded(v, signal.decimals)} for d, v in series],
-        "measured_nights": len(measured), "missing_nights": len(series) - len(measured),
-        "note": "value null = not measured that night (missing, not zero)",
+        "nights": [{"day": d.isoformat(), "value": rounded(v, signal.decimals)} for d, v in tracked],
+        "measured_nights": len(measured), "missing_nights": len(tracked) - len(measured),
+        "note": "starts at the first measured night; value null = not measured that night (missing, not zero)",
     }
 
 
@@ -305,9 +312,9 @@ def sleep_context(scores: dict[date, dict[str, Any]], anchor: date, zone: ZoneIn
     day = anchor - timedelta(days=count - 1)
     while day <= anchor:
         row = scores.get(day) or {}
-        minutes = plausible(total, row.get(total.column))
+        hours = plausible(total, row.get(total.column))
         rows.append({"day": day.isoformat(),
-                     "duration_h": rounded(minutes / 60.0, 1) if minutes is not None else None,
+                     "duration_h": rounded(hours, 1),
                      "efficiency_pct": rounded(plausible(efficiency, row.get(efficiency.column)), 0),
                      "onset_local": _local_time(row.get("sleep_onset_at"), zone),
                      "wake_local": _local_time(row.get("wake_onset_at"), zone)})
@@ -318,7 +325,7 @@ def sleep_context(scores: dict[date, dict[str, Any]], anchor: date, zone: ZoneIn
     out: dict[str, Any] = {"nights": rows, "estimated": True,
                            "note": "sleep timing and duration are estimated from motion and heart rate"}
     if durations:
-        out["usual_duration_h"] = {"median": rounded(median(durations) / 60.0, 1), "nights": len(durations)}
+        out["usual_duration_h"] = {"median": rounded(median(durations), 1), "nights": len(durations)}
     timing = ((document or {}).get("sleep") or {}).get("timing") if document else None
     if isinstance(timing, dict) and timing.get("state") == "available":
         out["timing_change"] = {
@@ -400,13 +407,18 @@ def recent_events(exposures: list[dict[str, Any]], document: dict[str, Any] | No
 def data_quality(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date, window_days: int,
                  document: dict[str, Any] | None, context_mode: str | None) -> dict[str, Any]:
     series = nights(scores, metric.signal, anchor - timedelta(days=window_days - 1), anchor)
-    measured = [d for d, v in series if v is not None]
+    tracked = _tracked(series)
+    measured = [d for d, v in tracked if v is not None]
     out: dict[str, Any] = {
-        "window_nights": len(series), "measured_nights": len(measured), "missing_nights": len(series) - len(measured),
+        "window_nights": len(series),
+        "tracked_nights": len(tracked),
+        "measured_nights": len(measured),
+        "missing_nights": len(tracked) - len(measured),
         "first_measured": measured[0].isoformat() if measured else None,
         "last_measured": measured[-1].isoformat() if measured else None,
-        "longest_gap_nights": _longest_gap([(d, v) for d, v in series if not measured or d >= measured[0]]),
+        "longest_gap_nights": _longest_gap(tracked),
         "measured_in_last_7": sum(1 for d in measured if d > anchor - timedelta(days=RECENT_NIGHTS)),
+        "note": "tracked = nights since the first measurement; missing = tracked nights without a measurement",
     }
     if document:
         statuses: dict[str, int] = {}

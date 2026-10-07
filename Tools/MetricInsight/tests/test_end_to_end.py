@@ -113,7 +113,7 @@ def test_rhr_explained_end_to_end_then_served_from_cache(pg, stub, worker):
     assert insight["kind"] == "explained" and insight["data_through"] == "2026-10-06"
     assert insight["headline"] == "Resting heart rate 45 bpm on Oct 6"
     assert insight["observed"] == ["Your resting heart rate was 45 bpm on Oct 6.", "That is 3 bpm lower than on Oct 5."]
-    assert insight["basis"]["nights"] == 7 and insight["basis"]["missing_nights"] == 83
+    assert insight["basis"]["nights"] == 7 and insight["basis"]["missing_nights"] == 1
     assert [c["id"] for c in insight["citations"]] and all(c["url"].startswith("https://pubmed") for c in insight["citations"])
     related = {r["metric"]: r for r in insight["related"]}
     assert related["hrv_rmssd"]["estimated"] is False and related["resp_rate"]["estimated"] is True

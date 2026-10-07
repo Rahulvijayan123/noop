@@ -19,6 +19,9 @@ from .metrics import INSIGHT_METRICS, SIGNALS, WINDOW_DAYS
 from .sources import Sources
 
 
+MAX_SEARCHES = 3
+
+
 class ToolError(ValueError):
     """A bad call (unknown tool, bad arguments). The message goes back to the model; never contains data."""
 
@@ -49,6 +52,7 @@ class JobTools:
         self.literature = literature
         self.calls: list[str] = []
         self.retrieved: dict[str, dict[str, Any]] = {}
+        self.searches = 0
 
     def call(self, name: str, args: dict[str, Any] | None) -> dict[str, Any]:
         tool = TOOLS.get(name)
@@ -107,6 +111,9 @@ class JobTools:
         return ev.previous_insight(self.sources.previous_insight())
 
     def search_literature(self, args: dict[str, Any]) -> dict[str, Any]:
+        self.searches += 1
+        if self.searches > MAX_SEARCHES:
+            raise ToolError(f"at most {MAX_SEARCHES} literature searches per analysis; use the results you have")
         try:
             records = self.literature.search(str(args["query"]), self.metric.key, int(args.get("limit", 3)))
         except ValueError as exc:  # a query that looks personal is refused, never sent anywhere

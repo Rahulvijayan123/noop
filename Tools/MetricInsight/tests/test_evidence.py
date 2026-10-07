@@ -31,8 +31,13 @@ def test_missing_nights_are_none_never_zero():
     assert series == [(date(2026, 9, 30), None), (date(2026, 10, 1), None), (date(2026, 10, 2), None),
                       (date(2026, 10, 3), 52.4)]
     payload = ev.metric_series(rows, RHR, date(2026, 10, 3), 7)
-    assert [n["value"] for n in payload["nights"]] == [None] * 6 + [52]
-    assert payload["measured_nights"] == 1 and payload["missing_nights"] == 6
+    # nights before the first measurement are before tracking began: not listed, not counted as missing
+    assert [n["value"] for n in payload["nights"]] == [52]
+    assert payload["measured_nights"] == 1 and payload["missing_nights"] == 0
+    rows[date(2026, 9, 29)] = {"day": date(2026, 9, 29), "resting_hr_bpm": 50}
+    payload = ev.metric_series(rows, RHR, date(2026, 10, 3), 7)
+    assert [n["value"] for n in payload["nights"]] == [50, None, None, None, 52]
+    assert payload["measured_nights"] == 2 and payload["missing_nights"] == 3
 
 
 def test_summary_without_context_uses_the_labelled_fallback_and_says_history_is_short():
@@ -109,7 +114,7 @@ def test_sleep_events_and_quality():
     rows[ANCHOR]["sleep_onset_at"] = datetime(2026, 10, 6, 6, 20, tzinfo=timezone.utc)
     sleep = ev.sleep_context(rows, ANCHOR, zone, 3, None)
     assert sleep["nights"][-1]["onset_local"] == "23:20" and sleep["estimated"] is True
-    assert sleep["nights"][-1]["duration_h"] == 7.1
+    assert sleep["nights"][-1]["duration_h"] == 7.1  # 426 min
     start = int(datetime(2026, 10, 5, 8, 0, tzinfo=zone).timestamp())
     events = ev.recent_events([
         {"kind": "caffeine", "label": "Coffee", "occurred_start": start, "occurred_end": start + 60,
@@ -121,5 +126,6 @@ def test_sleep_events_and_quality():
                                  "local_time": "08:00", "dose": 95, "dose_unit": "mg"}]
     assert events["unrecorded_categories"] == ["alcohol"]
     quality = ev.data_quality(rows, RHR, ANCHOR, 90, None, None)
-    assert quality["measured_nights"] == 7 and quality["missing_nights"] == 83
+    assert quality["measured_nights"] == 7 and quality["tracked_nights"] == 7 and quality["missing_nights"] == 0
+    assert quality["window_nights"] == 90
     assert quality["first_measured"] == "2026-09-30" and quality["longest_gap_nights"] == 0

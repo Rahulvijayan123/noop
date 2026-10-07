@@ -58,6 +58,18 @@ _NUMBER = re.compile(r"(?<![\w.])[-+−]?\d+(?:[.,]\d+)?(?![\w])")
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
 _PERSONAL = re.compile(r"\b(you|your|you're|you've)\b", re.I)
 
+# A cited finding must be about something the explanation says (by the curated entry's topic).
+TOPIC_WORDS: dict[str, tuple[str, ...]] = {
+    "alcohol": ("alcohol", "drink", "wine", "beer"), "caffeine": ("caffeine", "coffee"),
+    "sleep_restriction": ("sleep",), "training_load": ("training", "exercise", "workout", "exertion", "load"),
+    "detraining": ("training", "exercise", "fitness"), "aerobic_fitness": ("fitness", "training", "exercise"),
+    "heat": ("heat", "hot", "warm", "temperature"), "altitude": ("altitude", "elevation"),
+    "hydration": ("hydration", "fluid", "water"), "menstrual_cycle": ("cycle", "menstrual", "period"),
+    "seasonality": ("season", "winter", "summer"), "age": ("age",),
+    "normal_range": ("usual", "range", "normal", "typical", "vary", "variation", "differ"),
+    "day_to_day_variability": ("night-to-night", "day-to-day", "vary", "variation", "common", "usual"),
+    "wearable_accuracy": ("measure", "measurement", "sensor", "device", "wear", "accuracy"),
+}
 MAX_HEADLINE = 120
 MAX_SENTENCE = 280
 MAX_TOTAL = 1200
@@ -260,5 +272,10 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     unknown = [c for c in citations if c not in retrieved]
     if unknown:
         errors.append(f"citations:{', '.join(unknown[:3])} were not returned by search_literature in this session")
+    said = " ".join(sentences).lower()
+    for cited in (c for c in citations if c in retrieved):
+        words = TOPIC_WORDS.get(str(retrieved[cited].get("topic")))
+        if words and not any(word in said for word in words):
+            errors.append(f"citations:{cited} is about {retrieved[cited].get('topic')}, which the explanation does not mention")
     answer = {"headline": headline.strip(), **sections, "citations": list(dict.fromkeys(citations))}
     return Result(not errors, answer, list(dict.fromkeys(errors)))

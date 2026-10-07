@@ -88,8 +88,8 @@ def answer(evidence: dict[str, Any], *, bad: bool = False) -> str:
     return json.dumps({
         "headline": f"Resting heart rate {latest.get('value')} bpm on {_short(latest['day'])}",
         "observed": observed, "interpretation": interpretation,
-        "uncertainty": [f"{quality.get('missing_nights')} of the last {quality.get('window_nights')} nights were "
-                        "not measured, so what is usual for you is still uncertain."],
+        "uncertainty": [f"{quality.get('missing_nights')} of the {quality.get('tracked_nights')} nights since "
+                        "tracking began were not measured, so what is usual for you is still uncertain."],
         "citations": (evidence.get("lit") or [])[:1],
     })
 

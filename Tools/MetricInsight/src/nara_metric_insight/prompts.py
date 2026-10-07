@@ -20,12 +20,13 @@ Your final message must be only the JSON object the task asks for.
 """
 
 ANSWER_SHAPE = ('{"headline": "...", "observed": ["..."], "interpretation": ["..."], '
-                '"uncertainty": ["..."], "citations": ["pmid:..."]}')
+                '"uncertainty": ["..."], "citations": ["<id from search_literature>"]}')
 
 
 def task(label: str, units: str, latest_day: str, latest_value: object) -> str:
     return f"""\
-Explain this person's {label} for the screen that shows their latest value and its history.
+Explain this person's {label} to them, in second person ("your"), for the screen that shows their latest value
+and its history.
 The latest measured night is {latest_day}: {latest_value} {units}. Load everything else with the tools.
 
 1. In Python, load the evidence, for example:
@@ -50,7 +51,8 @@ The latest measured night is {latest_day}: {latest_value} {units}. Load everythi
    {ANSWER_SHAPE}
    headline: at most 90 characters. observed: 1-3 sentences of facts from the tools. interpretation: 0-3 hedged
    sentences ("may", "can", "is consistent with"). uncertainty: 1-3 sentences. citations: ids returned by
-   search_literature that support an interpretation (at most 2), or [].
+   search_literature (their "id" field) that support a sentence you wrote (at most 2), or []. Keep the whole explanation under
+   900 characters: short, plain sentences. At most 3 literature searches.
 
 Rules the reply is checked against:
 - Use absolute dates such as "Oct 6", never: {", ".join(RELATIVE_TIME)}.

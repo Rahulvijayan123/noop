@@ -95,7 +95,8 @@ def test_shape_and_length():
 def test_literature_is_curated_first_and_excludes_topics_the_app_never_infers():
     library = Literature()
     hits = library.search("resting heart rate alcohol sleep", "resting_hr", limit=3)
-    assert hits and all(h["id"].startswith("pmid:") and h["url"] for h in hits)
+    assert hits and all(h["id"].startswith("lit:") and h["url"].startswith("https://pubmed") for h in hits)
+    assert len({h["id"] for h in hits}) == len(hits)
     # wording the app never uses is refused as a query, and excluded topics are never returned
     try:
         library.search("resting heart rate acute illness infection fever", "resting_hr", limit=5)
@@ -111,3 +112,12 @@ def test_literature_is_curated_first_and_excludes_topics_the_app_never_infers():
         assert "rejected" in str(exc)
     else:  # a personal-looking query is refused even though the corpus is local
         raise AssertionError("personal query accepted")
+
+
+def test_a_citation_must_be_about_something_the_explanation_says():
+    retrieved = {"pmid:1": {"id": "pmid:1", "topic": "menstrual_cycle", "finding": ""},
+                 "pmid:2": {"id": "pmid:2", "topic": "alcohol", "finding": ""}}
+    text = answer(interpretation=["Alcohol can raise heart rate in the hours after drinking."], citations=["pmid:2"])
+    assert validate.check(text, EVIDENCE, retrieved).ok
+    off_topic = answer(interpretation=["Alcohol can raise heart rate in the hours after drinking."], citations=["pmid:1"])
+    assert "citations" in validate.check(off_topic, EVIDENCE, retrieved).codes
