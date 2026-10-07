@@ -97,7 +97,10 @@ enum DaytimeStressMode {
                 let to = Int(dayEnd.timeIntervalSince1970) - 1
                 let dayTz = TimeZone.current.secondsFromGMT(for: dayStart)
                 let dayHR = await repo.hrSamples(from: from, to: to, limit: 200_000)
-                guard !dayHR.isEmpty else { continue }
+                // BaselineStandard rule 7 (audit 2026-10-07): a day with no heart rate is a MISSING day of the
+                // 30, folded as skip-and-hold so the baseline's staleness sees the gap, not skipped so the
+                // remaining days silently stand in for a longer span.
+                guard !dayHR.isEmpty else { aggregates.append((hr: nil, rmssd: nil)); continue }
                 // The live baseline scores HR only while the RMSSD term is disabled. Skip the
                 // 30 days of historical R-R reads; they cannot change the selected mode.
                 let dayRR = DaytimeStress.daytimeRMSSDScoringEnabled
