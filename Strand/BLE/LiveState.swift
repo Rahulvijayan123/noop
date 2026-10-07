@@ -54,6 +54,9 @@ public final class LiveState: ObservableObject {
     /// radio-off / connect-fail / disconnect). Twin of the Android LiveState.streamingLiveHR.
     @Published public var streamingLiveHR: Bool = false
     @Published public var heartRate: Int? = nil
+    /// Wall-clock of the last real HR packet. Not published: same-bpm packets still advance Watchdog freshness.
+    public private(set) var lastHeartRatePacketUnix: Int?
+    public private(set) var lastHeartRatePacketBpm: Int?
     /// Whether the heavy R10/R11 realtime burst is currently armed (the "live feed"). Tracks the
     /// realtime INTENT (startRealtime/stopRealtime), NOT `heartRate` — the lightweight 0x2A37 profile
     /// keeps setting heartRate while bonded, so a heartRate-driven toggle could never read "off". The
@@ -743,11 +746,23 @@ public final class LiveState: ObservableObject {
         clearLiveHeartRate()
     }
 
+    /// Record a real HR packet without requiring a published bpm change.
+    /// Contact-not-detected packets do not advance the Watchdog freshness clock.
+    public func noteHeartRatePacket(bpm: Int, at unix: Int = Int(Date().timeIntervalSince1970),
+                                    contact: StandardHRContact? = nil) {
+        if contact == .supportedNotDetected { return }
+        guard (30...220).contains(bpm) else { return }
+        lastHeartRatePacketUnix = unix
+        lastHeartRatePacketBpm = bpm
+    }
+
     /// Blank all live biometric readouts (HR + R-R + the rolling buffer) so a stale heart rate or
     /// R-R strip can't outlive the link. Called on CoreBluetooth disconnect (BLEManager), the twin of
     /// the `charging = nil` / `encryptedBond = false` clears on the same path.
     public func clearBiometrics() {
         heartRate = nil
+        lastHeartRatePacketUnix = nil
+        lastHeartRatePacketBpm = nil
         rr.removeAll()
         rrRecent.removeAll()
         clearBatterySamples()   // a stale runtime estimate must not outlive the link either (#713)

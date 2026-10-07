@@ -12,6 +12,8 @@ import Foundation
 // ChartCards (all NoopMetrics.chartHeight tall). No hand-sized cards anywhere.
 
 struct TrendsView: View {
+    /// When true, the charts render inside another screen (the Monitor tab) without a second header.
+    var embedded: Bool = false
     @EnvironmentObject var repo: Repository
     // NOTE: deliberately does NOT observe LiveState — Trends shows historical data only, and
     // observing it forced a full re-render of this subtree on every ~1 Hz live-HR tick.
@@ -208,18 +210,23 @@ struct TrendsView: View {
     }
 
     var body: some View {
-        // The liquid metric cards now tap through to their MetricDetailView (matching Today's card
-        // taps + Explore's rows). On iOS each tab already supplies a NavigationStack, so those pushes
-        // land in the ambient stack. On macOS the .trends detail pane has NO enclosing NavigationStack
-        // (RootView), so — exactly like MetricExplorerView (#753) — wrap the scaffold in one here so the
-        // pushes get Back chrome instead of hanging. The SAME shared scaffold renders on both.
-        #if os(macOS)
-        // Register the value routes at THIS stack's root; on iOS the tab shell's stack registers
-        // them instead (once per stack — a double registration double-pushes, #38).
-        NavigationStack { scaffold.tabRouteDestinations() }
-        #else
-        scaffold
-        #endif
+        if embedded {
+            trendColumn
+                .task(id: repo.days.count) { await loadSleepPerformance() }
+        } else {
+            // The liquid metric cards now tap through to their MetricDetailView (matching Today's card
+            // taps + Explore's rows). On iOS each tab already supplies a NavigationStack, so those pushes
+            // land in the ambient stack. On macOS the .trends detail pane has NO enclosing NavigationStack
+            // (RootView), so — exactly like MetricExplorerView (#753) — wrap the scaffold in one here so the
+            // pushes get Back chrome instead of hanging. The SAME shared scaffold renders on both.
+            #if os(macOS)
+            // Register the value routes at THIS stack's root; on iOS the tab shell's stack registers
+            // them instead (once per stack — a double registration double-pushes, #38).
+            NavigationStack { scaffold.tabRouteDestinations() }
+            #else
+            scaffold
+            #endif
+        }
     }
 
     private var scaffold: some View {
@@ -230,6 +237,17 @@ struct TrendsView: View {
                        onRefresh: { await repo.refresh() },
                        lazy: true,
                        topBackground: liquidScaffoldSky()) {
+            trendColumn
+        }
+        // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
+        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
+        // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
+        // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
+        .task(id: repo.days.count) { await loadSleepPerformance() }
+    }
+
+    private var trendColumn: some View {
+        Group {
             if repo.days.isEmpty {
                 ComingSoon(what: repo.loaded
                     ? "Trends need history to draw. Import your WHOOP export in Data Sources to see weeks, months and years instantly."
@@ -271,14 +289,11 @@ struct TrendsView: View {
                 }
             }
         }
-        // #732 — load the resolved sleep_performance series so Rest plots the SAME composite the Today
-        // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
-        // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
-        // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
-        .task(id: repo.days.count) {
-            let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
-            sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        }
+    }
+
+    private func loadSleepPerformance() async {
+        let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
+        sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
     }
 
     // MARK: Week-in-review digest with prev/next week browsing (#710)

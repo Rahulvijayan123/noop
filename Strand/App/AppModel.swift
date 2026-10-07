@@ -63,6 +63,10 @@ final class AppModel: ObservableObject {
     private(set) var historyGate: HistoryIntakeGate?
     /// Read model over the on-device store (dashboard + detail screens).
     let repo: Repository
+    /// Layer 1 day/night usuals. Separate from Charge (`Baselines.swift`).
+    let baseline = BaselineStore()
+    /// Live Watchdog. Scores the last ~30 minutes on device; does not write Layer 1 snapshots.
+    let watchdog = WatchdogService()
     /// G1 day-boundary driver (audit 20261003): recomputes the local "Today" key on launch/resume/
     /// timezone/significant-time changes and keeps the next-local-midnight timer while the app is
     /// active, so the Today surfaces re-key without waiting for any data refresh. See
@@ -978,6 +982,7 @@ final class AppModel: ObservableObject {
             }
             #endif
             await self.repo.refresh()                          // surface any imported data at once
+            await MainActor.run { self.watchdog.start(on: self) }
             await self.wireSourceCoordinator()                 // dormant unless a generic strap is active
             await self.recordAppVersionChangeIfNeeded()        // #1410: stamp an update transition once
             try? await Task.sleep(nanoseconds: 6_000_000_000)  // give the first offload a moment

@@ -158,6 +158,10 @@ struct StrandiOSApp: App {
             await model?.checkStrapNotSeen()
         })
         StaleBatteryBackgroundScheduler.schedule()
+        WatchdogBackgroundScheduler.register { [weak model] in
+            await model?.watchdog.tick(skipForecast: true)
+        }
+        WatchdogBackgroundScheduler.scheduleIfNeeded()
         let bridge = HealthKitBridge(
             repo: model.repo,
             appleDeviceId: model.appleDeviceId,
@@ -232,6 +236,7 @@ struct StrandiOSApp: App {
                 .environmentObject(model.ble)   // #334: Today pull-to-sync reads BLEManager (no HR churn)
                 .environmentObject(model.live)
                 .environmentObject(model.repo)
+                .environmentObject(model.baseline)
                 .environmentObject(model.profile)
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)

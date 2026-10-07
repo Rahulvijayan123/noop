@@ -1967,6 +1967,12 @@ public enum SleepStager {
     ///
     /// NOTE: faithful port of sleep_features.resp_rate_and_rrv (which the Python
     /// source derives without neurokit), using a simple local-maxima peak finder.
+    /// Public door for live Watchdog: same peak-detector as the stager, or nil when unusable.
+    public static func respRateFromWaveform(_ respRaw: [Double], dtS: Double = 1.0) -> Double? {
+        let (rate, _) = respRateAndRRV(respRaw, dtS: dtS)
+        return rate.isFinite ? rate : nil
+    }
+
     static func respRateAndRRV(_ respRaw: [Double], dtS: Double = 1.0) -> (Double, Double) {
         let nan = Double.nan
         if respRaw.count < 8 { return (nan, nan) }
