@@ -86,6 +86,25 @@ public struct LBTrustInputs: Equatable, Sendable {
     public var tonightStatus: LBQualityStatus?
 }
 
+/// One night vital against its own usual (`LongitudinalBaseline.vitalVerdict`).
+public struct LBVitalVerdict: Equatable, Sendable {
+    public enum State: String, Equatable, Sendable {
+        case inRange = "in_range"
+        case off
+        /// Not enough trusted nights for a usual yet.
+        case learning
+        /// The night has no reading for this vital.
+        case noReading = "no_reading"
+    }
+
+    public var state: State
+    public var value: Double?
+    public var bandLo: Double?
+    public var bandHi: Double?
+    /// Which copy the band came from: the week usual when it is trusted, else the longer one.
+    public var fromWeek: Bool
+}
+
 extension LongitudinalBaseline {
 
     public static let reviewDisclaimer =
@@ -312,6 +331,26 @@ extension LongitudinalBaseline {
     public static func isOffUsual(z: Double?, k: Double) -> Bool {
         guard let z else { return false }
         return abs(z) >= k
+    }
+
+    /// The Monitor card verdict for one night: the week copy when it is trusted, else the longer one; off when a
+    /// trusted copy's z reaches its k band. The Home ring and Monitor list use it; the server's metric
+    /// explanations mirror it (Tools/MetricInsight/src/nara_metric_insight/layer1.py).
+    public static func vitalVerdict(_ ev: LBEvaluation) -> LBVitalVerdict {
+        let week = ev.show7 && ev.usualTrustPct7 >= trustHideThreshold ? ev.copy7 : nil
+        let long = ev.showLong && ev.usualTrustPctLong >= trustHideThreshold ? ev.copyLong : nil
+        let copy = week ?? long
+        guard let today = ev.todayNative else {
+            return LBVitalVerdict(state: copy == nil ? .learning : .noReading, value: nil,
+                                  bandLo: copy?.bandLoDisplay, bandHi: copy?.bandHiDisplay, fromWeek: week != nil)
+        }
+        guard let copy else {
+            return LBVitalVerdict(state: .learning, value: today, bandLo: nil, bandHi: nil, fromWeek: false)
+        }
+        let offWeek = week != nil && isOffUsual(z: ev.z7, k: ev.kBandUsed)
+        let offLong = long != nil && isOffUsual(z: ev.zLong, k: ev.kBandUsed)
+        return LBVitalVerdict(state: (offWeek || offLong) ? .off : .inRange, value: today,
+                              bandLo: copy.bandLoDisplay, bandHi: copy.bandHiDisplay, fromWeek: week != nil)
     }
 
     /// Stable-stretch FPR table. `realWhoopRun` stays false until a WHOOP tape is passed in.
