@@ -549,6 +549,10 @@ public struct LBEvaluation: Equatable, Sendable {
     public var p7: Double? = nil
     /// Out-of-sample tail calibration factor applied to the band multiplier (≥ 1).
     public var calibrationFactor: Double = 1
+    /// Median within-day scale (math space) over the 60-day window's clean days that carried one (context strata
+    /// only). A LIVE short-window value varies around the day's level by this much on top of the between-day
+    /// spread; nil when unknown.
+    public var withinDayScaleLong: Double? = nil
 
     /// LABEL: human-readable math dump
     /// One block you can print after a test failure to see both copies, gap, CUSUM, and confidence.
@@ -1836,6 +1840,10 @@ public enum LongitudinalBaseline {
             paramSet: V2.paramSet, carry: next)
         ev.pLong = pLong
         ev.zPredLong = zPredLong
+        ev.withinDayScaleLong = PhysiologyContext.RobustStats.median(longEpochs.compactMap { e in
+            guard trainableMath(byDay[e], series: series) != nil else { return nil }
+            return byDay[e]?.withinDayScale
+        })
         ev.p7 = p7
         ev.calibrationFactor = calFactor
         let worseDir = p.worse

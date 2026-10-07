@@ -336,34 +336,47 @@ final class WatchdogV40CloseoutTests: XCTestCase {
     }
 
     func testThinWindowRestHR135IsSafetySevere() throws {
+        // v2.clinical (audit 2026-10-07): three fresh minutes at 135 in a thin window used to page "severe" from a
+        // single-sample extreme. Safety now needs ≥ 10 sustained still minutes AND verified on-body / signal
+        // quality; missing metadata holds (shown, never sent).
         let now = 97_300_000
         let feed = Watchdog.syntheticFeed(now: now, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
         guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
             return XCTFail("window")
         }
+        var full = win
         if win.hr.count > 4 {
             for i in 0..<(win.hr.count - 3) { win.hr[i] = nil }
         }
-        XCTAssertNotNil(WatchdogQuality.gate(win))
-        XCTAssertTrue(Watchdog.safetyCap(window: win))
-        let r = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
-        XCTAssertEqual(r.severity, .severe)
-        XCTAssertEqual(r.qualityGate, "safety-during-quality-fail")
-        XCTAssertTrue(r.shouldNotify)
-        let silent = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(),
+        win.quality = .synthetic(for: win)
+        let thin = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertNotEqual(thin.severity, .severe)
+        XCTAssertFalse(thin.shouldNotify, "3 minutes is not a sustained extreme")
+
+        full.quality = .synthetic(for: full)
+        let sustained = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertEqual(sustained.severity, .severe)
+        XCTAssertTrue(sustained.shouldNotify)
+        XCTAssertEqual(sustained.verdicts?.first(where: { $0.decision == .alert })?.candidate.kind, .safetyExtreme)
+        let silent = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(),
                                        nowUnix: now, liveAlerts: false)
         XCTAssertFalse(silent.shouldNotify)
+
+        full.quality = .empty
+        let unverified = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertEqual(unverified.severity, .candidate, "unknown sensor quality holds the candidate")
+        XCTAssertFalse(unverified.shouldNotify)
     }
 
     func testSafetyHighLowIgnoresLoggedIllFreeze() {
+        // v2: a sustained, verified still extreme is absolute: a logged-ill freeze of the personal usual does not
+        // change it (and a single fresh minute never pages; see testThinWindowRestHR135IsSafetySevere).
         let now = 97_310_000
         let feed = Watchdog.syntheticFeed(now: now, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
         guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
             return XCTFail("window")
         }
-        if win.hr.count > 4 {
-            for i in 0..<(win.hr.count - 3) { win.hr[i] = nil }
-        }
+        win.quality = .synthetic(for: win)
         let asOf = "2026-06-15"
         let t = LongitudinalBaseline.isoEpochDay(asOf)!
         var rows: [LBDailyObservation] = []
@@ -379,8 +392,7 @@ final class WatchdogV40CloseoutTests: XCTestCase {
         let r = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(),
                                   evaluations: [ev], nowUnix: now)
         XCTAssertEqual(r.severity, .severe)
-        XCTAssertEqual(r.qualityGate, "safety-during-quality-fail")
-        XCTAssertTrue(Watchdog.safetyCap(window: win))
+        XCTAssertTrue(r.verdicts?.contains { $0.candidate.kind == .safetyExtreme && $0.decision == .alert } ?? false)
     }
 
     func testPersonalNativeOffIndependentOfHat() {
@@ -570,21 +582,24 @@ final class WatchdogV40CloseoutTests: XCTestCase {
     }
 
     func testHrMinuteMeanDoesNotHideFreshHigh() {
+        // v2 (audit 2026-10-07): a 20-second burst above 120 shows in the minute max but is not a sustained
+        // extreme; it must not page (v1 paged on the single-sample minute max).
         let now = 97_400_000
         var feed = Watchdog.syntheticFeed(now: now, hr: 70, hrv: 44, temp: 33.0, resp: 14, motion: 0)
         feed.hr = feed.hr.map { sample in
             sample.ts >= now - 20 ? HRSample(ts: sample.ts, bpm: 135) : sample
         }
-        guard case .success(let win) = WatchdogWindowBuilder.build(feed) else {
+        guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
             return XCTFail("window")
         }
         let lastMean = try! XCTUnwrap(win.hr.last ?? nil)
         let lastMax = try! XCTUnwrap(win.hrMax.last ?? nil)
         XCTAssertLessThan(lastMean, WatchdogConfig.restHrHigh)
         XCTAssertGreaterThan(lastMax, WatchdogConfig.restHrHigh)
-        XCTAssertTrue(Watchdog.safetyCap(window: win))
+        win.quality = .synthetic(for: win)
         let r = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
-        XCTAssertEqual(r.severity, .severe)
+        XCTAssertNotEqual(r.severity, .severe)
+        XCTAssertFalse(r.shouldNotify)
     }
 
     func testMedian3KeepsSafetyBoundRMSSD() {
@@ -594,26 +609,27 @@ final class WatchdogV40CloseoutTests: XCTestCase {
     }
 
     func testSafetyDurationSurvivesThinWindowTicks() {
+        // v2: a thin window (coverage below the model gate) that still holds ≥ 10 sustained, verified still
+        // minutes above 120 alerts through the quality-fail path, and the safety clock survives ticks.
         let now = 97_500_000
-        let feed = Watchdog.syntheticFeed(now: now, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
-        guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
-            return XCTFail("window")
+        func thin(_ t: Int) -> WatchdogWindow? {
+            let feed = Watchdog.syntheticFeed(now: t, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
+            guard case .success(var w) = WatchdogWindowBuilder.build(feed) else { return nil }
+            if w.hr.count > 12 {
+                for i in 0..<(w.hr.count - 12) { w.hr[i] = nil }
+            }
+            w.quality = .synthetic(for: w)
+            return w
         }
-        if win.hr.count > 4 {
-            for i in 0..<(win.hr.count - 3) { win.hr[i] = nil }
-        }
+        guard let win = thin(now) else { return XCTFail("window") }
+        XCTAssertNotNil(WatchdogQuality.gate(win))
         let first = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
         XCTAssertEqual(first.severity, .severe)
+        XCTAssertEqual(first.qualityGate, "safety-during-quality-fail")
         XCTAssertEqual(first.carry.safetyFirstUnix, now)
         XCTAssertEqual(first.carry.safetyChannel, "HR")
         let laterNow = now + 90
-        let laterFeed = Watchdog.syntheticFeed(now: laterNow, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
-        guard case .success(var later) = WatchdogWindowBuilder.build(laterFeed) else {
-            return XCTFail("later window")
-        }
-        if later.hr.count > 4 {
-            for i in 0..<(later.hr.count - 3) { later.hr[i] = nil }
-        }
+        guard let later = thin(laterNow) else { return XCTFail("later window") }
         let second = Watchdog.evaluate(window: .success(later), prompt: UniTSPrompt(),
                                        nowUnix: laterNow, previous: first.carry)
         XCTAssertEqual(second.severity, .severe)

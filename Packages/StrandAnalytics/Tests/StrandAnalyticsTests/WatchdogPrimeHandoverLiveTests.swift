@@ -162,23 +162,37 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
         XCTAssertFalse(Watchdog.liveOff(severity: .withinLimits, safety: false, personalOff: false))
     }
 
-    func testThinWindowHR135IsSafetySevere() {
+    func testThinWindowHR135IsSafetySevere() throws {
+        // v2.clinical (audit 2026-10-07): three fresh minutes at 135 in a thin window used to page "severe" from a
+        // single-sample extreme. Safety now needs ≥ 10 sustained still minutes AND verified on-body / signal
+        // quality; missing metadata holds (shown, never sent).
         let now = 97_300_000
         let feed = Watchdog.syntheticFeed(now: now, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
         guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
             return XCTFail("window")
         }
+        var full = win
         if win.hr.count > 4 {
             for i in 0..<(win.hr.count - 3) { win.hr[i] = nil }
         }
-        XCTAssertTrue(Watchdog.safetyCap(window: win))
-        let r = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
-        XCTAssertEqual(r.severity, .severe)
-        XCTAssertEqual(r.qualityGate, "safety-during-quality-fail")
-        XCTAssertTrue(r.shouldNotify)
-        let silent = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(),
+        win.quality = .synthetic(for: win)
+        let thin = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertNotEqual(thin.severity, .severe)
+        XCTAssertFalse(thin.shouldNotify, "3 minutes is not a sustained extreme")
+
+        full.quality = .synthetic(for: full)
+        let sustained = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertEqual(sustained.severity, .severe)
+        XCTAssertTrue(sustained.shouldNotify)
+        XCTAssertEqual(sustained.verdicts?.first(where: { $0.decision == .alert })?.candidate.kind, .safetyExtreme)
+        let silent = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(),
                                        nowUnix: now, liveAlerts: false)
         XCTAssertFalse(silent.shouldNotify)
+
+        full.quality = .empty
+        let unverified = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertEqual(unverified.severity, .candidate, "unknown sensor quality holds the candidate")
+        XCTAssertFalse(unverified.shouldNotify)
     }
 
     func testWristOffIsUnavailableNotRecovered() {

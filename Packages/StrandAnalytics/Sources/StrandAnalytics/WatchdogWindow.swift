@@ -126,6 +126,9 @@ public struct WatchdogWindow: Equatable, Sendable {
     /// v2 sensor-quality metadata for the alert-verification stage (`WatchdogVerification.swift`). Empty means
     /// UNKNOWN, never good.
     public var quality: WatchdogQualityFeed = .empty
+    /// Respiration came from beat intervals (no respiration waveform): it is the beat stream, not independent
+    /// evidence, and never a safety input.
+    public var respFromBeats: Bool = true
 
     public var seqLen: Int { hr.count }
 
@@ -204,8 +207,10 @@ public enum WatchdogWindowBuilder {
         let hrMax = bucketReduce(inWindow.map { ($0.ts, Double($0.bpm)) }, start: start, end: end, pick: max)
         let temp = bucketMean(feed.skinTempC.map { ($0.ts, $0.value) }, start: start, end: end)
         var resp = bucketMean(feed.respPerMin.map { ($0.ts, $0.value) }, start: start, end: end)
+        var respFromBeats = false
         if resp.compactMap({ $0 }).isEmpty {
             resp = respFromRR(feed.rr, start: start, end: end)
+            respFromBeats = true
         }
         let motion = bucketMean(feed.motion.map { ($0.ts, $0.value) }, start: start, end: end)
         let hrv = rmssdGrid(feed.rr, start: start, end: end)
@@ -245,6 +250,7 @@ public enum WatchdogWindowBuilder {
             steps: feed.steps
         )
         window.activityFeatures = WatchdogActivityFeatures.build(window: window)
+        window.respFromBeats = respFromBeats
         return .success(window)
     }
 

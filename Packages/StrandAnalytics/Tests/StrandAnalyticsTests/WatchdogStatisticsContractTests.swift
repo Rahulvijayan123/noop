@@ -150,8 +150,13 @@ final class WatchdogStatisticsContractTests: XCTestCase {
     }
 
     func testStillWristExtremaPageWithoutTheModelDoor() throws {
-        let w = try window(now: 80_420_000, hr: 132, motion: 0)
-        XCTAssertTrue(WatchdogSafety.fired(w))
+        // v2: a sustained still extreme pages without any model — but only once on-body / signal quality are
+        // verified. With no quality metadata the same window is held (shown as a candidate, never sent).
+        var w = try window(now: 80_420_000, hr: 132, motion: 0)
+        let unverified = Watchdog.evaluate(window: .success(w), prompt: prompt, nowUnix: w.nowUnix)
+        XCTAssertEqual(unverified.severity, .candidate)
+        XCTAssertFalse(unverified.shouldNotify)
+        w.quality = .synthetic(for: w)
         let r = Watchdog.evaluate(window: .success(w), prompt: prompt, nowUnix: w.nowUnix)
         XCTAssertEqual(r.severity, .severe)
         XCTAssertTrue(r.shouldNotify)
