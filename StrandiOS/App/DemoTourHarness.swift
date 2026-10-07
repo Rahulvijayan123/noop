@@ -1,5 +1,7 @@
 #if DEBUG && os(iOS)
+import ObjectiveC
 import UIKit
+import UserNotifications
 
 /// DEBUG-only `--demo-tour`: walks the frontmost page from top to bottom one screenful at a time, so a host
 /// script can `simctl io screenshot` every part of a long page without being able to scroll it.
@@ -12,8 +14,22 @@ import UIKit
 @MainActor
 enum DemoTour {
     static func startIfRequested() {
+        if CommandLine.arguments.contains("--demo-no-prompts") { silenceNotificationPrompt() }
         guard CommandLine.arguments.contains("--demo-tour") else { return }
         Task { @MainActor in await run() }
+    }
+
+    /// `--demo-no-prompts`: answer every notification-permission request with "not granted" without showing
+    /// the system alert, which would otherwise sit over the first screenshot of a fresh install and cannot be
+    /// dismissed from the host. Swaps the one Objective-C method every Swift and async variant routes through.
+    private static func silenceNotificationPrompt() {
+        let center = UNUserNotificationCenter.self
+        guard let original = class_getInstanceMethod(
+                center, #selector(UNUserNotificationCenter.requestAuthorization(options:completionHandler:))),
+              let silent = class_getInstanceMethod(
+                center, #selector(UNUserNotificationCenter.demoTourDeclineAuthorization(options:completionHandler:)))
+        else { return }
+        method_exchangeImplementations(original, silent)
     }
 
     private static func run() async {
@@ -63,6 +79,14 @@ enum DemoTour {
         }
         visit(top.view)
         return best
+    }
+}
+
+extension UNUserNotificationCenter {
+    /// The stand-in `DemoTour.silenceNotificationPrompt` swaps in for `requestAuthorization`.
+    @objc func demoTourDeclineAuthorization(options: UNAuthorizationOptions,
+                                            completionHandler: @escaping (Bool, Error?) -> Void) {
+        completionHandler(false, nil)
     }
 }
 #endif

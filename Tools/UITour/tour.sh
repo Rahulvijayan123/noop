@@ -3,7 +3,7 @@
 #
 #   tour.sh <udid> <bundle-id> <out-dir> <name> [app launch arguments...]
 #
-# Launches the app with `--demo-seed --demo-tour` plus the given arguments (for example `--demo-tab 3`,
+# Launches the app with `--demo-seed --demo-no-prompts --demo-tour` plus the given arguments (for example `--demo-tab 3`,
 # `--demo-push metric:hrv`, `--demo-days 3`, `--demo-screen settings`) and saves <out-dir>/<name>-<n>.png for
 # every screenful the app scrolls through (StrandiOS/App/DemoTourHarness.swift is the app side).
 #
@@ -18,7 +18,7 @@ shift 4
 mkdir -p "$out"
 
 if [[ -n "${SHOT_AFTER:-}" ]]; then
-  xcrun simctl launch --terminate-running-process "$udid" "$bundle" --demo-seed "$@" >/dev/null
+  xcrun simctl launch --terminate-running-process "$udid" "$bundle" --demo-seed --demo-no-prompts "$@" >/dev/null
   sleep "$SHOT_AFTER"
   xcrun simctl io "$udid" screenshot "$out/$name.png" >/dev/null 2>&1
   echo "$out/$name.png"
@@ -28,7 +28,7 @@ fi
 container=$(xcrun simctl get_app_container "$udid" "$bundle" data)
 dir="$container/Documents/demo-tour"
 rm -rf "$dir"
-xcrun simctl launch --terminate-running-process "$udid" "$bundle" --demo-seed --demo-tour "$@" >/dev/null
+xcrun simctl launch --terminate-running-process "$udid" "$bundle" --demo-seed --demo-no-prompts --demo-tour "$@" >/dev/null
 
 step=0
 deadline=$((SECONDS + ${TOUR_TIMEOUT:-90}))
