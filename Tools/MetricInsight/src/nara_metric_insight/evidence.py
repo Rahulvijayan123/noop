@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -30,11 +31,17 @@ def _day(value: Any) -> date:
 
 
 def rounded(value: float | None, decimals: int) -> float | int | None:
+    """Display rounding, half up (50.5 -> 51, the way a person rounds)."""
     if value is None or not math.isfinite(value):
         return None
-    if decimals <= 0:
-        return int(round(value))
-    return round(value, decimals)
+    quantum = Decimal(1).scaleb(-max(decimals, 0))
+    result = Decimal(repr(float(value))).quantize(quantum, rounding=ROUND_HALF_UP)
+    return int(result) if decimals <= 0 else float(result)
+
+
+def shown_difference(a: float, b: float, decimals: int) -> float | int | None:
+    """a - b as the reader would compute it from the two displayed values, so shown numbers always add up."""
+    return rounded(float(rounded(a, decimals)) - float(rounded(b, decimals)), decimals)
 
 
 def quantile(values: list[float], q: float) -> float:
@@ -201,15 +208,16 @@ def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, an
     if len(measured) >= 2:
         prev_day, prev = measured[-2]
         out["previous"] = {"day": prev_day.isoformat(), "value": rounded(prev, d),
-                           "change": rounded(latest - prev, d)}
+                           "change": shown_difference(latest, prev, d)}
     prior = measured[:-1][-BASELINE_NIGHTS:]
     stats = robust([v for _, v in prior])
     if stats:
+        change = shown_difference(latest, stats["median"], d)
         out["baseline"] = {
             "nights": stats["n"], "from": prior[0][0].isoformat(), "to": prior[-1][0].isoformat(),
             "median": rounded(stats["median"], d),
-            "change_vs_median": rounded(latest - stats["median"], d),
-            "direction": _direction(latest - stats["median"], signal.flat),
+            "change_vs_median": change,
+            "direction": _direction(change, signal.flat),
             "method": f"median of up to {BASELINE_NIGHTS} measured nights before the latest",
         }
         if stats["n"] >= MIN_RANGE_NIGHTS:
@@ -271,9 +279,9 @@ def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         entry["latest"] = {"day": latest_day.isoformat(), "value": rounded(latest, signal.decimals)}
         entry["same_night_as_metric"] = latest_day == anchor
         if stats:
-            delta = latest - stats["median"]
+            delta = shown_difference(latest, stats["median"], signal.decimals)
             entry["median"] = rounded(stats["median"], signal.decimals)
-            entry["change_vs_median"] = rounded(delta, signal.decimals)
+            entry["change_vs_median"] = delta
             entry["baseline_nights"] = stats["n"]
             entry["direction"] = _direction(delta, signal.flat)
         else:

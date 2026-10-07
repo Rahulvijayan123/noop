@@ -28,7 +28,7 @@ class Sources:
         self.anchor = anchor
         self.zone = zone
         self._cache: dict[str, Any] = {}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # loaders build on each other (context needs the scores)
         self.loaded: list[str] = []
 
     def _get(self, name: str, loader: Callable[[], Any]) -> Any:

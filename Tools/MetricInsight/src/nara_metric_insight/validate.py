@@ -56,6 +56,7 @@ _ISO_DAY = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _CLOCK = re.compile(r"\b\d{1,2}:\d{2}\b")
 _NUMBER = re.compile(r"(?<![\w.])[-+−]?\d+(?:[.,]\d+)?(?![\w])")
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
+_PERSONAL = re.compile(r"\b(you|your|you're|you've)\b", re.I)
 
 MAX_HEADLINE = 120
 MAX_SENTENCE = 280
@@ -246,9 +247,13 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
         for month, day, year in _mentioned_days(sentence):
             if not any(d.month == month and d.day == day and (year is None or d.year == year) for d in known_days):
                 errors.append(f"dates:{month}/{day} is not a night in the tool results")
+        # A sentence that states this person's own estimated value (a number, a date, "you/your") must say it
+        # is an estimate; a general remark ("may reflect sleep timing") need not.
+        personal = bool(re.search(r"\d", sentence) or _PERSONAL.search(sentence))
         for group in estimated:
-            if any(alias in lowered for alias in ESTIMATED_MENTIONS[group]) and "estimat" not in lowered:
-                errors.append(f"estimated:a sentence about {group.replace('_', ' ')} must say it is estimated")
+            if (personal and any(alias in lowered for alias in ESTIMATED_MENTIONS[group])
+                    and "estimat" not in lowered):
+                errors.append(f"estimated:a sentence about your {group.replace('_', ' ')} must say it is estimated")
         if _PMID_OR_DOI.search(sentence):
             errors.append("citations:put literature ids only in the citations list, not in the text")
 
