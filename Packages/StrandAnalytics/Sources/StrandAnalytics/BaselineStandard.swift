@@ -176,9 +176,13 @@ public enum BaselineStandard {
 
     /// True when the day carries a logged confounder. Same semantics (and the same day key) as
     /// `LongitudinalBaseline.nightIsClean`, the rule Layer 1 trains its usuals with.
+    ///
+    /// `nightIsClean` re-renders the epoch day to its canonical key and looks it up; every key here is already
+    /// canonical `yyyy-MM-dd`, so the direct lookup is the same rule without a string format per call (it runs
+    /// per day inside cache keys). `BaselineStandardTests` pins the equivalence.
     public static func isConfounded(_ day: String, dayLogs: [String: LBDayLog]) -> Bool {
-        guard !dayLogs.isEmpty, let e = epochDay(day) else { return false }
-        return !LongitudinalBaseline.nightIsClean(e, dayLogs: dayLogs)
+        guard !dayLogs.isEmpty, let log = dayLogs[day] else { return false }
+        return log.confoundsUsual
     }
 
     // MARK: - Rule 6: device regimes

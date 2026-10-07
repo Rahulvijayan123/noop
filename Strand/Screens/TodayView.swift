@@ -1366,7 +1366,7 @@ struct TodayView: View {
         // key instead (the section header then stamps "Last night · <date>"). Honest: it's the real prior
         // read, not a fabricated today's, and today's own readiness wins the instant tonight is scored.
         let anchor = lastScoredRecoveryDay?.day ?? Repository.logicalDayKey(Date())
-        return ReadinessEngine.evaluate(days: repo.days, today: anchor)
+        return ReadinessEngine.evaluate(days: repo.days, today: anchor, context: .app())
     }
 
     private func computeCalibration() -> Int? {
