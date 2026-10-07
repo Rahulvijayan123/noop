@@ -115,11 +115,15 @@ struct CoachBubble: View {
                             .frame(maxWidth: maxBubbleWidth, alignment: .leading)
                             .transition(.opacity)
                     } else if let viz = message.viz {
-                        CoachVizView(viz: viz)
-                            .equatable()
-                            .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) { vizWasGenerating = false }
-                            .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                            .transition(.opacity)
+                        Group {
+                            CoachVizView(viz: viz)
+                                .equatable()
+                        }
+                        .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) {
+                            vizWasGenerating = false
+                        }
+                        .frame(maxWidth: maxBubbleWidth, alignment: .leading)
+                        .transition(.opacity)
                     }
                 }
                 if !isUser, message.didStall, let onRetry { retryButton(onRetry) }

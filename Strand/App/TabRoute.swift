@@ -40,6 +40,10 @@ enum TabRoute: Hashable {
     case coupled
     case medication
     case watchdog
+    /// Layer 1 day and night usuals, with Watchdog and trends. The Monitor tab.
+    case layer1
+    /// Homepage Baseline ring. The usuals only.
+    case baselineCharts
     /// One event, with the full list so its Recovery card can open the cross-event view.
     case event(HealthEvent, history: [HealthEvent])
     case allEvents([HealthEvent])
@@ -82,7 +86,9 @@ extension View {
             case .hydration: HydrationView()
             case .coupled: CoupledView()
             case .medication: ComingSoonScreen(title: "Medication")
-            case .watchdog: WatchdogView()
+            case .watchdog: WatchdogPlaceholderView()
+            case .layer1: BaselineMonitorView()
+            case .baselineCharts: BaselineMonitorView(focus: .baseline)
             case .event(let event, let history): EventDetailView(event: event, history: history)
             case .allEvents(let events): AllEventsView(events: events)
             case .recoveryDetails(let event, let history): RecoveryDetailsView(event: event, history: history)

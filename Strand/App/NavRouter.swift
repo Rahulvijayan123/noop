@@ -35,6 +35,10 @@ final class NavRouter: ObservableObject {
         /// Also the K5 scheduled morning-brief notification's tap-through target.
         case coach
         case alarms
+        /// Layer 1 day and night usuals. Not the Charge ring.
+        case baseline
+        /// Logged treatment start. The only path that restarts the long Layer 1 usual.
+        case treatment
 
         var id: String { rawValue }
 
@@ -74,6 +78,8 @@ final class NavRouter: ObservableObject {
     func openCoach() { requestedDestination = .coach }
     /// Open the existing wake-alarm and wind-down settings from Sleep.
     func openAlarms() { requestedDestination = .alarms }
+    func openBaseline() { requestedDestination = .baseline }
+    func openTreatment() { requestedDestination = .treatment }
     /// Open the v5 Insights hub (the n-of-1 "what moves your Charge" surface).
     func openInsightsHub() { requestedDestination = .insightsHub }
     /// Open the Lab Book (private health-records logbook).

@@ -206,6 +206,8 @@ struct RootView: View {
     @AppStorage("noop.coachEnabled") private var coachEnabled = true
 
     @State private var selection: NavItem? = .today
+    /// Layer 1 and treatment are not sidebar rows. Charge stays on Today.
+    @State private var engineSheet: NavRouter.Destination?
     /// Which sidebar groups are expanded (S1, #805). Default = the group owning the launch selection
     /// (`.today`). The single-item Today/Sleep sections always read expanded so their one row shows; the
     /// multi-item groups (Body / Insights / Data & App) collapse to just their header until tapped.
@@ -334,9 +336,26 @@ struct RootView: View {
             // stays in exactly one place.
             case .coach: selection = .coach
             case .alarms: selection = .smartAlarm
+            case .baseline, .treatment: engineSheet = dest
             case nil: break
             }
             if dest != nil { router.requestedDestination = nil }
+        }
+        .sheet(item: $engineSheet) { dest in
+            NavigationStack {
+                Group {
+                    switch dest {
+                    case .baseline: BaselineMonitorView()
+                    case .treatment: TreatmentCaregiverView()
+                    default: EmptyView()
+                    }
+                }
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Done") { engineSheet = nil }
+                    }
+                }
+            }
         }
         // Whenever the selection moves (a cross-screen route, or restoring a deep destination), make sure
         // the group that owns it is expanded so the selected row is actually visible, not hidden inside a

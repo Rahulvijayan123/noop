@@ -14,7 +14,12 @@ let package = Package(
         // phone) that is ~28x slower than Release (about 17 s against 0.6 s for a cold day on a Mac), which is
         // what made the Heart rate page crawl in development builds. Optimise this module in Debug too; the
         // DEBUG define and `-enable-testing` are unaffected, so assertions and `@testable import` still work.
-        .target(name: "StrandAnalytics", dependencies: ["WhoopProtocol", "WhoopStore"],
+        .target(name: "StrandAnalytics",
+                dependencies: ["WhoopProtocol", "WhoopStore"],
+                resources: [
+                    .copy("Resources/UniTS_AD.mlpackage"),
+                    .copy("Resources/TimesFM3_Student.mlpackage"),
+                ],
                 swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]),
         // WhoopStore is declared on the TEST target as well as the library: the Oura respiration
         // scoring-exclusion tests assert on `OuraRespScale` (the seam that keeps the ring's 0x6A rows

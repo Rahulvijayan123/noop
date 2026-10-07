@@ -411,6 +411,10 @@ struct SettingsView: View {
 
     private var appGroup: some View {
         SettingsGroup("App") {
+            navRow("Day & night usuals") { BaselineMonitorView() }
+            SettingsDivider()
+            navRow("Logged treatment start") { TreatmentCaregiverView() }
+            SettingsDivider()
             #if os(macOS)
             navRow("Notifications") { NotificationSettingsView() }
             SettingsDivider()

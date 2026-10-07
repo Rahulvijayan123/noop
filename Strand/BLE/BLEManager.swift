@@ -5871,6 +5871,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // Live console every second.
         if readable {
             state.noteReadableHeartRate()
+            state.noteHeartRatePacket(bpm: m.hr, contact: m.contact)
             if state.heartRate != m.hr { state.heartRate = m.hr }
         }
         // Record it continuously — independent of the realtime stream or the open screen.

@@ -1,5 +1,7 @@
 # How data moves through Nara
 
+Layer 1 usuals and live Watchdog score on the phone. They are not part of this hosted Charge pipeline. The contract is [PORT_LAYER1_WATCHDOG.md](PORT_LAYER1_WATCHDOG.md). Charge on this page stays a separate engine.
+
 A reading travels from the strap to the phone, up to Supabase, through the VPS worker, back into
 Supabase, and down to the phone again. This page follows one reading through each step and names the
 code that handles it.
