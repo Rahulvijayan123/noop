@@ -43,8 +43,25 @@ final class ActivityContextDisplayTests: XCTestCase {
     func testAmbiguousSeatedVersusUprightIsNeverCommitted() {
         let split: [PostureClass: Double] = [.seatedLikely: 0.42, .uprightStationary: 0.38, .unknown: 0.20]
         XCTAssertEqual(label(posture: split, arm: [.quiet: 0.8], confidence: 0.9), "Still, sitting or standing")
+        // hsmm-1.8 (D1-11): a clearly stationary second whose posture is unresolved still says the coarse fact,
+        // "Stationary" (class `stationary`), rather than "Unclear" (class `unknown` at 0).
         let weak: [PostureClass: Double] = [.seatedLikely: 0.30, .uprightStationary: 0.15, .unknown: 0.55]
-        XCTAssertEqual(label(posture: weak, arm: [.quiet: 0.8], confidence: 0.9), ActivityDisplay.unclear)
+        XCTAssertEqual(label(posture: weak, arm: [.quiet: 0.8], confidence: 0.9), "Stationary")
+    }
+
+    func testAStationarySecondSplitBetweenLyingAndSittingIsStationaryNotUnknown() {
+        // D1-11 probe E7: stationary 0.97, recumbent 0.47, seated 0.37 used to publish "Unclear" / unknown@0.
+        let split: [PostureClass: Double] = [.recumbent: 0.47, .seatedLikely: 0.37, .uprightStationary: 0.06,
+                                             .unknown: 0.10]
+        XCTAssertEqual(label(posture: split, locomotion: [.stationary: 0.97, .unknown: 0.03], arm: [.quiet: 0.8],
+                             sleep: .unknown, confidence: 0.72), "Stationary")
+        let k = ActivityClassifier.classify(posture: HeadProbabilities(split),
+                                            locomotion: HeadProbabilities([.stationary: 0.97, .unknown: 0.03]),
+                                            armBehavior: HeadProbabilities([.quiet: 0.8, .unknown: 0.2]),
+                                            sleep: .unknown, wear: .onWrist, evidenceQuality: 0.72)
+        XCTAssertEqual(k.activityClass, .stationary)
+        XCTAssertGreaterThanOrEqual(k.confidence, 0.5)
+        XCTAssertEqual(k.runnerUp, .lyingDown, "the posture split is carried as the runner-up")
     }
 
     func testLowOverallConfidenceIsUnclearWhateverTheHeadsSay() {

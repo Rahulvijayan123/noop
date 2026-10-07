@@ -446,7 +446,7 @@ enum ActivityContextModel {
     /// Recumbent evidence cap (log-odds over the no-evidence ceiling `recumbentShareFloor`). Held orientation
     /// alone reaches at most its own source cap (ln 25, recumbent ≤ 75 % of the stationary mass); the
     /// staged night may go further.
-    static let postureEvidenceCapRecumbent = log(100.0)
+    static let postureEvidenceCapRecumbent = log(200.0)
     /// Without recumbent evidence, recumbent rest may hold at most this share relative to seated + upright.
     static let recumbentShareFloor = 0.12
     /// Slack (log-odds) the seated / upright split may lean without any posture evidence: small enough that
@@ -477,6 +477,19 @@ enum ActivityContextModel {
         var p: [BodyMode: Double] = [:]
         for (m, v) in raw { p[m] = max(0, v) / total }
         return (q, p)
+    }
+
+    /// How strongly the encoder's FOLDED classes name a specialist label (channel 6b; the fine head, when
+    /// present, replaces this for stairs and generic exercise). An abstained window says nothing, here as in
+    /// channel 4 (D1V-02). The folded head files eating, drinking and brushing teeth under other_movement, so
+    /// it opens generic exercise only when the movement or the heart corroborates (D1-08).
+    static func encoderNames(_ label: String, mode: BodyMode, _ f: ActivityFeatures, effort: Double) -> Double {
+        guard let enc = f.encoder, !enc.abstained else { return 0 }
+        var said = enc.classProbs[label] ?? 0
+        if mode == .otherExercise, enc.fineProbs.flatMap(HartFineActivities.vector) == nil {
+            said *= max(acSigmoid(((f.m10 ?? 0) - 0.50) / 0.05), effort)
+        }
+        return said
     }
 
     /// No pulse, no wear event, and a strap stiller than any resting wrist (below ~5.4 mg median, no
@@ -590,12 +603,12 @@ enum ActivityContextModel {
         /// leaves the published heads hedged; a shift whose direction the forearm shows, or a learned head,
         /// may commit. The seated / upright total is capped again by the decoder (higher with an adopted
         /// personal profile).
-        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(8.0), log(25.0), log(4.0), log(100.0)]
+        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(8.0), log(25.0), log(4.0), log(200.0)]
         /// The lower (upright / not recumbent) side of each cap, where it differs. A stand-up's direction
-        /// alone may not commit "standing": in free living standing still is about a tenth of still time and
-        /// Capture-24 standing claims after a detected stand-up were right 10 % of the time, so standing needs
-        /// the stand-up AND a hanging arm (or a learned head).
-        static let lowerCaps: [Double] = [log(1.6), log(1.4), log(2.0), log(8.0), log(25.0), log(4.0), 0]
+        /// carries less than a sit-down's: in free living standing still is about a tenth of still time and
+        /// most stand-ups lead straight into walking, so "standing" after a stand-up is committed at a lower
+        /// confidence than "sitting" after a sit-down.
+        static let lowerCaps: [Double] = [log(1.6), log(1.4), log(3.0), log(8.0), log(25.0), log(4.0), 0]
         /// A shift is one event spread over a few seconds of tempered evidence: its direction is remembered at
         /// this gain so that one clear, direction-resolved change of posture can carry the split on its own
         /// (FORTH: 33 of 33 detected sit / stand shifts in the right direction once the forearm axis is read).
@@ -964,13 +977,7 @@ enum ActivityContextModel {
             let mode = BodyMode(rawValue: m)!
             // HART's fine head can name stairs (the folded head files it under other_movement) and ball
             // sports; eating, drinking or brushing teeth no longer open the generic-exercise gate.
-            // An abstained window says nothing, here as in channel 4 (D1V-02).
-            var said = (f.encoder?.abstained ?? true) ? 0 : (f.encoder?.classProbs[label] ?? 0)
-            // The folded head files eating, drinking and brushing teeth under other_movement: without the fine
-            // head it opens generic exercise only when the movement or the heart corroborates (D1-08).
-            if mode == .otherExercise, fine == nil {
-                said *= max(acSigmoid(((f.m10 ?? 0) - 0.50) / 0.05), effort)
-            }
+            var said = encoderNames(label, mode: mode, f, effort: effort)
             if let fine {
                 switch mode {
                 case .stairs: said = HartFineActivities.stairsMass(fine)

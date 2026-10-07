@@ -87,7 +87,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         // tables or the feature layout change behaviour.
         XCTAssertEqual(ActivityContextVersions.schema, 2)
         XCTAssertEqual(ActivityContextVersions.ontology, "v2.0")
-        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.7")
+        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.8")
         XCTAssertEqual(ActivityContextVersions.featureSchema, "imu-feat-2")  // bumped by I4 (true gyro RMS, per-second jerk)
     }
 
@@ -125,7 +125,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(loco["walking"]), 0.5)
         let versions = try XCTUnwrap(json["versions"] as? [String: Any])
         XCTAssertEqual(versions["ontology"] as? String, "v2.0")
-        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.7")
+        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.8")
         XCTAssertEqual(versions["feature_schema"] as? String, "imu-feat-2")  // I4 bumped the feature contract
         XCTAssertEqual(versions["schema"] as? Int, 2)
         let intensity = try XCTUnwrap(json["intensity"] as? Double)
@@ -311,9 +311,12 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertEqual(end.locomotion.top?.0, .walking)
         XCTAssertEqual(events(end, .walkStart).count, 1)
         XCTAssertLessThanOrEqual(try XCTUnwrap(events(end, .walkStart).first).ts - walkStart, 15)
-        // The pre-walk state was a settled desk state.
+        // The pre-walk state was a settled desk state. (hsmm-1.8: without a sit-down the seated lean is the
+        // hedged one the desk-like arm and the forearm allow, no longer the 0.8+ the seated dwell prior built.)
         let before = try XCTUnwrap(states(in: published, from: walkStart - 10, to: walkStart - 1).last)
-        XCTAssertGreaterThan(before.posture[.seatedLikely], 0.8)
+        XCTAssertGreaterThan(before.locomotion[.stationary], 0.9)
+        XCTAssertGreaterThan(before.posture[.seatedLikely], before.posture[.uprightStationary])
+        XCTAssertEqual(before.armBehavior.top?.0, .deskLike)
     }
 
     func testAShortBurstOfWalkLikeMotionDoesNotBecomeWalking() {
@@ -328,11 +331,14 @@ final class ActivityContextDecoderTests: XCTestCase {
     // MARK: Sit / stand-like transitions and the seated-vs-upright question
 
     func testWalkStopSitLikeThenLongDeskPeriodRaisesSeatedLikely() throws {
+        // hsmm-1.8: the sit-down is a real one for the forearm axis (the hanging arm of the walk ends on the
+        // desk), which is what lets the decoder tell its direction.
         var sim = ActivitySim()
+        sim.forearm(0.9)
         sim.still(10); sim.walk(60)
         sim.still(8)
         let sitMoment = sim.ts
-        sim.postureShift(netDegrees: 70, seconds: 3)
+        sim.postureShift(netDegrees: 70, seconds: 3, toForearm: 0.2)
         sim.desk(400)
         let (_, published) = decode(sim)
 
@@ -345,20 +351,22 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertFalse(flagged.isEmpty, "stand-to-sit-like should be flagged")
         XCTAssertLessThan(flagged.map(\.probability).max() ?? 1, 0.95)
 
-        // After minutes of desk-like stillness, seated_likely dominates and the label says so. (The head
-        // tops out around 0.84 by design: even a certain "seated" mode leaves room for upright/unknown.)
+        // After minutes of desk-like stillness the label still says seated work. hsmm-1.8: the seated belief
+        // is what the sit-down and the desk-like arm support, strongest right after the sit-down and easing
+        // as that evidence ages; it no longer grows with dwell time alone (the dwell prior made a lean that
+        // was identical for people sitting and standing, D7).
         let end = try XCTUnwrap(published.last)
-        XCTAssertGreaterThan(end.posture[.seatedLikely], 0.80)
+        XCTAssertGreaterThan(end.posture[.seatedLikely], end.posture[.uprightStationary] + 0.2)
         XCTAssertGreaterThan(end.armBehavior[.deskLike], 0.7)
         XCTAssertEqual(end.displayContext, "Desk sitting")
         XCTAssertGreaterThan(end.history.stationaryForS, 300)
         XCTAssertGreaterThan(end.history.sinceLocomotionS ?? 0, 300)
 
-        // Seated belief grows with dwell time; it is not a step function.
         let early = try XCTUnwrap(states(in: published, from: sitMoment + 10, to: sitMoment + 20).last)
-        let mid = try XCTUnwrap(states(in: published, from: sitMoment + 100, to: sitMoment + 110).last)
-        XCTAssertLessThan(early.posture[.seatedLikely], mid.posture[.seatedLikely] + 0.001)
-        XCTAssertLessThan(mid.posture[.seatedLikely], end.posture[.seatedLikely] + 0.001)
+        XCTAssertGreaterThan(early.posture[.seatedLikely], 0.65, "a direction-resolved sit-down commits at once")
+        for s in states(in: published, from: sitMoment + 40, to: published.last!.ts) {
+            XCTAssertEqual(ActivityDisplay.group(s.displayContext ?? ""), "seated", "at \(s.ts)")
+        }
     }
 
     func testSitToStandLikeShiftIsFlaggedBeforeWalking() throws {
@@ -375,12 +383,14 @@ final class ActivityContextDecoderTests: XCTestCase {
     }
 
     func testAFifteenSecondStandShowsAsStandingAndSettlesBackToSitting() throws {
+        // hsmm-1.8: the stand lets the arm hang and the sit brings it back to the desk, so both directions are
+        // visible on the forearm axis (a pure roll about the forearm would leave the direction open).
         var sim = ActivitySim()
         sim.desk(300)
         let up = sim.ts
-        sim.postureShift(netDegrees: -75, seconds: 3)
+        sim.postureShift(netDegrees: -75, seconds: 3, toForearm: 0.9)
         sim.still(15)
-        sim.postureShift(netDegrees: 75, seconds: 3)
+        sim.postureShift(netDegrees: 75, seconds: 3, toForearm: 0.2)
         sim.desk(120)
         let (_, published) = decode(sim)
         let stand = states(in: published, from: up, to: up + 45)
@@ -393,7 +403,7 @@ final class ActivityContextDecoderTests: XCTestCase {
                                  "sit → changing → stand → (changing) → sit, no flicker: \(shown)")
     }
 
-    func testReachingAndReturningIsNotAPostureChange() {
+    func testReachingAndReturningIsNotAPostureChange() throws {
         var sim = ActivitySim()
         sim.desk(200)
         sim.postureShift(netDegrees: 70, seconds: 3)
@@ -404,7 +414,10 @@ final class ActivityContextDecoderTests: XCTestCase {
         for kind in [ActivityTransitionKind.standToSitLike, .sitToStandLike, .lyingDownLike, .gettingUpLike] {
             XCTAssertFalse(anyEvent(published, kind), "\(kind) should not fire for a reach-and-return")
         }
-        XCTAssertGreaterThan(published.last?.posture[.seatedLikely] ?? 0, 0.8)
+        // The desk-time posture lean is not reversed (hsmm-1.8: it is the hedged desk lean, not 0.8+).
+        let end = try XCTUnwrap(published.last)
+        XCTAssertGreaterThan(end.posture[.seatedLikely], end.posture[.uprightStationary])
+        XCTAssertNotEqual(ActivityDisplay.group(end.displayContext ?? ""), "upright")
     }
 
     func testSeatedVersusUprightStaysAmbiguousWithoutContext() throws {
@@ -424,12 +437,19 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertFalse(["Desk sitting", "Standing quietly"].contains(label), "got \(label)")
     }
 
-    func testAStopAfterWalkingFavoursUprightOverSeated() throws {
+    func testAStopAfterWalkingDoesNotClaimAPosture() throws {
+        // hsmm-1.8 (was "favours upright over seated"): stopping after a walk is no posture evidence. In free
+        // living a stop is followed by sitting about as often as by standing, and standing claims after
+        // activity were no better than the base rate (D7, Capture-24: precision 0.06-0.13 in every bin), so
+        // the heads stay hedged and nothing is committed.
         var sim = ActivitySim()
         sim.walk(60); sim.still(15)
         let (_, published) = decode(sim)
         let end = try XCTUnwrap(published.last)
-        XCTAssertGreaterThan(end.posture[.uprightStationary], end.posture[.seatedLikely])
+        XCTAssertLessThan(abs(end.posture[.uprightStationary] - end.posture[.seatedLikely]), 0.2)
+        XCTAssertFalse(["seated", "upright"].contains(ActivityDisplay.group(end.displayContext ?? "")),
+                       "got \(end.displayContext ?? "nil")")
+        XCTAssertEqual(ActivityClassifier.classify(state: end).activityClass, .stationary)
     }
 
     // MARK: Recumbent, sleep, getting up
@@ -448,7 +468,10 @@ final class ActivityContextDecoderTests: XCTestCase {
     }
 
     func testAQuietWristWithoutSleepEvidenceIsNotCalledRecumbent() throws {
+        // hsmm-1.8: the forearm is inclined (resting on a knee or an armrest). A forearm held FLAT and quiet for
+        // many minutes is recumbent evidence now (see `testThirtyMinutesOfAFlatForearmAwakeIsNotConfidentSitting`).
         var sim = ActivitySim()
+        sim.forearm(0.55)
         sim.still(900)
         let (_, published) = decode(sim)
         for s in published.suffix(60) {
@@ -528,8 +551,10 @@ final class ActivityContextDecoderTests: XCTestCase {
         var sim = ActivitySim()
         sim.desk(200); sim.fidget(120)
         let (_, published) = decode(sim)
+        // Fidgeting does not reverse the desk-time lean (hsmm-1.8: that lean is the hedged desk one, no longer the
+        // 0.75+ the seated dwell prior built), and it is not a change of position.
         let end = try XCTUnwrap(published.last)
-        XCTAssertGreaterThan(end.posture[.seatedLikely], 0.75)
+        XCTAssertGreaterThan(end.posture[.seatedLikely], end.posture[.uprightStationary])
         XCTAssertFalse(anyEvent(published, .standToSitLike))
         XCTAssertFalse(anyEvent(published, .sitToStandLike))
     }
@@ -677,7 +702,9 @@ final class ActivityContextDecoderTests: XCTestCase {
         let (_, sparseStates) = decode(sparse)
 
         let f = try XCTUnwrap(fullStates.last), s = try XCTUnwrap(sparseStates.last)
-        XCTAssertGreaterThan(s.posture[.seatedLikely], 0.8)
+        // hsmm-1.8: the desk-like arm alone leaves a hedged seated lean (it was 0.8+ from the dwell prior).
+        XCTAssertGreaterThan(s.posture[.seatedLikely], s.posture[.uprightStationary])
+        XCTAssertGreaterThan(s.locomotion[.stationary], 0.9)
         XCTAssertEqual(s.armBehavior.top?.0, .deskLike)
         XCTAssertLessThan(s.overallConfidence, f.overallConfidence)
         XCTAssertLessThan(s.evidence.coverage, f.evidence.coverage)
@@ -749,8 +776,13 @@ final class ActivityContextDecoderTests: XCTestCase {
         sim.desk(30)
         let (_, published) = decode(sim)
         let end = try XCTUnwrap(published.last)
-        XCTAssertGreaterThan(end.posture[.seatedLikely], 0.8)
-        XCTAssertEqual(end.displayContext, "Desk sitting")
+        // hsmm-1.8: the context is the desk-like, stationary, seated-leaning one it was before the gap (a 30 s gap
+        // flattens the belief only a little); the lean is the hedged desk lean, not the old 0.8+.
+        XCTAssertGreaterThan(end.locomotion[.stationary], 0.9)
+        XCTAssertEqual(end.armBehavior.top?.0, .deskLike)
+        XCTAssertGreaterThan(end.posture[.seatedLikely], end.posture[.uprightStationary])
+        XCTAssertTrue(["Desk sitting", "Hands busy, sitting or standing"].contains(end.displayContext ?? ""),
+                      "got \(end.displayContext ?? "nil")")
     }
 
     // MARK: Stability
@@ -1002,8 +1034,9 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertGreaterThan(expertProb, plainProb + 0.1)
 
         // Lying down: desk → a shift that leaves the wrist recumbent → sleep. The shift alone leaves the
-        // transition direction ambiguous (no lying-down-like event without the expert); the expert
-        // naming lie-down disambiguates it and flags the event.
+        // transition direction ambiguous (hsmm-1.8: the burst's direction is no longer decided up front by
+        // where the mass was, so with sleep right after it the plain stream may already lean lying-down);
+        // the expert naming lie-down must make that call clearly stronger.
         var bed = ActivitySim()
         bed.desk(200)
         let lieShift = bed.ts
@@ -1014,11 +1047,11 @@ final class ActivityContextDecoderTests: XCTestCase {
                                        none: 0.06, lieDown: 0.85)
         let (_, bedPlainStates) = decode(bedPlain)
         let (_, bedExpertStates) = decode(bedExpert)
-        XCTAssertFalse(anyEvent(bedPlainStates, .lyingDownLike),
-                       "the shift alone must not name lying-down")
         XCTAssertTrue(anyEvent(bedExpertStates, .lyingDownLike),
                       "the expert naming lie-down must disambiguate the shift")
         XCTAssertGreaterThan(eventProbability(bedExpertStates, .lyingDownLike), 0.6)
+        XCTAssertGreaterThan(eventProbability(bedExpertStates, .lyingDownLike),
+                             eventProbability(bedPlainStates, .lyingDownLike) + 0.1)
     }
 
     func testNoneDominantEvidenceSuppressesUnsupportedTransitionMass() throws {
@@ -1038,7 +1071,10 @@ final class ActivityContextDecoderTests: XCTestCase {
         let (_, b) = decode(noneDominant)
         let peakA = peakPostural(a, from: shiftStart, to: shiftStart + 10)
         let peakB = peakPostural(b, from: shiftStart, to: shiftStart + 10)
-        XCTAssertGreaterThan(peakA, peakB + 0.1,
+        // hsmm-1.8: a "none" lowers the transition modes only to a floor (`ActivityContextModel.expertNoneFloor`):
+        // on held-out FORTH the expert named 1 of 8 real stand-to-sits, so its "none" is weak evidence and
+        // halved the correct events when it was strong (D7). It still suppresses, by less.
+        XCTAssertGreaterThan(peakA, peakB + 0.03,
                              "a confident 'none' must suppress the transition mass the shift alone would raise")
         // The expert's "none" must never itself raise a transition mode above the fallback's level.
         XCTAssertLessThan(peakB, 0.20)
@@ -1113,11 +1149,13 @@ final class ActivityContextDecoderTests: XCTestCase {
         let aged = postural(at: evStart + 5, oneStates) - postural(at: evStart + 5, plainStates)
         XCTAssertLessThan(aged, fresh, "the evidence's effect must decay as it ages")
         XCTAssertGreaterThan(aged, 0, "the decayed evidence is still (weakly) present at age 5")
-        // Past the 6 s hold the evidence is dropped: the difference collapses to ~0.
+        // Past the 6 s hold the evidence is dropped: the difference collapses to ~0. (hsmm-1.8: the expert's named
+        // direction also enters the decoder's posture-evidence memory, which fades over minutes rather than at
+        // the hold, so a trace of order 1e-5 of transition mass remains.)
         XCTAssertEqual(postural(at: evStart + 10, oneStates), postural(at: evStart + 10, plainStates),
-                       accuracy: 1e-6, "evidence older than the hold is ignored")
+                       accuracy: 1e-4, "evidence older than the hold is ignored")
         XCTAssertEqual(postural(at: evStart + 15, oneStates), postural(at: evStart + 15, plainStates),
-                       accuracy: 1e-8, "the posterior converges back to the no-expert stream")
+                       accuracy: 1e-4, "the posterior converges back to the no-expert stream")
     }
 
     func testTransitionEncoderEvidenceCodableRoundTripUsesSnakeCaseKeys() throws {

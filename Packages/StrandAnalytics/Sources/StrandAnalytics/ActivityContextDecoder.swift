@@ -81,6 +81,9 @@ struct PosturalEventTrack: Codable, Equatable {
     var kind: ActivityTransitionKind
     var ts: Int
     var probability: Double
+    /// hsmm-1.8: a published state has shown this event. Until then its kind may still follow whichever
+    /// direction comes to lead (older snapshots never have the key).
+    var shown: Bool?
 }
 
 struct DisplayState: Codable, Equatable {
@@ -514,11 +517,17 @@ public struct ActivityContextDecoder: Sendable {
             clarity = min(1, abs(log(v[BodyMode.standToSit.rawValue] / v[BodyMode.sitToStand.rawValue])) / log(4))
         }
         let movingFade = 1 - 0.3 * min(1, max(0, moving))
-        let shiftFade = (1 - 0.15 * burst * (1 - shift)) * (1 - 0.25 * shift * (1 - clarity))
+        let burstFade = 1 - 0.15 * burst * (1 - shift)
+        let direction = 2  // index of the direction source in `Evidence.values`
         for i in memory.indices {
             // Bursts fade the sitting / standing memory only: turning over or getting out of bed is the
-            // transition modes' call, and the night stays recumbent evidence until then.
-            let fade = i < Evidence.recumbentStart ? movingFade * shiftFade : movingFade
+            // transition modes' call, and the night stays recumbent evidence until then. A shift makes what the
+            // arm, the orientation and the learned heads said before it stale whichever way it went; the
+            // direction memory itself fades only when the shift's own direction is unclear. Getting up ends
+            // the recumbent evidence (the night included) as fast as it is believed.
+            let shiftFade = i == direction ? 1 - 0.25 * shift * (1 - clarity) : 1 - 0.25 * shift
+            let fade = i < Evidence.recumbentStart ? movingFade * burstFade * shiftFade
+                : movingFade * (1 - 0.5 * min(1, post[BodyMode.gettingUp.rawValue] / 0.3))
             memory[i] = min(Evidence.caps[i], max(-Evidence.lowerCaps[i], memory[i] * exp(-1 / Evidence.taus[i]) * fade + fresh[i]))
         }
         // The staged night (asleep, or awake inside its in-bed window) is recumbent evidence in full.
@@ -828,12 +837,13 @@ public struct ActivityContextDecoder: Sendable {
         ]
         let transitionTotal = kinds.reduce(0.0) { $0 + post[$1.0.rawValue] }
         if var active = tracking.activePostural {
-            var mass = post[kinds.first { $0.1 == active.kind }!.0.rawValue]
             let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts })
-            // While the excursion lasts its direction may still resolve (hsmm-1.8: the burst is no longer
-            // assigned a direction up front): the event follows the kind that now leads it.
-            if let best = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }), best.1 != active.kind,
-               post[best.0.rawValue] > mass {
+            var mass = post[kinds.first { $0.1 == active.kind }!.0.rawValue]
+            // Until a published state has shown it, the event follows the direction that comes to lead
+            // (hsmm-1.8: a burst is no longer assigned a direction up front, so it may resolve a second or two
+            // after the excursion began). Once shown it keeps its kind, so no reader ever sees two.
+            if active.shown != true, let best = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
+               best.1 != active.kind, post[best.0.rawValue] > mass {
                 active.kind = best.1
                 mass = post[best.0.rawValue]
                 active.probability = mass
@@ -848,9 +858,8 @@ public struct ActivityContextDecoder: Sendable {
             if transitionTotal < Self.posturalEventFloor / 2 { tracking.activePostural = nil }
         } else if let hit = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
                   // hsmm-1.8: the floor is on the transition modes' summed mass. A burst whose direction is
-                  // still open now spreads over the kinds (it is no longer diverted only "from where the mass
-                  // is"), and a change of position must not vanish because no single direction reached the
-                  // floor; the event names the most likely kind at that kind's own probability.
+                  // still open now spreads over the kinds, and a change of position must not vanish because no
+                  // single direction reached the floor; the event names the leading kind at its own mass.
                   transitionTotal >= Self.posturalEventFloor {
             tracking.activePostural = PosturalEventTrack(kind: hit.1, ts: ts, probability: post[hit.0.rawValue])
             record(hit.1, p: post[hit.0.rawValue], ts: ts)
@@ -977,6 +986,9 @@ public struct ActivityContextDecoder: Sendable {
 
         // The event field shows only fresh events.
         let fresh = tracking.events.last { ts - $0.ts <= config.eventHoldS && ts >= $0.ts }
+        if let fresh, let active = tracking.activePostural, fresh.ts == active.ts, fresh.kind == active.kind {
+            tracking.activePostural?.shown = true
+        }
 
         let wearValidity: Double
         switch tracking.lastWear {
