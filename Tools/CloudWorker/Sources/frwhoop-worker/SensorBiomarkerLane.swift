@@ -774,6 +774,27 @@ struct SensorBiomarkerFamilyStage {
                     }
                 }
                 if any { mergedMeasurements[key] = .double(sum) }
+            } else if let pooled = pooledDayQuantile(key: key, stages: stages) {
+                // Day-level quantile from the POOLED bounded-bin distribution
+                // across every request (spec section 8: day quantiles aggregate
+                // over the day's epochs/windows/pulses), never one chunk's value
+                // presented as the day's. Falls back to the best-coverage
+                // carry below when the stages carry no consistent distribution.
+                if case .object(let m) = best.measurements, let v = m[key] {
+                    var entry = m
+                    if case .object(var fields) = v {
+                        fields["value"] = .double(pooled)
+                        fields["aggregation"] = .string("pooled-day-bins")
+                        entry[key] = .object(fields)
+                    } else {
+                        entry[key] = .object(["value": .double(pooled),
+                                               "aggregation": .string("pooled-day-bins")])
+                    }
+                    mergedMeasurements[key] = entry[key]
+                } else {
+                    mergedMeasurements[key] = .object(["value": .double(pooled),
+                                                       "aggregation": .string("pooled-day-bins")])
+                }
             } else {
                 if case .object(let m) = best.measurements, let v = m[key] { mergedMeasurements[key] = v }
             }
@@ -787,9 +808,84 @@ struct SensorBiomarkerFamilyStage {
     }
 
     /// Keys whose values are additive across the day's requests (counts and seconds). Quantile and
-    /// rate keys are NOT additive and are carried from the best-coverage request instead.
+    /// rate keys are NOT additive and are pooled from the day's bounded-bin distributions instead
+    /// (falling back to the best-coverage request when a stage carries no consistent distribution).
     static func isAdditiveMeasurement(_ key: String) -> Bool {
         key.hasSuffix("_seconds") || key.hasSuffix("_count")
+    }
+
+    /// A mergeable bounded-bin distribution from one stage (`extra.distributions[]`).
+    struct DayDistribution {
+        let key: String
+        let edges: [Double]
+        let counts: [Int]
+        var n: Int { counts.reduce(0, +) }
+    }
+
+    /// The day-level value for one quantile measurement key, pooled from the
+    /// stages' bounded-bin distributions (CONTRACTS.md section 8 / spec 8).
+    /// Returns nil when the stages carry no distribution for the key or their
+    /// edges disagree (the lane then falls back to the best-coverage carry and
+    /// never silently mixes edge sets).
+    static func pooledDayQuantile(key: String, stages: [SensorBiomarkerFamilyStage]) -> Double? {
+        // The distribution block is keyed by the measurement family's median key:
+        // enmo_p95_mg/enmo_median_mg, template_similarity_p25/..._median,
+        // pulse_amplitude_iqr_au/pulse_amplitude_median_au, ...
+        var base = key
+        var quantile = 0.5
+        var iqr = false
+        if let r = key.range(of: "_p95") { base = key.replacingCharacters(in: r, with: "_median"); quantile = 0.95 }
+        else if let r = key.range(of: "_p25") { base = key.replacingCharacters(in: r, with: "_median"); quantile = 0.25 }
+        else if let r = key.range(of: "_iqr") { base = key.replacingCharacters(in: r, with: "_median"); iqr = true }
+        guard base.contains("_median") else { return nil }
+
+        var found: [DayDistribution] = []
+        for s in stages where s.status == "ok" {
+            guard case .array(let blocks)? = s.extra["distributions"] else { continue }
+            for block in blocks {
+                guard case .object(let b) = block,
+                      b["key"]?.stringValue == base,
+                      case .array(let edgeVals)? = b["edges"],
+                      case .array(let countVals)? = b["counts"] else { continue }
+                let edges = edgeVals.compactMap { $0.doubleValue }
+                let counts = countVals.compactMap { $0.intValue }
+                if edges.count == counts.count + 1, !edges.isEmpty {
+                    found.append(DayDistribution(key: base, edges: edges, counts: counts))
+                }
+            }
+        }
+        guard !found.isEmpty else { return nil }
+        let edges = found[0].edges
+        guard found.allSatisfy({ $0.edges == edges }) else { return nil }
+        var counts = [Int](repeating: 0, count: edges.count - 1)
+        for d in found {
+            for (i, c) in d.counts.enumerated() { counts[i] += c }
+        }
+        let n = counts.reduce(0, +)
+        guard n > 0 else { return nil }
+        if iqr {
+            let p75 = Self.quantileFromBins(edges: edges, counts: counts, n: n, q: 0.75)
+            let p25 = Self.quantileFromBins(edges: edges, counts: counts, n: n, q: 0.25)
+            return p75 - p25
+        }
+        return Self.quantileFromBins(edges: edges, counts: counts, n: n, q: quantile)
+    }
+
+    /// A quantile from binned counts: the rank walks the cumulative counts and
+    /// interpolates linearly within the occupied bin (bounded-bin resolution,
+    /// coarser than a raw-sample quantile and honestly labeled as pooled).
+    static func quantileFromBins(edges: [Double], counts: [Int], n: Int, q: Double) -> Double {
+        let rank = min(max(q * Double(n), 0), Double(n))
+        var cumulative = 0
+        for (i, c) in counts.enumerated() {
+            let before = cumulative
+            cumulative += c
+            if c > 0 && Double(cumulative) >= rank {
+                let within = (rank - Double(before)) / Double(c)
+                return edges[i] + within * (edges[i + 1] - edges[i])
+            }
+        }
+        return edges.last ?? 0
     }
 
     var jsonValue: JSONValue {

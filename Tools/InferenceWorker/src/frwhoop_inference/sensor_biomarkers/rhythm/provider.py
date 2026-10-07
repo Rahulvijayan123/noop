@@ -175,7 +175,7 @@ def compute_rhythm_shadow_document(
             # publishable measurement on unresolved preprocessing).
             raw_scores["deepbeat_quality_scores"] = deep_result["quality"]
             raw_scores["deepbeat_rhythm_scores"] = deep_result["rhythm"]
-        adapters["deepbeat"] = {"status": deep_status,
+        adapters["deepbeat"] = {"status": deep_status, "ran": True,
                                 "reason": deep_result.get("reason"),
                                 "windows": deep_result.get("windows", 0)}
     if siam_result is not None:
@@ -185,7 +185,7 @@ def compute_rhythm_shadow_document(
             # still nonpublishable (WHOOP domain + release gate).
             measurements["siamaf_rhythm_scores"] = siam_result["rhythm"]
             raw_scores["siamaf_rhythm_scores"] = siam_result["rhythm"]
-        adapters["siamaf"] = {"status": siam_status,
+        adapters["siamaf"] = {"status": siam_status, "ran": True,
                               "reason": siam_result.get("reason"),
                               "windows": siam_result.get("windows", 0)}
 
@@ -213,9 +213,14 @@ def compute_rhythm_shadow_document(
     extra: dict[str, Any] = {"adapters": adapters, "schema_version": SCHEMA_VERSION}
     if raw_scores:
         extra["raw_scores"] = raw_scores
+    # The family's provider_revision names the adapters that actually ran (a
+    # SiamAF-only shadow is never labelled deepbeat/1.0.0).
+    ran = [a for a in ("deepbeat", "siamaf") if adapters.get(a, {}).get("ran")]
+    provider_revision = "+".join(
+        {"deepbeat": DEEPBEAT_REVISION, "siamaf": SIAMAF_REVISION}[a] for a in ran) or "rhythm-shadow/none"
     return family_document(
         family=_FAMILY, status=status, reason=reason,
-        measurements=measurements, extra=extra)
+        measurements=measurements, provider_revision=provider_revision, extra=extra)
 
 
 class RhythmProvider:

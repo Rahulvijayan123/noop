@@ -333,6 +333,13 @@ def compute_movement(grid: dict[str, Any], rate_hz: float,
             "partial_epoch_seconds": _partial_epoch_seconds(t, rate_hz),
             "calibrated": True,
         }
+        # Mergeable bounded bins: the day lane pools the ENMO epoch distribution
+        # across the day's chunk requests and recomputes the day median/p95
+        # (spec section 8: day quantiles aggregate over the day's epochs).
+        from .contract import distribution_block
+        enmo_dist = distribution_block("enmo_median_mg", epoch_values, "enmo")
+        if enmo_dist is not None:
+            extra["distributions"] = [enmo_dist]
         return family_document(
             family="movement", status="ok",
             measurements=measurements,
@@ -428,6 +435,11 @@ def compute_oscillation(grid: dict[str, Any], rate_hz: float) -> dict[str, Any]:
         "distinct_from": ("mean gyroscope magnitude (existing app metric) and "
                           "ParaDigMa tremor power (research, upstream band)"),
     }
+    from .contract import distribution_block
+    power_dist = distribution_block("wrist_oscillation_power_3_7hz_median",
+                                    values, "oscillation_power")
+    if power_dist is not None:
+        extra["distributions"] = [power_dist]
     return family_document(
         family="oscillation", status="ok", measurements=measurements,
         observed_seconds=observed_seconds,

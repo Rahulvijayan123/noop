@@ -168,6 +168,47 @@ upgraded. DeepBeat/SiamAF load in the main env (keras 3.15.1 + torch 2.14.1; TF 
    URLProtocol-stub-tested; a device-path test against a deployed backend was not run (no
    deployment was authorized).
 
+## 6. Independent review (docs/sensor-biomarkers/REVIEW.md) and the fixes applied
+
+An independent adversarial reviewer re-ran the suites (515 passed; CloudWorker build rc 0; sensor
+Deno tests green) and re-verified all five artifact sha256s from freshly downloaded bytes. Its
+findings and the parent's resolution:
+
+- **P1 (fixed)**: the iOS client and the edge route spoke different contracts (`{days:[...]}` +
+  404-on-absent vs `{sensor_biomarkers:<doc>}` + 200-null), with every iOS test mocking the wrong
+  shape. Fixed in `SensorBiomarkerRepository.swift`: the route envelope is now the primary parse
+  path (legacy shapes tolerated), a 404 settles as no-data (one request, never retried, never a
+  failed state). Tests now pin the REAL wire shape; a cross-layer fixture test mirrors the route
+  test's row JSON character-for-character. 37/37 macOS tests green.
+- **P2 (fixed)**: `pulse_shape.eligible_seconds` was the accepted-pulse COUNT; it is now the summed
+  duration of accepted pulses (a duration renders as a duration).
+- **P2 (fixed)**: day-level quantiles were carried from the single best-coverage request. The
+  provider now emits mergeable bounded-bin distributions per family (fixed documented edges,
+  `CONTRACTS.md`-pinned), and the lane pools the bins across every request and recomputes day
+  median/p95/p25/IQR (labelled `aggregation: pooled-day-bins`; a documented best-coverage fallback
+  only when a stage carries no consistent distribution). Lane tests pin the pooled math against an
+  independent reference.
+- **P2 (covered)**: the always-withheld PPG path is now exercised end-to-end at lane level: a real
+  anchor-less ppgWaveformSample wire object seeded, the request the lane sends asserted to carry no
+  PPG amplitude data, and the published document asserted to carry the withheld ppg families with
+  `missing_ppg_anchor`.
+- **P3 (fixed)**: the rhythm family's `provider_revision` now names the adapters that actually ran
+  (a SiamAF-only shadow is never labelled deepbeat/1.0.0); an uncalibrated movement family
+  (eligible 0) never renders "eligible 0s" (the honest line is the observed time alone).
+- **P3 (accepted, documented)**: family-level reason codes reuse the sidecar envelope enum plus the
+  CONTRACTS detail vocabulary (by design, documented in CONTRACTS §3); the enqueue
+  fingerprint-overwrite race under READ COMMITTED is inherited unchanged from the repo's
+  activity-context pattern and self-heals via the input-revision fence.
+
+Security: no findings (RLS owner-select verified via real PostgREST negative control; cross-owner
+reads blocked at two layers; loopback-only sidecar; no secrets). Regressions: none. Licenses:
+compliant (GPL-3.0 DeepBeat confined to the disabled server-side shadow lane; MIT vendored file
+carries attribution; Apache-2.0 fixtures documented).
+
+Reviewer verdict after fixes: the P1 release blocker for the descriptive tier end-to-end is
+resolved; movement + oscillation (and the gated research/shadow tiers, shipped disabled) are
+correct, honest and independently verified.
+
 ## 6. Infra incident note
 
 Mid-task the external SSD holding the worktree unmounted (bus error). All state was recovered

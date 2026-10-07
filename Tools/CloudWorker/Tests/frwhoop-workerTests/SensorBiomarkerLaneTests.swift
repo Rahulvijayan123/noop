@@ -27,6 +27,21 @@ final class SensorBiomarkerLaneTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// The inputs fixtures resource (same file-system lookup the inputs tests use).
+    private func ppgWireFixtureResource() throws -> Data {
+        if let dir = ProcessInfo.processInfo.environment["FRWHOOP_SENSOR_FIXTURE_DIR"], !dir.isEmpty,
+           FileManager.default.fileExists(atPath: dir + "/sensor_biomarkers_ppg_wire.json") {
+            return try Data(contentsOf: URL(fileURLWithPath: dir + "/sensor_biomarkers_ppg_wire.json"))
+        }
+        for candidate in [
+            "Tests/frwhoop-workerTests/Resources/sensor_biomarkers/sensor_biomarkers_ppg_wire.json",
+            "Tests/frwhoop-workerTests/Resources/sensor_biomarkers_ppg_wire.json",
+        ] where FileManager.default.fileExists(atPath: candidate) {
+            return try Data(contentsOf: URL(fileURLWithPath: candidate))
+        }
+        throw SensorBiomarkerLane.SensorBiomarkerError.deterministic("ppg_wire_fixture_missing")
+    }
+
     private func hexData(_ hex: String) -> Data {
         var out = Data(capacity: hex.count / 2)
         var i = hex.startIndex
@@ -182,6 +197,88 @@ final class SensorBiomarkerLaneTests: XCTestCase {
     }
 
     // MARK: - Family-stage parsing and merge
+
+    /// A stage carrying the provider's bounded-bin distribution (CONTRACTS/§8, spec 8):
+    /// mergeable counts over the fixed documented edges, keyed by the median measurement key.
+    private func stageJSONWithDistribution(family: String, observed: Double?,
+                                           medianValue: Double, distributionKey: String,
+                                           edges: [Double], counts: [Int]) -> JSONValue {
+        var obj: [String: JSONValue] = [
+            "status": .string("ok"),
+            "release_tier": .string("descriptive"),
+            "provider_revision": .string("x/1"),
+            "measurements": .object(["enmo_median_mg": .object(["value": .double(medianValue)])]),
+            "reason_counts": .object([:]),
+            "distributions": .array([.object([
+                "key": .string(distributionKey),
+                "edges": .array(edges.map { .double($0) }),
+                "counts": .array(counts.map { .int($0) }),
+            ])]),
+        ]
+        if let observed { obj["observed_seconds"] = .double(observed) }
+        return .object(obj)
+    }
+
+    func testFamilyStageMergePoolsDayQuantilesFromDistributionBins() throws {
+        // Two requests (chunks) with disjoint ENMO distributions: chunk A holds
+        // 4 epochs in [1,2) mg and 4 in [6,8); chunk B holds 8 epochs in [3,4).
+        // The pooled day median is rank 8 of 16 -> mid of the [3,4) bin -> 3.5 mg,
+        // which is NEITHER stage's own carried median (5.0 / 4.5): the day value
+        // is pooled across both chunks' bins, never one request's value presented
+        // as the day's.
+        let edges = [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0]
+        let a = try SensorBiomarkerFamilyStage.parse(
+            family: "movement",
+            stageJSONWithDistribution(family: "movement", observed: 300, medianValue: 5.0,
+                                      distributionKey: "enmo_median_mg", edges: edges,
+                                      counts: [0, 4, 0, 0, 0, 0, 4, 0]))
+        let b = try SensorBiomarkerFamilyStage.parse(
+            family: "movement",
+            stageJSONWithDistribution(family: "movement", observed: 700, medianValue: 4.5,
+                                      distributionKey: "enmo_median_mg", edges: edges,
+                                      counts: [0, 0, 0, 8, 0, 0, 0, 0]))
+        let merged = try SensorBiomarkerFamilyStage.merge([a, b])
+        guard case .object(let m) = merged.measurements else { return XCTFail("measurements object expected") }
+        guard case .object(let entry)? = m["enmo_median_mg"] else { return XCTFail("median entry expected") }
+        XCTAssertEqual(entry["value"]?.doubleValue ?? -1, 3.5, accuracy: 0.26,
+                       "the day median is pooled across both chunks' bins")
+        XCTAssertEqual(entry["aggregation"]?.stringValue, "pooled-day-bins")
+        // The p95 pools too: rank 15.2 of 16 -> inside the 6-8 bin.
+        _ = m // (p95 key absent in this fixture; the median proves the pooling path)
+    }
+
+    func testFamilyStageMergeFallsBackToBestCoverageWhenEdgesDisagree() throws {
+        // A stage set with no distributions keeps the documented best-coverage carry.
+        let a = try SensorBiomarkerFamilyStage.parse(
+            family: "movement",
+            stageJSON(family: "movement", status: "ok", observed: 300, measurements: [
+                "enmo_median_mg": ["value": 10.0],
+            ]))
+        let b = try SensorBiomarkerFamilyStage.parse(
+            family: "movement",
+            stageJSON(family: "movement", status: "ok", observed: 700, measurements: [
+                "enmo_median_mg": ["value": 25.0],
+            ]))
+        let merged = try SensorBiomarkerFamilyStage.merge([a, b])
+        guard case .object(let m) = merged.measurements else { return XCTFail("measurements object expected") }
+        XCTAssertEqual(m["enmo_median_mg"]?.member("value")?.doubleValue ?? 0, 25.0,
+                       "no distribution: the best-coverage request's quantile is carried unchanged")
+    }
+
+    func testQuantileFromBinsMatchesIndependentReference() {
+        // Independent reference: edges [0,1,2], counts [2,2] -> n=4.
+        // median (q=0.5): rank 2.0 -> end of bin 0 / start of bin 1 -> 1.0.
+        // p25: rank 1.0 -> mid of bin 0 -> 0.5. p95: rank 3.8 -> bin 1 (cum 2..4),
+        // 0.9 across -> 1 + 0.9*(2-1) = 1.9.
+        let q = SensorBiomarkerFamilyStage.quantileFromBins(edges: [0, 1, 2], counts: [2, 2], n: 4, q: 0.5)
+        XCTAssertEqual(q, 1.0, accuracy: 1e-9)
+        let p25 = SensorBiomarkerFamilyStage.quantileFromBins(edges: [0, 1, 2], counts: [2, 2], n: 4, q: 0.25)
+        XCTAssertEqual(p25, 0.5, accuracy: 1e-9)
+        let p95 = SensorBiomarkerFamilyStage.quantileFromBins(edges: [0, 1, 2], counts: [2, 2], n: 4, q: 0.95)
+        XCTAssertEqual(p95, 1.9, accuracy: 1e-9)
+    }
+
+    // MARK: - (merge tests continue)
 
     func testFamilyStageParseRejectsMalformedStage() {
         XCTAssertThrowsError(try SensorBiomarkerFamilyStage.parse(family: "movement", .string("nope")))
@@ -520,6 +617,85 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(job["consecutive_failures"], "0")
         XCTAssertTrue(lane.stats.published >= 1)
         XCTAssertTrue(lane.stats.sidecarRequests >= 1)
+        db.rollbackTransaction()
+        try? db.exec("delete from auth.users where id = '\(f.user)'")
+    }
+
+    /// The PPG path end-to-end at lane level with the PRODUCTION anchor-less wire
+    /// (review P2-4): the ppgWaveformSample object lane carries no baseCode, so
+    /// every decoded second is honestly withheld. The request the lane sends must
+    /// carry NO ppg amplitude data, and the published document must carry the
+    /// sidecar's withheld ppg stages verbatim (missing_ppg_anchor), never a
+    /// fabricated value and never a dropped family.
+    func testAnchorLessPpgWireWithholdsPpgFamiliesEndToEnd() throws {
+        let db = try connect()
+        let f = try makeFixture(db: db)
+        let imuID = UUID().uuidString.lowercased()
+        let ppgID = UUID().uuidString.lowercased()
+        let imu = try syntheticImu(seconds: (0..<300).map { f.dayStart + Int64($0) })
+        let digestImu = try seedImuObject(f, seconds: (0..<300).map { f.dayStart + Int64($0) }, objectID: imuID)
+        // A real gzip NPB1 ppgWaveformSample wire object from the inputs fixtures
+        // (anchor-less by construction: the wire carries no baseCode).
+        let wireData = try ppgWireFixtureResource()
+        guard let wireFixture = try JSONSerialization.jsonObject(with: wireData) as? [String: Any],
+              let objects = wireFixture["objects"] as? [[String: Any]],
+              let first = objects.first,
+              let gzipB64 = first["gzip_base64"] as? String,
+              let gzipBytes = Data(base64Encoded: gzipB64),
+              let decodedHex = first["decoded_hex"] as? String else {
+            return XCTFail("ppg wire fixture unusable")
+        }
+        let decoded = hexData(decodedHex)
+        let digestPpg = sha256Hex(decoded)
+        let startISO = SensorBiomarkerLane.iso(f.dayStart)
+        let endISO = SensorBiomarkerLane.iso(f.dayStart + 86_400)
+        _ = try f.db.query("""
+            insert into public.object_manifests(id,user_id,device_id,object_class,object_kind,object_key,
+              start_at,end_at,sha256,sha256_source,status,verified_at,durability_receipt)
+            values($1::uuid,$2::uuid,$3::uuid,'raw','ppgWaveformSample',$4::text,
+              $5::timestamptz,$6::timestamptz,$7::text,'server_verified','ready',clock_timestamp(),
+              jsonb_build_object('state','verified_indexed'))
+            """, [ppgID, f.user, f.device, "sb-test-\(ppgID)", startISO, endISO, digestPpg])
+        let fp = try fingerprintSQL(f, digests: [digestImu, digestPpg].sorted())
+        try enqueue(f, objectID: imuID, digest: digestImu, fingerprint: fp,
+                    families: ["movement", "ppg_quality", "pulse_shape"])
+        try enqueue(f, objectID: ppgID, digest: digestPpg, fingerprint: fp,
+                    families: ["movement", "ppg_quality", "pulse_shape"])
+
+        let withheldEnvelope = envelope(stages: [
+            "movement": stageJSON(family: "movement", status: "ok", observed: 600,
+                                  measurements: ["enmo_median_mg": ["value": 12.5]]),
+            "ppg_quality": stageJSON(family: "ppg_quality", status: "withheld", observed: 0,
+                                     measurements: [:], reason: "missing_ppg_anchor"),
+            "pulse_shape": stageJSON(family: "pulse_shape", status: "withheld", observed: 0,
+                                     measurements: [:], reason: "missing_ppg_anchor"),
+        ])
+        let server = StubHTTPServer { _ in .json(withheldEnvelope) }
+        defer { server.stop() }
+        var lane = makeLane(f: f, server: server,
+                            zstdByKey: ["sb-test-\(imuID)": imu.zstd, "sb-test-\(ppgID)": gzipBytes])
+        lane.drain(budget: 1)
+
+        // The request the lane sent: the anchor-less PPG wire contributes no
+        // amplitude data, so the input carries no `ppg` key at all.
+        let bodies = server.servedRequests.map { String(decoding: $0.body, as: UTF8.self) }
+        XCTAssertGreaterThanOrEqual(bodies.count, 1)
+        for body in bodies {
+            XCTAssertFalse(body.contains("\"ppg\""),
+                           "an anchor-less ppg wire must never be sent as PPG amplitudes")
+        }
+        // The published document carries the honestly-withheld PPG families.
+        let row = try f.db.query(
+            "select status::text, withheld_reasons::text, "
+            + "document->'families'->'ppg_quality'->>'reason' as ppg_reason, "
+            + "document->'families'->'pulse_shape'->>'status' as pulse_status "
+            + "from public.sensor_biomarker_days where user_id=$1::uuid and device_id=$2::uuid",
+            [f.user, f.device]).first ?? [:]
+        XCTAssertEqual(row["status"], "completed")
+        XCTAssertEqual(row["ppg_reason"], "missing_ppg_anchor",
+                       "the anchor-less PPG families are withheld with the precise reason")
+        XCTAssertEqual(row["pulse_status"], "withheld")
+        XCTAssertTrue(row["withheld_reasons"]?.contains("missing_ppg_anchor") ?? false)
         db.rollbackTransaction()
         try? db.exec("delete from auth.users where id = '\(f.user)'")
     }

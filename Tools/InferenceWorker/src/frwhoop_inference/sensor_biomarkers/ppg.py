@@ -42,7 +42,7 @@ from typing import Any
 import numpy as np
 
 from . import PROVIDER_REVISIONS
-from .contract import family_document, measurement
+from .contract import distribution_block, family_document, measurement
 
 NEUROKIT2_VERSION = "0.2.13"
 PEAK_DETECTOR = "charlton (MSPTDfast v2, win_durn=6)"
@@ -263,6 +263,7 @@ def compute_ppg_quality(
             # per-sample values, weighted by their seconds.
             pooled.extend(finite.tolist())
             quality_seconds += QUALITY_WINDOW_SECONDS
+    similarity_dist: dict[str, Any] | None = None
     if pooled:
         arr = np.asarray(pooled, dtype=float)
         measurements["template_similarity_median"] = measurement(
@@ -277,6 +278,8 @@ def compute_ppg_quality(
             denominator="complete 30 s core windows, finite values",
             count=quality_seconds // QUALITY_WINDOW_SECONDS,
             method="p25 over the same pooled values")
+        similarity_dist = distribution_block("template_similarity_median",
+                                             pooled, "template_similarity")
     else:
         reasons = {"no_finite_template_similarity": 1}
         return family_document(
@@ -292,7 +295,8 @@ def compute_ppg_quality(
         reason_counts={"clipped_samples": raw["clipped_samples"],
                        "flat_runs": raw["flat_runs"]},
         extra={"raw_diagnostics": raw, "native_rate_hz": rate_hz,
-               "valid_waveform_fraction_unknown": valid_unknown})
+               "valid_waveform_fraction_unknown": valid_unknown,
+               **({"distributions": [similarity_dist]} if similarity_dist else {})})
 
 
 def _pulse_metrics(clean: np.ndarray, rate_hz: float,
@@ -456,12 +460,22 @@ def compute_pulse_shape(segments: list[dict[str, Any]], rate_hz: float) -> dict[
         clean = nk.ppg_clean(clean, sampling_rate=int(round(rate_hz)), method=CLEANER)
         detected = _detect(clean, rate_hz)
         metrics = _pulse_metrics(clean, rate_hz, detected)
+        distributions = [
+            block for block in (
+                distribution_block("pulse_amplitude_median_au", metrics["amplitudes"], "pulse_amplitude_au"),
+                distribution_block("pulse_upstroke_median_ms", metrics["upstrokes_ms"], "pulse_time_ms"),
+                distribution_block("pulse_width50_median_ms", metrics["widths_ms"], "pulse_time_ms"),
+                distribution_block("pulse_normalized_area_median", metrics["normalized_areas"], "pulse_area"),
+            ) if block is not None
+        ]
         configurations.append({
             "configuration": identity,
             "segments": len(segs),
             "accepted": metrics["accepted"],
             "rejected": metrics["rejected"],
+            "eligible_seconds": float(sum(metrics["durations_s"])),
             "measurements": _summarize_pulses(metrics),
+            "distributions": distributions,
         })
     accepted_total = sum(c["accepted"] for c in configurations)
     if accepted_total == 0:
@@ -479,18 +493,25 @@ def compute_pulse_shape(segments: list[dict[str, Any]], rate_hz: float) -> dict[
     # stable configuration the top-level keys carry it directly; with more,
     # the per-configuration blocks are the result and the top level stays empty.
     measurements: dict[str, Any] = {}
+    top_distributions: list[dict[str, Any]] = []
     if len(configurations) == 1:
         measurements = dict(configurations[0]["measurements"])
+        top_distributions = list(configurations[0].get("distributions") or [])
+    # eligible_seconds: seconds covered by ACCEPTED pulses (the summed pulse
+    # durations), never the pulse COUNT (a duration is rendered as a duration).
+    eligible_seconds = float(sum(
+        float(c.get("eligible_seconds") or 0.0) for c in configurations))
     return family_document(
         family="pulse_shape", status="ok", measurements=measurements,
         observed_seconds=observed,
-        eligible_seconds=float(sum(c["accepted"] for c in configurations)),
+        eligible_seconds=eligible_seconds,
         reason_counts={f"rejected_{k}": sum(c["rejected"][k] for c in configurations)
                        for k in configurations[0]["rejected"]},
         extra={"configurations": configurations,
                "pooled_across_configurations": False,
                "native_rate_hz": rate_hz,
-               "native_sample_period_ms": 1000.0 / rate_hz})
+               "native_sample_period_ms": 1000.0 / rate_hz,
+               **({"distributions": top_distributions} if top_distributions else {})})
 
 
 def compute_perfusion_research(
