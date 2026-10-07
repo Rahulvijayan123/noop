@@ -172,6 +172,13 @@ final class WatchdogV2RealDataReplayTests: XCTestCase {
         for (k, v) in quality.sorted(by: { $0.value > $1.value }).prefix(10) {
             lines.append(String(format: "  %@ %.1f%%", k, 100 * Double(v) / Double(max(totalQ, 1))))
         }
+        for dim in 0..<3 {
+            var marg: [String: Int] = [:]
+            for (k, v) in quality { marg[String(k.split(separator: "/")[dim]), default: 0] += v }
+            lines.append(["onBody", "signal", "motion"][dim] + ": " + marg.sorted { $0.key < $1.key }
+                .map { String(format: "%@=%.1f%%", $0.key, 100 * Double($0.value) / Double(max(totalQ, 1))) }
+                .joined(separator: " "))
+        }
         lines.append("evaluations: " + evaluations.map { "\($0.series.rawValue):n=\($0.nLong),\($0.maturity.rawValue)" }.joined(separator: " "))
         for h in heldExamples { lines.append("  held \(h)") }
         print(lines.joined(separator: "\n"))
