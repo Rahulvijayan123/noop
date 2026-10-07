@@ -12,13 +12,13 @@ Pure functions over the sources loaded for one job (sources.py). Conventions:
 from __future__ import annotations
 
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import layer1
+from . import gait, layer1
 from .metrics import (BASELINE_NIGHTS, EPISODE_RANK, INSIGHT_METRICS, REFERENCE_ORDER, SIGNALS, WINDOW_DAYS,
                       InsightMetric, Signal, plausible)
 
@@ -126,8 +126,8 @@ def context_judgment(document: dict[str, Any] | None, metric: InsightMetric) -> 
     if not document:
         return {"available": False, "reason": "no_context_document"}
     comparisons = [c for c in document.get("comparisons") or [] if isinstance(c, dict)
-                   and c.get("series_key") == metric.nightly_series]
-    if not comparisons:  # no nightly comparison: the page's other series family members, like the app
+                   and metric.context_series and c.get("series_key") == metric.context_series]
+    if not comparisons:  # no comparison of the value's own series: the page's other family members, like the app
         comparisons = [c for c in document.get("comparisons") or [] if isinstance(c, dict)
                        and _belongs(str(c.get("series_key", "")), metric)]
     reference = headline_reference(comparisons)
@@ -181,8 +181,6 @@ def availability_estimated(document: dict[str, Any] | None, signal: Signal) -> b
 # the Home ring and the Monitor do from the same nightly values, replayed over the whole history as the phone does.
 # Day logs, confounders and treatment trials live on the phone; they are neutral here, as on a phone with none logged.
 
-LAYER1_SERIES = {"resting_hr": "sleep_rhr", "hrv_rmssd": "sleep_hrv_ln", "resp_rate": "sleep_resp",
-                 "spo2": "sleep_spo2_mean"}
 # The Home ring's night vitals (BaselineStore.vitalsCheckSeries), in its order: the Layer 1 series, the app's name for
 # it, the label and unit here, the decimals the Monitor prints, and the signal whose availability says measured or
 # estimated.
@@ -292,46 +290,113 @@ def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, an
         prev_day, prev = measured[-2]
         out["previous"] = {"day": prev_day.isoformat(), "value": rounded(prev, d),
                            "change": shown_difference(latest, prev, d)}
-    # The person's usual and the call for the night as the app's Baseline shows them: the week usual when the app
-    # trusts it, else the 60-day one. One definition everywhere, so an explanation never shows a "usual range" the
-    # app does not.
-    baseline = app_baseline(scores if history is None else history, LAYER1_SERIES[metric.key], latest_day, d)
-    shown = _shown_usual(baseline)
-    if shown:
-        change = rounded(float(rounded(latest, d)) - float(shown["center"]), d)
-        baseline.update(usual="week" if baseline["call"]["shown_usual"] == "this_week" else "long",
-                        usual_value=shown["center"],
-                        usual_low=shown["low"], usual_high=shown["high"], change_vs_usual=change,
-                        direction=_direction(change, signal.flat))
+    # The person's usual, defined as the app defines it for this metric: its Baseline (the week usual when the app
+    # trusts it, else the 60-day one, and its call for the night), the context layer's reference, or, where the app
+    # shows no usual, the person's recent measured periods. One definition everywhere, so an explanation never shows
+    # a "usual range" the app does not.
+    context = context_judgment(document, metric)
+    if metric.usual == "app_baseline":
+        baseline = app_baseline(scores if history is None else history, signal.layer1, latest_day, d)
+        shown = _shown_usual(baseline)
+        if shown:
+            change = rounded(float(rounded(latest, d)) - float(shown["center"]), d)
+            baseline.update(usual="week" if baseline["call"]["shown_usual"] == "this_week" else "long",
+                            usual_value=shown["center"],
+                            usual_low=shown["low"], usual_high=shown["high"], change_vs_usual=change,
+                            direction=_direction(change, signal.flat))
+    elif metric.usual == "context_layer":
+        baseline = context_usual(context, latest_day, rounded(latest, d), signal)
+    else:
+        baseline = recent_usual(measured, latest_day, latest, signal, metric.period)
     out["baseline"] = baseline
     recent = [v for day, v in measured if day > anchor - timedelta(days=RECENT_NIGHTS)]
     if recent:
         out["last_7_nights"] = {"measured": len(recent), "median": rounded(median(recent), d),
                                 "low": rounded(min(recent), d), "high": rounded(max(recent), d)}
-    context = context_judgment(document, metric)
     out["context_layer"] = context
     out["assessment"] = _assessment(baseline, context)
+    out["period"] = metric.period
     return out
 
 
 def _shown_usual(baseline: dict[str, Any]) -> dict[str, Any] | None:
     """The usual whose band the app shows next to its call (None while it is still learning)."""
-    return {"this_week": baseline["week"], "60_days": baseline["long"]}.get(baseline["call"]["shown_usual"])
+    return {"this_week": baseline.get("week"), "60_days": baseline.get("long")}.get(baseline["call"].get("shown_usual"))
+
+
+# The app's words for a context-layer change-episode state (MeasurementContextWording.episodeState).
+CONTEXT_STATES = {"usual_variation": "Within usual variation", "transient_deviation": "Transient deviation from reference",
+                  "recurring_episode": "Recurring deviation from reference",
+                  "persistent_shift": "Persistent change from your recent usual range",
+                  "insufficient_evidence": "Insufficient evidence for a change"}
+
+
+def context_usual(context: dict[str, Any], day: date, value: float | int | None, signal: Signal) -> dict[str, Any]:
+    """The context layer's view of the day, as the app's Measurement context page words it: the value against its
+    personal reference ("+3 bpm vs your rolling reference") and the change-episode state ("Within usual variation",
+    "Transient deviation from reference", ...). The call follows that state; with no ready reference it is learning."""
+    reference, episode = context.get("reference") or {}, context.get("episode") or {}
+    ready = reference.get("status") == "ready" and reference.get("center") is not None
+    current = bool(episode) and bool(episode.get("ongoing") or episode.get("last") == day.isoformat())
+    state = episode.get("state") if current else "usual_variation" if ready else None
+    if not ready or state in (None, "insufficient_evidence"):
+        call = {"state": "learning", "app_label": "No usual yet", "side": None}
+    elif state == "usual_variation":
+        call = {"state": "in_range", "app_label": CONTEXT_STATES["usual_variation"], "side": None}
+    else:
+        difference = _num(reference.get("difference")) or 0.0
+        direction = _num(episode.get("direction")) or (1 if difference > 0 else -1 if difference < 0 else 0)
+        call = {"state": "off", "app_label": CONTEXT_STATES.get(state, state),
+                "side": "above" if direction > 0 else "below" if direction < 0 else None}
+    out: dict[str, Any] = {"night": day.isoformat(), "value": value, "call": dict(call, context_state=state),
+                           "rules": "the context layer's personal reference and change detection (Measurement context)"}
+    if ready:
+        out.update(usual="context_reference", usual_value=reference["center"], change_vs_usual=reference.get("difference"),
+                   direction=_direction(_num(reference.get("difference")), signal.flat),
+                   reference={k: reference.get(k) for k in ("view", "support_nights", "from", "to")})
+    return out
+
+
+def recent_usual(measured: list[tuple[date, float]], day: date, value: float, signal: Signal,
+                 period: str) -> dict[str, Any]:
+    """Where the app shows no usual (SDNN, the SpO2 estimate, calories): the person's last measured periods, as
+    plain facts (median, lowest, highest, where the latest falls), never an in-or-out-of-range call."""
+    d = signal.decimals
+    earlier = [v for day_, v in measured if day_ < day][-BASELINE_NIGHTS:]
+    out: dict[str, Any] = {"night": day.isoformat(), "value": rounded(value, d),
+                           "call": {"state": "no_usual", "app_label": None, "side": None},
+                           "rules": f"no usual in the app: compared with the last measured {period}s only"}
+    if len(earlier) >= 3:
+        middle = median(earlier)
+        change = rounded(float(rounded(value, d)) - float(rounded(middle, d)), d)
+        below = sum(1 for v in earlier if v < value)
+        position = ("lowest" if value < min(earlier) else "highest" if value > max(earlier) else
+                    "below_most" if below < len(earlier) / 4 else "above_most" if below > 3 * len(earlier) / 4 else
+                    "within")
+        out.update(usual="recent", usual_value=rounded(middle, d), change_vs_usual=change,
+                   direction=_direction(change, signal.flat),
+                   recent={"periods": len(earlier), "median": rounded(middle, d), "lowest": rounded(min(earlier), d),
+                           "highest": rounded(max(earlier), d), "position": position, "lower_than_latest": below})
+    return out
 
 
 def _assessment(baseline: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """Whether the night is unusual for this person: the app's own call (the Home ring and the Monitor: in range, off
-    usual, still learning, no reading) and, when its reference is ready, the context layer's change detection over
-    the recent weeks (a persistent shift, a recurring or a transient deviation)."""
+    """Whether the night (or day) is unusual for this person: the app's own call (the Home ring and the Monitor for
+    its Baseline vitals; the Measurement context page's episode state for calm awake heart rate) and, when its
+    reference is ready, the context layer's change detection over the recent weeks. Where the app shows no usual,
+    only the comparison with recent periods."""
     call = baseline["call"]
+    basis = ("context_layer" if "context_state" in call else "recent_periods" if call["state"] == "no_usual"
+             else "app_baseline")
     out: dict[str, Any] = {
-        "basis": "app_baseline", "state": call["state"], "app_label": call["app_label"], "side": call["side"],
-        "outside": call["outside"], "shown_usual": call["shown_usual"],
-        "note": "the app's call for this night: in_range = inside the band it shows; off = outside the band of a usual "
-                "it trusts (outside names which: this_week, 60_days; side says above or below); learning = no usual "
-                "it trusts yet; no_reading = the night was not measured"}
+        "basis": basis, "state": call["state"], "app_label": call.get("app_label"), "side": call.get("side"),
+        "outside": call.get("outside", []), "shown_usual": call.get("shown_usual"),
+        "note": "the app's call: in_range = inside the usual it shows; off = outside a usual it trusts (side says "
+                "above or below; outside names which: this_week, 60_days); learning = no usual it trusts yet; "
+                "no_reading = not measured; no_usual = the app shows no usual for this metric (compare with recent "
+                "periods only, never call it in or out of a usual range)"}
     reference = context.get("reference") or {}
-    if reference.get("status") == "ready" and reference.get("difference") is not None:
+    if basis != "context_layer" and reference.get("status") == "ready" and reference.get("difference") is not None:
         out["change_detection"] = {"state": (context.get("episode") or {}).get("state") or "no_change_episode",
                                    "robust_distance": reference.get("robust_distance"),
                                    "note": "the context layer's change detection against its personal reference"}
@@ -360,8 +425,8 @@ def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         entry["latest"] = {"day": latest_day.isoformat(), "value": rounded(latest, signal.decimals)}
         entry["same_night_as_metric"] = latest_day == anchor
         usual, nights_used = None, 0
-        if key in LAYER1_SERIES:  # a night vital: the app's own usual and call, as for the metric itself
-            baseline = app_baseline(history, LAYER1_SERIES[key], latest_day, signal.decimals)
+        if signal.layer1:  # the app's own usual and call, as for the metric itself
+            baseline = app_baseline(history, signal.layer1, latest_day, signal.decimals)
             entry["app_call"] = baseline["call"]["state"]
             shown = _shown_usual(baseline)
             if shown:
@@ -451,8 +516,12 @@ STATE_SERIES: dict[str, tuple[tuple[str, str, str], ...]] = {
                    ("with_movement", "the rise in heart rate when you walked", "hr_response.stepping.")),
     "hrv_rmssd": (("sleep", "during sleep", "hrv_rmssd.sleep_night"),
                   ("awake_rest", "at calm awake rest", "hrv_rmssd.stable_awake_5min")),
+    # Calm awake heart rate is itself the awake-rest series: its states are the time of day and movement.
+    "heart_rate": (("awake_rest", "at calm awake rest", "heart_rate.stable_awake_5min"),
+                   ("with_movement", "the rise in heart rate when you walked", "hr_response.stepping.")),
 }
-TIME_BANDS = {"band_00_06": "between midnight and 6 am", "band_12_18": "between noon and 6 pm"}
+TIME_BANDS = {"band_00_06": "between midnight and 6 am", "band_06_12": "between 6 am and noon",
+              "band_12_18": "between noon and 6 pm", "band_18_24": "between 6 pm and midnight"}
 NOT_ON_SERVER = {"hrv_rmssd": {"state": "with_movement", "label": "while moving", "available": False,
                                "reason": "not_measured_on_server",
                                "note": "HRV while moving is followed live on the phone (Watchdog); the server has no "
@@ -499,7 +568,7 @@ def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         entry: dict[str, Any] = {"state": state, "label": label}
         if state == "sleep":
             value = nightly.get(anchor)
-            baseline = app_baseline(scores if history is None else history, LAYER1_SERIES[metric.key], anchor, d)
+            baseline = app_baseline(scores if history is None else history, signal.layer1, anchor, d)
             call = baseline["call"]
             entry.update(value=rounded(value, d), units=signal.units, available=value is not None,
                          source="the night's score", usual=_shown_usual(baseline), week=baseline["week"],
@@ -734,20 +803,110 @@ def _per(value: float | None, divisor: float, decimals: int) -> float | int | No
     return rounded(value / divisor, decimals) if value is not None else None
 
 
-def activity_context(document: dict[str, Any] | None) -> dict[str, Any]:
-    if not document:
-        return {"available": False, "reason": "no_context_document"}
-    values = {}
-    for value in document.get("daily_values") or []:
-        if isinstance(value, dict) and str(value.get("series_key", "")).startswith(("functional.", "coverage.")):
-            values[value["series_key"]] = _num(value.get("value"))
-    worn = values.get("coverage.motion_observed_s")
-    return {"available": True, "estimated": True,
-            "worn_h": rounded(worn / 3600.0, 1) if worn is not None else None,
-            "locomotion_min_per_worn_hour": _per(values.get("functional.locomotion_s_per_worn_hour"), 60.0, 1),
-            "bouts_per_worn_hour": rounded(values.get("functional.bouts_per_worn_hour"), 2),
-            "median_bout_min": _per(values.get("functional.median_bout_s"), 60.0, 1),
-            "note": "daily activity level from wrist motion (estimated)"}
+def activity_context(document: dict[str, Any] | None, scores: dict[date, dict[str, Any]] | None = None,
+                     anchor: date | None = None) -> dict[str, Any]:
+    """The day's activity level from wrist motion (the context layer) and, when the hosted day has it, the energy
+    model's split of the day's calories (resting, active, workouts; minutes by intensity)."""
+    out: dict[str, Any] = {"available": False, "reason": "no_context_document"}
+    if document:
+        values = {}
+        for value in document.get("daily_values") or []:
+            if isinstance(value, dict) and str(value.get("series_key", "")).startswith(("functional.", "coverage.")):
+                values[value["series_key"]] = _num(value.get("value"))
+        observed = values.get("coverage.motion_observed_s")
+        out = {"available": True, "estimated": True,
+               "motion_observed_h": rounded(observed / 3600.0, 1) if observed is not None else None,
+               "locomotion_min_per_worn_hour": _per(values.get("functional.locomotion_s_per_worn_hour"), 60.0, 1),
+               "bouts_per_worn_hour": rounded(values.get("functional.bouts_per_worn_hour"), 2),
+               "median_bout_min": _per(values.get("functional.median_bout_s"), 60.0, 1),
+               "note": "daily activity level from wrist motion (estimated); motion_observed_h is the time the strap "
+                       "saw wrist motion data, not necessarily the time it was worn"}
+    energy = energy_context(scores or {}, anchor) if anchor else None
+    if energy:
+        out["energy"] = energy
+    return out
+
+
+def energy_context(scores: dict[date, dict[str, Any]], day: date) -> dict[str, Any] | None:
+    """The energy model's estimate of the day (the app's Calories value is its total) and its parts, with the
+    median total of the person's previous measured days."""
+    energy = (scores.get(day) or {}).get("energy")
+    if not isinstance(energy, dict) or _num(energy.get("total_kcal")) is None:
+        return None
+    totals = [v for d, row in sorted(scores.items()) if d < day
+              and (v := plausible(SIGNALS["calories"], (row or {}).get("total_kcal"))) is not None][-BASELINE_NIGHTS:]
+    minutes = {k: rounded(_num(energy.get(f"{k}_min")), 0) for k in ("sedentary", "light", "moderate", "high")}
+    out = {"day": day.isoformat(), "estimated": True,
+           "total_kcal": rounded(_num(energy.get("total_kcal")), 0),
+           "resting_kcal": rounded(_num(energy.get("resting_kcal")), 0),
+           "active_kcal": rounded(_num(energy.get("active_kcal")), 0),
+           "workout_kcal": rounded(_num(energy.get("workout_kcal")), 0),
+           "workouts": energy.get("workouts"),
+           "minutes_by_intensity": {k: v for k, v in minutes.items() if v is not None},
+           "coverage_min": rounded(_num(energy.get("coverage_min")), 0),
+           "gap_min": rounded(_num(energy.get("gap_min")), 0),
+           "model_confidence": rounded(_num(energy.get("confidence")), 2),
+           "note": "the energy model's estimate (resting + active energy), not a measurement; gap_min = minutes "
+                   "without enough data, filled by the model"}
+    if len(totals) >= 3:
+        out["usual_total_kcal"] = {"median": rounded(median(totals), 0), "days": len(totals)}
+    return out
+
+
+# --------------------------------------------------------------------------- ElderNet gait (steps)
+
+
+def _clock_of(epoch: int, zone: ZoneInfo) -> str:
+    return datetime.fromtimestamp(epoch, zone).strftime("%H:%M")
+
+
+def gait_context(rows: list[dict[str, Any]], day: date, zone: ZoneInfo) -> dict[str, Any]:
+    """How the person walked on the day, read as the app's "How you walked" card reads it (gait.py: the windows
+    starting inside the local day), and the walking of the days before from the stored day summaries."""
+    if not rows:
+        return {"available": False, "reason": "no_gait_data",
+                "note": "no ElderNet gait for these days; say nothing about how the person walked"}
+    start = int(datetime.combine(day, time(), zone).timestamp())
+    end = int(datetime.combine(day + timedelta(days=1), time(), zone).timestamp())
+    utc_days = {datetime.fromtimestamp(t, timezone.utc).date() for t in (start, end - 1)}
+    today = [row for row in rows if row["day"] in utc_days]
+    columns = [c for c in (gait.columns(row.get("windows")) for row in today) if c is not None]
+    out: dict[str, Any] = {"available": True, "day": day.isoformat(), "estimated": True,
+                           "model": sorted({str(row.get("model_version")) for row in today}) or None,
+                           "note": "ElderNet's estimate of walking from wrist motion (a model, fine-tuned on older "
+                                   "adults; it can miss some walking); not a step count"}
+    if columns:
+        r = gait.reading(columns, start, end)
+        bands = dict(zip(("strolling", "steady", "brisk", "fast"), r.cadence_band_seconds))
+        longest = sorted(r.bouts, key=lambda b: b.seconds, reverse=True)[:6]
+        out.update(
+            walking_min=rounded(r.walking_seconds / 60.0, 0), brisk_min=rounded(r.brisk_seconds / 60.0, 0),
+            walks=len(r.bouts), walk_steps=rounded(r.steps, 0) if r.steps is not None else None,
+            cadence_spm=rounded(r.cadence_spm, 0), typical_speed_mps=rounded(r.typical_speed_mps, 2),
+            typical_speed_kmh=rounded(r.typical_speed_mps * 3.6, 1) if r.typical_speed_mps is not None else None,
+            stride_m=rounded(r.stride_m, 2), regularity_pct=rounded(r.regularity * 100, 0) if r.regularity is not None
+            else None,
+            minutes_by_cadence={k: rounded(v / 60.0, 0) for k, v in bands.items()},
+            longest_walks=[{"start_local": _clock_of(b.start, zone), "end_local": _clock_of(b.end, zone),
+                            "minutes": rounded(b.seconds / 60.0, 0), "cadence_spm": rounded(b.cadence_spm, 0),
+                            "speed_mps": rounded(b.speed_mps, 2)} for b in sorted(longest, key=lambda b: b.start)],
+            assessed=r.assessed_windows > 0, source="the day's 10-second windows")
+    elif today:  # windows too large to store: the UTC day's own summary
+        summary = next(((row.get("gait") or {}) for row in today if isinstance(row.get("gait"), dict)), {})
+        out.update(walking_min=rounded(sum((row.get("n_gait") or 0) * (row.get("hop_s") or 0) for row in today)
+                                       / 60.0, 0),
+                   cadence_spm=rounded(_num(summary.get("cadence_spm")), 0),
+                   typical_speed_mps=rounded(_num(summary.get("speed_mps")), 2), source="the UTC day summary")
+    else:
+        out.update(available=False, reason="no_gait_data_that_day")
+    earlier = [row for row in rows if row["day"] < min(utc_days) and row.get("n_gait") is not None]
+    minutes = [(row.get("n_gait") or 0) * (row.get("hop_s") or 0) / 60.0 for row in earlier]
+    cadences = [v for row in earlier if (v := _num((row.get("gait") or {}).get("cadence_spm"))) is not None]
+    if len(minutes) >= 3:
+        out["previous_days"] = {"days": len(minutes), "walking_min_median": rounded(median(minutes), 0),
+                                "cadence_spm_median": rounded(median(cadences), 0) if cadences else None,
+                                "note": "per UTC day, from the stored day summaries"}
+    return out
 
 
 def recent_events(exposures: list[dict[str, Any]], document: dict[str, Any] | None, zone: ZoneInfo) -> dict[str, Any]:

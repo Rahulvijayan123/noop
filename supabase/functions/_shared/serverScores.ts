@@ -23,8 +23,10 @@ function fail(code: string, status: number): Error {
   return Object.assign(new Error(code), { code, status });
 }
 
-/** The metrics with an AI-written explanation (metric_insight_jobs.metric). */
-export const INSIGHT_METRICS: ReadonlySet<string> = new Set(['resting_hr', 'hrv_rmssd']);
+/** The metrics with an AI-written explanation (metric_insight_jobs.metric; docs/METRIC_INSIGHTS.md). */
+export const INSIGHT_METRICS: ReadonlySet<string> = new Set([
+  'resting_hr', 'hrv_rmssd', 'hrv_sdnn', 'skin_temp', 'resp_rate', 'spo2', 'heart_rate', 'steps', 'calories',
+]);
 
 export async function readOwnerDayScores({ rest, userId, day, deviceId }: {
   rest: Pick<SupabaseRest, 'rpc'>; userId: string; day: string; deviceId: string | null;

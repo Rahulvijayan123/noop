@@ -61,7 +61,12 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "hrv_rmssd": ("heart rate variability", "hrv", "rmssd"),
     "resp_rate": ("respiratory rate", "breathing rate", "breaths per minute", "breaths/min", "breathing"),
     "spo2": ("blood oxygen", "oxygen saturation", "oxygen level", "spo2", "oxygen"),
-    "skin_temp_dev": ("skin temperature", "skin temp", "wrist temperature", "wrist temp"),
+    "skin_temp": ("wrist temperature", "wrist temp", "skin temperature", "skin temp"),
+    "skin_temp_dev": ("temperature deviation",),
+    "hrv_sdnn": ("sdnn",),
+    "heart_rate": ("calm awake heart rate", "calm heart rate", "awake heart rate"),
+    "steps": ("steps", "step count"),
+    "calories": ("calories", "calorie", "kcal", "energy expenditure", "energy burned"),
     # An estimated sleep MEASURE (not "during sleep", which names the state an HRV or heart-rate reading was in).
     "sleep": ("sleep duration", "sleep efficiency", "sleep timing", "sleep length", "sleep was", "sleep is",
               "shorter sleep", "longer sleep", "less sleep", "more sleep", "hours of sleep", "slept", "bedtime",
@@ -70,10 +75,12 @@ ALIASES: dict[str, tuple[str, ...]] = {
                  "steps", "training"),
 }
 SIGNAL_GROUP = {"sleep_total": "sleep", "sleep_efficiency": "sleep"}
-# The signals the app makes a call for (its Baseline night vitals), by their names here.
-SIGNAL_CALLS = frozenset({"resting_hr", "hrv_rmssd", "resp_rate", "spo2", "skin_temp_dev"})
+# The signals an explanation may place inside or outside a usual (the app's call), or, for a metric with no usual in
+# the app, must not (call "no_usual"), by their names here.
+SIGNAL_CALLS = frozenset({"resting_hr", "hrv_rmssd", "hrv_sdnn", "resp_rate", "spo2", "skin_temp", "heart_rate",
+                          "steps", "calories"})
 # The Home ring's night vitals (evidence.NIGHT_VITALS) by the signal whose wording they share.
-VITAL_GROUP = {"sleep_rhr": "resting_hr", "sleep_hrv_ln": "hrv_rmssd", "sleep_temp": "skin_temp_dev",
+VITAL_GROUP = {"sleep_rhr": "resting_hr", "sleep_hrv_ln": "hrv_rmssd", "sleep_temp": "skin_temp",
                "sleep_resp": "resp_rate", "sleep_spo2_mean": "spo2"}
 # Phrases that only state the person's own value after "your" ("your sleep was short"); a number near them is
 # usually some other reading taken during sleep ("the 51 ms during sleep was below ...").
@@ -102,9 +109,13 @@ UNITS: dict[str, str] = {
     "h": "h", "hr": "h", "hrs": "h", "hour": "h", "hours": "h", "min": "min", "mins": "min", "minute": "min",
     "minutes": "min", "%": "%", "percent": "%", "breaths/min": "breaths/min", "breaths per minute": "breaths/min",
     "°c": "°C", "degrees": "°C", "mg": "mg", "ml": "ml", "g": "g", "drink": "drinks", "drinks": "drinks",
+    "steps": "steps", "step": "steps", "kcal": "kcal", "calories": "kcal", "calorie": "kcal",
+    "steps/min": "spm", "steps per minute": "spm", "spm": "spm", "m/s": "m/s", "km/h": "km/h",
+    "meters per second": "m/s", "metres per second": "m/s", "kilometers per hour": "km/h",
+    "kilometres per hour": "km/h",
 }
-MEASURED_UNITS = frozenset({"bpm", "ms", "breaths/min"})  # a value of these is never zero
-CHANGE_UNITS = frozenset({"bpm", "ms", "h", "min", "%", "breaths/min", "°C"})
+MEASURED_UNITS = frozenset({"bpm", "ms", "breaths/min", "kcal"})  # a value of these is never zero (steps can be)
+CHANGE_UNITS = frozenset({"bpm", "ms", "h", "min", "%", "breaths/min", "°C", "steps", "kcal", "spm"})
 NUMBER_WORDS = {w: i for i, w in enumerate(
     "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen "
     "seventeen eighteen nineteen twenty".split())} | {"thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
@@ -125,11 +136,14 @@ _SLASH_DAY = re.compile(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
 _CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})\b(?:\s*([ap])\.?\s*m\b\.?)?", re.I)  # 21:30, or 9:30 p.m.
 _UNIT_RE = "|".join(sorted((re.escape(u) for u in UNITS), key=len, reverse=True))
 _DIRECTIONS = "|".join(UP_WORDS + DOWN_WORDS)
-_NUMBER = re.compile(rf"(?<![\w.])([-+−]?\d+(?:\.\d+)?)(?!\d)(?!st\b|nd\b|rd\b|th\b)\s*(?:({_UNIT_RE})(?![a-z]))?", re.I)
+# A number as people write it: 52, 52.4, 8,123 (thousands separators), 12,345.6.
+_NUM = r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?"
+_NUMBER = re.compile(rf"(?<![\w.,])([-+−]?(?:{_NUM}))(?![\d,]\d)(?!st\b|nd\b|rd\b|th\b)\s*(?:({_UNIT_RE})(?![a-z]))?",
+                     re.I)
 _NUMBER_WORD = re.compile(r"\b(" + "|".join(sorted(NUMBER_WORDS, key=len, reverse=True)) + r")(?:-(one|two|three|"
                           r"four|five|six|seven|eight|nine))?\b", re.I)
-_DIRECTION_AFTER = re.compile(rf"(?<![\w.])(\d+(?:\.\d+)?)\s*({_UNIT_RE})(?![a-z])\s+(?:\w+\s+)?({_DIRECTIONS})\b", re.I)
-_DIRECTION_BEFORE = re.compile(rf"\b({_DIRECTIONS})\s+(?:by\s+)?(\d+(?:\.\d+)?)\s*({_UNIT_RE})?(?![a-z])", re.I)
+_DIRECTION_AFTER = re.compile(rf"(?<![\w.,])({_NUM})\s*({_UNIT_RE})(?![a-z])\s+(?:\w+\s+)?({_DIRECTIONS})\b", re.I)
+_DIRECTION_BEFORE = re.compile(rf"\b({_DIRECTIONS})\s+(?:by\s+)?({_NUM})\s*({_UNIT_RE})?(?![a-z])", re.I)
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
 _NEGATION = re.compile(r"\b(no|not|none|nothing|without|never|neither|nor)\b|n['’]t\b", re.I)
 # "because" explains with the person's own data ("likely because you walked 40 minutes that evening"); it must be
@@ -224,7 +238,7 @@ class Facts:
     days: set[date] = field(default_factory=set)
     clocks: set[str] = field(default_factory=set)
     literature: set[float] = field(default_factory=set)
-    estimated: set[str] = field(default_factory=lambda: {"sleep", "activity"})
+    estimated: set[str] = field(default_factory=lambda: {"sleep", "activity", "calories"})
     # The value of a unit on a night, where the tools state it (the metric's nights, each signal's latest night,
     # the sleep nights): "59 bpm on Oct 6" must be Oct 6's value, not any bpm value.
     on_day: dict[tuple[str, date], set[float]] = field(default_factory=dict)
@@ -233,6 +247,13 @@ class Facts:
     calls: dict[str, str] = field(default_factory=dict)
     sides: dict[str, str] = field(default_factory=dict)
     metric: str | None = None
+    # Each signal's own values (and change sizes) by unit: a number said about one signal must not be another's.
+    by_signal: dict[tuple[str, str], set[float]] = field(default_factory=dict)
+
+    def own(self, signal: Any, unit: str, value: Any) -> None:
+        number = _num(value)
+        if number is not None and signal:
+            self.by_signal.setdefault((str(signal), unit), set()).add(abs(number))
 
     def dated(self, unit: str, day: Any, value: Any) -> None:
         number = _num(value)
@@ -341,19 +362,24 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
                      ("baseline", "week", "low"), ("baseline", "week", "high"),
                      ("baseline", "long", "center"), ("baseline", "long", "low"), ("baseline", "long", "high"),
                      ("last_7_nights", "median"), ("last_7_nights", "low"), ("last_7_nights", "high"),
-                     ("context_layer", "reference", "center")):
+                     ("context_layer", "reference", "center"), ("baseline", "recent", "median"),
+                     ("baseline", "recent", "lowest"), ("baseline", "recent", "highest")):
             f.add(unit, _get(summary, *path))
+            f.own(summary.get("metric"), unit, _get(summary, *path))
         for path in (("previous", "change"), ("baseline", "change_vs_usual"), ("context_layer", "reference", "difference")):
             f.change(unit, _get(summary, *path))
+            f.own(summary.get("metric"), unit, _get(summary, *path))
         for path in (("measured_nights",), ("baseline", "week", "nights"), ("baseline", "long", "nights"),
                      ("last_7_nights", "measured"), ("assessment", "nights_needed"),
-                     ("context_layer", "reference", "support_nights")):
+                     ("context_layer", "reference", "support_nights"), ("baseline", "recent", "periods"),
+                     ("baseline", "recent", "lower_than_latest")):
             f.count(_get(summary, *path))
         if summary.get("estimated"):
             f.estimated.add(str(summary.get("metric")))
     for series in _listed(evidence.get("get_metric_series")):
         for night in series.get("nights") or []:
             f.add(series.get("units") or "", night.get("value"))
+            f.own(series.get("metric"), series.get("units") or "", night.get("value"))
             f.dated(series.get("units") or "", night.get("day"), night.get("value"))
         f.count(series.get("measured_nights"))
         f.count(series.get("missing_nights"))
@@ -364,7 +390,10 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
             f.dated(unit, _get(signal, "latest", "day"), _get(signal, "latest", "value"))
             for key in ("usual", "usual_low", "usual_high"):
                 f.add(unit, signal.get(key))
+                f.own(signal.get("metric"), unit, signal.get(key))
             f.change(unit, signal.get("change_vs_usual"))
+            f.own(signal.get("metric"), unit, _get(signal, "latest", "value"))
+            f.own(signal.get("metric"), unit, signal.get("change_vs_usual"))
             f.count(signal.get("measured_nights"))
             f.count(signal.get("usual_nights"))
             if signal.get("estimated"):
@@ -374,6 +403,7 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
             unit = vital.get("units") or ""
             for key in ("value", "usual_low", "usual_high"):
                 f.add(unit, vital.get(key))
+                f.own(VITAL_GROUP.get(str(vital.get("vital"))), unit, vital.get(key))
             f.dated(unit, night, vital.get("value"))
             if vital.get("estimated"):
                 f.estimated.add(VITAL_GROUP.get(str(vital.get("vital")), str(vital.get("vital"))))
@@ -381,6 +411,11 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
         for state in breakdown.get("states") or []:
             unit = state.get("units") or ""
             f.add(unit, state.get("value"))
+            for value in [state.get("value")] + [(b or {}).get(k) for b in (state.get("usual"), state.get("week"),
+                                                                            state.get("long"))
+                                                 for k in ("center", "low", "high")] + [
+                    slot.get("value") for slot in state.get("time_of_day") or []]:
+                f.own(breakdown.get("metric"), unit, value)
             f.dated(unit, breakdown.get("night"), state.get("value")) if state.get("state") == "sleep" else None
             for band in (state.get("usual") or {}, state.get("week") or {}, state.get("long") or {}):
                 for key in ("center", "low", "high"):
@@ -442,10 +477,49 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
             f.count(bout.get("count"))
             f.add("min", bout.get("minutes"))
     for activity in _listed(evidence.get("get_activity_context")):
-        f.add("h", activity.get("worn_h"))
+        f.add("h", activity.get("motion_observed_h"))
         f.add("min", activity.get("locomotion_min_per_worn_hour"))
         f.add("min", activity.get("median_bout_min"))
         f.count(activity.get("bouts_per_worn_hour"))
+        energy = activity.get("energy") or {}
+        for key in ("total_kcal", "resting_kcal", "active_kcal", "workout_kcal"):
+            f.add("kcal", energy.get(key))
+        f.add("kcal", _get(energy, "usual_total_kcal", "median"))
+        f.own("calories", "kcal", energy.get("total_kcal"))
+        f.own("calories", "kcal", _get(energy, "usual_total_kcal", "median"))
+        if _num(energy.get("total_kcal")) is not None and _num(_get(energy, "usual_total_kcal", "median")) is not None:
+            f.change("kcal", energy["total_kcal"] - energy["usual_total_kcal"]["median"])
+        for minutes in list((energy.get("minutes_by_intensity") or {}).values()) + [energy.get("coverage_min"),
+                                                                                  energy.get("gap_min")]:
+            f.add("min", minutes)
+            f.add("h", round(minutes / 60.0, 1) if _num(minutes) is not None else None)
+        f.count(energy.get("workouts"))
+        f.count(_get(energy, "usual_total_kcal", "days"))
+    for walking in _listed(evidence.get("get_gait_context")):
+        for key in ("walking_min", "brisk_min"):
+            f.add("min", walking.get(key))
+            f.add("h", round(walking[key] / 60.0, 1) if _num(walking.get(key)) is not None else None)
+        for minutes in (walking.get("minutes_by_cadence") or {}).values():
+            f.add("min", minutes)
+        f.count(walking.get("walks"))
+        f.add("steps", walking.get("walk_steps"))
+        f.add("spm", walking.get("cadence_spm"))
+        f.add("m/s", walking.get("typical_speed_mps"))
+        f.add("km/h", walking.get("typical_speed_kmh"))
+        f.add("%", walking.get("regularity_pct"))
+        for walk in walking.get("longest_walks") or []:
+            f.add("min", walk.get("minutes"))
+            f.add("spm", walk.get("cadence_spm"))
+            f.add("m/s", walk.get("speed_mps"))
+            for key in ("start_local", "end_local"):
+                if walk.get(key):
+                    f.clocks.add(_clock_key(walk[key]))
+        previous = walking.get("previous_days") or {}
+        f.count(previous.get("days"))
+        f.add("min", previous.get("walking_min_median"))
+        f.add("spm", previous.get("cadence_spm_median"))
+        if _num(walking.get("walking_min")) is not None and _num(previous.get("walking_min_median")) is not None:
+            f.change("min", walking["walking_min"] - previous["walking_min_median"])
     for events in _listed(evidence.get("get_recent_events")):
         for event in events.get("events") or []:
             unit = str(event.get("dose_unit") or "")
@@ -474,6 +548,7 @@ def _strip_dates(text: str) -> str:
 
 
 def _matches(token: str, values: set[float]) -> bool:
+    token = token.replace(",", "")
     number = float(token.replace("−", "-"))
     decimals = len(token.split(".", 1)[1]) if "." in token else 0
     return any(round(v, decimals) == round(number, decimals) for v in values)
@@ -511,7 +586,7 @@ def _numbers_errors(sentence: str, f: Facts, *, interpretation: bool) -> list[st
     for match in _NUMBER.finditer(stripped):
         token, unit_word = match.group(1).replace("+", ""), match.group(2)
         unit = UNITS.get(unit_word.lower()) if unit_word else None
-        if unit in MEASURED_UNITS and float(token.replace("−", "-")) == 0:
+        if unit in MEASURED_UNITS and float(token.replace(",", "").replace("−", "-")) == 0:
             errors.append(f"grounding:0 {unit} is not a measurement (a missing night is missing, never zero)")
         elif unit and unit != "drinks":
             if not _matches(token, f.unit_values(unit) | literature):
@@ -538,14 +613,14 @@ def _numbers_errors(sentence: str, f: Facts, *, interpretation: bool) -> list[st
     return errors
 
 
-_DATED = re.compile(rf"(?<![\w.])(\d+(?:\.\d+)?)\s*({_UNIT_RE})(?![a-z])", re.I)
+_DATED = re.compile(rf"(?<![\w.,])({_NUM})\s*({_UNIT_RE})(?![a-z])", re.I)
 _CHANGE_AFTER = re.compile(rf"\s+(?:\w+\s+)?(?:{_DIRECTIONS})\b", re.I)
 
 
 def _dated_errors(sentence: str, f: Facts) -> list[str]:
     """In each clause that names one night, a value of a unit the tools state for that night must be that value."""
     errors = []
-    for clause in re.split(r"[;,]|\band\b|\bwhile\b|\bwhereas\b|\bthan\b", sentence):
+    for clause in re.split(r"[;]|,(?=\s)|\band\b|\bwhile\b|\bwhereas\b|\bthan\b", sentence):
         days = _mentioned_days(clause)
         if len(days) != 1:
             continue
@@ -569,7 +644,7 @@ _OUT_OF_USUAL = re.compile(r"\b(?:outside|beyond|out of|above|below|higher than|
                            r"\bunusual(?:ly\s+\w+)?\s+for\s+you\b", re.I)
 _IN_USUAL = re.compile(r"\b(?:within|inside|in)\s+(?:your|the|its|their)\s+(?:[\w-]+\s+)?usual\s+(?:range|band)\b|"
                        r"\b(?:normal|typical)\s+for\s+you\b|\bin\s+line\s+with\s+(?:your|the|its)\s+usual\b", re.I)
-_CLAUSE = re.compile(r"[;,:—–]|\b(?:while|whereas|but|and)\b", re.I)
+_CLAUSE = re.compile(r"[;—–]|[,:](?=\s)|\b(?:while|whereas|but|and)\b", re.I)
 _OPEN_QUESTION = re.compile(r"\b(?:whether|if)\b", re.I)
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")  # not "6.7 h" or "9:30 p.m. on"
 CALL_WORDS = {"in_range": "In range", "off": "Off usual", "learning": "Learning (no usual yet)",
@@ -577,9 +652,16 @@ CALL_WORDS = {"in_range": "In range", "off": "Off usual", "learning": "Learning 
 
 
 def _named(clause: str) -> list[str]:
+    """The signals a clause names, by their longest alias ("resting heart rate" is not also "heart rate"); "HRV
+    (SDNN)" names SDNN, not RMSSD."""
     lowered = clause.lower()
-    return [key for key, words in ALIASES.items() if key in SIGNAL_CALLS
-            and any(re.search(rf"\b{re.escape(w)}\b", lowered) for w in words)]
+    spans = [(m.start(), m.end(), key) for key, words in ALIASES.items() if key in SIGNAL_CALLS for w in words
+             for m in re.finditer(rf"\b{re.escape(w)}\b", lowered)]
+    kept = [a for a in spans if not any(b[0] <= a[0] and a[1] <= b[1] and b[1] - b[0] > a[1] - a[0] for b in spans)]
+    named = list(dict.fromkeys(key for _, _, key in sorted(kept)))
+    if "hrv_sdnn" in named and "hrv_rmssd" in named and not re.search(r"\brmssd\b", lowered):
+        named.remove("hrv_rmssd")
+    return named
 
 
 def _call_errors(sentence: str, f: Facts) -> list[str]:
@@ -594,6 +676,12 @@ def _call_errors(sentence: str, f: Facts) -> list[str]:
         subject = named[0] if named else subject
         call = f.calls.get(subject) if subject else None
         if call is None:
+            continue
+        if call == "no_usual":
+            if any(not _OPEN_QUESTION.search(clause[max(0, m.start() - 40):m.start()])
+                   for pattern in (_OUT_OF_USUAL, _IN_USUAL) for m in pattern.finditer(clause)):
+                errors.append(f"usual:the app shows no usual range for {subject}; compare it with the person's recent "
+                              "nights or days instead (metric_summary.baseline.recent)")
             continue
         for pattern, says in ((_OUT_OF_USUAL, "off"), (_IN_USUAL, "in_range")):
             for match in pattern.finditer(clause):
@@ -613,6 +701,27 @@ def _call_errors(sentence: str, f: Facts) -> list[str]:
                         "below" if re.search(r"below|lower", match.group(0), re.I) else None
                     if side and f.sides.get(subject) and side != f.sides[subject]:
                         errors.append(f"usual:{subject} was {f.sides[subject]} its usual range, not {side} it")
+    return errors
+
+
+def _signal_errors(sentence: str, f: Facts) -> list[str]:
+    """A number said about a named signal is that signal's own: an RMSSD value is not SDNN's, a resting heart rate
+    during sleep is not the calm awake one. Flagged only when the number is another signal's and not this one's."""
+    errors = []
+    for clause in _CLAUSE.split(sentence):
+        named = _named(clause)
+        if len(named) != 1:
+            continue
+        subject = named[0]
+        for match in _NUMBER.finditer(_strip_dates(clause)):
+            unit = UNITS.get(match.group(2).lower()) if match.group(2) else None
+            own = f.by_signal.get((subject, unit)) if unit else None
+            if own is None or _matches(match.group(1), own):
+                continue
+            others = sorted(k for (k, u), values in f.by_signal.items()
+                            if u == unit and k != subject and _matches(match.group(1), values))
+            if others:
+                errors.append(f"grounding:{match.group(1)} {unit} is {others[0]}'s value, not {subject}'s")
     return errors
 
 
@@ -693,6 +802,7 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
                     errors.append(f"dates:{month}/{day} is not a night in the tool results")
             errors += _estimated_errors(sentence, f)
             errors += _call_errors(sentence, f)
+            errors += _signal_errors(sentence, f)
             if _PMID_OR_DOI.search(sentence):
                 errors.append("citations:put literature ids only in the citations list, not in the text")
 

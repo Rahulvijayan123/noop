@@ -14,10 +14,16 @@ from zoneinfo import ZoneInfo
 
 from . import layer1
 from .db import Database
-from .metrics import ALGORITHM_VERSION, BASELINE_NIGHTS, SIGNALS, WINDOW_DAYS
+from .metrics import ALGORITHM_VERSION, BASELINE_NIGHTS, INSIGHT_METRICS, SIGNALS, WINDOW_DAYS
 
-SCORE_COLUMNS = sorted({s.column for s in SIGNALS.values()} | {"sleep_onset_at", "wake_onset_at", "source_device_id"})
-VITAL_COLUMNS = sorted(layer1.COLUMNS.values())  # the app's Baseline night vitals (layer1.COLUMNS)
+SCORE_COLUMNS = sorted({s.column for s in SIGNALS.values() if s.source == "scores"}
+                       | {"sleep_onset_at", "wake_onset_at", "source_device_id"})
+# The app's Baseline night vitals that are server_daily_scores columns (steps come from the day values).
+VITAL_COLUMNS = sorted(c for k, c in layer1.COLUMNS.items() if k != "waking_steps")
+DAY_VALUE_COLUMNS = ("steps", "total_kcal", "energy", "spo2_candidate_pct", "spo2_candidate_samples")
+CALM_HR_SERIES = "heart_rate.stable_awake_5min"
+STEPS_HISTORY_DAYS = 400   # public.metric_insight_day_values_v1's longest range (the steps usual's replay)
+GAIT_HISTORY_DAYS = 30     # activity_gait_windows_days keeps 30 days
 EXPOSURE_DAYS = 14
 MEMORY_ITEMS = 12
 
@@ -42,8 +48,19 @@ class Sources:
 
     # ------------------------------------------------------------------ loaders
 
+    def _needs(self) -> set[str]:
+        """The sources the metric and its related signals read (Signal.source)."""
+        metric = INSIGHT_METRICS[self.metric]
+        return {metric.signal.source} | {SIGNALS[k].source for k in metric.related if k in SIGNALS}
+
+    def _uses_layer1(self, series: str) -> bool:
+        metric = INSIGHT_METRICS[self.metric]
+        return any(SIGNALS[k].layer1 == series for k in (metric.key, *metric.related) if k in SIGNALS)
+
     def scores(self) -> dict[date, dict[str, Any]]:
-        """server_daily_scores for the analysis window plus the baseline lead-in, keyed by day."""
+        """Every day's values for the analysis window plus the baseline lead-in, keyed by day: the server_daily_scores
+        row, and where the metric reads them, the hosted day values (steps, energy, the SpO2 estimate) and the
+        calm awake heart rate of the day's context document. One row per day, so every signal reads the same way."""
         def load() -> dict[date, dict[str, Any]]:
             if self.anchor is None:
                 return {}
@@ -55,12 +72,84 @@ class Sources:
                     "where user_id = %s and algorithm_version = %s and day between %s and %s order by day",
                     (self.user_id, ALGORITHM_VERSION, start, self.anchor))
                 return {row["day"]: row for row in cur.fetchall()}
-            return self.db.as_owner(self.user_id, read)
+            rows = self.db.as_owner(self.user_id, read)
+            needs = self._needs()
+            if "day_values" in needs:
+                _merge(rows, self.day_values(start))
+            if "context" in needs:
+                _merge(rows, self.calm_heart_rate(start))
+            return rows
         return self._get("scores", load)
 
+    def day_values(self, start: date) -> dict[date, dict[str, Any]]:
+        """The hosted day values from `start` to the anchor (public.metric_insight_day_values_v1, as the owner)."""
+        def read(cur, start=start):
+            cur.execute("select * from public.metric_insight_day_values_v1(%s, %s)", (start, self.anchor))
+            return {row["day"]: {k: row[k] for k in DAY_VALUE_COLUMNS} for row in cur.fetchall()}
+        return self.db.as_owner(self.user_id, read) if self.anchor else {}
+
+    def calm_heart_rate(self, start: date) -> dict[date, dict[str, Any]]:
+        """Calm awake heart rate (the context layer's `heart_rate.stable_awake_5min` daily value) of each day from
+        `start` to the anchor, from the scoring device's selected document: retrospective first, else live."""
+        device = self.device()
+        if device is None:
+            return {}
+
+        def read(cur):
+            cur.execute(
+                "select distinct on (d.day) d.day, internal_value.value from public.physiology_context_days d "
+                "cross join lateral (select (x ->> 'value')::double precision as value "
+                "  from jsonb_array_elements(case when jsonb_typeof(d.document -> 'daily_values') = 'array' "
+                "                                 then d.document -> 'daily_values' else '[]'::jsonb end) x "
+                "  where x ->> 'series_key' = %s and jsonb_typeof(x -> 'value') = 'number' limit 1) internal_value "
+                "where d.user_id = %s and d.device_id = %s and d.day between %s and %s and d.superseded_by is null "
+                "order by d.day, (d.mode = 'retrospective') desc",
+                (CALM_HR_SERIES, self.user_id, device, start, self.anchor))
+            return {row["day"]: {"calm_awake_hr_bpm": row["value"]} for row in cur.fetchall()}
+        return self.db.as_owner(self.user_id, read)
+
+    def device(self) -> str | None:
+        """The analysed day's scoring device: its own score row, else the latest one before it (as the inputs
+        fingerprint resolves it)."""
+        def load() -> str | None:
+            if self.anchor is None:
+                return None
+
+            def read(cur):
+                cur.execute(
+                    "select source_device_id from public.server_daily_scores where user_id = %s "
+                    "and algorithm_version = %s and day <= %s and source_device_id is not null "
+                    "order by day desc limit 1", (self.user_id, ALGORITHM_VERSION, self.anchor))
+                row = cur.fetchone()
+                return row["source_device_id"] if row else None
+            return self.db.as_owner(self.user_id, read)
+        return self._get("device", load)
+
+    def gait_days(self) -> list[dict[str, Any]]:
+        """ElderNet gait rows (activity_gait_windows_days, UTC days) of the analysed local day and the month before:
+        per UTC day the newest result across modes and models, as the app's gait route serves it."""
+        def load() -> list[dict[str, Any]]:
+            device = self.device()
+            if self.anchor is None or device is None:
+                return []
+
+            def read(cur):
+                cur.execute(
+                    "select distinct on (g.day) g.day, g.model_version, g.mode, g.n_windows, g.n_gait, g.hop_s, "
+                    "g.window_s, g.summary -> 'gait' as gait, g.summary -> 'mean_gait_prob' as mean_gait_prob, "
+                    "g.windows, g.result_revision from public.activity_gait_windows_days g "
+                    "where g.user_id = %s and g.device_id = %s and g.day between %s and %s "
+                    "order by g.day, g.computed_at desc, g.result_revision desc",
+                    (self.user_id, device, self.anchor - timedelta(days=GAIT_HISTORY_DAYS),
+                     self.anchor + timedelta(days=1)))
+                return [dict(row) for row in cur.fetchall()]
+            return self.db.as_owner(self.user_id, read)
+        return self._get("gait_days", load)
+
     def vital_history(self) -> dict[date, dict[str, Any]]:
-        """The night vitals of every scored night up to the anchor: the app's Baseline replays the whole history (the
-        phone loads all of it), so the usual and its call need it too."""
+        """The night vitals of every scored night up to the anchor, and, when the metric uses the app's steps usual,
+        the steps of the last 400 days: the app's Baseline replays the whole history (the phone loads all of it), so
+        the usual and its call need it too."""
         def load() -> dict[date, dict[str, Any]]:
             if self.anchor is None:
                 return layer1.History()
@@ -70,8 +159,11 @@ class Sources:
                     f"select day, {', '.join(VITAL_COLUMNS)} from public.server_daily_scores "
                     "where user_id = %s and algorithm_version = %s and day <= %s order by day",
                     (self.user_id, ALGORITHM_VERSION, self.anchor))
-                return layer1.History({row["day"]: row for row in cur.fetchall()})
-            return self.db.as_owner(self.user_id, read)
+                return {row["day"]: row for row in cur.fetchall()}
+            rows = self.db.as_owner(self.user_id, read)
+            if self._uses_layer1("waking_steps"):
+                _merge(rows, self.day_values(self.anchor - timedelta(days=STEPS_HISTORY_DAYS)))
+            return layer1.History(rows)
         return self._get("vital_history", load)
 
     def context(self) -> tuple[dict[str, Any] | None, str | None]:
@@ -87,7 +179,7 @@ class Sources:
     def _context_of(self, day: date | None) -> tuple[dict[str, Any] | None, str | None]:
         if day is None or self.anchor is None:
             return None, None
-        device = (self.scores().get(self.anchor) or {}).get("source_device_id")
+        device = self.device()
         if device is None:
             return None, None
 
@@ -194,3 +286,9 @@ class Sources:
                 return cur.fetchone()
             return self.db.as_owner(self.user_id, read)
         return self._get("previous_insight", load)
+
+
+def _merge(rows: dict[date, dict[str, Any]], extra: dict[date, dict[str, Any]]) -> None:
+    """Add another source's values to each day's row (a day with only those values gets a row of its own)."""
+    for day, values in extra.items():
+        rows.setdefault(day, {"day": day}).update(values)

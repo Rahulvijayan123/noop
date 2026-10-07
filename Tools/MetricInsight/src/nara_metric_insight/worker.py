@@ -80,11 +80,12 @@ def related_items(evidence: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def basis(evidence: dict[str, Any], anchor: date) -> dict[str, Any]:
+def basis(evidence: dict[str, Any], anchor: date, period: str = "night") -> dict[str, Any]:
+    """What the explanation rests on. `nights` counts the measured periods (nights, or days for a day metric)."""
     quality = evidence.get("get_data_quality") or {}
     summary = evidence.get("get_metric_summary") or {}
     return {"nights": quality.get("measured_nights", 0), "from": quality.get("first_measured"),
-            "to": anchor.isoformat(), "missing_nights": quality.get("missing_nights", 0),
+            "to": anchor.isoformat(), "missing_nights": quality.get("missing_nights", 0), "period": period,
             "comparison_status": (summary.get("assessment") or {}).get("basis")}
 
 
@@ -95,19 +96,21 @@ def insufficient_payload(job: dict[str, Any], tools: JobTools, started: float) -
     quality = evidence.get("get_data_quality") or {}
     summary = evidence.get("get_metric_summary") or {}
     nights = int(quality.get("measured_nights") or 0)
-    label = metric.signal.label
+    label, period = metric.signal.label, metric.period
     observed = []
     latest = summary.get("latest")
     if nights and latest:
-        observed.append(f"{nights} night{'s' if nights != 1 else ''} of {label[0].lower() + label[1:]} measured so far, "
-                        f"most recently {latest['value']} {metric.signal.units} on {short_day(latest['day'])}.")
+        observed.append(f"{nights} {period}{'s' if nights != 1 else ''} of {label[0].lower() + label[1:]} measured so "
+                        f"far, most recently {_with_units(latest['value'], metric.signal.units)} on "
+                        f"{short_day(latest['day'])}.")
     insight = {
-        "headline": "Not enough measured nights yet",
+        "headline": f"Not enough measured {period}s yet",
         "observed": observed, "interpretation": [],
-        "uncertainty": [f"An explanation needs at least {MIN_MEASURED_NIGHTS} measured nights, and what is usual "
-                        "for you takes more nights to establish."],
+        "uncertainty": [f"An explanation needs at least {MIN_MEASURED_NIGHTS} measured {period}s, and what is usual "
+                        f"for you takes more {period}s to establish."],
         "related": [],
-        "basis": basis(evidence, tools.anchor) if tools.anchor else {"nights": 0},
+        "basis": basis(evidence, tools.anchor, period) if tools.anchor else {"nights": 0, "period": period},
+        "period": period,
     }
     return {"kind": "insufficient_data", "analysis_version": job["analysis_version"], "model": None,
             "duration_ms": int((time.monotonic() - started) * 1000), "insight": insight,
@@ -132,8 +135,7 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
     summary = tools.evidence()["get_metric_summary"]
     attempts, rejected = 0, []
     async with PrimeSession(cfg, tools, mode=mode, readable=readable) as session:
-        text = await session.ask(prompts.task(metric.signal.label, metric.signal.units,
-                                              summary["latest"]["day"], summary["latest"]["value"]))
+        text = await session.ask(prompts.task(metric, summary["latest"]["day"], summary["latest"]["value"]))
         attempts = 1
         result = validate.check(text, tools.validation_evidence(), tools.retrieved, called=set(tools.calls), required=REQUIRED)
         if not result.ok:
@@ -157,7 +159,8 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
         citations.append({k: record.get(k) for k in ("id", "title", "year", "url")})
     insight = {"headline": answer["headline"], "observed": answer["observed"],
                "interpretation": answer["interpretation"], "uncertainty": answer["uncertainty"],
-               "related": related_items(evidence), "basis": basis(evidence, anchor)}
+               "related": related_items(evidence), "basis": basis(evidence, anchor, metric.period),
+               "period": metric.period}
     record = {"summary": evidence.get("get_metric_summary"), "quality": evidence.get("get_data_quality"),
               "tool_calls": tools.calls, "sources_loaded": sources.loaded,
               "validator": {"attempts": attempts, "rejected": rejected}, "run": stats}

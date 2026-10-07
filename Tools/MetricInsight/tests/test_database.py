@@ -64,7 +64,91 @@ def test_owner_reads_see_only_the_owner_and_cannot_write(pg, db):
     assert sorted(sources.scores()) == [ANCHOR - timedelta(days=2), ANCHOR - timedelta(days=1), ANCHOR]
     assert [m["content"] for m in sources.memory()] == ["A note"]
     assert sources.context() == (None, None)
-    assert sources.loaded == ["scores", "memory", "context"]
+    assert sources.loaded == ["scores", "memory", "device", "context"]
+
+
+def _devices(pg) -> None:
+    pg.psql(f"insert into public.devices(id, user_id, source_kind, external_device_id) values"
+            f" ('{DEVICE_A}', '{USER_A}', 'noop_push', 'whoop-A'), ('{DEVICE_B}', '{USER_B}', 'noop_push', 'whoop-B')"
+            " on conflict do nothing")
+
+
+def _snapshot(pg, user: str, device: str, day: date, daily: dict) -> None:
+    """A scored day as production has it: its scoring job (selected_scoring_device_v2 picks among them) and the
+    snapshot it published."""
+    pg.psql("insert into public.scoring_jobs_v2(user_id, device_id, day, algorithm_version, input_revision,"
+            f" completed_revision) values ('{user}', '{device}', '{day}', 'frwhoop-server-1', 1, 1)"
+            " on conflict do nothing")
+    pg.psql("insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,"
+            f" computed_at, payload) values ('{user}', '{device}', '{day}', 'frwhoop-server-1', 1, now(),"
+            f" $j${json.dumps({'daily': daily})}$j$::jsonb)")
+
+
+def test_day_values_calm_heart_rate_and_gait_are_the_owners_own(pg, db):
+    pg.psql("truncate public.scoring_jobs_v2, public.scoring_snapshots_v2, public.physiology_context_days,"
+            " public.activity_gait_windows_days cascade")
+    _devices(pg)
+    seed(pg, USER_A, DEVICE_A, [50, 51, 49])
+    seed(pg, USER_B, DEVICE_B, [60, 61])
+    for user, device, steps in ((USER_A, DEVICE_A, 8123), (USER_B, DEVICE_B, 999)):
+        for offset in (2, 1, 0):
+            energy = {"total_kcal": 2300 + offset, "resting_kcal": 1600, "active_kcal": 700 + offset,
+                      "workout_kcal": 0, "light_min": 200, "workouts": [], "model_version": "fusion-1"}
+            _snapshot(pg, user, device, ANCHOR - timedelta(days=offset),
+                      {"steps": steps + offset, "activeKcalEst": 2300 + offset, "energy": energy,
+                       **({"spo2_candidate_pct": 96, "spo2_candidate_samples": 40} if offset == 0 else {})})
+    _snapshot(pg, USER_A, DEVICE_A, ANCHOR - timedelta(days=3), {"steps": "lots", "activeKcalEst": True})
+
+    def day_values(start, end):
+        def read(cur):
+            cur.execute("select * from public.metric_insight_day_values_v1(%s, %s)", (start, end))
+            return cur.fetchall()
+        return read
+    mine = db.as_owner(USER_A, day_values(ANCHOR - timedelta(days=5), ANCHOR))
+    # A value that is not a JSON number (a string, a boolean) is no value, never zero; only the owner's rows.
+    assert [(r["day"], r["steps"], r["total_kcal"]) for r in mine] == [
+        (ANCHOR - timedelta(days=3), None, None), (ANCHOR - timedelta(days=2), 8125, 2302),
+        (ANCHOR - timedelta(days=1), 8124, 2301), (ANCHOR, 8123, 2300)]
+    assert mine[-1]["spo2_candidate_pct"] == 96 and mine[-1]["energy"]["active_kcal"] == 700
+    assert "model_version" not in mine[-1]["energy"]  # only the parts an explanation reads
+    assert [r["steps"] for r in db.as_owner(USER_B, day_values(ANCHOR - timedelta(days=5), ANCHOR))] == [1001, 1000, 999]
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        db.as_owner(USER_A, day_values(ANCHOR - timedelta(days=401), ANCHOR))
+
+    # Calm awake heart rate: the retrospective document first, else the live one; another owner's never.
+    def context(user, device, day, mode, value):
+        document = {"daily_values": [{"series_key": "heart_rate.stable_awake_5min", "value": value, "units": "bpm"},
+                                     {"series_key": "hrv_rmssd.sleep_night", "value": 70}], "status": "available"}
+        pg.psql("insert into public.physiology_context_days(user_id, device_id, day, mode, job_revision, finality,"
+                " status, availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint,"
+                f" input_fingerprint, document, document_bytes) values ('{user}', '{device}', '{day}', '{mode}', 1,"
+                " 'provisional', 'available', 1791400000, 1791400000, 'physiology-context-1', 1, 'fixture-policy',"
+                f" 'fixture-input', $j${json.dumps(document)}$j$::jsonb, 100)")
+    context(USER_A, DEVICE_A, ANCHOR - timedelta(days=1), "causal_live", 66.0)
+    context(USER_A, DEVICE_A, ANCHOR - timedelta(days=1), "retrospective", 64.0)
+    context(USER_A, DEVICE_A, ANCHOR, "causal_live", 63.0)
+    context(USER_B, DEVICE_B, ANCHOR, "retrospective", 90.0)
+    rows = Sources(db, USER_A, "heart_rate", ANCHOR, ZoneInfo("UTC")).scores()
+    assert {d: r.get("calm_awake_hr_bpm") for d, r in rows.items() if r.get("calm_awake_hr_bpm")} == {
+        ANCHOR - timedelta(days=1): 64.0, ANCHOR: 63.0}
+    assert rows[ANCHOR]["steps"] == 8123 and rows[ANCHOR]["resting_hr_bpm"] == 49  # steps are related, merged per day
+
+    # ElderNet gait rows: the owner's own, per UTC day the newest result.
+    def gait_row(user, device, day, n_gait):
+        windows = {"format": "gait-windows-1", "n": 1, "w": 10, "h": 5, "s0": 1791200000, "ds": [0], "gp": [950],
+                   "g": [1], "pf": [0], "sp": [130], "cad": [108], "st": [140], "rg": [80], "stp": [180]}
+        pg.psql("insert into public.activity_gait_windows_days(user_id, device_id, day, model_version, mode,"
+                " algorithm_version, model_id, weights, weights_digest, upstream_commit, preprocessing_version,"
+                " gait_schema, job_fingerprint, input_revision, window_s, hop_s, gait_threshold, n_windows, n_gait,"
+                " n_prefiltered, n_dropped, summary, windows, result_revision, computed_at) values"
+                f" ('{user}', '{device}', '{day}', 'eldernet-437a38b', 'shadow', 'gait-1', 'eldernet', '{{}}',"
+                f" '{'a' * 64}', '437a38bc', 'pre-1', 'gait-quality-1', '{'b' * 64}', 1, 10, 5, 0.5, 100, {n_gait},"
+                " 10, 0, '{\"gait\": {\"cadence_spm\": 104}}', $j$" + json.dumps(windows) + "$j$::jsonb, 1, now())")
+    gait_row(USER_A, DEVICE_A, ANCHOR, 40)
+    gait_row(USER_B, DEVICE_B, ANCHOR, 70)
+    days = Sources(db, USER_A, "steps", ANCHOR, ZoneInfo("UTC")).gait_days()
+    assert [(d["day"], d["n_gait"]) for d in days] == [(ANCHOR, 40)]
+    assert days[0]["windows"]["format"] == "gait-windows-1" and days[0]["gait"] == {"cadence_spm": 104}
 
 
 def config(pg, secret_file, tmp_path) -> Config:

@@ -304,3 +304,31 @@ def test_checks_read_each_sentence_and_each_clause():
     assert result.ok, result.errors
     absent = answer(interpretation=["No exercise was recorded that evening."], citations=["lit:x"])
     assert "citations" in validate.check(absent, EVIDENCE, retrieved).codes
+
+
+def test_new_metrics_wording_and_numbers():
+    evidence = json.loads(json.dumps(EVIDENCE))
+    evidence["get_metric_summary"] = {
+        "metric": "hrv_sdnn", "units": "ms", "estimated": False, "latest": {"day": "2026-10-06", "value": 48},
+        "baseline": {"usual": "recent", "usual_value": 63, "change_vs_usual": -15,
+                     "call": {"state": "no_usual", "side": None},
+                     "recent": {"periods": 30, "median": 63, "lowest": 60, "highest": 66, "position": "lowest"}}}
+    evidence["get_related_metrics"]["signals"][0].update(latest={"day": "2026-10-06", "value": 52})
+    ok = answer(headline="HRV (SDNN) 48 ms on Oct 6", observed=["Your HRV (SDNN) was 48 ms on Oct 6, lower than all of your last 30 nights (60 to 66 ms)."])
+    result = validate.check(ok, evidence, RETRIEVED)
+    assert result.ok, result.errors
+    usual = answer(headline="HRV (SDNN) 48 ms on Oct 6", observed=["Your HRV (SDNN) was 48 ms on Oct 6, below your usual range."])
+    assert any("no usual range for hrv_sdnn" in e for e in validate.check(usual, evidence, RETRIEVED).errors)
+    # RMSSD's 52 ms is not SDNN's value.
+    mixed = answer(headline="HRV (SDNN) on Oct 6", observed=["Your HRV (SDNN) was 52 ms on Oct 6."])
+    assert any("hrv_rmssd's value, not hrv_sdnn's" in e for e in validate.check(mixed, evidence, RETRIEVED).errors)
+    # Steps: thousands separators, and "estimated" when stated.
+    evidence["get_metric_summary"] = {"metric": "steps", "units": "steps", "estimated": True,
+                                      "latest": {"day": "2026-10-06", "value": 8123},
+                                      "baseline": {"call": {"state": "in_range"}}}
+    steps = answer(headline="Estimated steps on Oct 6", observed=["Your estimated steps were 8,123 steps on Oct 6, within your usual range."])
+    assert validate.check(steps, evidence, RETRIEVED).ok, validate.check(steps, evidence, RETRIEVED).errors
+    unlabelled = answer(headline="Steps on Oct 6", observed=["You took 8,123 steps on Oct 6."])
+    assert "estimated" in validate.check(unlabelled, evidence, RETRIEVED).codes
+    wrong = answer(headline="Estimated steps on Oct 6", observed=["Your estimated steps were 8,124 steps on Oct 6."])
+    assert "grounding" in validate.check(wrong, evidence, RETRIEVED).codes

@@ -115,7 +115,13 @@ class JobTools:
         return ev.workout_context(self._context())
 
     def activity_context(self, args: dict[str, Any]) -> dict[str, Any]:
-        return ev.activity_context(self._context())
+        return ev.activity_context(self._context(), self.sources.scores(), self.anchor)
+
+    def gait_context(self, args: dict[str, Any]) -> dict[str, Any]:
+        if self.metric.key != "steps":
+            return {"available": False, "reason": "steps_only",
+                    "note": "ElderNet gait is loaded for step explanations only"}
+        return ev.gait_context(self.sources.gait_days(), self.anchor, self.zone)
 
     def recent_events(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.recent_events(self.sources.exposures(), self._context(), self.zone)
@@ -151,15 +157,22 @@ class JobTools:
         e = self.evidence()
         summary, states = e.get("get_metric_summary") or {}, e.get("get_state_breakdown") or {}
         movement, quality = e.get("get_movement_patterns") or {}, e.get("get_data_quality") or {}
+        walking, activity = e.get("get_gait_context") or {}, e.get("get_activity_context") or {}
         base = summary.get("baseline") or {}
         related = e.get("get_related_metrics") or {}
         vitals = related.get("night_vitals") or {}
         return {
-            "metric": summary.get("label"), "units": summary.get("units"), "latest": summary.get("latest"),
+            "metric": summary.get("label"), "units": summary.get("units"), "period": summary.get("period"),
+            "latest": summary.get("latest"),
             "previous": summary.get("previous"),
             "usual": {k: base.get(k) for k in ("usual", "usual_value", "usual_low", "usual_high", "change_vs_usual",
                                                "direction") if base.get(k) is not None},
             "app_call": base.get("call"),
+            **({"recent_periods": base["recent"]} if base.get("recent") else {}),
+            **({"energy": activity["energy"]} if activity.get("energy") else {}),
+            **({"walking": {k: walking.get(k) for k in ("walking_min", "brisk_min", "walks", "cadence_spm",
+                                                        "typical_speed_mps", "previous_days") if k in walking}}
+               if walking.get("available") else {}),
             "assessment": summary.get("assessment"),
             "states": [{k: s.get(k) for k in ("state", "label", "value", "units", "position", "available")}
                        | ({"usual": {k: (s.get("usual") or {}).get(k) for k in ("center", "low", "high")}}
@@ -201,7 +214,8 @@ class JobTools:
 
 
 TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
-    Tool("get_metric_series", "This metric's nightly values (oldest first), null where a night was not measured.",
+    Tool("get_metric_series", "This metric's values per night (or per day for calm awake heart rate, steps and "
+         "calories), oldest first, null where it was not measured.",
          _object({"days": {"type": "integer", "minimum": 7, "maximum": WINDOW_DAYS}}), JobTools.metric_series),
     Tool("get_metric_summary", "Latest value, previous night, the person's usual and the app's call for the night "
          "(in range or off usual, exactly as the Home ring and the Monitor show it), last 7 nights, and the context "
@@ -222,8 +236,12 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
          _object({"nights": {"type": "integer", "minimum": 1, "maximum": 14}}), JobTools.sleep_context),
     Tool("get_workout_context", "Exertion over the 24/48/72 h before the analysis day and that day's movement bouts.",
          _object(), JobTools.workout_context),
-    Tool("get_activity_context", "The analysis day's wear time and general activity level from wrist motion.",
+    Tool("get_activity_context", "The analysis day's general activity level from wrist motion and the energy "
+         "model's split of the day's calories (resting, active, workouts; minutes by intensity).",
          _object(), JobTools.activity_context),
+    Tool("get_gait_context", "How the person walked on the analysed day (ElderNet, estimated): walking and brisk "
+         "minutes, walks, cadence, walking speed, stride and regularity, against the days before. Steps only.",
+         _object(), JobTools.gait_context),
     Tool("get_recent_events", "Exposures the person recorded in the 14 days up to the analysis day (caffeine, "
          "alcohol, ...) and the categories they did not record.", _object(), JobTools.recent_events),
     Tool("get_data_quality", "Measured and missing nights, gaps, and the context layer's status for this metric.",
@@ -268,6 +286,7 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("sleep_context", "get_sleep_context", "physiological"),
     Variable("workout_context", "get_workout_context", "movement"),
     Variable("activity_context", "get_activity_context", "movement"),
+    Variable("gait_context", "get_gait_context", "movement"),
     Variable("recent_events", "get_recent_events", "events"),
     Variable("data_quality", "get_data_quality", "quality"),
     Variable("user_context", "get_user_context", "personal"),

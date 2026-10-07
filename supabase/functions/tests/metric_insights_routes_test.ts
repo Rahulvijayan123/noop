@@ -63,7 +63,8 @@ Deno.test('POST /insights: owner from the credential, no device, the RPC outcome
   const other = await handleScoresRequest(request({ bearer: 'noop_auth_b', body: { metric: 'hrv_rmssd' } }), { rest, cfg });
   assertEquals(other.status, 200);
   assertEquals(calls[1], { name: 'metric_insight_request_v1', args: { p_user: OTHER, p_metric: 'hrv_rmssd' } });
-  assertEquals([...INSIGHT_METRICS].sort(), ['hrv_rmssd', 'resting_hr']);
+  assertEquals([...INSIGHT_METRICS].sort(), ['calories', 'heart_rate', 'hrv_rmssd', 'hrv_sdnn', 'resp_rate',
+    'resting_hr', 'skin_temp', 'spo2', 'steps']);
 });
 
 Deno.test('POST /insights: only the allow-listed metrics, a bounded JSON body, and POST only', async () => {

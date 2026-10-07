@@ -33,8 +33,13 @@ const PUBLIC_FUNCTIONS: Record<string, string> = {
   metric_insight_fail_v1: 'uuid,bigint,text',
   metric_insight_publish_v1: 'uuid,bigint,jsonb',
 };
+// The owner's own hosted day values: callable by an authenticated owner, never by anon (asserted on its own).
+const OWNER_FUNCTIONS: Record<string, string> = { metric_insight_day_values_v1: 'date,date' };
 const INTERNAL_FUNCTIONS: Record<string, string> = {
   metric_insight_version: '',
+  metric_insight_number: 'jsonb',
+  metric_insight_daily_value: 'jsonb,text',
+  metric_insight_day_values: 'uuid,date,date',
   metric_insight_context_document: 'uuid,uuid,date',
   metric_insight_inputs: 'uuid,text',
   metric_insight_json: 'public.metric_insights,boolean',
@@ -42,7 +47,7 @@ const INTERNAL_FUNCTIONS: Record<string, string> = {
 };
 // The migration header's rollback, verbatim in intent: the functions, then the two tables.
 const ROLLBACK = `
-  ${Object.entries(PUBLIC_FUNCTIONS).map(([name, args]) => `drop function public.${name}(${args});`).join('\n')}
+  ${Object.entries({ ...PUBLIC_FUNCTIONS, ...OWNER_FUNCTIONS }).map(([name, args]) => `drop function public.${name}(${args});`).join('\n')}
   ${Object.entries(INTERNAL_FUNCTIONS).map(([name, args]) => `drop function internal.${name}(${args});`).join('\n')}
   drop table public.metric_insights;
   drop table public.metric_insight_jobs;`;
@@ -183,6 +188,19 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
           }
         }
       }
+      for (const [name, args] of Object.entries(OWNER_FUNCTIONS)) {
+        const row = await json(`select json_build_object('definer', p.prosecdef, 'config', p.proconfig,
+            'public', exists (select 1 from aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+                               where a.grantee = 0 and a.privilege_type = 'EXECUTE'),
+            'anon', has_function_privilege('anon', p.oid, 'execute'),
+            'authenticated', has_function_privilege('authenticated', p.oid, 'execute'))
+          from pg_proc p where p.oid = 'public.${name}(${args})'::regprocedure`);
+        assert.deepEqual([row.definer, row.config, row.public, row.anon, row.authenticated],
+          [true, ['search_path=""'], false, false, true], `${name}: an owner's own read only`);
+      }
+      // Without an owner (no auth.uid()) it refuses rather than reading anyone's day values.
+      await assert.rejects(() => db.sql(`select * from public.metric_insight_day_values_v1('2026-10-01', '2026-10-06')`),
+        /authentication_required/);
       // Both tables go with the account.
       assert.deepEqual(await json(`select json_agg(confdeltype::text order by conrelid::regclass::text) from pg_constraint
         where contype = 'f' and confrelid = 'auth.users'::regclass
@@ -542,6 +560,81 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
       await publish(lease.lease_token, lease.input_revision);
       const ready = await request(USER_A, 'hrv_rmssd');
       assert.deepEqual([ready.status, ready.insight.metric], ['ready', 'hrv_rmssd']);
+    });
+
+    await t.step('each metric has its own anchor and inputs: nights, complete days, context and gait', async () => {
+      // Days relative to the real local today: a day metric is explained for the latest COMPLETE local day.
+      const USER_E = '77777777-7777-4777-8777-777777777777';
+      const DEVICE_E = '88888888-8888-4888-8888-888888888888';
+      const zone = 'America/Los_Angeles';
+      const today = new Intl.DateTimeFormat('en-CA', { timeZone: zone }).format(new Date());
+      const day = (offset: number) => {
+        const d = new Date(`${today}T12:00:00Z`);
+        d.setUTCDate(d.getUTCDate() - offset);
+        return d.toISOString().slice(0, 10);
+      };
+      await db.sql(`insert into auth.users(id) values ('${USER_E}');
+        insert into public.profiles(id, timezone) values ('${USER_E}', '${zone}')
+          on conflict (id) do update set timezone = excluded.timezone;
+        insert into public.devices(id, user_id, source_kind, external_device_id)
+          values ('${DEVICE_E}', '${USER_E}', 'noop_push', 'whoop-MIE00001')`);
+      for (const offset of [3, 2, 1, 0]) {
+        await db.sql(`insert into public.server_daily_scores(user_id, day, algorithm_version, source_device_id,
+            resting_hr_bpm, hrv_sdnn_ms) values ('${USER_E}', '${day(offset)}', 'frwhoop-server-1', '${DEVICE_E}', 52,
+            ${offset === 1 ? 61 : 'null'})`);
+        await db.sql(`insert into public.scoring_jobs_v2(user_id, device_id, day, algorithm_version, input_revision,
+            completed_revision) values ('${USER_E}', '${DEVICE_E}', '${day(offset)}', 'frwhoop-server-1', 1, 1);
+          insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,
+            computed_at, payload) values ('${USER_E}', '${DEVICE_E}', '${day(offset)}', 'frwhoop-server-1', 1, now(),
+            '${JSON.stringify({ daily: { steps: 8000 + offset, activeKcalEst: 2300 + offset,
+              ...(offset === 0 ? { spo2_candidate_pct: 96 } : {}) } })}'::jsonb)`);
+      }
+      const anchor = async (metric: string) => (await db.sql(
+        `select anchor_day from internal.metric_insight_inputs('${USER_E}', '${metric}')`)) || null;
+      // Nights: the latest measured one (today's night counts); SDNN on its own column.
+      assert.equal(await anchor('resting_hr'), today);
+      assert.equal(await anchor('hrv_sdnn'), day(1));
+      assert.equal(await anchor('spo2'), today, 'the strap SpO2 estimate of last night');
+      // Days: never today, which is still running.
+      assert.equal(await anchor('steps'), day(1));
+      assert.equal(await anchor('calories'), day(1));
+      // Calm awake heart rate: no context document yet, then the latest complete day that has the value.
+      assert.equal(await anchor('heart_rate'), null);
+      assert.equal((await request(USER_E, 'heart_rate')).status, 'unavailable');
+      const contextDoc = (offset: number, value: number | null) => db.sql(`insert into public.physiology_context_days(
+          user_id, device_id, day, mode, job_revision, finality, status, availability_cutoff, generated_at,
+          contract_version, schema_version, policy_fingerprint, input_fingerprint, document, document_bytes)
+        values ('${USER_E}', '${DEVICE_E}', '${day(offset)}', 'retrospective', 1, 'final', 'available', 1791400000,
+          1791400000, 'physiology-context-1', 1, 'fixture-policy', 'fixture-input',
+          '${JSON.stringify({ daily_values: value === null ? [] : [
+            { series_key: 'heart_rate.stable_awake_5min', value, units: 'bpm' }] })}'::jsonb, 100)`);
+      await contextDoc(2, 63);
+      await contextDoc(0, 64); // today: not complete
+      assert.equal(await anchor('heart_rate'), day(2));
+      const steps = await fingerprint(USER_E, 'steps');
+      const rhr = await fingerprint(USER_E);
+      // A new context document moves calm awake heart rate's inputs (and the day metrics that read it).
+      const heart = await fingerprint(USER_E, 'heart_rate');
+      await contextDoc(3, 62);
+      assert.notEqual(await fingerprint(USER_E, 'heart_rate'), heart);
+      // ElderNet gait is the steps explanation's input only.
+      const stepsBefore = await fingerprint(USER_E, 'steps');
+      await db.sql(`insert into public.activity_gait_windows_days(user_id, device_id, day, model_version, mode,
+          algorithm_version, model_id, weights, weights_digest, upstream_commit, preprocessing_version, gait_schema,
+          job_fingerprint, input_revision, window_s, hop_s, gait_threshold, n_windows, n_gait, n_prefiltered, n_dropped,
+          summary, result_revision, computed_at)
+        values ('${USER_E}', '${DEVICE_E}', '${day(1)}', 'eldernet-437a38b', 'shadow', 'gait-1', 'eldernet', '{}',
+          '${'a'.repeat(64)}', '437a38bc', 'pre-1', 'gait-quality-1', '${'b'.repeat(64)}', 1, 10, 5, 0.5, 100, 40, 10,
+          0, '{}', 1, now())`);
+      assert.notEqual(await fingerprint(USER_E, 'steps'), stepsBefore, 'a gait row did not move the steps inputs');
+      assert.equal(await fingerprint(USER_E), rhr, 'a gait row moved the resting heart rate inputs');
+      // A rescored day (a new snapshot revision) is new input for the day metrics.
+      const calories = await fingerprint(USER_E, 'calories');
+      await db.sql(`insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,
+          computed_at, payload) values ('${USER_E}', '${DEVICE_E}', '${day(2)}', 'frwhoop-server-1', 2, now(),
+          '${JSON.stringify({ daily: { steps: 9000, activeKcalEst: 2500 } })}'::jsonb)`);
+      assert.notEqual(await fingerprint(USER_E, 'calories'), calories);
+      assert.ok(steps && rhr);
     });
 
     await t.step('the real scores handler on this database: POST /insights for an installation', async () => {

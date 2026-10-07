@@ -269,3 +269,86 @@ def test_logged_medications_are_never_named():
                                 "dose_amount": 20, "dose_unit": "mg"}], None, zone)
     assert events["events"][0]["label"] is None and "dose" not in events["events"][0]
     assert "never name it" in events["events"][0]["note"]
+
+
+def _days(n: int, make) -> dict[date, dict]:
+    return {ANCHOR - timedelta(days=n - 1 - i): {"day": ANCHOR - timedelta(days=n - 1 - i), **make(i)} for i in range(n)}
+
+
+def test_sdnn_spo2_and_calories_compare_with_recent_periods_only():
+    rows = _days(31, lambda i: {"hrv_sdnn_ms": 60.0 + (i % 7), "hrv_rmssd_ms": 50.0 + (i % 5),
+                                "spo2_candidate_pct": 95.0 + (i % 3), "total_kcal": 2200.0 + 10 * (i % 9)})
+    rows[ANCHOR].update(hrv_sdnn_ms=48.0, spo2_candidate_pct=94.0, total_kcal=2600.0)
+    for key, value, position in (("hrv_sdnn", 48, "lowest"), ("spo2", 94, "lowest"), ("calories", 2600, "highest")):
+        summary = ev.metric_summary(rows, INSIGHT_METRICS[key], ANCHOR, 90, None)
+        base = summary["baseline"]
+        assert summary["latest"]["value"] == value and summary["assessment"]["basis"] == "recent_periods"
+        assert base["call"]["state"] == "no_usual" and base["recent"]["position"] == position, key
+        assert base["recent"]["periods"] == 30 and "usual_low" not in base
+    assert ev.metric_summary(rows, INSIGHT_METRICS["calories"], ANCHOR, 90, None)["period"] == "day"
+    # A 0 kcal day is no value (missing, never zero); a worn day's 0 steps is a real 0.
+    rows[ANCHOR].update(total_kcal=0, steps=0)
+    assert ev.metric_summary(rows, INSIGHT_METRICS["calories"], ANCHOR, 90, None)["latest"]["day"] != ANCHOR.isoformat()
+    assert ev.nights(rows, SIGNALS["steps"], ANCHOR, ANCHOR) == [(ANCHOR, 0.0)]
+
+
+def test_steps_use_the_apps_steps_usual_and_the_days_gait():
+    rows = _days(60, lambda i: {"steps": 8000 + 300 * (i % 7)})
+    rows[ANCHOR]["steps"] = 2100
+    summary = ev.metric_summary(rows, INSIGHT_METRICS["steps"], ANCHOR, 90, None, rows)
+    assert summary["assessment"]["basis"] == "app_baseline" and summary["assessment"]["state"] == "off"
+    assert summary["assessment"]["side"] == "below" and summary["baseline"]["usual_low"] > 2100
+    zone = ZoneInfo("America/Los_Angeles")
+    start = int(datetime(2026, 10, 6, 8, 0, tzinfo=zone).timestamp())
+    n = 180  # 15 minutes of 5-second hops
+    windows = {"format": "gait-windows-1", "n": n, "w": 10, "h": 5, "s0": start - 5, "ds": [5] * n,
+               "gp": [950] * n, "g": [1] * n, "pf": [0] * n, "sp": [140] * n, "cad": [112] * n, "st": [150] * n,
+               "rg": [85] * n, "stp": [187] * n}
+    utc_day = datetime.fromtimestamp(start, timezone.utc).date()
+    days = [{"day": utc_day, "model_version": "eldernet-437a38b", "windows": windows, "n_gait": n, "hop_s": 5,
+             "gait": {"cadence_spm": 112}},
+            *({"day": ANCHOR - timedelta(days=k), "n_gait": 240, "hop_s": 5, "gait": {"cadence_spm": 100},
+               "windows": None} for k in range(2, 6))]
+    walking = ev.gait_context(days, ANCHOR, zone)
+    assert walking["available"] and walking["walking_min"] == 15 and walking["brisk_min"] == 15
+    assert walking["walks"] == 1 and walking["cadence_spm"] == 112 and walking["typical_speed_mps"] == 1.4
+    assert walking["longest_walks"][0]["start_local"] == "08:00" and walking["estimated"] is True
+    assert walking["previous_days"] == {"days": 4, "walking_min_median": 20, "cadence_spm_median": 100,
+                                        "note": walking["previous_days"]["note"]}
+    assert ev.gait_context([], ANCHOR, zone)["available"] is False
+
+
+def test_calorie_split_and_calm_awake_heart_rate_against_the_context_layer():
+    rows = _days(20, lambda i: {"total_kcal": 2300.0})
+    rows[ANCHOR]["energy"] = {"total_kcal": 2650.4, "resting_kcal": 1610, "active_kcal": 1040.4, "workout_kcal": 380,
+                              "light_min": 180, "moderate_min": 55, "high_min": 12, "workouts": 1, "gap_min": 30,
+                              "confidence": 0.71}
+    activity = ev.activity_context(None, rows, ANCHOR)
+    energy = activity["energy"]
+    assert (energy["total_kcal"], energy["active_kcal"], energy["workouts"]) == (2650, 1040, 1)
+    assert energy["minutes_by_intensity"] == {"light": 180, "moderate": 55, "high": 12}
+    assert energy["usual_total_kcal"] == {"median": 2300, "days": 19}
+    hr = INSIGHT_METRICS["heart_rate"]
+    rows = _days(20, lambda i: {"calm_awake_hr_bpm": 64.0 + (i % 3)})
+    rows[ANCHOR]["calm_awake_hr_bpm"] = 71.0
+    reference = {"series_key": "heart_rate.stable_awake_5min", "view": "rolling", "status": "ready",
+                 "center": 65.0, "signed_difference": 6.0, "robust_z": 2.9, "support_days": 19}
+    calm = {"comparisons": [reference], "episodes": []}
+    summary = ev.metric_summary(rows, hr, ANCHOR, 90, calm)
+    assert summary["assessment"]["basis"] == "context_layer" and summary["assessment"]["state"] == "in_range"
+    assert summary["baseline"]["usual_value"] == 65 and summary["baseline"]["change_vs_usual"] == 6
+    shifted = dict(calm, episodes=[{"series_key": "heart_rate.stable_awake_5min", "state": "transient_deviation",
+                                    "direction": 1, "last_day": ANCHOR.isoformat(), "ongoing": True}])
+    call = ev.metric_summary(rows, hr, ANCHOR, 90, shifted)["baseline"]["call"]
+    assert (call["state"], call["side"], call["app_label"]) == ("off", "above", "Transient deviation from reference")
+    learning = ev.metric_summary(rows, hr, ANCHOR, 90, None)["assessment"]
+    assert learning["state"] == "learning" and learning["basis"] == "context_layer"
+
+
+def test_wrist_temperature_is_the_apps_absolute_usual():
+    rows = _days(70, lambda i: {"skin_temp_c": 33.8 + 0.1 * (i % 3), "skin_temp_dev_c": 0.0})
+    rows[ANCHOR]["skin_temp_c"] = 35.4
+    summary = ev.metric_summary(rows, INSIGHT_METRICS["skin_temp"], ANCHOR, 90, None, rows)
+    assert summary["units"] == "°C" and summary["latest"]["value"] == 35.4
+    assert summary["assessment"]["basis"] == "app_baseline" and summary["assessment"]["state"] == "off"
+    assert summary["assessment"]["side"] == "above"

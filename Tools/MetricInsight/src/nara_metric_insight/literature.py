@@ -13,16 +13,23 @@ from pathlib import Path
 from typing import Any
 
 from . import litsearch
+from .metrics import INSIGHT_METRICS
 from .validate import FORBIDDEN_TERMS, TOPIC_WORDS, forbidden_term
 
 CORPUS = Path(__file__).resolve().parent / "data" / "literature_seed.json"
 REMOTE = {"pubmed": litsearch.search_pubmed, "europepmc": litsearch.search_europepmc}
 EXCLUDED_TOPICS = frozenset({"acute_illness", "vaccination", "psychological_stress", "medication", "long_term_risk"})
-CORPUS_METRIC = {"resting_hr": "rhr", "hrv_rmssd": "hrv"}
+# The curated corpus' metric tag of each explained metric (metrics.InsightMetric.literature).
+CORPUS_METRIC = {k: m.literature for k, m in INSIGHT_METRICS.items() if m.literature}
 # Words every query shares ("resting heart rate"): they rank nothing, so a hit must match the query's topic words.
 GENERIC = frozenset(litsearch.tokenize("resting rest heart rate hrv rmssd person people wearable value values "
                                        "level levels"))
 MIN_TOPIC_COVERAGE = 0.5   # share of the topic words' idf the entry matches
+# The explained metrics' own names, which a query names but which rank nothing.
+METRIC_NAMES = (r"\b((calm\s+)?(resting|awake)\s+)?heart\s+rate(\s+variability)?\b|\b(sdnn|rmssd|hrv)\b|"
+                r"\b(wrist|skin)\s+temperature\b|\b(respiratory|breathing)\s+rate\b|\bblood\s+oxygen\b|"
+                r"\boxygen\s+saturation\b|\bspo2\b|\b(daily\s+)?steps?(\s+count)?\b|\bcalories\b|"
+                r"\benergy\s+expenditure\b")
 MIN_RELATIVE_SCORE = 0.5   # and at least half the best hit's BM25 score
 
 
@@ -62,7 +69,7 @@ class Literature:
         entries, index = litsearch._seed_index(CORPUS)
         vocabulary = {t for e in entries for t in litsearch._entry_tokens(e)}
         # The metric's own name is not a topic ("heart rate variability" is in every HRV query).
-        named = re.sub(r"\b(resting\s+)?heart\s+rate(\s+variability)?\b", " ", query, flags=re.I)
+        named = re.sub(METRIC_NAMES, " ", query, flags=re.I)
         topic = [t for t in litsearch.tokenize(named) if t not in GENERIC]
         if not topic:
             raise ValueError("query rejected: name a topic (e.g. sleep, alcohol, training load, heat)")
