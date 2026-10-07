@@ -571,6 +571,7 @@ _IN_USUAL = re.compile(r"\b(?:within|inside|in)\s+(?:your|the|its|their)\s+(?:[\
                        r"\b(?:normal|typical)\s+for\s+you\b|\bin\s+line\s+with\s+(?:your|the|its)\s+usual\b", re.I)
 _CLAUSE = re.compile(r"[;,:—–]|\b(?:while|whereas|but|and)\b", re.I)
 _OPEN_QUESTION = re.compile(r"\b(?:whether|if)\b", re.I)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")  # not "6.7 h" or "9:30 p.m. on"
 CALL_WORDS = {"in_range": "In range", "off": "Off usual", "learning": "Learning (no usual yet)",
               "no_reading": "No reading"}
 
@@ -668,31 +669,32 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     if sum(len(s) for _, s in labelled) > MAX_TOTAL:
         errors.append(f"concise:the whole explanation is longer than {MAX_TOTAL} characters")
     f = facts(evidence, retrieved)
-    for key, sentence in labelled:
-        for term, pattern in _FORBIDDEN:
-            if pattern.search(sentence):
-                errors.append(f"wording:forbidden term '{term}'")
-        for term, pattern in _CLAIMS:
-            if pattern.search(sentence):
-                errors.append(f"claim:'{term}' states a diagnosis, a cause or certainty; describe an association "
-                              "with uncertainty instead")
-        for term, pattern in _RELATIVE:
-            if pattern.search(sentence):
-                errors.append(f"dates:'{term}' is relative; use the absolute date (e.g. Oct 6)")
-        if _BECAUSE.search(sentence) and not _HEDGE.search(sentence):
-            errors.append("claim:'because' must be hedged ('likely because', 'may be because'): a pattern in "
-                          "the data is an association, not proof")
-        if _SLASH_DAY.search(sentence):
-            errors.append("dates:write dates like Oct 6, not with slashes")
-        errors += _numbers_errors(sentence, f, interpretation=key == "interpretation")
-        errors += _dated_errors(sentence, f)
-        for month, day, year in _mentioned_days(sentence):
-            if not any(d.month == month and d.day == day and (year is None or d.year == year) for d in f.days):
-                errors.append(f"dates:{month}/{day} is not a night in the tool results")
-        errors += _estimated_errors(sentence, f)
-        errors += _call_errors(sentence, f)
-        if _PMID_OR_DOI.search(sentence):
-            errors.append("citations:put literature ids only in the citations list, not in the text")
+    for key, item in labelled:
+        for sentence in _SENTENCE_END.split(item):  # each check reads one sentence of an item
+            for term, pattern in _FORBIDDEN:
+                if pattern.search(sentence):
+                    errors.append(f"wording:forbidden term '{term}'")
+            for term, pattern in _CLAIMS:
+                if pattern.search(sentence):
+                    errors.append(f"claim:'{term}' states a diagnosis, a cause or certainty; describe an association "
+                                  "with uncertainty instead")
+            for term, pattern in _RELATIVE:
+                if pattern.search(sentence):
+                    errors.append(f"dates:'{term}' is relative; use the absolute date (e.g. Oct 6)")
+            if _BECAUSE.search(sentence) and not _HEDGE.search(sentence):
+                errors.append("claim:'because' must be hedged ('likely because', 'may be because'): a pattern in "
+                              "the data is an association, not proof")
+            if _SLASH_DAY.search(sentence):
+                errors.append("dates:write dates like Oct 6, not with slashes")
+            errors += _numbers_errors(sentence, f, interpretation=key == "interpretation")
+            errors += _dated_errors(sentence, f)
+            for month, day, year in _mentioned_days(sentence):
+                if not any(d.month == month and d.day == day and (year is None or d.year == year) for d in f.days):
+                    errors.append(f"dates:{month}/{day} is not a night in the tool results")
+            errors += _estimated_errors(sentence, f)
+            errors += _call_errors(sentence, f)
+            if _PMID_OR_DOI.search(sentence):
+                errors.append("citations:put literature ids only in the citations list, not in the text")
 
     missing = sorted(required - (called or set()))
     if missing:
@@ -707,7 +709,8 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
         errors.append(f"citations:{', '.join(unknown[:3])} were not returned by search_literature in this session")
     # A citation supports an interpretation of something present: an interpretation sentence that names its
     # topic without negating it ("no alcohol was recorded" is not a reason to cite alcohol research).
-    supported = " ".join(s for s in sections["interpretation"] if not _NEGATION.search(s)).lower()
+    supported = " ".join(clause for s in sections["interpretation"] for clause in _CLAUSE.split(s)
+                         if not _NEGATION.search(clause)).lower()
     for cited in (c for c in citations if c in retrieved):
         words = TOPIC_WORDS.get(str(retrieved[cited].get("topic")))
         if not words:

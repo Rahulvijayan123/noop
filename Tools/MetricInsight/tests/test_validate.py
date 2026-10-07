@@ -284,3 +284,23 @@ def test_the_usual_range_wording_follows_the_apps_call():
         assert result.ok, (sentence, result.errors)
     claimed = answer(observed=["Your resting heart rate stayed within your usual range."])
     assert "usual" in validate.check(claimed, evidence, RETRIEVED).codes
+
+
+def test_checks_read_each_sentence_and_each_clause():
+    # A value after a sentence that named Oct 5 belongs to its own sentence, not to Oct 5.
+    two = answer(observed=["Your resting heart rate was 48 bpm on Oct 5. Your usual is 51 bpm."])
+    result = validate.check(two, EVIDENCE, RETRIEVED)
+    assert result.ok, result.errors
+    one = answer(observed=["On Oct 5 your resting heart rate was 51 bpm."])
+    assert "grounding" in validate.check(one, EVIDENCE, RETRIEVED).codes
+    # A hedge in one clause ("this does not show ...") does not void the pattern the sentence names (a real model's
+    # sentence); "no alcohol was recorded" still cannot be a reason to cite alcohol research.
+    retrieved = dict(RETRIEVED, **{"lit:x": {"id": "lit:x", "topic": "training_load", "peer_reviewed": True,
+                                             "finding": "late exercise and overnight HRV"}})
+    hedged = answer(interpretation=["Your evening walking and cycling may be relevant; evening exercise can be "
+                                    "associated with lower overnight HRV, though this does not show what explains "
+                                    "your reading."], citations=["lit:x"])
+    result = validate.check(hedged, EVIDENCE, retrieved)
+    assert result.ok, result.errors
+    absent = answer(interpretation=["No exercise was recorded that evening."], citations=["lit:x"])
+    assert "citations" in validate.check(absent, EVIDENCE, retrieved).codes
