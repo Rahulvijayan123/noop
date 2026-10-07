@@ -14,14 +14,15 @@ enum MetricInsightCopy {
     static var signedOut: String { String(localized: "Sign in to see an explanation of your recent nights.") }
     static var updating: String { String(localized: "Updating…") }
     static var earlier: String { String(localized: "Earlier explanation") }
-    static var observed: String { String(localized: "Observed") }
-    static var interpretation: String { String(localized: "Interpretation") }
-    static var uncertainty: String { String(localized: "Uncertainty") }
+    // The three section labels, in plain words for patients: what was observed, the likely interpretation, and the
+    // uncertainty.
+    static var observed: String { String(localized: "What we noticed") }
+    static var interpretation: String { String(localized: "What may be behind it") }
+    static var uncertainty: String { String(localized: "What we can't tell yet") }
     static var related: String { String(localized: "Related signals") }
     static var estimated: String { String(localized: "Estimated") }
     static var sources: String { String(localized: "Sources") }
     static var writtenBy: String { String(localized: "Written by AI from your measured nights.") }
-    static var notAdvice: String { String(localized: "Informational only, not medical advice.") }
 
     /// "Based on 38 nights through Oct 6, 2026", from what the insight carries; nil when it carries neither.
     static func basis(_ insight: MetricInsight, locale: Locale = AppLanguage.activeLocale) -> String? {
@@ -64,7 +65,7 @@ enum MetricInsightCopy {
     /// Every fixed string above (for the copy checks).
     static var allFixedText: [String] {
         [title, preparing, notEnoughData, unavailable, signedOut, updating, earlier, observed, interpretation,
-         uncertainty, related, estimated, sources, writtenBy, notAdvice]
+         uncertainty, related, estimated, sources, writtenBy]
     }
 }
 
@@ -293,7 +294,6 @@ struct MetricInsightCard: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
             ForEach(MetricInsightCopy.footerLines(insight), id: \.self) { Text($0) }
             Text(MetricInsightCopy.writtenBy)
-            Text(MetricInsightCopy.notAdvice)
         }
         .font(StrandFont.footnote)
         .foregroundStyle(StrandPalette.textTertiary)

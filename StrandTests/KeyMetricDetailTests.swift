@@ -288,6 +288,19 @@ final class KeyMetricDetailTests: XCTestCase {
         XCTAssertNil(term("recovery"), "'recovery' is not 'recovered'")
     }
 
+    /// The section labels read plainly for patients, and the card carries no medical-advice line (that rule lives in
+    /// the model prompt). The AI attribution stays.
+    func testTheCardReadsPlainlyAndCarriesNoAdviceLine() {
+        XCTAssertEqual(MetricInsightCopy.observed, "What we noticed")
+        XCTAssertEqual(MetricInsightCopy.interpretation, "What may be behind it")
+        XCTAssertEqual(MetricInsightCopy.uncertainty, "What we can't tell yet")
+        XCTAssertEqual(MetricInsightCopy.writtenBy, "Written by AI from your measured nights.")
+        XCTAssertFalse(MetricInsightCopy.allFixedText.contains { $0.localizedCaseInsensitiveContains("medical advice") },
+                       "\(MetricInsightCopy.allFixedText)")
+        XCTAssertEqual(MetricInsightCopy.allFixedText.count, Set(MetricInsightCopy.allFixedText).count,
+                       "every fixed string is distinct")
+    }
+
     func testTheCardsOwnCopyPassesTheWordingGuard() {
         for text in MetricInsightCopy.allFixedText {
             XCTAssertNil(PhysiologyContextWording.containsForbiddenTerm(text), text)
