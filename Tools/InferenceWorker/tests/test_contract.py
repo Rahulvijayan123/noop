@@ -50,8 +50,13 @@ def _context(**overrides):
 # -- constants --------------------------------------------------------------
 
 
-def test_metric_domain_is_the_four_declared_metrics():
-    assert METRICS == ("hrv", "sleep_boundary", "sleep_stage", "respiration")
+def test_metric_domain_is_the_declared_metrics():
+    # The original four metric domains, plus the additive sensor-biomarkers domain
+    # (docs/sensor-biomarkers/CONTRACTS.md section 4). The extension is append-only:
+    # the four original domains and their order are unchanged.
+    assert METRICS[:4] == ("hrv", "sleep_boundary", "sleep_stage", "respiration")
+    assert METRICS == ("hrv", "sleep_boundary", "sleep_stage", "respiration",
+                       "sensor_biomarkers")
 
 
 def test_withheld_reason_enum_matches_the_shared_plan():

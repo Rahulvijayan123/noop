@@ -419,6 +419,11 @@ struct SettingsView: View {
             navRow("Notifications") { NotificationSettingsView() }
             SettingsDivider()
             #endif
+            navRow("Sensor biomarkers",
+                   SensorBiomarkerFeature.isEnabled ? String(localized: "On") : String(localized: "Off")) {
+                SensorBiomarkersView()
+            }
+            SettingsDivider()
             Button { showAbout = true } label: { SettingsRow("About") }
                 .buttonStyle(SettingsRowStyle())
         }

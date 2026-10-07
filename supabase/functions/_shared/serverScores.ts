@@ -162,6 +162,45 @@ export async function readActivityWindows({ rest, userId, deviceId, days, known 
   });
 }
 
+/**
+ * `GET /sensor-biomarkers?day=YYYY-MM-DD[&deviceId=...]` (or `days=a,b,c`, up to 31 UTC days):
+ * the sensor-biomarker day documents (docs/sensor-biomarkers/CONTRACTS.md §6, spec-31 §8) for the
+ * credential owner's device. The latest `analysis_version` row wins per day; a day with no stored
+ * document is simply absent. No cross-owner reads: owner and device come from the credential,
+ * never from the query.
+ */
+export const SENSOR_BIOMARKERS_MAX_DAYS = 31;
+
+export function parseSensorBiomarkersQuery(params: URLSearchParams) {
+  const day = params.get('day');
+  const daysRaw = params.get('days');
+  if (day != null && daysRaw != null) throw fail('invalid_days', 400);
+  const raw = day ?? daysRaw;
+  if (raw == null) throw fail('invalid_days', 400);
+  const days = raw.split(',');
+  if (days.length < 1 || days.length > SENSOR_BIOMARKERS_MAX_DAYS || new Set(days).size !== days.length
+      || days.some((d) => !DAY_RE.test(d) || !isCalendarDay(d))) {
+    throw fail('invalid_days', 400);
+  }
+  return { days };
+}
+
+export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
+  rest: Pick<SupabaseRest, 'select'>; userId: string; deviceId: string; days: string[];
+}) {
+  const scope = `user_id=eq.${userId}&device_id=eq.${deviceId}&day=in.(${days.join(',')})`;
+  const rows = (await rest.select('sensor_biomarker_days',
+    `${scope}&select=day,analysis_version,input_revision,interval_start_utc,interval_end_utc,status,` +
+    `document,families_ok,withheld_reasons,run_ms,model_revisions,published_at,updated_at` +
+    `&order=day.asc,analysis_version.desc`)) ?? [];
+  // One row per requested day: the first row per day in analysis_version.desc order is the latest.
+  const byDay = new Map<string, unknown>();
+  for (const r of rows as Array<Record<string, unknown>>) {
+    if (!byDay.has(String(r.day))) byDay.set(String(r.day), r);
+  }
+  return days.map((d) => byDay.get(d)).filter((r): r is Record<string, unknown> => r != null);
+}
+
 const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
   + 'result_revision,computed_at';
 
@@ -300,9 +339,11 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isExposurePost = req.method === 'POST' && route === '/exposures';
   const isExposureGet = req.method === 'GET' && route === '/exposures';
   const isGroundTruthLabels = req.method === 'POST' && route === '/ground-truth-labels';
+  const isSensorBiomarkers = req.method === 'GET' && route === '/sensor-biomarkers';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
-      && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels) {
+      && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
+      && !isSensorBiomarkers) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -338,12 +379,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       user={id:installation.id,sourceId:installation.sourceId};
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
-        || isPlacementGet || isContext || isContextHistory || isExposureGet
+        || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
         : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
-        || isContext || isContextHistory
+        || isContext || isContextHistory || isSensorBiomarkers
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels) ? null
       : isPlacementPost ? (requestBody?.device_id ?? null)
@@ -390,6 +431,14 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (!deviceId) throw fail('device_registration_pending', 409);
       const query = parseActivityWindowsQuery(url.searchParams);
       const days = await readActivityWindows({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isSensorBiomarkers) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseSensorBiomarkersQuery(url.searchParams);
+      const days = await readSensorBiomarkers({ rest, userId: user.id, deviceId, ...query });
+      // No stored document for any requested day: 404 (the contract's explicit absent answer).
+      if (days.length === 0) throw fail('not_found', 404);
       return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isGaitWindows) {

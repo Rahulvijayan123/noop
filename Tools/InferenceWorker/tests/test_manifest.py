@@ -26,10 +26,14 @@ def test_default_manifest_path_points_at_the_package_manifest():
 
 
 def test_manifest_has_the_eight_planned_entries(manifest_entries):
+    # The eight planned entries, plus the additive sensor-biomarker entries
+    # (docs/sensor-biomarkers/CONTRACTS.md section 7): optional research/shadow
+    # lanes, appended after the planned list, order unchanged.
     ids = [e["id"] for e in manifest_entries]
     assert ids == ["neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa", "wav2sleep",
                    "no_eeg_sleep_staging", "rr_estimation", "stepcount",
-                   "cnn_wrist_model_freeliving"]
+                   "cnn_wrist_model_freeliving",
+                   "paradigma", "deepbeat", "siamaf"]
 
 
 def test_every_entry_declares_revision_license_rights_status_and_input_contract(manifest_entries):
@@ -58,13 +62,19 @@ def test_artifact_entries_publish_size_and_digest(manifest_entries):
 
 
 def test_only_the_landed_providers_are_wired(manifest_entries):
-    """Wired entries: the HRV dependency plus the two landed sleep candidates."""
+    """Wired entries: the HRV dependency, the two landed sleep candidates and
+    the additive sensor-biomarker lanes (paradigma research; deepbeat/siamaf
+    rhythm shadow)."""
     wired = {e["id"]: e["wired"] for e in manifest_entries}
     assert wired["neurokit2"] is True
     assert wired["hypnospy"] is True
     assert wired["sleepecg_wrn_gru_mesa"] is True
+    assert wired["paradigma"] is True
+    assert wired["deepbeat"] is True
+    assert wired["siamaf"] is True
     assert all(value is False for key, value in wired.items()
-               if key not in {"neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa"})
+               if key not in {"neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa",
+                              "paradigma", "deepbeat", "siamaf"})
 
 
 def test_blocked_models_stay_blocked(manifest_entries):
@@ -106,7 +116,7 @@ def test_pinned_digests_match_the_research_findings(manifest_entries):
 def test_manifest_summary_exposes_the_capability_fields(manifest_entries):
     state = verify_manifest(load_manifest(MANIFEST_PATH), "/nonexistent", manifest_path=MANIFEST_PATH)
     summary = manifest_summary(state)
-    assert len(summary) == 8
+    assert len(summary) == 11
     assert all("status" in row and "input_contract" in row for row in summary)
 
 

@@ -95,5 +95,16 @@ def default_providers() -> list[Provider]:
     their accuracy is unverified (spec section 8).
     """
     from ..frwhoop_sleep.registry_adapter import sleep_providers
+    from ..sensor_biomarkers import collect_optional_providers, collect_providers
 
-    return [HrvProductionProvider(), HrvNeurokitShadowProvider(), *sleep_providers()]
+    return [
+        HrvProductionProvider(),
+        HrvNeurokitShadowProvider(),
+        *sleep_providers(),
+        # Additive sensor-biomarker families (docs/sensor-biomarkers/CONTRACTS.md). The
+        # descriptive providers are import-safe by construction; the heavy optional
+        # research/shadow providers (paradigma, rhythm) fail closed inside
+        # collect_optional_providers and can never break startup.
+        *collect_providers(),
+        *collect_optional_providers(),
+    ]
