@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from datetime import date, timedelta
@@ -55,6 +56,16 @@ def job(pg) -> dict:
                               f" and user_id = '{USER_A}'"))
 
 
+@pytest.fixture(scope="session")
+def curated_harness():
+    out = Path(tempfile.mkdtemp(prefix="mih-", dir="/tmp"))
+    script = Path(__file__).resolve().parents[1] / "scripts" / "build_curated_harness.py"
+    built = subprocess.run([KERNEL_PYTHON, str(script), str(out)], capture_output=True, text=True, timeout=120)
+    assert built.returncode == 0, built.stderr
+    yield built.stdout.strip()
+    shutil.rmtree(out, ignore_errors=True)
+
+
 @pytest.fixture()
 def stub():
     server = StubLLM()
@@ -63,14 +74,14 @@ def stub():
 
 
 @pytest.fixture()
-def worker(pg, stub, secret_file):
+def worker(pg, stub, secret_file, curated_harness):
     pg.psql("truncate public.server_daily_scores, public.metric_insight_jobs, public.metric_insights,"
             " public.coach_memory_items cascade")
     work_root = Path(tempfile.mkdtemp(prefix="mie-", dir="/tmp"))
     env = {"NARA_DB_URL_FILE": secret_file("db_url", pg.url), "NARA_LLM_API_KEY_FILE": secret_file("llm_api_key", API_KEY),
            "NARA_LLM_BASE_URL": stub.url, "NARA_LLM_MODEL": "fixture-model", "NARA_PRIME_BIN": PRIME_BIN,
            "NARA_KERNEL_PYTHON": KERNEL_PYTHON, "NARA_WORK_ROOT": str(work_root), "NARA_WORKER_ID": "pytest-e2e",
-           "NARA_SANDBOX": "macos", "NARA_TURN_TIMEOUT_S": "120"}
+           "NARA_SANDBOX": "macos", "NARA_TURN_TIMEOUT_S": "120", "NARA_CURATED_HARNESS": curated_harness}
     instance = Worker(Config.from_env(env))
     instance.db = Database(connect(pg.url))
     yield instance
@@ -115,6 +126,10 @@ def test_rhr_explained_end_to_end_then_served_from_cache(pg, stub, worker):
     assert "53" not in json.dumps(task), "the series itself must not be in the prompt"
     evidence_line = next(o for o in tool_outputs(stub) if "EVIDENCE=" in o)
     probe = json.loads(evidence_line.split("EVIDENCE=", 1)[1].split("\\n")[0].split("\n")[0])["probe"]
+    assert probe.pop("global_harness_write") in ("blocked:PermissionError", "blocked:OSError")  # the sandbox, not a typo
+    # agent learning reaches the model only as the curated, user-free harness, and nothing is added to it on disk
+    assert probe.pop("harness_ids_on_disk") == ["absolute-dates", "estimates", "evidence-first", "rhr-variation",
+                                                "short-history"]
     assert probe == {"cross_user": "refused", "internet": "blocked", "secret_like_env": []}
     assert "B only" not in json.dumps(stub.requests) and "73" not in evidence_line
 

@@ -6,7 +6,7 @@ are the job's LLM proxy and the job's tool broker; the only writable path is the
 environment is exactly what prime.py builds (no secrets).
 
 * macOS (development): sandbox-exec. Network: IP egress denied except loopback to the proxy port; DNS denied.
-  Writes denied outside the run directory; reads of secret paths denied.
+  Writes denied outside the run directory and to the agent's global harness; reads of secret paths denied.
 * Linux (production): bubblewrap with every namespace unshared (no network route at all, own PID namespace,
   dies with its parent), read-only binds of the system, the Prime binary and the kernel Python, and the run
   directory. A forwarder inside the namespace turns the proxy's Unix socket into the loopback port Prime calls.
@@ -77,7 +77,9 @@ def macos_profile(plan: Plan) -> str:
                '(deny network-outbound (literal "/private/var/run/mDNSResponder"))',
                f'(allow network-outbound (remote ip "localhost:{int(plan.proxy_port)}"))',
                '(deny file-write* (subpath "/"))',
-               f'(allow file-write* (subpath "/dev") (subpath "{run}"))']
+               f'(allow file-write* (subpath "/dev") (subpath "{run}"))',
+               # Prime's global Continual Harness is the curated, user-free copy: read-only to the whole tree.
+               f'(deny file-write* (subpath "{run}/agent/harness"))']
     for path in plan.deny_read:
         if os.path.exists(path):
             profile.append(f'(deny file-read* (subpath "{_sbpl_path(path)}"))')
@@ -92,7 +94,8 @@ def linux_argv(plan: Plan, argv: list[str], env: dict[str, str], kernel_python: 
         out += ["--ro-bind-try", path, path]
     for path in plan.readable:
         out += ["--ro-bind", path, path]
-    out += ["--bind", run, run, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", f"{run}/work"]
+    out += ["--bind", run, run, "--ro-bind", f"{run}/agent/harness", f"{run}/agent/harness",
+            "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", f"{run}/work"]
     for key, value in sorted(env.items()):
         out += ["--setenv", key, value]
     assert plan.proxy_unix

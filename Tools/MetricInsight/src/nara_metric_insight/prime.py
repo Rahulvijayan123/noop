@@ -199,8 +199,9 @@ class PrimeSession:
             "mcpServers": {"nara": {"type": "stdio", "command": cfg.kernel_python,
                                     "args": [str(agent / "mcp_shim.py"), "--socket", str(run / "b.sock"),
                                              "--token", tool_token]}}}))
+        # The global Continual Harness: only the curated, user-free file, and read-only inside the sandbox.
+        (agent / "harness").mkdir()
         if cfg.curated_harness:
-            (agent / "harness").mkdir()
             shutil.copy(cfg.curated_harness, agent / "harness" / "harness_state.json")
         env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(tmp), "LANG": "C.UTF-8",
                "PRIME_AGENT_CODING_AGENT_DIR": str(agent), "PRIME_AGENT_DAEMON_SOCKET": str(run / "d.sock"),

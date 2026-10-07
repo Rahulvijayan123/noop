@@ -226,7 +226,7 @@ def test_macos_sandbox_blocks_egress_secret_reads_and_writes(short_dir):
 
 def test_linux_plan_unshares_everything_and_passes_no_secrets(tmp_path):
     run = tmp_path / "r-1"
-    (run / "agent").mkdir(parents=True)
+    (run / "agent" / "harness").mkdir(parents=True)
     plan = sandbox.Plan(mode="linux", run_dir=str(run), proxy_port=18080, proxy_unix=str(run / "p.sock"),
                         readable=("/opt/prime/bin", "/opt/prime-venv"), deny_read=())
     env = {"PATH": "/usr/bin:/bin", "HOME": f"{run}/home", "PRIME_AGENT_KERNEL_PYTHON": "/opt/prime-venv/bin/python"}
@@ -234,6 +234,8 @@ def test_linux_plan_unshares_everything_and_passes_no_secrets(tmp_path):
     assert argv[:5] == ["bwrap", "--unshare-all", "--die-with-parent", "--new-session", "--clearenv"]
     assert "--share-net" not in argv
     assert ["--bind", str(run.resolve()), str(run.resolve())] == argv[argv.index("--bind"):argv.index("--bind") + 3]
+    harness = f"{run.resolve()}/agent/harness"
+    assert argv[argv.index("--bind") + 3:argv.index("--bind") + 6] == ["--ro-bind", harness, harness]
     assert argv[argv.index("--") + 1:argv.index("--") + 3] == ["/opt/prime-venv/bin/python", f"{run.resolve()}/agent/forwarder.py"]
     assert argv[-3:] == ["/opt/prime/bin/prime-agent", "--mode", "rpc"]
     assert (run / "agent" / "forwarder.py").exists()
