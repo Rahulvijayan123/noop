@@ -2,15 +2,18 @@
 -- test database with 20261003120000_activity_context.sql (sections 1-11),
 -- 20261003130000_activity_context_days.sql (section 12, the ActivityContext v2 day documents),
 -- 20261003140000_activity_context_stream_days.sql (section 13, stream days and the read surface) and
--- 20261004150000_activity_context_canonical_class.sql (section 14, the canonical class columns)
--- applied. Every fixture change rolls back; no deployed credentials or data are touched.
+-- 20261004150000_activity_context_canonical_class.sql (section 14, the canonical class columns) and
+-- 20261007120000_activity_context_current_lineage_and_versions.sql (section 15, the current-lineage view
+-- and version-driven re-derivation) applied. Every fixture change rolls back; no deployed credentials or data are touched.
 -- Statement timeout keeps a misbehaving assertion from hanging a disposable cluster.
 --
 -- Run against a disposable cluster the way the other *.sql tests run:
 --   psql -X -qAt -v ON_ERROR_STOP=1 -f ../../migrations/20261003120000_activity_context.sql \
 --        -f ../../migrations/20261003130000_activity_context_days.sql \
 --        -f ../../migrations/20261003140000_activity_context_stream_days.sql \
---        -f ../../migrations/20261004150000_activity_context_canonical_class.sql -f activity_context_contract.sql
+--        -f ../../migrations/20261004150000_activity_context_canonical_class.sql \
+--        -f ../../migrations/20261007120000_activity_context_current_lineage_and_versions.sql \
+--        -f activity_context_contract.sql
 -- (the migrations must apply to a fully migrated Supabase-style schema first; the fixtures here
 -- only need base_schema, production_persistence, scoring_service_state, physiology_revisions,
 -- the devices_owner_identity unique constraint and these migrations).
@@ -311,7 +314,8 @@ begin
   rev := public.publish_activity_context_v2(tok,j.input_revision,
     jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(epB)),100);
   assert rev is not null, 'replacement publish must succeed';
-  -- Prior fingerprint-1 output is preserved until its own replacement commits.
+  -- Prior fingerprint-1 output is preserved: the table keeps history for causal replay, and current
+  -- readers read the newest publish of the day through activity_context_epochs_current (section 15).
   assert (select count(*)=2 from public.activity_context_epochs
     where user_id=u and device_id=dev and day=v_day and fingerprint=fp1), 'prior fingerprint output must be preserved';
   assert (select count(*)=1 from public.activity_context_epochs
@@ -1934,5 +1938,235 @@ end;
 $$;
 reset role;
 do $$ begin raise notice 'PASS 14.4 owner isolation of the class columns'; end $$;
+
+rollback;
+
+-- 15. Current lineage and version-driven re-derivation (20261007120000). History stays in
+-- activity_context_epochs; activity_context_epochs_current is the newest publish of each UTC day; the
+-- worker's registered versions are folded into both day fingerprints; a bounded sweep re-derives the days
+-- another decoder wrote.
+begin;
+set local statement_timeout = '120s';
+insert into auth.users(id) values
+ ('a0000000-0000-4000-8000-000000000001'),
+ ('a0000000-0000-4000-8000-000000000002');
+insert into public.devices(id,user_id,source_kind) values
+ ('a0000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','noop_push'),
+ ('a0000000-0000-4000-8000-000000000012','a0000000-0000-4000-8000-000000000002','noop_push');
+
+create function pg_temp.v_lo(p_day date) returns bigint language sql as $$
+  select extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint
+$$;
+create function pg_temp.v_ep(p_s bigint, p_m text) returns jsonb language sql as $$
+  select jsonb_build_object('s',p_s,'e',p_s+30,'m',p_m,'p','unknown','ex','false','sl','awake','ec','active',
+    'w','on_wrist','c',0.9,'os',30,'vs',30)
+$$;
+-- A day document row as publish_activity_context_day stores it (only the columns the sweep reads matter).
+create function pg_temp.v_day_row(p_user uuid, p_device uuid, p_day date, p_alg text, p_decoder text) returns void
+language sql as $$
+  insert into public.activity_context_days(user_id, device_id, day, algorithm_version, schema_version,
+    ontology_version, decoder_version, feature_schema, model_version, preprocessing_version, job_fingerprint,
+    input_revision, publish_interval_s, observed_s, run_count, event_count, unclear_s, mean_confidence,
+    document, result_revision, computed_at)
+  values (p_user, p_device, p_day, p_alg, 2, 'v2.0', p_decoder, 'imu-feat-2', 'm', 'p', repeat('e', 64),
+    1, 5, 0, 0, 0, 0, 0.5, '{}'::jsonb, nextval('public.activity_context_days_result_revision_seq'),
+    clock_timestamp())
+$$;
+create function pg_temp.v_raises(p_sql text, p_msg text) returns boolean language plpgsql as $$
+begin
+  begin
+    execute p_sql;
+  exception when others then
+    return sqlerrm = p_msg;
+  end;
+  return false;
+end $$;
+
+-- 15.1 The current view holds only the newest publish of each UTC day; history is kept.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001'; dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := '2026-10-05'; lo bigint := pg_temp.v_lo('2026-10-05'); lo2 bigint := pg_temp.v_lo('2026-10-06');
+  fpa text := repeat('1',64); fpb text := repeat('2',64); fpc text := repeat('3',64);
+  j public.activity_context_jobs; rev_b bigint; rev_c bigint;
+begin
+  assert to_regclass('public.activity_context_epochs_day_revision') is not null, 'per-day revision index';
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('a',64)],fpa);
+  select * into j from public.claim_activity_context_v2(300);
+  perform public.publish_activity_context_v2(j.lease_token,j.input_revision,
+    jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(pg_temp.v_ep(lo,'walking'),
+      pg_temp.v_ep(lo+30,'walking'), pg_temp.v_ep(lo+43200,'running'))),10);
+  -- A later lineage of the same day that covers less (an object retracted, a shorter decode).
+  perform public.enqueue_activity_context(u,dev,v_day,array[gen_random_uuid()],array[repeat('b',64)],fpb);
+  select * into j from public.claim_activity_context_v2(300);
+  rev_b := public.publish_activity_context_v2(j.lease_token,j.input_revision,
+    jsonb_build_object('day',v_day::text,'epochs',jsonb_build_array(pg_temp.v_ep(lo,'stationary'))),10);
+  perform public.enqueue_activity_context(u,dev,v_day+1,array[gen_random_uuid()],array[repeat('c',64)],fpc);
+  select * into j from public.claim_activity_context_v2(300);
+  rev_c := public.publish_activity_context_v2(j.lease_token,j.input_revision,
+    jsonb_build_object('day',(v_day+1)::text,'epochs',jsonb_build_array(pg_temp.v_ep(lo2,'walking'))),10);
+  assert rev_c > rev_b, 'publishes draw one global sequence';
+
+  assert (select count(*) = 5 from public.activity_context_epochs where user_id=u and device_id=dev),
+    'every lineage stays in the table (causal replay reads history)';
+  assert (select count(*) = 1 and bool_and(fingerprint = fpb and result_revision = rev_b and motion_label = 'stationary')
+          from public.activity_context_epochs_current where user_id=u and device_id=dev and day=v_day),
+    'the current view holds only the newest publish of the day';
+  assert not exists(select 1 from public.activity_context_epochs_current
+                     where user_id=u and device_id=dev and day=v_day and start_ts = lo + 43200),
+    'a slot only a superseded lineage covered is not current';
+  assert (select count(*) = 1 and bool_and(fingerprint = fpc)
+          from public.activity_context_epochs_current where user_id=u and device_id=dev and day=v_day+1),
+    'a later UTC day with a higher revision never hides an earlier day';
+  -- A local day west of UTC stitches both UTC days' current publishes, one row per slot.
+  assert (select count(*) = 2 and count(distinct start_ts) = 2 from public.activity_context_epochs_current
+          where user_id=u and device_id=dev and start_ts >= lo and start_ts < lo2 + 25200),
+    'a local window spanning two UTC days reads both days';
+  raise notice 'PASS 15.1 current lineage per UTC day';
+end;
+$$;
+
+-- 15.2 Registered versions are folded into both day fingerprints; with none registered nothing changes.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001'; dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  d0 date := (clock_timestamp() at time zone 'UTC')::date - 3; lo bigint := pg_temp.v_lo(d0);
+  dg text[] := array[repeat('d',64)]; fp_lit text; fp_stream0 text; fp_stream1 text; n integer;
+begin
+  delete from public.activity_context_lane_versions;
+  fp_lit := public.activity_context_fingerprint(dg,lo,lo+86399,'hart-activity-1','hart-activity-v1',
+    'hart-activity-preprocess-v1','v1');
+  assert internal.activity_hart_day_fingerprint(dg, d0) = fp_lit,
+    'no registered versions: the trigger''s historical fingerprint, so the migration re-derives nothing';
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u,dev,d0,'frwhoop-server-1',2,2,clock_timestamp());
+  n := public.enqueue_activity_stream_days(interval '36 hours', 0, interval '0');
+  assert n = 3, 'got ' || n;
+  select fingerprint into fp_stream0 from public.activity_context_jobs
+   where user_id=u and device_id=dev and day=d0 and algorithm_version='streams-activity-1';
+  assert fp_stream0 = encode(extensions.digest(convert_to('activity-streams-v1' || E'\n' || u::text || E'\n' ||
+      dev::text || E'\n' || d0::text || E'\n' || (d0::text || ':2'), 'UTF8'), 'sha256'), 'hex'),
+    'no registered versions: the historical stream-day fingerprint';
+
+  -- The worker registers what it runs (limit 0: register only).
+  assert public.reconcile_activity_context_versions('hart-activity-1', jsonb_build_object(
+    'tag','d=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-x;p=pre-y','decoder','hsmm-1.7','ontology','v2.0',
+    'feature_schema','imu-feat-2','model','hart-x','preprocessing','pre-y'), 0) = 0;
+  assert public.reconcile_activity_context_versions('streams-activity-1', jsonb_build_object(
+    'tag','d=hsmm-1.7;o=v2.0;f=imu-feat-2','decoder','hsmm-1.7','ontology','v2.0','feature_schema','imu-feat-2'), 0) = 0;
+  assert internal.activity_hart_day_fingerprint(dg, d0) = public.activity_context_fingerprint(dg,lo,lo+86399,
+    'hart-activity-1','hart-x','pre-y','v1;d=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-x;p=pre-y'),
+    'the HART fingerprint carries the worker''s model, preprocessing and full tag, not the trigger literals';
+  update public.activity_context_jobs set completed_revision = input_revision where algorithm_version='streams-activity-1';
+  n := public.enqueue_activity_stream_days(interval '36 hours', 0, interval '0');
+  assert n = 3, 'a new decoder version re-fingerprints the live stream days; got ' || n;
+  select fingerprint into fp_stream1 from public.activity_context_jobs
+   where user_id=u and device_id=dev and day=d0 and algorithm_version='streams-activity-1';
+  assert fp_stream1 <> fp_stream0, 'the stream-day fingerprint carries the registered tag';
+  -- Registering the same versions again is a no-op for the fingerprints.
+  perform public.reconcile_activity_context_versions('streams-activity-1', jsonb_build_object(
+    'tag','d=hsmm-1.7;o=v2.0;f=imu-feat-2','decoder','hsmm-1.7','ontology','v2.0','feature_schema','imu-feat-2'), 0);
+  update public.activity_context_jobs set completed_revision = input_revision where algorithm_version='streams-activity-1';
+  n := public.enqueue_activity_stream_days(interval '36 hours', 0, interval '0');
+  assert n = 0, 'same versions, same fingerprints; got ' || n;
+  raise notice 'PASS 15.2 versions are part of the day fingerprints';
+end;
+$$;
+
+-- 15.3 The bounded sweep re-derives days another decoder wrote: newest first, at most p_limit, never a
+--      pending, leased or dead-lettered job, and only while the lane's queue is nearly idle.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001'; dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  base date := '2026-08-01'; i integer; n integer; ids uuid[]; dg text[]; r record;
+  hart jsonb := jsonb_build_object('tag','d=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-x;p=pre-y','decoder','hsmm-1.7',
+    'ontology','v2.0','feature_schema','imu-feat-2','model','hart-x','preprocessing','pre-y');
+  streams jsonb := jsonb_build_object('tag','d=hsmm-1.7;o=v2.0;f=imu-feat-2','decoder','hsmm-1.7',
+    'ontology','v2.0','feature_schema','imu-feat-2');
+begin
+  delete from public.activity_context_jobs where user_id = u;
+  delete from public.activity_context_lane_versions;
+  -- Five completed raw-IMU days decoded by hsmm-1.5, one by the current decoder, one dead-lettered.
+  for i in 0..6 loop
+    ids := array[gen_random_uuid()]; dg := array[repeat(chr(97 + i), 64)];
+    insert into public.activity_context_jobs(user_id,device_id,day,algorithm_version,input_object_ids,input_digests,
+      fingerprint,input_revision,completed_revision,dead_letter)
+    values (u,dev,base+i,'hart-activity-1',ids,dg,internal.activity_hart_day_fingerprint(dg, base+i),1,1,i = 6);
+    perform pg_temp.v_day_row(u,dev,base+i,'hart-activity-1', case when i = 5 then 'hsmm-1.7' else 'hsmm-1.5' end);
+  end loop;
+  n := public.reconcile_activity_context_versions('hart-activity-1', hart, 2);
+  assert n = 2, 'at most p_limit days per call; got ' || n;
+  assert (select array_agg(day order by day) = array[base+3, base+4] from public.activity_context_jobs
+          where user_id=u and algorithm_version='hart-activity-1' and input_revision = 2),
+    'newest stale days first (day 5 is current, day 6 is dead-lettered)';
+  select * into r from public.activity_context_jobs where user_id=u and day=base+4 and algorithm_version='hart-activity-1';
+  assert r.fingerprint = internal.activity_hart_day_fingerprint(r.input_digests, r.day) and r.completed_revision = 1
+     and r.reason = 'input', 'the bump goes through the normal enqueue path with the version-folded fingerprint';
+  n := public.reconcile_activity_context_versions('hart-activity-1', hart, 2);
+  assert n = 0, 'a lane with p_limit pending jobs is left to drain first; got ' || n;
+  update public.activity_context_jobs set completed_revision = input_revision where user_id = u;
+  n := public.reconcile_activity_context_versions('hart-activity-1', hart, 2);
+  assert n = 2, 'the next stale days once the queue drained; got ' || n;
+  assert (select array_agg(day order by day) = array[base+1, base+2] from public.activity_context_jobs
+          where user_id=u and algorithm_version='hart-activity-1' and input_revision = 2 and completed_revision = 1);
+  -- A job already carrying the version-folded fingerprint is not bumped again (its document may simply have
+  -- failed to republish): no loop.
+  update public.activity_context_jobs set completed_revision = input_revision where user_id = u;
+  n := public.reconcile_activity_context_versions('hart-activity-1', hart, 10);
+  assert n = 1, 'only day 0 is left; got ' || n;
+  update public.activity_context_jobs set completed_revision = input_revision where user_id = u;
+  assert public.reconcile_activity_context_versions('hart-activity-1', hart, 10) = 0, 'converged';
+  assert (select dead_letter and input_revision = 1 from public.activity_context_jobs
+          where user_id=u and day=base+6 and algorithm_version='hart-activity-1'), 'a dead letter is never resurrected';
+  assert (select input_revision = 1 from public.activity_context_jobs
+          where user_id=u and day=base+5 and algorithm_version='hart-activity-1'), 'a current day is left alone';
+
+  -- Stream days: the same sweep, bumping the job directly with reason 'versions'.
+  insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
+  values (u,dev,base,'frwhoop-server-1',1,1,clock_timestamp());
+  insert into public.activity_context_jobs(user_id,device_id,day,algorithm_version,fingerprint,input_revision,completed_revision)
+  values (u,dev,base,'streams-activity-1',
+          internal.activity_stream_day_fingerprint(u,dev,base,internal.activity_stream_day_marker(u,dev,base)),4,4);
+  perform pg_temp.v_day_row(u,dev,base,'streams-activity-1','hsmm-1.3');
+  n := public.reconcile_activity_context_versions('streams-activity-1', streams, 4);
+  assert n = 1, 'got ' || n;
+  assert (select input_revision = 5 and completed_revision = 4 and reason = 'versions'
+             and fingerprint = internal.activity_stream_day_fingerprint(u,dev,base,internal.activity_stream_day_marker(u,dev,base))
+          from public.activity_context_jobs where user_id=u and day=base and algorithm_version='streams-activity-1'),
+    'a stale stream day gets the version-folded fingerprint and a new revision';
+  assert (select count(*) = 1 from public.claim_activity_stream_day(60)), 'and is claimable at once';
+
+  assert pg_temp.v_raises($q$select public.reconcile_activity_context_versions('other', '{}'::jsonb, 1)$q$,
+    'invalid_arguments'), 'unknown lane';
+  assert pg_temp.v_raises($q$select public.reconcile_activity_context_versions('streams-activity-1',
+    '{"tag":"bad tag","decoder":"d","ontology":"o","feature_schema":"f"}'::jsonb, 1)$q$, 'invalid_arguments'),
+    'a tag must be a plain identifier';
+  assert pg_temp.v_raises($q$select public.reconcile_activity_context_versions('streams-activity-1',
+    '{"tag":"t","decoder":"d","ontology":"o"}'::jsonb, 1)$q$, 'invalid_arguments'), 'every version is named';
+  raise notice 'PASS 15.3 bounded re-derivation on a version change';
+end;
+$$;
+
+-- 15.4 Privileges: owners read their own current epochs; only the service role registers versions.
+set local role authenticated;
+select set_config('request.jwt.claim.sub','a0000000-0000-4000-8000-000000000002',true);
+select set_config('request.jwt.claim.role','authenticated',true);
+do $$
+begin
+  assert (select count(*) = 0 from public.activity_context_epochs_current), 'never another owner''s epochs';
+  assert pg_temp.v_raises('select count(*) from public.activity_context_lane_versions',
+    'permission denied for table activity_context_lane_versions'), 'the registry is the worker''s';
+  assert pg_temp.v_raises($q$select public.reconcile_activity_context_versions('streams-activity-1', '{}'::jsonb, 0)$q$,
+    'permission denied for function reconcile_activity_context_versions'), 'only the worker re-derives';
+end;
+$$;
+select set_config('request.jwt.claim.sub','a0000000-0000-4000-8000-000000000001',true);
+do $$
+begin
+  assert (select count(*) > 0 from public.activity_context_epochs_current), 'an owner reads their own current epochs';
+end;
+$$;
+reset role;
+do $$ begin raise notice 'PASS 15.4 privileges'; end $$;
 
 rollback;
