@@ -1213,8 +1213,9 @@ extension WhoopStore {
         //
         // `activityContextInterval` gains the run-level fields the interval builder is gaining (in-bed, overall
         // uncertainty, the experts that shaped the run, the transitions folded inside, seconds absorbed from
-        // short fragments, the data gap before it, and the settling time after a posture change). Defaults
-        // read as "not recorded".
+        // short fragments, the data gap before it, and the settling time after a posture change). All NULL-able,
+        // and NULL reads as "not recorded" (a 0 transition count is a real "none folded in", so it is never the
+        // default). Until the builder fills them, count a run's transitions with `activityContextIntervalTransitions`.
         //
         // `activityContextTransition` keeps the decoder's typed events (sit-to-stand and the like) durably, so a
         // 10 s stand that the interval builder folds into a sitting stretch still leaves a joinable trace.
@@ -1222,7 +1223,9 @@ extension WhoopStore {
         // decoder reports them.
         //
         // `spotHrvReading` keeps each manual 60 s HRV reading with its own start and end, instead of one value
-        // per day that a second reading overwrote.
+        // per day that a second reading overwrote. It carries no copy of the activity context: like every other
+        // measurement, a reading joins its context by time (`spotHrvReadingCtx`), so a re-derived day never leaves
+        // a stale label on it, and whether that context is still provisional is the ledger's answer.
         //
         // The `*Ctx` views are rebuilt: a sample now joins the interval of its day's OWNER (the ledger), not
         // only intervals stored under the sample's own id, and carries the day's decoder version and whether
@@ -1247,8 +1250,8 @@ extension WhoopStore {
                 t.add(column: "inBed", .integer)
                 t.add(column: "uncertainty", .double)
                 t.add(column: "experts", .text)
-                t.add(column: "transitionCount", .integer).notNull().defaults(to: 0)
-                t.add(column: "absorbedSeconds", .integer).notNull().defaults(to: 0)
+                t.add(column: "transitionCount", .integer)       // NULL = not recorded (0 means none folded in)
+                t.add(column: "absorbedSeconds", .integer)
                 t.add(column: "precededByGapS", .integer)
                 t.add(column: "settlingSeconds", .integer)
             }
@@ -1273,12 +1276,6 @@ extension WhoopStore {
                 t.column("inputBeats", .integer).notNull()
                 t.column("source", .text).notNull()              // manual-hrv
                 t.column("methodVersion", .text).notNull()
-                t.column("ctxClass", .text)                      // stored context over the capture, if any
-                t.column("ctxPosture", .text)
-                t.column("ctxConfidence", .double)
-                t.column("ctxSleep", .text)
-                t.column("ctxWear", .text)
-                t.column("ctxDecoderVersion", .text)
                 t.column("createdAt", .integer).notNull()
                 t.primaryKey(["deviceId", "startTs"])
             }

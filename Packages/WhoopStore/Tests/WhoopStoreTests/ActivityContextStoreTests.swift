@@ -73,7 +73,8 @@ final class ActivityContextStoreTests: XCTestCase {
 
         // Querying each view compiles its SELECT against the live stream tables, so a renamed or dropped
         // column in a source table fails here and not in a user's query.
-        for view in ActivityContextViews.sampleViewNames + [ActivityContextViews.dayClassView, ActivityContextViews.intervalTransitionsView] {
+        for view in ActivityContextViews.sampleViewNames + [ActivityContextViews.dayClassView, ActivityContextViews.intervalTransitionsView,
+                                                            ActivityContextViews.spotHrvReadingView] {
             _ = try await store.rowsForTest("SELECT * FROM \(view) LIMIT 1")
         }
     }

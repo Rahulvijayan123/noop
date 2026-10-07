@@ -38,18 +38,19 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
     public var rrDiffCount: Int
     public var respRateBpm: Double?
     public var respBreaths: Int
-    // v50: run-level fields the interval builder carries through. nil / 0 reads as "not recorded" (a row
-    // written before v50, or by a builder that does not fill the field yet).
+    // v50: run-level fields the interval builder carries through. nil reads as "not recorded" (a row written
+    // before v50, or by a builder that does not fill the field yet); a 0 count is a real "none".
     /// Inside the night's in-bed window (lying awake in bed is not the same context as lying on a couch).
     public var inBed: Bool?
     /// The decoder's overall uncertainty over the interval, 0...1.
     public var uncertainty: Double?
     /// The evidence experts that shaped the interval, comma-separated codes (e.g. `hart,eldernet`).
     public var experts: String?
-    /// Transition events folded inside the interval.
-    public var transitionCount: Int
-    /// Seconds of shorter fragments absorbed into the interval.
-    public var absorbedSeconds: Int
+    /// Transition events folded inside the interval (nil when not recorded: count the stored events inside
+    /// `[startTs, endTs)` with `activityContextTransitionCount` or the `activityContextIntervalTransitions` view).
+    public var transitionCount: Int?
+    /// Seconds of shorter fragments absorbed into the interval (nil when not recorded).
+    public var absorbedSeconds: Int?
     /// Seconds of no data immediately before the interval (nil when unknown).
     public var precededByGapS: Int?
     /// Seconds after a change of posture before the interval is settled (nil when not applicable).
@@ -65,7 +66,7 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
                 rrDiffSqSumMs2: Double = 0, rrDiffCount: Int = 0,
                 respRateBpm: Double? = nil, respBreaths: Int = 0,
                 inBed: Bool? = nil, uncertainty: Double? = nil, experts: String? = nil,
-                transitionCount: Int = 0, absorbedSeconds: Int = 0, precededByGapS: Int? = nil,
+                transitionCount: Int? = nil, absorbedSeconds: Int? = nil, precededByGapS: Int? = nil,
                 settlingSeconds: Int? = nil) {
         self.startTs = startTs
         self.endTs = endTs
@@ -639,7 +640,7 @@ extension WhoopStore {
             rrDiffSqSumMs2: row["rrDiffSqSumMs2"] ?? 0, rrDiffCount: row["rrDiffCount"] ?? 0,
             respRateBpm: row["respRateBpm"], respBreaths: row["respBreaths"],
             inBed: row["inBed"], uncertainty: row["uncertainty"], experts: row["experts"],
-            transitionCount: row["transitionCount"] ?? 0, absorbedSeconds: row["absorbedSeconds"] ?? 0,
+            transitionCount: row["transitionCount"], absorbedSeconds: row["absorbedSeconds"],
             precededByGapS: row["precededByGapS"], settlingSeconds: row["settlingSeconds"])
     }
 

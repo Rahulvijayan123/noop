@@ -410,14 +410,14 @@
         {
           "name": "transitionCount",
           "affinity": "INTEGER",
-          "notNull": true,
-          "default": "0"
+          "notNull": false,
+          "default": null
         },
         {
           "name": "absorbedSeconds",
           "affinity": "INTEGER",
-          "notNull": true,
-          "default": "0"
+          "notNull": false,
+          "default": null
         },
         {
           "name": "precededByGapS",
@@ -2582,7 +2582,7 @@
     },
     "spotHrvReading": {
       "platform": "ios_only",
-      "reason": "GRDB v50: timestamped manual spot HRV readings (start, end, support, method, context at capture). iOS-only for now: Android still banks the reading as the day-level hrv_snapshot metric point only, which iOS keeps writing too.",
+      "reason": "GRDB v50: timestamped manual spot HRV readings (start, end, support, method; context joins by time). iOS-only for now: Android still banks the reading as the day-level hrv_snapshot metric point only, which iOS keeps writing too.",
       "columns": [
         {
           "name": "deviceId",
@@ -2642,42 +2642,6 @@
           "name": "methodVersion",
           "affinity": "TEXT",
           "notNull": true,
-          "default": null
-        },
-        {
-          "name": "ctxClass",
-          "affinity": "TEXT",
-          "notNull": false,
-          "default": null
-        },
-        {
-          "name": "ctxPosture",
-          "affinity": "TEXT",
-          "notNull": false,
-          "default": null
-        },
-        {
-          "name": "ctxConfidence",
-          "affinity": "REAL",
-          "notNull": false,
-          "default": null
-        },
-        {
-          "name": "ctxSleep",
-          "affinity": "TEXT",
-          "notNull": false,
-          "default": null
-        },
-        {
-          "name": "ctxWear",
-          "affinity": "TEXT",
-          "notNull": false,
-          "default": null
-        },
-        {
-          "name": "ctxDecoderVersion",
-          "affinity": "TEXT",
-          "notNull": false,
           "default": null
         },
         {

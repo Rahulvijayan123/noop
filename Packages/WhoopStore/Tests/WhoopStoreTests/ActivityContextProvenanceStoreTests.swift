@@ -90,8 +90,8 @@ final class ActivityContextProvenanceStoreTests: XCTestCase {
             XCTAssertNil(day["configTag"] as String?)
             XCTAssertNil(day["inputFingerprint"] as String?)
             let iv = try XCTUnwrap(Row.fetchOne(db, sql: "SELECT * FROM activityContextInterval"))
-            XCTAssertEqual(iv["transitionCount"] as Int, 0)
-            XCTAssertEqual(iv["absorbedSeconds"] as Int, 0)
+            XCTAssertNil(iv["transitionCount"] as Int?, "an old row did not record its transitions: unknown, not none")
+            XCTAssertNil(iv["absorbedSeconds"] as Int?)
             XCTAssertNil(iv["inBed"] as Int?)
             let ctx = try XCTUnwrap(Row.fetchOne(db, sql: "SELECT ctxClass, ctxDecoderVersion, ctxProvisional FROM hrSampleCtx"))
             XCTAssertEqual(ctx["ctxClass"] as String?, "sitting", "the rebuilt views still join the old rows")
@@ -114,7 +114,15 @@ final class ActivityContextProvenanceStoreTests: XCTestCase {
         let back = try await store.activityContextIntervals(deviceId: dev, from: day0, to: day0 + 86_400)
         XCTAssertEqual(back.first, row)
         XCTAssertNil(back.last?.inBed, "a row the builder did not fill reads as not recorded")
-        XCTAssertEqual(back.last?.transitionCount, 0)
+        XCTAssertNil(back.last?.transitionCount, "not recorded is not the same as no transitions")
+        XCTAssertNil(back.last?.absorbedSeconds)
+        var none = interval(day0 + 500, 60)
+        none.transitionCount = 0
+        none.absorbedSeconds = 0
+        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0), intervals: [row, none])
+        let zero = try await store.activityContextIntervals(deviceId: dev, from: day0 + 500, to: day0 + 560)
+        XCTAssertEqual(zero.first?.transitionCount, 0, "a recorded zero stays a zero")
+        XCTAssertEqual(zero.first?.absorbedSeconds, 0)
     }
 
     // MARK: Transition events
@@ -370,9 +378,7 @@ final class ActivityContextProvenanceStoreTests: XCTestCase {
         let store = try await WhoopStore.inMemory()
         let morning = SpotHrvReadingRow(startTs: day0 + 7 * 3_600, endTs: day0 + 7 * 3_600 + 60, rmssd: 72, sdnn: 61,
                                         meanNN: 1_010, cleanBeats: 58, inputBeats: 60, source: "manual-hrv",
-                                        methodVersion: "spot-rmssd-1", ctxClass: "lying_down", ctxPosture: "reclined",
-                                        ctxConfidence: 0.7, ctxSleep: "awake", ctxWear: "on_wrist",
-                                        ctxDecoderVersion: "hsmm-1.9", createdAt: day0 + 7 * 3_600 + 61)
+                                        methodVersion: "spot-rmssd-1", createdAt: day0 + 7 * 3_600 + 61)
         let afternoon = SpotHrvReadingRow(startTs: day0 + 13 * 3_600, endTs: day0 + 13 * 3_600 + 60, rmssd: 41,
                                           cleanBeats: 70, inputBeats: 72, source: "manual-hrv",
                                           methodVersion: "spot-rmssd-1", createdAt: day0 + 13 * 3_600 + 61)
@@ -383,6 +389,53 @@ final class ActivityContextProvenanceStoreTests: XCTestCase {
         XCTAssertEqual(back, [morning, afternoon])
         let other = try await store.spotHrvReadings(deviceId: "strap-b", from: day0, to: day0 + 86_400)
         XCTAssertTrue(other.isEmpty)
+    }
+
+    /// A reading saved on the live day, before its context was decoded, joins the context the day is later given,
+    /// and follows the day when it is derived again: nothing on the row can go stale.
+    func testASpotReadingJoinsItsContextByTimeAndFollowsARederivedDay() async throws {
+        let store = try await WhoopStore.inMemory()
+        let start = day0 + 7 * 3_600
+        let reading = SpotHrvReadingRow(startTs: start, endTs: start + 60, rmssd: 72, cleanBeats: 58, inputBeats: 60,
+                                        source: "manual-hrv", methodVersion: "spot-rmssd-1", createdAt: start + 61)
+        try await store.saveSpotHrvReading(reading, deviceId: dev)
+        let sql = """
+            SELECT startTs, endTs, rmssd, ctxClass, ctxDecoderVersion, ctxProvisional, ctxDeviceId
+            FROM \(ActivityContextViews.spotHrvReadingView) WHERE deviceId = ?
+            """
+        let before = try await rows(store, sql, [dev])
+        XCTAssertEqual(before.count, 1, "a reading with no context yet still appears")
+        XCTAssertNil(before.first?["ctxClass"] as String?)
+        XCTAssertNil(before.first?["ctxProvisional"] as Int?)
+
+        // The live day is decoded: provisional context.
+        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0, through: start + 600),
+                                               intervals: [interval(start - 300, 900, "sitting")])
+        let live = try await rows(store, sql, [dev])
+        XCTAssertEqual(live.first?["ctxClass"] as String?, "sitting")
+        XCTAssertEqual(live.first?["ctxProvisional"] as Int?, 1, "the live day's context is marked provisional")
+        XCTAssertEqual(live.first?["rmssd"] as Double?, 72)
+
+        // Derived again once settled, with another label: the reading follows, and it is final now.
+        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0, finality: ActivityContextDayRow.final),
+                                               intervals: [interval(start - 300, 900, "lying_down")])
+        let settled = try await rows(store, sql, [dev])
+        XCTAssertEqual(settled.first?["ctxClass"] as String?, "lying_down")
+        XCTAssertEqual(settled.first?["ctxProvisional"] as Int?, 0)
+        XCTAssertEqual(settled.first?["ctxDecoderVersion"] as String?, "hsmm-1.9")
+
+        // A reading under another id on a day this strap owns joins the owner's context.
+        let other = SpotHrvReadingRow(startTs: start + 120, endTs: start + 180, rmssd: 60, cleanBeats: 50,
+                                      inputBeats: 52, source: "manual-hrv", methodVersion: "spot-rmssd-1",
+                                      createdAt: start + 181)
+        try await store.saveSpotHrvReading(other, deviceId: "strap-b")
+        let swapped = try await rows(store, sql, ["strap-b"])
+        XCTAssertEqual(swapped.first?["ctxClass"] as String?, "lying_down")
+        XCTAssertEqual(swapped.first?["ctxDeviceId"] as String?, dev)
+
+        let columns = try await store.provenanceRowsForTest("PRAGMA table_info(spotHrvReading)", [])
+            .map { $0["name"] as String }
+        XCTAssertFalse(columns.contains { $0.hasPrefix("ctx") }, "the reading stores no copy of its context")
     }
 
     func testNewTablesAreDeviceScoped() throws {
