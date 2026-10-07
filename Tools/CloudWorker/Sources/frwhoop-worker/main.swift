@@ -47,7 +47,18 @@ import FoundationNetworking
 //   FRWHOOP_CONTEXT_BUDGET       context jobs per wake (default 2)
 //   FRWHOOP_CONTEXT_LEASE_SECONDS     context job lease length (default 300)
 //   FRWHOOP_CONTEXT_ENQUEUE_INTERVAL_SECONDS  seconds between enqueue_physiology_context_days_v1 calls (default 120)
-//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity,context);
+//   FRWHOOP_SENSOR_BIOMARKERS_ENABLED  "1" runs the sensor-biomarker lane (default OFF; exactly "1", and
+//                                the lane only runs when enabled, "sensor" is not in DISABLE_LANES, AND
+//                                FRWHOOP_INFERENCE_URL is set). Needs 20261007140000_sensor_biomarkers.sql;
+//                                without it the lane idles and reports sensor_tables_missing
+//   FRWHOOP_SENSOR_BIOMARKERS_BUDGET  sensor-biomarker jobs per wake (default 2)
+//   FRWHOOP_SENSOR_BIOMARKERS_LEASE_SECONDS  sensor-biomarker job lease length (default 300)
+//   FRWHOOP_PARADIGMA_ENABLED    "1" adds tremor + arm_swing to the sensor families (research)
+//   FRWHOOP_DEEPBEAT_SHADOW_ENABLED "1" adds rhythm_shadow to the sensor families (shadow, never user-facing)
+//   FRWHOOP_SIAMAF_SHADOW_ENABLED    "1" lets the sidecar attach the optional SiamAF shadow adapter to
+//                                rhythm_shadow (the family itself needs FRWHOOP_DEEPBEAT_SHADOW_ENABLED)
+//   FRWHOOP_PERFUSION_RESEARCH_ENABLED "1" adds perfusion_research to the sensor families (gated research)
+//   FRWHOOP_DISABLE_LANES        comma-separated lanes to skip (projection,scoring,archive,verify,activity,context,sensor);
 //                                "series" keeps scoring but stops building and writing the dense intraday series
 //   FRWHOOP_LEGACY_QUIET_SECONDS legacy-queue items wait until their owner has not uploaded for this long
 //                                (default 20; 0 claims them immediately, as the queue did originally)
@@ -114,6 +125,12 @@ struct WorkerConfig {
     let contextLeaseSeconds: Int
     let contextEnqueueIntervalSeconds: Int
     let activityCacheDir: String
+    /// Sensor-biomarker lane (spec-31 §8-9). OFF unless FRWHOOP_SENSOR_BIOMARKERS_ENABLED is exactly "1".
+    let sensorBiomarkersEnabled: Bool
+    /// The enabled family set, sorted (CONTRACTS.md section 1 flags passed through).
+    let sensorFamilies: [String]
+    let sensorBudget: Int
+    let sensorLeaseSeconds: Int
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -131,6 +148,10 @@ struct WorkerConfig {
 
     /// The context lane runs only when enabled AND not listed in FRWHOOP_DISABLE_LANES.
     var contextLaneRuns: Bool { contextEnabled && !disabledLanes.contains("context") }
+
+    /// The sensor lane runs only when enabled AND not listed in FRWHOOP_DISABLE_LANES (the
+    /// inference URL requirement is checked where the client is built).
+    var sensorLaneRuns: Bool { sensorBiomarkersEnabled && !disabledLanes.contains("sensor") }
 
     init(environment: [String: String]) throws {
         guard let dbURL = environment["FRWHOOP_DB_URL"], !dbURL.isEmpty else {
@@ -177,6 +198,28 @@ struct WorkerConfig {
         self.contextLeaseSeconds = max(30, Int(environment["FRWHOOP_CONTEXT_LEASE_SECONDS"] ?? "") ?? 300)
         self.contextEnqueueIntervalSeconds = max(
             1, Int(environment["FRWHOOP_CONTEXT_ENQUEUE_INTERVAL_SECONDS"] ?? "") ?? 120)
+        // The sensor-biomarker lane is OFF by default: only the exact value "1" turns it on, so
+        // "true", "yes" or a typo leave it off. The family sub-flags are passed through to the
+        // lane's families list (CONTRACTS.md section 1).
+        self.sensorBiomarkersEnabled = (environment["FRWHOOP_SENSOR_BIOMARKERS_ENABLED"] ?? "") == "1"
+        var sensorFamilies: [String] = []
+        if self.sensorBiomarkersEnabled {
+            sensorFamilies = ["movement", "oscillation", "ppg_quality", "pulse_shape"]
+            if (environment["FRWHOOP_PERFUSION_RESEARCH_ENABLED"] ?? "") == "1" {
+                sensorFamilies.append("perfusion_research")
+            }
+            if (environment["FRWHOOP_PARADIGMA_ENABLED"] ?? "") == "1" {
+                sensorFamilies.append("tremor")
+                sensorFamilies.append("arm_swing")
+            }
+            if (environment["FRWHOOP_DEEPBEAT_SHADOW_ENABLED"] ?? "") == "1" {
+                sensorFamilies.append("rhythm_shadow")
+            }
+            sensorFamilies.sort()
+        }
+        self.sensorFamilies = sensorFamilies
+        self.sensorBudget = max(1, Int(environment["FRWHOOP_SENSOR_BIOMARKERS_BUDGET"] ?? "") ?? 2)
+        self.sensorLeaseSeconds = max(30, Int(environment["FRWHOOP_SENSOR_BIOMARKERS_LEASE_SECONDS"] ?? "") ?? 300)
         // On-host cache of downloaded raw-IMU objects and model answers (ActivityLocalCache). Under
         // /var/lib/frwhoop by default, which the unit already lets the worker write; "" turns it off.
         self.activityCacheDir = environment["FRWHOOP_ACTIVITY_CACHE_DIR"] ?? "/var/lib/frwhoop/activity-cache"
@@ -253,6 +296,20 @@ if config.contextLaneRuns {
     }
 }
 
+// The sensor lane's connection follows the same rule: it exists only when the lane runs and a
+// failure to open it never stops the worker.
+var dbSensor: PostgresClient?
+var sensorStartupError: String?
+if config.sensorLaneRuns {
+    do {
+        dbSensor = try PostgresClient(options: dbOptions)
+    } catch {
+        sensorStartupError = String(describing: error).prefix(2000).description
+        FileHandle.standardError.write(
+            "frwhoop-worker: sensor lane connection failed; the lane stays off: \(error)\n".data(using: .utf8)!)
+    }
+}
+
 let startupLine = "frwhoop-worker: started name=\(config.workerName) revision=\(config.sourceRevision) "
     + "sslmode=\(dbOptions.sslMode) sslrootcert=\(dbOptions.sslRootCert ?? "(system store)")\n"
 FileHandle.standardOutput.write(startupLine.data(using: .utf8)!)
@@ -318,6 +375,13 @@ let contextState = LaneState(LaneSnapshot(
     // A context-only startup failure is reported on the lane, never as a blocked database for the worker.
     lastError: contextStartupError,
     lastErrorKind: contextStartupError == nil ? nil : "context_connection"))
+
+let sensorState = LaneState(LaneSnapshot(
+    name: "sensor",
+    enabled: config.sensorLaneRuns,
+    // A sensor-only startup failure is reported on the lane, never as a blocked database for the worker.
+    lastError: sensorStartupError,
+    lastErrorKind: sensorStartupError == nil ? nil : "sensor_connection"))
 
 let startedAt = Date()
 let processInstanceID = UUID().uuidString.lowercased()
@@ -668,6 +732,40 @@ if contextState.read().enabled, let dbContext {
     }
 }
 
+if sensorState.read().enabled, let dbSensor, let inferenceClient {
+    var sensor = SensorBiomarkerLane(
+        db: dbSensor,
+        storage: storage,
+        inference: inferenceClient,
+        leaseSeconds: config.sensorLeaseSeconds,
+        families: config.sensorFamilies)
+    FileHandle.standardOutput.write(
+        ("frwhoop-worker: sensor biomarkers lane enabled budget=\(config.sensorBudget) "
+         + "lease_seconds=\(config.sensorLeaseSeconds) "
+         + "families=\(config.sensorFamilies.joined(separator: ","))\n").data(using: .utf8)!)
+    laneQueue.async {
+        runLane(sensorState, cycle: {
+            func settled() -> Int {
+                sensor.stats.published + sensor.stats.failed + sensor.stats.superseded
+                    + sensor.stats.notCompleted
+            }
+            let before = settled()
+            sensor.drain(budget: config.sensorBudget)
+            sensorState.update {
+                $0.counters = sensor.stats.counters
+                $0.lastError = sensor.stats.lastError
+                $0.lastErrorKind = sensor.stats.lastErrorKind
+                $0.lastActivityAt = sensor.stats.lastActivityAt
+            }
+            return settled() > before
+        }, ensureConnected: { try dbSensor.ensureConnected() })
+    }
+} else if config.sensorBiomarkersEnabled {
+    // Enabled but no sidecar URL: the lane cannot run; say so once.
+    FileHandle.standardOutput.write(
+        "frwhoop-worker: sensor biomarkers lane off (FRWHOOP_INFERENCE_URL unset)\n".data(using: .utf8)!)
+}
+
 // MARK: - Heartbeat
 
 /// Cached sidecar readiness for the heartbeat payload.
@@ -780,7 +878,7 @@ func inferenceHeartbeatMeta() -> Any {
 /// that target's `main`, so a test bundle that never runs `main` reads
 /// uninitialized storage (crash/garbage). Keeping the composition pure makes
 /// the pre/post-migration behavior directly unit-testable.
-func queueAgeQuery(includeActivity: Bool, includeContext: Bool = false) -> String {
+func queueAgeQuery(includeActivity: Bool, includeContext: Bool = false, includeSensor: Bool = false) -> String {
     let base = """
 with q as (
   select 'scoring_legacy' as lane, count(*) as n, min(w.next_attempt_at) as oldest
@@ -836,6 +934,13 @@ with q as (
    where j.completed_revision < j.input_revision and not j.dead_letter
      and j.not_before <= now() and (j.lease_until is null or j.lease_until <= now())
 """
+    let sensor = """
+  union all
+  select 'sensor', count(*), min(j.not_before)
+    from public.sensor_biomarker_jobs j
+   where j.completed_revision < j.input_revision and not j.dead_letter
+     and j.not_before <= now() and (j.lease_until is null or j.lease_until <= now())
+"""
     let closing = """
 )
 select lane, n::text as n,
@@ -844,7 +949,7 @@ select lane, n::text as n,
   from q
 """
     return base + (includeActivity ? activity : "") + (includeContext ? ContextSQL.queueAgeEntry + "\n" : "")
-        + closing
+        + (includeSensor ? sensor : "") + closing
 }
 
 
@@ -867,8 +972,14 @@ func queueAge() throws -> QueueAge {
     let contextTablePresent = config.contextLaneRuns && (try? dbHeartbeat.query(
         "select to_regclass('public.physiology_context_jobs') is not null as present", []))?
         .first?["present"] == "t"
+    // The sensor entry follows the same rule, and is added only while the sensor lane runs, so a
+    // backlog nobody drains (lane off) never turns the poll state to "working".
+    let sensorTablePresent = config.sensorLaneRuns && (try? dbHeartbeat.query(
+        "select to_regclass('public.sensor_biomarker_jobs') is not null as present", []))?
+        .first?["present"] == "t"
     let rows = try dbHeartbeat.query(queueAgeQuery(includeActivity: activityTablePresent,
-                                                   includeContext: contextTablePresent), [])
+                                                   includeContext: contextTablePresent,
+                                                   includeSensor: sensorTablePresent), [])
     var out = QueueAge()
     for row in rows {
         let lane = row["lane"] ?? ""
@@ -897,7 +1008,7 @@ var heartbeatFailures = 0
 
 func heartbeat(final: Bool = false) {
     let lanes = [projectionState.read(), scoringState.read(), archiveState.read(),
-                 verifyState.read(), activityState.read(), contextState.read()]
+                 verifyState.read(), activityState.read(), contextState.read(), sensorState.read()]
     var dbError: String?
     var queue: QueueAge?
     do {
