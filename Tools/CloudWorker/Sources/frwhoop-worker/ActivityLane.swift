@@ -182,6 +182,8 @@ struct ActivityLane {
         /// never reach the HART path.
         var eldernetJobs = 0
         var eldernetChunks = 0
+        /// Chunks answered from `ElderNetStage.responses` (counted in `eldernetChunks` too).
+        var eldernetChunksReused = 0
         var eldernetWindows = 0
         var eldernetFailures = 0
         /// Jobs where the ElderNet model was not available (ping said so, or the child would not start).
@@ -962,7 +964,16 @@ struct ActivityLane {
                                     message: "\(String(format: "%.1f", eldernetSpent)) s used of the "
                                         + "\(String(format: "%.1f", eldernet.jobBudgetSeconds)) s per-job budget")
             }
-            if eldernetReady, let eldernet, out.gaitQuality.stopped == nil {
+            let eldernetKey = eldernetReady ? eldernet?.cacheKey(request) : nil
+            if eldernetReady, let eldernet, out.gaitQuality.stopped == nil, let eldernetKey,
+               let cached = eldernet.responses.response(eldernetKey),
+               out.gaitQuality.responses.first.map({ $0.model == cached.model }) ?? true {
+                out.gaitQuality.chunks += 1
+                out.gaitQuality.responses.append(cached)
+                stats.eldernetChunks += 1
+                stats.eldernetChunksReused += 1
+                stats.eldernetWindows += cached.windows.count
+            } else if eldernetReady, let eldernet, out.gaitQuality.stopped == nil {
                 guard try renew() else {
                     throw PostgresClient.Error(message: "activity lease lost during inference",
                                                sqlstate: "55000", kind: .stale)
@@ -983,6 +994,7 @@ struct ActivityLane {
                     } else {
                         out.gaitQuality.responses.append(response)
                         stats.eldernetWindows += response.windows.count
+                        if let eldernetKey { eldernet.responses.store(response, key: eldernetKey) }
                     }
                 case .failed(let kind, let message, let stop):
                     out.gaitQuality.failedChunks += 1

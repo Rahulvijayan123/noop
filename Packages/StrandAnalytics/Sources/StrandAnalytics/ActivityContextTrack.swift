@@ -822,7 +822,8 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
         self.dataThrough = track.lastTs.map { $0 + 1 }
         self.observedSeconds = track.observedSeconds
         self.sleepKnownOutsideSessions = input.sleepKnownOutsideSessions
-        self.contextFingerprint = ActivityContextDayBuilder.fingerprint(input, through: track.lastTs.map { $0 + 1 })
+        self.contextFingerprint = ActivityContextDayBuilder.fingerprint(input, through: track.lastTs.map { $0 + 1 },
+                                                                         config: config)
         self.runs = runs
         self.events = track.events
         self.latest = track.states.last
@@ -859,7 +860,8 @@ public enum ActivityContextDayBuilder {
     /// has not read yet) hashes the same once the day has grown past it — but a sport rename with
     /// identical bounds, a corrected sample value, or a re-served encoder window now changes the hash,
     /// and the day is decoded again instead of reusing a stale document (spec §4 A07, WS-10-F04).
-    static func fingerprint(_ input: ActivityContextTrackInput, through: Int?) -> String {
+    static func fingerprint(_ input: ActivityContextTrackInput, through: Int?,
+                            config: ActivityDecoderConfig = ActivityDecoderConfig()) -> String {
         let hi = min(through ?? input.dayEnd, input.dayEnd)
         func clipped(_ spans: [(Int, Int)]) -> [String] {
             spans.compactMap { s, e -> String? in
@@ -939,7 +941,32 @@ public enum ActivityContextDayBuilder {
             foldString(w.modelVersion, into: &h)
             foldString(w.preprocessingVersion, into: &h)
         }
+        // ElderNet and Inertia windows also arrive from the server after the strap's streams; a late batch must
+        // re-decode the day. Folded only when the config accepts them, so a day without accepted windows hashes
+        // exactly as before.
+        if let gait = input.gaitQuality, !gait.windows.isEmpty,
+           ActivityContextTrackBuilder.acceptsGaitQuality(for: input, config: config) {
+            foldString("eg", into: &h)
+            foldString(gait.model.modelVersion, into: &h)
+            for key in gait.model.weights.keys.sorted() { foldString(gait.model.weights[key] ?? "", into: &h) }
+            foldEncoded(gait.windows.filter { $0.endTs >= input.dayStart && $0.endTs < hi }
+                            .sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }, into: &h)
+        }
+        if let heads = input.motionHeads, !heads.windows.isEmpty,
+           ActivityContextTrackBuilder.acceptsMotionHeads(for: input, config: config) {
+            foldString("ih", into: &h)
+            foldEncoded(heads.bundle, into: &h)
+            foldEncoded(heads.windows.filter { $0.endTs >= input.dayStart && $0.endTs < hi }
+                            .sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }, into: &h)
+        }
         return String(h, radix: 16)
+    }
+
+    private static func foldEncoded<T: Encodable>(_ value: T, into h: inout UInt64) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(value) else { return }
+        for b in data { h = (h ^ UInt64(b)) &* 0x100000001b3 }
     }
 
     /// FNV-1a fold of one 64-bit word's raw little-endian bytes, so values hash by their stored bits
@@ -1010,7 +1037,7 @@ public enum ActivityContextDayBuilder {
         // A same-count change — a corrected value, a sport rename, a re-served encoder window — leaves
         // the observation count alone, so only the fingerprint (which now carries sport kinds and a
         // per-stream content digest) can see it.
-        guard cached.contextFingerprint == fingerprint(input, through: through) else { return fresh("context_changed") }
+        guard cached.contextFingerprint == fingerprint(input, through: through, config: decodeConfig) else { return fresh("context_changed") }
         let newer = Array(all.dropFirst(covered))
         guard !newer.isEmpty else {
             var same = cached
@@ -1036,7 +1063,7 @@ public enum ActivityContextDayBuilder {
         doc.generatedAt = now
         doc.dataThrough = track.lastTs.map { $0 + 1 } ?? cached.dataThrough
         doc.observedSeconds = cached.observedSeconds + track.observedSeconds
-        doc.contextFingerprint = fingerprint(input, through: doc.dataThrough)
+        doc.contextFingerprint = fingerprint(input, through: doc.dataThrough, config: decodeConfig)
         doc.snapshot = track.snapshot
         doc.versions = track.snapshot.versions
         doc.summary = ActivityContextDaySummary(runs: doc.runs)

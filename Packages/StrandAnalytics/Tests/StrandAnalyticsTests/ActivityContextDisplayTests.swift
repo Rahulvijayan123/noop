@@ -117,7 +117,11 @@ final class ActivityContextDisplayTests: XCTestCase {
 
         XCTAssertEqual(ActivityDisplay.group("Walking"), ActivityDisplay.group("Brisk walking"))
         XCTAssertEqual(ActivityDisplay.group("Asleep"), ActivityDisplay.group("Resting in bed"))
-        XCTAssertEqual(ActivityDisplay.group("Desk sitting"), ActivityDisplay.group("Standing quietly"))
+        XCTAssertEqual(ActivityDisplay.group("Desk sitting"), ActivityDisplay.group("Sitting quietly"))
+        XCTAssertEqual(ActivityDisplay.group("Standing quietly"), ActivityDisplay.group("Standing, hands busy"))
+        // Getting up is a change of kind (hsmm-1.6), so it does not wait out the refinement hold.
+        XCTAssertNotEqual(ActivityDisplay.group("Desk sitting"), ActivityDisplay.group("Standing quietly"))
+        XCTAssertNotEqual(ActivityDisplay.group("Standing quietly"), ActivityDisplay.group("Still, sitting or standing"))
         XCTAssertNotEqual(ActivityDisplay.group("Walking"), ActivityDisplay.group("Desk sitting"))
         XCTAssertNotEqual(ActivityDisplay.group(ActivityDisplay.offWrist), ActivityDisplay.group(ActivityDisplay.unclear))
         XCTAssertEqual(ActivityDisplay.group("Changing position"), "transition")

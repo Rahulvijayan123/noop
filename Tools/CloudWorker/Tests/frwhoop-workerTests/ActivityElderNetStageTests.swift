@@ -509,6 +509,38 @@ final class ActivityElderNetStageTests: XCTestCase {
         XCTAssertEqual(try hartPayloads(filled).v2, try hartPayloads(cached).v2)
     }
 
+    /// The same day re-claimed after an upload moved its revision: a pinned stage answers the chunks it has
+    /// already seen from its own memory, so only the new chunk costs a call and the job can publish in time.
+    func testAPinnedStageAnswersARepeatedChunkWithoutCallingTheChild() throws {
+        let stage = try eldernet("ok", pinVersion: .some(version), pinDigest: .some(try digest()))
+        var first = ActivityLane.Stats()
+        let filled = try infer(stage, stats: &first)
+        XCTAssertEqual(first.eldernetChunksReused, 0)
+        XCTAssertEqual(stage.responses.count, 3)
+        var calls = 0
+        var second = ActivityLane.Stats()
+        let again = try infer(stage, stats: &second, renew: { calls += 1; return true })
+        XCTAssertEqual(second.eldernetChunks, 3)
+        XCTAssertEqual(second.eldernetChunksReused, 3)
+        XCTAssertEqual(calls, 4, "the readiness check and the three HART calls; no ElderNet call")
+        XCTAssertEqual(again.gaitQuality.responses, filled.gaitQuality.responses)
+        XCTAssertEqual(again.gaitQuality.trackInput, filled.gaitQuality.trackInput)
+        // Unpinned, the answer could come from any model: nothing is kept.
+        let unpinned = try eldernet("ok")
+        var stats = ActivityLane.Stats()
+        _ = try infer(unpinned, stats: &stats)
+        XCTAssertEqual(unpinned.responses.count, 0)
+    }
+
+    func testTheResponseCacheDropsTheOldestPastItsCapacity() {
+        let cache = ElderNetResponseCache(capacity: 2)
+        let model = GaitQualityModelInfo(modelVersion: "v", weights: [:], upstreamCommit: "c", hopS: 5)
+        for k in ["a", "b", "c"] { cache.store(GaitQualityResponse(model: model, windows: []), key: k) }
+        XCTAssertEqual(cache.count, 2)
+        XCTAssertNil(cache.response("a"))
+        XCTAssertNotNil(cache.response("c"))
+    }
+
     // MARK: - Shadow and candidate output
 
     func testShadowModeStoresCompactGaitWindowsAndLeavesTheHartPayloadsByteIdentical() throws {

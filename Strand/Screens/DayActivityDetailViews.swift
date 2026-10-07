@@ -339,6 +339,151 @@ struct StrapSignalCard: View {
     }
 }
 
+// MARK: Walking (ElderNet gait quality)
+
+/// The day's walking as the server's gait model read it from raw motion: how long, how many steps, at what
+/// cadence, speed and stride, how even the steps were, and each walk on a lane.
+struct WalkingQualityCard: View {
+    let dayStart: Date
+    let window: ClosedRange<Date>
+
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.distanceSystemKey) private var distanceRaw = ""
+    @State private var reading: WalkingDayReading?
+    @State private var loaded = false
+
+    private var system: UnitSystem {
+        UnitPrefs.resolveDistance(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric, override: distanceRaw)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "figure.walk")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(ActivityFamily.walking.color)
+                Text("Walking")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Spacer(minLength: 8)
+                if !loaded { ProgressView().controlSize(.small) }
+            }
+            if let reading, !reading.isEmpty {
+                headline(reading)
+                metrics(reading)
+                if !reading.bouts.isEmpty { lane(reading) }
+                Text("From the strap's raw motion, read every 5 seconds by a gait model (ElderNet). Steps, speed and stride are wrist estimates; they are steadiest on longer, unhurried walks.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if loaded {
+                Text(reading == nil
+                     ? "No gait reading for this day yet. It appears once the server has processed a raw motion session from your strap."
+                     : "No walking detected in the motion the server has processed for this day.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NoopPanelSurface(cornerRadius: 20))
+        .task(id: dayStart) { await load() }
+    }
+
+    private func headline(_ r: WalkingDayReading) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 18) {
+            stat(StretchFormat.duration(r.walkingSeconds), "walking")
+            if let steps = r.steps { stat(Int(steps.rounded()).formatted(), "steps") }
+            if r.briskSeconds > 0 { stat(StretchFormat.duration(r.briskSeconds), "brisk") }
+        }
+    }
+
+    private func stat(_ value: String, _ caption: LocalizedStringKey) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(value)
+                .font(StrandFont.number(20))
+                .foregroundStyle(StrandPalette.textPrimary)
+            Text(caption)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+    }
+
+    private func metrics(_ r: WalkingDayReading) -> some View {
+        FlowLayout(spacing: 6) {
+            if let c = r.cadenceSpm { chip("Cadence", "\(Int(c.rounded())) steps/min") }
+            if let s = r.speedMps { chip("Speed", speed(s)) }
+            if let s = r.strideM { chip("Stride", UnitFormatter.distanceFromMeters(s, system: system)) }
+            if let g = r.regularity { chip("Step evenness", "\(Int((g * 100).rounded()))%") }
+            if !r.bouts.isEmpty {
+                chip("Walks", "\(r.bouts.count) · longest \(StretchFormat.duration(r.bouts.map(\.seconds).max() ?? 0))")
+            }
+        }
+    }
+
+    private func chip(_ label: LocalizedStringKey, _ value: String) -> some View {
+        HStack(spacing: 5) {
+            Text(label)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textSecondary)
+            Text(value)
+                .font(StrandFont.caption.weight(.semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(Capsule().fill(ActivityFamily.walking.color.opacity(0.12)))
+    }
+
+    private func speed(_ mps: Double) -> String {
+        system == .imperial
+            ? String(format: "%.1f mph", mps * 2.236_94)
+            : String(format: "%.1f km/h", mps * 3.6)
+    }
+
+    /// Each walk on the day's axis, brighter for a brisker cadence.
+    private func lane(_ r: WalkingDayReading) -> some View {
+        Chart(r.bouts) { bout in
+            RectangleMark(
+                xStart: .value("Start", Date(timeIntervalSince1970: TimeInterval(bout.start))),
+                xEnd: .value("End", Date(timeIntervalSince1970: TimeInterval(bout.end))),
+                yStart: .value("Bottom", 0.0),
+                yEnd: .value("Top", 1.0)
+            )
+            .foregroundStyle(ActivityFamily.walking.color.opacity(
+                (bout.cadenceSpm ?? 0) >= WalkingDayReading.briskCadenceSpm ? 1.0 : 0.55))
+        }
+        .chartXScale(domain: window)
+        .chartYScale(domain: 0.0...1.0)
+        .chartYAxis(.hidden)
+        .chartXAxis {
+            AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
+                AxisValueLabel(format: .dateTime.hour())
+            }
+        }
+        .chartPlotStyle { $0.background(StrandPalette.surfaceInset).clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous)) }
+        .frame(height: 34)
+        .accessibilityLabel(Text("\(r.bouts.count) walks across the day"))
+    }
+
+    private func load() async {
+        defer { loaded = true }
+        guard let identity = CloudPushIdentityStore.current(),
+              let repository = CloudPushRuntime.shared.scoreRepository(),
+              let device = await IntradaySeriesStore.shared.readCandidates.first else { return }
+        let from = Int(dayStart.timeIntervalSince1970)
+        let to = Int((Calendar.current.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400))
+            .timeIntervalSince1970)
+        let days = ActivityEncoderWindowStore.utcDays(from: from, to: to)
+        guard let columns = try? await GaitWindowsCache.shared.columns(
+            utcDays: days, deviceId: device, ownerId: identity.ownerId, repository: repository),
+              !columns.isEmpty else { return }
+        reading = WalkingDayReading(days: columns, from: from, to: to)
+    }
+}
+
 // MARK: Guided calibration
 
 /// Entry to the guided sessions that give the detector labelled examples of the wearer's own movements.

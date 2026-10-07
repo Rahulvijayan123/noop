@@ -299,16 +299,22 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
         intervalStartTs = cueStartTs + task.guardSeconds
         intervalEndTs = cueStopTs - task.guardSeconds
         transitionTs = nil
-        haptic()   // start cue
+        // A transition task's only movement cue is "do it now": a start buzz a few seconds earlier
+        // reads as that cue, and people move on the wrong one.
+        if !Self.hasHeldPreState(task) { haptic() }   // start cue
         phase = .active(taskIndex: taskIndex, rep: currentRep, cueStartTs: cueStartTs)
     }
 
     /// Auto-fire the transition cue once `preStateSeconds` of quiet hold have passed since the
     /// start cue. Runs only for transition tasks and only once per repetition.
+    static func hasHeldPreState(_ task: ActivityCalibrationTask) -> Bool {
+        task.transitionKind != nil && (task.preStateSeconds ?? 0) > 0
+    }
+
     private func maybeFireTransitionCue(taskIndex: Int) {
         guard transitionTs == nil else { return }
         let task = model.tasks[taskIndex]
-        guard task.transitionKind != nil, let pre = task.preStateSeconds, pre > 0 else { return }
+        guard Self.hasHeldPreState(task), let pre = task.preStateSeconds else { return }
         guard nowSeconds >= cueStartTs + pre else { return }
         transitionTs = nowSeconds
         haptic()   // "do it now" cue

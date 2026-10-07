@@ -167,7 +167,7 @@ final class ActivityContextGoldenTests: XCTestCase {
         func strip(_ v: Any) -> Any {
             if let d = v as? [String: Any] {
                 var out: [String: Any] = [:]
-                for (k, x) in d where !["motion_heads", "motionHeads", "motionHeadsSeenTs"].contains(k) { out[k] = strip(x) }
+                for (k, x) in d where !["motion_heads", "motionHeads", "motionHeadsSeenTs", "context_fp"].contains(k) { out[k] = strip(x) }
                 return out
             }
             if let a = v as? [Any] { return a.map(strip) }

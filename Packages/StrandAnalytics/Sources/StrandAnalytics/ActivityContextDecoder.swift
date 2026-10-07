@@ -53,6 +53,10 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// mismatch, out-of-bounds weights) also leaves the decoder untouched; `ActivityContextDecoder.
     /// gaitQualityRefusal` says why.
     public var gaitQuality: GaitQualityEvidenceConfig? = nil
+    /// This wearer's adapted observation profiles, fitted from their guided calibration labels and adopted
+    /// only after beating the defaults on held-out runs (`ActivityPersonalProfileFitter`). nil (the default)
+    /// scores with the population profiles exactly as before.
+    public var personalProfile: ActivityPersonalProfile? = nil
 
     public init() {}
 }
@@ -196,6 +200,12 @@ public struct ActivityContextDecoder: Sendable {
     public let gaitQualityRefusal: String?
     /// What ElderNet did in this decoder's lifetime (nil without a gait config). Not part of the snapshot.
     public private(set) var gaitQualityReport: GaitQualityTrackReport?
+    /// Observation profiles this decoder scores with: the static table, or the wearer's adapted copy.
+    private let observationProfiles: [ModeProfile]
+    /// When set, `ingest` keeps the scored second's features and body posterior in `lastScored` (the
+    /// personal-profile fitter reads them; ordinary decodes never pay for the copy).
+    var recordsScoredSeconds = false
+    private(set) var lastScored: (features: ActivityFeatures, posterior: [Double])?
 
     /// A transition mode needs at least this much posterior mass to be flagged as an event.
     private static let posturalEventFloor = 0.20
@@ -206,6 +216,7 @@ public struct ActivityContextDecoder: Sendable {
 
     public init(config: ActivityDecoderConfig = ActivityDecoderConfig()) {
         self.config = config
+        self.observationProfiles = ActivityContextModel.profiles(for: config.personalProfile)
         self.body = bodyLayout.expand(ActivityContextModel.prior)
         self.arm = ActivityContextModel.armPrior
         let prepared = PreparedMotionHeads.prepare(config.motionHeads)
@@ -277,6 +288,7 @@ public struct ActivityContextDecoder: Sendable {
     @discardableResult
     public mutating func ingest(_ obs: ActivityObservation) -> ActivityContextState? {
         if let last = lastTs, obs.ts <= last { return nil }
+        if recordsScoredSeconds { lastScored = nil }
 
         if let enc = obs.encoder {
             tracking.encoderId = enc.encoderId
@@ -318,7 +330,7 @@ public struct ActivityContextDecoder: Sendable {
 
         if !firstEver { predictBody(shift: ActivityContextModel.shiftStrength(f)); predictArm() }
         let score = ActivityContextModel.score(f, temperature: config.evidenceTemperature, motionHeads: motionHeads,
-                                               gaitQuality: gaitQuality)
+                                               gaitQuality: gaitQuality, table: observationProfiles)
         applyBody(score)
         applyArm(f, motionHeads: score.arm)
         smoothArmForDisplay()
@@ -346,6 +358,7 @@ public struct ActivityContextDecoder: Sendable {
         }
 
         let post = bodyPosterior()
+        if recordsScoredSeconds { lastScored = (f, post) }
         var agreement = 0.0
         for m in 0..<BodyMode.count { agreement += post[m] * exp(score.disagreement[m]) }
         tracking.lastAgreement = min(1, max(0, agreement))
@@ -769,6 +782,9 @@ public struct ActivityContextDecoder: Sendable {
         if hold <= 0 { d.label = raw; clear(); return d.label }
 
         let crossKind = ActivityDisplay.group(raw) != ActivityDisplay.group(d.label)
+        if crossKind, confirmedByEvent(group: ActivityDisplay.group(raw), ts: ts) {
+            d.label = raw; clear(); return d.label
+        }
         if crossKind {
             if d.candidateGroup == ActivityDisplay.group(raw), let since = d.candidateSince {
                 if ts - since >= hold { d.label = raw; clear() }
@@ -783,5 +799,19 @@ public struct ActivityContextDecoder: Sendable {
             }
         }
         return d.label
+    }
+
+    /// How long after a change of position the label may follow it without a hold. Longer than the event's own
+    /// visibility: the posture settles some seconds after the burst that flagged it.
+    static let eventConfirmsS = 30
+
+    /// The hold guards against flicker, which a flagged change of position is the evidence against: a fresh,
+    /// confident event that ends in `group` lets the label follow at once, so a short stand still shows.
+    private func confirmedByEvent(group: String, ts: Int) -> Bool {
+        tracking.events.contains { event in
+            ts >= event.ts && ts - event.ts <= Self.eventConfirmsS
+                && event.probability >= PositionChanges.minimumProbability
+                && ActivityDisplay.groups(after: event.kind).contains(group)
+        }
     }
 }

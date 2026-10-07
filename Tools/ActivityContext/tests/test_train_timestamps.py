@@ -20,7 +20,7 @@ from activity_context import train
 def blocks(tmp_path_factory):
     wisdm_dir = train.write_synthetic_wisdm(str(tmp_path_factory.mktemp("wisdm")))
     subjects = train.wisdm_loader.available_subjects(wisdm_dir, list(range(1600, 1651)))
-    out, _ = train.load_all_blocks(wisdm_dir, subjects[:1])
+    out = train.load_all_blocks(wisdm_dir, subjects[:1])
     assert len(out) >= 2
     return out
 

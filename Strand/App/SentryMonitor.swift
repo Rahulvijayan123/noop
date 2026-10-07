@@ -34,7 +34,9 @@ enum SentryMonitor {
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = hangThreshold
             // Report hangs that only delay some frames, not just full stalls, and app kills by the watchdog.
+            #if os(iOS)
             options.enableReportNonFullyBlockingAppHangs = true
+            #endif
             options.enableWatchdogTerminationTracking = true
             options.enableAutoSessionTracking = true
 

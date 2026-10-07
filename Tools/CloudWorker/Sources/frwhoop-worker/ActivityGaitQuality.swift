@@ -184,8 +184,36 @@ struct GaitQualityCollector {
     var trackInput: GaitQualityTrackInput? { GaitQualityTrackInput(responses: responses) }
 }
 
-/// The ElderNet service and what to do with it. Stateless apart from the service (a class); the lane keeps the
-/// counters.
+/// ElderNet answers by request and pinned model, for this process's lifetime; the oldest go first past `capacity`
+/// (a day of hour chunks is 24 entries, a day of short uploads a few hundred).
+final class ElderNetResponseCache: @unchecked Sendable {
+    let capacity: Int
+    private let lock = NSLock()
+    private var entries: [String: GaitQualityResponse] = [:]
+    private var order: [String] = []
+
+    init(capacity: Int = 4096) { self.capacity = max(1, capacity) }
+
+    var count: Int { lock.lock(); defer { lock.unlock() }; return entries.count }
+
+    func response(_ key: String) -> GaitQualityResponse? {
+        lock.lock(); defer { lock.unlock() }
+        return entries[key]
+    }
+
+    func store(_ response: GaitQualityResponse, key: String) {
+        lock.lock(); defer { lock.unlock() }
+        if entries.updateValue(response, forKey: key) == nil { order.append(key) }
+        if order.count > capacity {
+            let drop = order.count - capacity
+            for k in order.prefix(drop) { entries[k] = nil }
+            order.removeFirst(drop)
+        }
+    }
+}
+
+/// The ElderNet service and what to do with it. Stateless apart from the service and the answer cache (classes);
+/// the lane keeps the counters.
 struct ElderNetStage {
     let service: ActivityPythonService
     let mode: ElderNetSettings.Mode
@@ -196,6 +224,16 @@ struct ElderNetStage {
     var gaitPrior: Double? = nil
     /// Wall-clock seconds this stage may spend per job (`ElderNetSettings.jobBudgetSeconds`).
     var jobBudgetSeconds: Double = ElderNetSettings.defaultJobBudgetSeconds
+    /// Answers this process already has. A job re-reads the whole day, and the day's revision moves with every
+    /// upload, so without this every claim re-runs every chunk and a job outlives the revision it must publish.
+    var responses = ElderNetResponseCache()
+
+    /// The key of `request`'s answer, or nil when the stage is not pinned (the answer could come from any model).
+    func cacheKey(_ request: ActivityPythonService.RunRequest) -> String? {
+        guard let version = expectedModelVersion, let digest = expectedWeightsDigest else { return nil }
+        return ActivityLocalCache.inferenceKey(request: request, modelVersion: "eldernet:\(version)",
+                                               preprocessingVersion: digest)
+    }
 
     enum Outcome: Equatable {
         case ok(GaitQualityResponse)

@@ -344,6 +344,78 @@ final class ActivityGroundTruthTests: XCTestCase {
         }
     }
 
+    func testTheSessionRunsTheTenMinuteFlow() {
+        let p = ActivityCalibrationProtocols.current
+        XCTAssertEqual(p.version, "calibration-v2")
+        let seconds = p.estimatedSeconds(countdownSeconds: 3)
+        XCTAssertLessThanOrEqual(seconds, 600, "a run fits in ten minutes, countdowns included")
+        XCTAssertGreaterThanOrEqual(seconds, 420, "and still holds every class long enough to window")
+        XCTAssertGreaterThan(ActivityCalibrationProtocols.v1.estimatedSeconds(countdownSeconds: 3), 3600,
+                             "v1 stays as recorded: the hour-long drill")
+    }
+
+    func testV2IsWellFormedAndCoversEveryClassAndTransition() {
+        let p = ActivityCalibrationProtocols.v2
+        var ids = Set<String>()
+        for task in p.tasks {
+            XCTAssertTrue(ids.insert(task.id).inserted, "task ids are unique: \(task.id)")
+            XCTAssertEqual(task.repetitions, 1, task.id)
+            XCTAssertEqual(task.restSeconds, 0, "\(task.id): the flow never stops to reset")
+            XCTAssertGreaterThan(task.durationSeconds, 2 * task.guardSeconds, "\(task.id) keeps a guarded interval")
+            XCTAssertNoThrow(try ActivityGroundTruthLabel.vocabularyCheck(
+                posture: task.posture, locomotion: task.locomotion, armBehavior: task.armBehavior,
+                transitionKind: task.transitionKind, semanticTag: task.semanticTag))
+            if task.transitionKind != nil {
+                XCTAssertNil(task.posture, task.id)
+                XCTAssertNil(task.locomotion, task.id)
+                XCTAssertNil(task.armBehavior, task.id)
+                let pre = task.preStateSeconds ?? 0
+                XCTAssertGreaterThanOrEqual(pre, task.guardSeconds, "\(task.id): the move lands inside the label")
+                XCTAssertGreaterThan(task.durationSeconds - pre, task.guardSeconds + 2, "\(task.id): room to move")
+            }
+        }
+        let kinds = Set(p.tasks.compactMap(\.transitionKind))
+        let everyDayMoves: [ActivityGroundTruthTransitionKind] = [.sitToStand, .standToSit, .lyingDown,
+                                                                  .gettingUp, .walkStart, .walkStop]
+        XCTAssertEqual(kinds, Set(everyDayMoves.map(\.rawValue)), "run start/stop come from workouts")
+        XCTAssertEqual(Set(p.tasks.compactMap(\.posture)),
+                       [PostureClass.seatedLikely.rawValue, PostureClass.uprightStationary.rawValue,
+                        PostureClass.recumbent.rawValue])
+        XCTAssertEqual(Set(p.tasks.compactMap(\.locomotion)),
+                       [LocomotionClass.walking.rawValue, LocomotionClass.briskWalking.rawValue])
+        let deskTags: [ActivityGroundTruthSemanticTag] = [.typing, .deskWork, .phoneUse, .fidgeting]
+        XCTAssertEqual(Set(p.tasks.compactMap(\.semanticTag)), Set(deskTags.map(\.rawValue)))
+    }
+
+    func testV2StepsFlowIntoEachOtherWithoutAReset() {
+        enum State { case seated, standing, walking, lying }
+        let moves: [String: (State, State)] = [
+            ActivityGroundTruthTransitionKind.sitToStand.rawValue: (.seated, .standing),
+            ActivityGroundTruthTransitionKind.standToSit.rawValue: (.standing, .seated),
+            ActivityGroundTruthTransitionKind.walkStart.rawValue: (.standing, .walking),
+            ActivityGroundTruthTransitionKind.walkStop.rawValue: (.walking, .standing),
+            ActivityGroundTruthTransitionKind.lyingDown.rawValue: (.standing, .lying),
+            ActivityGroundTruthTransitionKind.gettingUp.rawValue: (.lying, .standing),
+        ]
+        func span(_ t: ActivityCalibrationTask) -> (State, State)? {
+            if let kind = t.transitionKind { return moves[kind] }
+            if t.locomotion != nil { return (.walking, .walking) }
+            switch t.posture {
+            case PostureClass.seatedLikely.rawValue?: return (.seated, .seated)
+            case PostureClass.uprightStationary.rawValue?: return (.standing, .standing)
+            case PostureClass.recumbent.rawValue?: return (.lying, .lying)
+            default: return nil
+            }
+        }
+        let tasks = ActivityCalibrationProtocols.v2.tasks
+        XCTAssertEqual(span(tasks[0])?.0, .seated, "the run starts where people open the app: seated")
+        XCTAssertEqual(span(tasks[tasks.count - 1])?.1, .seated, "and ends seated")
+        for (a, b) in zip(tasks, tasks.dropFirst()) {
+            guard let sa = span(a), let sb = span(b) else { return XCTFail("unmapped step \(a.id) or \(b.id)") }
+            XCTAssertEqual(sa.1, sb.0, "\(a.id) ends where \(b.id) starts")
+        }
+    }
+
     func testProtocolCodingRoundTrips() throws {
         let data = try JSONEncoder().encode(ActivityCalibrationProtocols.v1)
         let back = try JSONDecoder().decode(ActivityCalibrationProtocolModel.self, from: data)

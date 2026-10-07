@@ -65,8 +65,8 @@ def test_censored_transition_delay_stops_at_the_next_change():
     d = E.transition_delay_censored(y, preds)
     assert d["n_transitions"] == 2 and d["n_missed"] == 1
     assert d["mean_s"] == pytest.approx(E.HOP_SECONDS)
-    # the uncensored v0 metric searches past the next change and finds nothing for 'running'
-    assert E._transition_delay(np.asarray(y), preds)["n_transitions"] == 1
+    # the session-aware metric also counts both changes and misses 'running' (censored at the session end)
+    assert E._transition_delay(np.asarray(y), preds)["n_transitions"] == 2
 
 
 def test_accepted_precision_pools_accepted_predictions():

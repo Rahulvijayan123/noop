@@ -203,7 +203,7 @@ def _write_smoke_datasets(root: Optional[str] = None) -> str:
     os.makedirs(wisdm_gyr, exist_ok=True)
     for subj in (1600, 1601):
         d = _rng_wave(600, 20, subj, bursts=(15.0,))
-        # train.parse_raw_file expects: subject,activity,ts_ns,x,y,z; (trailing semicolon)
+        # wisdm_raw.parse_raw_file expects: subject,activity,ts_ns,x,y,z; (trailing semicolon)
         with open(os.path.join(wisdm_acc, f"data_{subj}_accel_watch.txt"), "w") as f:
             for i in range(d.shape[0]):
                 ts_ns = int(i * 1e9 / 20)  # 20 Hz

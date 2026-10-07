@@ -48,7 +48,8 @@ extension ActivityDecoderConfig {
     /// caller keying a decoded track input uses `ActivityContextTrackBuilder.effectiveConfig(for:config:).cacheTag`, which
     /// drops the Inertia suffix when that input's windows are not from the config's bundle (or it has none).
     ///
-    /// ElderNet adds its own suffix (`-eg<weights12><cfgtag>`) only while its evidence is active, after Inertia's.
+    /// ElderNet adds its own suffix (`-eg<weights12><cfgtag>`) only while its evidence is active, after Inertia's,
+    /// and an adopted personal profile its own (`-pp<tag>`) last.
     public var cacheTag: String {
         var tag = "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
         if let heads = motionHeads, heads.evidenceRefusal == nil {
@@ -56,6 +57,9 @@ extension ActivityDecoderConfig {
         }
         if let gait = gaitQuality, gait.evidenceRefusal == nil {
             tag += "-eg\(gait.model.weights12)\(gait.configTag)"
+        }
+        if let personal = personalProfile, !personal.modes.isEmpty {
+            tag += "-pp\(personal.tag)"
         }
         return tag
     }

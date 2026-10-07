@@ -735,6 +735,7 @@ if activityState.read().enabled {
                 if activity.eldernet != nil {
                     $0.counters["eldernet_jobs"] = activity.stats.eldernetJobs
                     $0.counters["eldernet_chunks"] = activity.stats.eldernetChunks
+                    $0.counters["eldernet_chunks_reused"] = activity.stats.eldernetChunksReused
                     $0.counters["eldernet_windows"] = activity.stats.eldernetWindows
                     $0.counters["eldernet_failures"] = activity.stats.eldernetFailures
                     $0.counters["eldernet_unavailable"] = activity.stats.eldernetUnavailable

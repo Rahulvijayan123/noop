@@ -115,7 +115,9 @@ final class GaitQualityGoldenTests: XCTestCase {
     /// with sorted keys.
     static func stripped(_ text: String) throws -> String {
         let keys: Set<String> = ["gait_quality", "gaitQuality", "gaitQualitySeenTs", "gaitStretch", "gait",
-                                 "motion_heads", "motionHeads", "motionHeadsSeenTs"]
+                                 "motion_heads", "motionHeads", "motionHeadsSeenTs",
+                                 // The day fingerprint folds the accepted windows, so an active channel moves it.
+                                 "context_fp"]
         func strip(_ v: Any) -> Any {
             if let d = v as? [String: Any] {
                 var out: [String: Any] = [:]

@@ -64,7 +64,7 @@ enum DayStretchTotals {
         for (label, s) in doc.summary.labelSeconds { seconds[ActivityFamily.of(label), default: 0] += s }
         if doc.summary.unclearSeconds > 0 { seconds[.unclear, default: 0] += doc.summary.unclearSeconds }
         var counts: [ActivityFamily: Int] = [:]
-        for e in episodes where e.durationSeconds >= DayStretchLayout.minimumSeconds {
+        for e in episodes where DayStretchLayout.isListed(e) {
             counts[ActivityFamily.of(e.label), default: 0] += 1
         }
         return seconds
@@ -157,6 +157,7 @@ struct DayStretchesSection: View {
         ActivityImprovementSection(episodes: episodes, dayStart: dayStart, deviceId: repo.deviceId)
         earlierList(layout)
         positionChangesLink(doc)
+        WalkingQualityCard(dayStart: dayStart, window: window)
         StrapSignalCard(dayStart: dayStart, window: window)
         ActivityCalibrationEntry()
         footnote

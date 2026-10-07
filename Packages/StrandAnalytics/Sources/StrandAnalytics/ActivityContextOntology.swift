@@ -23,7 +23,9 @@ public enum ActivityContextVersions {
     /// the serve response says otherwise (A01).
     /// 1.5: adds the optional learned raw-IMU transition expert evidence channel (`ActivityContextModel`
     /// channel 4b) and the `transition` field on observations/features/windows.
-    public static let decoder = "hsmm-1.5"
+    /// 1.6: sitting and standing are separate display kinds, and a fresh, confident change-of-position event
+    /// lets the label follow without the display hold (a 15 s stand shows).
+    public static let decoder = "hsmm-1.6"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
     /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump

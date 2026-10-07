@@ -14,7 +14,7 @@ import Foundation
 // through a context prior. Heads are marginals of those two filtered posteriors; none is ever a raw
 // per-window classifier output.
 //
-// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.5`). They were set from this strap's own
+// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.6`). They were set from this strap's own
 // distributions where those exist (dynamic-acceleration percentiles for still / walking / running
 // seconds) and from physiological plausibility elsewhere. They are versioned, centralized, and meant
 // to be replaced by fitted values once labelled data exists; tests pin behaviour, not the numbers.
@@ -97,19 +97,20 @@ struct ModeProfile {
     // Fixed soft mappings onto the public heads.
     let posture: [PostureClass: Double]
     let locomotion: [LocomotionClass: Double]
-    // Observation profile.
-    let move: ClosedRange<Double>
+    // Observation profile. `move`, `orientPath`, `hrRel`, `encoder` and `arm` are the fields a wearer's
+    // `ActivityPersonalProfile` may adapt (`ActivityContextModel.profiles(for:)`); the rest stay fixed.
+    var move: ClosedRange<Double>
     let moveIsBurst: Bool
     /// Judge `move` against the 30-s median instead of the 10-s mean: recumbent rest is almost always
     /// still, with occasional bursts (turning over) that must not refute it.
     let moveIsMedian: Bool
     let gaitExpect: Double
     let cadence: ClosedRange<Double>?
-    let orientPath: ClosedRange<Double>
+    var orientPath: ClosedRange<Double>
     let expectsPostureShift: Bool
-    let hrRel: Double
-    let encoder: [String: Double]
-    let arm: [Double]          // compat with ArmBehaviorClass cases except unknown (7 values)
+    var hrRel: Double
+    var encoder: [String: Double]
+    var arm: [Double]          // compat with ArmBehaviorClass cases except unknown (7 values)
     let sleepAsleep: Double
     let workout: Double
     /// Specialist modes (stairs, cycling, vehicle) have no evidence of their own in the current feature
@@ -287,6 +288,25 @@ enum ActivityContextModel {
                     expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.6, workout: 0.5),
     ]
+
+    /// The observation table one wearer is scored with: the static `profiles` with their adopted
+    /// `ActivityPersonalProfile` applied (only the modes and fields it adapts). nil, or an empty profile,
+    /// returns `profiles` itself.
+    static func profiles(for personal: ActivityPersonalProfile?) -> [ModeProfile] {
+        guard let personal, !personal.modes.isEmpty else { return profiles }
+        var table = profiles
+        for mode in ActivityPersonalProfile.adaptableModes {
+            guard let adj = personal.modes[mode.personalKey] else { continue }
+            var p = table[mode.rawValue]
+            if let move = adj.move?.range { p.move = move }
+            if let path = adj.orientPath?.range { p.orientPath = path }
+            if let hr = adj.hrRel { p.hrRel = hr }
+            if let arm = adj.arm, arm.count == p.arm.count { p.arm = arm }
+            if let enc = adj.encoder, !enc.isEmpty { p.encoder = enc }
+            table[mode.rawValue] = p
+        }
+        return table
+    }
 
     /// Multiplier on exit weights INTO recumbent modes, by sleep evidence. Lying down is something the
     /// band can know (sleep session) far better than a wrist can sense, so without sleep evidence the
@@ -487,9 +507,14 @@ enum ActivityContextModel {
     /// Score every body mode against the features. `motionHeads` adds the Inertia-1 channels (see
     /// `ActivityContextMotionHeadsFusion.swift`) after the existing ones, and `gaitQuality` the ElderNet channel
     /// after those (`ActivityContextGaitQualityFusion.swift`); nil (the default) scores exactly as before.
+    ///
+    /// `table` is the observation profile per mode: the static `profiles`, or a wearer's adapted copy from
+    /// `profiles(for:)`. Duration priors and exits always come from the static table.
     static func score(_ f: ActivityFeatures, temperature: Double,
                       motionHeads: PreparedMotionHeads? = nil,
-                      gaitQuality: PreparedGaitQuality? = nil) -> Score {
+                      gaitQuality: PreparedGaitQuality? = nil,
+                      table: [ModeProfile] = profiles) -> Score {
+        let profiles = table
         let n = BodyMode.count
         var logL = [Double](repeating: 0, count: n)
         var dis = [Double](repeating: 0, count: n)
@@ -671,7 +696,9 @@ enum ActivityContextModel {
             let recovering = min(1, max(0, (-slope - 2) / 6))
             if recovering > 0 {
                 var v = [Double](repeating: 1, count: n)
-                for m in 0..<n where m != unknownIdx && profiles[m].hrRel >= exertionFull {
+                // Which modes mean "working hard" is a property of the mode, not of one wearer's resting
+                // pulse in it: the static table decides, whatever `table` adapted.
+                for m in 0..<n where m != unknownIdx && Self.profiles[m].hrRel >= exertionFull {
                     v[m] = 1 - 0.7 * recovering
                 }
                 add(v, unknownValue: 1.0, weight: wHRTrend, isEvidence: false)

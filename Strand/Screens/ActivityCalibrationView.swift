@@ -35,6 +35,10 @@ private struct ActivityCalibrationPage: View {
     @State private var sessionID = CalibrationSessionID()
     /// Feedback counters fed by the `onBout` closure (a reference box the view observes).
     @StateObject private var status = CalibrationStatus()
+    /// The last personal-profile fit for this account and strap, and whether one is running now.
+    @State private var personalRecord: ActivityPersonalProfileStore.Record?
+    @State private var personalScoped = true
+    @State private var refitting = false
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -46,7 +50,7 @@ private struct ActivityCalibrationPage: View {
         self.model = model
         self.live = live
         let runner = ActivityCalibrationSessionRunner(
-            protocol: ActivityCalibrationProtocols.v1,
+            protocol: ActivityCalibrationProtocols.current,
             deviceId: nil,   // the label builder reads model.ble.deviceId at save time
             gate: { ActivityCalibrationPage.gateStatus(model: model, live: live) },
             applyMode: { mode in model.ble.setActivityImuCaptureMode(mode) },
@@ -86,12 +90,16 @@ private struct ActivityCalibrationPage: View {
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 overviewCard
+                personalCard
                 liveCard
                 controls
                 savedSummary
             }
         }
-        .onAppear { wireBoutSink() }
+        .onAppear {
+            wireBoutSink()
+            refreshPersonal(refit: true)
+        }
         .onReceive(ticker) { _ in
             runner.tick()
             runner.refreshGate()
@@ -104,7 +112,118 @@ private struct ActivityCalibrationPage: View {
             // Control Center only makes the scene inactive, which does not stop the clock.
             if phase == .background { runner.cancel() }
         }
+        .onChangeCompat(of: runner.phase) { phase in
+            switch phase {
+            case .finished, .cancelled, .gate:
+                if status.savedCount > 0 {
+                    Task { try? await ActivityGroundTruthCloudSync().pushPending() }
+                    refreshPersonal(refit: true)
+                }
+            default:
+                break
+            }
+        }
     }
+
+    // MARK: - Personal calibration
+
+    /// Show the stored fit at once; with `refit`, run a fit (a no-op when nothing changed) and show its result.
+    private func refreshPersonal(refit: Bool) {
+        let store = ActivityPersonalProfileStore.shared
+        personalScoped = store.currentScope != nil
+        personalRecord = store.record()
+        guard refit, personalScoped, !refitting else { return }
+        refitting = true
+        Task { @MainActor in
+            let record = await model.refitActivityPersonalProfile()
+            personalRecord = record ?? store.record()
+            refitting = false
+        }
+    }
+
+    private var personalCard: some View {
+        StrandCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                Text("Personal calibration").font(StrandFont.overline).foregroundStyle(StrandPalette.textSecondary)
+                Text(personalHeadline)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(personalRecord?.result.status == .adopted
+                                     ? StrandPalette.statusPositive : StrandPalette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let detail = personalDetail {
+                    Text(detail)
+                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if refitting {
+                    Text("Checking your runs...")
+                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+        }
+    }
+
+    private var personalHeadline: String {
+        guard personalScoped else { return "Off: link the strap to your account to personalise it." }
+        guard let result = personalRecord?.result else {
+            return "Off: \(ActivityPersonalProfileFitter.minRuns) runs needed."
+        }
+        switch result.outcome {
+        case .needsMoreRuns(let have, let need):
+            let more = max(1, need - have)
+            return "Off: \(more) more run\(more == 1 ? "" : "s") needed."
+        case .adopted(let profile):
+            let since = Date(timeIntervalSince1970: TimeInterval(profile.fittedAt)).formatted(date: .abbreviated, time: .omitted)
+            guard let v = profile.validation else { return "Active since \(since)." }
+            let (label, before, after) = Self.headlineAccuracy(v)
+            return "Active since \(since): \(label) \(Self.pct(before)) -> \(Self.pct(after)) on your held-out runs."
+        case .notBetter:
+            return "Tried, not better; keeping the defaults."
+        }
+    }
+
+    private var personalDetail: String? {
+        guard personalScoped, let result = personalRecord?.result else {
+            return "Each run teaches the activity view how you sit, stand, lie and walk. It is only used once it beats the defaults on runs it was not fit on."
+        }
+        switch result.status {
+        case .needsMoreRuns:
+            return "\(result.runs) usable run\(result.runs == 1 ? "" : "s") so far. Your profile is tested on runs it was not fit on, so it needs at least \(result.runsNeeded)."
+        case .adopted, .notBetter:
+            guard let v = result.validation else { return nil }
+            let classes = ActivityPersonalProfile.modeKeys.compactMap { key -> String? in
+                guard let c = v.classes[key] else { return nil }
+                return "\(Self.modeName(key)) \(Self.pct(c.baselineRecall)) -> \(Self.pct(c.personalRecall))"
+            }
+            var line = "Defaults -> yours, over \(v.runs) runs: " + classes.joined(separator: ", ") + "."
+            if v.transitions > 0 {
+                line += " Position changes caught: \(v.baselineTransitionHits) -> \(v.personalTransitionHits) of \(v.transitions)."
+            }
+            return line
+        }
+    }
+
+    /// Sitting/standing accuracy when both were held out (the pair the defaults confuse most), else overall.
+    private static func headlineAccuracy(_ v: ActivityPersonalValidation) -> (String, Double, Double) {
+        if let sit = v.classes["seated"], let stand = v.classes["upright"] {
+            return ("sitting/standing accuracy", (sit.baselineRecall + stand.baselineRecall) / 2,
+                    (sit.personalRecall + stand.personalRecall) / 2)
+        }
+        return ("accuracy", v.baselineBalancedAccuracy, v.personalBalancedAccuracy)
+    }
+
+    private static func modeName(_ key: String) -> String {
+        switch key {
+        case "bedRest": return "lying"
+        case "seated": return "sitting"
+        case "upright": return "standing"
+        case "walk": return "walking"
+        case "briskWalk": return "brisk walking"
+        default: return key
+        }
+    }
+
+    private static func pct(_ x: Double) -> String { "\(Int((x * 100).rounded()))%" }
 
     // MARK: - Gate
 
@@ -190,7 +309,7 @@ private struct ActivityCalibrationPage: View {
                 Text("Session").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                 Text("\(protocolSummary)")
                     .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                Text("Keep the strap on your wrist and follow the on-screen cues. Each repetition labels the raw 100 Hz motion the strap records during the interval.")
+                Text("Keep the strap on your wrist and follow the on-screen cues. Each step labels the raw 100 Hz motion the strap records during it.")
                     .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -223,7 +342,7 @@ private struct ActivityCalibrationPage: View {
     private var idleContent: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
             Text("Guided calibration").font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
-            Text("A scripted set of posture, desk, locomotion and transition tasks. Each repetition follows a 3 s countdown and a strap cue; the guarded interval in between becomes a ground-truth label.")
+            Text("A short stretch of an ordinary day: sitting and desk work, standing up, a walk, lying down and getting up. Each step flows into the next; read the next step during the 3 s countdown and move when the strap buzzes. You'll need a chair, a few metres to walk and a bed or sofa. A few runs on different days help more than one long one.")
                 .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             gateLine
@@ -273,8 +392,12 @@ private struct ActivityCalibrationPage: View {
                 Text(task.instructions)
                     .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text(task.transitionKind != nil ? "Move now" : "Hold")
-                    .font(StrandFont.overline).foregroundStyle(StrandPalette.accent)
+                TimelineView(.periodic(from: .now, by: 0.2)) { timeline in
+                    let waiting = ActivityCalibrationSessionRunner.hasHeldPreState(task)
+                        && Int(timeline.date.timeIntervalSince1970) < cueStartTs + (task.preStateSeconds ?? 0)
+                    Text(task.transitionKind == nil ? "Keep going" : (waiting ? "Hold, wait for the buzz" : "Move now"))
+                        .font(StrandFont.overline).foregroundStyle(StrandPalette.accent)
+                }
                 activeRemaining(task: task, cueStartTs: cueStartTs)
                     .frame(maxWidth: .infinity, alignment: .center)
                 if task.transitionKind != nil, let pre = task.preStateSeconds, pre > 0 {
@@ -297,7 +420,7 @@ private struct ActivityCalibrationPage: View {
     private func restContent(taskIndex: Int, rep: Int, endsAt: Date) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
             Text("Rest").font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
-            Text("Relax between repetitions. The next cue starts automatically.")
+            Text("Stay as you are. The next step starts automatically.")
                 .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
             countdownNumber(until: endsAt)
                 .frame(maxWidth: .infinity, alignment: .center)
@@ -367,19 +490,15 @@ private struct ActivityCalibrationPage: View {
     // MARK: - Helpers
 
     private func task(at index: Int) -> ActivityCalibrationTask? {
-        let tasks = ActivityCalibrationProtocols.v1.tasks
+        let tasks = ActivityCalibrationProtocols.current.tasks
         return tasks.indices.contains(index) ? tasks[index] : nil
     }
 
     private var protocolSummary: String {
-        let tasks = ActivityCalibrationProtocols.v1.tasks
-        let totalSeconds = tasks.reduce(0) { sum, task in
-            sum + task.durationSeconds * task.repetitions
-                + (ActivityCalibrationSessionRunner.countdownSeconds + task.restSeconds)
-                    * max(0, task.repetitions - 1)
-        }
-        let minutes = max(1, Int((Double(totalSeconds) / 60).rounded()))
-        return "\(tasks.count) tasks - ~\(minutes) min - \(ActivityCalibrationProtocols.v1.version)"
+        let model = ActivityCalibrationProtocols.current
+        let totalSeconds = model.estimatedSeconds(countdownSeconds: ActivityCalibrationSessionRunner.countdownSeconds)
+        let minutes = max(1, Int((Double(totalSeconds) / 60).rounded(.up)))
+        return "\(model.tasks.count) steps - about \(minutes) min - \(model.version)"
     }
 
     private func taskHeader(_ task: ActivityCalibrationTask) -> some View {
@@ -393,12 +512,12 @@ private struct ActivityCalibrationPage: View {
 
     /// "Task i of N [ - Rep j of m]" for the running task; the countdown phase has no rep yet.
     private func progressLine(taskIndex: Int, rep: Int?) -> some View {
-        let tasks = ActivityCalibrationProtocols.v1.tasks
+        let tasks = ActivityCalibrationProtocols.current.tasks
         var line: String?
         if tasks.indices.contains(taskIndex) {
             let task = tasks[taskIndex]
-            var text = "Task \(taskIndex + 1) of \(tasks.count)"
-            if let rep {
+            var text = "Step \(taskIndex + 1) of \(tasks.count)"
+            if let rep, task.repetitions > 1 {
                 text += " - Rep \(rep + 1) of \(task.repetitions)"
             }
             line = text
