@@ -1,9 +1,22 @@
 import Foundation
 import Combine
+import GRDB
 import WhoopProtocol
 import WhoopStore
 import StrandAnalytics
 
+/// Live Watchdog driver: one tick every `WatchdogConfig.tickSeconds` while the app runs, plus best-effort
+/// background refreshes.
+///
+/// Reliability rules this type keeps (BW2):
+/// - It reads the strap the rest of the app reads: `Repository.rawPhysiologyReadIds` (active strap first, then
+///   other registered WHOOPs, then the canonical history), and persists its carry and sidecars under the
+///   active strap's registry id, rebinding when that changes (`WatchdogDeviceBinding`).
+/// - Ticks are single-flight: a request while one runs joins it, so an older tick can never overwrite a newer
+///   carry, and one `now` is captured per tick.
+/// - The window build and the evaluation run off the main actor on value copies; the main actor only gathers
+///   inputs (including the main-confined raw IMU file read) and publishes results.
+/// - A push's delivery is awaited and persisted inside the tick, so a background task completes only after it.
 @MainActor
 final class WatchdogService {
     weak var model: AppModel?
@@ -11,15 +24,25 @@ final class WatchdogService {
     private var carry = WatchdogCarry.empty
     private var liveHRRing: [HRSample] = []
     private var liveRRRing: [RRInterval] = []
-    private var lastRRSeq: Int = -1
-    private var boundDeviceId: String = ""
+    /// Last `LiveState.rrSeq` taken into the ring: every R-R packet exactly once.
+    private var rrCursor = 0
+    private var liveWristEvents: [WatchdogQualityFeed.WristEvent] = []
+    /// The key the carry and sidecars are persisted under (the active strap's registry id). Empty until bound.
+    private(set) var stateKey: String = ""
     private var cancellables = Set<AnyCancellable>()
+    private var tickInFlight: Task<Bool, Never>?
+    /// Strap families proven by stored evidence (positive only).
+    private var provenFamilies: [String: DeviceFamily] = [:]
+    /// The family of the strap that owned the last window's heart rate (nil = unknown).
+    private var lastWindowFamily: DeviceFamily?
+    /// WRIST_OFF seconds already closed by sustained HR recovery.
+    private var recoveredOffs: Set<Int> = []
+
+    /// Live ring retention: the window plus a margin for a tick that runs late.
+    private static let ringSeconds = WatchdogConfig.contextSeconds + 5 * 60
 
     func start(on model: AppModel) {
         self.model = model
-        boundDeviceId = model.deviceId
-        carry = loadCarry(deviceId: model.deviceId)
-        model.baseline.loadWatchdogSidecars(deviceId: model.deviceId)
         bindLive(model)
         loop?.cancel()
         loop = Task { [weak self] in
@@ -32,25 +55,60 @@ final class WatchdogService {
         }
     }
 
-    func tick(inject: Watchdog.WatchdogInject? = nil, skipForecast: Bool = false) async {
-        guard let model else { return }
-        if Task.isCancelled { return }
-        if model.deviceId != boundDeviceId {
-            liveHRRing = []
-            liveRRRing = []
-            lastRRSeq = -1
-            boundDeviceId = model.deviceId
-            carry = loadCarry(deviceId: model.deviceId)
-            model.baseline.loadWatchdogSidecars(deviceId: model.deviceId)
+    /// BGAppRefresh entry. On a cold background launch the launch sequence starts this service only after
+    /// `repo.refresh()`, so wait for it within the task's budget rather than tick against a nil model (which
+    /// used to return at once and report success). Returns true only when a tick ran to completion (its own,
+    /// or one already in flight that it joined).
+    func backgroundTick(budgetSeconds: Double) async -> Bool {
+        guard await waitUntilStarted(timeoutSeconds: budgetSeconds) else { return false }
+        return await tick(skipForecast: true)
+    }
+
+    /// True once `start(on:)` has bound a model; false when `timeoutSeconds` passes first or the caller is
+    /// cancelled.
+    func waitUntilStarted(timeoutSeconds: Double) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while model == nil {
+            if Task.isCancelled || Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 250_000_000)
         }
-        captureLive(model)
+        return true
+    }
+
+    /// Single-flight tick. A request while a tick runs waits for that tick instead of starting a second one
+    /// that could interleave at an await and persist an older carry over a newer one.
+    @discardableResult
+    func tick(inject: Watchdog.WatchdogInject? = nil, skipForecast: Bool = false) async -> Bool {
+        if let running = tickInFlight { return await running.value }
+        let task = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return false }
+            return await self.runTick(inject: inject, skipForecast: skipForecast)
+        }
+        tickInFlight = task
+        let completed = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        if tickInFlight == task { tickInFlight = nil }
+        return completed
+    }
+
+    private func runTick(inject: Watchdog.WatchdogInject?, skipForecast: Bool) async -> Bool {
+        guard let model else { return false }
+        if Task.isCancelled { return false }
+        await rebindIfNeeded(model)
+        let key = stateKey
+        // One clock for the whole tick.
         let now = Int(Date().timeIntervalSince1970)
+        captureLive(model, now: now)
         let liveAlerts = !model.live.backfilling
+        let intervalMinutes = WatchdogConfig.clampInterval(model.baseline.liveIntervalMinutes)
         let days = model.repo.days
         // v2 context strata (posture / walking / sleep HR) come from the stored activity-context intervals;
         // refreshed at most every 30 min, off the main actor.
         await model.baseline.refreshContextStrata(repo: model.repo)
-        if Task.isCancelled { return }
+        if Task.isCancelled { return false }
         let promptEvals = model.baseline.watchdogPromptEvaluations(days: days)
         let prompt = UniTSPrompt.from(evaluations: promptEvals)
         let window: Result<WatchdogWindow, WatchdogUnavailable>
@@ -59,34 +117,48 @@ final class WatchdogService {
         } else {
             window = .failure(.empty)
         }
-        if Task.isCancelled { return }
+        if Task.isCancelled { return false }
         let sessions = await model.repo.watchdogSleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
-        if Task.isCancelled { return }
+        if Task.isCancelled { return false }
         var sleepIntervals = sessions.map {
             WatchdogSleepInterval(startUnix: $0.effectiveStartTs, endUnix: $0.endTs)
         }
         // The strap's own asleep code (sleepStateSample state 2) covers minutes a scored
         // sleep session has not closed yet. Those minutes must not train awake rest.
         sleepIntervals.append(contentsOf: await asleepBandIntervals(model: model, now: now))
+        if Task.isCancelled { return false }
+        // A strap switch during the awaits: this tick read the old strap. Drop it; the next tick rebinds.
+        guard key == stateKey else { return false }
         let sleepOpen = sleepIntervals.contains { $0.contains(now) }
         let todayLog = model.baseline.calendarTodayLog
         let yesterdayLog = model.baseline.dayLogsByDay[BaselineStore.yesterdayKey()]
         let log = Watchdog.liveDayLog(today: todayLog, yesterday: yesterdayLog, sleepOpen: sleepOpen)
-        let result = Watchdog.evaluate(window: window,
-                                       prompt: prompt,
-                                       evaluations: promptEvals,
-                                       dayLog: log,
-                                       nowUnix: now,
-                                       liveIntervalMinutes: WatchdogConfig.defaultLiveIntervalMinutes,
-                                       previous: carry,
-                                       inject: inject,
-                                       sleepSessionOpen: sleepOpen,
-                                       sleepIntervals: sleepIntervals,
-                                       skipForecast: skipForecast,
-                                       liveAlerts: liveAlerts)
-        if Task.isCancelled { return }
+        await reconcileQueuedDelivery(model: model, now: now)
+        let previous = carry
+        // Pure evaluation (Core ML sessions are lock-guarded) on value copies, off the main actor.
+        let evaluated = await Task.detached(priority: .utility) { () -> (WatchdogResult, Data?) in
+            var result = Watchdog.evaluate(window: window,
+                                           prompt: prompt,
+                                           evaluations: promptEvals,
+                                           dayLog: log,
+                                           nowUnix: now,
+                                           liveIntervalMinutes: intervalMinutes,
+                                           previous: previous,
+                                           inject: inject,
+                                           sleepSessionOpen: sleepOpen,
+                                           sleepIntervals: sleepIntervals,
+                                           skipForecast: skipForecast,
+                                           liveAlerts: liveAlerts)
+            if result.shouldNotify { result.carry.notifyQueuedAtUnix = now }
+            return (result, try? JSONEncoder().encode(result.carry))
+        }.value
+        if Task.isCancelled { return false }
+        guard key == stateKey else { return false }
+        let result = evaluated.0
         carry = result.carry
-        persistCarry(deviceId: model.deviceId)
+        if let data = evaluated.1 {
+            UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: key))
+        }
         if case .success(let built) = window,
            Watchdog.shouldTrainUsual(result: result, dayLog: log) {
             model.baseline.ingestImu(samples: built.imu, nowUnix: now)
@@ -96,42 +168,90 @@ final class WatchdogService {
         }
         model.baseline.activityContextNote = await activityContextNote(model: model, now: now)
         model.baseline.applyWatchdog(result)
-        model.baseline.ingestLiveSidecars(result: result, deviceId: model.deviceId,
+        model.baseline.ingestLiveSidecars(result: result, deviceId: key,
                                           nowUnix: now, liveAlerts: liveAlerts,
                                           evaluations: promptEvals)
-        if result.shouldNotify, !Task.isCancelled {
-            WatchdogNotifier.post(result) { [weak self] delivery in
-                Task { @MainActor in
-                    guard let self, let model = self.model else { return }
-                    self.carry.notifyDelivery = delivery
-                    if delivery == "sent", let eid = self.carry.episodeId {
-                        self.carry.notifiedSevereEpisodeId = eid
-                        let opened = eid.split(separator: "-").last.flatMap { Int($0) } ?? now
-                        model.baseline.noteAfterSent(episodeId: eid, deviceId: model.deviceId,
-                                                     eventUnix: opened, liveAlerts: liveAlerts)
-                    }
-                    self.persistCarry(deviceId: model.deviceId)
-                    var shown = result
-                    shown.carry = self.carry
-                    model.baseline.applyWatchdog(shown)
-                }
-            }
+        if result.shouldNotify {
+            // Awaited, so the outcome is persisted before this tick (and a background task) completes.
+            let delivery = await WatchdogNotifier.deliver(result)
+            applyDelivery(delivery, result: result, queuedAt: now, key: key, liveAlerts: liveAlerts, model: model)
         }
+        return true
     }
+
+    // MARK: - Notification delivery
+
+    private func applyDelivery(_ delivery: String, result: WatchdogResult, queuedAt: Int, key: String,
+                               liveAlerts: Bool, model: AppModel) {
+        // A strap switch or a newer push owns the carry now; the stale-queue rule recovers this one.
+        guard key == stateKey, carry.notifyQueuedAtUnix == queuedAt else { return }
+        carry.notifyDelivery = delivery
+        if delivery == "sent", let eid = result.episodeId {
+            carry.notifiedSevereEpisodeId = eid
+            let opened = eid.split(separator: "-").last.flatMap { Int($0) } ?? queuedAt
+            model.baseline.noteAfterSent(episodeId: eid, deviceId: key, eventUnix: opened, liveAlerts: liveAlerts)
+        }
+        persistCarry(key: key)
+        var shown = result
+        shown.carry = carry
+        model.baseline.applyWatchdog(shown)
+    }
+
+    /// A carry still "queued" at the start of a tick lost its delivery callback (the process died mid-post).
+    /// Once it is overdue, ask Notification Center whether that push landed: delivered → "sent"; otherwise
+    /// "failed", which the policy retries after the cooldown.
+    private func reconcileQueuedDelivery(model: AppModel, now: Int) async {
+        guard WatchdogNotifyPolicy.inFlight(carry.notifyDelivery) else { return }
+        let queuedAt = carry.notifyQueuedAtUnix ?? carry.lastNotifiedAt
+        guard !WatchdogNotifyPolicy.inFlight(WatchdogNotifyPolicy.effectiveDelivery(
+            carry.notifyDelivery, queuedAtUnix: queuedAt, nowUnix: now)) else { return }
+        let key = stateKey
+        let delivered = await WatchdogNotifier.deliveredIdentifiers()
+        guard key == stateKey, WatchdogNotifyPolicy.inFlight(carry.notifyDelivery) else { return }
+        if let eid = carry.episodeId, delivered.contains(eid) {
+            carry.notifyDelivery = "sent"
+            carry.notifiedSevereEpisodeId = eid
+            let opened = eid.split(separator: "-").last.flatMap { Int($0) } ?? (queuedAt ?? now)
+            model.baseline.noteAfterSent(episodeId: eid, deviceId: key, eventUnix: opened, liveAlerts: true)
+        } else {
+            carry.notifyDelivery = "failed"
+        }
+        persistCarry(key: key)
+    }
+
+    // MARK: - Live ingest
 
     private func bindLive(_ model: AppModel) {
         cancellables.removeAll()
+        rrCursor = model.live.rrSeq
         model.live.$heartRate
-            .sink { [weak self] _ in self?.captureLive(model) }
+            .sink { [weak self, weak model] _ in
+                guard let self, let model else { return }
+                self.captureHR(model)
+            }
             .store(in: &cancellables)
-        model.live.$rr
-            .sink { [weak self] _ in self?.captureLive(model) }
+        // `rrSeq` moves after `rr` is written (`setRRIntervals`), so in this sink `live.rr` is the packet that
+        // owns the delivered sequence number: every packet once, stamped at receipt.
+        model.live.$rrSeq
+            .sink { [weak self, weak model] seq in
+                guard let self, let model else { return }
+                self.ingestRRPacket(seq: seq, packet: model.live.rr, receivedUnix: Int(Date().timeIntervalSince1970))
+                self.captureHR(model)
+            }
+            .store(in: &cancellables)
+        // Live WRIST_ON / WRIST_OFF (FrameRouter flips `worn` only on a real, fresh event).
+        model.live.$worn
+            .dropFirst()
+            .sink { [weak self] on in
+                guard let self else { return }
+                let now = Int(Date().timeIntervalSince1970)
+                self.liveWristEvents.append(.init(ts: now, on: on))
+                self.liveWristEvents.removeAll { now - $0.ts > WatchdogQualityFeedBuilder.wearLookbackSeconds }
+            }
             .store(in: &cancellables)
     }
 
-    private func captureLive(_ model: AppModel) {
-        let now = Int(Date().timeIntervalSince1970)
-        let cut = now - WatchdogConfig.contextSeconds
+    private func captureHR(_ model: AppModel) {
         if let sample = WatchdogLiveTape.hrSample(
             lastRingTs: liveHRRing.last?.ts,
             packetUnix: model.live.lastHeartRatePacketUnix,
@@ -139,138 +259,160 @@ final class WatchdogService {
         ) {
             liveHRRing.append(sample)
         }
-        if let beat = WatchdogLiveTape.rrSample(
-            lastSeq: lastRRSeq,
-            currentSeq: model.live.rrSeq,
-            lastRingTs: liveRRRing.last?.ts,
-            packetUnix: model.live.lastHeartRatePacketUnix,
-            rrMs: model.live.rr.last
-        ) {
-            lastRRSeq = model.live.rrSeq
-            liveRRRing.append(beat)
-        }
+    }
+
+    private func ingestRRPacket(seq: Int, packet: [Int], receivedUnix: Int) {
+        guard seq != rrCursor else { return }
+        rrCursor = seq
+        liveRRRing.append(contentsOf: WatchdogLiveTape.rrBeats(packet: packet, receivedUnix: receivedUnix,
+                                                               lastRingBeat: liveRRRing.last))
+    }
+
+    private func captureLive(_ model: AppModel, now: Int) {
+        captureHR(model)
+        let cut = now - Self.ringSeconds
         liveHRRing.removeAll { $0.ts < cut }
         liveRRRing.removeAll { $0.ts < cut }
+        liveWristEvents.removeAll { now - $0.ts > WatchdogQualityFeedBuilder.wearLookbackSeconds }
+    }
+
+    private func liveSnapshot(_ model: AppModel) -> WatchdogLiveInputs {
+        WatchdogLiveInputs(hrRing: liveHRRing, rrRing: liveRRRing,
+                             lastHeartRatePacketUnix: model.live.lastHeartRatePacketUnix,
+                             wristEvents: liveWristEvents,
+                             charging: model.live.connected ? model.live.charging : nil)
+    }
+
+    // MARK: - Window
+
+    /// Structure-only fallback (gap / freshness tolerances) when no evidence names the family. Never used to
+    /// convert a unit: an unknown family leaves temperature missing.
+    private static var structuralHint: DeviceFamily {
+        UserDefaults.standard.string(forKey: WhoopModel.storageKey) == WhoopModel.whoop5mg.rawValue ? .whoop5 : .whoop4
     }
 
     private func loadWindow(model: AppModel, now: Int) async -> Result<WatchdogWindow, WatchdogUnavailable> {
+        let snapshot = liveSnapshot(model)
         guard let store = await model.repo.storeHandle() else {
-            return windowFromLiveOnly(model: model, now: now)
+            let family = provenFamilies[stateKey] ?? lastWindowFamily
+            return WatchdogWindowLoader.liveOnly(snapshot: snapshot, nowUnix: now, family: family,
+                                                 structuralHint: Self.structuralHint).window
         }
+        let ids = model.repo.rawPhysiologyReadIds(store: store)
+        let devices = (try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []
+        var registry: [String: (model: String?, brand: String?)] = [:]
+        for d in devices { registry[d.id] = (d.model, d.brand) }
+        let placement = WatchdogQualityFeedBuilder.placement(at: now, rows: Self.placementRows(store: store),
+                                                             deviceIds: ids)
         let from = now - WatchdogConfig.contextSeconds
-        let id = model.deviceId
-        let family: DeviceFamily = UserDefaults.standard.string(forKey: "selectedWhoopModel") == WhoopModel.whoop5mg.rawValue
-            ? .whoop5 : .whoop4
-        let limit = family == .whoop5 ? 8_000 : 4_000
+        // The raw IMU file store is main-confined (the Collector appends on the main actor): read here, convert
+        // off the main actor. A logged bicep / other site never reads it.
+        let rawImu: [[ImuStoredRecord]] = (placement == "bicep" || placement == "other") ? [] : ids.map {
+            ImuSessionFileStore.shared.readRecords(deviceId: $0, fromTs: Int64(from), toTs: Int64(now))
+        }
+        let context = await model.repo.storedActivityContext(from: from - 600, to: now).intervals.map(\.storeRow)
+        let request = WatchdogWindowRequest(store: store, readIds: ids, nowUnix: now, live: snapshot,
+                                            registry: registry, provenFamilies: provenFamilies,
+                                            structuralHint: Self.structuralHint, placement: placement,
+                                            rawImu: rawImu, contextIntervals: context,
+                                            recoveredOffs: recoveredOffs)
+        let load = await Task.detached(priority: .utility) {
+            await WatchdogWindowLoader.load(request)
+        }.value
+        provenFamilies.merge(load.provenFamilies) { _, new in new }
+        recoveredOffs = load.recoveredOffs
+        lastWindowFamily = load.family
+        return load.window
+    }
 
-        let hrStored = (try? await store.hrSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        let rrStored = (try? await store.rrIntervals(deviceId: id, from: from, to: now, limit: 8_000)) ?? []
-        let tempLists = (try? await store.skinTempSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        let spo2Lists = (try? await store.spo2Samples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        let respRows = (try? await store.respSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        var respPerMin = WatchdogWindowBuilder.respPerMin(
-            rawRows: respRows.map { (ts: $0.ts, raw: $0.raw) },
-            ringRate: OuraRespScale.isRingRateStream(deviceId: id),
-            start: from, end: now)
-        let eventLists = (try? await store.events(deviceId: id, from: from, to: now, limit: 400)) ?? []
-        let stepLists = (try? await store.stepSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        var hr = hrStored
-        hr.append(contentsOf: liveHRRing.filter { sample in
-            sample.ts >= from && sample.ts <= now && !hr.contains(where: { $0.ts == sample.ts })
-        })
-        var rr = rrStored
-        rr.append(contentsOf: liveRRRing.filter { beat in
-            beat.ts >= from && beat.ts <= now
-        })
-        if respPerMin.isEmpty {
-            let window = Repository.hrvRollingWindowSec(spanSeconds: max(1, now - from))
-            let step = Repository.respRollingStepSec(windowSec: window)
-            respPerMin = SleepStager.rollingRespRate(rr, windowSec: window, stepSec: step)
-                .filter { $0.ts >= from && $0.ts <= now }
-                .map { WatchdogScalarSample(ts: $0.ts, value: $0.breathsPerMinute) }
-        }
-        let tempsRaw = tempLists.sorted { $0.ts < $1.ts }
-        let temps = tempsRaw.map {
-            WatchdogScalarSample(ts: $0.ts, value: skinTempCelsius(raw: $0.raw, family: family))
-        }
-        let gravity = (try? await store.gravitySamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        let imu = Self.imuSamples(gravity: gravity, family: family, store: store, deviceId: id, from: from, to: now)
-        let motion = imu.map { sample -> WatchdogScalarSample in
-            let mag = (sample.x * sample.x + sample.y * sample.y + sample.z * sample.z).squareRoot()
-            let fromVector = min(1, max(0, abs(mag - 1.0) / 0.4))
-            let occ: Double
-            if let dyn = sample.dynAccel { occ = min(1, max(0, dyn / 0.4)) }
-            else { occ = fromVector }
-            return WatchdogScalarSample(ts: sample.ts, value: occ)
-        }
-        let events = eventLists.sorted { $0.ts < $1.ts }
-        let liveBeating = WatchdogLiveTape.isFresh(
-            packetUnix: model.live.lastHeartRatePacketUnix,
-            now: now,
-            freshnessSeconds: WatchdogQuality.freshnessLimit(family)
-        )
-        let wristOff = WatchdogLiveTape.wristOff(deviceOff: lastWristOff(events), freshLiveHR: liveBeating)
-        var spo2Pct = spo2Lists.sorted { $0.ts < $1.ts }.compactMap { sample -> WatchdogScalarSample? in
-            guard let pct = WatchdogWindowBuilder.percentFromOptical(red: sample.red, ir: sample.ir) else {
-                return nil
+    /// Every placement interval row (bare and `installation:…:<id>` scopes). A plain read: no table is created
+    /// here, and a missing table is no placement (UNKNOWN).
+    private static func placementRows(store: WhoopStore) -> [WatchdogQualityFeedBuilder.PlacementRow] {
+        (try? store.registryWriter.read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT deviceId, placement, effectiveStart, effectiveEnd, recordedAt, revision
+                FROM placementInterval WHERE deviceId IS NOT NULL
+                """).map { row in
+                WatchdogQualityFeedBuilder.PlacementRow(
+                    scope: row["deviceId"] as String?,
+                    placement: row["placement"] as String? ?? "unknown",
+                    effectiveStart: row["effectiveStart"] as Int? ?? 0,
+                    effectiveEnd: row["effectiveEnd"] as Int?,
+                    recordedAt: row["recordedAt"] as Int? ?? 0,
+                    revision: Int64(row["revision"] as Int? ?? 1))
             }
-            return WatchdogScalarSample(ts: sample.ts, value: pct)
-        }
-        let aux = (try? await store.v18AuxSamples(deviceId: id, from: from, to: now, limit: limit)) ?? []
-        let strapSpO2 = Spo2StrapEstimate.readings(from: aux)
-        if spo2Pct.isEmpty {
-            spo2Pct = strapSpO2.map { WatchdogScalarSample(ts: $0.ts, value: Double($0.percent)) }
-        } else {
-            let have = Set(spo2Pct.map(\.ts))
-            spo2Pct.append(contentsOf: strapSpO2.compactMap { reading in
-                guard !have.contains(reading.ts) else { return nil }
-                return WatchdogScalarSample(ts: reading.ts, value: Double(reading.percent))
-            })
-        }
-        let usedLive = liveHRRing.contains { $0.ts >= from }
-        let hrSource: WatchdogHRSource = usedLive ? .live2A37 : (family == .whoop5 ? .ppgHr : .v18)
-        let steps = stepLists.sorted { $0.ts < $1.ts }
-        let feed = WatchdogFeed(family: family, hrSource: hrSource, nowUnix: now,
-                                hr: hr, rr: rr, skinTempC: temps, respPerMin: respPerMin,
-                                motion: motion,
-                                spo2Pct: spo2Pct, wristOff: wristOff,
-                                holdSeeds: .empty,
-                                imu: imu, steps: steps)
-        return WatchdogWindowBuilder.build(feed)
+        }) ?? []
     }
 
-    private func windowFromLiveOnly(model: AppModel, now: Int) -> Result<WatchdogWindow, WatchdogUnavailable> {
-        captureLive(model)
-        let from = now - WatchdogConfig.contextSeconds
-        let hr = liveHRRing.filter { $0.ts >= from }
-        let liveBeating = WatchdogLiveTape.isFresh(
-            packetUnix: model.live.lastHeartRatePacketUnix,
-            now: now,
-            freshnessSeconds: WatchdogQuality.freshnessLimit(.whoop4)
-        )
-        if hr.isEmpty && !liveBeating { return .failure(.empty) }
-        let feed = WatchdogFeed(family: .whoop4, hrSource: .live2A37, nowUnix: now,
-                                hr: hr, rr: liveRRRing.filter { $0.ts >= from },
-                                wristOff: false,
-                                holdSeeds: .empty)
-        return WatchdogWindowBuilder.build(feed)
-    }
-
-    private func lastWristOff(_ events: [WhoopEvent]) -> Bool {
-        var off = false
-        for e in events.sorted(by: { $0.ts < $1.ts }) {
-            if e.kind.hasPrefix("WRIST_OFF") { off = true }
-            if e.kind.hasPrefix("WRIST_ON") { off = false }
-        }
-        return off
-    }
+    // MARK: - Device binding
 
     private static let carryKeyPrefix = "noop.watchdog.carry.v2."
     private static let legacyCarryKey = "noop.watchdog.carry.v1"
     private static let legacyMigratedKey = "noop.watchdog.carry.v1.migratedTo"
+    /// Set once the pre-binding "my-whoop" state has been copied to the first non-legacy strap.
+    private static let legacyIdMigratedKey = "noop.watchdog.carry.v2.myWhoopMigratedTo"
 
     private static func carryKey(deviceId: String) -> String {
         carryKeyPrefix + deviceId
+    }
+
+    /// Every persisted per-device Watchdog key: the carry and the three sidecars `BaselineStore` loads.
+    private static func stateKeys(deviceId: String) -> [String] {
+        [carryKey(deviceId: deviceId),
+         WatchdogEventRecovery.persistKey(deviceId: deviceId),
+         WatchdogEpisodeAnnotation.persistKey(deviceId: deviceId),
+         WatchdogEpisodeLedger.persistKey(deviceId: deviceId)]
+    }
+
+    /// Bind to the active strap (`Repository.deviceId`, which follows the registry's active device). On a change:
+    /// migrate persisted state if the rules say so, reload carry + sidecars, and reset what belonged to the old
+    /// strap. A serial-identity adoption (same physical strap, rows moved) keeps the live rings.
+    private func rebindIfNeeded(_ model: AppModel) async {
+        let key = WatchdogDeviceBinding.stateKey(activeDeviceId: model.repo.deviceId)
+        guard key != stateKey else { return }
+        let previous = stateKey.isEmpty ? nil : stateKey
+        let registered: Set<String>
+        if let store = await model.repo.storeHandle() {
+            registered = Set(((try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []).map(\.id))
+        } else {
+            registered = []
+        }
+        // Re-check after the await: another tick cannot run (single-flight), but the active id can move.
+        guard WatchdogDeviceBinding.stateKey(activeDeviceId: model.repo.deviceId) == key, key != stateKey else {
+            return
+        }
+        let sameStrap = previous.map { !registered.isEmpty && !registered.contains($0) } ?? false
+        migratePersistedState(to: key, previous: previous, registered: registered)
+        if !sameStrap {
+            liveHRRing = []
+            liveRRRing = []
+            liveWristEvents = []
+            rrCursor = model.live.rrSeq
+        }
+        recoveredOffs = []
+        lastWindowFamily = nil
+        stateKey = key
+        carry = loadCarry(deviceId: key)
+        model.baseline.loadWatchdogSidecars(deviceId: key)
+    }
+
+    private func migratePersistedState(to key: String, previous: String?, registered: Set<String>) {
+        let defaults = UserDefaults.standard
+        func hasState(_ id: String) -> Bool { defaults.data(forKey: Self.carryKey(deviceId: id)) != nil }
+        let legacy = WatchdogDeviceBinding.legacyCarryId
+        guard let source = WatchdogDeviceBinding.migrationSource(
+            target: key, previous: previous,
+            targetHasState: hasState(key),
+            previousHasState: previous.map(hasState) ?? false,
+            previousStillRegistered: previous.map { registered.isEmpty || registered.contains($0) } ?? true,
+            legacyHasState: hasState(legacy),
+            legacyAlreadyMigrated: defaults.string(forKey: Self.legacyIdMigratedKey) != nil)
+        else { return }
+        for (from, to) in zip(Self.stateKeys(deviceId: source), Self.stateKeys(deviceId: key))
+        where defaults.data(forKey: to) == nil {
+            if let data = defaults.data(forKey: from) { defaults.set(data, forKey: to) }
+        }
+        if source == legacy { defaults.set(key, forKey: Self.legacyIdMigratedKey) }
     }
 
     private func loadCarry(deviceId: String) -> WatchdogCarry {
@@ -291,37 +433,13 @@ final class WatchdogService {
         return .empty
     }
 
-    private func persistCarry(deviceId: String) {
+    private func persistCarry(key: String) {
         if let data = try? JSONEncoder().encode(carry) {
-            UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: deviceId))
+            UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: key))
         }
     }
 
-    /// Lane B is SQLite `gravitySample`, plus any second the 100 Hz capture has that SQLite does not.
-    /// A live walk updates heart rate before the next gravity row is stored. Those seconds still
-    /// have dynamic acceleration in the raw file, and that is what moves the HR corridor.
-    /// SQLite x/y/z win on a shared second. A nil `dynAccel` is filled from the same second in the file.
-    /// A logged bicep or other site drops the wrist IMU model entirely.
-    private static func imuSamples(gravity: [GravitySample], family: DeviceFamily, store: WhoopStore,
-                                   deviceId: String, from: Int, to: Int) -> [WatchdogIMUSample] {
-        if placementDropsWristImu(store: store, deviceId: deviceId, now: to) { return [] }
-        _ = family
-        let sqlite = gravity.map {
-            WatchdogIMUSample(ts: $0.ts, x: $0.x, y: $0.y, z: $0.z, dynAccel: $0.dynAccel)
-        }
-        let raw = ImuSessionFileStore.shared.readRecords(deviceId: deviceId, fromTs: Int64(from), toTs: Int64(to))
-        let fromFiles = WatchdogGravityFill.fromRawIMU(raw)
-        if fromFiles.isEmpty { return sqlite }
-        if sqlite.isEmpty { return fromFiles }
-        var dynByTs: [Int: Double?] = [:]
-        for sample in fromFiles { dynByTs[sample.ts] = sample.dynAccel }
-        let covered = Set(sqlite.map(\.ts))
-        let filled = sqlite.map { sample -> WatchdogIMUSample in
-            guard sample.dynAccel == nil, let dyn = dynByTs[sample.ts] ?? nil else { return sample }
-            return WatchdogIMUSample(ts: sample.ts, x: sample.x, y: sample.y, z: sample.z, dynAccel: dyn)
-        }
-        return filled + fromFiles.filter { !covered.contains($0.ts) }
-    }
+    // MARK: - Sleep
 
     /// Strap asleep code 2, coalesced. A gap longer than 90 seconds starts a new interval.
     nonisolated static func asleepIntervals(from samples: [SleepStateSample]) -> [WatchdogSleepInterval] {
@@ -346,25 +464,15 @@ final class WatchdogService {
         return out
     }
 
+    /// The same raw-physiology ids the window reads.
     private func asleepBandIntervals(model: AppModel, now: Int) async -> [WatchdogSleepInterval] {
         guard let store = await model.repo.storeHandle() else { return [] }
         let from = now - WatchdogConfig.contextSeconds
         var samples: [SleepStateSample] = []
-        for id in await model.repo.watchdogSourceIds() {
+        for id in model.repo.rawPhysiologyReadIds(store: store) {
             samples += (try? await store.sleepStateSamples(deviceId: id, from: from, to: now + 60)) ?? []
         }
         return Self.asleepIntervals(from: samples)
-    }
-
-    private static func placementDropsWristImu(store: WhoopStore, deviceId: String, now: Int) -> Bool {
-        guard let placementStore = try? PlacementStore(dbQueue: store.registryWriter),
-              let interval = try? placementStore.activePlacement(
-                at: Date(timeIntervalSince1970: TimeInterval(now)), deviceId: deviceId)
-        else { return false }
-        switch interval.placement {
-        case .bicep, .other: return true
-        case .wrist, .unknown: return false
-        }
     }
 
     /// The heart-rate page already decodes today's activity context onto disk. Read that
