@@ -216,14 +216,116 @@ struct MetricInsight: Equatable, Sendable {
             + related.flatMap { [$0.label, $0.summary] } + citations.map(\.title)
     }
 
-    /// The first word in the explanation that would infer an illness, a medication effect or a psychological state
-    /// (`PhysiologyContextWording.forbiddenTerms`, whole words), nil when it reads clean. The server writes within
-    /// the same rules; this is the phone's last guard, and an explanation that trips it is not shown at all.
-    var forbiddenTerm: String? {
+    /// Why the explanation may not be shown (`MetricInsightWordingGuard`), nil when every string it displays reads
+    /// clean. The server writes within the same rules; this is the phone's last guard, and an explanation that trips
+    /// it is not shown at all.
+    var wordingViolation: MetricInsightWordingGuard.Violation? {
         for text in displayedText {
-            if let term = PhysiologyContextWording.containsForbiddenTerm(text) { return term }
+            if let violation = MetricInsightWordingGuard.violation(in: text) { return violation }
         }
         return nil
+    }
+}
+
+// MARK: - Wording guard
+
+/// The explanation card's wording guard: stricter than `PhysiologyContextWording.containsForbiddenTerm` (which the
+/// context screens keep using unchanged) because this text is model-written.
+///
+/// A string is first normalised with NFKC and lowercased, so compatibility forms (fullwidth letters, a no-break
+/// space) and capitals cannot hide a term. Then it is rejected outright when it holds an invisible format character
+/// (general category Cf: zero-width space, joiners, soft hyphen, bidi marks) or a word that mixes Latin letters with
+/// Cyrillic or Greek ones ("strеss" with a Cyrillic е). Finally the app's forbidden terms are matched as whole words
+/// with their simple inflections: the term followed by s, es, ed, ing, ness or nesses ("illnesses", "stresses",
+/// "side effects"), plus the irregular forms in `extraForms`. The base list is
+/// `PhysiologyContextWording.forbiddenTerms` itself, read here and never copied, so it stays identical to the
+/// server's list.
+enum MetricInsightWordingGuard {
+
+    enum Violation: Equatable, Sendable {
+        /// A forbidden term (the base term, or the irregular form) appeared, possibly inflected.
+        case forbiddenTerm(String)
+        /// An invisible format character (its scalar value).
+        case invisibleCharacter(UInt32)
+        /// A word mixing Latin letters with Cyrillic or Greek ones (as normalised).
+        case mixedScriptWord(String)
+    }
+
+    /// Forms of the base terms the suffix rule cannot reach.
+    static let extraForms = ["diagnose", "diagnoses", "diagnosing", "infections"]
+
+    /// The suffixes a term may carry and still be the term.
+    static let inflections = ["s", "es", "ed", "ing", "ness", "nesses"]
+
+    /// The text as it is matched: NFKC, then lowercase.
+    static func normalized(_ text: String) -> String {
+        text.precomposedStringWithCompatibilityMapping.lowercased()
+    }
+
+    /// The first reason `text` may not be shown, nil when it reads clean.
+    static func violation(in text: String) -> Violation? {
+        if let scalar = firstFormCharacter(text) { return .invisibleCharacter(scalar.value) }
+        let normal = normalized(text)
+        if let scalar = firstFormCharacter(normal) { return .invisibleCharacter(scalar.value) }
+        if let word = firstMixedScriptWord(normal) { return .mixedScriptWord(word) }
+        let range = NSRange(normal.startIndex..., in: normal)
+        for (term, pattern) in patterns where pattern.firstMatch(in: normal, range: range) != nil {
+            return .forbiddenTerm(term)
+        }
+        return nil
+    }
+
+    /// One whole-word pattern per term: the words of a multi-word term may be split by any whitespace or a hyphen.
+    private static let patterns: [(term: String, regex: NSRegularExpression)] = {
+        let suffixes = "(?:" + inflections.joined(separator: "|") + ")?"
+        return (PhysiologyContextWording.forbiddenTerms + extraForms).compactMap { term in
+            let words = term.split(separator: " ").map { NSRegularExpression.escapedPattern(for: String($0)) }
+            let pattern = #"\b"# + words.joined(separator: #"[\s\-\x{2010}]+"#) + suffixes + #"\b"#
+            return (try? NSRegularExpression(pattern: pattern)).map { (term, $0) }
+        }
+    }()
+
+    private static func firstFormCharacter(_ text: String) -> Unicode.Scalar? {
+        text.unicodeScalars.first { $0.properties.generalCategory == .format }
+    }
+
+    private enum Script { case latin, cyrillic, greek, other }
+
+    /// The script of a letter, by Unicode block; nil for anything that is not a letter.
+    private static func script(_ scalar: Unicode.Scalar) -> Script? {
+        guard scalar.properties.isAlphabetic else { return nil }
+        switch scalar.value {
+        case 0x41...0x5A, 0x61...0x7A, 0xC0...0xD6, 0xD8...0xF6, 0xF8...0x2AF, 0x1E00...0x1EFF, 0x2C60...0x2C7F,
+             0xA720...0xA7FF, 0xAB30...0xAB6F, 0xFF21...0xFF3A, 0xFF41...0xFF5A:
+            return .latin
+        case 0x400...0x52F, 0x1C80...0x1C8F, 0x2DE0...0x2DFF, 0xA640...0xA69F:
+            return .cyrillic
+        case 0x370...0x3FF, 0x1F00...0x1FFF:
+            return .greek
+        default:
+            return .other
+        }
+    }
+
+    /// The first word (a run of letters, marks and digits) holding Latin letters together with Cyrillic or Greek ones.
+    private static func firstMixedScriptWord(_ text: String) -> String? {
+        var word = String.UnicodeScalarView()
+        var scripts = Set<Script>()
+        func mixed() -> Bool { scripts.contains(.latin) && (scripts.contains(.cyrillic) || scripts.contains(.greek)) }
+        for scalar in text.unicodeScalars {
+            let category = scalar.properties.generalCategory
+            let inWord = scalar.properties.isAlphabetic || scalar.properties.numericType != nil
+                || category == .nonspacingMark || category == .spacingMark || category == .enclosingMark
+            if inWord {
+                word.append(scalar)
+                if let script = script(scalar) { scripts.insert(script) }
+            } else {
+                if mixed() { return String(word) }
+                word = String.UnicodeScalarView()
+                scripts = []
+            }
+        }
+        return mixed() ? String(word) : nil
     }
 }
 

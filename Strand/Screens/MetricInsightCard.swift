@@ -68,12 +68,32 @@ enum MetricInsightCopy {
     }
 }
 
+/// The marker on an explanation the card shows that is not current.
+enum MetricInsightMarker: Equatable, Sendable {
+    /// A newer analysis is being prepared: "Updating…".
+    case updating
+    /// The explanation describes earlier nights and nothing newer is on its way right now: "Earlier explanation".
+    case earlier
+}
+
+extension MetricInsightStore.State {
+    /// The marker for the shown explanation given the phone's latest measured night (`isCurrent(latestMeasuredDay:)`);
+    /// nil when there is no explanation or it is current.
+    func marker(latestMeasuredDay: String?) -> MetricInsightMarker? {
+        guard insight != nil, !isCurrent(latestMeasuredDay: latestMeasuredDay) else { return nil }
+        return phase == .pending || phase == .loading ? .updating : .earlier
+    }
+}
+
 /// Renders one `MetricInsightStore.State`. The screen owns the request (its `.task`) and hides the card entirely in
 /// local-only mode (`.hidden`).
 struct MetricInsightCard: View {
     /// Nil before the first request has started: shown as the quiet placeholder.
     let state: MetricInsightStore.State?
     var tint: Color? = nil
+    /// The latest night the screen's own series has measured (`yyyy-MM-dd`). An explanation through an earlier day is
+    /// marked as not current.
+    var latestMeasuredDay: String? = nil
 
     var body: some View {
         NoopCard(tint: tint) {
@@ -105,15 +125,16 @@ struct MetricInsightCard: View {
     }
 
     /// "Updating…" while a newer analysis is prepared over the one shown; "Earlier explanation" when the one shown is
-    /// not current and nothing newer is coming.
+    /// not current (stale, or older than the phone's latest measured night) and nothing newer is coming.
     @ViewBuilder
     private var marker: some View {
-        if let state, state.insight != nil, !state.insightIsCurrent {
-            if state.phase == .pending || state.phase == .loading {
-                StatePill("\(MetricInsightCopy.updating)", tone: .accent, pulsing: true)
-            } else {
-                StatePill("\(MetricInsightCopy.earlier)", tone: .neutral, showsDot: false)
-            }
+        switch state?.marker(latestMeasuredDay: latestMeasuredDay) {
+        case .updating?:
+            StatePill("\(MetricInsightCopy.updating)", tone: .accent, pulsing: true)
+        case .earlier?:
+            StatePill("\(MetricInsightCopy.earlier)", tone: .neutral, showsDot: false)
+        case nil:
+            EmptyView()
         }
     }
 

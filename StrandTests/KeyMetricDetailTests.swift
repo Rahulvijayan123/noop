@@ -183,7 +183,7 @@ final class KeyMetricDetailTests: XCTestCase {
 
     func testTheWordingGuardRejectsAForbiddenTermInAnyField() throws {
         let clean = try XCTUnwrap(MetricInsight.decode(F.insight()))
-        XCTAssertNil(clean.forbiddenTerm)
+        XCTAssertNil(clean.wordingViolation)
         XCTAssertNotNil(MetricInsightStore.renderable(clean))
 
         let cases: [(String, [String: Any])] = [
@@ -197,23 +197,101 @@ final class KeyMetricDetailTests: XCTestCase {
         ]
         for (field, insight) in cases {
             let decoded = try XCTUnwrap(MetricInsight.decode(insight), field)
-            XCTAssertNotNil(decoded.forbiddenTerm, field)
+            XCTAssertNotNil(decoded.wordingViolation, field)
             XCTAssertNil(MetricInsightStore.renderable(decoded), field)
         }
-        XCTAssertEqual(MetricInsight.decode(F.insight(headline: "STRESS shows here"))?.forbiddenTerm, "stress",
-                       "case-insensitive")
+        XCTAssertEqual(MetricInsight.decode(F.insight(headline: "STRESS shows here"))?.wordingViolation,
+                       .forbiddenTerm("stress"), "case-insensitive")
     }
 
     func testTheWordingGuardMatchesWholeWordsOnly() throws {
         let insight = try XCTUnwrap(MetricInsight.decode(F.insight(
             headline: "Resting heart rate is still near your usual range",
             observed: ["Distressing nothing: the illustration below shows the trend."])))
-        XCTAssertNil(insight.forbiddenTerm, "'still' is not 'ill', 'distressing' and 'illustration' are not terms")
+        XCTAssertNil(insight.wordingViolation, "'still' is not 'ill', 'distressing' and 'illustration' are not terms")
+    }
+
+    // MARK: - Wording guard hardening
+
+    typealias G = MetricInsightWordingGuard
+
+    /// The term a string trips, when it trips one.
+    private func term(_ text: String) -> String? {
+        if case .forbiddenTerm(let term)? = G.violation(in: text) { return term }
+        return nil
+    }
+
+    func testTheGuardNormalisesWithNFKCAndLowercaseBeforeMatching() {
+        XCTAssertEqual(G.normalized("ＲＥＳＴ\u{00A0}Hr"), "rest hr")
+        XCTAssertEqual(term("Ｓｔｒｅｓｓ shows here"), "stress", "fullwidth letters fold to ASCII")
+        XCTAssertEqual(term("A SIDE\u{00A0}EFFECT of the week"), "side effect", "a no-break space folds to a space")
+        XCTAssertEqual(term("a ﬁlled fever chart"), "fever", "a ligature folds and the term is still found")
+        XCTAssertEqual(term("Possible side-effects"), "side effect", "a hyphen may join the words of a term")
+    }
+
+    func testTheGuardCatchesSimpleInflections() {
+        XCTAssertEqual(term("Two illnesses this month"), "illness")
+        XCTAssertEqual(term("The week stresses your heart"), "stress")
+        XCTAssertEqual(term("Possible side effects"), "side effect")
+        XCTAssertEqual(term("Recent infections"), "infection")
+        XCTAssertEqual(term("We cannot diagnose this"), "diagnose")
+        XCTAssertNotNil(term("Nobody diagnoses from one night"))
+        XCTAssertEqual(term("Diagnosing needs a clinician"), "diagnosing")
+        for text in ["Stressing over sleep", "Moods vary", "Fevers can do this", "Calming down helps", "Tiredness shows",
+                     "Fully recovered", "Drug effects can last"] {
+            XCTAssertNotNil(term(text), text)
+        }
+        XCTAssertEqual(G.extraForms, ["diagnose", "diagnoses", "diagnosing", "infections"])
+        XCTAssertEqual(G.inflections, ["s", "es", "ed", "ing", "ness", "nesses"])
+    }
+
+    func testAnInvisibleFormCharacterRejectsTheInsightOutright() throws {
+        let formCharacters: [(String, UInt32)] = [("zero-width space", 0x200B), ("zero-width joiner", 0x200D),
+                                                  ("soft hyphen", 0x00AD), ("word joiner", 0x2060),
+                                                  ("left-to-right mark", 0x200E)]
+        for (name, value) in formCharacters {
+            let scalar = try XCTUnwrap(Unicode.Scalar(value))
+            XCTAssertEqual(G.violation(in: "Your resting heart\(Character(scalar)) rate is steady."),
+                           .invisibleCharacter(value), name)
+        }
+        XCTAssertEqual(G.violation(in: "st\u{200B}ress"), .invisibleCharacter(0x200B),
+                       "a term split by a zero-width space is rejected, not read as two clean words")
+        let hidden = try XCTUnwrap(MetricInsight.decode(F.insight(uncertainty: ["Two nights\u{200D} were not measured."])))
+        XCTAssertEqual(hidden.wordingViolation, .invisibleCharacter(0x200D))
+        XCTAssertNil(MetricInsightStore.renderable(hidden))
+    }
+
+    func testAWordMixingLatinWithCyrillicOrGreekRejectsTheInsight() throws {
+        XCTAssertEqual(G.violation(in: "Your str\u{0435}ss is high"), .mixedScriptWord("str\u{0435}ss"),
+                       "a Cyrillic е inside a Latin word")
+        XCTAssertEqual(G.violation(in: "A m\u{03BF}od change"), .mixedScriptWord("m\u{03BF}od"), "a Greek ο")
+        XCTAssertEqual(G.violation(in: "R\u{0435}sting heart rate"), .mixedScriptWord("r\u{0435}sting"),
+                       "rejected even when the word itself is not a term")
+        XCTAssertNil(G.violation(in: "Пульс в покое"), "a word in one script is not mixed")
+        XCTAssertNil(G.violation(in: "Ruhepuls σταθερός"), "words of different scripts side by side are fine")
+        let spoofed = try XCTUnwrap(MetricInsight.decode(F.insight(related: [["label": "HRV",
+                                                                             "summary": "lower aft\u{0435}r a long day"]])))
+        XCTAssertEqual(spoofed.wordingViolation, .mixedScriptWord("aft\u{0435}r"))
+        XCTAssertNil(MetricInsightStore.renderable(spoofed))
+    }
+
+    func testACleanInsightStillPassesTheHardenedGuard() throws {
+        XCTAssertNil(try XCTUnwrap(MetricInsight.decode(F.insight())).wordingViolation)
+        for text in ["Resting heart rate is still near your usual range",
+                     "Recovery of your usual range took two nights",
+                     "The illustration below shows the trend; nothing distressing",
+                     "Night-to-night variation, 6.3 h of estimated sleep, VO₂ max about 44",
+                     "52 bpm · café · 30-night median"] {
+            XCTAssertNil(G.violation(in: text), text)
+        }
+        XCTAssertNil(term("still"), "'still' is not 'ill'")
+        XCTAssertNil(term("recovery"), "'recovery' is not 'recovered'")
     }
 
     func testTheCardsOwnCopyPassesTheWordingGuard() {
         for text in MetricInsightCopy.allFixedText {
             XCTAssertNil(PhysiologyContextWording.containsForbiddenTerm(text), text)
+            XCTAssertNil(MetricInsightWordingGuard.violation(in: text), text)
             XCTAssertFalse(text.isEmpty)
         }
         let lines = MetricInsightCopy.footerLines(F.cleanInsight(), locale: Locale(identifier: "en_GB"))

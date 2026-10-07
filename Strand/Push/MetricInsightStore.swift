@@ -43,6 +43,19 @@ final class MetricInsightStore: ObservableObject {
         var insightIsCurrent: Bool
 
         static let loading = State(phase: .loading, insight: nil, insightIsCurrent: false)
+
+        /// Whether `insight` describes the latest night the PHONE has measured, not only the latest the server had.
+        ///
+        /// The value and the chart come from the phone's own series, the explanation from the server's nights through
+        /// `insight.dataThrough`. When the phone holds a measured night after that day, the explanation is about
+        /// earlier nights and must not read as current. Without a `dataThrough` (or a local night) the server's own
+        /// answer decides (`insightIsCurrent`: ready and not stale).
+        func isCurrent(latestMeasuredDay: String?) -> Bool {
+            guard insightIsCurrent, let insight else { return false }
+            guard let latest = latestMeasuredDay.flatMap(PhysiologyContextDates.date),
+                  let through = insight.dataThrough.flatMap(PhysiologyContextDates.date) else { return true }
+            return latest <= through
+        }
     }
 
     /// What the store reads its preconditions, transport and clock from (injectable for tests).
@@ -192,7 +205,7 @@ final class MetricInsightStore: ObservableObject {
 
     /// The explanation if it may be shown: nil when any of its text trips the wording guard.
     nonisolated static func renderable(_ insight: MetricInsight) -> MetricInsight? {
-        insight.forbiddenTerm == nil ? insight : nil
+        insight.wordingViolation == nil ? insight : nil
     }
 
     /// The server's suggested wait, clamped to `pollDelayRange`.

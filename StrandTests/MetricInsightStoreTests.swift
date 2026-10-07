@@ -237,6 +237,61 @@ final class MetricInsightStoreTests: XCTestCase {
         XCTAssertFalse(t.state(for: rhr)?.insightIsCurrent ?? true)
     }
 
+    // MARK: - Currency against the phone's own nights
+
+    private func shown(_ phase: MetricInsightStore.Phase, serverCurrent: Bool,
+                       dataThrough: Any?) -> MetricInsightStore.State {
+        let insight = MetricInsight.decode(F.insight(stale: !serverCurrent,
+                                                     extra: ["data_through": dataThrough ?? NSNull()]))!
+        return MetricInsightStore.State(phase: phase, insight: insight, insightIsCurrent: serverCurrent)
+    }
+
+    func testAnExplanationThroughThePhonesLatestNightIsCurrent() {
+        let ready = shown(.ready, serverCurrent: true, dataThrough: "2026-10-06")
+        XCTAssertTrue(ready.isCurrent(latestMeasuredDay: "2026-10-06"), "equal days")
+        XCTAssertNil(ready.marker(latestMeasuredDay: "2026-10-06"))
+        XCTAssertTrue(ready.isCurrent(latestMeasuredDay: "2026-10-04"), "the server is ahead of the phone")
+        XCTAssertTrue(ready.isCurrent(latestMeasuredDay: nil), "no local night: the server's answer decides")
+    }
+
+    func testANewerLocalNightShowsTheExplanationAsEarlier() {
+        let ready = shown(.ready, serverCurrent: true, dataThrough: "2026-10-06")
+        XCTAssertFalse(ready.isCurrent(latestMeasuredDay: "2026-10-07"), "the phone measured a night the explanation lacks")
+        XCTAssertEqual(ready.marker(latestMeasuredDay: "2026-10-07"), .earlier, "nothing newer is being prepared")
+        let pending = MetricInsightStore.State(phase: .pending, insight: ready.insight, insightIsCurrent: false)
+        XCTAssertEqual(pending.marker(latestMeasuredDay: "2026-10-07"), .updating, "a request is pending")
+        XCTAssertNil(MetricInsightStore.State(phase: .pending, insight: nil, insightIsCurrent: false)
+            .marker(latestMeasuredDay: "2026-10-07"), "no explanation, no marker")
+    }
+
+    func testWithoutDataThroughTheServersStaleFlagDecides() {
+        let current = shown(.ready, serverCurrent: true, dataThrough: nil)
+        XCTAssertTrue(current.isCurrent(latestMeasuredDay: "2026-10-09"))
+        XCTAssertNil(current.marker(latestMeasuredDay: "2026-10-09"))
+        let stale = shown(.unavailable, serverCurrent: false, dataThrough: nil)
+        XCTAssertFalse(stale.isCurrent(latestMeasuredDay: "2026-10-09"))
+        XCTAssertEqual(stale.marker(latestMeasuredDay: "2026-10-09"), .earlier)
+        XCTAssertTrue(shown(.ready, serverCurrent: true, dataThrough: "next tuesday")
+            .isCurrent(latestMeasuredDay: "2026-10-09"), "an unreadable day is treated as missing")
+        XCTAssertFalse(shown(.ready, serverCurrent: false, dataThrough: "2026-10-09")
+            .isCurrent(latestMeasuredDay: "2026-10-09"), "the server's stale flag still wins on equal days")
+    }
+
+    func testANewerLocalNightTurnsAReadyAnswerIntoUpdatingOnceTheServerIsAsked() async {
+        let h = InsightHarness()
+        h.answers = [answer("ready", insight: F.insight()),                                 // through 2026-10-06
+                     answer("pending", insight: F.insight(stale: true), retryAfter: 10)]    // the newer night queued
+        h.sleepError = CancellationError()
+        let s = h.store()
+        await s.refresh(rhr)
+        XCTAssertNil(s.state(for: rhr)?.marker(latestMeasuredDay: "2026-10-06"))
+        XCTAssertEqual(s.state(for: rhr)?.marker(latestMeasuredDay: "2026-10-07"), .earlier,
+                       "the phone's newer night: not current until the server has it")
+        await s.refresh(rhr)   // the screen asks again when its latest night changes
+        XCTAssertEqual(s.state(for: rhr)?.marker(latestMeasuredDay: "2026-10-07"), .updating)
+        XCTAssertEqual(h.requests.count, 2, "requests keep going as before")
+    }
+
     // MARK: - Preconditions
 
     func testLocalOnlyHidesTheCardAndSignedOutSaysSo() async {

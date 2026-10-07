@@ -56,7 +56,7 @@ struct KeyMetricDetailView: View {
                 hero
                 historyCard
                 if insightState?.phase != .hidden {
-                    MetricInsightCard(state: insightState, tint: domainTint)
+                    MetricInsightCard(state: insightState, tint: domainTint, latestMeasuredDay: nights.last?.day)
                 }
             }
             .padding(NoopMetrics.screenPadding)
