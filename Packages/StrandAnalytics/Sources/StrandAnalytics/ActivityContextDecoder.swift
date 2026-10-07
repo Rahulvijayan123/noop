@@ -130,6 +130,15 @@ struct DecoderTracking: Codable, Equatable {
     var lastInBedTs: Int?
     /// A postural event whose excursion ended before any published state showed it: shown next.
     var showNext: ActivityTransitionEvent?
+    /// The second the current excursion of the transition modes' summed mass (>= `onsetMass`), of the moving mass
+    /// and of the running mass (>= `onsetMovingMass`) began: an event's `onsetTs`. nil outside one (and in older
+    /// snapshots, whose events then carry no onset until the next excursion).
+    var transitionRiseTs: Int?
+    var movingRiseTs: Int?
+    var runRiseTs: Int?
+    /// Whether the learned transition expert spoke (confident, not abstained) during the open postural
+    /// excursion: the event's `source`.
+    var expertInExcursion: Bool?
     /// Forearm sign calibration (hsmm-1.8): gait seconds' decaying, clipped vote of the forearm-axis component
     /// and its decaying weight (`ActivityContextModel.forearmSignMinGaitS`). nil until the first walk, so a
     /// snapshot without them still decodes (and re-calibrates on the next walk).
@@ -419,7 +428,7 @@ public struct ActivityContextDecoder: Sendable {
         tracking.lastIntensity = f.m10
         tracking.lastGait = f.gait
         tracking.lastGaitAgeS = f.gaitAgeS
-        updateTracking(post, ts: obs.ts)
+        updateTracking(post, ts: obs.ts, expertSpoke: ActivityContextModel.expertTransition(f) != nil)
         if let gaitQuality { updateGaitStretch(post, arrived: obs.gaitQuality, held: f.gaitQuality, gait: gaitQuality) }
         lastTs = obs.ts
         return publishIfDue(obs.ts)
@@ -451,6 +460,10 @@ public struct ActivityContextDecoder: Sendable {
         tracking.running = false
         tracking.stationarySinceTs = nil
         tracking.activePostural = nil
+        tracking.transitionRiseTs = nil
+        tracking.movingRiseTs = nil
+        tracking.runRiseTs = nil
+        tracking.expertInExcursion = nil
         tracking.lastGait = nil
         tracking.lastGaitAgeS = nil
         tracking.lastWindowFill = 0
@@ -848,42 +861,92 @@ public struct ActivityContextDecoder: Sendable {
 
     // MARK: Tracking (events, history)
 
-    private mutating func updateTracking(_ post: [Double], ts: Int) {
+    /// Mass at which an excursion toward an event is taken to have begun (`ActivityTransitionEvent.onsetTs`).
+    static let onsetMass = 0.05
+    static let onsetMovingMass = 0.2
+
+    /// The other direction of a change of position: standing up is undone by sitting down, lying down by
+    /// getting up.
+    static func inverse(_ kind: ActivityTransitionKind) -> ActivityTransitionKind? {
+        switch kind {
+        case .sitToStandLike: return .standToSitLike
+        case .standToSitLike: return .sitToStandLike
+        case .lyingDownLike: return .gettingUpLike
+        case .gettingUpLike: return .lyingDownLike
+        case .walkStart, .walkStop, .runStart, .runStop: return nil
+        }
+    }
+
+    /// Share of its peak the open event's own direction must have fallen to before the inverse direction may
+    /// open a second event inside the same excursion (D2-12): the first change has passed, this is a new one.
+    static let inverseAfterPeakShare = 0.6
+
+    private mutating func updateTracking(_ post: [Double], ts: Int, expertSpoke: Bool = false) {
         let pMoving = post[BodyMode.walk.rawValue] + post[BodyMode.briskWalk.rawValue]
             + post[BodyMode.run.rawValue] + post[BodyMode.stairs.rawValue]
         let pRun = post[BodyMode.run.rawValue]
         let pStationary = post[BodyMode.bedRest.rawValue] + post[BodyMode.seated.rawValue] + post[BodyMode.upright.rawValue]
 
-        if pMoving >= 0.5 { tracking.lastMovingTs = ts }
+        // Where each excursion began (the events' onset), causal: the first second of the current rise.
+        func rise(_ since: Int?, _ mass: Double, _ floor: Double) -> Int? { mass >= floor ? (since ?? ts) : nil }
+        func onset(_ since: Int?) -> Int? {
+            since.map { max($0, ts - ActivityTransitionEvent.maxOnsetLeadS) }
+        }
+        tracking.movingRiseTs = rise(tracking.movingRiseTs, pMoving, Self.onsetMovingMass)
+        tracking.runRiseTs = rise(tracking.runRiseTs, pRun, Self.onsetMovingMass)
+        let decoderSource = ActivityTransitionEvent.sourceDecoder
 
         if !tracking.moving, pMoving >= 0.6 {
             tracking.moving = true
-            record(.walkStart, p: pMoving, ts: ts)
+            record(.walkStart, p: pMoving, ts: ts, onset: onset(tracking.movingRiseTs), source: decoderSource)
         } else if tracking.moving, pMoving <= 0.3 {
             tracking.moving = false
-            record(.walkStop, p: 1 - pMoving, ts: ts)
+            // The stop began the second after the moving mass last stood at half.
+            let stop = tracking.lastMovingTs.map { min(ts, $0 + 1) }
+            record(.walkStop, p: 1 - pMoving, ts: ts, onset: onset(stop), source: decoderSource)
         }
         if !tracking.running, pRun >= 0.55 {
             tracking.running = true
-            record(.runStart, p: pRun, ts: ts)
+            record(.runStart, p: pRun, ts: ts, onset: onset(tracking.runRiseTs), source: decoderSource)
         } else if tracking.running, pRun <= 0.25 {
             tracking.running = false
-            record(.runStop, p: 1 - pRun, ts: ts)
+            let stop = tracking.lastMovingTs.map { min(ts, $0 + 1) }
+            record(.runStop, p: 1 - pRun, ts: ts, onset: onset(stop), source: decoderSource)
         }
+        if pMoving >= 0.5 { tracking.lastMovingTs = ts }
 
         // Stationary run length.
         if pStationary >= 0.6 { if tracking.stationarySinceTs == nil { tracking.stationarySinceTs = ts } }
         else if pStationary <= 0.4 { tracking.stationarySinceTs = nil }
 
-        // Posture-change events: one event per excursion of a transition mode above 0.30.
+        // Posture-change events: one event per excursion of the transition modes above the floor.
         let kinds: [(BodyMode, ActivityTransitionKind)] = [
             (.sitToStand, .sitToStandLike), (.standToSit, .standToSitLike),
             (.lyingDown, .lyingDownLike), (.gettingUp, .gettingUpLike),
         ]
+        func massOf(_ kind: ActivityTransitionKind) -> Double { post[kinds.first { $0.1 == kind }!.0.rawValue] }
         let transitionTotal = kinds.reduce(0.0) { $0 + post[$1.0.rawValue] }
-        if var active = tracking.activePostural {
+        tracking.transitionRiseTs = rise(tracking.transitionRiseTs, transitionTotal, Self.onsetMass)
+        if tracking.transitionRiseTs == nil { tracking.expertInExcursion = nil }
+        else if expertSpoke { tracking.expertInExcursion = true }
+        let posturalSource = tracking.expertInExcursion == true
+            ? ActivityTransitionEvent.sourceTransitionExpert : decoderSource
+
+        // D2-12: once the open event has settled its direction and its own mass has fallen well below its peak, the
+        // inverse direction rising above the floor is a second change (stand up, then sit straight back down), not
+        // a wobble of the first: close the first and open the second rather than relabel or swallow it.
+        if let active = tracking.activePostural, ts - active.ts >= Self.posturalEventSettleS,
+           let back = Self.inverse(active.kind), massOf(back) >= Self.posturalEventFloor,
+           massOf(back) > massOf(active.kind),
+           massOf(active.kind) <= Self.inverseAfterPeakShare * active.probability {
+            if active.shown != true, let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
+                tracking.showNext = tracking.events[i]
+            }
+            tracking.activePostural = PosturalEventTrack(kind: back, ts: ts, probability: massOf(back))
+            record(back, p: massOf(back), ts: ts, onset: ts, source: posturalSource)
+        } else if var active = tracking.activePostural {
             let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts })
-            var mass = post[kinds.first { $0.1 == active.kind }!.0.rawValue]
+            var mass = massOf(active.kind)
             // Until a published state has shown it, the event follows the direction that comes to lead
             // (hsmm-1.8: a burst is no longer assigned a direction up front, so it may resolve a second or two
             // after the excursion began). Once shown it keeps its kind, so no reader ever sees two.
@@ -902,6 +965,7 @@ public struct ActivityContextDecoder: Sendable {
                 tracking.activePostural = active
                 if let i { tracking.events[i].probability = mass }
             }
+            if let i { tracking.events[i].source = posturalSource }
             if transitionTotal < Self.posturalEventFloor / 2 {
                 if active.shown != true, let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
                     tracking.showNext = tracking.events[i]
@@ -914,17 +978,25 @@ public struct ActivityContextDecoder: Sendable {
                   // single direction reached the floor; the event names the leading kind at its own mass.
                   transitionTotal >= Self.posturalEventFloor {
             tracking.activePostural = PosturalEventTrack(kind: hit.1, ts: ts, probability: post[hit.0.rawValue])
-            record(hit.1, p: post[hit.0.rawValue], ts: ts)
+            record(hit.1, p: post[hit.0.rawValue], ts: ts, onset: onset(tracking.transitionRiseTs),
+                   source: posturalSource)
         }
 
         let cutoff = ts - config.historyWindowS
         tracking.events.removeAll { $0.ts < cutoff }
     }
 
-    private mutating func record(_ kind: ActivityTransitionKind, p: Double, ts: Int) {
-        tracking.events.append(ActivityTransitionEvent(kind: kind, probability: min(1, max(0, p)), ts: ts))
+    private mutating func record(_ kind: ActivityTransitionKind, p: Double, ts: Int, onset: Int? = nil,
+                                 source: String? = nil) {
+        tracking.events.append(ActivityTransitionEvent(kind: kind, probability: min(1, max(0, p)), ts: ts,
+                                                       onsetTs: onset.map { min(ts, $0) }, source: source))
         if tracking.events.count > 24 { tracking.events.removeFirst(tracking.events.count - 24) }
     }
+
+    /// Every event the decoder flagged in its history window, newest last, each at its current (highest)
+    /// probability. `ActivityContextTrackBuilder` drains this after every second, so an event reaches the
+    /// day's document whether or not a published state showed it (D2-01).
+    var recordedEvents: [ActivityTransitionEvent] { tracking.events }
 
     // MARK: Publishing
 
@@ -1111,15 +1183,24 @@ public struct ActivityContextDecoder: Sendable {
         // once rather than waiting out the 30 s refinement hold inside the lying kind (D2-17).
         if d.label == "Asleep", tracking.lastSleep != .asleep { d.label = raw; clear(); return d.label }
 
-        let crossKind = ActivityDisplay.group(raw) != ActivityDisplay.group(d.label)
-        if crossKind, confirmedByEvent(group: ActivityDisplay.group(raw), ts: ts) {
+        let rawGroup = ActivityDisplay.group(raw), currentGroup = ActivityDisplay.group(d.label)
+        let crossKind = rawGroup != currentGroup
+        if crossKind, confirmedByEvent(group: rawGroup, leaving: currentGroup, ts: ts) {
             d.label = raw; clear(); return d.label
         }
         if crossKind {
-            if d.candidateGroup == ActivityDisplay.group(raw), let since = d.candidateSince {
-                if ts - since >= hold { d.label = raw; clear() }
+            if d.candidateGroup != nil, let since = d.candidateSince {
+                // The clock measures how long the current label has gone unsupported, not how long one new kind
+                // has led: leaving "Walking" through "Standing" and "Changing position" to "Sitting" is one change,
+                // and restarting the hold at each step held a stale label for 30 s (D2-08). The label still only
+                // moves to a kind seen on two ticks running, so a one-tick wobble never shows.
+                if d.candidateGroup == rawGroup {
+                    if ts - since >= hold { d.label = raw; clear() }
+                } else {
+                    d.candidate = raw; d.candidateGroup = rawGroup
+                }
             } else {
-                d.candidate = raw; d.candidateGroup = ActivityDisplay.group(raw); d.candidateSince = ts
+                d.candidate = raw; d.candidateGroup = rawGroup; d.candidateSince = ts
             }
         } else {
             if d.candidate == raw, d.candidateGroup == nil, let since = d.candidateSince {
@@ -1136,12 +1217,13 @@ public struct ActivityContextDecoder: Sendable {
     static let eventConfirmsS = 30
 
     /// The hold guards against flicker, which a flagged change of position is the evidence against: a fresh,
-    /// confident event that ends in `group` lets the label follow at once, so a short stand still shows.
-    private func confirmedByEvent(group: String, ts: Int) -> Bool {
+    /// confident event that ends in `group` lets the label follow at once, so a short stand still shows. A walk
+    /// or run start confirms entering the moving kind, and its stop confirms leaving it (D2-08).
+    private func confirmedByEvent(group: String, leaving current: String, ts: Int) -> Bool {
         tracking.events.contains { event in
             ts >= event.ts && ts - event.ts <= Self.eventConfirmsS
                 && event.probability >= PositionChanges.minimumProbability
-                && ActivityDisplay.groups(after: event.kind).contains(group)
+                && ActivityDisplay.groups(after: event.kind, leaving: current).contains(group)
         }
     }
 }

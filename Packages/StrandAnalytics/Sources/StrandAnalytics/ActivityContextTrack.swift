@@ -93,14 +93,7 @@ public struct ActivityContextTrack: Sendable {
     /// This track followed by one that continued it from `snapshot` (events the decoder keeps flagging
     /// across the join are listed once).
     public func appending(_ next: ActivityContextTrack) -> ActivityContextTrack {
-        var merged = events
-        for e in next.events {
-            if let i = merged.lastIndex(where: { $0.kind == e.kind && $0.ts == e.ts }) {
-                merged[i].probability = max(merged[i].probability, e.probability)
-            } else {
-                merged.append(e)
-            }
-        }
+        let merged = ActivityTransitionEvent.merging(events, next.events)
         var report = motionHeads
         if let n = next.motionHeads { report = report?.merged(with: n) ?? n }
         var gait = gaitQuality
@@ -182,20 +175,33 @@ public enum ActivityContextTrackBuilder {
         var events: [ActivityTransitionEvent] = []
         var index: [String: Int] = [:]
         var accepted = 0
+        // Every event the decoder flags, drained from its own history after each second (D2-01): a published
+        // state shows at most one event, so harvesting `state.transition` lost the earlier of two events inside
+        // one 5-s tick and kept a postural event at the probability it had when last shown, not its peak. Events
+        // restored with a snapshot were harvested by the decode that wrote it; they are listed again only if they
+        // change. The same rule as `ActivityTransitionEvent.merging`: a newer reading replaces kind, onset and
+        // source and keeps the higher probability.
+        var seen = decoder.recordedEvents
         for o in observations {
             if let floor, o.ts <= floor { continue }
             accepted += 1
-            guard let s = decoder.ingest(o) else { continue }
-            states.append(s)
-            if let t = s.transition {
-                let key = "\(t.kind.rawValue)@\(t.ts)"
-                if let i = index[key] {
-                    events[i].probability = max(events[i].probability, t.probability)
-                } else {
-                    index[key] = events.count
-                    events.append(t)
+            let s = decoder.ingest(o)
+            let now = decoder.recordedEvents
+            if now != seen {
+                for e in now where !seen.contains(e) {
+                    let key = e.identity
+                    if let i = index[key] {
+                        let p = max(events[i].probability, e.probability)
+                        events[i] = e
+                        events[i].probability = p
+                    } else {
+                        index[key] = events.count
+                        events.append(e)
+                    }
                 }
+                seen = now
             }
+            if let s { states.append(s) }
         }
         return ActivityContextTrack(states: states, events: events, snapshot: decoder.snapshot(),
                                     restore: decoder.restoreOutcome, observedSeconds: accepted,
@@ -1149,13 +1155,7 @@ public enum ActivityContextDayBuilder {
         var doc = cached
         let interval = cached.publishIntervalS
         doc.runs = ActivityContextRuns.append(cached.runs, ActivityContextRuns.coalesce(track.states, intervalS: interval))
-        for e in track.events {
-            if let i = doc.events.lastIndex(where: { $0.kind == e.kind && $0.ts == e.ts }) {
-                doc.events[i].probability = max(doc.events[i].probability, e.probability)
-            } else {
-                doc.events.append(e)
-            }
-        }
+        doc.events = ActivityTransitionEvent.merging(cached.events, track.events)
         doc.latest = track.states.last ?? cached.latest
         doc.dayEnd = max(cached.dayEnd, input.dayEnd)
         doc.generatedAt = now

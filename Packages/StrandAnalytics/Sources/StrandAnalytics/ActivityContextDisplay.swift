@@ -64,6 +64,18 @@ public enum ActivityDisplay {
         }
     }
 
+    /// `groups(after:)`, plus what starting or stopping a walk confirms: a start confirms entering the moving
+    /// kind, and a stop confirms leaving it for any still kind (only while the label is still on the moving kind,
+    /// so a stop never fast-tracks a later change between two still kinds).
+    static func groups(after kind: ActivityTransitionKind, leaving current: String) -> Set<String> {
+        switch kind {
+        case .walkStart, .runStart: return current == "moving" ? [] : ["moving"]
+        case .walkStop, .runStop:
+            return current == "moving" ? ["seated", "upright", "stationary", "transition", "lying"] : []
+        default: return groups(after: kind)
+        }
+    }
+
     /// Derives the label from the heads. `confidence` is the decoder's overall confidence.
     public static func derive(posture: HeadProbabilities<PostureClass>,
                               locomotion: HeadProbabilities<LocomotionClass>,

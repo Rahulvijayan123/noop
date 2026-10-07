@@ -225,12 +225,71 @@ public struct ActivityStateVersions: Codable, Equatable, Sendable {
 /// A flagged event with the probability that it really happened and when it was first flagged.
 public struct ActivityTransitionEvent: Codable, Equatable, Sendable {
     public var kind: ActivityTransitionKind
+    /// The highest probability the decoder gave the event while it lasted (a persisted event keeps it, whatever
+    /// a display filter later shows).
     public var probability: Double
-    /// Unix seconds when the decoder first flagged the event.
+    /// Unix seconds when the decoder first flagged the event (the detection time).
     public var ts: Int
+    /// Unix seconds the change began, as far as the decoder's own belief shows: the second the transition
+    /// modes' mass (a postural event) or the moving mass (walk / run start) first rose toward the event, or the
+    /// second after the moving mass last stood at half (walk / run stop). At most `ActivityTransitionEvent.
+    /// maxOnsetLeadS` before `ts`, and never after it. Causal: it uses nothing later than `ts`. nil when not
+    /// known (events written before the field existed, or a decode resumed from such a snapshot).
+    public var onsetTs: Int?
+    /// What flagged the event: `hsmm` (the decoder's own belief), or `transition_expert` when the learned
+    /// raw-IMU transition expert was speaking (confident, not abstained) while the event's excursion was open.
+    /// nil on events written before the field existed.
+    public var source: String?
 
-    public init(kind: ActivityTransitionKind, probability: Double, ts: Int) {
+    /// Longest back-dating of `onsetTs` before the detection second.
+    public static let maxOnsetLeadS = 10
+    public static let sourceDecoder = "hsmm"
+    public static let sourceTransitionExpert = "transition_expert"
+
+    public init(kind: ActivityTransitionKind, probability: Double, ts: Int, onsetTs: Int? = nil,
+                source: String? = nil) {
         self.kind = kind; self.probability = probability; self.ts = ts
+        self.onsetTs = onsetTs; self.source = source
+    }
+
+    enum CodingKeys: String, CodingKey {
+        // Written only when known (synthesized `encodeIfPresent`), so an event without them encodes as before.
+        case kind, probability, ts, onsetTs = "onset_ts", source
+    }
+
+    /// A change of position (sit / stand / lie / get up), as opposed to starting or stopping a walk or run.
+    public var isPostural: Bool {
+        switch kind {
+        case .sitToStandLike, .standToSitLike, .lyingDownLike, .gettingUpLike: return true
+        case .walkStart, .walkStop, .runStart, .runStop: return false
+        }
+    }
+
+    /// Whether `other` is the same flagged event (a newer reading of it). A postural event is one excursion,
+    /// identified by its detection second whatever direction it came to name (its kind may resolve after it
+    /// was first flagged); a walk / run event is identified by kind and second.
+    public func isSameEvent(as other: ActivityTransitionEvent) -> Bool { identity == other.identity }
+
+    /// The key `isSameEvent` compares.
+    var identity: String { isPostural ? "postural@\(ts)" : "\(kind.rawValue)@\(ts)" }
+
+    /// `events` with `newer` folded in, in time order: a newer reading of a listed event updates it (its kind,
+    /// onset and source are the newer reading's, its probability the higher of the two), anything else is added.
+    /// The one merge rule every harvest uses (fresh decode, chunked decode, resumed day), so all three agree.
+    public static func merging(_ events: [ActivityTransitionEvent], _ newer: [ActivityTransitionEvent])
+        -> [ActivityTransitionEvent] {
+        var out = events
+        for e in newer {
+            if let i = out.lastIndex(where: { $0.isSameEvent(as: e) }) {
+                let p = max(out[i].probability, e.probability)
+                out[i] = e
+                out[i].probability = p
+            } else {
+                out.append(e)
+            }
+        }
+        // Stable: equal seconds keep their flagging order.
+        return out.enumerated().sorted { ($0.element.ts, $0.offset) < ($1.element.ts, $1.offset) }.map(\.element)
     }
 }
 
