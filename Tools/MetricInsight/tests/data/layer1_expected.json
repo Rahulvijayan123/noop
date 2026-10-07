@@ -769,6 +769,182 @@
       "z_long" : -6.4297609151245929,
       "z7" : -2.8426960748719274
     },
+    "steps_long_history" : {
+      "copy_long" : {
+        "center" : 8067.8999999999996,
+        "center_display" : 8067.8999999999996,
+        "held" : false,
+        "hi" : 11340.769151999999,
+        "lo" : 4795.0308480000003,
+        "n" : 43,
+        "spread" : 974.06819999999993
+      },
+      "copy7" : {
+        "center" : 8490.3960506822768,
+        "center_display" : 8490.3960506822768,
+        "held" : false,
+        "hi" : 15202.559398441492,
+        "lo" : 1778.2327029230619,
+        "n" : 7,
+        "spread" : 1997.6676630235759
+      },
+      "established_long" : true,
+      "expected_long" : 8067.8999999999996,
+      "k_used" : 3.3599999999999999,
+      "n_learn" : 5.236033211811753,
+      "n_long" : 43,
+      "n7" : 7,
+      "p_change" : 0,
+      "regime_shift" : false,
+      "show_long" : true,
+      "show7" : true,
+      "slope_usable" : true,
+      "stale" : false,
+      "today" : 13812,
+      "trust_long" : 81,
+      "trust7" : 100,
+      "verdict" : {
+        "from_week" : true,
+        "hi" : 15202.559398441492,
+        "lo" : 1778.2327029230619,
+        "state" : "off",
+        "value" : 13812
+      },
+      "z_long" : 5.8970203523736844,
+      "z7" : 2.6639085408546852
+    },
+    "steps_low_day" : {
+      "copy_long" : {
+        "center" : 9718.1458333333339,
+        "center_display" : 9718.1458333333339,
+        "held" : false,
+        "hi" : 12248.291666666668,
+        "lo" : 7188,
+        "n" : 50,
+        "spread" : 1213.5081
+      },
+      "copy7" : {
+        "center" : 8695.2686471624074,
+        "center_display" : 8695.2686471624074,
+        "held" : false,
+        "hi" : 12239.721773478774,
+        "lo" : 5150.8155208460412,
+        "n" : 7,
+        "spread" : 1699.9899856320135
+      },
+      "established_long" : true,
+      "expected_long" : 9718.1458333333339,
+      "k_used" : 2.0849847094826428,
+      "n_learn" : 6.4297065118610472,
+      "n_long" : 50,
+      "n7" : 7,
+      "p_change" : 0,
+      "regime_shift" : false,
+      "show_long" : true,
+      "show7" : true,
+      "slope_usable" : true,
+      "stale" : false,
+      "today" : 1800,
+      "trust_long" : 94,
+      "trust7" : 65,
+      "verdict" : {
+        "from_week" : true,
+        "hi" : 12239.721773478774,
+        "lo" : 5150.8155208460412,
+        "state" : "off",
+        "value" : 1800
+      },
+      "z_long" : -6.5250045165197772,
+      "z7" : -4.0560642741662507
+    },
+    "steps_short_history" : {
+      "copy_long" : {
+        "center" : 4701,
+        "center_display" : 4701,
+        "held" : false,
+        "hi" : 5901,
+        "lo" : 3501,
+        "n" : 4,
+        "spread" : 500
+      },
+      "copy7" : {
+        "center" : 6725.5713178840597,
+        "center_display" : 6725.5713178840597,
+        "held" : false,
+        "hi" : 11926.192844031837,
+        "lo" : 1524.9497917362833,
+        "n" : 7,
+        "spread" : 2166.9256358949069
+      },
+      "established_long" : false,
+      "expected_long" : 4701,
+      "k_used" : 2.3999999999999999,
+      "n_learn" : 7,
+      "n_long" : 4,
+      "n7" : 7,
+      "p_change" : 0,
+      "regime_shift" : false,
+      "show_long" : true,
+      "show7" : true,
+      "slope_usable" : false,
+      "stale" : false,
+      "today" : 4939,
+      "trust_long" : 2,
+      "trust7" : 100,
+      "verdict" : {
+        "from_week" : true,
+        "hi" : 11926.192844031837,
+        "lo" : 1524.9497917362833,
+        "state" : "in_range",
+        "value" : 4939
+      },
+      "z_long" : 0.47599999999999998,
+      "z7" : -0.82447283298036822
+    },
+    "steps_zero_days_count" : {
+      "copy_long" : {
+        "center" : 7169.605263157895,
+        "center_display" : 7169.605263157895,
+        "held" : false,
+        "hi" : 10975.498767157895,
+        "lo" : 3363.7117591578949,
+        "n" : 35,
+        "spread" : 1132.7064
+      },
+      "copy7" : {
+        "center" : 6598.1092840447272,
+        "center_display" : 6598.1092840447272,
+        "held" : false,
+        "hi" : 12765.705120695251,
+        "lo" : 430.51344739420347,
+        "n" : 7,
+        "spread" : 1835.5939990031322
+      },
+      "established_long" : true,
+      "expected_long" : 7169.605263157895,
+      "k_used" : 3.3599999999999999,
+      "n_learn" : 5.6815366986942166,
+      "n_long" : 35,
+      "n7" : 7,
+      "p_change" : 0,
+      "regime_shift" : false,
+      "show_long" : true,
+      "show7" : true,
+      "slope_usable" : true,
+      "stale" : false,
+      "today" : 0,
+      "trust_long" : 66,
+      "trust7" : 60,
+      "verdict" : {
+        "from_week" : true,
+        "hi" : 12765.705120695251,
+        "lo" : 430.51344739420347,
+        "state" : "off",
+        "value" : 0
+      },
+      "z_long" : -6.3296236899146106,
+      "z7" : -3.5945363122934619
+    },
     "temp_stable" : {
       "copy_long" : {
         "center" : 34.057272727272732,

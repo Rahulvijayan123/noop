@@ -1,0 +1,267 @@
+{
+  "about" : "Recorded by Packages\/StrandAnalytics\/Tests\/StrandAnalyticsTests\/GaitServerMirrorTests (GaitWindowColumns + WalkingDayReading) for the cases in gait_cases.json.",
+  "expected" : {
+    "hop_10_no_overlap" : {
+      "assessed_windows" : 120,
+      "bouts" : [
+        {
+          "cadence_spm" : 118.01666666666667,
+          "end" : 1791080400,
+          "speed_mps" : 1.495916666666667,
+          "start" : 1791079200,
+          "steps" : 2360.6999999999985
+        }
+      ],
+      "brisk_seconds" : 1200,
+      "cadence_band_seconds" : [
+        0,
+        0,
+        810,
+        390
+      ],
+      "cadence_spm" : 118.01666666666667,
+      "hourly_seconds" : [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1200,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "regularity" : 0.8293333333333337,
+      "speed_mps" : 1.495916666666667,
+      "steps" : 2360.6999999999985,
+      "stride_m" : 1.5212500000000004,
+      "typical_speed_mps" : 1.495916666666667,
+      "walking_seconds" : 1200
+    },
+    "no_walking_but_assessed" : {
+      "assessed_windows" : 180,
+      "bouts" : [
+
+      ],
+      "brisk_seconds" : 0,
+      "cadence_band_seconds" : [
+        0,
+        0,
+        0,
+        0
+      ],
+      "cadence_spm" : null,
+      "hourly_seconds" : [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "regularity" : null,
+      "speed_mps" : null,
+      "steps" : null,
+      "stride_m" : null,
+      "typical_speed_mps" : null,
+      "walking_seconds" : 0
+    },
+    "nothing_stored" : {
+      "assessed_windows" : 0,
+      "bouts" : [
+
+      ],
+      "brisk_seconds" : 0,
+      "cadence_band_seconds" : [
+        0,
+        0,
+        0,
+        0
+      ],
+      "cadence_spm" : null,
+      "hourly_seconds" : [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "regularity" : null,
+      "speed_mps" : null,
+      "steps" : null,
+      "stride_m" : null,
+      "typical_speed_mps" : null,
+      "walking_seconds" : 0
+    },
+    "two_utc_rows_one_seam" : {
+      "assessed_windows" : 120,
+      "bouts" : [
+        {
+          "cadence_spm" : 104.15833333333333,
+          "end" : 1791039900,
+          "speed_mps" : 1.2989999999999999,
+          "start" : 1791039300,
+          "steps" : 1041.3500000000001
+        }
+      ],
+      "brisk_seconds" : 600,
+      "cadence_band_seconds" : [
+        0,
+        0,
+        600,
+        0
+      ],
+      "cadence_spm" : 104.15833333333333,
+      "hourly_seconds" : [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        300,
+        300,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "regularity" : 0.82216666666666682,
+      "speed_mps" : 1.2989999999999999,
+      "steps" : 1041.3500000000001,
+      "stride_m" : 1.49725,
+      "typical_speed_mps" : 1.2989999999999999,
+      "walking_seconds" : 600
+    },
+    "walks_pauses_and_still" : {
+      "assessed_windows" : 462,
+      "bouts" : [
+        {
+          "cadence_spm" : 109.61235955056179,
+          "end" : 1791044100,
+          "speed_mps" : 1.3925842696629209,
+          "start" : 1791043200,
+          "steps" : 1626.05
+        },
+        {
+          "cadence_spm" : 84.875,
+          "end" : 1791065040,
+          "speed_mps" : 0.97555555555555529,
+          "start" : 1791064800,
+          "steps" : 339.55000000000018
+        },
+        {
+          "cadence_spm" : 84.813953488372093,
+          "end" : 1791065280,
+          "speed_mps" : 0.98454545454545461,
+          "start" : 1791065065,
+          "steps" : 304.05000000000001
+        }
+      ],
+      "brisk_seconds" : 890,
+      "cadence_band_seconds" : [
+        0,
+        485,
+        890,
+        0
+      ],
+      "cadence_spm" : 101.07636363636364,
+      "hourly_seconds" : [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        890,
+        0,
+        0,
+        0,
+        0,
+        0,
+        455,
+        0,
+        30,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "regularity" : 0.81505454545454559,
+      "speed_mps" : 1.2726877470355729,
+      "steps" : 2316.599999999999,
+      "stride_m" : 1.4849011857707501,
+      "typical_speed_mps" : 0.98454545454545461,
+      "walking_seconds" : 1375
+    }
+  }
+}

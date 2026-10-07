@@ -69,6 +69,17 @@ def cases() -> list[dict]:
         case("spo2_low_night", "sleep_spo2_mean",
              tonight(tape(40, lambda i, r: r.gauss(96.5, 0.8), seed=16, decimals=1), 92.4)),
     ]
+    # Daily steps (waking_steps: 21 nights to establish, k 2.4, a 500-step floor; a worn day's 0 is a real 0).
+    walk = lambda mu, sd: (lambda i, r: max(0, r.gauss(mu, sd)))  # noqa: E731
+    out += [
+        case("steps_long_history", "waking_steps", tape(90, walk(8200, 1800), seed=18, decimals=0)),
+        case("steps_low_day", "waking_steps", tonight(tape(60, walk(9000, 1500), seed=19, decimals=0), 1800)),
+        case("steps_short_history", "waking_steps", tape(12, walk(6500, 1200), seed=20, decimals=0)),
+    ]
+    zeros = tape(50, walk(7000, 1600), seed=21, decimals=0, missing=0.1)
+    for index in (12, 30):
+        zeros[index][1] = 0
+    out.append(case("steps_zero_days_count", "waking_steps", tonight(zeros, 0)))
     # Gaps, nights outside the plausible range (low quality: kept, never trained) and a zero (also low quality).
     gappy = tape(60, rhr(54, 2.2), seed=5, decimals=0, missing=0.2)
     for index, value in ((10, 25), (31, 140), (44, 0)):

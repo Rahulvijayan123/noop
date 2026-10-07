@@ -1,6 +1,7 @@
-"""Layer 1, the phone Baseline (LongitudinalBaseline, param set v1.review), ported for the five night vitals.
+"""Layer 1, the phone Baseline (LongitudinalBaseline, param set v1.review), ported for the night vitals and steps.
 
-A line-by-line port of `LongitudinalBaseline.evaluate` with replay and `scoreOneDay`
+A line-by-line port of `LongitudinalBaseline.evaluate` with replay and `scoreOneDay`, for the five night vitals and
+the daily steps series,
 (Packages/StrandAnalytics/Sources/StrandAnalytics/LongitudinalBaseline.swift, LongitudinalBaselineReview.swift,
 LongitudinalBaselineTrial.swift) and of the verdict the Home ring and the Monitor show
 (`LongitudinalBaseline.vitalVerdict`), so an explanation calls a night "in range" or "off usual" exactly when the
@@ -64,10 +65,13 @@ SERIES: dict[str, Series] = {s.key: s for s in (
     Series("sleep_temp", 20, 42, 0.3, 2.0, 7, 14),
     Series("sleep_resp", 4, 40, 0.5, 1.6, 7, 14),
     Series("sleep_spo2_mean", 70, 100, 0.5, 1.5, 7, 14),
+    Series("waking_steps", 0, 200_000, 500, 2.4, 7, 21),
 )}
 # The server_daily_scores column each series reads (ServerScoreRepository → DailyMetric → nativeValue).
 COLUMNS = {"sleep_rhr": "resting_hr_bpm", "sleep_hrv_ln": "hrv_rmssd_ms", "sleep_temp": "skin_temp_c",
-           "sleep_resp": "resp_rate_bpm", "sleep_spo2_mean": "spo2_pct"}
+           "sleep_resp": "resp_rate_bpm", "sleep_spo2_mean": "spo2_pct", "waking_steps": "steps"}
+# Read as integers on the phone (ServerScoreRepository: Int(value.rounded())).
+INTEGER_SERIES = frozenset({"sleep_rhr", "waking_steps"})
 # BaselineStore.vitalsCheckSeries: the Home ring and Monitor list, in their order.
 VITALS = ("sleep_rhr", "sleep_hrv_ln", "sleep_temp", "sleep_resp", "sleep_spo2_mean")
 
@@ -318,6 +322,8 @@ def observation(native: float | None, series: Series, *, sleep_hr_only: bool = F
     value is missing (never zero)."""
     if native is None:
         return Observation(None, MISSING)
+    if series.key == "waking_steps":  # a present 0 is a real 0; only an impossible count is low quality
+        return Observation(native, LOW_QUALITY if native > series.max_val else OK)
     if native < series.min_val or native > series.max_val or sleep_hr_only:
         return Observation(native, LOW_QUALITY)
     return Observation(native, OK)
@@ -563,7 +569,7 @@ def native_values(rows: dict[date, dict[str, Any]], series: str) -> dict[date, O
         number = None if raw is None or isinstance(raw, bool) else float(raw)
         if number is not None and not math.isfinite(number):
             number = None
-        if number is not None and series == "sleep_rhr":
+        if number is not None and series in INTEGER_SERIES:
             number = round_half_away(number)
         out[day] = observation(number, spec)
     return out
