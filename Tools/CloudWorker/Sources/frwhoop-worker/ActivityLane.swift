@@ -1289,6 +1289,8 @@ struct ActivityLane {
             let input = ActivityContextDays.trackInput(
                 windows: windows, streams: streams, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
+                // A finished day's waking hours are awake, exactly as the stream day decodes them (audit D1-02).
+                sleepKnownOutsideSessions: ActivityContextDays.sleepKnown(now: now, dayEnd: dayBounds.end),
                 encoderVersion: versions.model,
                 transitionVersion: transitionVersion,
                 transitionPreprocessingVersion: versions.preprocessing,

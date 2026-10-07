@@ -143,7 +143,9 @@ enum ActivityContextDays {
 
     /// The decoder input for one job day. Sleep outside logged sessions stays "unknown" on the server
     /// unless the caller says the day has been through sleep detection (`sleepKnownOutsideSessions`):
-    /// the detector may not have run over a stretch yet, and stillness alone never means asleep.
+    /// the detector may not have run over a stretch yet, and stillness alone never means asleep. There is
+    /// no default: the raw-IMU lane took one and left every finished day's waking hours "unknown" forever
+    /// (audit D1-02), so each caller decides (`sleepKnown(now:dayEnd:)` for a stored day).
     ///
     /// `horizon` is how far the day has actually happened (`now` for the UTC day in progress, the day's end
     /// for a finished one). A WRIST_OFF with no WRIST_ON yet stays open only up to it: the decoder emits an
@@ -153,10 +155,10 @@ enum ActivityContextDays {
                            sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
                            exercise: [(start: Int, end: Int, sport: String)],
                            dayStart: Int, dayEnd: Int, horizon: Int? = nil,
+                           sleepKnownOutsideSessions: Bool,
                            encoderVersion: String,
                            transitionVersion: String = "unknown",
                            transitionPreprocessingVersion: String = "unknown",
-                           sleepKnownOutsideSessions: Bool = false,
                            gaitWindows: [ActivityGaitWindow] = []) -> ActivityContextTrackInput {
         let spanEnd = min(horizon ?? dayEnd, dayEnd)
         let offWrist = AnalyticsEngine
@@ -273,6 +275,11 @@ enum ActivityContextDays {
     /// "awake". The night that straddles midnight is only logged once the scorer has seen its morning.
     static let streamsSleepSettleSeconds = 12 * 3600
 
+    /// Whether a stored UTC day's time outside logged sleep counts as awake: once the day has been over for
+    /// `streamsSleepSettleSeconds`. Shared by the stream-day and the raw-IMU decodes so a day is the same day
+    /// whichever lane decoded it.
+    static func sleepKnown(now: Int, dayEnd: Int) -> Bool { now >= dayEnd + streamsSleepSettleSeconds }
+
     enum StreamDayOutcome: Equatable {
         /// A document was stored (its result revision).
         case stored(revision: Int64)
@@ -295,8 +302,8 @@ enum ActivityContextDays {
         var input = trackInput(
             windows: [], streams: streams, sleep: sleep, inBed: inBed, exercise: exercise,
             dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
-            encoderVersion: streamsPreprocessingVersion,
-            sleepKnownOutsideSessions: now >= dayBounds.end + streamsSleepSettleSeconds)
+            sleepKnownOutsideSessions: sleepKnown(now: now, dayEnd: dayBounds.end),
+            encoderVersion: streamsPreprocessingVersion)
         if let encoder, !encoder.isEmpty {
             input.encoderWindows = encoder.windows
             input.imuWindows = encoder.features

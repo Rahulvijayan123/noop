@@ -211,7 +211,9 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
         XCTAssertEqual(row["observed_s"], String(built.observedSeconds))
         XCTAssertEqual(row["day"], day)
         XCTAssertEqual(row["day_start"], String(dayStart))
-        XCTAssertEqual(row["known"], "false")
+        // The job day ended long before `now`, so its waking hours are awake, exactly as the stream day decodes
+        // them (audit D1-02: the raw-IMU decode used to leave every finished day "unknown" forever).
+        XCTAssertEqual(row["known"], "true")
         XCTAssertEqual(row["has_snapshot"], "false")
         XCTAssertEqual(row["job_fingerprint"], fingerprint("a"))
 
@@ -401,7 +403,7 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
             streams.events = events
             return ActivityContextDays.trackInput(
                 windows: sim.windows, streams: streams, sleep: sleep, exercise: exercise,
-                dayStart: dayStart, dayEnd: dayEnd, encoderVersion: model)
+                dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: model)
         }
 
         var shapes: [(name: String, input: ActivityContextTrackInput)] = []

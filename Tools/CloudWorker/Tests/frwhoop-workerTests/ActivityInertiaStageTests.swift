@@ -88,7 +88,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         let v1 = try ActivityLane.dayStampedJSONText(doc: &doc, day: day)
         let input = ActivityContextDays.trackInput(
             windows: inferred.windows, streams: daySim().streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: inferred.versions.model)
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: inferred.versions.model)
         let v2 = try ActivityContextDays.build(input: input, day: day, modelVersion: inferred.versions.model,
                                                preprocessingVersion: inferred.versions.preprocessing,
                                                generatedAt: 1_789_500_000).payloadText
@@ -103,7 +103,7 @@ final class ActivityInertiaStageTests: XCTestCase {
     private func contextInput() -> ActivityContextTrackInput {
         let sim = daySim()
         return ActivityContextDays.trackInput(windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-                                              dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "stub-model")
+                                              dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "stub-model")
     }
 
     private func payloadObject(_ text: String?) throws -> [String: Any] {
@@ -625,7 +625,7 @@ final class ActivityInertiaStageTests: XCTestCase {
         sim.still(360)
         var sleepInput = ActivityContextDays.trackInput(
             windows: sim.windows, streams: sim.streams, sleep: [(dayStart + 36_000, dayStart + 36_360)], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "stub-model")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "stub-model")
         sleepInput.sleepKnownOutsideSessions = true
         var cStats = ActivityLane.Stats()
         let real = try infer(try inertia("ok", kind: "inertia1", tier: "candidate", mode: .candidate), stats: &cStats)
