@@ -23,26 +23,40 @@ enum MetricInsightCopy {
     static var writtenBy: String { String(localized: "Written by AI from your measured nights.") }
     static var notAdvice: String { String(localized: "Informational only, not medical advice.") }
 
-    /// "Based on 28 nights through 6 Oct 2026 · Generated 7 Oct 2026, 02:43", from what the insight carries.
-    static func footer(_ insight: MetricInsight, locale: Locale = AppLanguage.activeLocale) -> String? {
-        var parts: [String] = []
+    /// "Based on 38 nights through Oct 6, 2026", from what the insight carries; nil when it carries neither.
+    static func basis(_ insight: MetricInsight, locale: Locale = AppLanguage.activeLocale) -> String? {
         let nights = insight.basis?.nights
         let through = (insight.dataThrough ?? insight.basis?.to).flatMap { KeyMetricDates.day($0, locale: locale) }
         switch (nights, through) {
-        case (1?, let through?): parts.append(String(localized: "Based on 1 night through \(through)"))
-        case (let n?, let through?): parts.append(String(localized: "Based on \(n) nights through \(through)"))
-        case (nil, let through?): parts.append(String(localized: "Based on nights through \(through)"))
-        case (1?, nil): parts.append(String(localized: "Based on 1 night"))
-        case (let n?, nil): parts.append(String(localized: "Based on \(n) nights"))
-        case (nil, nil): break
+        case (1?, let through?): return String(localized: "Based on 1 night through \(through)")
+        case (let n?, let through?): return String(localized: "Based on \(n) nights through \(through)")
+        case (nil, let through?): return String(localized: "Based on nights through \(through)")
+        case (1?, nil): return String(localized: "Based on 1 night")
+        case (let n?, nil): return String(localized: "Based on \(n) nights")
+        case (nil, nil): return nil
         }
-        if let generated = insight.generatedAt {
-            let when = generated.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened).locale(locale))
-            parts.append(String(localized: "Generated \(when)"))
-        }
-        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// "Generated Oct 6, 7:12 AM": the day and time the explanation was written, in the reader's locale and time
+    /// zone, without the year. Nil when the server's timestamp could not be read.
+    ///
+    /// The day and the time are formatted separately and joined by the localizable string: one combined
+    /// month-day-hour-minute style reads "Oct 6 at 7:12 AM" in current English data.
+    static func generated(_ insight: MetricInsight, locale: Locale = AppLanguage.activeLocale,
+                          timeZone: TimeZone = .autoupdatingCurrent) -> String? {
+        guard let date = insight.generatedAt else { return nil }
+        let day = date.formatted(Date.FormatStyle(locale: locale, timeZone: timeZone).month(.abbreviated).day())
+        let time = date.formatted(Date.FormatStyle(date: .omitted, time: .shortened, locale: locale, timeZone: timeZone))
+        return String(localized: "Generated \(day), \(time)")
+    }
+
+    /// The footer, one line each: what the explanation covered, then when it was written.
+    static func footerLines(_ insight: MetricInsight, locale: Locale = AppLanguage.activeLocale,
+                            timeZone: TimeZone = .autoupdatingCurrent) -> [String] {
+        [basis(insight, locale: locale), generated(insight, locale: locale, timeZone: timeZone)].compactMap { $0 }
+    }
+
+    /// The whole citation, "Title (2020)", for VoiceOver (the card truncates the title on screen).
     static func citation(_ c: MetricInsight.Citation) -> String {
         c.year.map { "\(c.title) (\($0))" } ?? c.title
     }
@@ -144,8 +158,10 @@ struct MetricInsightCard: View {
 
     private func explanation(_ insight: MetricInsight) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            // The card's most prominent text on both platforms: `title2` is 20 pt on iOS and 15 pt on macOS, above
+            // the 14 pt sentences (InsightCard's headline token).
             Text(insight.headline)
-                .font(StrandFont.headline)
+                .font(StrandFont.title2)
                 .foregroundStyle(StrandPalette.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             section(MetricInsightCopy.observed, insight.observed)
@@ -156,11 +172,10 @@ struct MetricInsightCard: View {
         }
     }
 
+    /// A section label in the hero's overline style ("Latest measured night").
     private func label(_ text: String) -> some View {
         Text(text)
-            .font(StrandFont.caption)
-            .fontWeight(.semibold)
-            .foregroundStyle(StrandPalette.textSecondary)
+            .strandOverline()
             .accessibilityAddTraits(.isHeader)
     }
 
@@ -220,27 +235,42 @@ struct MetricInsightCard: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
             label(MetricInsightCopy.sources)
             ForEach(Array(citations.enumerated()), id: \.offset) { _, citation in
-                let text = MetricInsightCopy.citation(citation)
-                Group {
-                    if let url = citation.url {
-                        Link(destination: url) {
-                            Text(text).foregroundStyle(StrandPalette.accent)
-                        }
-                    } else {
-                        Text(text).foregroundStyle(StrandPalette.textSecondary)
-                    }
+                if let url = citation.url {
+                    Link(destination: url) { citationLabel(citation, color: StrandPalette.accent) }
+                        .accessibilityLabel(Text(MetricInsightCopy.citation(citation)))
+                } else {
+                    citationLabel(citation, color: StrandPalette.textSecondary)
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel(Text(MetricInsightCopy.citation(citation)))
                 }
-                .font(StrandFont.footnote)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    /// What the explanation covered and when it was written, then where it came from.
+    /// The title on at most two lines, cut at the tail, with the year kept visible after it; leading-aligned across
+    /// the card's width (a macOS `Link` would otherwise centre a wrapped label like a button title).
+    private func citationLabel(_ citation: MetricInsight.Citation, color: Color) -> some View {
+        HStack(alignment: .lastTextBaseline, spacing: 4) {
+            Text(citation.title)
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if let year = citation.year {
+                Text(verbatim: "(\(year))")
+                    .fixedSize()
+            }
+        }
+        .font(StrandFont.footnote)
+        .foregroundStyle(color)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+    }
+
+    /// What the explanation covered and when it was written (a line each), then where it came from.
     private func notes(_ insight: MetricInsight) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-            if let footer = MetricInsightCopy.footer(insight) { Text(footer) }
+            ForEach(MetricInsightCopy.footerLines(insight), id: \.self) { Text($0) }
             Text(MetricInsightCopy.writtenBy)
             Text(MetricInsightCopy.notAdvice)
         }

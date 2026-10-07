@@ -216,23 +216,43 @@ final class KeyMetricDetailTests: XCTestCase {
             XCTAssertNil(PhysiologyContextWording.containsForbiddenTerm(text), text)
             XCTAssertFalse(text.isEmpty)
         }
-        let footer = MetricInsightCopy.footer(F.cleanInsight(), locale: Locale(identifier: "en_GB"))
-        XCTAssertNotNil(footer)
-        XCTAssertNil(footer.flatMap(PhysiologyContextWording.containsForbiddenTerm))
+        let lines = MetricInsightCopy.footerLines(F.cleanInsight(), locale: Locale(identifier: "en_GB"))
+        XCTAssertEqual(lines.count, 2)
+        for line in lines { XCTAssertNil(PhysiologyContextWording.containsForbiddenTerm(line), line) }
     }
 
-    func testTheFooterSaysWhatTheExplanationCovered() throws {
-        let gb = Locale(identifier: "en_GB")
-        let full = try XCTUnwrap(MetricInsightCopy.footer(F.cleanInsight(), locale: gb))
-        XCTAssertTrue(full.hasPrefix("Based on 28 nights through "), full)
-        XCTAssertTrue(full.contains("2026"), full)
-        XCTAssertTrue(full.contains(" · Generated "), full)
+    /// Two lines: what the explanation covered (with the year), then when it was written (without the year), in the
+    /// reader's locale and time zone.
+    func testTheFooterSaysWhatTheExplanationCoveredAndWhenItWasWritten() throws {
+        let us = Locale(identifier: "en_US"), gb = Locale(identifier: "en_GB")
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let insight = F.cleanInsight()   // basis 28 nights, data through 2026-10-06, generated 2026-10-07T02:43:31Z
+        let lines = MetricInsightCopy.footerLines(insight, locale: us, timeZone: utc)
+        XCTAssertEqual(lines.count, 2, "\(lines)")
+        XCTAssertEqual(lines.first, "Based on 28 nights through Oct 6, 2026")
+        let generated = try XCTUnwrap(lines.last)
+        XCTAssertTrue(generated.hasPrefix("Generated Oct 7, 2:43"), generated)
+        XCTAssertFalse(generated.contains("2026"), "the generated time carries no year: \(generated)")
+        XCTAssertFalse(lines.joined().contains(" · "), "no joined single line any more")
+
+        let british = try XCTUnwrap(MetricInsightCopy.generated(insight, locale: gb, timeZone: utc))
+        XCTAssertTrue(british.hasPrefix("Generated 7 Oct, "), british)
+        // The locale's own 24-hour clock (zero padding varies with the OS's locale data), never an AM/PM marker.
+        let britishTime = british.components(separatedBy: ", ").last ?? ""
+        XCTAssertTrue(["2:43", "02:43"].contains(britishTime), "24-hour clock where the locale uses one: \(british)")
+        let pacific = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        XCTAssertTrue(MetricInsightCopy.generated(insight, locale: us, timeZone: pacific)?
+            .hasPrefix("Generated Oct 6, 7:43") == true, "the reader's own time zone")
 
         let bare = try XCTUnwrap(MetricInsight.decode(["headline": "Only 2 nights measured so far"]))
-        XCTAssertNil(MetricInsightCopy.footer(bare, locale: gb))
+        XCTAssertEqual(MetricInsightCopy.footerLines(bare, locale: gb), [])
 
         let oneNight = try XCTUnwrap(MetricInsight.decode(F.insight(basis: ["nights": 1])))
-        XCTAssertTrue(MetricInsightCopy.footer(oneNight, locale: gb)?.hasPrefix("Based on 1 night through ") == true)
+        XCTAssertTrue(MetricInsightCopy.basis(oneNight, locale: gb)?.hasPrefix("Based on 1 night through ") == true)
+        let undated = try XCTUnwrap(MetricInsight.decode(F.insight(extra: ["data_through": NSNull(),
+                                                                           "generated_at": NSNull()])))
+        XCTAssertEqual(MetricInsightCopy.footerLines(undated, locale: us), ["Based on 28 nights through Oct 6, 2026"],
+                       "basis.to stands in for data_through; an unreadable time drops its line")
 
         XCTAssertEqual(MetricInsightCopy.citation(.init(id: nil, title: "A study", year: 2020, url: nil)),
                        "A study (2020)")
