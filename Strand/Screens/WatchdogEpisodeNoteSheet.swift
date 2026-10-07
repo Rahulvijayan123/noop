@@ -18,7 +18,7 @@ struct WatchdogEpisodeNoteSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("What was going on when that alert fired? Skipping is fine — it is not the same as “no symptoms,” and it does not change your usual.")
+                    Text("What was going on when that alert fired? Skipping is fine. It is not the same as “no symptoms,” and it does not change your usual.")
                         .font(StrandFont.body)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -34,7 +34,7 @@ struct WatchdogEpisodeNoteSheet: View {
                         chipRow([WatchdogAnnotationStress.low, .high],
                                 selection: $stress, label: { $0.rawValue })
                     }
-                    field("Illness (note only — not the daily log)") {
+                    field("Illness (note only, not the daily log)") {
                         chipRow([WatchdogAnnotationIllness.feltOff, .not],
                                 selection: $illness, label: {
                                     $0 == .feltOff ? "Felt off" : "Not ill"

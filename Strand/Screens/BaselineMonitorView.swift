@@ -10,12 +10,12 @@ import UIKit
 import AppKit
 #endif
 
-/// Monitor: Watchdog for the last half-hour, then the day-and-night usuals, then trends.
-/// The homepage Baseline ring opens `.baseline` and shows only the usuals.
+/// Monitor: Watchdog for the last half-hour, its triggered events, then last night against the usuals.
+/// The homepage Baseline ring (and each Monitor vital row) opens `.baseline`, which holds the plots.
 /// Treatment stays a separate caregiver screen. The plots themselves are unchanged.
 struct BaselineMonitorView: View {
     enum Focus {
-        /// Monitor tab: Watchdog, baseline, and trends.
+        /// Monitor tab: Watchdog, triggered events, and the baseline vitals list.
         case monitor
         /// Homepage Baseline ring: the day-and-night usuals only.
         case baseline
@@ -47,24 +47,30 @@ struct BaselineMonitorView: View {
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 if focus == .monitor {
-                    NaraSectionHeader(
-                        title: "Watchdog",
-                        subtitle: "Last 30 minutes. Separate from Charge."
-                    )
-                    WatchdogPlaceholderView(embedded: true)
-                    NaraSectionHeader(
-                        title: "Baseline",
-                        subtitle: "Day and night usuals. This week, and the longer copy."
-                    )
-                }
-                monitorCard
-                if focus == .monitor {
-                    NaraSectionHeader(
-                        title: "Trends",
-                        subtitle: "Charge, effort, and the other vitals over weeks and months."
-                    )
-                    TrendsView(embedded: true)
+                    VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                        NaraSectionHeader(
+                            title: "Watchdog",
+                            subtitle: "Last 30 minutes. Tap a vital for its trace."
+                        )
+                        WatchdogPlaceholderView(embedded: true)
+                    }
+                    VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                        NaraSectionHeader(
+                            title: "Triggered events",
+                            subtitle: "Last 21 days. Tap one to see why it opened."
+                        )
+                        WatchdogEventsCard()
+                    }
+                    VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                        NaraSectionHeader(
+                            title: "Baseline",
+                            subtitle: "Last night against your usual. Tap a vital for its plots."
+                        )
+                        BaselineVitalsCard()
+                    }
                     pipelineDiagnosticsLink
+                } else {
+                    monitorCard
                 }
             }
         }
@@ -74,10 +80,14 @@ struct BaselineMonitorView: View {
                 store.asOf = last
                 store.longAsOf = last
             }
-            store.rescore(days: tape)
+            store.rescore(days: tape, preferReadySeries: !store.consumeSeriesPin())
+            if focus == .monitor { store.refreshVitalsCheck(days: repo.days) }
         }
         // A synced night has to move the usuals without leaving and re-entering the tab.
-        .onChangeCompat(of: repo.refreshSeq) { _ in store.rescore(days: days) }
+        .onChangeCompat(of: repo.refreshSeq) { _ in
+            store.rescore(days: days)
+            if focus == .monitor { store.refreshVitalsCheck(days: repo.days) }
+        }
     }
 
     private var pipelineDiagnosticsLink: some View {
@@ -315,7 +325,7 @@ struct BaselineMonitorView: View {
                 }
             }
             if store.evaluation?.trial.phase == .washingOut, let days = tr?.washoutDaysUsed {
-                Text("Washing out — you entered \(days) days after last dose.")
+                Text("Washing out. You entered \(days) days after last dose.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
@@ -366,7 +376,7 @@ struct BaselineMonitorView: View {
                 .lineLimit(2)
                 .minimumScaleFactor(0.8)
                 .fixedSize(horizontal: false, vertical: true)
-            Text(value.map { BaselineMonitorView.format($0, unit: "") } ?? "—")
+            Text(value.map { BaselineMonitorView.format($0, unit: "") } ?? "–")
                 .font(StrandFont.rounded(20, weight: .bold))
                 .foregroundStyle(StrandPalette.textPrimary)
                 .monospacedDigit()
@@ -1071,6 +1081,156 @@ struct DayLogTodayButton: View {
             BaselineDayLogSheet(days: store.displayDays(from: repo.days))
                 .environmentObject(store)
         }
+    }
+}
+
+/// Last scored night, one row per night vital against its own usual. Each row opens that vital's plots.
+private struct BaselineVitalsCard: View {
+    @EnvironmentObject private var repo: Repository
+    @EnvironmentObject private var store: BaselineStore
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
+
+    private var fahrenheit: Bool {
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+                                     override: temperatureRaw) == .fahrenheit
+    }
+
+    var body: some View {
+        NoopCard(padding: 0) {
+            if let check = store.vitalsCheck {
+                VStack(alignment: .leading, spacing: 0) {
+                    summary(check)
+                    ForEach(check.vitals) { vital in
+                        Divider().overlay(NoopVisualStyle.divider).padding(.leading, 16)
+                        NavigationLink(value: TabRoute.baselineCharts) {
+                            row(vital)
+                        }
+                        .buttonStyle(.plain)
+                        .simultaneousGesture(TapGesture().onEnded {
+                            store.openVital(vital.series, days: store.displayDays(from: repo.days))
+                        })
+                        .accessibilityHint("Opens the \(vital.name) plots")
+                    }
+                }
+            } else if repo.days.isEmpty {
+                empty("No nights synced yet", "Wear the strap overnight. After the first scored night, each vital shows here against your usual.")
+            } else {
+                empty("No scored night yet", "Nights sync but none has been scored yet. Pull to refresh once the strap has synced.")
+            }
+        }
+    }
+
+    private func summary(_ check: BaselineVitalsCheck) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(check.statusLine)
+                .font(StrandFont.headline)
+                .foregroundStyle(check.offCount > 0 ? StrandPalette.statusWarning : StrandPalette.textPrimary)
+            Spacer(minLength: 8)
+            Text(Self.nightLabel(check.night))
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .padding(16)
+    }
+
+    private func row(_ vital: BaselineVitalsCheck.Vital) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            Circle()
+                .fill(Self.tone(vital.state))
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(vital.name)
+                    .font(StrandFont.subhead.weight(.semibold))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text(usualLine(vital))
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .monospacedDigit()
+            }
+            Spacer(minLength: 8)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(vital.value.map { show($0, vital) } ?? "–")
+                    .font(StrandFont.rounded(17, weight: .bold))
+                    .foregroundStyle(vital.value == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+                    .monospacedDigit()
+                Text(Self.stateLabel(vital.state))
+                    .font(StrandFont.caption.weight(.semibold))
+                    .foregroundStyle(Self.tone(vital.state))
+            }
+            Image(systemName: "chevron.right")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(StrandPalette.textTertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .frame(minHeight: 56)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+
+    private func empty(_ title: String, _ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(StrandFont.subhead.weight(.semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+            Text(detail)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func isTemp(_ vital: BaselineVitalsCheck.Vital) -> Bool { vital.series == .sleepTemp }
+
+    private func show(_ value: Double, _ vital: BaselineVitalsCheck.Vital) -> String {
+        if isTemp(vital), fahrenheit {
+            return String(format: "%.1f °F", UnitFormatter.celsiusToFahrenheit(value))
+        }
+        if vital.unit == "bpm" || vital.unit == "ms" || vital.unit == "%" {
+            return String(format: "%.0f %@", value, vital.unit)
+        }
+        return BaselineMonitorView.format(value, unit: vital.unit)
+    }
+
+    private func usualLine(_ vital: BaselineVitalsCheck.Vital) -> String {
+        guard let lo = vital.bandLo, let hi = vital.bandHi else {
+            return vital.state == .learning ? "Building your usual" : "No usual yet"
+        }
+        let range = "\(show(lo, vital).split(separator: " ").first ?? "")–\(show(hi, vital))"
+        return "Usual \(range)\(vital.fromWeek ? ", this week" : ", 60 days")"
+    }
+
+    private static func tone(_ state: BaselineVitalsCheck.Vital.State) -> Color {
+        switch state {
+        case .inRange: return StrandPalette.statusPositive
+        case .off: return StrandPalette.statusWarning
+        case .learning, .noReading: return StrandPalette.textTertiary
+        }
+    }
+
+    private static func stateLabel(_ state: BaselineVitalsCheck.Vital.State) -> String {
+        switch state {
+        case .inRange: return "In range"
+        case .off: return "Off usual"
+        case .learning: return "Learning"
+        case .noReading: return "No reading"
+        }
+    }
+
+    private static func nightLabel(_ key: String) -> String {
+        let parse = DateFormatter()
+        parse.locale = Locale(identifier: "en_US_POSIX")
+        parse.dateFormat = "yyyy-MM-dd"
+        guard let date = parse.date(from: key) else { return key }
+        if Calendar.current.isDateInToday(date) { return "Last night" }
+        let out = DateFormatter()
+        out.setLocalizedDateFormatFromTemplate("EEEdMMM")
+        return "Night of \(out.string(from: date))"
     }
 }
 

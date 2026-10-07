@@ -332,13 +332,7 @@ struct LiquidTodayView: View {
                     ForEach(sectionOrder) { section in
                         switch section {
                         case .hero:
-                            heroCard
-                            // Layer 1 Baseline + live Watchdog, and the daily log that labels the day for them.
-                            // Riding with the hero keeps them out of the Android-shared section order.
-                            if selectedDayOffset == 0 {
-                                BaselineTodayPeek(liquid: true)
-                                DayLogTodayButton(liquid: true)
-                            }
+                        heroCard
                         case .synthesis: EmptyView()
                         case .keyMetrics: keyMetricsSection
                         case .workouts: lastWorkoutsSection
@@ -610,31 +604,10 @@ struct LiquidTodayView: View {
         }
     }
 
-    /// Heart-rate reserve in use, from the banked 5-minute HR buckets: the latest bucket for today, the
-    /// day's peak for a past day.
-    private var watchdogLoad: Double? {
-        let bpm: Double? = selectedDayOffset == 0 ? hrValues.last : hrValues.max()
-        let stored = displayDay?.restingHr ?? restingHrDay?.restingHr
-        let resting = stored.map(Double.init) ?? StrainScorer.defaultRestingHR
-        return HeroRings.heartLoad(bpm: bpm, resting: resting, max: Double(profile.hrMax))
-    }
-
     private var heroCard: some View {
         HStack(alignment: .top, spacing: 4) {
-            // #543 carry: an unscored today shows the last scored night's REAL Charge (labelled as prior by
-            // the state pill) rather than an empty vessel, matching the classic Today, the widget/watch/Live
-            // Activity (`Repository.widgetAnchor`) and Android. While calibrating, the ring fills with the
-            // learning progress instead of reading as an empty "–".
-            HeroScoreCell(label: String(localized: "Baseline"), score: chargeDisplay.ringValue,
-                          tint: chargeDisplay.pct.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.chargeColor,
-                          animated: dataLoaded, onGuide: { guideSection = .charge },
-                          status: chargeDisplay.ringStatus,
-                          detailRoute: .baselineCharts, labelRoute: .baselineCharts)
-            HeroScoreCell(label: String(localized: "Watchdog"), score: watchdogLoad,
-                          tint: StrandPalette.effortColor, animated: dataLoaded,
-                          onGuide: { guideSection = .effort },
-                          status: HeroRings.watchdogStatus(load: watchdogLoad),
-                          detailRoute: .watchdog, labelRoute: .watchdog)
+            BaselineHeroCell(animated: dataLoaded)
+            WatchdogHeroCell(animated: dataLoaded)
             HeroScoreCell(label: String(localized: "Recovery"), score: restScore, tint: StrandPalette.restColor,
                           animated: dataLoaded, onGuide: { guideSection = .rest },
                           status: HeroRings.recoveryStatus(score: restScore),
@@ -1894,6 +1867,47 @@ private struct HeroScoreCell: View {
     }
 }
 
+
+/// Layer 1 Baseline: how many night vitals sat inside their own usual on the last scored night.
+/// Isolated so Today only re-renders this cell when the usuals move.
+private struct BaselineHeroCell: View {
+    let animated: Bool
+    @EnvironmentObject private var repo: Repository
+    @EnvironmentObject private var store: BaselineStore
+
+    private var check: BaselineVitalsCheck? { store.vitalsCheck }
+
+    private var tint: Color {
+        guard let check, !check.counted.isEmpty else { return StrandPalette.accent }
+        return check.offCount == 0 ? StrandPalette.statusPositive : StrandPalette.statusWarning
+    }
+
+    var body: some View {
+        let counted = check?.counted.count ?? 0
+        HeroScoreCell(label: String(localized: "Baseline"),
+                      score: counted > 0 ? check.map { Double($0.inRangeCount) } : nil,
+                      tint: tint, animated: animated, onGuide: {},
+                      status: check?.statusLine ?? String(localized: "No data"),
+                      maxValue: Double(max(counted, 1)),
+                      detailRoute: .baselineCharts, labelRoute: .baselineCharts)
+            .task(id: repo.refreshSeq) { store.refreshVitalsCheck(days: repo.days) }
+    }
+}
+
+/// Live Watchdog: the ring fills with how far the last half-hour is from the usual, full at the severe cut.
+private struct WatchdogHeroCell: View {
+    let animated: Bool
+    @EnvironmentObject private var store: BaselineStore
+
+    var body: some View {
+        let state = HeroRings.watchdogState(store.watchdogResult)
+        HeroScoreCell(label: String(localized: "Watchdog"),
+                      score: HeroRings.watchdogDistance(store.watchdogResult),
+                      tint: WatchdogTone.color(state), animated: animated, onGuide: {},
+                      status: HeroRings.watchdogLabel(state),
+                      detailRoute: .watchdog, labelRoute: .watchdog)
+    }
+}
 
 // MARK: - Scene controls (LiveState-isolated leaves)
 

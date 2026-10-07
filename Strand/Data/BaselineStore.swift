@@ -81,6 +81,8 @@ final class BaselineStore: ObservableObject {
     @Published var watchCandidates: [BaselineWatchCandidate] = []
     /// Per-chip readiness in the current context. One thin series must not hide the others.
     @Published var seriesReadiness: [LBSeries: SeriesReadiness] = [:]
+    /// Today ring and Monitor list. Nil until real nights exist.
+    @Published var vitalsCheck: BaselineVitalsCheck?
     private var dismissedPromptDay: String?
 
     struct SeriesReadiness: Equatable {
@@ -535,6 +537,21 @@ final class BaselineStore: ObservableObject {
         rescore(days: days, preferReadySeries: false)
     }
 
+    /// Set when a Monitor vital row opens the plots, so the plots' first rescore keeps that vital
+    /// even while it is still learning.
+    private(set) var seriesPinned = false
+
+    func openVital(_ next: LBSeries, days: [DailyMetric]) {
+        context = .sleep
+        seriesPinned = true
+        selectSeries(next, days: days)
+    }
+
+    func consumeSeriesPin() -> Bool {
+        defer { seriesPinned = false }
+        return seriesPinned
+    }
+
     /// Metric / context switches always land on the newest scored night so the plots are current.
     func jumpToNewestNight(days: [DailyMetric]) {
         guard let newest = lastScoredDay(in: days) else { return }
@@ -809,6 +826,28 @@ final class BaselineStore: ObservableObject {
         default:
             return "Still learning your usuals."
         }
+    }
+
+    /// Night vitals with a DailyMetric column, in the order the Today ring and Monitor list them.
+    static let vitalsCheckSeries: [LBSeries] = [.sleepRHR, .sleepHRVLn, .sleepTemp, .sleepResp, .sleepSpO2Mean]
+
+    /// Last scored night of each night vital against its own usual. Real nights only: the demo tape
+    /// never reaches this, so an empty repository reads as no data rather than a made-up count.
+    func refreshVitalsCheck(days: [DailyMetric]) {
+        guard let night = lastScoredDay(in: days) else {
+            vitalsCheck = nil
+            return
+        }
+        let vitals = Self.vitalsCheckSeries.map { series -> BaselineVitalsCheck.Vital in
+            let trial = LBTrialRequest(events: events, freeze: loadFreeze(series: series),
+                                       confoundersByDay: confoundersByDay,
+                                       dayLogsByDay: dayLogsByDay)
+            let ev = LongitudinalBaseline.evaluate(asOf: night, series: series,
+                                                   observations: observations(from: days, series: series),
+                                                   trial: trial)
+            return BaselineVitalsCheck.Vital.make(series: series, name: shortTitle(for: series), ev: ev)
+        }
+        vitalsCheck = BaselineVitalsCheck(night: night, vitals: vitals)
     }
 
     static func yesterdayKey(now: Date = Date()) -> String {

@@ -14,11 +14,24 @@ public struct WatchdogEpisodeLedgerRow: Equatable, Sendable, Codable {
     public var liveAlerts: Bool
     public var offMinutes: [Int]
     public var unavailableMinutes: Int
+    /// The tick with the highest fused energy in this episode, and what `evaluate` saw then.
+    /// Optional so rows written before these fields decode unchanged.
+    public var peakUnix: Int?
+    public var peakEnergy: Double?
+    public var peakSeverity: String?
+    public var headline: String?
+    public var eventLabel: String?
+    public var activityLabel: String?
+    public var contributing: [String]?
+    public var signals: [WatchdogSignalEvidence]?
 
     public init(episodeId: String, deviceId: String, openedUnix: Int, lastUnix: Int,
                 closedUnix: Int? = nil, maxSeverity: String, safety: Bool,
                 personalOff: Bool, notifyDelivery: String, liveAlerts: Bool,
-                offMinutes: [Int] = [], unavailableMinutes: Int = 0) {
+                offMinutes: [Int] = [], unavailableMinutes: Int = 0,
+                peakUnix: Int? = nil, peakEnergy: Double? = nil, peakSeverity: String? = nil,
+                headline: String? = nil, eventLabel: String? = nil, activityLabel: String? = nil,
+                contributing: [String]? = nil, signals: [WatchdogSignalEvidence]? = nil) {
         self.episodeId = episodeId
         self.deviceId = deviceId
         self.openedUnix = openedUnix
@@ -31,6 +44,28 @@ public struct WatchdogEpisodeLedgerRow: Equatable, Sendable, Codable {
         self.liveAlerts = liveAlerts
         self.offMinutes = offMinutes
         self.unavailableMinutes = unavailableMinutes
+        self.peakUnix = peakUnix
+        self.peakEnergy = peakEnergy
+        self.peakSeverity = peakSeverity
+        self.headline = headline
+        self.eventLabel = eventLabel
+        self.activityLabel = activityLabel
+        self.contributing = contributing
+        self.signals = signals
+    }
+
+    /// Keeps the strongest scored moment. Unavailable ticks carry no evidence and never replace it.
+    mutating func notePeak(_ result: WatchdogResult, nowUnix: Int) {
+        guard result.unavailable == nil else { return }
+        if let peakEnergy, result.fusedEnergy <= peakEnergy { return }
+        peakUnix = nowUnix
+        peakEnergy = result.fusedEnergy
+        peakSeverity = result.severity.rawValue
+        headline = result.headline
+        eventLabel = result.eventLabel
+        activityLabel = result.activityLabel
+        contributing = result.contributing
+        signals = result.signals.filter { $0.name != "Motion" }
     }
 }
 
@@ -74,18 +109,21 @@ public enum WatchdogEpisodeLedger: Sendable {
             if result.episodeState == .resolved {
                 row.closedUnix = row.closedUnix ?? nowUnix
             }
+            row.notePeak(result, nowUnix: nowUnix)
             next[i] = row
         } else if result.severity == .candidate || result.severity == .active
                     || result.severity == .severe {
             var off: [Int] = []
             if result.liveOff { off = [minute] }
-            next.append(WatchdogEpisodeLedgerRow(
+            var row = WatchdogEpisodeLedgerRow(
                 episodeId: eid, deviceId: deviceId, openedUnix: nowUnix, lastUnix: nowUnix,
                 maxSeverity: sev, safety: result.severity == .severe,
                 personalOff: result.personalOff,
                 notifyDelivery: result.carry.notifyDelivery,
                 liveAlerts: true, offMinutes: off,
-                unavailableMinutes: result.unavailable == nil ? 0 : 1))
+                unavailableMinutes: result.unavailable == nil ? 0 : 1)
+            row.notePeak(result, nowUnix: nowUnix)
+            next.append(row)
         }
         return prune(next, nowUnix: nowUnix, deviceId: deviceId)
     }

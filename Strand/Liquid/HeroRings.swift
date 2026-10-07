@@ -30,6 +30,42 @@ enum HeroRings {
         return String(localized: "Elevated")
     }
 
+    enum WatchdogState: Equatable {
+        case calm, watching, alert, waiting, offWrist
+    }
+
+    /// The live Watchdog call for the last half-hour. Nil result means the service has not scored yet.
+    static func watchdogState(_ result: WatchdogResult?) -> WatchdogState {
+        guard let result else { return .waiting }
+        if result.unavailable == .wristOff { return .offWrist }
+        guard result.monitoringCurrent, result.unavailable == nil else { return .waiting }
+        switch result.severity {
+        case .withinLimits, .note: return .calm
+        case .candidate: return .watching
+        case .active, .severe: return .alert
+        case .dataUnavailable: return .waiting
+        }
+    }
+
+    /// How far the last half-hour sits from the usual, 0...100. 100 is the severe cut, so the ring is
+    /// full exactly when Watchdog would call it severe. Nil while there is nothing current to score.
+    static func watchdogDistance(_ result: WatchdogResult?) -> Double? {
+        guard let result, result.monitoringCurrent, result.unavailable == nil,
+              result.fusedEnergy.isFinite else { return nil }
+        let cut = max(WatchdogCalibration.tSevere, 0.01)
+        return min(100, max(0, result.fusedEnergy / cut * 100))
+    }
+
+    static func watchdogLabel(_ state: WatchdogState) -> String {
+        switch state {
+        case .calm: return String(localized: "Calm")
+        case .watching: return String(localized: "Watching")
+        case .alert: return String(localized: "Alert")
+        case .waiting: return String(localized: "Waiting")
+        case .offWrist: return String(localized: "Off wrist")
+        }
+    }
+
     // MARK: Recovery
 
     static func recoveryStatus(score: Double?) -> String {

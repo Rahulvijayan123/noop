@@ -183,6 +183,61 @@ final class WatchdogAddonSidecarTests: XCTestCase {
         XCTAssertEqual(rows.first?.offMinutes.count, 1)
     }
 
+    func testLedgerKeepsStrongestScoredMoment() {
+        let now = 1_900_000
+        var first = Watchdog.evaluate(window: .failure(.empty), prompt: UniTSPrompt(),
+                                      nowUnix: now, inject: .severe, liveAlerts: true)
+        first.unavailable = nil
+        first.fusedEnergy = 1.8
+        first.headline = "A pattern is forming."
+        first.contributing = ["HR"]
+        first.signals = [
+            WatchdogSignalEvidence(name: "HR", observed: 96, usual: 64, reconstructed: 66,
+                                   energy: 1.8, unit: "bpm"),
+            WatchdogSignalEvidence(name: "Motion", observed: 0, usual: 0, reconstructed: 0,
+                                   energy: 0, unit: "")
+        ]
+        var rows = WatchdogEpisodeLedger.upsert(rows: [], result: first, deviceId: "s",
+                                                nowUnix: now, liveAlerts: true)
+        XCTAssertEqual(rows.first?.peakUnix, now)
+        XCTAssertEqual(rows.first?.signals?.map(\.name), ["HR"])
+
+        var weaker = first
+        weaker.fusedEnergy = 1.1
+        weaker.headline = "weaker"
+        rows = WatchdogEpisodeLedger.upsert(rows: rows, result: weaker, deviceId: "s",
+                                            nowUnix: now + 60, liveAlerts: true)
+        XCTAssertEqual(rows.first?.peakUnix, now)
+        XCTAssertEqual(rows.first?.headline, "A pattern is forming.")
+
+        var gap = first
+        gap.unavailable = .empty
+        gap.fusedEnergy = 9
+        rows = WatchdogEpisodeLedger.upsert(rows: rows, result: gap, deviceId: "s",
+                                            nowUnix: now + 120, liveAlerts: true)
+        XCTAssertEqual(rows.first?.peakEnergy, 1.8)
+
+        var stronger = first
+        stronger.fusedEnergy = 2.6
+        stronger.contributing = ["HR", "HRV"]
+        rows = WatchdogEpisodeLedger.upsert(rows: rows, result: stronger, deviceId: "s",
+                                            nowUnix: now + 180, liveAlerts: true)
+        XCTAssertEqual(rows.first?.peakUnix, now + 180)
+        XCTAssertEqual(rows.first?.contributing, ["HR", "HRV"])
+    }
+
+    func testLedgerRowWithoutPeakFieldsStillDecodes() throws {
+        let json = """
+        [{"episodeId":"wd-1","deviceId":"s","openedUnix":10,"lastUnix":20,"maxSeverity":"active",
+          "safety":false,"personalOff":true,"notifyDelivery":"sent","liveAlerts":true,
+          "offMinutes":[0],"unavailableMinutes":0}]
+        """
+        let rows = try JSONDecoder().decode([WatchdogEpisodeLedgerRow].self, from: Data(json.utf8))
+        XCTAssertEqual(rows.first?.episodeId, "wd-1")
+        XCTAssertNil(rows.first?.peakUnix)
+        XCTAssertNil(rows.first?.signals)
+    }
+
     func testExportMarksStudentsAndKeepsTwoCopies() {
         let week = LBCopySnapshot(center: 70, spread: 3, centerDisplay: 70,
                                   bandLoDisplay: 64, bandHiDisplay: 76, n: 7,
