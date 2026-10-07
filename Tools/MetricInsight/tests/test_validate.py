@@ -274,3 +274,13 @@ def test_the_usual_range_wording_follows_the_apps_call():
     # Negated, it agrees: "not within your usual range" is the app's "Off usual".
     negated = answer(observed=["Your resting heart rate of 45 bpm on Oct 6 was not within your usual range."])
     assert validate.check(negated, evidence, RETRIEVED).ok
+    # While the app is still learning, saying so is right (sentences a real model wrote, curly apostrophe included).
+    evidence["get_metric_summary"]["baseline"]["call"] = {"state": "learning", "side": None, "low": None, "high": None,
+                                                          "outside": [], "shown_usual": None}
+    for sentence in ("Nara is still learning your usual, so it can’t yet say whether this is within your usual range.",
+                     "Nara is still learning your usual, so it has not called this reading in or outside your usual "
+                     "range."):
+        result = validate.check(answer(observed=[sentence]), evidence, RETRIEVED)
+        assert result.ok, (sentence, result.errors)
+    claimed = answer(observed=["Your resting heart rate stayed within your usual range."])
+    assert "usual" in validate.check(claimed, evidence, RETRIEVED).codes

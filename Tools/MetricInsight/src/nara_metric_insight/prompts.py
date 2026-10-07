@@ -41,6 +41,9 @@ def bootstrap() -> str:
 
 def task(label: str, units: str, latest_day: str, latest_value: object) -> str:
     cell = "\n".join(f"   {line}" for line in bootstrap().splitlines())
+    name = label.lower()
+    examples = (f"'alcohol {name} sleep' after recorded alcohol, 'evening exercise {name}' after a late workout, "
+                f"'{name} night-to-night variability' when nothing stands out")
     names = ", ".join(v.name for v in VARIABLES)
     return f"""\
 Explain this person's {label} to them, gently and simply, in second person ("your"), for the screen that shows
@@ -73,9 +76,11 @@ their latest value and its history. The latest measured night is {latest_day}: {
      activity_context, sleep_context, recent_events and user_context;
    - the most likely explanation in the data, said with care ("likely because…", "this can happen after…");
    - what limits confidence (missing nights, a short history, estimated signals, the comparison status).
-3. Search peer-reviewed research for the main pattern you describe, with generic scientific words only:
-   research_evidence = await mcp.call_tool('nara', 'search_literature', {{'query': 'heart rate variability evening exercise'}})
-   and cite at least one result that supports one of your interpretation sentences.
+3. Search peer-reviewed research for the pattern your interpretation names, in generic scientific words that
+   name that pattern and the metric (for example {examples}):
+   research_evidence = await mcp.call_tool('nara', 'search_literature', {{'query': '<your words>'}})
+   Cite only a result whose finding is about a pattern an interpretation sentence says is present for this
+   person; if none fits, search again with other words (at most 3 searches in all).
 4. Reply with ONLY this JSON object (no prose, no code fence):
    {ANSWER_SHAPE}
    headline: one short, plain sentence (at most 90 characters) saying what happened.
@@ -98,8 +103,19 @@ Rules the reply is checked against:
 """
 
 
+RETRY_HINTS = {
+    "citations": "For citations: call search_literature again with words for the pattern your interpretation names "
+                 "(alcohol, a late workout, short sleep, ...) and cite one of the new results about it.",
+    "grounding": "Copy numbers, dates and times exactly as the tools give them (21:30, or 9:30 p.m.).",
+    "usual": "Say within or outside your usual range only as metric_summary.assessment.state says (and each "
+             "vital's state in related_metrics.night_vitals).",
+}
+
+
 def retry(errors: list[str]) -> str:
     listed = "\n".join(f"- {error}" for error in errors[:12])
-    return (f"Your reply did not pass the checks:\n{listed}\n"
+    codes = {error.split(":", 1)[0] for error in errors}
+    hints = "".join(f"\n{hint}" for code, hint in RETRY_HINTS.items() if code in codes)
+    return (f"Your reply did not pass the checks:\n{listed}{hints}\n"
             f"Fix every point using only your tool results (load anything missing first) and reply with ONLY the "
             f"JSON object {ANSWER_SHAPE}.")

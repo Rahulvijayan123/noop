@@ -122,7 +122,7 @@ _MONTH_DAY = re.compile(rf"\b{_MONTH}\s+(\d{{1,2}})(?:st|nd|rd|th)?(?:,?\s+(\d{{
 _DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}(?:,?\s+(\d{{4}}))?\b")
 _ISO_DAY = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _SLASH_DAY = re.compile(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
-_CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+_CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})\b(?:\s*([ap])\.?\s*m\b\.?)?", re.I)  # 21:30, or 9:30 p.m.
 _UNIT_RE = "|".join(sorted((re.escape(u) for u in UNITS), key=len, reverse=True))
 _DIRECTIONS = "|".join(UP_WORDS + DOWN_WORDS)
 _NUMBER = re.compile(rf"(?<![\w.])([-+−]?\d+(?:\.\d+)?)(?!\d)(?!st\b|nd\b|rd\b|th\b)\s*(?:({_UNIT_RE})(?![a-z]))?", re.I)
@@ -131,7 +131,7 @@ _NUMBER_WORD = re.compile(r"\b(" + "|".join(sorted(NUMBER_WORDS, key=len, revers
 _DIRECTION_AFTER = re.compile(rf"(?<![\w.])(\d+(?:\.\d+)?)\s*({_UNIT_RE})(?![a-z])\s+(?:\w+\s+)?({_DIRECTIONS})\b", re.I)
 _DIRECTION_BEFORE = re.compile(rf"\b({_DIRECTIONS})\s+(?:by\s+)?(\d+(?:\.\d+)?)\s*({_UNIT_RE})?(?![a-z])", re.I)
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
-_NEGATION = re.compile(r"\b(no|not|none|nothing|without|never|neither|nor)\b|n't\b", re.I)
+_NEGATION = re.compile(r"\b(no|not|none|nothing|without|never|neither|nor)\b|n['’]t\b", re.I)
 # "because" explains with the person's own data ("likely because you walked 40 minutes that evening"); it must be
 # hedged, since a pattern in the data is an association, not proof.
 _BECAUSE = re.compile(r"\bbecause\b", re.I)
@@ -526,8 +526,11 @@ def _numbers_errors(sentence: str, f: Facts, *, interpretation: bool) -> list[st
         if not _matches(str(value), f.any_values() | literature):
             errors.append(f"grounding:'{match.group(0)}' ({value}) is not in any tool result")
     for match in _CLOCK.finditer(sentence):
-        if f"{int(match.group(1))}:{match.group(2)}" not in f.clocks:
-            errors.append(f"grounding:the time {match.group(0)} is not in any tool result")
+        hour, half = int(match.group(1)), (match.group(3) or "").lower()
+        if half and 1 <= hour <= 12:  # the same clock time in 12-hour form
+            hour = hour % 12 + (12 if half == "p" else 0)
+        if f"{hour}:{match.group(2)}" not in f.clocks:
+            errors.append(f"grounding:the time {match.group(0).strip()} is not in any tool result")
     for m in _DIRECTION_AFTER.finditer(stripped):
         errors += _direction_errors(m.group(1), m.group(2), m.group(3), f)
     for m in _DIRECTION_BEFORE.finditer(stripped):
@@ -566,7 +569,8 @@ _OUT_OF_USUAL = re.compile(r"\b(?:outside|beyond|out of|above|below|higher than|
                            r"\bunusual(?:ly\s+\w+)?\s+for\s+you\b", re.I)
 _IN_USUAL = re.compile(r"\b(?:within|inside|in)\s+(?:your|the|its|their)\s+(?:[\w-]+\s+)?usual\s+(?:range|band)\b|"
                        r"\b(?:normal|typical)\s+for\s+you\b|\bin\s+line\s+with\s+(?:your|the|its)\s+usual\b", re.I)
-_CLAUSE = re.compile(r"[;,]|\b(?:while|whereas|but|and)\b", re.I)
+_CLAUSE = re.compile(r"[;,:—–]|\b(?:while|whereas|but|and)\b", re.I)
+_OPEN_QUESTION = re.compile(r"\b(?:whether|if)\b", re.I)
 CALL_WORDS = {"in_range": "In range", "off": "Off usual", "learning": "Learning (no usual yet)",
               "no_reading": "No reading"}
 
@@ -592,11 +596,14 @@ def _call_errors(sentence: str, f: Facts) -> list[str]:
             continue
         for pattern, says in ((_OUT_OF_USUAL, "off"), (_IN_USUAL, "in_range")):
             for match in pattern.finditer(clause):
-                negated = _NEGATION.search(clause[max(0, match.start() - 14):match.start()])
+                if _OPEN_QUESTION.search(clause[max(0, match.start() - 40):match.start()]):
+                    continue  # "can't yet say whether it is within your usual range" claims nothing
+                negated = _NEGATION.search(clause[max(0, match.start() - 40):match.start()])
                 claim = {"off": "in_range", "in_range": "off"}[says] if negated else says
                 if call in ("learning", "no_reading"):
-                    errors.append(f"usual:the app shows {subject} as {CALL_WORDS[call]} for this night; do not place "
-                                  "it inside or outside a usual range")
+                    if not negated:  # "has not called it in or outside your usual range" is right
+                        errors.append(f"usual:the app shows {subject} as {CALL_WORDS[call]} for this night; do not "
+                                      "place it inside or outside a usual range")
                 elif claim != call:
                     errors.append(f"usual:the app shows {subject} {CALL_WORDS[call]} for this night; the text says it "
                                   f"was {'outside' if claim == 'off' else 'within'} the usual range")
