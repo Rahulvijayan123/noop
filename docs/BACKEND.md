@@ -96,6 +96,7 @@ limited to 8 KiB, except `stretch-feedback`.
 | `GET /context` | The stored physiology context of one device-day (`?deviceId=&day=[&mode=][&metric=]`; see Physiology context). |
 | `GET /context/history` | Context episodes, bouts and daily values over up to 120 days (`?deviceId=&from=&to=[&mode=]`). |
 | `GET`, `POST /exposures` | Reads and records revisioned exposure events (medication, caffeine, meals, ...); `POST` takes up to 25 per request, body up to 64 KiB. |
+| `POST /insights` | The explanation of one key metric (`{"metric": "resting_hr" \| "hrv_rmssd"}`; see Metric insights). |
 
 ### Activity stretch feedback
 
@@ -1028,6 +1029,24 @@ series, BLE or uploads.
 - Routes: `GET /scores/context`, `GET /scores/context/history`, `GET`/`POST /scores/exposures` (table above).
 
 Design, methods, validation and rollout: [`docs/physiology-context/`](physiology-context/).
+
+## Metric insights (off until the worker is deployed)
+
+The explanation card on a key metric's detail screen (resting heart rate; HRV is supported server-side but its
+screen is not switched on). The app draws the value and the chart from its own data; the card is optional, so a
+missing or failed explanation never affects the rest of the screen.
+
+- Migration `20261008000000_metric_insights.sql`: `metric_insight_jobs` (queue, one row per owner and metric) and
+  `metric_insights` (one immutable row per published analysis; owners can read only their own). An analysis is keyed
+  by an inputs fingerprint (the metric's 90 measured days, its own context comparisons and episodes, exposures around
+  the latest night, coach memory). `POST /scores/insights` calls `metric_insight_request_v1`: unchanged inputs are
+  served from the cache with no work queued; changed inputs queue the worker and the previous explanation is served
+  marked stale. Bounded to 8 analyses per owner, metric and UTC day; 3 failures dead-letter the inputs until they change.
+- Worker: `Tools/MetricInsight` (`deploy/frwhoop-metric-insight.service`). Prime Agent reasons over owner-scoped
+  tools in a per-job sandbox; every number it states must come from the tools, and a validator gates what is
+  published. Architecture, isolation and memory: [`Tools/MetricInsight/README.md`](../Tools/MetricInsight/README.md).
+- Nothing is queued until the worker is running: requests then return `pending`, and the app shows "Explanation
+  unavailable right now" after its bounded wait.
 
 ## Health checks
 

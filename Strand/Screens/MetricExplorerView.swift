@@ -39,8 +39,8 @@ private func longDate(_ d: Date) -> String {
     return f.string(from: d)
 }
 
-/// The category accent (colour communicates category only — never decoration).
-private func metricAccent(_ m: MetricDescriptor) -> Color {
+/// The category accent (colour communicates category only — never decoration). Shared with `KeyMetricDetailView`.
+func metricAccent(_ m: MetricDescriptor) -> Color {
     switch m.key {
     case "recovery", "sleep_performance", "hours_vs_needed_pct", "sleep_consistency",
          "restorative_pct", "restorative_min", "sleep_efficiency", "sleep_total_min",
@@ -77,8 +77,8 @@ private func metricGradient(_ m: MetricDescriptor) -> Gradient {
 /// The Bevel colour world a metric's detail hero belongs to — the catalog's category
 /// already names it (Charge / Rest / Effort), and Heart/Health/Nutrition/Mind metrics
 /// fall back to the world that best fits their accent. Drives the ScenicHeroBackground
-/// tint + the hero gauge/number glow.
-private func metricDomain(_ m: MetricDescriptor) -> DomainTheme {
+/// tint + the hero gauge/number glow. Shared with `KeyMetricDetailView`.
+func metricDomain(_ m: MetricDescriptor) -> DomainTheme {
     switch m.category {
     case "Charge":            return .charge
     case "Effort":            return .effort
@@ -681,17 +681,13 @@ private struct MetricRow: View {
 /// The full analytic dossier for one metric, built ONLY from locked components:
 /// a SegmentedPillControl range, a hero ChartCard (line + latest "as of"), a uniform
 /// StatTile row (Average / Min / Max / Latest / Δ), and a "What correlates" NoopCard.
+///
+/// The key metrics in `KeyMetricCatalog` (resting heart rate) are handed to `KeyMetricDetailView` at the top of
+/// `body` instead, so every entry point that pushes this view reaches the simplified screen and none of the
+/// dossier's loading below runs for them.
 struct MetricDetailView: View {
     let metric: MetricDescriptor
     @EnvironmentObject var repo: Repository
-    /// #430 parity: the detail carries the SAME backdrop as the screen that pushed it — the day-cycle sky
-    /// when the setting is on, the plain canvas when off — so a Key-Metrics tile tap doesn't jar from the
-    /// liquid Today's sky to a flat page. Same keys TodayView/LiquidTodayView gate on; "Sky behind cards"
-    /// extends the sky to the full viewport (softer settle) so the transparent cards reveal it throughout.
-    @AppStorage(SceneBackgroundPrefs.enabledKey) private var showDayCycleBackground = true
-    @AppStorage(SkyBehindCardsPrefs.enabledKey) private var skyBehindCards = true
-    /// Custom background image (#custom-background): when active it overrides the sky in the backdrop.
-    @ObservedObject private var backgroundStore = BackgroundImageStore.shared
     // Profile basics for the Fitness Age not-ready countdown (age/sex gate its readiness lead). Injected
     // app-wide at the root; previews supply their own. Only read on the fitness_age empty-state path.
     @EnvironmentObject var profile: ProfileStore
@@ -937,6 +933,16 @@ struct MetricDetailView: View {
     // MARK: Body
 
     var body: some View {
+        // The one routing point for the simplified key-metric screen. The dossier below, and its `.task` loads,
+        // are not built at all for those metrics.
+        if let keyMetric = KeyMetricCatalog.entry(for: metric) {
+            KeyMetricDetailView(metric: metric, entry: keyMetric)
+        } else {
+            dossier
+        }
+    }
+
+    private var dossier: some View {
         // Compute the heavy window derivations ONCE per body eval, then hand them to
         // the subviews — instead of every subview re-deriving `effectiveRange` /
         // `windowed` (each of which re-parses + re-filters the full history).
@@ -1060,23 +1066,8 @@ struct MetricDetailView: View {
         // Day-cycle-aware backdrop (#430 parity): the top sky band every liquid screen uses when the
         // setting is on — or the FULL-viewport sky with the softer settle when "Sky behind cards" is also
         // on (the LiquidTodayView treatment, so the transparent cards reveal it the whole way down); the
-        // plain canvas when off.
-        .background(alignment: .top) {
-            ZStack(alignment: .top) {
-                StrandPalette.surfaceBase
-                // Custom background image (#custom-background) OVERRIDES the sky, full-bleed.
-                if backgroundStore.isActive {
-                    BackgroundImageBackdrop()
-                } else if showDayCycleBackground {
-                    LiquidSkyStatic(hour: nil, settleStrength: skyBehindCards ? 0.78 : 1)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: skyBehindCards ? nil : 240, alignment: .top)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
-            }
-            .ignoresSafeArea()
-        }
+        // plain canvas when off. Shared with `KeyMetricDetailView` (KeyMetricDetailView.swift).
+        .modifier(MetricDetailBackdrop())
         .navigationTitle(metric.title)
         .task(id: loadTaskID) { await load() }
         // Range changes the window, hence the correlation inputs — recompute the

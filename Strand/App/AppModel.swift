@@ -391,6 +391,7 @@ final class AppModel: ObservableObject {
         hostedAccountScope = nil
         IntradaySeriesStore.shared.reset()
         PhysiologyContextStore.shared.reset()
+        MetricInsightStore.shared.reset()   // metric explanations read with the ended account's credential
         ActivityEncoderWindowStore.shared.reset()
         SensorBiomarkerStore.shared.reset()
         activityWindowsSyncedAt = nil

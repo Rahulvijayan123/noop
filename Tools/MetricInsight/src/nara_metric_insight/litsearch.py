@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Vendored from the metric-explain literature design work (litsearch.py + its PubMed-verified seed, here
+# data/literature_seed.json). The worker always passes corpus_path and cache explicitly (literature.py).
 """litsearch: small, privacy-safe literature retrieval for the metric-explain agent.
 
 Retrieval order, cheapest and most trustworthy first:
@@ -51,7 +53,7 @@ from typing import Any, Callable, Iterable, Sequence
 # Configuration and hard caps
 # ---------------------------------------------------------------------------
 HERE = Path(__file__).resolve().parent
-DEFAULT_CORPUS = HERE / "rhr_evidence_seed.json"
+DEFAULT_CORPUS = HERE / "data" / "literature_seed.json"
 DEFAULT_CACHE_PATH = HERE / ".cache" / "litsearch.sqlite3"  # override with LITSEARCH_CACHE
 
 TOOL_NAME = "nara_litsearch"
