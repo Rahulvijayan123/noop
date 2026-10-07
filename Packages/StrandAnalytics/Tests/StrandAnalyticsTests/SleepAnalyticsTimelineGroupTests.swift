@@ -481,3 +481,70 @@ final class SleepAnalyticsAnchorFollowUpTests: XCTestCase {
         XCTAssertEqual(group.nightlySd1Ms.reason, .insufficientDuration)
     }
 }
+
+
+// Review round-3 residuals (R1/R2): the anchor-grid snap with an off-grid
+// fragment start after a leading uncovered gap, and PRV clipped tails that
+// follow full windows.
+final class SleepAnalyticsReviewResidualTests: XCTestCase {
+
+    private let t0 = 1_789_000_000
+
+    /// R1: gridAnchor < fragment.start with an OFF-grid fragment.start and a
+    /// leading uncovered gap (the first segment starts after the fragment start,
+    /// ON the anchor grid — so alignment passes): the matrix rebuild must still
+    /// snap to the ANCHOR's grid, not silently anchor at the off-grid start.
+    func testMatrixSnapsToAnchorGridWithOffGridStart() {
+        let anchor = t0
+        let fragmentStart = t0 + 17          // off-grid effective start
+        let end = t0 + 390
+        // The segment starts ON the anchor grid (a leading uncovered gap of 13 s)
+        // and ends on it, so alignment is ESTABLISHED from the anchor.
+        let input = SleepAnalyticsInput(
+            fragments: [SleepAnalyticsInput.Fragment(
+                id: "sleep-test-\(anchor)", start: fragmentStart, end: end,
+                sourceKind: .nativeWhoop, sourceEpochSeconds: 30,
+                edited: true, editRevision: 3,
+                stageGridAnchorSeconds: anchor,
+                stages: [StageSegment(start: t0 + 30, end: end, stage: "light")])],
+            timezoneId: "Etc/UTC",
+            hr: (fragmentStart..<end).map { HRSample(ts: $0, bpm: 58) },
+            gravity: [], skinTemp: [], beats: [], deviceFamily: .whoop5,
+            stageSourceVersion: "s", inputRevision: 1)
+        let timeline = SleepAnalyticsV1.normalize(input: input, config: .v1)
+        XCTAssertTrue(timeline.epochAlignmentEstablished)   // segment boundaries on the anchor grid
+        let d = SleepAnalyticsV1.stageDynamicsGroup(timeline: timeline, input: input, config: .v1)
+        let matrix = d.epochTransitions
+        XCTAssertNotNil(matrix)
+        // The matrix grid snaps to the ANCHOR (R1): epochs are [30,60)…[360,390) —
+        // the leading off-grid 17 s region carries no epoch — so the epoch count
+        // matches the anchor grid, not a grid anchored at the off-grid start.
+        // 12 grid points inside [fragmentStart, end) from the anchor grid
+        // (30…360): 11 adjacent pairs, all light→light.
+        XCTAssertEqual(matrix?.counts[1][1], 11)             // light → light self-transitions
+        XCTAssertEqual(matrix?.eligiblePairCount.value, 11)
+    }
+
+    /// R2: a fragment that fits one full window plus a clipped tail counts the
+    /// tail as withheld (insufficient_duration), e.g. [0, 650) drops [600, 650).
+    func testPrvClippedTailAfterFullWindowIsCounted() {
+        let start = t0 - t0 % 300
+        let end = start + 650               // 2 full windows + a 50 s tail
+        let input = SleepAnalyticsInput(
+            fragments: [SleepAnalyticsInput.Fragment(
+                id: "sleep-test-\(start)", start: start, end: end,
+                sourceKind: .nativeWhoop, sourceEpochSeconds: 30,
+                stages: [StageSegment(start: start, end: end, stage: "light")])],
+            timezoneId: "Etc/UTC",
+            hr: (start..<end).map { HRSample(ts: $0, bpm: 58) },
+            gravity: [], skinTemp: [],
+            beats: (start..<end).map { RRInterval(ts: $0, rrMs: 1000, srcChannel: nil, ord: $0 - start, seq: $0 - start) },
+            deviceFamily: .whoop5, stageSourceVersion: "s", inputRevision: 1)
+        let timeline = SleepAnalyticsV1.normalize(input: input, config: .v1)
+        let group = SleepAnalyticsV1.prvGroup(timeline: timeline, input: input, config: .v1)
+        // Two full windows (600 s of eligible beats) + the 50 s tail withheld as
+        // insufficient_duration (R2 — previously silently dropped).
+        XCTAssertEqual(group.eligibleWindowCount.value, 2)
+        XCTAssertEqual(group.withheldWindowCount.value, 1)
+    }
+}

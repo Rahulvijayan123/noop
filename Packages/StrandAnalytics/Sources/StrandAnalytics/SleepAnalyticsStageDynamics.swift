@@ -200,8 +200,12 @@ extension SleepAnalyticsV1 {
                 // effective start that sits off-grid must not re-anchor the matrix grid),
                 // clipped into the fragment; the first epoch can be clipped.
                 var epochLabels: [SleepAnalyticsLabel] = []
-                var t = max(fragment.start, fragment.gridAnchor)
-                // Snap to the anchor's grid: the anchor itself is a grid point.
+                // Snap to the ANCHOR's grid: advance from the anchor itself (a grid
+                // point) to the first grid point at/after the fragment start. Starting
+                // at max(start, anchor) would leave an off-grid fragment.start in place
+                // when the anchor precedes it (review R1) and build the matrix on a
+                // grid the anchor check never verified.
+                var t = fragment.gridAnchor
                 while t < fragment.start { t += epochSeconds }
                 while t < fragment.end {
                     let epochEnd = min(t + epochSeconds, fragment.end)

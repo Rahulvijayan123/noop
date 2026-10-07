@@ -178,22 +178,11 @@ extension SleepAnalyticsV1 {
         for fragment in timeline.fragments {
             // UTC-aligned window starts inside [fragment.start, fragment.end - window).
             var w = fragment.start - fragment.start % windowSeconds + (fragment.start % windowSeconds == 0 ? 0 : windowSeconds)
-            // A clipped TAIL window (the fragment ends before a full window fits) is
-            // withheld as insufficient_duration (review P2-5), never silently skipped.
-            var clippedTailCounted = false
-            if w < fragment.end, w + windowSeconds > fragment.end, w >= fragment.start {
-                withheld += 1
-                withheldByDuration += 1
-                clippedTailCounted = true
-            }
-            // A fragment TOO SHORT for any window at all (its whole span is under one
-            // window, so neither a full nor a clipped window fits — e.g. a mid-window
-            // start with the end exactly at the next window start) is ALSO withheld
-            // as insufficient_duration, not silently skipped (review P2-5 residual).
-            if !clippedTailCounted, fragment.end - fragment.start < windowSeconds {
-                withheld += 1
-                withheldByDuration += 1
-            }
+            // Full windows first; the clipped TAIL (the first candidate window whose
+            // full span exceeds the fragment end while still containing fragment time)
+            // is counted AFTER the loop — so a tail after any number of full windows is
+            // withheld as insufficient_duration too (review P2-5 + R2), never silently
+            // skipped and never double-counted.
             while w + windowSeconds <= fragment.end {
                 let wEnd = w + windowSeconds
                 // Window pairs: TRUE pairs whose two beats lie inside the window.
@@ -236,6 +225,16 @@ extension SleepAnalyticsV1 {
                     withheld += 1
                 }
                 w += windowSeconds
+            }
+            // Post-loop: w is now the first candidate whose full window exceeds the
+            // fragment end. If it still contains fragment time it is a clipped TAIL —
+            // withheld as insufficient_duration (P2-5/R2); a fragment too short for any
+            // window at all (neither a full nor a clipped candidate contains fragment
+            // time — e.g. a mid-window start ending exactly at the next window start)
+            // is withheld the same way (P2-5 residual).
+            if w < fragment.end || fragment.end - fragment.start < windowSeconds {
+                withheld += 1
+                withheldByDuration += 1
             }
         }
 
