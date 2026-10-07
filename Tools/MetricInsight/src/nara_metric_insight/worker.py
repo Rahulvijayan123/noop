@@ -133,12 +133,12 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
         text = await session.ask(prompts.task(metric.signal.label, metric.signal.units,
                                               summary["latest"]["day"], summary["latest"]["value"]))
         attempts = 1
-        result = validate.check(text, tools.evidence(), tools.retrieved)
+        result = validate.check(text, tools.validation_evidence(), tools.retrieved)
         if not result.ok:
             rejected = result.codes
             text = await session.ask(prompts.retry(result.errors))
             attempts = 2
-            result = validate.check(text, tools.evidence(), tools.retrieved)
+            result = validate.check(text, tools.validation_evidence(), tools.retrieved)
         stats = session.stats()
     if not result.ok or result.answer is None:
         raise AnalysisRejected(result.codes)

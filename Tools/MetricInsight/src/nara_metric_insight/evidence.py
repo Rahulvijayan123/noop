@@ -209,6 +209,7 @@ def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, an
     latest_day, latest = measured[-1]
     out: dict[str, Any] = {
         "metric": metric.key, "label": signal.label, "units": signal.units,
+        "estimated": availability_estimated(document, signal),
         "latest": {"day": latest_day.isoformat(), "value": rounded(latest, d)},
         "measured_nights": len(measured), "window": {"from": series[0][0].isoformat(), "to": anchor.isoformat()},
     }
@@ -346,9 +347,11 @@ def workout_context(document: dict[str, Any] | None) -> dict[str, Any]:
     for entry in document.get("exertion") or []:
         if not isinstance(entry, dict):
             continue
+        locomotion, observed = _num(entry.get("locomotion_s")), _num(entry.get("observed_s"))
+        # Unknown stays unknown (the contract's nil): a strap that was off is not "no training load".
         windows.append({"hours": entry.get("window_h"), "bouts": entry.get("bout_count"),
-                        "locomotion_min": rounded((_num(entry.get("locomotion_s")) or 0) / 60.0, 0),
-                        "observed_h": rounded((_num(entry.get("observed_s")) or 0) / 3600.0, 1)})
+                        "locomotion_min": rounded(locomotion / 60.0, 0) if locomotion is not None else None,
+                        "observed_h": rounded(observed / 3600.0, 1) if observed is not None else None})
     bouts: dict[str, dict[str, Any]] = {}
     for bout in document.get("bouts") or []:
         if not isinstance(bout, dict):
@@ -365,6 +368,10 @@ def workout_context(document: dict[str, Any] | None) -> dict[str, Any]:
             "note": "movement bouts are classified from wrist motion; locomotion minutes are an estimate of training load"}
 
 
+def _per(value: float | None, divisor: float, decimals: int) -> float | int | None:
+    return rounded(value / divisor, decimals) if value is not None else None
+
+
 def activity_context(document: dict[str, Any] | None) -> dict[str, Any]:
     if not document:
         return {"available": False, "reason": "no_context_document"}
@@ -375,11 +382,9 @@ def activity_context(document: dict[str, Any] | None) -> dict[str, Any]:
     worn = values.get("coverage.motion_observed_s")
     return {"available": True, "estimated": True,
             "worn_h": rounded(worn / 3600.0, 1) if worn is not None else None,
-            "locomotion_min_per_worn_hour": rounded((values.get("functional.locomotion_s_per_worn_hour") or 0) / 60.0, 1)
-            if values.get("functional.locomotion_s_per_worn_hour") is not None else None,
+            "locomotion_min_per_worn_hour": _per(values.get("functional.locomotion_s_per_worn_hour"), 60.0, 1),
             "bouts_per_worn_hour": rounded(values.get("functional.bouts_per_worn_hour"), 2),
-            "median_bout_min": rounded((values.get("functional.median_bout_s") or 0) / 60.0, 1)
-            if values.get("functional.median_bout_s") is not None else None,
+            "median_bout_min": _per(values.get("functional.median_bout_s"), 60.0, 1),
             "note": "daily activity level from wrist motion (estimated)"}
 
 

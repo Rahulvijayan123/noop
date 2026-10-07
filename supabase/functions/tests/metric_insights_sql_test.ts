@@ -12,8 +12,8 @@ import { startLocalPostgres, USER_A, USER_B } from './local_postgres.ts';
 //  3. the request/claim/publish cycle: nothing measured, pending, ready, cache hits (no new revision; a
 //     recompute that only rewrites metadata changes nothing), changed inputs served stale, inputs changing
 //     mid-run (published_superseded, keyed by the claim's inputs so it is never served as fresh);
-//  4. the fingerprint: the metric's own context comparisons and episodes, the retrospective document first,
-//     exposures inside the window, coach memory; another metric's series and another user's data do not move it;
+//  4. the fingerprint: the whole selected context document (the retrospective one first), exposures inside the
+//     window, coach memory (topic included); another user's data does not move it;
 //  5. fencing and failure: lost and expired leases, release on a newer revision, backoff, dead letter and its
 //     reset by changed inputs, the daily bound, the 6 h request horizon, payload validation;
 //  6. isolation: owners read only their own insights through PostgREST and never the queue or the RPCs; a
@@ -35,7 +35,6 @@ const PUBLIC_FUNCTIONS: Record<string, string> = {
 };
 const INTERNAL_FUNCTIONS: Record<string, string> = {
   metric_insight_version: '',
-  metric_insight_series_prefixes: 'text',
   metric_insight_context_document: 'uuid,uuid,date',
   metric_insight_inputs: 'uuid,text',
   metric_insight_json: 'public.metric_insights,boolean',
@@ -283,7 +282,7 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
       assert.equal(await count(`user_id = '${USER_A}' and metric = 'resting_hr'`), 3);
     });
 
-    await t.step('fingerprint: own context series, retrospective first, exposures in the window, coach memory', async () => {
+    await t.step('fingerprint: the selected context document, retrospective first, exposures in the window, coach memory', async () => {
       const context = (rhrDifference: number, hrvDifference: number, mode: string, input: string) =>
         db.sql(`insert into public.physiology_context_days(user_id, device_id, day, mode, job_revision, finality, status,
             availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint, input_fingerprint,
@@ -302,16 +301,14 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
       await context(-3.1, 4.0, 'causal_live', 'fixture-live');
       const live = { rhr: await fingerprint(USER_A), hrv: await fingerprint(USER_A, 'hrv_rmssd') };
       assert.notEqual(live.rhr, before.rhr, 'the context document is not an input');
-      // Another metric's comparison and an unrelated document section do not move the RHR analysis.
-      await db.sql(`update public.physiology_context_days set document = jsonb_set(jsonb_set(document,
-          '{comparisons,1,signed_difference}', '9.9'), '{features,unrelated}', '2')
+      assert.notEqual(live.hrv, before.hrv);
+      // Any section the worker reads (bouts, daily values, exposure categories, ...) is input: the whole selected
+      // document is hashed, so a republish of any part of it is a new analysis.
+      await db.sql(`update public.physiology_context_days set document = jsonb_set(document, '{features,unrelated}', '2')
         where user_id = '${USER_A}' and mode = 'causal_live'`);
-      assert.equal(await fingerprint(USER_A), live.rhr);
-      assert.notEqual(await fingerprint(USER_A, 'hrv_rmssd'), live.hrv);
-      await db.sql(`update public.physiology_context_days set document = jsonb_set(document,
-          '{comparisons,0,signed_difference}', '-2.5') where user_id = '${USER_A}' and mode = 'causal_live'`);
       const edited = await fingerprint(USER_A);
       assert.notEqual(edited, live.rhr);
+      assert.notEqual(await fingerprint(USER_A, 'hrv_rmssd'), live.hrv);
       // The retrospective document wins over the live one.
       await context(-1.0, 4.0, 'retrospective', 'fixture-retro');
       const retrospective = await fingerprint(USER_A);
@@ -338,8 +335,11 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
 
       await db.sql(`insert into public.coach_memory_items(user_id, content, topic, importance)
         values ('${USER_A}', 'Trains for a marathon on weekends', 'training', 4)`);
+      const noted = await fingerprint(USER_A);
+      assert.notEqual(noted, withExposure);
+      await db.sql(`update public.coach_memory_items set topic = 'sleep' where user_id = '${USER_A}'`);
       const withMemory = await fingerprint(USER_A);
-      assert.notEqual(withMemory, withExposure);
+      assert.notEqual(withMemory, noted, 'a memory item\'s topic is input too');
 
       // Another user's data never moves this user's inputs.
       await db.sql(`insert into public.coach_memory_items(user_id, content, importance) values ('${USER_B}', 'Other user', 5)`);

@@ -12,6 +12,7 @@ Every request body is kept for inspection.
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 from datetime import date
@@ -149,6 +150,10 @@ class StubLLM:
         if tool_results == 0:
             return "load", {"tool": "ipython", "code": LOAD_CODE}
         evidence = _evidence(messages)
+        if not evidence:  # the load cell failed: surface the kernel's output in the test log
+            tool = next((m for m in reversed(messages) if m.get("role") == "tool"), {})
+            sys.stderr.write("STUB: no EVIDENCE line; last tool output:\n" + _text(tool.get("content"))[:3000] + "\n")
+            return "no-evidence", {"final": "{}"}
         bad = self.scenario == "always_bad" or (self.scenario == "retry" and not retrying)
         return ("retry-answer" if retrying else "answer"), {"final": answer(evidence, bad=bad)}
 

@@ -8,14 +8,17 @@ from nara_metric_insight.literature import Literature
 SWIFT = Path(__file__).resolve().parents[3] / "Strand" / "Screens" / "MeasurementContextWording.swift"
 
 EVIDENCE = {
-    "get_metric_summary": {"latest": {"day": "2026-10-06", "value": 45}, "previous": {"day": "2026-10-05", "value": 48, "change": -3},
+    "get_metric_summary": {"metric": "resting_hr", "units": "bpm", "estimated": False,
+                           "latest": {"day": "2026-10-06", "value": 45}, "previous": {"day": "2026-10-05", "value": 48, "change": -3},
                            "baseline": {"nights": 6, "median": 51, "change_vs_median": -6},
                            "assessment": {"basis": "insufficient_history", "nights_available": 6, "nights_needed": 7}},
-    "get_data_quality": {"measured_nights": 7, "missing_nights": 83, "window_nights": 90},
-    "get_related_metrics": {"signals": [{"metric": "hrv_rmssd", "estimated": False, "latest": {"day": "2026-10-06", "value": 85}},
-                                        {"metric": "resp_rate", "estimated": True, "latest": {"day": "2026-10-06", "value": 14.2}}]},
+    "get_data_quality": {"measured_nights": 7, "missing_nights": 0, "tracked_nights": 7},
+    "get_related_metrics": {"signals": [
+        {"metric": "hrv_rmssd", "units": "ms", "estimated": False, "latest": {"day": "2026-10-06", "value": 85}},
+        {"metric": "resp_rate", "units": "breaths/min", "estimated": True, "latest": {"day": "2026-10-06", "value": 14.2}}]},
 }
-RETRIEVED = {"pmid:32023264": {"id": "pmid:32023264", "finding": "mean daily RHR was 65 bpm"}}
+RETRIEVED = {"pmid:32023264": {"id": "pmid:32023264", "topic": "day_to_day_variability",
+                               "finding": "mean daily RHR was 65 bpm"}}
 
 
 def answer(**over):
@@ -52,7 +55,8 @@ def test_wording_claims_and_relative_days_are_rejected():
         result = validate.check(text, EVIDENCE, RETRIEVED)
         assert not result.ok and code in result.codes, (code, result.errors)
     # whole words only: "still" is not "ill", "stressing" is not in the list but "stress" is
-    assert validate.check(answer(interpretation=["It is still within a few bpm of Oct 5."]), EVIDENCE, RETRIEVED).ok
+    assert validate.check(answer(interpretation=["It is still within a few bpm of Oct 5."], citations=[]),
+                          EVIDENCE, RETRIEVED).ok
     assert validate.forbidden_term("Still calm") == "calm"
 
 
@@ -64,18 +68,22 @@ def test_numbers_and_dates_must_come_from_the_tools():
     result = validate.check(answer(observed=["Your resting heart rate was 45 bpm on Oct 9."]), EVIDENCE, RETRIEVED)
     assert "dates" in result.codes
     # magnitudes of signed changes, window lengths and retrieved findings are allowed
-    ok = answer(observed=["It was 6 bpm below your median of 51 bpm over the last 7 nights; a large study saw a mean of 65 bpm."])
+    ok = answer(observed=["It was 6 bpm below your median of 51 bpm over the last 7 nights."],
+                interpretation=["Night-to-night values vary widely between people; a large study saw a mean of 65 bpm."])
     assert validate.check(ok, EVIDENCE, RETRIEVED).ok
+    # a general finding grounds numbers only where findings are discussed, never a statement about the person
+    personal = answer(observed=["Your resting heart rate was 65 bpm on Oct 6."])
+    assert "grounding" in validate.check(personal, EVIDENCE, RETRIEVED).codes
 
 
 def test_estimated_signals_must_be_called_estimated():
     bad = answer(interpretation=["Your respiratory rate was 14.2 breaths per minute, similar to before."])
     assert "estimated" in validate.check(bad, EVIDENCE, RETRIEVED).codes
-    good = answer(interpretation=["Your estimated respiratory rate was 14.2 breaths per minute."])
+    good = answer(interpretation=["Your estimated respiratory rate was 14.2 breaths per minute."], citations=[])
     assert validate.check(good, EVIDENCE, RETRIEVED).ok
     sleep = answer(interpretation=["You slept less on Oct 5, which may matter."])
     assert "estimated" in validate.check(sleep, EVIDENCE, RETRIEVED).codes
-    general = answer(interpretation=["Changes of a few bpm may reflect sleep timing."])
+    general = answer(interpretation=["Changes of a few bpm may reflect sleep timing."], citations=[])
     assert validate.check(general, EVIDENCE, RETRIEVED).ok
 
 
@@ -123,3 +131,63 @@ def test_a_citation_must_be_about_something_the_explanation_says():
     assert "citations" in validate.check(off_topic, EVIDENCE, retrieved).codes
     absent = answer(interpretation=["No alcohol was recorded, and nights vary."], citations=["pmid:2"])
     assert "citations" in validate.check(absent, EVIDENCE, retrieved).codes  # research about what did not happen
+
+
+# The independent review's bypasses, on evidence shaped like the real-model smoke run (latest 59 bpm on Oct 6,
+# 58 on Oct 5, median 52, usual range 51-53).
+REVIEW = {
+    "get_metric_summary": {"metric": "resting_hr", "units": "bpm", "estimated": False,
+                           "latest": {"day": "2026-10-06", "value": 59}, "previous": {"day": "2026-10-05", "value": 58, "change": 1},
+                           "baseline": {"nights": 30, "median": 52, "change_vs_median": 7,
+                                        "usual_range": {"low": 51, "high": 53}}},
+    "get_metric_series": {"units": "bpm", "nights": [{"day": "2026-10-04", "value": 58}, {"day": "2026-10-05", "value": 58},
+                                                     {"day": "2026-10-06", "value": 59}]},
+    "get_data_quality": {"measured_nights": 38, "missing_nights": 2, "tracked_nights": 40},
+    "get_sleep_context": {"nights": [{"day": "2026-10-06", "duration_h": 6.2, "efficiency_pct": 90,
+                                      "onset_local": "23:40", "wake_local": "06:12"}], "estimated": True},
+    "get_related_metrics": {"signals": [{"metric": "hrv_rmssd", "units": "ms", "estimated": True,
+                                         "latest": {"day": "2026-10-06", "value": 85}, "median": 69, "change_vs_median": 16}]},
+}
+
+
+def review(**over):
+    base = {"headline": "Resting heart rate 59 bpm on Oct 6, above your usual range",
+            "observed": ["Your resting heart rate was 59 bpm on Oct 6, 7 bpm above your median of 52 bpm."],
+            "interpretation": [], "uncertainty": ["Two tracked nights have no measurement."], "citations": []}
+    base.update(over)
+    return json.dumps(base)
+
+
+def test_the_review_bypasses_are_closed():
+    assert validate.check(review(), REVIEW, {}).ok, validate.check(review(), REVIEW, {}).errors
+    rejected = {
+        "Your resting heart rate was 51 bpm on Oct 6, 7 bpm below your median of 58 bpm.": "grounding",
+        "It fell 6 bpm to 53 bpm.": "direction",
+        "It was 7 bpm below your median.": "direction",
+        "Your resting heart rate was 0 bpm on Oct 5.": "grounding",
+        "Your resting heart rate was 75bpm on Oct 6.": "grounding",
+        "Your estimated bedtime was 3:17.": "grounding",
+        "Your estimated sleep was 6 bpm.": "grounding",
+        "Twelve nights were missing.": "grounding",
+        "It rose because your training was harder.": "claim",
+        "This can be a side effect of travel.": "wording",
+        "Stresses can raise resting heart rate.": "wording",
+        "Illnesses and infections can raise it.": "wording",
+        "Str​ess can raise it.": "text",
+        "Strеss can raise it.": "text",
+        "It was higher two days ago.": "dates",
+        "It was higher on Monday.": "dates",
+        "Your HRV was 85 ms on Oct 6.": "estimated",
+        "Your sleep was short on Oct 6.": "estimated",
+        "It was 59 bpm on 10/6.": "dates",
+    }
+    for sentence, code in rejected.items():
+        result = validate.check(review(observed=[sentence]), REVIEW, {})
+        assert code in result.codes, (sentence, result.errors)
+    # and what must still pass
+    for sentence in ("A change of 1 may be ordinary variation.", "Your estimated sleep was 6.2 h on Oct 6.",
+                     "Your estimated bedtime was 23:40 on Oct 6.", "It was 1 bpm above Oct 5 and 59 bpm on Oct 6.",
+                     "Your estimated HRV was 85 ms on Oct 6, 16 ms above your median of 69 ms.",
+                     "Your resting heart rate stayed within 51-53 bpm over most of the last 30 nights."):
+        result = validate.check(review(observed=[sentence]), REVIEW, {})
+        assert result.ok, (sentence, result.errors)

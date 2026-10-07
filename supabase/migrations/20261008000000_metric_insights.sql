@@ -8,9 +8,10 @@
 --   metric_insight_jobs   queue, one row per (user, metric); service role only
 --   metric_insights       one immutable row per published analysis; the current one has superseded_at NULL
 --
--- Caching: an analysis is keyed by an input fingerprint (internal.metric_insight_inputs): the measured values
--- of the 90 days ending at the metric's latest measured day, the context-layer comparisons and episodes the
--- worker reads for that day, the exposure events around it and the coach memory the worker may read. The scores
+-- Caching: an analysis is keyed by an input fingerprint (internal.metric_insight_inputs): the scores of the 90
+-- days ending at the metric's latest measured day, the whole context document the worker reads for that day,
+-- the exposure events around it and the coach memory the worker may read. Changing what the worker does with
+-- them (prompt, tools, validator) must bump internal.metric_insight_version() so cached analyses are redone. The scores
 -- route calls metric_insight_request_v1 when the detail screen opens: an insight whose fingerprint matches is
 -- served as is (no model call); otherwise the job is queued, and the previous insight is served marked stale
 -- until the new one lands. Nothing is queued for a user who never opens the screen.
@@ -70,7 +71,7 @@ create table if not exists public.metric_insight_jobs (
   check (completed_revision <= input_revision)
 );
 create index if not exists metric_insight_jobs_due
-  on public.metric_insight_jobs (requested_at)
+  on public.metric_insight_jobs (dirty_at)
   where completed_revision < input_revision and not dead_letter;
 create unique index if not exists metric_insight_jobs_token
   on public.metric_insight_jobs (lease_token) where lease_token is not null;
@@ -134,15 +135,6 @@ language sql immutable set search_path = '' as $$
   select 'metric-insight-1'::text
 $$;
 
--- The context-layer series of a metric (MeasurementContextPage.seriesPrefixes in the app).
-create or replace function internal.metric_insight_series_prefixes(p_metric text) returns text[]
-language sql immutable set search_path = '' as $$
-  select case p_metric
-    when 'resting_hr' then array['resting_hr.', 'heart_rate.']
-    when 'hrv_rmssd' then array['hrv_rmssd.']
-    else '{}'::text[] end
-$$;
-
 -- The context row the worker reads for a day: the retrospective document when it exists, else the live one, of
 -- the device that produced the day's score.
 create or replace function internal.metric_insight_context_document(p_user uuid, p_device uuid, p_day date)
@@ -163,8 +155,6 @@ declare
   v_device uuid;
   v_zone text;
   v_doc jsonb;
-  v_prefixes text[] := internal.metric_insight_series_prefixes(p_metric);
-  v_context jsonb;
   v_lo bigint;
   v_hi bigint;
 begin
@@ -180,25 +170,10 @@ begin
   v_zone := internal.physiology_context_zone(p_user);
   v_lo := extract(epoch from ((v_anchor - 14)::timestamp at time zone v_zone))::bigint;
   v_hi := extract(epoch from ((v_anchor + 1)::timestamp at time zone v_zone))::bigint;
+  -- The whole selected document: the worker reads many of its sections (comparisons, episodes, availability,
+  -- sleep, exertion, bouts, daily values, exposure categories), and a republish of any of them is new input.
   if v_device is not null then
     v_doc := internal.metric_insight_context_document(p_user, v_device, v_anchor);
-  end if;
-  if v_doc is not null then
-    v_context := jsonb_build_object(
-      'comparisons', (select coalesce(jsonb_agg(c.value order by c.ord), '[]'::jsonb)
-          from jsonb_array_elements(case when jsonb_typeof(v_doc -> 'comparisons') = 'array'
-                                         then v_doc -> 'comparisons' else '[]'::jsonb end) with ordinality as c(value, ord)
-         where exists (select 1 from unnest(v_prefixes) p(prefix)
-                        where pg_catalog.starts_with(coalesce(c.value ->> 'series_key', ''), p.prefix))),
-      'episodes', (select coalesce(jsonb_agg(e.value order by e.ord), '[]'::jsonb)
-          from jsonb_array_elements(case when jsonb_typeof(v_doc -> 'episodes') = 'array'
-                                         then v_doc -> 'episodes' else '[]'::jsonb end) with ordinality as e(value, ord)
-         where exists (select 1 from unnest(v_prefixes) p(prefix)
-                        where pg_catalog.starts_with(coalesce(e.value ->> 'series_key', ''), p.prefix))),
-      'availability', v_doc -> 'availability',
-      'sleep_timing', v_doc -> 'sleep' -> 'timing',
-      'exertion', v_doc -> 'exertion',
-      'status', v_doc -> 'status');
   end if;
   return query select v_anchor, encode(pg_catalog.sha256(convert_to(
     internal.metric_insight_version() || E'\n' || p_user::text || E'\n' || p_metric
@@ -209,15 +184,15 @@ begin
            from public.server_daily_scores s
           where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1'
             and s.day between v_anchor - 89 and v_anchor), '')
-    || E'\ncontext:' || coalesce(v_context::text, '-')
+    || E'\ncontext:' || coalesce(md5(v_doc::text), '-')
     || E'\nexposures:' || coalesce((
          select string_agg(e.event_id || ':' || e.revision::text, ',' order by e.event_id collate "C")
            from public.exposure_events e
-          where e.owner = p_user and e.occurred_start < v_hi and e.occurred_end > v_lo
-            and e.occurred_start > v_lo - 2678400), '')
+          where e.owner = p_user and e.occurred_start < v_hi and e.occurred_end > v_lo), '')
     || E'\nmemory:' || coalesce((
-         select string_agg(m.id::text || ':' || m.importance::text || ':' || md5(m.content), ',' order by m.id)
-           from (select x.id, x.importance, x.content from public.coach_memory_items x
+         select string_agg(m.id::text || ':' || m.importance::text || ':' || md5(m.topic || E'\n' || m.content), ','
+                           order by m.id)
+           from (select x.id, x.importance, x.topic, x.content from public.coach_memory_items x
                   where x.user_id = p_user order by x.importance desc, x.created_at desc, x.id limit 12) m), ''),
     'UTF8')), 'hex');
 end $$;
@@ -332,8 +307,9 @@ begin
   return jsonb_build_object('status', 'pending', 'metric', p_metric, 'insight', v_stale, 'retry_after_s', 10);
 end $$;
 
--- One due job under a fresh lease: the oldest request first, FOR UPDATE SKIP LOCKED. Requests older than 6 h
--- and owners at their daily bound are skipped; retired owners are never handed out. Re-stamps the fingerprint
+-- One due job under a fresh lease: the longest-waiting inputs first (dirty_at; a poll does not move a job up),
+-- FOR UPDATE SKIP LOCKED. Requests nobody repeated for 6 h and owners at their daily bound are skipped; retired
+-- owners are never handed out. Re-stamps the fingerprint
 -- and anchor as of the claim, which is what the published insight is keyed by.
 create or replace function public.metric_insight_claim_v1(p_worker text, p_lease_seconds integer default 300)
 returns table (user_id uuid, metric text, input_revision bigint, lease_token uuid, lease_until timestamptz,
@@ -359,7 +335,7 @@ begin
      and (q.lease_until is null or q.lease_until <= pg_catalog.clock_timestamp())
      and (q.runs_day is distinct from v_today or q.runs_count < 8)
      and not exists (select 1 from public.noop_account_retirements x where x.user_id = q.user_id)
-   order by q.requested_at, q.user_id, q.metric
+   order by q.dirty_at, q.user_id, q.metric
    for update of q skip locked limit 1;
   if not found then
     return;
@@ -540,7 +516,6 @@ end $$;
 -- ---------------------------------------------------------------------------------------------------------
 
 revoke all on function internal.metric_insight_version() from public, anon, authenticated, service_role;
-revoke all on function internal.metric_insight_series_prefixes(text) from public, anon, authenticated, service_role;
 revoke all on function internal.metric_insight_context_document(uuid, uuid, date)
   from public, anon, authenticated, service_role;
 revoke all on function internal.metric_insight_inputs(uuid, text) from public, anon, authenticated, service_role;

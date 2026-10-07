@@ -51,6 +51,7 @@ class JobTools:
         self.sources = sources
         self.literature = literature
         self.calls: list[str] = []
+        self.received: list[tuple[str, dict[str, Any]]] = []  # every result the model got, as it got it
         self.retrieved: dict[str, dict[str, Any]] = {}
         self.searches = 0
 
@@ -64,13 +65,23 @@ class JobTools:
             return {"available": False, "reason": "no_measured_data"}
         result = tool.handler(self, args)
         self.calls.append(name)
+        self.received.append((name, result))
         return result
 
     def evidence(self) -> dict[str, Any]:
-        """Every data tool with its default arguments: what the explanation may draw on. Not logged as calls."""
+        """Every data tool with its default arguments (the payload's related signals and basis). Not logged."""
         if self.anchor is None:
             return {}
         return {name: tool.handler(self, {}) for name, tool in TOOLS.items() if tool.data}
+
+    def validation_evidence(self) -> dict[str, list[dict[str, Any]]]:
+        """What the answer may draw on: the default results plus every result the model actually received (it may
+        have asked for other windows or signals)."""
+        out: dict[str, list[dict[str, Any]]] = {name: [result] for name, result in self.evidence().items()}
+        for name, result in self.received:
+            if TOOLS[name].data:
+                out.setdefault(name, []).append(result)
+        return out
 
     # handlers --------------------------------------------------------------------------------------------
 
