@@ -235,6 +235,7 @@ final class ActivityCalibrationSessionTests: XCTestCase {
         XCTAssertEqual(step.cueAt?.timeIntervalSince1970, TimeInterval(epoch + 18))
     }
 
+    @MainActor
     func testAStallStartsTheNextStepNowInsteadOfFiringItsCueEarly() {
         let deadline = Date(timeIntervalSince1970: 100)
         XCTAssertEqual(ActivityCalibrationSessionRunner.chainStart(deadline: deadline, now: Date(timeIntervalSince1970: 100.9)), deadline)
