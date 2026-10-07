@@ -5618,18 +5618,14 @@ public final class BLEManager: NSObject, ObservableObject {
         let localFmt = DateFormatter()
         localFmt.dateFormat = "EEE HH:mm zzz"
         if selectedModel.deviceFamily == .whoop5 {
-            // The 5/MG firmware alarm remains experimental despite reported wakes, so only arm it when
-            // the user has opted into Protocol probes — matching the Android
-            // client, which refuses to arm it otherwise. Without this a normal 5/MG user is silently
-            // armed onto an alarm that may never fire.
-            guard PuffinExperiment.isEnabled else {
-                log("Alarm: 5/MG firmware alarm needs Protocol probes (Test Centre) — not armed")
-                return
-            }
+            // This build is WHOOP 5/MG only, so the upstream Protocol-probes opt-in is not required to arm.
+            // It used to gate this path and left a normal 5/MG user silently unarmed.
             // 5/MG SET_ALARM_TIME is REVISION_4: [04][id][u32 sec][u16 subsec][12-byte 47/152
             // pattern, overallLoop 7, 30 s]. No SET_CLOCK preamble (see doc comment above).
             let wakeMs = Int64((date.timeIntervalSince1970 * 1000).rounded())
-            send(.setAlarmTime, payload: AlarmPayload.setAlarmRev4(wakeEpochMs: wakeMs))
+            let body = AlarmPayload.setAlarmRev4(wakeEpochMs: wakeMs)
+            log("Alarm: sending 5/MG SET_ALARM_TIME rev4 body=\(body.map { String(format: "%02x", $0) }.joined()) connected=\(commandChannelReady)")
+            send(.setAlarmTime, payload: body)
             recordAlarmArm(sentEpoch: Int(wakeMs / 1000))
             // #34: don't claim "armed" when the strap isn't connected (the send was dropped) — the arm
             // re-fires on the next connect.

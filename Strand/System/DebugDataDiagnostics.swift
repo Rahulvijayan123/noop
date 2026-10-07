@@ -504,8 +504,7 @@ enum DebugDataDiagnostics {
             // wearer to "Experimental" in Settings, which is neither where nor what the gate is; the copy
             // and the refusal logs were corrected in #2484 / #2488 and this line was missed, so a wearer
             // reading their own strap log was still sent hunting for the old name.
-            lines.append("Model: \(WhoopModel.whoop5mg.displayName) · Protocol probes (Test Centre): "
-                         + (PuffinExperiment.isEnabled ? "on" : "off → firmware alarm NOT armed"))
+            lines.append("Model: \(WhoopModel.whoop5mg.displayName)")
         case nil:
             lines.append("Model: unknown (family not yet detected)")
         }
@@ -607,6 +606,15 @@ enum DebugDataDiagnostics {
             }
         } else {
             lines.append("Last arm: never")
+        }
+        if let reply = d.string(forKey: "alarm.lastReplyFrame5") {
+            var rline = "Strap reply (5/MG): \(reply)"
+            if let at = d.object(forKey: "alarm.lastReplyAt5") as? Double {
+                rline += " · \(relTime(Date().timeIntervalSince1970 - at))"
+            }
+            lines.append(rline)
+        } else if d.object(forKey: "alarm.lastArmSentEpoch") != nil {
+            lines.append("Strap reply (5/MG): none received for the last arm")
         }
         // #1: did the strap actually fire? (STRAP_DRIVEN_ALARM_EXECUTED)
         if let firedAt = d.object(forKey: "alarm.lastFiredAt") as? Double {

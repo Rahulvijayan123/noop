@@ -210,6 +210,21 @@ public final class FrameRouter {
                                 + "frame=\(Self.fullFrameHex(frame))",
                              domain: .connection)
             }
+            // The 5/MG's own answer to the alarm family. The 4.0 branch below decodes these; a 5/MG used to
+            // get "armed" in the log the moment the frame left the phone and nothing about whether the strap
+            // accepted it. Quote the evidence (result byte at the 5/MG offset + the whole frame) and claim no
+            // verdict, the same stance as the clock lines above. LOG-ONLY, never gates behaviour.
+            if family == .whoop5, let cmd = parsed.cmdName,
+               cmd.hasPrefix("SET_ALARM_TIME") || cmd.hasPrefix("GET_ALARM_TIME")
+                || cmd.hasPrefix("DISABLE_ALARM") || cmd.hasPrefix("RUN_ALARM") {
+                let r = Self.commandResultByte(in: frame, family: family)
+                let rhex = r.map { String(format: "0x%02x", UInt8(truncatingIfNeeded: $0)) } ?? "none"
+                let full = Self.fullFrameHex(frame)
+                state.append(log: "Alarm: strap replied to \(cmd) result@offset=\(rhex) frame=\(full)")
+                let d = UserDefaults.standard
+                d.set("\(cmd) result=\(rhex) frame=\(full)", forKey: "alarm.lastReplyFrame5")
+                d.set(Date().timeIntervalSince1970, forKey: "alarm.lastReplyAt5")
+            }
             if family == .whoop4, let cmd = parsed.cmdName {
                 if cmd.hasPrefix("TOGGLE_GENERIC_HR_PROFILE") {
                     // #2400: this is evidence that the strap answered opcode 14, not a read-back of the
