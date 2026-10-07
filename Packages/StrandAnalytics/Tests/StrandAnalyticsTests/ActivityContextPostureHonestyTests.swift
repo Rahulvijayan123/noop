@@ -101,9 +101,13 @@ final class ActivityContextPostureHonestyTests: XCTestCase {
         // D2-06: sit, then lie down on a sofa (the forearm goes from inclined on the knee to flat with the hand
         // raised toward the chest), awake. The four transition modes shared one observation profile, so the
         // event kind came from where the mass was and a lie-down from sitting was stamped sit_to_stand_like.
+        // The walk there (arm hanging) calibrates the strap's forearm sign: without it a raised hand cannot be
+        // told from a hanging arm, and the lie-down's direction would rest on the flat forearm alone.
         var sim = ActivitySim()
-        sim.forearm(0.55)
         var awake = ActivitySim.Options(); awake.sleep = .awake
+        sim.forearm(0.9)
+        sim.walk(90, opt: awake)
+        sim.forearm(0.55)
         sim.desk(240, opt: awake)
         let lie = sim.ts
         sim.postureShift(netDegrees: 80, seconds: 4, toForearm: -0.45, opt: awake)
@@ -112,11 +116,19 @@ final class ActivityContextPostureHonestyTests: XCTestCase {
         let near = events(states).filter { postural.contains($0.kind) && abs($0.ts - lie) <= 15 }
         XCTAssertTrue(near.contains { $0.kind == .lyingDownLike }, "got \(near.map(\.kind))")
         XCTAssertFalse(near.contains { $0.kind == .sitToStandLike }, "got \(near.map(\.kind))")
-        // Minutes later the held orientation has made it lying down (or at least not sitting).
+        // Minutes later the lie-down's direction and the held orientation have made it possibly lying, never
+        // sitting: from the wrist alone (no night, no in-bed window) the posture stays unresolved, because a
+        // seated wearer raising a phone looks the same (`testTwentyMinutesSeatedHoldingAPhoneUpIsNeverLying`).
         let end = try XCTUnwrap(states.last)
         let k = ActivityClassifier.classify(state: end)
         XCTAssertTrue([.lyingDown, .stationary].contains(k.activityClass), "got \(k.activityClass)")
-        XCTAssertGreaterThan(end.posture[.recumbent], end.posture[.seatedLikely])
+        XCTAssertLessThan(end.posture[.seatedLikely] - end.posture[.uprightStationary], 0.2)
+        // In the minutes after it the lie-down's direction lifts recumbent above what the held orientation alone
+        // may (~0.23), and then fades back toward unresolved as the direction memory ages.
+        let before = try XCTUnwrap(states.last { $0.ts < lie })
+        let peak = states.filter { $0.ts >= lie && $0.ts <= lie + 400 }.map { $0.posture[.recumbent] }.max() ?? 0
+        XCTAssertGreaterThan(peak, 0.3)
+        XCTAssertGreaterThan(peak, before.posture[.recumbent] + 0.25)
     }
 
     func testDirectionComesFromTheForearmNotFromWhereTheMassWas() throws {
@@ -358,5 +370,201 @@ final class ActivityContextPostureHonestyTests: XCTestCase {
         // The arm chain still sees the workout (its exercise reading).
         XCTAssertGreaterThan(ActivityContextModel.armPattern(logged)[ArmState.exercise],
                              ActivityContextModel.armPattern(logged, includeWorkout: false)[ArmState.exercise])
+    }
+
+    // MARK: Held orientation alone never commits lying; the forearm sign is calibrated (hsmm-1.8 review)
+
+    private func walkCalibrating(_ sim: inout ActivitySim, hanging x: Double = 0.9,
+                                 opt: ActivitySim.Options = ActivitySim.Options()) {
+        let held = sim.forearmX
+        sim.forearm(x)
+        sim.walk(90, opt: opt)
+        sim.forearm(held)
+    }
+
+    private func assertNeverLying(_ states: [ActivityContextState], from t0: Int, _ what: String,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        let late = states.filter { $0.ts >= t0 + 60 }
+        XCTAssertFalse(late.isEmpty, file: file, line: line)
+        for (s, k) in zip(late, classes(late)) {
+            XCTAssertNotEqual(k.activityClass, .lyingDown, "\(what) at \(s.ts - t0) s", file: file, line: line)
+            XCTAssertNotEqual(k.activityClass, .unknown, "\(what) at \(s.ts - t0) s", file: file, line: line)
+            XCTAssertLessThan(s.posture[.recumbent], 0.5, "\(what) at \(s.ts - t0) s", file: file, line: line)
+            XCTAssertFalse(["Lying down", "Resting in bed"].contains(s.displayContext ?? ""),
+                           "\(what) at \(s.ts - t0) s: \(s.displayContext ?? "nil")", file: file, line: line)
+        }
+    }
+
+    func testFortyMinutesOfQuietSittingWithAFlatForearmIsNeverLying() {
+        // Review probe P1: walk, sit down, then 40 min quiet with the forearm flat on an armrest or the lap (TV,
+        // a meeting), sleep unknown. The held orientation alone used to commit lying_down in 363 of 479 states.
+        for calibrated in [false, true] {
+            var sim = ActivitySim()
+            sim.forearm(0.1)
+            if calibrated { walkCalibrating(&sim) }
+            sim.walk(60)
+            sim.postureShift(netDegrees: 70, seconds: 3, toForearm: 0.1)
+            let t0 = sim.ts
+            sim.still(2400)
+            assertNeverLying(decode(sim.observations), from: t0, calibrated ? "calibrated" : "sign unknown")
+        }
+    }
+
+    func testTwentyMinutesSeatedHoldingAPhoneUpIsNeverLying() {
+        // Review probe P2: desk work, then the hand raised above the elbow to read a phone, quiet for 20 min.
+        // A raised hand is the strongest recumbent cue the forearm has, and still only a hedge on its own.
+        for calibrated in [false, true] {
+            var sim = ActivitySim()
+            sim.forearm(0.5)
+            if calibrated { walkCalibrating(&sim) }
+            sim.desk(120)
+            sim.postureShift(netDegrees: 40, seconds: 3, toForearm: -0.45)
+            let t0 = sim.ts
+            sim.still(1200)
+            assertNeverLying(decode(sim.observations), from: t0, calibrated ? "calibrated" : "sign unknown")
+        }
+    }
+
+    func testTheOriginalQuietWristNeverReachesLying() {
+        // Review probe P5 at its full length: the simulator's default (flat) forearm, quiet, no sleep evidence.
+        var sim = ActivitySim()
+        let t0 = sim.ts
+        sim.still(2400)
+        let states = decode(sim.observations)
+        assertNeverLying(states, from: t0, "default forearm")
+        for s in states.filter({ $0.ts >= t0 + 60 }) { XCTAssertLessThan(s.posture[.recumbent], 0.3, "at \(s.ts - t0)") }
+    }
+
+    func testQuietDeskReadingThroughTheTrackIsNotRestingInBed() {
+        // Review probe P6: desk work, then 30 min quiet reading with the forearm flat on the desk, through the
+        // track builder (wear from the pulse, sleep known awake outside sessions). It became lying_down at 0.61
+        // and "Resting in bed".
+        var sim = ActivitySim()
+        sim.forearm(0.05)
+        sim.desk(300)
+        let t0 = sim.ts
+        sim.still(1800)
+        let obs = ActivityContextTrackBuilder.observations(for: sim.trackInput())
+        assertNeverLying(decode(obs), from: t0, "track path")
+    }
+
+    /// The same stream with the strap's x axis mirrored (worn the other way round).
+    private func mirrored(_ obs: [ActivityObservation]) -> [ActivityObservation] {
+        obs.map { o in
+            var o = o
+            if let g = o.gravity, g.count == 3 { o.gravity = [-g[0], g[1], g[2]] }
+            return o
+        }
+    }
+
+    func testAStrapWornTheOtherWayRoundDecodesTheSame() throws {
+        // Review probes P3 / P4: nothing on the strap says which way its +x points. Read with a fixed sign, a
+        // hanging arm on a flipped strap was "hand above the elbow" (lying_down from 240 s of quiet standing)
+        // and every stand-up / sit-down came out inverted. Calibrated from gait (or read as |x| until then),
+        // a mirrored stream decodes to exactly the same states.
+        var sim = ActivitySim()
+        walkCalibrating(&sim)
+        sim.forearm(0.3)
+        sim.desk(240)
+        let up = sim.ts
+        sim.postureShift(netDegrees: -60, seconds: 3, toForearm: 0.92)
+        sim.still(120)
+        let down = sim.ts
+        sim.postureShift(netDegrees: 60, seconds: 3, toForearm: 0.3)
+        sim.desk(300)
+        let normal = decode(sim.observations), flipped = decode(mirrored(sim.observations))
+        XCTAssertEqual(normal.count, flipped.count)
+        for (a, b) in zip(normal, flipped) {
+            XCTAssertEqual(ActivityClassifier.classify(state: a).activityClass, ActivityClassifier.classify(state: b).activityClass,
+                           "at \(a.ts)")
+            XCTAssertEqual(a.posture[.recumbent], b.posture[.recumbent], accuracy: 1e-9, "at \(a.ts)")
+            XCTAssertEqual(a.posture[.seatedLikely], b.posture[.seatedLikely], accuracy: 1e-9, "at \(a.ts)")
+        }
+        let ev = events(flipped).filter { postural.contains($0.kind) }
+        XCTAssertEqual(ev.first { abs($0.ts - up) <= 10 }?.kind, .sitToStandLike, "got \(ev)")
+        XCTAssertEqual(ev.first { abs($0.ts - down) <= 10 }?.kind, .standToSitLike, "got \(ev)")
+        XCTAssertFalse(ev.contains { $0.kind == .lyingDownLike }, "got \(ev)")
+
+        // Standing still after a walk on the flipped strap (P3): never lying.
+        var stand = ActivitySim()
+        stand.forearm(0.9)
+        stand.walk(90)
+        let t0 = stand.ts
+        stand.still(900)
+        assertNeverLying(decode(mirrored(stand.observations)), from: t0, "flipped, standing")
+        // And before any walk has calibrated the sign, the mirrored strap reads the same as the normal one.
+        var cold = ActivitySim()
+        cold.forearm(0.9)
+        cold.still(900)
+        let c1 = decode(cold.observations), c2 = decode(mirrored(cold.observations))
+        for (a, b) in zip(c1, c2) { XCTAssertEqual(a.posture[.recumbent], b.posture[.recumbent], accuracy: 1e-9) }
+    }
+
+    func testTheForearmSignIsCalibratedFromGaitAndForgottenOffWrist() throws {
+        var sim = ActivitySim()
+        sim.forearm(-0.9)
+        sim.walk(90)
+        var d = ActivityContextDecoder(config: ActivityDecoderConfig())
+        _ = d.run(sim.observations)
+        let t = d.snapshot().tracking
+        let votes = try XCTUnwrap(t.forearmSignVotes), weight = try XCTUnwrap(t.forearmSignWeight)
+        XCTAssertGreaterThanOrEqual(weight, ActivityContextModel.forearmSignMinGaitS)
+        XCTAssertLessThan(votes / weight, -ActivityContextModel.forearmSignMinMean, "a flipped strap's arm hangs toward −x")
+        // A walk with the arm held up (a phone, a carried bag) leaves it unknown rather than wrong.
+        var phone = ActivitySim()
+        phone.walk(300)
+        var d2 = ActivityContextDecoder(config: ActivityDecoderConfig())
+        _ = d2.run(phone.observations)
+        let t2 = d2.snapshot().tracking
+        XCTAssertLessThan(abs((t2.forearmSignVotes ?? 0) / max(1, t2.forearmSignWeight ?? 1)),
+                          ActivityContextModel.forearmSignMinMean)
+        // Off the wrist it may go back on the other way round.
+        sim.offWrist(30)
+        var d3 = ActivityContextDecoder(config: ActivityDecoderConfig())
+        _ = d3.run(sim.observations)
+        XCTAssertNil(d3.snapshot().tracking.forearmSignVotes)
+    }
+
+    func testAnEventIsPublishedUnderOneKindOnly() {
+        // Review: an unshown postural event may still change kind, and it was already in every state's
+        // recent_events, so persisted states showed one event as lying_down_like and stand_to_sit_like.
+        var scenarios: [[ActivityObservation]] = []
+        var a = ActivitySim()
+        a.forearm(0.5)
+        a.desk(120)
+        a.postureShift(netDegrees: 40, seconds: 3, toForearm: -0.45)
+        a.still(600)
+        scenarios.append(a.observations)
+        var b = ActivitySim()
+        b.forearm(0.3)
+        b.desk(240)
+        b.postureShift(netDegrees: -60, seconds: 3, toForearm: 0.92)
+        b.still(120)
+        b.postureShift(netDegrees: 60, seconds: 3, toForearm: 0.3)
+        b.desk(300)
+        scenarios.append(b.observations)
+        scenarios.append(mirrored(b.observations))
+        for (i, obs) in scenarios.enumerated() {
+            var kinds: [Int: Set<ActivityTransitionKind>] = [:]
+            for s in decode(obs) {
+                for e in s.history.recentEvents { kinds[e.ts, default: []].insert(e.kind) }
+                if let e = s.transition { kinds[e.ts, default: []].insert(e.kind) }
+            }
+            for (ts, k) in kinds { XCTAssertEqual(k.count, 1, "scenario \(i), event at \(ts): \(k)") }
+        }
+    }
+
+    func testAVeryStillSleeperWithoutAPulseStaysAsleep() {
+        // Review probe P7: staged asleep, wear unknown, the HR stream missing, a very still wrist. The pulseless
+        // "strap on a table" rule made it unknown@0 from 300 s while the display still said "Asleep".
+        var sim = ActivitySim()
+        var o = ActivitySim.Options(); o.hr = nil; o.sleep = .asleep; o.wear = .unknown
+        let t0 = sim.ts
+        sim.still(1200, dyn: 0.004, opt: o)
+        let late = decode(sim.observations).filter { $0.ts >= t0 + 200 }
+        XCTAssertFalse(late.isEmpty)
+        for (s, k) in zip(late, classes(late)) {
+            XCTAssertEqual(k.activityClass, .sleeping, "at \(s.ts - t0)")
+        }
     }
 }

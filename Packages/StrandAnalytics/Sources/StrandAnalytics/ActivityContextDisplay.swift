@@ -108,11 +108,9 @@ public enum ActivityDisplay {
         // Stationary: posture, then arm behaviour.
         if posture[.posturalTransition] >= 0.45 { return "Changing position" }
         if posture[.recumbent] >= 0.5 {
-            switch sleep {
-            case .asleep: return "Asleep"
-            case .awake: return "Resting in bed"
-            case .unknown: return "Lying down"
-            }
+            // Outside the in-bed window (handled above) awake lying is not "in bed": a sofa, the floor, a
+            // daytime lie-down. "Resting in bed" is the in-bed window's wording only.
+            return sleep == .asleep ? "Asleep" : "Lying down"
         }
         let seated = posture[.seatedLikely], upright = posture[.uprightStationary]
         let armTop = arm.top(excluding: .unknown)?.0

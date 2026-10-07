@@ -130,6 +130,11 @@ struct DecoderTracking: Codable, Equatable {
     var lastInBedTs: Int?
     /// A postural event whose excursion ended before any published state showed it: shown next.
     var showNext: ActivityTransitionEvent?
+    /// Forearm sign calibration (hsmm-1.8): gait seconds' decaying, clipped vote of the forearm-axis component
+    /// and its decaying weight (`ActivityContextModel.forearmSignMinGaitS`). nil until the first walk, so a
+    /// snapshot without them still decodes (and re-calibrates on the next walk).
+    var forearmSignVotes: Double?
+    var forearmSignWeight: Double?
 }
 
 // MARK: - Layout of the Erlang-expanded state space
@@ -323,6 +328,7 @@ public struct ActivityContextDecoder: Sendable {
         var gapS = 0
         if let last = lastTs {
             let gap = obs.ts - last
+            if gap > ActivityContextModel.forearmSignResetGapS { resetForearmSign() }
             if gap > config.gapResetS {
                 resetBelief()
             } else if gap > 1 {
@@ -342,6 +348,8 @@ public struct ActivityContextDecoder: Sendable {
             if tracking.offWristSinceTs == nil {
                 tracking.offWristSinceTs = obs.ts
                 resetBelief()
+                // It may go back on the other way round.
+                resetForearmSign()
             }
             lastTs = obs.ts
             return publishIfDue(obs.ts)
@@ -356,8 +364,10 @@ public struct ActivityContextDecoder: Sendable {
         var f = window.push(obs, restingHR: config.restingHeartRate, maxHR: config.maxHeartRate,
                             motionHeadsHoldS: motionHeads?.holdS ?? 0, gaitQualityHoldS: gaitQuality?.holdS ?? 0)
         if gapS > Self.gapFlattenOnsetS { flattenAfterGap(gapS) }
-        // No pulse, no wear evidence, stiller than a resting wrist: count it (D1-05).
-        if obs.wear == .unknown, f.hr == nil, ActivityContextModel.implausiblyStill(f) {
+        f.forearmSign = calibrateForearmSign(f)
+        // No pulse, no wear evidence, stiller than a resting wrist: count it (D1-05). Never on the staged night
+        // or in its in-bed window: a sleeper is very still, and sleep staging already says someone is there.
+        if obs.wear == .unknown, f.hr == nil, obs.sleep != .asleep, !obs.inBed, ActivityContextModel.implausiblyStill(f) {
             tracking.noPulseStillS = (tracking.noPulseStillS ?? 0) + 1
         } else {
             tracking.noPulseStillS = nil
@@ -466,10 +476,37 @@ public struct ActivityContextDecoder: Sendable {
 
     private typealias Evidence = ActivityContextModel.PostureEvidence
 
+    /// Fold this second's gait forearm axis into the sign calibration; the calibrated sign, or nil while unknown.
+    private mutating func calibrateForearmSign(_ f: ActivityFeatures) -> Double? {
+        var votes = tracking.forearmSignVotes ?? 0, weight = tracking.forearmSignWeight ?? 0
+        if let ux = f.gaitUx {
+            let k = exp(-1 / ActivityContextModel.forearmSignTauS)
+            votes = votes * k + min(1, max(-1, ux))
+            weight = weight * k + 1
+            tracking.forearmSignVotes = votes
+            tracking.forearmSignWeight = weight
+        }
+        guard weight >= ActivityContextModel.forearmSignMinGaitS,
+              abs(votes / weight) >= ActivityContextModel.forearmSignMinMean else { return nil }
+        return votes > 0 ? 1 : -1
+    }
+
+    private mutating func resetForearmSign() {
+        tracking.forearmSignVotes = nil
+        tracking.forearmSignWeight = nil
+    }
+
     private mutating func decayPostureEvidence(seconds: Int) {
         guard seconds > 0, var e = tracking.postureEvidence else { return }
         for i in e.indices { e[i] *= exp(-Double(seconds) / Evidence.taus[i]) }
         tracking.postureEvidence = e
+    }
+
+    /// The recumbent memory without the held orientation (lie-down direction, the night): what may open entry.
+    private var recumbentEntryEvidence: Double {
+        guard let e = tracking.postureEvidence else { return 0 }
+        let k = Evidence.recumbentStart
+        return max(0, e[k...].reduce(0, +) - e[Evidence.recumbentOrientationIndex])
     }
 
     /// The memory's seated-over-upright total and recumbent total (0 without a memory).
@@ -514,7 +551,8 @@ public struct ActivityContextDecoder: Sendable {
         // A posture shift whose direction the forearm axis cannot tell (a roll about the forearm) may have
         // changed the posture either way: what was known before it fades too, and the transition modes decide.
         var clarity = 0.0
-        if let a = f.shiftFromUx, let b = f.shiftToUx {
+        if let a = ActivityContextModel.forearmAxis(f.shiftFromUx, sign: f.forearmSign),
+           let b = ActivityContextModel.forearmAxis(f.shiftToUx, sign: f.forearmSign) {
             let v = ActivityContextModel.shiftDirection(from: a, to: b)
             clarity = min(1, abs(log(v[BodyMode.standToSit.rawValue] / v[BodyMode.sitToStand.rawValue])) / log(4))
         }
@@ -598,9 +636,11 @@ public struct ActivityContextDecoder: Sendable {
                                       expert: (q: Double, p: [BodyMode: Double])? = nil) {
         var next = [Double](repeating: 0, count: bodyLayout.total)
         // Entry into recumbent modes: free in the night's in-bed window (lying awake in bed is still lying,
-        // D1-04), otherwise damped by the sleep evidence and opened again by held recumbent evidence (a
-        // forearm held flat or a hand raised for minutes: a daytime lie-down, D2-06).
-        let support = max(0, min(1, postureEvidenceTotals.recumbent / ActivityContextModel.postureEvidenceCapRecumbent))
+        // D1-04), otherwise damped by the sleep evidence and opened again by a lie-down whose direction the
+        // forearm showed, or the night just ended (a daytime lie-down, D2-06). Never by the held orientation
+        // alone: a forearm flat on the lap or a phone held up reads the same while seated, so on its own it
+        // may only hedge the posture toward unresolved (its source cap), not open the way to lying.
+        let support = max(0, min(1, recumbentEntryEvidence / ActivityContextModel.postureEvidenceCapRecumbent))
         let exitTable: [[(Int, Double)]]
         if tracking.lastInBed {
             exitTable = bodyLayout.exits(for: .asleep)
@@ -929,7 +969,7 @@ public struct ActivityContextDecoder: Sendable {
 
         let sinceLoco = tracking.lastMovingTs.map { max(0, ts - $0) }
         let stationaryFor = tracking.stationarySinceTs.map { max(0, ts - $0) } ?? 0
-        let history = ActivityHistorySummary(sinceLocomotionS: sinceLoco, stationaryForS: stationaryFor,
+        var history = ActivityHistorySummary(sinceLocomotionS: sinceLoco, stationaryForS: stationaryFor,
                                              recentEvents: tracking.events)
 
         if tracking.offWristSinceTs != nil {
@@ -1015,6 +1055,12 @@ public struct ActivityContextDecoder: Sendable {
             decided = true
         }
         if !decided { fresh = tracking.events.last(where: isFresh) }
+        // A postural event that no state has shown yet may still change its kind: it stays out of the published
+        // history too until it is shown, so no reader sees one event under two kinds.
+        if let active = tracking.activePostural, active.shown != true {
+            history = ActivityHistorySummary(sinceLocomotionS: sinceLoco, stationaryForS: stationaryFor,
+                                             recentEvents: tracking.events.filter { !($0.kind == active.kind && $0.ts == active.ts) })
+        }
 
         let wearValidity: Double
         switch tracking.lastWear {

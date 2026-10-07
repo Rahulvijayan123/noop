@@ -389,6 +389,15 @@ struct ActivityFeatures: Equatable {
     /// Seconds in a row the strap has been implausibly still (below a resting wrist's micro-motion, no
     /// rotation) with no pulse and no wear evidence. Set by the decoder, which keeps the count across seconds.
     var noPulseStillS = 0
+    /// Forearm-axis (+x) component of the mean direction over the last 10 s while the step counter (or IMU
+    /// rhythm) says gait: walking lets the arm hang, so its sign is the strap's forearm sign (+ when +x points
+    /// toward the hand). nil without gait or without gravity.
+    var gaitUx: Double? = nil
+    /// The strap's forearm sign as the decoder has calibrated it from gait (+1 / −1), nil while unknown. Set by
+    /// the decoder. Every absolute-orientation cue reads `forearmAxis`, never the raw components: an
+    /// uncalibrated strap is read sign-agnostically (|x|), because a strap worn the other way round turns a
+    /// hanging arm into "hand above the elbow".
+    var forearmSign: Double? = nil
 }
 
 /// Causal ring of recent seconds. Codable so a decoder restart resumes with its context intact.
@@ -732,6 +741,10 @@ struct ActivityFeatureWindow: Codable, Equatable {
             if n >= 20, norm / Double(n) >= 0.96, quiet { heldUx = sx / norm }
         }
 
+        // Forearm axis while walking (calibrates the strap's forearm sign in the decoder).
+        var gaitUx: Double? = nil
+        if (gait ?? 0) >= 0.5, let d = meanDirection(0, 10), d.n >= 6 { gaitUx = d.v[0] }
+
         // Heart rate.
         var hr: Double? = nil, hrRel: Double? = nil
         if let h = lastHr, let t = lastHrTs, now - t <= 10 {
@@ -786,6 +799,6 @@ struct ActivityFeatureWindow: Codable, Equatable {
                                 transition: trans, transitionAgeS: transAge,
                                 gait: gaitExpert, gaitAgeS: gaitExpertAge,
                                 evidence: evidence,
-                                windowFill: min(10, w10.count))
+                                windowFill: min(10, w10.count), gaitUx: gaitUx)
     }
 }

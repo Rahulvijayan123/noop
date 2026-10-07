@@ -468,10 +468,7 @@ final class ActivityContextDecoderTests: XCTestCase {
     }
 
     func testAQuietWristWithoutSleepEvidenceIsNotCalledRecumbent() throws {
-        // hsmm-1.8: the forearm is inclined (resting on a knee or an armrest). A forearm held FLAT and quiet for
-        // many minutes is recumbent evidence now (see `testThirtyMinutesOfAFlatForearmAwakeIsNotConfidentSitting`).
         var sim = ActivitySim()
-        sim.forearm(0.55)
         sim.still(900)
         let (_, published) = decode(sim)
         for s in published.suffix(60) {

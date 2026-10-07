@@ -414,10 +414,31 @@ enum ActivityContextModel {
     static let orientationRows: (bed: [Double], seated: [Double], upright: [Double]) = (
         [0.35, 0.42, 0.17, 0.06], [0.12, 0.30, 0.40, 0.18], [0.04, 0.12, 0.36, 0.48])
 
+    /// The same rows for a strap whose forearm sign is not calibrated yet (`forearmAxis` reads |x|): a raised
+    /// hand and a hanging arm are both just "vertical" then, so the two categories merge (neg + hang).
+    static let orientationRowsUnsigned: (bed: [Double], seated: [Double], upright: [Double]) = (
+        [0, 0.42, 0.17, 0.41], [0, 0.30, 0.40, 0.30], [0, 0.12, 0.36, 0.52])
+
+    /// A forearm-axis gravity component as the orientation cues read it: signed by the calibrated forearm sign,
+    /// or |x| while the sign is unknown (nothing on the strap says which way round it is worn; the old code
+    /// refused absolute orientation for that reason).
+    @inline(__always) static func forearmAxis(_ ux: Double?, sign: Double?) -> Double? {
+        guard let ux else { return nil }
+        if let sign { return sign < 0 ? -ux : ux }
+        return abs(ux)
+    }
+
+    /// Forearm sign calibration from gait: walking seconds vote with their forearm-axis component (clipped),
+    /// in a memory that decays over gait seconds only. The sign is adopted once this many seconds of gait agree
+    /// on average by at least `forearmSignMinMean`; an arm carrying something, or a phone held while walking,
+    /// pulls the mean toward 0 and leaves the sign unknown rather than wrong.
+    static let forearmSignMinGaitS = 40.0, forearmSignMinMean = 0.30, forearmSignTauS = 3600.0
+    /// A gap this long (s) may have been a strap taken off and put back the other way round: re-calibrate.
+    static let forearmSignResetGapS = 3600
+
     /// Per-second weights of the two orientation factors. Both are small on purpose: a held orientation
     /// repeats every second, so what it may claim is bounded by the decoder's posture-evidence memory, and
-    /// these weights only set how many minutes it takes to get there (recumbent: several minutes of a held
-    /// flat / raised forearm; seated vs upright: never more than a hedge on its own).
+    /// these weights only set how many minutes it takes to get there (neither is more than a hedge on its own).
     static let wOrientRecumbent = 0.08, wOrientUpright = 0.01
     /// Weight of the direction terms the four transition modes take from the forearm axis during a shift.
     static let wShiftDirection = 1.0
@@ -427,6 +448,8 @@ enum ActivityContextModel {
     /// flat or the hand above the elbow, getting up starts there and leaves it. Values in (0, 1], index by
     /// mode; 1 for every other mode.
     static func shiftDirection(from a: Double, to b: Double) -> [Double] {
+        // Arguments are `forearmAxis` values: with the sign unknown they are ≥ 0, so "hand above the elbow"
+        // never fires and only flat vs inclined vs vertical, and the change between them, speak.
         var v = [Double](repeating: 1, count: BodyMode.count)
         let d = b - a
         let to = orientationCategories(b), from = orientationCategories(a)
@@ -444,8 +467,8 @@ enum ActivityContextModel {
     /// population cap is `postureEvidenceCapSU`.
     static let postureEvidenceCapSU = log(8.0), postureEvidenceCapSUPersonal = log(12.0)
     /// Recumbent evidence cap (log-odds over the no-evidence ceiling `recumbentShareFloor`). Held orientation
-    /// alone reaches at most its own source cap (ln 25, recumbent ≤ 75 % of the stationary mass); the
-    /// staged night may go further.
+    /// alone reaches at most its own source cap (ln 2.5, recumbent ≤ ~23 % of the stationary mass: a hedge,
+    /// never a lying claim); a lie-down's direction and the staged night may go further.
     static let postureEvidenceCapRecumbent = log(200.0)
     /// Without recumbent evidence, recumbent rest may hold at most this share relative to seated + upright.
     static let recumbentShareFloor = 0.12
@@ -604,7 +627,14 @@ enum ActivityContextModel {
         /// learned head moderately (HART's fine sit / stand rows separate sitting from standing at a balanced
         /// accuracy of 0.74-0.81 on FORTH / PAMAP2, D7). The seated / upright total is capped again by the decoder (higher with an adopted
         /// personal profile).
-        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(3.0), log(25.0), log(12.0), log(200.0)]
+        /// The held orientation's recumbent cap is ln 2.5: on its own it may lift recumbent to at most ~23 % of the
+        /// stationary mass (`recumbentShareFloor` × 2.5), below any lying claim, because a forearm flat on the lap
+        /// or a phone held up looks the same while seated (Capture-24: 357 daytime lying claims, none right, at
+        /// ln 25). A lie-down's direction is capped at ln 3: the forearm cannot tell lying back on a sofa from
+        /// raising a phone while seated, so the two together (ratio 0.9, recumbent just under half the
+        /// stationary mass) leave the posture unresolved ("Stationary") rather than claim lying. Lying awake is
+        /// claimed with the staged night or its in-bed window (the night source), not from the wrist alone.
+        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(3.0), log(2.5), log(3.0), log(200.0)]
         /// The lower (upright / not recumbent) side of each cap, where it differs. A stand-up's direction
         /// carries less than a sit-down's: in free living standing still is about a tenth of still time and
         /// most stand-ups lead straight into walking, so "standing" after a stand-up is committed at a lower
@@ -618,6 +648,8 @@ enum ActivityContextModel {
         static let taus: [Double] = [180, 180, 180, 180, 600, 600, 600]
         /// Index of the night source in `values`.
         static let night = 6
+        /// Index of the held-orientation recumbent source in `values`.
+        static let recumbentOrientationIndex = 4
     }
 
     /// Every term the shared accelerometer budget bounds at one second, term by term, as the tempered, signed log
@@ -767,10 +799,11 @@ enum ActivityContextModel {
         // repetitive, gesturing) the recumbent factor reads the forearm as seated.
         let bed = BodyMode.bedRest.rawValue, seat = BodyMode.seated.rawValue, up = BodyMode.upright.rawValue
         var orientRecumbent = 0.0, orientSeated = 0.0
-        if let ux = f.heldUx {
+        if let ux = forearmAxis(f.heldUx, sign: f.forearmSign) {
             let c = orientationCategories(ux)
+            let rows = f.forearmSign != nil ? orientationRows : orientationRowsUnsigned
             func held(_ row: [Double]) -> Double { row[0] * c.neg + row[1] * c.flat + row[2] * c.mid + row[3] * c.hang }
-            let fb = held(orientationRows.bed), fs = held(orientationRows.seated), fu = held(orientationRows.upright)
+            let fb = held(rows.bed), fs = held(rows.seated), fu = held(rows.upright)
             let q = armPattern(f, includeWorkout: false)
             let qs = q[0..<ArmState.unknown].reduce(0, +)
             let busy = qs > 0 ? (q[ArmState.desk] + q[ArmState.repetitive] + q[ArmState.gesture]) / qs : 0
@@ -820,7 +853,7 @@ enum ActivityContextModel {
         // 3d. Which way the shift went, from the forearm axis at both ends (hsmm-1.8). The four transition modes
         // used to share one observation profile, so the event kind came from where the belief's mass was
         // (D2-06, D7: direction right 15 of 35). Not an evidence channel; neutral for every other mode.
-        if let a = f.shiftFromUx, let b = f.shiftToUx {
+        if let a = forearmAxis(f.shiftFromUx, sign: f.forearmSign), let b = forearmAxis(f.shiftToUx, sign: f.forearmSign) {
             add(shiftDirection(from: a, to: b), unknownValue: 1, weight: wShiftDirection, isEvidence: false)
         }
 

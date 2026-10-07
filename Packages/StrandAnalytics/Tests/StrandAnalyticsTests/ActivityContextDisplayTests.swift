@@ -74,8 +74,13 @@ final class ActivityContextDisplayTests: XCTestCase {
     func testRecumbentWordingFollowsTheSleepContext() {
         let bed: [PostureClass: Double] = [.recumbent: 0.88, .unknown: 0.12]
         XCTAssertEqual(label(posture: bed, arm: [.quiet: 0.9], sleep: .asleep), "Asleep")
-        XCTAssertEqual(label(posture: bed, arm: [.quiet: 0.9], sleep: .awake), "Resting in bed")
+        // hsmm-1.8: awake lying outside the night's in-bed window is a sofa or a daytime lie-down, not "in bed"
+        // (before 1.8 awake recumbent was unreachable outside the window, so this wording never showed).
+        XCTAssertEqual(label(posture: bed, arm: [.quiet: 0.9], sleep: .awake), "Lying down")
         XCTAssertEqual(label(posture: bed, arm: [.quiet: 0.9], sleep: .unknown), "Lying down")
+        XCTAssertEqual(ActivityDisplay.derive(posture: HeadProbabilities(bed), locomotion: HeadProbabilities([.stationary: 0.96]),
+                                              arm: HeadProbabilities([.quiet: 0.9]), sleep: .awake, inBed: true,
+                                              confidence: 0.8), "Resting in bed")
     }
 
     // MARK: Moving

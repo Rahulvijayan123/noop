@@ -18,9 +18,6 @@ final class ActivityPersonalProfileTests: XCTestCase {
 
     static func run(_ w: Wearer, session: String, seed: UInt64, start: Int) -> ActivityCalibrationRun {
         var sim = ActivitySim(start: start, seed: seed)
-        // hsmm-1.8: a seated wearer's forearm rests inclined (knee, armrest). Minutes of a quiet forearm held flat
-        // are recumbent evidence now, which would make this synthetic sitter look like a lie-down.
-        sim.forearm(0.55)
         var labels: [ActivityGroundTruthLabel] = []
         var sit = ActivitySim.Options(); sit.hr = w.sitHR
         var stand = ActivitySim.Options(); stand.hr = w.standLooksLikeSitting ? w.sitHR : w.standHR
