@@ -543,8 +543,6 @@ def capture24_participant(pid: str, c24_dir: str = CAPTURE24_DIR) -> Dict[str, A
     imu_s: List[int] = []
     imu_e: List[int] = []
     imu_f: List[List[float]] = []
-    FEAT_KEYS = ("accel_rms_g", "gyro_rms_dps", "jerk_rms", "cadence_hz", "cadence_strength",
-                 "orientation_change_deg")
     runs_meta = []
     for idx in run_bounds:
         if len(idx) == 0:
@@ -584,8 +582,35 @@ def load_splits(datasets: Sequence[str] = ("capture24", "wisdm2019_watch")) -> D
 # HART reproduction summary (per-window accuracy vs the manifest's coarse mapping)
 # ---------------------------------------------------------------------------
 
-FEAT_KEYS: Tuple[str, ...] = ("accel_rms_g", "gyro_rms_dps", "jerk_rms", "cadence_hz", "cadence_strength",
+FEAT_KEYS: Tuple[str, ...] = ("accel_rms_g", "gyro_rms_dps", "jerk_rms_gps", "cadence_hz", "cadence_strength",
                               "orientation_change_deg")
+#: imu-feat-1 caches (and WISDM documents) written before the imu-feat-2 bump store jerk per SAMPLE at 30 Hz
+#: under ``jerk_rms``; the Swift decoder reads per-second ``jerk_rms_gps`` (ImuWindowFeatures CodingKeys), so
+#: legacy values are converted on read, the same way labels.py and ActivityEncoderWindows do.
+LEGACY_JERK_KEY = "jerk_rms"
+LEGACY_JERK_SAMPLE_RATE_HZ = 30.0
+
+
+def feature_value(feat: Dict[str, Any], key: str) -> Optional[float]:
+    """One window feature by its imu-feat-2 name, reading a legacy ``jerk_rms`` (x30) when that is all there is."""
+    v = feat.get(key)
+    if v is None and key == "jerk_rms_gps" and feat.get(LEGACY_JERK_KEY) is not None:
+        return float(feat[LEGACY_JERK_KEY]) * LEGACY_JERK_SAMPLE_RATE_HZ
+    return None if v is None else float(v)
+
+
+def current_feature_matrix(feat: np.ndarray, keys: Sequence[str]) -> np.ndarray:
+    """Re-order a stored feature matrix whose columns are ``keys`` into FEAT_KEYS order (legacy jerk x30;
+    columns the cache lacks become NaN)."""
+    keys = [str(k) for k in keys]
+    feat = np.asarray(feat, dtype=np.float32).reshape(-1, len(keys))
+    out = np.full((feat.shape[0], len(FEAT_KEYS)), np.nan, dtype=np.float32)
+    for q, k in enumerate(FEAT_KEYS):
+        if k in keys:
+            out[:, q] = feat[:, keys.index(k)]
+        elif k == "jerk_rms_gps" and LEGACY_JERK_KEY in keys:
+            out[:, q] = feat[:, keys.index(LEGACY_JERK_KEY)] * LEGACY_JERK_SAMPLE_RATE_HZ
+    return out
 
 
 def flatten_hart(subject_docs: Sequence[Dict[str, Any]]) -> Dict[str, np.ndarray]:
@@ -603,7 +628,8 @@ def flatten_hart(subject_docs: Sequence[Dict[str, Any]]) -> Dict[str, np.ndarray
                 cols["e"].append(w["e"])
                 cols["label"].append(w["label"])
                 cols["probs"].append([w["probs"].get(c, 0.0) for c in COARSE_ORDER])
-                cols["feat"].append([np.nan if w["feat"].get(k) is None else float(w["feat"][k]) for k in FEAT_KEYS])
+                cols["feat"].append([np.nan if feature_value(w["feat"], k) is None else feature_value(w["feat"], k)
+                                     for k in FEAT_KEYS])
     out = {
         "subject": np.asarray(cols["subject"], dtype=np.int64),
         "block_id": np.asarray(cols["block_id"]),

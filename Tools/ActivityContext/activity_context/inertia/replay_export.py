@@ -154,8 +154,8 @@ def wisdm_recordings(split: str, cache_dir: Optional[str] = None, subjects: Opti
                 truth_strict=strict, truth_lenient=lenient, truth_label=lab, labels=labels,
                 imu_s=np.asarray([int(round(w["s"])) for w in iw], dtype=np.int64),
                 imu_e=np.asarray([int(round(w["e"])) for w in iw], dtype=np.int64),
-                imu_feat=np.asarray([[np.nan if w["feat"].get(q) is None else float(w["feat"][q]) for q in FEAT_KEYS]
-                                     for w in iw], dtype=np.float32).reshape(-1, len(FEAT_KEYS)),
+                imu_feat=np.asarray([[np.nan if rd.feature_value(w["feat"], q) is None else rd.feature_value(w["feat"], q)
+                                      for q in FEAT_KEYS] for w in iw], dtype=np.float32).reshape(-1, len(FEAT_KEYS)),
                 hart_s=np.asarray([int(round(w["s"])) for w in hw], dtype=np.int64),
                 hart_e=np.asarray([int(round(w["e"])) for w in hw], dtype=np.int64),
                 hart_probs=np.asarray([[w["probs"].get(c, 0.0) for c in HART_ORDER] for w in hw],
@@ -190,7 +190,8 @@ def capture24_recordings(pids: Sequence[str], split: str, cache_dir: Optional[st
             sec=ts - t0, gravity=z["gravity"].astype(np.float32), dyn=z[dyn_proxy].astype(np.float32),
             truth_strict=strict, truth_lenient=lenient, truth_label=lab, labels=labels,
             imu_s=z["imu_s"].astype(np.int64) - t0, imu_e=z["imu_e"].astype(np.int64) - t0,
-            imu_feat=z["imu_feat"].astype(np.float32),
+            imu_feat=rd.current_feature_matrix(z["imu_feat"], z["imu_feat_keys"] if "imu_feat_keys" in z.files
+                                               else rd.FEAT_KEYS),
             meta={"dyn_proxy": dyn_proxy, "runs": z["runs"].tolist(), "gyro": "absent (zeros in imu-feat-1)"},
         )
         rec.validate()
