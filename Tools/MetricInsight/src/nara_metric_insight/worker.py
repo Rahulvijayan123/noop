@@ -10,10 +10,12 @@ import asyncio
 import hashlib
 import logging
 import os
+import shutil
 import signal
 import threading
 import time
 from datetime import date
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -164,6 +166,18 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
             "evidence": record, "citations": citations}
 
 
+def purge_run_dirs(work_root: str) -> int:
+    """Run directories left by a worker that died mid-job (they hold a job's scratch state): removed at start."""
+    removed = 0
+    for path in Path(work_root).glob("r-*"):
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            removed += 1
+    if removed:
+        log.warning("removed %d run directories left by an earlier worker", removed)
+    return removed
+
+
 class LeaseKeeper:
     def __init__(self, db: Database, token: str, lease_seconds: int) -> None:
         self.db, self.token, self.lease_seconds = db, token, lease_seconds
@@ -200,9 +214,10 @@ class Worker:
             if not os.access(path, os.X_OK):
                 raise RuntimeError(f"{what} is not executable")
         self.readable: tuple[str, ...] = ()
-        if self.mode == "linux":
+        if self.mode in ("linux", "macos"):
             self.readable = (os.path.dirname(os.path.realpath(cfg.prime_bin)),
                              *sandbox.python_prefixes(cfg.kernel_python))
+        purge_run_dirs(cfg.work_root)
         self.literature = Literature(cfg.literature_remote, cfg.literature_cache)
         self.db: Database | None = None
         self.stopping = threading.Event()

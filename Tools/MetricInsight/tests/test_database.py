@@ -71,7 +71,7 @@ def config(pg, secret_file, tmp_path) -> Config:
     env = {"NARA_DB_URL_FILE": secret_file("db_url", pg.url), "NARA_LLM_API_KEY_FILE": secret_file("llm", "unused"),
            "NARA_LLM_BASE_URL": "http://127.0.0.1:9/v1", "NARA_LLM_MODEL": "fixture",
            "NARA_PRIME_BIN": sys.executable, "NARA_KERNEL_PYTHON": sys.executable,
-           "NARA_WORK_ROOT": str(tmp_path / "work"), "NARA_WORKER_ID": "pytest-worker"}
+           "NARA_WORK_ROOT": str(tmp_path / "work"), "NARA_WORKER_ID": "pytest-worker", "NARA_SANDBOX": "macos"}
     return Config.from_env(env)
 
 

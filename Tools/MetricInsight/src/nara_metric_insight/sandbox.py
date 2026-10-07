@@ -5,11 +5,13 @@ The whole tree is confined, not just the kernel: model-written code can ask the 
 are the job's LLM proxy and the job's tool broker; the only writable path is the job's run directory; the
 environment is exactly what prime.py builds (no secrets).
 
-* macOS (development only): sandbox-exec. Network: IP egress denied except loopback to the proxy port; DNS
-  denied. Writes denied outside the run directory and to the job's settings, provider config, curated harness and
-  cwd; reads of secret paths denied. It
-  cannot hide other same-uid processes (their launch environment is readable through KERN_PROCARGS2), so never
-  run it with real users' data or with secrets in any of your own processes' environments.
+* macOS (development only; NARA_SANDBOX=macos must be set explicitly): sandbox-exec. Network: IP egress denied
+  except loopback to the proxy port; DNS denied. Reads denied for other jobs' run directories, the developer's
+  home (except the interpreter's own paths) and secret paths. Writes denied outside the run directory and to the
+  job's settings, provider config, auth file, curated harness and cwd. Known gaps, all absent on Linux: other
+  same-uid processes' launch environments are readable (KERN_PROCARGS2), and Unix-domain sockets are not filtered
+  (sandbox-exec's unix-socket and IP filters interfere with each other intermittently), so a local database
+  socket without a password would be reachable. Never run it with real users' data.
 * Linux (production): bubblewrap with every namespace unshared (no network route at all, own PID namespace,
   dies with its parent), read-only binds of the system, the Prime binary and the kernel Python, and the run
   directory. A forwarder inside the namespace turns the proxy's Unix socket into the loopback port Prime calls.
@@ -41,14 +43,16 @@ class Plan:
     run_dir: str
     proxy_port: int                # the loopback port Prime's provider URL names
     proxy_unix: str | None         # linux: the proxy's socket the forwarder connects to
-    readable: tuple[str, ...]      # linux: extra read-only binds (Prime binary dir, kernel Python prefixes)
+    readable: tuple[str, ...]      # read-only paths the tree needs (Prime binary dir, kernel Python prefixes)
     deny_read: tuple[str, ...]     # macos: secret paths
 
 
 def resolve_mode(requested: str) -> str:
     if requested == "none":
         return "none"
-    if requested in ("auto", "macos") and sys.platform == "darwin":
+    if sys.platform == "darwin":
+        if requested != "macos":  # never chosen implicitly: it is development-only (see the module docstring)
+            raise SandboxUnavailable("the macOS sandbox is for development only; set NARA_SANDBOX=macos to use it")
         if not Path("/usr/bin/sandbox-exec").exists():
             raise SandboxUnavailable("sandbox-exec not found")
         return "macos"
@@ -60,32 +64,60 @@ def resolve_mode(requested: str) -> str:
 
 
 def python_prefixes(python: str) -> tuple[str, ...]:
-    """The directories a Python interpreter needs at run time (its venv and the base installation)."""
+    """The directories a Python interpreter needs at run time: its venv, the base installation, and every hop of
+    the symlink chain in between (uv venvs point at a versioned link such as cpython-3.11-... -> cpython-3.11.15-...),
+    both as linked and as resolved."""
     out = subprocess.run([python, "-c", "import sys, json; print(json.dumps([sys.prefix, sys.base_prefix]))"],
                          capture_output=True, text=True, timeout=30, check=True, env={"PATH": "/usr/bin:/bin"})
-    return tuple(dict.fromkeys(os.path.realpath(p) for p in json.loads(out.stdout)))
+    prefix, base = json.loads(out.stdout)
+    paths = [prefix, base]
+    hop = os.path.abspath(python)
+    for _ in range(16):
+        paths.append(os.path.dirname(hop))
+        if not os.path.islink(hop):
+            break
+        target = os.readlink(hop)
+        hop = target if os.path.isabs(target) else os.path.normpath(os.path.join(os.path.dirname(hop), target))
+    venv_cfg = Path(prefix) / "pyvenv.cfg"
+    if venv_cfg.exists():
+        for line in venv_cfg.read_text().splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home" and value.strip():
+                paths += [value.strip(), os.path.dirname(value.strip())]
+    return tuple(dict.fromkeys([os.path.abspath(p) for p in paths] + [os.path.realpath(p) for p in paths]))
 
 
-def _sbpl_path(path: str) -> str:
-    resolved = os.path.realpath(path)
+def _sbpl_path(path: str, *, resolve: bool = True) -> str:
+    resolved = os.path.realpath(path) if resolve else os.path.abspath(path)
     if '"' in resolved or "\\" in resolved:
         raise SandboxUnavailable(f"unsupported character in sandbox path {resolved!r}")
     return resolved
 
 
+def _both(path: str) -> list[str]:
+    """A path as given and as resolved: a symlink in it (a uv python link) must be readable itself."""
+    return list(dict.fromkeys([_sbpl_path(path, resolve=False), _sbpl_path(path)]))
+
+
 def macos_profile(plan: Plan) -> str:
     run = _sbpl_path(plan.run_dir)
+    work_root = _sbpl_path(os.path.dirname(run))
+    home = _sbpl_path(os.path.expanduser("~"))
     profile = ['(version 1)', '(allow default)',
                '(deny network-outbound (remote ip "*:*"))',
                '(deny network-outbound (literal "/private/var/run/mDNSResponder"))',
                f'(allow network-outbound (remote ip "localhost:{int(plan.proxy_port)}"))',
+               # Reads: not other jobs' run directories, not the developer's home (except what the tree needs).
+               f'(deny file-read* (subpath "{work_root}") (subpath "{home}"))',
+               f'(allow file-read* (subpath "{run}")'
+               + "".join(f' (subpath "{q}")' for p in plan.readable for q in _both(p)) + ')',
                '(deny file-write* (subpath "/"))',
                f'(allow file-write* (subpath "/dev") (subpath "{run}"))',
                # Read-only to the whole tree: the job's settings, provider config and curated harness, and the cwd
                # (project settings there would override them). Prime keeps its own MCP/runtime state elsewhere in
                # the agent dir, so that stays writable, as do HOME and TMPDIR.
                f'(deny file-write* (literal "{run}/agent/settings.json") (literal "{run}/agent/models.json")'
-               f' (subpath "{run}/agent/harness") (subpath "{run}/work"))']
+               f' (literal "{run}/agent/auth.json") (subpath "{run}/agent/harness") (subpath "{run}/work"))']
     for path in plan.deny_read:
         if os.path.exists(path):
             profile.append(f'(deny file-read* (subpath "{_sbpl_path(path)}"))')
@@ -94,14 +126,15 @@ def macos_profile(plan: Plan) -> str:
 
 def linux_argv(plan: Plan, argv: list[str], env: dict[str, str], kernel_python: str) -> list[str]:
     run = os.path.realpath(plan.run_dir)
-    out = ["bwrap", "--unshare-all", "--die-with-parent", "--new-session", "--clearenv",
+    out = ["bwrap", "--unshare-all", "--die-with-parent", "--new-session", "--clearenv", "--cap-drop", "ALL",
            "--ro-bind", "/usr", "/usr"]
     for path in ("/bin", "/sbin", "/lib", "/lib64", "/etc/ld.so.cache", "/etc/localtime", "/etc/alternatives"):
         out += ["--ro-bind-try", path, path]
     for path in plan.readable:
         out += ["--ro-bind", path, path]
     out += ["--bind", run, run]
-    for path in (f"{run}/agent/settings.json", f"{run}/agent/models.json", f"{run}/agent/harness", f"{run}/work"):
+    for path in (f"{run}/agent/settings.json", f"{run}/agent/models.json", f"{run}/agent/auth.json",
+                 f"{run}/agent/harness", f"{run}/work"):
         out += ["--ro-bind", path, path]
     out += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", f"{run}/work"]
     for key, value in sorted(env.items()):

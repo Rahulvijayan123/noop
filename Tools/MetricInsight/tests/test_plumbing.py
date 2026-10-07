@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -178,6 +179,9 @@ def test_macos_sandbox_blocks_egress_secret_reads_and_writes(short_dir):
     run = short_dir / "run"
     for name in ("agent", "work", "home", "tmp"):
         (run / name).mkdir(parents=True)
+    other_run = short_dir / "r-other"  # another job's run directory, same work root
+    (other_run / "agent").mkdir(parents=True)
+    (other_run / "agent" / "models.json").write_text('{"apiKey": "other-job-token"}')
     secret = short_dir / "secrets"
     secret.mkdir()
     (secret / "db_url").write_text("canary")
@@ -214,17 +218,26 @@ def test_macos_sandbox_blocks_egress_secret_reads_and_writes(short_dir):
         "    open(os.path.expanduser('~/nara-sandbox-probe'), 'w'); out['write_home'] = True\n"
         "except Exception:\n"
         "    out['write_home'] = False\n"
+        "try:\n"
+        "    open(sys.argv[6]).read(); out['read_other_run'] = True\n"
+        "except Exception:\n"
+        "    out['read_other_run'] = False\n"
+        "try:\n"
+        "    os.listdir(sys.argv[7]); out['read_real_home'] = True\n"
+        "except Exception:\n"
+        "    out['read_real_home'] = False\n"
         "print(json.dumps(out))\n")
     plan = sandbox.Plan(mode="macos", run_dir=str(run), proxy_port=allowed.getsockname()[1], proxy_unix=None,
                         readable=(), deny_read=(str(secret),))
     argv, env = sandbox.wrap(plan, [sys.executable, "-c", probe, str(allowed.getsockname()[1]),
                                     str(other.getsockname()[1]), str(secret / "db_url"), str(run / "tmp" / "ok"),
-                                    str(run / "agent" / "settings.json")],
+                                    str(run / "agent" / "settings.json"), str(other_run / "agent" / "models.json"),
+                                    os.path.expanduser("~")],
                              {"PATH": "/usr/bin:/bin", "HOME": "/Users/nobody-here"}, sys.executable)
     done = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=60)
     result = json.loads(done.stdout.strip().splitlines()[-1])
     assert result == {"proxy": True, "other": False, "internet": False, "secret": False, "write_run": True,
-                      "write_agent": False, "write_home": False}
+                      "write_agent": False, "write_home": False, "read_other_run": False, "read_real_home": False}
     allowed.close()
     other.close()
 
@@ -258,3 +271,83 @@ def test_literature_searches_are_capped_per_analysis():
     with pytest.raises(ToolError, match="at most 3"):
         tools.call("search_literature", {"query": "resting heart rate training load"})
     assert tools.retrieved and all(r["topic"] for r in tools.retrieved.values())
+
+
+def test_broker_refuses_malformed_lengths_and_counts_every_attempt(short_dir):
+    tools = job_tools()
+    with Broker(str(short_dir / "b.sock"), "job-token", tools, max_calls=3) as broker:
+        def raw(length: str) -> int:
+            sock = socket.socket(socket.AF_UNIX)
+            sock.connect(str(short_dir / "b.sock"))
+            sock.sendall(f"POST /tools/get_metric_summary HTTP/1.1\r\nHost: b\r\nAuthorization: Bearer job-token\r\n"
+                         f"Content-Length: {length}\r\n\r\n{{}}".encode())
+            status = int(sock.recv(4096).split(b" ", 2)[1])
+            sock.close()
+            return status
+        assert raw("-1") == 400
+        assert raw("abc") == 400
+        assert raw("2") == 200
+        assert raw("2") == 429  # the malformed attempts counted towards the budget
+        assert broker.calls == 4
+
+
+def test_llm_proxy_forwards_only_allowlisted_fields():
+    from nara_metric_insight.llm_proxy import clean_request
+    cleaned = clean_request({"model": "x", "messages": [], "n": 64, "store": True, "metadata": {"a": 1},
+                             "user": "someone", "max_tokens": "lots", "stream": True,
+                             "tools": [{"type": "function", "function": {"name": "ipython"}}, {"type": "web_search"}]},
+                            "pinned", 256)
+    assert cleaned == {"model": "pinned", "messages": [], "max_tokens": 256, "stream": True,
+                       "tools": [{"type": "function", "function": {"name": "ipython"}}]}
+    assert clean_request({"messages": [], "max_completion_tokens": 10}, "pinned", 256)["max_completion_tokens"] == 10
+
+
+def test_a_token_starting_with_a_dash_reaches_the_shim(short_dir):
+    token = "-starts-with-a-dash"
+    with Broker(str(short_dir / "b.sock"), token, job_tools()):
+        proc = subprocess.Popen([sys.executable, str(SHIM), f"--socket={short_dir / 'b.sock'}", f"--token={token}"],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        proc.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
+        proc.stdin.flush()
+        listed = json.loads(proc.stdout.readline())
+        proc.stdin.close()
+        proc.wait(timeout=10)
+    assert listed["result"]["tools"]
+
+
+def test_process_tree_is_collected_including_new_sessions(short_dir):
+    from nara_metric_insight.prime import descendants
+    script = "import os, subprocess, sys, time\nsubprocess.Popen([sys.executable, '-c', 'import os, time; os.setsid(); time.sleep(30)'])\ntime.sleep(30)"
+    parent = subprocess.Popen([sys.executable, "-c", script])
+    try:
+        found = set()
+        for _ in range(50):
+            found = descendants(parent.pid)
+            if found:
+                break
+            import time
+            time.sleep(0.1)
+        assert found, "the setsid child was not found under its parent"
+    finally:
+        for pid in found:
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+        parent.kill()
+
+
+def test_leftover_run_dirs_are_purged_at_start(tmp_path):
+    from nara_metric_insight.worker import purge_run_dirs
+    (tmp_path / "r-old1" / "agent").mkdir(parents=True)
+    (tmp_path / "r-old2").mkdir()
+    (tmp_path / "keep-me").mkdir()
+    assert purge_run_dirs(str(tmp_path)) == 2
+    assert [p.name for p in tmp_path.iterdir()] == ["keep-me"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS behaviour")
+def test_the_macos_sandbox_is_never_chosen_implicitly():
+    with pytest.raises(sandbox.SandboxUnavailable, match="development only"):
+        sandbox.resolve_mode("auto")
+    assert sandbox.resolve_mode("macos") == "macos"

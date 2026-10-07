@@ -18,6 +18,7 @@ import os
 import secrets
 import shutil
 import signal
+import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ from .tools import JobTools
 
 SHIM = Path(__file__).resolve().parent / "mcp_shim.py"
 LINUX_PROXY_PORT = 18080  # inside the sandbox's own network namespace
-CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md")
+CONTEXT_FILES = ("AGENTS.md", "CLAUDE.md", ".agents", ".prime")  # files and dirs Prime loads from cwd ancestors
 
 
 class AgentFailed(RuntimeError):
@@ -39,7 +40,8 @@ class AgentFailed(RuntimeError):
 
 
 def check_work_root(work_root: str) -> None:
-    """Prime loads AGENTS.md / CLAUDE.md from every ancestor of its cwd: none may exist above the work root."""
+    """Prime loads AGENTS.md / CLAUDE.md (and .agents/ skills, .prime/ settings) from every ancestor of its cwd:
+    none may exist in or above the work root."""
     root = Path(work_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     for directory in (root, *root.parents):
@@ -133,18 +135,46 @@ class PrimeAgentRpc:
                     await self.request("abort")
 
     async def close(self) -> None:
+        # bash() children start their own sessions, so the process group is not enough: take the whole tree first.
+        tree = descendants(self.proc.pid)
         if self.proc.stdin and not self.proc.stdin.is_closing():
             self.proc.stdin.close()
         try:
             await asyncio.wait_for(self.proc.wait(), 10)
         except asyncio.TimeoutError:
             pass
+        tree |= descendants(self.proc.pid)
+        for pid in tree:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
         try:
             os.killpg(self.proc.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             pass
         await self.proc.wait()
         self._reader.cancel()
+
+
+def descendants(root: int) -> set[int]:
+    """Every process below root (ps works on Linux and macOS; the Linux sandbox's PID namespace reaps its own)."""
+    try:
+        listing = subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    children: dict[int, list[int]] = {}
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    out, stack = set(), [root]
+    while stack:
+        for child in children.get(stack.pop(), []):
+            if child not in out:
+                out.add(child)
+                stack.append(child)
+    return out
 
 
 class PrimeSession:
@@ -175,7 +205,8 @@ class PrimeSession:
             directory.mkdir()
         if len(str(run / "b.sock").encode()) > 100:
             raise RuntimeError("work root path too long for a Unix socket; use a shorter NARA_WORK_ROOT")
-        tool_token, llm_token = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
+        # Hex: a token starting with "-" would be read as an option by the shim's argument parser.
+        tool_token, llm_token = secrets.token_hex(32), secrets.token_hex(32)
         self.broker = Broker(str(run / "b.sock"), tool_token, self.tools).__enter__()
         if self.mode == "linux":
             self.proxy = LlmProxy(upstream=cfg.llm_base_url, api_key=cfg.llm_api_key, model=cfg.llm_model,
@@ -199,12 +230,14 @@ class PrimeSession:
             # No host-side model calls the model's code can start: compaction and harness refinement.
             "compaction": {"agentCallable": False}, "autoRefine": {"enabled": False},
             "mcpServers": {"nara": {"type": "stdio", "command": cfg.kernel_python,
-                                    "args": [str(agent / "mcp_shim.py"), "--socket", str(run / "b.sock"),
-                                             "--token", tool_token]}}}))
+                                    "args": [str(agent / "mcp_shim.py"), f"--socket={run / 'b.sock'}",
+                                             f"--token={tool_token}"]}}}))
+        (agent / "auth.json").write_text("{}")  # present and read-only: no credentials, none can be added
         # The global Continual Harness: only the curated, user-free file, and read-only inside the sandbox.
         (agent / "harness").mkdir()
         if cfg.curated_harness:
             shutil.copy(cfg.curated_harness, agent / "harness" / "harness_state.json")
+        readable = self.readable or (os.path.dirname(os.path.realpath(cfg.prime_bin)),)
         env = {"PATH": "/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(tmp), "LANG": "C.UTF-8",
                "PRIME_AGENT_CODING_AGENT_DIR": str(agent), "PRIME_AGENT_DAEMON_SOCKET": str(run / "d.sock"),
                "PRIME_AGENT_KERNEL_PYTHON": cfg.kernel_python, "DO_NOT_TRACK": "1", "PRIME_AGENT_TELEMETRY": "0"}
@@ -212,7 +245,7 @@ class PrimeSession:
                 "--model", cfg.llm_model, "--append-system-prompt", GUIDANCE]
         plan = sandbox.Plan(mode=self.mode, run_dir=str(run), proxy_port=port,
                             proxy_unix=str(run / "p.sock") if self.mode == "linux" else None,
-                            readable=self.readable,
+                            readable=readable,
                             deny_read=tuple(cfg.sandbox_deny_read) + tuple(cfg.secret_paths))
         argv, env = sandbox.wrap(plan, argv, env, cfg.kernel_python)
         self.rpc = await PrimeAgentRpc.start(argv, env=env, cwd=work, stderr=run / "stderr.log")

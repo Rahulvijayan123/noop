@@ -15,6 +15,7 @@ import hmac
 import http.client
 import json
 import os
+import re
 import socketserver
 import ssl
 import threading
@@ -24,10 +25,44 @@ from urllib.parse import urlsplit
 
 MAX_REQUEST = 4 * 1024 * 1024
 UPSTREAM_TIMEOUT_S = 120
+MAX_CONCURRENT = 4
+_LENGTH = re.compile(r"\d{1,8}")
+# The only request fields forwarded. Everything else (n, store, metadata, user, logprobs, provider-side tools,
+# ...) is dropped: more choices would multiply the budget, storage would keep health data at the provider.
+FORWARDED = frozenset({"messages", "tools", "tool_choice", "temperature", "top_p", "stop", "stream",
+                       "stream_options", "max_tokens", "max_completion_tokens", "response_format",
+                       "parallel_tool_calls", "seed", "presence_penalty", "frequency_penalty"})
 
 
-class _UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+class _Quiet:
+    def handle_error(self, request, client_address) -> None:  # never print a traceback with request data
+        pass
+
+
+class _UnixHTTPServer(_Quiet, socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
+
+
+class _TCPServer(_Quiet, ThreadingHTTPServer):
+    daemon_threads = True
+
+
+def clean_request(body: dict[str, Any], model: str, max_tokens: int) -> dict[str, Any]:
+    out = {k: v for k, v in body.items() if k in FORWARDED}
+    out["model"] = model
+    if isinstance(out.get("tools"), list):
+        out["tools"] = [t for t in out["tools"] if isinstance(t, dict) and t.get("type") == "function"]
+        if not out["tools"]:
+            out.pop("tools")
+            out.pop("tool_choice", None)
+    for key in ("max_tokens", "max_completion_tokens"):
+        value = out.get(key)
+        if key in out:
+            out[key] = min(value, max_tokens) if isinstance(value, int) and not isinstance(value, bool) and value > 0 \
+                else max_tokens
+    if "max_tokens" not in out and "max_completion_tokens" not in out:
+        out["max_tokens"] = max_tokens
+    return out
 
 
 class LlmProxy:
@@ -46,6 +81,7 @@ class LlmProxy:
         self.prompt_tokens = 0
         self.rejected = 0
         self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
         proxy = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -77,13 +113,22 @@ class LlmProxy:
                 self._json(200, {"object": "list", "data": [{"id": proxy.model, "object": "model"}]})
 
             def do_POST(self) -> None:  # noqa: N802
+                if not proxy._slots.acquire(blocking=False):
+                    return self._json(503, {"error": {"message": "too many concurrent model calls"}})
+                try:
+                    self._post()
+                finally:
+                    proxy._slots.release()
+
+            def _post(self) -> None:
                 if not self._authorized():
                     return self._json(401, {"error": {"message": "unauthorized"}})
                 if not self.path.split("?")[0].rstrip("/").endswith("/chat/completions"):
                     return self._json(404, {"error": {"message": "not found"}})
-                length = int(self.headers.get("Content-Length") or 0)
-                if length <= 0 or length > MAX_REQUEST:
-                    return self._json(413, {"error": {"message": "request too large"}})
+                raw = self.headers.get("Content-Length") or ""
+                if not _LENGTH.fullmatch(raw) or not 0 < int(raw) <= MAX_REQUEST:
+                    return self._json(413, {"error": {"message": "request too large or without a length"}})
+                length = int(raw)
                 with proxy._lock:
                     proxy.requests += 1
                     over = proxy.requests > proxy.max_requests
@@ -96,13 +141,9 @@ class LlmProxy:
                     body = json.loads(self.rfile.read(length))
                 except ValueError:
                     return self._json(400, {"error": {"message": "invalid JSON"}})
-                body["model"] = proxy.model
-                for key in ("max_tokens", "max_completion_tokens"):
-                    if key in body:
-                        body[key] = min(int(body[key] or proxy.max_tokens), proxy.max_tokens)
-                if "max_tokens" not in body and "max_completion_tokens" not in body:
-                    body["max_tokens"] = proxy.max_tokens
-                proxy._forward(self, json.dumps(body).encode())
+                if not isinstance(body, dict):
+                    return self._json(400, {"error": {"message": "invalid request"}})
+                proxy._forward(self, json.dumps(clean_request(body, proxy.model, proxy.max_tokens)).encode())
 
         if unix_path:
             if os.path.exists(unix_path):
@@ -112,8 +153,7 @@ class LlmProxy:
             self.address = unix_path
             self.listen_port = None
         else:
-            self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-            self.server.daemon_threads = True
+            self.server = _TCPServer(("127.0.0.1", 0), Handler)
             self.listen_port = self.server.server_address[1]
             self.address = f"127.0.0.1:{self.listen_port}"
         self.unix_path = unix_path

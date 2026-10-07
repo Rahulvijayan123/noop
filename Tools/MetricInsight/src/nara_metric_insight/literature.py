@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from . import litsearch
-from .validate import FORBIDDEN_TERMS
+from .validate import FORBIDDEN_TERMS, TOPIC_WORDS, forbidden_term
 
 CORPUS = Path(__file__).resolve().parent / "data" / "literature_seed.json"
 EXCLUDED_TOPICS = frozenset({"acute_illness", "vaccination", "psychological_stress", "medication", "long_term_risk"})
@@ -22,6 +22,13 @@ GENERIC = frozenset(litsearch.tokenize("resting rest heart rate hrv rmssd person
                                        "level levels"))
 MIN_TOPIC_COVERAGE = 0.5   # share of the topic words' idf the entry matches
 MIN_RELATIVE_SCORE = 0.5   # and at least half the best hit's BM25 score
+
+
+def infer_topic(text: str) -> str | None:
+    """A remote record's topic from its own words, when exactly one curated topic fits (else none: not citable)."""
+    lowered = text.lower()
+    fits = [topic for topic, words in TOPIC_WORDS.items() if any(word in lowered for word in words)]
+    return fits[0] if len(fits) == 1 else None
 
 
 class Literature:
@@ -60,6 +67,11 @@ class Literature:
             raise ValueError(f"query rejected: {exc.code}") from None
         out, seen = [], set()
         for record in records:
+            if record.get("source") != "seed":  # remote records: no curated topic, unvetted wording
+                text = f"{record.get('title') or ''} {record.get('abstract_snippet') or ''}"
+                if forbidden_term(text):
+                    continue
+                record = dict(record, topic=infer_topic(text))
             if record.get("context_only") or record.get("topic") in EXCLUDED_TOPICS:
                 continue
             # A curated entry is one claim (several can come from one paper): cite the claim, not just the paper.

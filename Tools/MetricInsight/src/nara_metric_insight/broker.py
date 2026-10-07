@@ -13,6 +13,7 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
 import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler
@@ -22,10 +23,15 @@ from .tools import JobTools, ToolError, tool_list
 
 MAX_BODY = 16 * 1024
 MAX_RESULT = 512 * 1024
+MAX_CONCURRENT = 4
+_LENGTH = re.compile(r"\d{1,7}")
 
 
 class _UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:  # never print a traceback with request data
+        pass
 
 
 class Broker:
@@ -37,6 +43,7 @@ class Broker:
         self.calls = 0
         self.errors = 0
         self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(MAX_CONCURRENT)
         broker = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -68,18 +75,29 @@ class Broker:
                 self._reply(200, {"tools": tool_list()})
 
             def do_POST(self) -> None:  # noqa: N802
-                if not self._authorized():
-                    return self._reply(401, {"error": "unauthorized"})
-                if not self.path.startswith("/tools/"):
-                    return self._reply(404, {"error": "not found"})
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > MAX_BODY:
-                    return self._reply(413, {"error": "arguments too large"})
-                with broker._lock:
+                if not broker._slots.acquire(blocking=False):
+                    return self._reply(503, {"error": "too many concurrent tool calls"})
+                try:
+                    self._post()
+                finally:
+                    broker._slots.release()
+
+            def _post(self) -> None:
+                with broker._lock:  # every attempt counts, malformed ones included
                     broker.calls += 1
                     over = broker.calls > broker.max_calls
                 if over:
                     return self._reply(429, {"error": "tool call budget for this analysis is exhausted"})
+                if not self._authorized():
+                    return self._reply(401, {"error": "unauthorized"})
+                if not self.path.startswith("/tools/"):
+                    return self._reply(404, {"error": "not found"})
+                raw = self.headers.get("Content-Length") or "0"
+                if not _LENGTH.fullmatch(raw):
+                    return self._reply(400, {"error": "bad Content-Length"})
+                length = int(raw)
+                if length > MAX_BODY:
+                    return self._reply(413, {"error": "arguments too large"})
                 try:
                     args = json.loads(self.rfile.read(length) or b"{}")
                     if not isinstance(args, dict):

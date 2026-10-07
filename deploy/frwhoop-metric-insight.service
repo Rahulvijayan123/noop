@@ -21,7 +21,9 @@ ExecStartPre=/opt/nara-metric-insight/venv/bin/nara-metric-insight self-test
 ExecStart=/opt/nara-metric-insight/venv/bin/nara-metric-insight run
 Restart=always
 RestartSec=10
-# SIGTERM stops claiming; the job in flight finishes (at most two model turns plus publish).
+# SIGTERM (to the worker only: KillMode=mixed) stops claiming; the job in flight, Prime included, finishes (at
+# most two model turns plus publish). Whatever is left at the timeout is killed; run dirs are purged at start.
+KillMode=mixed
 KillSignal=SIGTERM
 TimeoutStopSec=300
 NoNewPrivileges=true

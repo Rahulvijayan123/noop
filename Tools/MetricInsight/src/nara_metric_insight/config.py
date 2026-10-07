@@ -40,7 +40,7 @@ def _paths(raw: str | None) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Config:
-    db_url: str
+    db_url: str = field(repr=False)
     llm_base_url: str
     llm_model: str
     llm_api_key: str = field(repr=False)
