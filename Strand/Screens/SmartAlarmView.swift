@@ -787,6 +787,7 @@ private struct AlarmDiagnosticsCard: View {
 
     @State private var stateLines: [String] = []
     @State private var logLines: [String] = []
+    @State private var testAlarmPending = false
 
     var body: some View {
         StrandCard(padding: 20) {
@@ -820,7 +821,30 @@ private struct AlarmDiagnosticsCard: View {
                 }
                 .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
 
-                Text("Test buzz tells you whether the strap can vibrate at all. If it buzzes but the alarm does not, the alarm was not accepted or armed — the log above shows which.")
+                Button {
+                    testAlarmPending = true
+                    model.ble.armStrapAlarm(at: Date().addingTimeInterval(75))
+                    refresh()
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 180 * 1_000_000_000)
+                        model.applySmartAlarm()
+                        testAlarmPending = false
+                        refresh()
+                    }
+                } label: {
+                    Text(testAlarmPending ? "Test alarm armed for 75 seconds from tap" : "Test the strap alarm in 75 seconds")
+                }
+                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+                .disabled(testAlarmPending)
+
+                Button {
+                    model.stopHaptics()
+                } label: {
+                    Text("Stop buzzing")
+                }
+                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+
+                Text("Test buzz only shows the strap can vibrate. The alarm test arms the strap's own alarm for 75 seconds from now, the same path as your wake alarm, then puts your real wake time back about 3 minutes later. Keep the app open until then. Double-tap the strap to dismiss a buzzing alarm.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
