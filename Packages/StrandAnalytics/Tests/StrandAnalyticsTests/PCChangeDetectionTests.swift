@@ -154,7 +154,7 @@ final class PCChangeDetectionTests: XCTestCase {
 
     func testMissingDaysAreSkippedNotZeroFilledAndALongGapResetsTheDetector() throws {
         // Every other day missing: only present days are scored; calendar durations stay calendar days.
-        var xs: [Double?] = (0..<80).map { $0 % 2 == 0 ? 0.3 * Double(($0 * 7) % 5 - 2) / 2 : nil }
+        var xs: [Double?] = (0..<80).map { (i: Int) -> Double? in i % 2 == 0 ? 0.3 * Double((i * 7) % 5 - 2) / 2 : nil }
         let sparse = Self.run(Self.values(pattern: xs), at: 78)
         let status = try XCTUnwrap(sparse.episodes.first { $0.direction == 0 })
         XCTAssertEqual(status.state, .usualVariation)
@@ -391,7 +391,9 @@ final class PCChangeDetectionTests: XCTestCase {
     /// detectors: a level change inside the first 28 days of a series is not reported as a persistent shift
     /// measured against a 7-day reference.
     func testColdStartDaysAreScoredForDisplayButDoNotFeedTheDetectors() throws {
-        let xs: [Double?] = (0..<60).map { $0 < 7 ? Double(($0 * 3) % 5 - 2) * 0.2 : -4 + Double(($0 * 3) % 5 - 2) * 0.2 }
+        let xs: [Double?] = (0..<60).map { (i: Int) -> Double? in
+            i < 7 ? Double((i * 3) % 5 - 2) * 0.2 : -4 + Double((i * 3) % 5 - 2) * 0.2
+        }
         let vals = Self.values(pattern: xs)
         let d = Self.day(59)
         let eps = CD.episodes(today: vals.filter { $0.day == d }, history: vals.filter { $0.day < d }, frozen: [],
@@ -458,7 +460,9 @@ final class PCChangeDetectionTests: XCTestCase {
         XCTAssertEqual(estimated.first { $0.direction == 1 }?.alarmIdx, 4)
         // φ̂ pairs consecutive supported days up to `maxGapDays` apart, so an every-other-day series has an estimate
         // (the autocorrelation of the sequence the CUSUM runs on) instead of no adjustment.
-        let alternate = Self.points(Self.values(pattern: (0..<56).map { $0 % 2 == 0 ? Double(($0 * 7) % 5 - 2) : nil }))
+        let alternate = Self.points(Self.values(pattern: (0..<56).map { (i: Int) -> Double? in
+            i % 2 == 0 ? Double((i * 7) % 5 - 2) : nil
+        }))
         XCTAssertNotNil(CD.lagOneAutocorrelation(alternate[...], change: change))
         XCTAssertNil(CD.lagOneAutocorrelation(alternate.prefix(15), change: change))
         // Start of a series: past the 28-day burn-in, φ̂ needs 20 pairs on days d−69…d−14 (from day 34 on), so a
