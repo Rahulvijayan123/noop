@@ -1199,7 +1199,7 @@ public enum Watchdog {
                                 WatchdogActivityRuntime.displayName(
                                     WatchdogActivityClass.labels(logits: window.activityLogits).last ?? "unknown"),
                                 adapted.modelVersion == WatchdogConfig.fallbackModelVersion
-                                    ? "prior fallback" : adapted.modelVersion,
+                                    ? "on-device prior (fallback)" : "on-device prior \(adapted.modelVersion)",
                                 WatchdogConfig.tickSeconds),
             versionLine: "\(WatchdogConfig.configVersion) · \(adapted.modelVersion)+\(WatchdogForecastRuntime.modelVersion) · episode \(carry.episodeId ?? "none")",
             shouldNotify: allowNotify,

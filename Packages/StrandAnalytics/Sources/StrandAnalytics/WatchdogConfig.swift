@@ -112,7 +112,8 @@ public enum WatchdogConfig: Sendable {
     public static let modelVersion = "units-ad-coreml-v3"
     public static let fallbackModelVersion = "units-ad-recon-v4"
     public static let coreMLCheckpoint = "UniTS_AD.mlpackage"
-    public static let configVersion = "watchdog-v2.5"
+    /// v3.0 (audit 2026-10-07): verified candidates drive every decision (WatchdogVerifier.swift).
+    public static let configVersion = "watchdog-v3.0"
     public static let forecastModelVersion = "timesfm3-student-v3"
     public static let activityFeatureWidth = 20
     public static let paramSet = "v1.review"
