@@ -29,6 +29,8 @@ Test knobs (fields on any request):
   "transition": "plain"      -> per-window "transition" evidence + transition_schema/version
   "transition": "null"       -> "transition" key present but JSON null (fail-open nil)
   "transition": "bad"        -> malformed "transition" object (fail-open nil, window intact)
+  "experts": true            -> per-window HART "fine" + fine_schema, and two ElderNet gait_windows
+                                (one gait with quality, one prefiltered, one malformed dropped) + gait_*
 """
 import json
 import sys
@@ -113,6 +115,8 @@ def main():
                         window["transition"] = None
                     elif knob == "bad":
                         window["transition"] = {"probs": "not-an-object"}
+                    if req.get("experts"):
+                        window["fine"] = {"sitting": 0.7, "typing": 0.2, "standing": 0.1}
                     windows.append(window)
                 resp = {
                     "id": rid,
@@ -140,6 +144,20 @@ def main():
                 }
                 if not legacy:
                     resp["feature_schema"] = req.get("feature_schema") or "imu-feat-2"
+                if req.get("experts") and start_ts is not None:
+                    s0 = float(start_ts)
+                    resp["fine_schema"] = "wisdm-act-1"
+                    resp["gait_status"] = "gait_loaded"
+                    resp["gait_schema"] = "gait-quality-1"
+                    resp["gait_model_version"] = "stub-eldernet"
+                    resp["gait_windows"] = [
+                        {"s": s0, "e": s0 + 10.0, "gait_prob": 0.93, "is_gait": True,
+                         "speed_mps": 1.21, "cadence_spm": 108.5, "stride_m": 1.3,
+                         "regularity": 0.81, "steps": 18.0},
+                        {"s": s0 + 5.0, "e": s0 + 15.0, "gait_prob": 0.0, "is_gait": False,
+                         "prefiltered": True},
+                        {"s": s0 + 10.0, "e": s0 + 10.0, "gait_prob": 0.5, "is_gait": False},
+                    ]
         elif op == "shutdown":
             sys.stdout.write(json.dumps({"id": rid, "ok": True}) + "\n")
             sys.stdout.flush()

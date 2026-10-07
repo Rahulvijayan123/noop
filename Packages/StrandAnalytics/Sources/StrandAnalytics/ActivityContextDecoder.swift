@@ -98,6 +98,9 @@ struct DecoderTracking: Codable, Equatable {
     var lastPublishTs: Int?
     /// Slow average of the arm posterior: display wording follows it, the published head does not.
     var armDisplay: [Double]?
+    /// The ElderNet window behind the last second, and its age then (for the published gait reading).
+    var lastGait: GaitExpertEvidence?
+    var lastGaitAgeS: Int?
 }
 
 // MARK: - Layout of the Erlang-expanded state space
@@ -271,6 +274,8 @@ public struct ActivityContextDecoder: Sendable {
         tracking.lastWindowFill = f.windowFill
         tracking.lastHasMotion = score.hasMotion
         tracking.lastIntensity = f.m10
+        tracking.lastGait = f.gait
+        tracking.lastGaitAgeS = f.gaitAgeS
         updateTracking(post, ts: obs.ts)
         lastTs = obs.ts
         return publishIfDue(obs.ts)
@@ -288,6 +293,8 @@ public struct ActivityContextDecoder: Sendable {
         tracking.activePostural = nil
         tracking.lastWindowFill = 0
         tracking.armDisplay = nil
+        tracking.lastGait = nil
+        tracking.lastGaitAgeS = nil
         // The display label is carried state too: after a data gap or an off-wrist return the new
         // context must not keep publishing the stale pre-gap wording or its hysteresis candidate
         // (WS-05-F03). Resetting to the default ("Unclear", no candidate) lets the first fresh
@@ -380,9 +387,13 @@ public struct ActivityContextDecoder: Sendable {
     private mutating func applyArm(_ f: ActivityFeatures) {
         let q = ActivityContextModel.armPattern(f)
         let tau = config.armTemperature
+        // HART's fine head names what the hand is doing (typing, eating, clapping, a ball sport) where the
+        // movement pattern only sees its shape; both are likelihoods of the same arm state.
+        let hart = ActivityContextModel.armEncoder(f)
         var total = 0.0
         for i in 0..<ArmState.count {
             arm[i] *= pow(max(1e-6, q[i]), tau)
+            if let hart { arm[i] *= pow(hart.likelihood[i], tau * hart.weight) }
             total += arm[i]
         }
         if !(total > 1e-300) || !total.isFinite {
@@ -587,6 +598,11 @@ public struct ActivityContextDecoder: Sendable {
         case .offWrist: wearValidity = 0
         case .unknown: wearValidity = evidence.heartRate ? 0.9 : 0.5
         }
+        let gait = tracking.lastGait.map {
+            ActivityGaitReading(probability: $0.gaitProb, isGait: $0.isGait,
+                                cadenceSpm: $0.isGait ? $0.cadenceSpm : nil, speedMps: $0.isGait ? $0.speedMps : nil,
+                                ageS: tracking.lastGaitAgeS ?? 0, model: $0.modelVersion)
+        }
 
         return ActivityContextState(
             ts: ts, posture: postureHead, locomotion: locoHead, armBehavior: armHead,
@@ -595,7 +611,7 @@ public struct ActivityContextDecoder: Sendable {
             overallConfidence: confidence, overallUncertainty: uncertainty,
             headConfidence: headConf,
             displayContext: label == ActivityDisplay.unclear ? nil : label,
-            history: history, evidence: evidence, versions: versions)
+            history: history, evidence: evidence, versions: versions, gait: gait)
     }
 
     /// Display hysteresis. A change of *kind* (moving ↔ stationary ↔ lying …) must hold for the group's

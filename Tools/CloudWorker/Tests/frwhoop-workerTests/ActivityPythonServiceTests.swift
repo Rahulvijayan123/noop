@@ -278,6 +278,47 @@ final class ActivityPythonServiceTests: XCTestCase {
         XCTAssertFalse(window.baseline)
     }
 
+    /// HART's fine distribution parses per window and ElderNet's gait windows parse from the response,
+    /// a malformed gait window (zero length) is dropped, and the gait version keys the cache.
+    func testInferParsesHartFineAndElderNetGaitWindows() throws {
+        service = try makeService()
+        _ = try service.ping()
+        var request = emptyRun()
+        request.extra = ["experts": true]
+        let result = try service.infer(run: request)
+        XCTAssertEqual(result.fineSchema, "wisdm-act-1")
+        let fine = try XCTUnwrap(result.windows.first?.fine)
+        XCTAssertEqual(fine["sitting"] ?? -1, 0.7, accuracy: 1e-12)
+        XCTAssertEqual(fine.count, 3)
+        XCTAssertEqual(result.gaitSchema, "gait-quality-1")
+        XCTAssertEqual(result.gaitStatus, "gait_loaded")
+        XCTAssertEqual(service.reportedGaitVersion, "stub-eldernet")
+        XCTAssertEqual(result.gaitWindows.count, 2)
+        let g0 = result.gaitWindows[0], g1 = result.gaitWindows[1]
+        XCTAssertEqual(g0.startTs, Int(emptyRun().startTs))
+        XCTAssertEqual(g0.endTs - g0.startTs, 10)
+        XCTAssertTrue(g0.isGait)
+        XCTAssertEqual(g0.cadenceSpm ?? -1, 108.5, accuracy: 1e-12)
+        XCTAssertEqual(g0.speedMps ?? -1, 1.21, accuracy: 1e-12)
+        XCTAssertEqual(g0.modelVersion, "stub-eldernet")
+        XCTAssertFalse(g1.isGait)
+        XCTAssertTrue(g1.prefiltered)
+        XCTAssertNil(g1.cadenceSpm)
+        // The general window fields are untouched.
+        XCTAssertEqual(result.windows.first?.label, "stationary")
+    }
+
+    /// Without the experts the response carries neither, exactly as before.
+    func testInferWithoutExpertsCarriesNoFineOrGait() throws {
+        service = try makeService()
+        _ = try service.ping()
+        let result = try service.infer(run: emptyRun())
+        XCTAssertNil(result.fineSchema)
+        XCTAssertNil(result.windows.first?.fine)
+        XCTAssertTrue(result.gaitWindows.isEmpty)
+        XCTAssertNil(service.reportedGaitVersion)
+    }
+
     /// An older serve.py (or an unloaded expert) sends no `transition`; every window is unchanged.
     func testInferAgainstAnOlderServiceWithoutTransitions() throws {
         service = try makeService()

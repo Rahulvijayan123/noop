@@ -38,6 +38,7 @@ from . import PREPROCESSING_VERSION, __version__
 from .baseline import MOTION_LABELS, classify_window
 from .features import FEATURE_SCHEMA, window_features
 from .manifest import Manifest, load_manifest
+from .model_names import FINE_SCHEMA
 from .preprocess import (COLUMNS_BYTES_PER_SECOND, HOP_SAMPLES, MAX_HEAD_SECONDS,
                          MAX_RUN_SECONDS, MAX_TAIL_SECONDS, TARGET_HZ,
                          WINDOW_SECONDS, HOP_SECONDS, WHOOP_SAMPLE_COUNT,
@@ -82,10 +83,21 @@ class ServeContext:
     transition_status: str = "transition_absent"
     transition_error: Optional[str] = None
     transition_version: Optional[str] = None
+    # Optional ElderNet gait expert (gait-quality-1, ELDERNET.md). OFF unless the operator opts in
+    # (--gait-expert eldernet / ACTIVITY_GAIT_EXPERT=eldernet): the Oxford weights are academic-use only.
+    # Disabled -> gait_absent and this process never imports torch for it; enabled but unloadable ->
+    # gait_unavailable, a soft failure exactly like the transition expert.
+    gait: Any = None
+    gait_status: str = "gait_absent"
+    gait_error: Optional[str] = None
+
+
+GAIT_EXPERTS = ("eldernet",)
 
 
 def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
-                  timeout: float = DEFAULT_TIMEOUT_SECONDS) -> ServeContext:
+                  timeout: float = DEFAULT_TIMEOUT_SECONDS,
+                  gait_expert: Optional[str] = None, gait_runtime: Any = None) -> ServeContext:
     # An explicitly requested manifest that is missing or unreadable is a
     # CONFIGURATION ERROR, never a silent baseline fallback: a misconfigured
     # model dir must fail loudly (model_missing) instead of publishing
@@ -113,7 +125,29 @@ def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
             ctx.model_status = "hart_unavailable"
             ctx.model_error = f"{type(exc).__name__}: {exc}"
     _load_transition(ctx, manifest, checkpoint_dir)
+    _load_gait(ctx, gait_expert, gait_runtime)
     return ctx
+
+
+def _load_gait(ctx: ServeContext, expert: Optional[str], runtime: Any = None) -> None:
+    """Attach the opt-in gait expert. ``runtime`` injects a pre-built ElderNetRuntime (tests)."""
+    if runtime is None and not expert:
+        return
+    try:
+        if runtime is None:
+            if expert not in GAIT_EXPERTS:
+                raise ValueError(f"unknown gait expert {expert!r} (expected one of {list(GAIT_EXPERTS)})")
+            from .eldernet.runtime import build_runtime
+            runtime = build_runtime()
+        if not runtime.available:
+            err = runtime.error
+            raise RuntimeError(f"{err.kind}: {err.message}" if err is not None else "ElderNet runtime not loaded")
+        ctx.gait = runtime
+        ctx.gait_status = "gait_loaded"
+    except Exception as exc:
+        ctx.gait = None
+        ctx.gait_status = "gait_unavailable"
+        ctx.gait_error = f"{type(exc).__name__}: {exc}"
 
 
 def _load_transition(ctx: ServeContext, manifest: Manifest, checkpoint_dir: Optional[str]) -> None:
@@ -162,21 +196,28 @@ def parse_hop_samples(value: Any) -> int:
     return int(round(float(value) * TARGET_HZ))
 
 
-def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
-                     body: List[str], head: List[str], tail: List[str],
-                     hop_samples: int = HOP_SAMPLES,
-                     ) -> List[Dict[str, Any]]:
-    """Decode -> runs -> windows -> per-window labels (baseline or HART) + imu-feat-2 features."""
-    from .preprocess import windows_from_run, decode_seconds, PreprocessError, Run
-
+def decode_request_seconds(start_ts: int, end_ts: int, body: List[str], head: List[str],
+                           tail: List[str]) -> List[tuple]:
+    """(ts, int16 columns) for head (the seconds just before start_ts), body and tail, chronological."""
     seconds: List[tuple] = []
-    # head: the len(head) seconds immediately before start_ts, chronological.
     for i, b in enumerate(head):
         seconds.append((start_ts - len(head) + i, decode_columns_b64(b)))
     for i, b in enumerate(body):
         seconds.append((start_ts + i, decode_columns_b64(b)))
     for i, b in enumerate(tail):
         seconds.append((end_ts + i, decode_columns_b64(b)))
+    return seconds
+
+
+def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
+                     body: List[str], head: List[str], tail: List[str],
+                     hop_samples: int = HOP_SAMPLES, seconds: Optional[List[tuple]] = None,
+                     ) -> List[Dict[str, Any]]:
+    """Decode -> runs -> windows -> per-window labels (baseline or HART) + imu-feat-2 features."""
+    from .preprocess import windows_from_run, decode_seconds, PreprocessError, Run
+
+    if seconds is None:
+        seconds = decode_request_seconds(start_ts, end_ts, body, head, tail)
 
     # (window, native-rate slice) pairs: the transition expert consumes the ORIGINAL
     # 100 Hz samples the resampler ate, so its features keep the transient peaks the
@@ -196,10 +237,12 @@ def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
     out: List[Dict[str, Any]] = []
     for w, native in pairs:
         base_features = None
+        fine = None
         if ctx.model is not None:
             pred = ctx.model.predict_window(w.data)
             label, probs, baseline = pred.label, pred.probs, pred.baseline
             calibrated = pred.calibrated          # A01: from the manifest artifact
+            fine = getattr(pred, "fine_probs", None)
         else:
             res = classify_window(w)
             label, probs, baseline = res.label, res.probs, True
@@ -216,6 +259,8 @@ def classify_windows(ctx: ServeContext, start_ts: int, end_ts: int,
             "calibrated": calibrated,
             "feat": window_features(w, base_features),
         }
+        if fine:
+            row["fine"] = {k: round(float(v), 6) for k, v in fine.items()}
         transition_row = _transition_evidence(ctx, w, native)
         if transition_row is not None:
             row["transition"] = transition_row
@@ -253,6 +298,31 @@ def _transition_evidence(ctx: ServeContext, w: Any, native: Optional[np.ndarray]
         return None
 
 
+def gait_evidence(ctx: ServeContext, seconds: List[tuple], start_ts: int, end_ts: int) -> Optional[Dict[str, Any]]:
+    """ElderNet ``gait-quality-1`` windows for the request's own seconds, or None when the expert is off.
+
+    Fail-open like the transition expert: an exception yields ``gait_status: gait_failed`` and no windows,
+    and the HART windows in the same response are untouched. ElderNet reads accelerometer only (30 Hz
+    nearest-neighbour, 10 s windows, gravity kept), on the same decoded seconds HART just used.
+    """
+    if ctx.gait is None:
+        return None
+    from .eldernet import MODEL_VERSION, WIRE_SCHEMA, WINDOW_S
+    from .eldernet.gait import wire_windows
+    from .eldernet.runtime import score_request_seconds
+    rt = ctx.gait
+    try:
+        windows, scores = score_request_seconds(rt, seconds, start_ts, end_ts, rt.default_hop_s)
+        rows, dropped = wire_windows(windows, scores) if windows else ([], 0)
+    except Exception as exc:
+        return {"gait_status": "gait_failed", "gait_error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "gait_status": "gait_loaded", "gait_schema": WIRE_SCHEMA, "gait_model_version": MODEL_VERSION,
+        "gait_window_s": WINDOW_S, "gait_hop_s": rt.default_hop_s, "gait_threshold": rt.gait_threshold,
+        "gait_windows": rows, "gait_dropped_nonfinite": dropped,
+    }
+
+
 def handle_ping(ctx: ServeContext) -> Dict[str, Any]:
     versions: Dict[str, Any] = {
         "python": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
@@ -277,7 +347,14 @@ def handle_ping(ctx: ServeContext) -> Dict[str, Any]:
         "transition_status": ctx.transition_status,
         "transition_error": ctx.transition_error,
         "transition_version": ctx.transition_version,
+        "fine_schema": FINE_SCHEMA if getattr(ctx.model, "fine_names", None) else None,
+        "gait_status": ctx.gait_status,
+        "gait_error": ctx.gait_error,
     }
+    if ctx.gait is not None:
+        from .eldernet import MODEL_VERSION as GAIT_MODEL_VERSION, WIRE_SCHEMA as GAIT_SCHEMA
+        out["gait_schema"] = GAIT_SCHEMA
+        out["gait_model_version"] = GAIT_MODEL_VERSION
     return out
 
 
@@ -323,7 +400,10 @@ def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
     hop_samples = parse_hop_samples(run.get("hop_s") if run.get("hop_s") is not None else req.get("hop_s"))
 
     t0 = time.monotonic()
-    windows = classify_windows(ctx, start_ts, end_ts, body, head, tail, hop_samples=hop_samples)
+    seconds = decode_request_seconds(start_ts, end_ts, body, head, tail)
+    windows = classify_windows(ctx, start_ts, end_ts, body, head, tail, hop_samples=hop_samples,
+                               seconds=seconds)
+    gait = gait_evidence(ctx, seconds, start_ts, end_ts)
 
     resp: Dict[str, Any] = {
         "ok": True,
@@ -344,6 +424,11 @@ def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
         # (the Swift reader pattern — unknown schema -> drop, never fail).
         resp["transition_schema"] = "transition-1"
         resp["transition_version"] = ctx.transition_version
+    if any("fine" in w for w in windows):
+        resp["fine_schema"] = FINE_SCHEMA
+    if gait is not None:
+        resp.update(gait)
+    resp["duration_ms"] = int((time.monotonic() - t0) * 1000)
     raw = json.dumps(resp, separators=(",", ":"), default=_json_default)
     if len(raw.encode("utf-8")) > MAX_OUTPUT_BYTES:
         raise ValueError("response exceeds hard output size cap")
@@ -452,9 +537,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--checkpoint", default=None, help="dir containing model.safetensors")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS,
                     help="per-request timeout in seconds")
+    ap.add_argument("--gait-expert", choices=GAIT_EXPERTS, default=os.environ.get("ACTIVITY_GAIT_EXPERT") or None,
+                    help="opt-in gait expert (eldernet: Oxford academic-use weights via ELDERNET_WEIGHTS_DIR / "
+                         "ELDERNET_UPSTREAM_DIR); default off")
     args = ap.parse_args(argv)
     try:
-        ctx = build_context(args.manifest, args.checkpoint, args.timeout)
+        ctx = build_context(args.manifest, args.checkpoint, args.timeout, gait_expert=args.gait_expert)
     except Exception as exc:
         # Configuration error (e.g. an explicitly requested manifest that is
         # missing): exit with a single JSON diagnostic line so the parent

@@ -42,6 +42,8 @@ public struct ActivityContextTrackInput {
     /// 4-s window, model-agnostic. Attached by end second exactly like `encoderWindows`; absent when
     /// the expert did not run for the day (the decoder's no-model fallback then stays in charge).
     public var transitionWindows: [ActivityTransitionWindow]
+    /// Optional ElderNet gait-expert windows (10 s, own hop), attached by end second.
+    public var gaitWindows: [ActivityGaitWindow]
 
     public init(dayStart: Int, dayEnd: Int,
                 hr: [HRSample] = [], gravity: [GravitySample] = [], steps: [StepSample] = [],
@@ -50,13 +52,15 @@ public struct ActivityContextTrackInput {
                 encoderWindows: [ActivityWindowPrediction] = [],
                 encoderId: String = "hart", encoderVersion: String = "unknown",
                 imuWindows: [ImuWindowFeatures] = [],
-                transitionWindows: [ActivityTransitionWindow] = []) {
+                transitionWindows: [ActivityTransitionWindow] = [],
+                gaitWindows: [ActivityGaitWindow] = []) {
         self.dayStart = dayStart; self.dayEnd = dayEnd
         self.hr = hr; self.gravity = gravity; self.steps = steps
         self.sleep = sleep; self.inBed = inBed; self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
         self.workouts = workouts; self.offWrist = offWrist
         self.encoderWindows = encoderWindows; self.encoderId = encoderId; self.encoderVersion = encoderVersion
         self.imuWindows = imuWindows; self.transitionWindows = transitionWindows
+        self.gaitWindows = gaitWindows
     }
 }
 
@@ -189,6 +193,10 @@ public enum ActivityContextTrackBuilder {
                 modelVersion: w.modelVersion, preprocessingVersion: w.preprocessingVersion,
                 abstained: w.abstained)
         }
+        var gaitAt: [Int: GaitExpertEvidence] = [:]
+        for w in input.gaitWindows where w.endTs >= lo && w.endTs < hi && w.gaitProb.isFinite {
+            gaitAt[w.endTs] = GaitExpertEvidence(window: w)
+        }
 
         let sleepSpans = input.sleep.sorted { $0.start < $1.start }
         let bedSpans = input.inBed.sorted { $0.start < $1.start }
@@ -207,7 +215,7 @@ public enum ActivityContextTrackBuilder {
         for ts in lo..<hi {
             let isOff = inside(offSpans, &offCursor, ts, start: \.start, end: \.end)
             let hasData = hrAt[ts] != nil || gravAt[ts] != nil || classAt[ts] != nil || tickAt[ts] != nil
-                || encoderAt[ts] != nil || imuAt[ts] != nil || transitionAt[ts] != nil
+                || encoderAt[ts] != nil || imuAt[ts] != nil || transitionAt[ts] != nil || gaitAt[ts] != nil
             guard isOff || hasData else { continue }
 
             var o = ActivityObservation(ts: ts)
@@ -227,6 +235,7 @@ public enum ActivityContextTrackBuilder {
             o.encoder = encoderAt[ts]
             o.imu = imuAt[ts]
             o.transition = transitionAt[ts]
+            o.gait = gaitAt[ts]
             let inBedSpan = inside(bedSpans, &bedCursor, ts, start: \.start, end: \.end)
             if inside(sleepSpans, &sleepCursor, ts, start: \.start, end: \.end) {
                 o.sleep = .asleep
@@ -270,17 +279,26 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     public var wear: WearContextState
     /// Published states merged into the run.
     public var count: Int
+    /// Experts that spoke during the run (`ActivityEvidenceSummary.experts`, union, fixed order).
+    public var experts: [String]
+    /// Mean ElderNet gait probability over the run's states that had a gait reading, how many did, and
+    /// the mean cadence over those that ElderNet called gait. nil / 0 without the gait expert.
+    public var gaitProbability: Double?
+    public var gaitStates: Int
+    public var gaitCadenceSpm: Double?
 
     public init(start: Int, end: Int, posture: HeadProbabilities<PostureClass>,
                 locomotion: HeadProbabilities<LocomotionClass>, armBehavior: HeadProbabilities<ArmBehaviorClass>,
                 intensity: Double?, overallConfidence: Double, overallUncertainty: Double,
                 displayContext: String?, sleep: SleepContextState, inBed: Bool = false,
-                wear: WearContextState, count: Int) {
+                wear: WearContextState, count: Int, experts: [String] = [],
+                gaitProbability: Double? = nil, gaitStates: Int = 0, gaitCadenceSpm: Double? = nil) {
         self.start = start; self.end = end; self.posture = posture; self.locomotion = locomotion
         self.armBehavior = armBehavior; self.intensity = intensity
         self.overallConfidence = overallConfidence; self.overallUncertainty = overallUncertainty
         self.displayContext = displayContext; self.sleep = sleep; self.inBed = inBed; self.wear = wear
-        self.count = count
+        self.count = count; self.experts = experts
+        self.gaitProbability = gaitProbability; self.gaitStates = gaitStates; self.gaitCadenceSpm = gaitCadenceSpm
     }
 
     enum CodingKeys: String, CodingKey {
@@ -289,9 +307,18 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         case intensity
         case overallConfidence = "overall_confidence", overallUncertainty = "overall_uncertainty"
         case displayContext = "display_context", sleep, inBed = "in_bed", wear, count = "n"
+        case experts, gaitProbability = "gait_p", gaitStates = "gait_n", gaitCadenceSpm = "gait_cadence_spm"
         // Derived on write from the fields above (`ActivityClassifier`), never read back: the document
         // carries them so SQL and other readers get the canonical class without re-implementing the mapping.
         case activityClass = "activity_class", classConfidence = "class_confidence"
+        case activityDetail = "activity_detail", detailConfidence = "detail_confidence"
+    }
+
+    /// Canonical order of `experts` (a union keeps it).
+    static let expertOrder = ["encoder", "hart_fine", "transition", "eldernet"]
+    static func union(_ a: [String], _ b: [String]) -> [String] {
+        let s = Set(a).union(b)
+        return expertOrder.filter(s.contains) + s.subtracting(expertOrder).sorted()
     }
 
     public init(from decoder: Decoder) throws {
@@ -309,6 +336,10 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed) ?? false
         wear = try c.decode(WearContextState.self, forKey: .wear)
         count = try c.decode(Int.self, forKey: .count)
+        experts = try c.decodeIfPresent([String].self, forKey: .experts) ?? []
+        gaitProbability = try c.decodeIfPresent(Double.self, forKey: .gaitProbability)
+        gaitStates = try c.decodeIfPresent(Int.self, forKey: .gaitStates) ?? 0
+        gaitCadenceSpm = try c.decodeIfPresent(Double.self, forKey: .gaitCadenceSpm)
     }
 
     /// The canonical class of the run (see `ActivityClassifier`).
@@ -332,9 +363,20 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         if inBed { try c.encode(true, forKey: .inBed) }
         try c.encode(wear, forKey: .wear)
         try c.encode(count, forKey: .count)
+        // Each written only when there is something to say, so a run without the experts encodes as before.
+        if !experts.isEmpty { try c.encode(experts, forKey: .experts) }
+        if let gaitProbability, gaitStates > 0 {
+            try c.encode((gaitProbability * 1000).rounded() / 1000, forKey: .gaitProbability)
+            try c.encode(gaitStates, forKey: .gaitStates)
+        }
+        if let gaitCadenceSpm { try c.encode((gaitCadenceSpm * 10).rounded() / 10, forKey: .gaitCadenceSpm) }
         let k = classification
         try c.encode(k.activityClass.rawValue, forKey: .activityClass)
         try c.encode((k.confidence * 100).rounded() / 100, forKey: .classConfidence)
+        if let detail = k.detail {
+            try c.encode(detail.rawValue, forKey: .activityDetail)
+            try c.encode((k.detailConfidence * 100).rounded() / 100, forKey: .detailConfidence)
+        }
     }
 
     /// The run as the canonical published-state shape (provenance fields are carried by the document).
@@ -436,6 +478,14 @@ public enum ActivityContextRuns {
         last.overallUncertainty = (first.overallUncertainty * a + second.overallUncertainty * b) / n
         last.end = second.end
         last.count = first.count + second.count
+        last.experts = ActivityContextRun.union(first.experts, second.experts)
+        let ga = Double(first.gaitStates), gb = Double(second.gaitStates)
+        if ga + gb > 0 {
+            last.gaitProbability = ((first.gaitProbability ?? 0) * ga + (second.gaitProbability ?? 0) * gb) / (ga + gb)
+        }
+        last.gaitStates = first.gaitStates + second.gaitStates
+        if let x = first.gaitCadenceSpm, let y = second.gaitCadenceSpm { last.gaitCadenceSpm = (x * ga + y * gb) / max(1, ga + gb) }
+        else { last.gaitCadenceSpm = first.gaitCadenceSpm ?? second.gaitCadenceSpm }
         return last
     }
 
@@ -488,6 +538,8 @@ public enum ActivityContextRuns {
         var arm: [ArmBehaviorClass: Double] = [:]
         var intensitySum = 0.0, intensityN = 0
         var confidenceSum = 0.0, uncertaintySum = 0.0
+        var experts: [String] = []
+        var gaitSum = 0.0, gaitN = 0, cadenceSum = 0.0, cadenceN = 0
 
         init(first: ActivityContextState) {
             self.first = first; self.lastTs = first.ts
@@ -515,6 +567,12 @@ public enum ActivityContextRuns {
             if let i = s.intensity { intensitySum += i; intensityN += 1 }
             confidenceSum += s.overallConfidence
             uncertaintySum += s.overallUncertainty
+            let e = s.evidence.experts
+            if !e.isEmpty, e != experts { experts = ActivityContextRun.union(experts, e) }
+            if let g = s.gait {
+                gaitSum += g.probability; gaitN += 1
+                if g.isGait, let c = g.cadenceSpm { cadenceSum += c; cadenceN += 1 }
+            }
         }
 
         func run(intervalS: Int) -> ActivityContextRun {
@@ -533,7 +591,9 @@ public enum ActivityContextRuns {
                 intensity: intensityN > 0 ? intensitySum / Double(intensityN) : nil,
                 overallConfidence: confidenceSum / n, overallUncertainty: uncertaintySum / n,
                 displayContext: first.displayContext, sleep: first.sleep.state, inBed: first.sleep.inBed,
-                wear: first.wear.state, count: count)
+                wear: first.wear.state, count: count, experts: experts,
+                gaitProbability: gaitN > 0 ? gaitSum / Double(gaitN) : nil, gaitStates: gaitN,
+                gaitCadenceSpm: cadenceN > 0 ? cadenceSum / Double(cadenceN) : nil)
         }
     }
 }
@@ -726,6 +786,14 @@ public enum ActivityContextDayBuilder {
             }
             foldWord(w.baseline ? 1 : 0, into: &h)
             foldWord(w.calibrated ? 1 : 0, into: &h)
+            // Folded only when present, so a window without the fine head hashes as before.
+            if let fine = w.fineProbs {
+                foldString("h", into: &h)
+                for key in fine.keys.sorted() {
+                    foldString(key, into: &h)
+                    foldWord(fine[key]!.bitPattern, into: &h)
+                }
+            }
         }
         fold(imuWindows, into: &h, lo: input.dayStart, hi: hi, ts: { $0.endTs }) { f, h in
             foldWord(f.accelRmsG.bitPattern, into: &h)
@@ -744,6 +812,15 @@ public enum ActivityContextDayBuilder {
             foldWord(w.abstained ? 1 : 0, into: &h)
             foldString(w.modelVersion, into: &h)
             foldString(w.preprocessingVersion, into: &h)
+        }
+        let gaitWindows = input.gaitWindows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        fold(gaitWindows, into: &h, lo: input.dayStart, hi: hi, ts: { $0.endTs }) { w, h in
+            foldInt(w.startTs, into: &h)
+            foldWord(w.gaitProb.bitPattern, into: &h)
+            foldWord((w.isGait ? 1 : 0) | (w.prefiltered ? 2 : 0), into: &h)
+            foldWord(w.cadenceSpm?.bitPattern ?? .max, into: &h)
+            foldWord(w.speedMps?.bitPattern ?? .max, into: &h)
+            foldString(w.modelVersion, into: &h)
         }
         return String(h, radix: 16)
     }

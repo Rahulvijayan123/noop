@@ -23,6 +23,17 @@ import Foundation
 //            (none, sit_to_stand, stand_to_sit, lie_down, get_up), or null when the window has none
 //   t_schema "transition-1"
 //   t_v      the transition model's version; t_pv its preprocessing schema
+// HART's fine-grained activity distribution, also additive and aligned with the windows:
+//   h        per-mille probability per `h_labels` activity, or null when the window has none
+//   h_schema "wisdm-act-1"; h_labels the activity names (`HartFineActivities.names` when written here)
+// The optional ElderNet gait expert has its own 10 s windows on its own hop, so its columns are a separate
+// parallel block (`g_s.count` windows, not `s.count`):
+//   g_schema "gait-quality-1"; g_v the model version
+//   g_s, g_e window start / end, seconds after t0
+//   g_p      gait probability, per mille
+//   g_f      flags: 1 = is gait, 2 = pre-filtered (static)
+//   g_q      [cadence spm ×10, speed m/s ×1000, stride m ×1000, regularity ×1000, steps ×10] on gait windows
+//            (each entry null when that head is missing), null otherwise
 // Readers drop any window they cannot parse (transition rows included) instead of rejecting the document.
 
 /// One window's output of the learned raw-IMU transition expert (optional, additive over
@@ -73,12 +84,19 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
     /// Optional learned raw-IMU transition-expert output, one entry per window that has it (additive: a
     /// set without it reads and writes exactly as before the expert existed).
     public var transitions: [ActivityTransitionWindow]
+    /// Optional ElderNet gait-expert windows (their own 10 s grid; additive like `transitions`).
+    public var gaitWindows: [ActivityGaitWindow]
+
+    public static let fineSchema = HartFineActivities.schema
+    public static let gaitSchema = GaitExpert.schema
+    static let gaitQualityScale: [Double] = [10, 1_000, 1_000, 1_000, 10]
 
     public init(encoderId: String, encoderVersion: String,
                 windows: [ActivityWindowPrediction], features: [ImuWindowFeatures] = [],
-                transitions: [ActivityTransitionWindow] = []) {
+                transitions: [ActivityTransitionWindow] = [], gaitWindows: [ActivityGaitWindow] = []) {
         self.encoderId = encoderId; self.encoderVersion = encoderVersion
         self.windows = windows; self.features = features; self.transitions = transitions
+        self.gaitWindows = gaitWindows
     }
 
     public var isEmpty: Bool { windows.isEmpty }
@@ -94,7 +112,9 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
         for f in features { featureAt["\(f.startTs)-\(f.endTs)"] = f }
 
         var s: [Int] = [], e: [Int] = [], l: [Int] = [], b: [Int] = []
-        var p: [[Int]] = [], fRows: [Any] = [], tRows: [Any] = []
+        var p: [[Int]] = [], fRows: [Any] = [], tRows: [Any] = [], hRows: [Any] = []
+        let fineNames = HartFineActivities.names
+        let hasFine = sorted.contains { $0.fineProbs != nil }
         s.reserveCapacity(sorted.count); e.reserveCapacity(sorted.count)
         var transitionAt: [String: ActivityTransitionWindow] = [:]
         for t in transitions { transitionAt["\(t.startTs)-\(t.endTs)"] = t }
@@ -130,10 +150,42 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
             } else {
                 tRows.append(NSNull())
             }
+            if hasFine {
+                if let fine = w.fineProbs {
+                    hRows.append(fineNames.map { name -> Int in
+                        let value = fine[name] ?? 0
+                        return value.isFinite ? Int((min(1, max(0, value)) * 1000).rounded()) : 0
+                    })
+                } else {
+                    hRows.append(NSNull())
+                }
+            }
         }
         var doc: [String: Any] = ["format": Self.format, "t0": dayStart, "labels": labels,
                                   "features": Self.featureKeys, "feature_scale": Self.featureScale,
                                   "s": s, "e": e, "l": l, "p": p, "b": b, "f": fRows]
+        if hasFine {
+            doc["h_schema"] = Self.fineSchema
+            doc["h_labels"] = fineNames
+            doc["h"] = hRows
+        }
+        if !gaitWindows.isEmpty {
+            let gw = gaitWindows.sorted { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
+            doc["g_schema"] = Self.gaitSchema
+            doc["g_v"] = gw.first?.modelVersion ?? ""
+            doc["g_s"] = gw.map { $0.startTs - dayStart }
+            doc["g_e"] = gw.map { $0.endTs - dayStart }
+            doc["g_p"] = gw.map { $0.gaitProb.isFinite ? Int((min(1, max(0, $0.gaitProb)) * 1000).rounded()) : 0 }
+            doc["g_f"] = gw.map { ($0.isGait ? 1 : 0) | ($0.prefiltered ? 2 : 0) }
+            doc["g_q"] = gw.map { w -> Any in
+                guard w.isGait else { return NSNull() }
+                let values: [Double?] = [w.cadenceSpm, w.speedMps, w.strideM, w.regularity, w.steps]
+                return zip(values, Self.gaitQualityScale).map { value, scale -> Any in
+                    guard let value, value.isFinite, abs(value * scale) < 1e15 else { return NSNull() }
+                    return Int((value * scale).rounded())
+                }
+            }
+        }
         // The transition-expert columns are written only when the set carries transition output, so a
         // day without the expert serializes exactly as it did before the columns existed.
         if !transitions.isEmpty {
@@ -178,6 +230,13 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
             transitionModelVersion = doc["t_v"] as? String ?? ""
             transitionPreprocessingVersion = doc["t_pv"] as? String ?? ""
         }
+        var fineRows: [Any]? = nil
+        var fineLabels: [String] = []
+        if doc["h_schema"] as? String == fineSchema, let rows = doc["h"] as? [Any], rows.count == s.count,
+           let names = doc["h_labels"] as? [String], !names.isEmpty {
+            fineRows = rows
+            fineLabels = names
+        }
 
         var windows: [ActivityWindowPrediction] = [], features: [ImuWindowFeatures] = []
         var transitions: [ActivityTransitionWindow] = []
@@ -194,9 +253,19 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
             }
             guard valid else { continue }
             let startTs = t0 + start, endTs = t0 + end
+            var fine: [String: Double]? = nil
+            if let rows = fineRows, let row = rows[i] as? [Any], row.count == fineLabels.count {
+                var parsed: [String: Double] = [:]
+                var fineValid = true
+                for (k, value) in zip(fineLabels, row) {
+                    guard let perMille = double(value), perMille >= 0, perMille <= 1000 else { fineValid = false; break }
+                    if perMille > 0 { parsed[k] = perMille / 1000 }
+                }
+                if fineValid, !parsed.isEmpty { fine = parsed }
+            }
             windows.append(ActivityWindowPrediction(
                 startTs: startTs, endTs: endTs, label: MotionLabel(rawValue: labels[li]) ?? .unknown,
-                probs: probs, baseline: int(b[i]) == 1))
+                probs: probs, baseline: int(b[i]) == 1, fineProbs: fine))
             if let rows = transitionRows, let row = rows[i] as? [Any],
                row.count == transitionClassOrder.count {
                 var tProbs: [Double] = []
@@ -223,7 +292,34 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
                                               orientationChangeDeg: value(orientI)))
         }
         return ActivityEncoderWindowSet(encoderId: encoderId, encoderVersion: encoderVersion,
-                                        windows: windows, features: features, transitions: transitions)
+                                        windows: windows, features: features, transitions: transitions,
+                                        gaitWindows: decodeGait(doc, t0: t0))
+    }
+
+    /// The optional `g_*` block; a block whose columns do not line up is ignored, a row that does not parse
+    /// is left out.
+    private static func decodeGait(_ doc: [String: Any], t0: Int) -> [ActivityGaitWindow] {
+        guard doc["g_schema"] as? String == gaitSchema,
+              let gs = doc["g_s"] as? [Any], let ge = doc["g_e"] as? [Any], let gp = doc["g_p"] as? [Any],
+              let gf = doc["g_f"] as? [Any], gs.count <= maxWindows,
+              [ge.count, gp.count, gf.count].allSatisfy({ $0 == gs.count }) else { return [] }
+        let gq = doc["g_q"] as? [Any]
+        let version = doc["g_v"] as? String ?? ""
+        var out: [ActivityGaitWindow] = []
+        for i in 0..<gs.count {
+            guard let start = int(gs[i]), let end = int(ge[i]), end > start, end - start <= 3_600,
+                  let perMille = double(gp[i]), perMille >= 0, perMille <= 1000,
+                  let flags = int(gf[i]), (0...3).contains(flags) else { continue }
+            var w = ActivityGaitWindow(startTs: t0 + start, endTs: t0 + end, gaitProb: perMille / 1000,
+                                       isGait: flags & 1 != 0, prefiltered: flags & 2 != 0, modelVersion: version)
+            if w.isGait, let gq, gq.count == gs.count, let row = gq[i] as? [Any], row.count == gaitQualityScale.count {
+                func value(_ k: Int) -> Double? { double(row[k]).map { $0 / gaitQualityScale[k] } }
+                w.cadenceSpm = value(0); w.speedMps = value(1); w.strideM = value(2)
+                w.regularity = value(3); w.steps = value(4)
+            }
+            out.append(w)
+        }
+        return out
     }
 
     /// Windows (and their features and transition rows) that END inside `[from, to)`: the decoder keys a
@@ -233,6 +329,7 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
         copy.windows = windows.filter { $0.endTs >= from && $0.endTs < to }
         copy.features = features.filter { $0.endTs >= from && $0.endTs < to }
         copy.transitions = transitions.filter { $0.endTs >= from && $0.endTs < to }
+        copy.gaitWindows = gaitWindows.filter { $0.endTs >= from && $0.endTs < to }
         return copy
     }
 
@@ -241,18 +338,22 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
     public static func merged(_ sets: [ActivityEncoderWindowSet]) -> ActivityEncoderWindowSet? {
         guard let first = sets.first else { return nil }
         var seen = Set<String>(), seenFeatures = Set<String>(), seenTransitions = Set<String>()
+        var seenGait = Set<String>()
         var windows: [ActivityWindowPrediction] = [], features: [ImuWindowFeatures] = []
-        var transitions: [ActivityTransitionWindow] = []
+        var transitions: [ActivityTransitionWindow] = [], gaitWindows: [ActivityGaitWindow] = []
         for set in sets {
             for w in set.windows where seen.insert("\(w.startTs)-\(w.endTs)").inserted { windows.append(w) }
             for f in set.features where seenFeatures.insert("\(f.startTs)-\(f.endTs)").inserted { features.append(f) }
             for t in set.transitions where seenTransitions.insert("\(t.startTs)-\(t.endTs)").inserted { transitions.append(t) }
+            for g in set.gaitWindows where seenGait.insert("\(g.startTs)-\(g.endTs)").inserted { gaitWindows.append(g) }
         }
         windows.sort { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
         features.sort { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
         transitions.sort { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
+        gaitWindows.sort { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
         return ActivityEncoderWindowSet(encoderId: first.encoderId, encoderVersion: first.encoderVersion,
-                                        windows: windows, features: features, transitions: transitions)
+                                        windows: windows, features: features, transitions: transitions,
+                                        gaitWindows: gaitWindows)
     }
 
     /// JSON numbers arrive as `NSNumber` on Darwin and as Swift numbers on Linux; both are read here.

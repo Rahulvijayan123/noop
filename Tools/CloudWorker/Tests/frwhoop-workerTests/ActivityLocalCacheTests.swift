@@ -1,5 +1,6 @@
 import XCTest
 import CZstd
+import StrandAnalytics
 @testable import frwhoop_worker
 
 /// The on-host cache that keeps a raw-IMU day job from re-downloading and re-inferring the whole day each
@@ -109,6 +110,40 @@ final class ActivityLocalCacheTests: XCTestCase {
         XCTAssertEqual(back.windows[0].label, "walking")
         XCTAssertEqual(back.windows[0].probs, ["walking": 0.9, "stationary": 0.1])
         XCTAssertEqual(back.windows[0].features, ["accel_rms_g": 0.12, "cadence_hz": 1.8])
+    }
+
+    func testInferenceRoundTripsFineAndGaitWindows() throws {
+        let cache = try makeCache()
+        let gait = [
+            ActivityGaitWindow(startTs: 100, endTs: 110, gaitProb: 0.93, isGait: true, cadenceSpm: 108.5,
+                               speedMps: 1.21, strideM: 1.3, regularity: 0.81, steps: 18, modelVersion: "en-1"),
+            ActivityGaitWindow(startTs: 105, endTs: 115, gaitProb: 0, isGait: false, prefiltered: true,
+                               modelVersion: "en-1"),
+        ]
+        let result = ActivityPythonService.InferResult(
+            ok: true, modelVersion: "hart", preprocessingVersion: "1.0.0",
+            windows: [ActivityPythonService.WindowPrediction(
+                start: 100, end: 104, label: "stationary", probs: ["stationary": 1], baseline: false,
+                fine: ["sitting": 0.8, "typing": 0.2])],
+            error: nil, errorKind: nil, fineSchema: "wisdm-act-1", gaitWindows: gait,
+            gaitSchema: "gait-quality-1", gaitModelVersion: "en-1", gaitStatus: "gait_loaded")
+        let key = String(repeating: "c", count: 64)
+        cache.storeInference(result, key: key)
+        let back = try XCTUnwrap(cache.inference(key: key))
+        XCTAssertEqual(back.windows[0].fine, ["sitting": 0.8, "typing": 0.2])
+        XCTAssertEqual(back.fineSchema, "wisdm-act-1")
+        XCTAssertEqual(back.gaitWindows, gait)
+        XCTAssertEqual(back.gaitSchema, "gait-quality-1")
+        XCTAssertEqual(back.gaitStatus, "gait_loaded")
+    }
+
+    func testGaitVersionChangesTheInferenceKeyOnlyWhenPresent() {
+        let req = ActivityPythonService.RunRequest(startTs: 1, endTs: 2, columnsB64: ["AA"], headB64: [], tailB64: [])
+        let plain = ActivityLocalCache.inferenceKey(request: req, modelVersion: "m", preprocessingVersion: "p")
+        XCTAssertEqual(plain, ActivityLocalCache.inferenceKey(request: req, modelVersion: "m", preprocessingVersion: "p",
+                                                              gaitVersion: nil))
+        XCTAssertNotEqual(plain, ActivityLocalCache.inferenceKey(request: req, modelVersion: "m",
+                                                                 preprocessingVersion: "p", gaitVersion: "en-1"))
     }
 
     func testFailedAnswersAndUnsafeKeysAreNotStored() throws {

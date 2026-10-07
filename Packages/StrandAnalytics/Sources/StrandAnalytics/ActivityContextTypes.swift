@@ -155,11 +155,18 @@ public struct ActivityWindowPrediction: Codable, Equatable, Sendable {
     /// the manifest's calibration artifact). Absent on older payloads -> false (uncalibrated).
     /// Never derived from `baseline` — model identity is not calibration provenance.
     public let calibrated: Bool
+    /// HART's full per-activity softmax (`wisdm-act-1`: walking, jogging, stairs, sitting, standing,
+    /// typing, writing, eating_*, drinking, brushing_teeth, clapping, folding_clothes, kicking,
+    /// playing_catch, dribbling), before the manifest folds it into `probs`. nil on baseline windows and
+    /// on payloads written before the field existed.
+    public let fineProbs: [String: Double]?
 
     public init(startTs: Int, endTs: Int, label: MotionLabel,
-                probs: [String: Double], baseline: Bool = false, calibrated: Bool = false) {
+                probs: [String: Double], baseline: Bool = false, calibrated: Bool = false,
+                fineProbs: [String: Double]? = nil) {
         self.startTs = startTs; self.endTs = endTs; self.label = label
         self.probs = probs; self.baseline = baseline; self.calibrated = calibrated
+        self.fineProbs = fineProbs?.isEmpty == true ? nil : fineProbs
     }
 
     /// Older payloads predate the `calibrated` wire field (A01) and decode as uncalibrated —
@@ -172,6 +179,8 @@ public struct ActivityWindowPrediction: Codable, Equatable, Sendable {
         probs = try c.decode([String: Double].self, forKey: .probs)
         baseline = try c.decodeIfPresent(Bool.self, forKey: .baseline) ?? false
         calibrated = try c.decodeIfPresent(Bool.self, forKey: .calibrated) ?? false
+        let fine = try c.decodeIfPresent([String: Double].self, forKey: .fineProbs)
+        fineProbs = fine?.isEmpty == true ? nil : fine
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -182,6 +191,7 @@ public struct ActivityWindowPrediction: Codable, Equatable, Sendable {
         try c.encode(probs, forKey: .probs)
         try c.encode(baseline, forKey: .baseline)
         try c.encode(calibrated, forKey: .calibrated)
+        try c.encodeIfPresent(fineProbs, forKey: .fineProbs)
     }
 
     /// Highest class probability across `probs`, or nil when `probs` is empty.
@@ -197,6 +207,7 @@ public struct ActivityWindowPrediction: Codable, Equatable, Sendable {
     enum CodingKeys: String, CodingKey {
         case startTs = "s", endTs = "e", label = "label", probs = "probs", baseline = "baseline"
         case calibrated
+        case fineProbs = "fine"
     }
 }
 

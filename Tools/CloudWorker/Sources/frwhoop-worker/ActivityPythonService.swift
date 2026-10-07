@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 /// Persistent Python companion for activity inference (spec §5, C10 serve
 /// protocol).
@@ -116,6 +117,8 @@ final class ActivityPythonService {
         var calibrationVersion: String?
         /// The transition expert's model version, when one is loaded (nil = absent).
         var transitionVersion: String? = nil
+        /// The ElderNet gait expert's model version when it is loaded (nil = not opted in / unavailable).
+        var gaitVersion: String? = nil
     }
 
     struct WindowPrediction {
@@ -135,6 +138,9 @@ final class ActivityPythonService {
         /// Optional learned transition-expert output for the window (absent when the service did not
         /// send `transition`: an older serve.py, or the expert is not loaded — the fail-open default).
         var transition: TransitionOutput? = nil
+        /// HART's full per-activity softmax (`fine`, gated on the response's `fine_schema`); nil from an
+        /// older serve.py or a head whose classes are not the WISDM set.
+        var fine: [String: Double]? = nil
     }
 
     /// One window's learned transition-expert evidence (the five canonical classes plus the 100 Hz
@@ -164,6 +170,14 @@ final class ActivityPythonService {
         var transitionSchema: String? = nil
         /// The transition expert's model version (provenance for the `t` rows).
         var transitionVersion: String? = nil
+        /// `fine_schema` stamped on the windows' `fine` distributions (nil = none sent).
+        var fineSchema: String? = nil
+        /// ElderNet gait-expert windows on their own grid (`gait_windows`), their schema and model version,
+        /// and the expert's status (`gait_absent` when not opted in). Empty / nil from an older serve.py.
+        var gaitWindows: [ActivityGaitWindow] = []
+        var gaitSchema: String? = nil
+        var gaitModelVersion: String? = nil
+        var gaitStatus: String? = nil
     }
 
     /// One run request per C10 serve protocol. `columnsB64` is one base64
@@ -212,6 +226,8 @@ final class ActivityPythonService {
     /// The transition expert's model version, when one is loaded (nil otherwise — the
     /// expert is optional by design, so absence is a normal state, not a failure).
     private(set) var reportedTransitionVersion: String?
+    /// The gait expert's model version from ping / infer (nil until reported, or when not loaded).
+    private(set) var reportedGaitVersion: String?
     /// Last `echo` object from an infer response (stub diagnostic mirror of
     /// the request shape), used by tests to pin the wire contract.
     private(set) var lastEcho: [String: Any]?
@@ -407,6 +423,7 @@ final class ActivityPythonService {
         if status.calibrated != nil { reportedCalibrated = status.calibrated }
         if status.calibrationVersion != nil { reportedCalibrationVersion = status.calibrationVersion }
         if status.transitionVersion != nil { reportedTransitionVersion = status.transitionVersion }
+        if status.gaitVersion != nil { reportedGaitVersion = status.gaitVersion }
         lock.unlock()
         return status
     }
@@ -447,6 +464,7 @@ final class ActivityPythonService {
             if let mv = result.modelVersion, !mv.isEmpty { reportedModelVersion = mv }
             if let pv = result.preprocessingVersion, !pv.isEmpty { reportedPreprocessingVersion = pv }
             if let tv = result.transitionVersion, !tv.isEmpty { reportedTransitionVersion = tv }
+            if result.gaitStatus == "gait_loaded", let gv = result.gaitModelVersion, !gv.isEmpty { reportedGaitVersion = gv }
             if lastPingStatus == nil || !lastPingStatus!.modelAvailable {
                 lastPingStatus = PingStatus(ok: true, modelAvailable: true,
                                             modelStatus: "loaded",
@@ -621,7 +639,8 @@ final class ActivityPythonService {
             error: obj["error"] as? String,
             calibrated: obj["calibrated"] as? Bool,
             calibrationVersion: obj["calibration_version"] as? String,
-            transitionVersion: obj["transition_version"] as? String)
+            transitionVersion: obj["transition_version"] as? String,
+            gaitVersion: obj["gait_status"] as? String == "gait_loaded" ? obj["gait_model_version"] as? String : nil)
     }
 
     private static func parseInfer(_ obj: [String: Any]) -> InferResult {
@@ -649,9 +668,11 @@ final class ActivityPythonService {
                                                 probs: probs, baseline: (w["baseline"] as? Bool) ?? false,
                                                 calibrated: (w["calibrated"] as? Bool) ?? false,
                                                 features: features,
-                                                transition: Self.parseTransition(w["transition"])))
+                                                transition: Self.parseTransition(w["transition"]),
+                                                fine: Self.parseFine(w["fine"])))
             }
         }
+        let gaitVersion = obj["gait_model_version"] as? String
         return InferResult(
             ok: ok,
             modelVersion: obj["model_version"] as? String,
@@ -661,7 +682,41 @@ final class ActivityPythonService {
             errorKind: obj["kind"] as? String,
             featureSchema: obj["feature_schema"] as? String,
             transitionSchema: obj["transition_schema"] as? String,
-            transitionVersion: obj["transition_version"] as? String)
+            transitionVersion: obj["transition_version"] as? String,
+            fineSchema: obj["fine_schema"] as? String,
+            gaitWindows: parseGaitWindows(obj["gait_windows"], modelVersion: gaitVersion ?? "unknown"),
+            gaitSchema: obj["gait_schema"] as? String,
+            gaitModelVersion: gaitVersion,
+            gaitStatus: obj["gait_status"] as? String)
+    }
+
+    /// One window's `fine` distribution; nil when absent or nothing finite and non-negative survives.
+    static func parseFine(_ raw: Any?) -> [String: Double]? {
+        guard let obj = raw as? [String: Any] else { return nil }
+        var out: [String: Double] = [:]
+        for (k, v) in obj {
+            if let d = (v as? NSNumber)?.doubleValue, d.isFinite, d >= 0 { out[k] = d }
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    /// The response's `gait_windows` (ELDERNET.md §4). A malformed window is dropped, never fatal.
+    static func parseGaitWindows(_ raw: Any?, modelVersion: String) -> [ActivityGaitWindow] {
+        guard let rows = raw as? [[String: Any]] else { return [] }
+        func num(_ x: Any?) -> Double? { (x as? NSNumber).map(\.doubleValue).flatMap { $0.isFinite ? $0 : nil } }
+        return rows.compactMap { w in
+            guard let s = num(w["s"]), let e = num(w["e"]), abs(s) < 1e12, abs(e) < 1e12, Int(e) > Int(s),
+                  let p = num(w["gait_prob"]) else { return nil }
+            let isGait = (w["is_gait"] as? Bool) ?? false
+            return ActivityGaitWindow(startTs: Int(s), endTs: Int(e), gaitProb: min(1, max(0, p)), isGait: isGait,
+                                      prefiltered: (w["prefiltered"] as? Bool) ?? false,
+                                      cadenceSpm: isGait ? num(w["cadence_spm"]) : nil,
+                                      speedMps: isGait ? num(w["speed_mps"]) : nil,
+                                      strideM: isGait ? num(w["stride_m"]) : nil,
+                                      regularity: isGait ? num(w["regularity"]) : nil,
+                                      steps: isGait ? num(w["steps"]) : nil,
+                                      modelVersion: modelVersion)
+        }
     }
 
     /// Parse one window's optional `transition` object; nil for absent/malformed input (fail-open).

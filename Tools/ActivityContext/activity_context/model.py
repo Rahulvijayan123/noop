@@ -37,6 +37,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 import numpy as np
 
 from .manifest import Manifest
+from .model_names import WISDM_ACTIVITY_NAMES
 from .preprocess import N_CHANNELS, WINDOW_SAMPLES
 
 # The complete linear classification head (hart-repro s7.1, 8 tensors / 3,463
@@ -223,6 +224,9 @@ class Prediction:
     # A01 calibration provenance: true only when the manifest carries a
     # versioned calibration artifact (never from model_kind/baseline).
     calibrated: bool = False
+    # Full per-activity softmax keyed by WISDM_ACTIVITY_NAMES (FINE_SCHEMA); None when
+    # the head is not the 18-letter WISDM head.
+    fine_probs: Optional[Dict[str, float]] = None
 
 
 def abstain(probs: Dict[str, float], max_prob: float, margin: float) -> str:
@@ -252,10 +256,23 @@ class HARTModel:
         sc = manifest.scaler
         self.mean = np.asarray(sc["mean"], dtype=np.float64)
         self.scale = np.asarray(sc["scale"], dtype=np.float64)
+        self.fine_names: Optional[List[str]] = (
+            [WISDM_ACTIVITY_NAMES[c] for c in self.class_ids]
+            if self.class_ids and all(c in WISDM_ACTIVITY_NAMES for c in self.class_ids) else None)
+
+    @staticmethod
+    def _softmax(logits: np.ndarray) -> np.ndarray:
+        softmax = np.exp(logits - logits.max())
+        return softmax / softmax.sum()
+
+    def _fine_probs(self, logits: np.ndarray) -> Optional[Dict[str, float]]:
+        if self.fine_names is None or len(self.fine_names) != logits.shape[0]:
+            return None
+        softmax = self._softmax(logits)
+        return {name: float(softmax[i]) for i, name in enumerate(self.fine_names)}
 
     def _ontology_probs(self, logits: np.ndarray) -> Dict[str, float]:
-        softmax = np.exp(logits - logits.max())
-        softmax = softmax / softmax.sum()
+        softmax = self._softmax(logits)
         probs: Dict[str, float] = {}
         for cid, wisdm_label in enumerate(self.class_ids):
             onto = self.manifest.label_mapping.get(wisdm_label, "other_movement")
@@ -295,7 +312,8 @@ class HARTModel:
         # model_kind: with no fitted artifact today this is always False.
         return Prediction(label=label, probs=probs,
                           logits=logits, baseline=False,
-                          calibrated=self.manifest.calibrated)
+                          calibrated=self.manifest.calibrated,
+                          fine_probs=self._fine_probs(logits))
 
     def close(self) -> None:
         self.model = None

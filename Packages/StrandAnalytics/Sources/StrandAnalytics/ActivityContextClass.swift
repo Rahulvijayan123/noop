@@ -228,17 +228,42 @@ public struct ActivityClassification: Equatable, Sendable {
     public var posture: PostureClass?
     public var locomotion: LocomotionClass?
     public var armBehavior: ArmBehaviorClass?
+    /// A finer reading the stable class folds away (stairs inside `walking`, a vehicle inside `sitting`, a
+    /// postural transition inside `light_activity`), with its own head mass. nil when there is none.
+    public var detail: ActivityDetail?
+    public var detailConfidence: Double
 
     public init(activityClass: ActivityClass, confidence: Double, familyConfidence: Double = 0,
                 runnerUp: ActivityClass? = nil,
                 runnerUpConfidence: Double = 0, evidenceQuality: Double = 0,
                 posture: PostureClass? = nil, locomotion: LocomotionClass? = nil,
-                armBehavior: ArmBehaviorClass? = nil) {
+                armBehavior: ArmBehaviorClass? = nil,
+                detail: ActivityDetail? = nil, detailConfidence: Double = 0) {
         self.activityClass = activityClass; self.confidence = confidence
         self.familyConfidence = familyConfidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
         self.evidenceQuality = evidenceQuality
         self.posture = posture; self.locomotion = locomotion; self.armBehavior = armBehavior
+        self.detail = detail; self.detailConfidence = detailConfidence
+    }
+}
+
+/// Refinements below `ActivityClass`. Additive: the class codes (`act-class-3`) do not change, so a reader
+/// that ignores `activity_detail` reads exactly what it read before.
+public enum ActivityDetail: String, Codable, CaseIterable, Sendable {
+    case stairs
+    case inVehicle = "in_vehicle"
+    case posturalTransition = "postural_transition"
+
+    /// Derived from the same display label the class is, so the two can never disagree.
+    static func from(label: String?, posture: HeadProbabilities<PostureClass>,
+                     locomotion: HeadProbabilities<LocomotionClass>) -> (ActivityDetail, Double)? {
+        switch label {
+        case "Taking stairs": return (.stairs, locomotion[.stairs])
+        case "In a vehicle": return (.inVehicle, locomotion[.vehicleMotion])
+        case "Changing position": return (.posturalTransition, posture[.posturalTransition])
+        default: return nil
+        }
     }
 }
 
@@ -358,6 +383,7 @@ public enum ActivityClassifier {
             runnerUp = c; runnerUpMass = mass
         }
         if runnerUpMass < 0.02 { runnerUp = nil; runnerUpMass = 0 }
+        let detail = ActivityDetail.from(label: label, posture: posture, locomotion: locomotion)
 
         return ActivityClassification(
             activityClass: cls, confidence: min(1, max(0, confidence)),
@@ -365,7 +391,8 @@ public enum ActivityClassifier {
             runnerUp: runnerUp, runnerUpConfidence: min(1, runnerUpMass), evidenceQuality: quality,
             posture: posture.top(excluding: .unknown)?.0,
             locomotion: locomotion.top(excluding: .unknown)?.0,
-            armBehavior: armBehavior.top(excluding: .unknown)?.0)
+            armBehavior: armBehavior.top(excluding: .unknown)?.0,
+            detail: detail?.0, detailConfidence: min(1, max(0, detail?.1 ?? 0)))
     }
 
     public static func classify(run: ActivityContextRun) -> ActivityClassification {

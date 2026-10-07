@@ -28,6 +28,13 @@ model = [
     "datasets==2.14.4",
     "pyarrow==14.0.1",
 ]
+# ElderNet gait expert (activity_context.eldernet): six pinned upstream heads, CPU inference, numpy-only
+# preprocessing. Weights AND the upstream source are University of Oxford Academic Use Licence material,
+# fetched by sha256 by the operator (eldernet.weights / eldernet.upstream fetch) and never committed; use is
+# limited to internal academic, non-commercial research (ELDERNET.md "Licence"). Off unless --gait-expert.
+eldernet = [
+    "torch==2.8.0",
+]
 dev = [
     "pytest>=8.0,<10",
 ]
@@ -38,6 +45,7 @@ activity-infer = "activity_context.infer:main"
 activity-train = "activity_context.train:main"
 activity-evaluate = "activity_context.evaluate:main"
 activity-fetch = "activity_context.fetch_artifacts:main"
+activity-eldernet-serve = "activity_context.eldernet.serve:main"
 
 [tool.setuptools.packages.find]
 include = ["activity_context*"]

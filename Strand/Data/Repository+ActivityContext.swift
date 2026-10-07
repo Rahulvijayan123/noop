@@ -70,6 +70,10 @@ extension Repository {
             input.imuWindows = encoder.features
             input.encoderId = encoder.encoderId
             input.encoderVersion = encoder.encoderVersion
+            // The experts stored beside the windows, so the phone decodes the same evidence as the
+            // server's stream day (ActivityContextDays.buildStreamDay).
+            input.transitionWindows = encoder.transitions
+            input.gaitWindows = encoder.gaitWindows
         }
         let config = activityDecoderConfig
         return await ActivityContextWorker.shared.document(

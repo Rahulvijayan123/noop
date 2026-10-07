@@ -14,7 +14,7 @@ import Foundation
 // through a context prior. Heads are marginals of those two filtered posteriors; none is ever a raw
 // per-window classifier output.
 //
-// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.5`). They were set from this strap's own
+// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.6`). They were set from this strap's own
 // distributions where those exist (dynamic-acceleration percentiles for still / walking / running
 // seconds) and from physiological plausibility elsewhere. They are versioned, centralized, and meant
 // to be replaced by fitted values once labelled data exists; tests pin behaviour, not the numbers.
@@ -333,6 +333,29 @@ enum ActivityContextModel {
     static let wShift = 1.0, wHRTrend = 0.6, wTransition = 0.6
     static let uMotion = 0.20, uGait = 0.35, uOrient = 0.35, uEncoder = 0.30, uArm = 0.25, uHR = 0.55, uGate = 0.30
     static let uShift = 0.30, uTransition = 0.30
+    /// Share of the posture-shift heuristic's weight kept while the learned transition expert speaks.
+    static let shiftWeightWithExpert = 0.5
+
+    /// The transition expert's weight decay with window age (full to 2 s, then 0.8, then 0.5).
+    static func transitionAgeFactor(_ age: Int?) -> Double {
+        guard let age else { return 1 }
+        return age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5)
+    }
+    /// Weight (before trust multipliers) of HART's fine distribution as arm-chain evidence.
+    static let wArmEncoder = 0.6
+
+    /// HART's fine distribution as arm-chain likelihoods (`ArmState` order, max 1) and the weight to apply
+    /// them at; nil without a fine distribution. Same trust multipliers as body channel 4.
+    static func armEncoder(_ f: ActivityFeatures) -> (likelihood: [Double], weight: Double)? {
+        guard let enc = f.encoder, let p = enc.fineProbs.flatMap(HartFineActivities.vector) else { return nil }
+        let L = HartFineActivities.armLikelihood(p)
+        let best = max(L.max() ?? 1, 1e-12)
+        var w = wArmEncoder
+        if !enc.calibrated { w *= 0.6 }
+        if enc.abstained { w *= 0.4 }
+        if let age = f.encoderAgeS { w *= age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5) }
+        return (L.map { max(0.01, $0 / best) }, w)
+    }
 
     /// Fewer evidence channels than this and the unknown mode earns a bonus per missing channel.
     static let minChannels = 3
@@ -514,6 +537,11 @@ enum ActivityContextModel {
         // orientation. Stationary modes are penalized while it is present; the four transition modes
         // are only plausible while it is. (It also raises the hazard of entering a transition mode —
         // see ActivityContextDecoder.predictBody.)
+        // While the learned transition expert speaks it sees the same burst from the raw IMU, so the share
+        // of the heuristic that reports that burst (its strength `s`) is discounted toward
+        // `shiftWeightWithExpert`, scaled by the expert's own age decay. A quiet heuristic ("no shift") is a
+        // disagreement with the expert, not a duplicate, and keeps its full weight.
+        let transitionShare = (f.transition.map { !$0.abstained } ?? false) ? transitionAgeFactor(f.transitionAgeS) : 0
         if f.net5 != nil {
             let s = shiftStrength(f)
             var v = [Double](repeating: 1, count: n)
@@ -522,11 +550,25 @@ enum ActivityContextModel {
                 if mode.isTransition { v[m] = 0.05 + 0.95 * s }
                 else if mode.isStationary { v[m] = 1 - 0.9 * s }
             }
-            add(v, unknownValue: uShift, weight: wShift)
+            let discount = 1 - (1 - shiftWeightWithExpert) * s * transitionShare
+            add(v, unknownValue: uShift, weight: wShift * discount)
         }
 
-        // 4. Short-window motion encoder (HART or any other), weighted by how much to trust it.
-        if let enc = f.encoder {
+        // 4. Short-window motion encoder (HART or any other), weighted by how much to trust it. With HART's
+        // fine distribution the channel reads that (see ActivityContextExperts.swift) INSTEAD of the four
+        // folded labels — the same softmax, so never both.
+        var encoderSpoke = false
+        let fine = f.encoder?.fineProbs.flatMap(HartFineActivities.vector)
+        if let enc = f.encoder, let fine {
+            let L = HartFineActivities.bodyLikelihood(fine)
+            let best = max(L.max() ?? 1, 1e-12)
+            var w = wEncoder
+            if !enc.calibrated { w *= 0.6 }
+            if enc.abstained { w *= 0.4 }
+            if let age = f.encoderAgeS { w *= age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5) }
+            add(L.map { max(0.01, $0 / best) }, unknownValue: max(0.01, L[unknownIdx] / best), weight: w)
+            encoderSpoke = true
+        } else if let enc = f.encoder {
             var known = 0.0
             // Fixed order: floating-point sums must not depend on dictionary iteration order, or two runs
             // over the same stream (or a restored one) could differ in the last bit.
@@ -548,7 +590,18 @@ enum ActivityContextModel {
                 if enc.abstained { w *= 0.4 }
                 if let age = f.encoderAgeS { w *= age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5) }
                 add(v, unknownValue: uEncoder, weight: w)
+                encoderSpoke = true
             }
+        }
+
+        // 4c. ElderNet wrist-gait expert (optional): a likelihood ratio against its mean output π on the
+        // gait modes vs the still / seated-moving modes; neutral on everything it was not trained to tell
+        // apart (running, other exercise, transitions, unknown). Discounted while HART speaks (same
+        // accelerometer). Not counted as a channel: it never shrinks the missing-sensor unknown bonus.
+        if let g = f.gait {
+            var w = GaitExpert.weight
+            if encoderSpoke { w *= 1 - GaitExpert.hartRedundancy }
+            add(GaitExpert.likelihood(g.gaitProb), unknownValue: 1, weight: w, isEvidence: false)
         }
 
         // 4b. Learned raw-IMU transition expert (optional; see `Tools/ActivityContext`). A small
@@ -582,9 +635,8 @@ enum ActivityContextModel {
                 }
                 sum += v[m]; count += 1
             }
-            var w = wTransition
-            if let age = f.transitionAgeS { w *= age <= 2 ? 1 : (age <= 4 ? 0.8 : 0.5) }
-            add(v, unknownValue: count > 0 ? sum / Double(count) : 1, weight: w)
+            add(v, unknownValue: count > 0 ? sum / Double(count) : 1,
+                weight: wTransition * transitionAgeFactor(f.transitionAgeS))
         }
 
         // 5. Instantaneous arm pattern → body mode compat (couples desk-like motion to seated, etc.).
@@ -635,7 +687,16 @@ enum ActivityContextModel {
             guard let label = profiles[m].requiresLabel else { continue }
             specialists = true
             let mode = BodyMode(rawValue: m)!
-            let said = f.encoder?.classProbs[label] ?? 0
+            // HART's fine head can name stairs (the folded head files it under other_movement) and ball
+            // sports; eating, drinking or brushing teeth no longer open the generic-exercise gate.
+            var said = f.encoder?.classProbs[label] ?? 0
+            if let fine {
+                switch mode {
+                case .stairs: said = HartFineActivities.stairsMass(fine)
+                case .otherExercise: said = HartFineActivities.sportMass(fine)
+                default: break
+                }
+            }
             let covered = f.loggedWorkout && profiles[m].workout >= 0.9 && workoutCovers(mode, kind: f.workoutKind)
             var s = (said >= 0.15 || covered) ? 1.0 : 0.04
             if mode == .otherExercise { s = max(s, 0.04 + 0.96 * effort) }
