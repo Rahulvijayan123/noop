@@ -3,18 +3,34 @@
 // The harness (system prompt, tool loop, tools over the owner's local data) runs on the phone; this
 // function is the part that must not: it holds the model provider key, picks the model for each mode,
 // bounds every request, meters usage per owner, runs the visual pipeline, and persists memory and history.
+//
+// This module is the router plus the model relay, the visual route and the profile. Threads, folders and
+// messages live in coach_store.ts, memories in coach_memory.ts, the context library and recall in
+// coach_context.ts, and the cheap-model side calls (titles, follow-ups, starters, maintenance) in
+// coach_curator.ts (docs/COACH_MEMORY.md).
 import { IdentityError, resolveUploadIdentity } from './tokens.ts';
-import { isUuid } from './keys.ts';
 import type { SupabaseRest } from './rest.ts';
 import { parseVisualRequest, produceVisual, routeVisual, type VisualDeps } from './coach_visual.ts';
+import { type CoachDeps, fail, isObject, readJson } from './coach_llm.ts';
+import { foldersRoute, messagesRoute, threadsRoute } from './coach_store.ts';
+import { memoriesRoute } from './coach_memory.ts';
+import { contextRoute } from './coach_context.ts';
+import { followupsRoute, maintainRoute, suggestionsRoute, titleRoute } from './coach_curator.ts';
 
 export type CoachMode = 'chat' | 'vision';
 
 export interface CoachConfig {
   fireworksKey: string;
   upstreamUrl: string;
-  models: Record<CoachMode, string>;
+  /** `utility` is the cheap JSON model for titles, follow-ups, starters, summaries, curation and recall. */
+  models: Record<CoachMode | 'utility', string>;
   dailyCallLimit: number;
+  /** COACH_UTILITY_API_KEY, else the chat key. */
+  utilityKey: string;
+  /** `reasoning_effort` for utility passes; '' leaves the parameter out. */
+  utilityReasoning: string;
+  /** Cheap-model calls per owner per UTC day (its own budget, never the chat quota). */
+  dailyUtilityLimit: number;
   allowLegacyFleetUploads: boolean;
   allowLegacyEnrollment?: boolean;
   jevKey: string;
@@ -23,14 +39,22 @@ export interface CoachConfig {
 export function coachConfig(env: Record<string, string | undefined> = Deno.env.toObject()): CoachConfig {
   const pick = (name: string, fallback: string) => (env[name] ?? '').trim() || fallback;
   const limit = Number(pick('COACH_DAILY_CALL_LIMIT', '400'));
+  const utilityLimit = Number(pick('COACH_DAILY_UTILITY_LIMIT', '600'));
+  const chatModel = pick('COACH_MODEL_CHAT', 'accounts/fireworks/models/deepseek-v4p1-flash');
+  const fireworksKey = pick('FIREWORKS_AI_API_KEY', '');
   return {
-    fireworksKey: pick('FIREWORKS_AI_API_KEY', ''),
+    fireworksKey,
     upstreamUrl: pick('COACH_UPSTREAM_URL', 'https://api.fireworks.ai/inference/v1/chat/completions'),
     models: {
-      chat: pick('COACH_MODEL_CHAT', 'accounts/fireworks/models/deepseek-v4p1-flash'),
+      chat: chatModel,
       vision: pick('COACH_MODEL_VISION', 'accounts/fireworks/models/qwen3p8-max'),
+      utility: pick('COACH_MODEL_UTILITY', chatModel),
     },
     dailyCallLimit: Number.isFinite(limit) && limit > 0 ? Math.trunc(limit) : 400,
+    utilityKey: pick('COACH_UTILITY_API_KEY', fireworksKey),
+    // Unset means `none`; set but empty means the parameter is omitted (some models reject it).
+    utilityReasoning: env.COACH_UTILITY_REASONING === undefined ? 'none' : env.COACH_UTILITY_REASONING.trim(),
+    dailyUtilityLimit: Number.isFinite(utilityLimit) && utilityLimit > 0 ? Math.trunc(utilityLimit) : 600,
     allowLegacyFleetUploads: pick('NOOP_ALLOW_LEGACY_FLEET_UPLOADS', '').toLowerCase() === 'true',
     allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT', '').toLowerCase() === 'true',
     jevKey: pick('TYPESAFE_API_KEY', ''),
@@ -45,29 +69,12 @@ const MODES: Record<CoachMode, { maxTokens: number }> = {
 // The harness picks the reasoning effort per round: none on tool rounds, low or high on the final answer.
 const EFFORTS = new Set(['none', 'low', 'high']);
 
-const MAX_BODY_BYTES = 6_000_000;
 const MAX_IMAGE_BYTES = 4_500_000;
 const MAX_TEXT_CHARS = 60_000;
 const MAX_MESSAGES = 80;
 const MAX_TOOLS = 24;
-const MAX_MEMORIES = 50;
-const MAX_STORED_MESSAGES = 500;
-const MEMORY_TOPICS = new Set(['goal', 'injury', 'preference', 'achievement', 'lifestyle', 'general']);
 const TOOL_NAME = /^[A-Za-z0-9_]{1,64}$/;
 const IMAGE_URL = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/;
-
-function fail(code: string, status: number): Error {
-  return Object.assign(new Error(code), { code, status });
-}
-
-const isObject = (v: unknown): v is Record<string, any> => !!v && typeof v === 'object' && !Array.isArray(v);
-
-async function readJson(req: Request): Promise<any> {
-  const bytes = new Uint8Array(await req.arrayBuffer());
-  if (bytes.length > MAX_BODY_BYTES) throw fail('payload_too_large', 413);
-  try { return JSON.parse(new TextDecoder().decode(bytes)); }
-  catch { throw fail('invalid_body', 400); }
-}
 
 function cleanContent(content: unknown, mode: CoachMode): string | unknown[] {
   if (typeof content === 'string') {
@@ -206,81 +213,6 @@ async function chat(req: Request, userId: string, { rest, cfg, fetchImpl }: Deps
   return Response.json({ content: json?.choices?.[0]?.message?.content ?? '' });
 }
 
-function memoryInput(body: any) {
-  const content = typeof body?.content === 'string' ? body.content.trim() : '';
-  if (!content || content.length > 500) throw fail('invalid_memory', 400);
-  const importance = Number.isFinite(body.importance) ? Math.max(1, Math.min(5, Math.round(body.importance))) : 3;
-  const topic = typeof body.topic === 'string' && MEMORY_TOPICS.has(body.topic.toLowerCase()) ? body.topic.toLowerCase() : 'general';
-  return { content, importance, topic };
-}
-
-const publicMemory = (r: any) => ({ id: r.id, content: r.content, topic: r.topic, importance: r.importance, createdAt: r.created_at });
-
-async function memoriesRoute(req: Request, userId: string, tail: string[], { rest }: Deps): Promise<Response> {
-  const owner = `user_id=eq.${userId}`;
-  const ranked = `${owner}&order=importance.desc,created_at.desc&select=id,content,topic,importance,created_at`;
-  if (req.method === 'GET') {
-    return Response.json({ memories: (await rest.select('coach_memory_items', `${ranked}&limit=${MAX_MEMORIES}`)).map(publicMemory) });
-  }
-  if (req.method === 'POST') {
-    const input = memoryInput(await readJson(req));
-    const existing = await rest.select('coach_memory_items', ranked);
-    const dup = existing.find((r: any) => r.content.trim().toLowerCase() === input.content.toLowerCase());
-    if (dup) return Response.json({ memory: publicMemory(dup), deduped: true });
-    const [row] = await rest.request('coach_memory_items', { method: 'POST', body: { user_id: userId, ...input } });
-    // Past the cap the lowest-ranked fact goes, which may be the one just saved if it ranks last.
-    const rank = (a: any, b: any) => (b.importance - a.importance) || (a.created_at < b.created_at ? 1 : -1);
-    const overflow = [...existing, row].sort(rank).slice(MAX_MEMORIES).map((r: any) => r.id);
-    if (overflow.length) await rest.delete('coach_memory_items', `${owner}&id=in.(${overflow.join(',')})`);
-    return Response.json({ memory: publicMemory(row), kept: !overflow.includes(row.id) });
-  }
-  if (req.method === 'DELETE') {
-    if (tail[0] && !isUuid(tail[0])) throw fail('invalid_id', 400);
-    await rest.delete('coach_memory_items', tail[0] ? `${owner}&id=eq.${tail[0]}` : owner);
-    return Response.json({ deleted: true });
-  }
-  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
-}
-
-const publicMessage = (r: any) => ({
-  id: r.id, clientId: r.client_id, role: r.role, content: r.content, meta: r.meta ?? {}, createdAt: r.created_at,
-});
-
-function messageRow(userId: string, m: any) {
-  if (!isObject(m) || !isUuid(m.clientId) || !['user', 'assistant'].includes(m.role)
-      || typeof m.content !== 'string' || m.content.length > MAX_TEXT_CHARS) throw fail('invalid_message', 400);
-  const meta = isObject(m.meta) ? m.meta : {};
-  if (JSON.stringify(meta).length > 20_000) throw fail('invalid_message', 400);
-  // Always present: PostgREST bulk upserts write NULL for a key missing from any row, and created_at is NOT NULL.
-  const created = typeof m.createdAt === 'string' && Number.isFinite(Date.parse(m.createdAt)) ? m.createdAt : new Date().toISOString();
-  return { user_id: userId, client_id: m.clientId, role: m.role, content: m.content, meta, created_at: created };
-}
-
-async function messagesRoute(req: Request, userId: string, { rest }: Deps): Promise<Response> {
-  const owner = `user_id=eq.${userId}`;
-  if (req.method === 'GET') {
-    const asked = Number(new URL(req.url).searchParams.get('limit') ?? 60);
-    const limit = Number.isFinite(asked) ? Math.max(1, Math.min(200, Math.trunc(asked))) : 60;
-    const rows = await rest.select('coach_messages',
-      `${owner}&order=created_at.desc,id.desc&limit=${limit}&select=id,client_id,role,content,meta,created_at`);
-    return Response.json({ messages: rows.map(publicMessage).reverse() });
-  }
-  if (req.method === 'POST') {
-    const body = await readJson(req);
-    if (!Array.isArray(body?.messages) || !body.messages.length || body.messages.length > 40) throw fail('invalid_message', 400);
-    const rows = body.messages.map((m: any) => messageRow(userId, m));
-    await rest.upsert('coach_messages', rows, { onConflict: 'user_id,client_id', prefer: 'resolution=merge-duplicates,return=minimal' });
-    const stale = await rest.select('coach_messages', `${owner}&order=created_at.desc,id.desc&offset=${MAX_STORED_MESSAGES}&limit=200&select=id`);
-    if (stale.length) await rest.delete('coach_messages', `${owner}&id=in.(${stale.map((r: any) => r.id).join(',')})`);
-    return Response.json({ saved: rows.length });
-  }
-  if (req.method === 'DELETE') {
-    await rest.delete('coach_messages', owner);
-    return Response.json({ deleted: true });
-  }
-  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
-}
-
 const PROFILE_SEXES = new Set(['male', 'female', 'nonbinary']);
 const PROFILE_COLUMNS = 'display_name,date_of_birth,sex_model,height_cm,weight_kg,timezone,updated_at';
 
@@ -380,7 +312,7 @@ async function profileRoute(req: Request, userId: string, { rest }: Deps): Promi
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
 }
 
-interface Deps { rest: SupabaseRest; cfg: CoachConfig; fetchImpl: typeof fetch }
+type Deps = CoachDeps;
 
 /** Runs after the answer has streamed. `route_only` returns just the routing decision so the app can show its placeholder. */
 async function visualRoute(req: Request, userId: string, { rest, cfg, fetchImpl }: Deps): Promise<Response> {
@@ -416,8 +348,28 @@ async function visualRoute(req: Request, userId: string, { rest, cfg, fetchImpl 
   }
 }
 
-export async function handleCoachRequest(req: Request, deps: { rest: SupabaseRest; cfg: CoachConfig; fetchImpl?: typeof fetch }): Promise<Response> {
-  const d: Deps = { ...deps, fetchImpl: deps.fetchImpl ?? fetch };
+/** `EdgeRuntime.waitUntil` when the platform provides it, so maintenance can finish after the 202. */
+function edgeWaitUntil(): ((work: Promise<unknown>) => void) | null {
+  const runtime = (globalThis as any).EdgeRuntime;
+  return typeof runtime?.waitUntil === 'function' ? (work) => runtime.waitUntil(work) : null;
+}
+
+export interface CoachRequestDeps {
+  rest: SupabaseRest;
+  cfg: CoachConfig;
+  fetchImpl?: typeof fetch;
+  now?: () => number;
+  /** Background runner for maintenance; null forces it inline (tests), undefined detects EdgeRuntime. */
+  background?: ((work: Promise<unknown>) => void) | null;
+  timeScale?: number;
+}
+
+export async function handleCoachRequest(req: Request, deps: CoachRequestDeps): Promise<Response> {
+  const d: Deps = {
+    rest: deps.rest, cfg: deps.cfg, fetchImpl: deps.fetchImpl ?? fetch, now: deps.now ?? Date.now,
+    background: deps.background === undefined ? edgeWaitUntil() : deps.background,
+    timeScale: deps.timeScale && deps.timeScale > 0 ? deps.timeScale : 1,
+  };
   try {
     const identity = await resolveUploadIdentity({
       headers: req.headers, rest: d.rest, allowLegacyFleetUploads: d.cfg.allowLegacyFleetUploads,
@@ -427,12 +379,27 @@ export async function handleCoachRequest(req: Request, deps: { rest: SupabaseRes
     const tail = new URL(req.url).pathname.replace(/^.*\/coach(?=\/|$)/, '').split('/').filter(Boolean);
     const [route, ...sub] = tail;
     if (route === 'status' && req.method === 'GET') {
-      return Response.json({ ok: true, configured: Boolean(d.cfg.fireworksKey), dailyCallLimit: d.cfg.dailyCallLimit });
+      // `features` tells a thread-aware app it may use threads and the context tools; old servers never send it.
+      return Response.json({
+        ok: true, configured: Boolean(d.cfg.fireworksKey), dailyCallLimit: d.cfg.dailyCallLimit,
+        features: { threads: 1, context: 1 },
+      });
     }
     if (route === 'chat' && req.method === 'POST') return await chat(req, identity.id, d);
     if (route === 'visual' && req.method === 'POST') return await visualRoute(req, identity.id, d);
     if (route === 'memories') return await memoriesRoute(req, identity.id, sub, d);
     if (route === 'messages') return await messagesRoute(req, identity.id, d);
+    if (route === 'threads' && sub.length === 2 && sub[1] === 'title' && req.method === 'POST') {
+      return await titleRoute(req, identity.id, sub[0], d);
+    }
+    if (route === 'threads' && sub.length === 2 && sub[1] === 'maintain' && req.method === 'POST') {
+      return await maintainRoute(req, identity.id, sub[0], d);
+    }
+    if (route === 'threads') return await threadsRoute(req, identity.id, sub, d);
+    if (route === 'folders') return await foldersRoute(req, identity.id, sub, d);
+    if (route === 'followups' && req.method === 'POST') return await followupsRoute(req, identity.id, d);
+    if (route === 'suggestions' && req.method === 'POST') return await suggestionsRoute(req, identity.id, d);
+    if (route === 'context') return await contextRoute(req, identity.id, sub, d);
     if (route === 'profile') return await profileRoute(req, identity.id, d);
     return Response.json({ error: 'not_found' }, { status: 404 });
   } catch (err: any) {
