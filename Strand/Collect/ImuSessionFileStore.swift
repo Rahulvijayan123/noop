@@ -466,7 +466,9 @@ public final class ImuSessionFileStore {
     /// 600 samples) on the main actor each time; only the file still being appended to changes between reads.
     private var decodedSegments: [String: (size: Int, modified: Date, records: [Record])] = [:]
     private var decodedSegmentOrder: [String] = []
-    private static let decodedSegmentLimit = 4
+    /// Two: the Watchdog's half hour spans at most two 30-minute segments, and each holds about 2 MB decoded for
+    /// as long as the app runs, in the background too.
+    private static let decodedSegmentLimit = 2
 
     private func decodedSegment(_ url: URL) -> [Record] {
         let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)

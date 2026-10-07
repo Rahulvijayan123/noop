@@ -402,7 +402,7 @@ final class AppModel: ObservableObject {
         // The account layer calls this on every reconcile pass (each foreground, each session refresh), not only
         // when the account changes. The same account again runs the jobs below only on screen and only when
         // `cloudBecameActive` has not just run them; off screen the next foreground does.
-        guard (newAccount || Self.appIsOnScreen) && claimCloudJobs(for: identity.scope) else {
+        guard (newAccount || Platform.appIsOnScreen) && claimCloudJobs(for: identity.scope) else {
             startHostedRefreshLoop()
             return
         }
@@ -429,6 +429,7 @@ final class AppModel: ObservableObject {
         hostedLastReadAt = [:]
         hostedRetry = HostedRetryLedger()
         hostedAccountScope = nil
+        cloudJobsRan = nil   // a sign-in after this, even to the same account, runs its jobs at once
         IntradaySeriesStore.shared.reset()
         PhysiologyContextStore.shared.reset()
         ActivityEncoderWindowStore.shared.reset()
@@ -592,7 +593,11 @@ final class AppModel: ObservableObject {
                 try await scores.refresh(day: day, deviceId: id, maxAgeMs: maxAgeMs).hostedResult
             }
             outcomes.append(outcome)
-            if !outcome.failedTransiently { hostedLastReadAt[day] = now }
+            // Only while this pass's account is still the running one: a pass that outlived its account must not
+            // mark days read in the map `cloudAccountReady` has just cleared for the next account.
+            if !outcome.failedTransiently, CloudPushRuntime.shared.runningScope == account {
+                hostedLastReadAt[day] = now
+            }
             guard let result = outcome.result,
                   hostedWrittenRevision[day] != result.resultRevision else { continue }
             // The account may have changed while this read was in flight; its result is not the new
@@ -731,12 +736,12 @@ final class AppModel: ObservableObject {
         // close (active → background within a second) went to the background first, so the loop started after
         // `cloudWillResignActive` had already cancelled it and then polled the server every half minute for as
         // long as the strap kept the app alive.
-        guard cloudScoringIsAuthoritative, hostedRefreshTask == nil, Self.appIsOnScreen else { return }
+        guard cloudScoringIsAuthoritative, hostedRefreshTask == nil, Platform.appIsOnScreen else { return }
         hostedRefreshTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: AppModel.hostedRefreshSeconds * 1_000_000_000)
                 guard !Task.isCancelled, let self else { return }
-                guard Self.appIsOnScreen else {
+                guard Platform.appIsOnScreen else {
                     // Missed the cancel (see above). The next `cloudBecameActive` starts a fresh loop.
                     self.hostedRefreshTask = nil
                     return
@@ -744,16 +749,6 @@ final class AppModel: ObservableObject {
                 await self.syncHostedResults()
             }
         }
-    }
-
-    /// Whether the app is in the foreground. Read from UIKit rather than the cloud runtime's flag, which is only
-    /// set by scene-phase changes and so stays at its default (active) through a Bluetooth relaunch.
-    static var appIsOnScreen: Bool {
-        #if os(iOS)
-        UIApplication.shared.applicationState == .active
-        #else
-        true
-        #endif
     }
 
     /// Upload the strap history this install banked before its offload was journaled (one-time, resumable).
@@ -1178,7 +1173,7 @@ final class AppModel: ObservableObject {
         // flash either way; off screen it hands over on the 15-minute cadence, and opening the app asks for a
         // sync at once (`requestSync(.foreground)`). Re-applied on every scene change (`cloudBecameActive`,
         // `cloudWillResignActive`).
-        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative && Self.appIsOnScreen)
+        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative && Platform.appIsOnScreen)
         ble.setLowBatteryOffloadThrottle(on ? PuffinExperiment.powerSavingBatteryPct : 0)
         // HRV pause is battery-%-aware like the offload lever — pass the same threshold.
         ble.setPauseCaptureOnPowerSave(on && PuffinExperiment.pauseHrvOnPowerSaveEnabled,

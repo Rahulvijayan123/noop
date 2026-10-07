@@ -560,6 +560,10 @@ public final class LiveState: ObservableObject {
     /// True while a historical offload session is running, so screens can say "Syncing strap
     /// history…" instead of presenting half-loaded data as final (#77).
     @Published public var backfilling = false
+    /// Whether the offload `backfilling` reports was asked for by the user (Sync now, a pull on Today, the Sync
+    /// Strap shortcut) or carries on one that was. Set by `BLEManager.requestSync` before the offload starts. Not
+    /// published: the sync banner reads it on the `backfilling` edge.
+    public var backfillRequestedByUser = false
     /// #1164 — true when the strap reports banked records newer than our local HR frontier (the strap has
     /// data we haven't ingested yet), even when no offload is actively running. Set by BLEManager from the
     /// GET_DATA_RANGE newest vs. the collector's latest HR sample, with the same 5-min `behindGapSeconds`

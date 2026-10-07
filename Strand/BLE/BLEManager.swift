@@ -5103,15 +5103,6 @@ public final class BLEManager: NSObject, ObservableObject {
         backfillTimer = t
     }
 
-    /// Whether the app is in the foreground (always true on macOS, where the Mac app has no background lifecycle).
-    static var appIsOnScreen: Bool {
-        #if os(iOS)
-        UIApplication.shared.applicationState == .active
-        #else
-        true
-        #endif
-    }
-
     /// The single gated entry point for every historical-offload kick. Applies the connection/state
     /// gate AND the BackfillPolicy rate-limiter for the trigger. On a go: records the attempt time
     /// (persisted) and starts the offload.
@@ -5130,7 +5121,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // raw-capture toggles included, and the raw-IMU duty cycle alone produces several in a few minutes, so
         // the background offload ran every few minutes instead of on its cadence. The strap banks days of
         // history, and the next foreground asks for a sync at once.
-        let policyTrigger: BackfillTrigger = (trigger == .strap && !Self.appIsOnScreen) ? .periodic : trigger
+        let policyTrigger: BackfillTrigger = (trigger == .strap && !Platform.appIsOnScreen) ? .periodic : trigger
         guard BackfillPolicy.shouldRun(trigger: policyTrigger, now: now, lastBackfillAt: last,
                                        // #battery: back off on EITHER a console-only streak (clock-lost) OR a
                                        // plain empty-offload streak incl. idle-timeout stalls — the latter is
@@ -5141,6 +5132,9 @@ public final class BLEManager: NSObject, ObservableObject {
             log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago)")
             return
         }
+        // For the sync banner, which holds back automatic syncs but not one the user asked for. An auto-continue
+        // carries on the sync before it.
+        if trigger != .autoContinue { state.backfillRequestedByUser = trigger == .manual }
         if beginBackfill() {
             UserDefaults.standard.set(now, forKey: BLEManager.backfillLastAtKey)
         }

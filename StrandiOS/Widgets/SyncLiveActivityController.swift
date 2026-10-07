@@ -43,8 +43,9 @@ final class SyncLiveActivityController {
     private static let chunkMinInterval: TimeInterval = 2
     /// When a foreground sync last started a banner. With the minute "fresh data" cadence a foreground sync
     /// starts every half minute or so, and each one brought the Dynamic Island up for its few seconds plus
-    /// `finalShownFor`, so the island was hardly ever still while the app was open. A new banner now waits this
-    /// long after the last one. A long recovery is one sync, so its banner still stays up for all of it.
+    /// `finalShownFor`, so the island was hardly ever still while the app was open. A new banner for an automatic
+    /// sync now waits this long after the last one; a sync the user asked for shows at once
+    /// (`LiveState.backfillRequestedByUser`). A long recovery is one sync, so its banner still stays up for all of it.
     private var lastForegroundStart: Date = .distantPast
     private static let foregroundStartMinInterval: TimeInterval = 600
 
@@ -119,7 +120,8 @@ final class SyncLiveActivityController {
         }
         // Only the foreground may start one. A background automatic sync stays silent, honestly.
         guard UIApplication.shared.applicationState == .active, !holdsBackNewBanner() else { return }
-        guard Date().timeIntervalSince(lastForegroundStart) >= Self.foregroundStartMinInterval else { return }
+        guard live.backfillRequestedByUser
+                || Date().timeIntervalSince(lastForegroundStart) >= Self.foregroundStartMinInterval else { return }
         lastForegroundStart = Date()
         startedAt = Date()
         request(state: state(syncing(live)))
