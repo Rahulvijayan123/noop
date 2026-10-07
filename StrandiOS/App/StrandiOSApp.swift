@@ -71,6 +71,9 @@ struct StrandiOSApp: App {
         // Same reason this lives here rather than StrandApp.swift: that file is the macOS @main and is
         // excluded from the iOS target. See DemoSyncHarness.swift.
         DemoSyncHarness.applyLaunchArgsIfNeeded()
+        // DEBUG-only screenshot tour: `--demo-tour` steps the frontmost page down one screenful at a time for a
+        // host script to capture. See DemoTourHarness.swift.
+        DemoTour.startIfRequested()
         #endif
         // Debug-only canary: trips if the App Group entitlement is missing on this target before any
         // silent no-op (PendingIntents, WidgetSnapshot.publish, Live Activity) can mask the issue as

@@ -261,6 +261,9 @@ struct RootTabView: View {
         // through the change callback. Both route through the same screens as the centre FAB.
         .onAppear {
             presentPendingHomeScreenQuickActionIfPossible()
+            #if DEBUG
+            applyDemoLaunchNavigation()
+            #endif
         }
         .onChange(of: homeScreenQuickActions.pendingAction) { _, _ in
             presentPendingHomeScreenQuickActionIfPossible()
@@ -289,6 +292,22 @@ struct RootTabView: View {
             LiftSessionView { }
         }
     }
+
+    #if DEBUG
+    /// Set once the DEBUG launch navigation has run, so a later `onAppear` does not push the page again.
+    @State private var demoNavigationApplied = false
+
+    /// DEBUG-only `--demo-tab` / `--demo-push` (DemoLaunchArgs.swift): open one tab, and optionally one page on
+    /// it, at launch, so a simulator screenshot can reach any first-hop page without a tap.
+    private func applyDemoLaunchNavigation() {
+        guard !demoNavigationApplied else { return }
+        demoNavigationApplied = true
+        let route = DemoLaunch.initialRoute
+        guard let tab = DemoLaunch.initialTab ?? (route == nil ? nil : 0), (0..<5).contains(tab) else { return }
+        selectedTab = tab
+        if let route { tabPaths[tab].append(route) }
+    }
+    #endif
 
     /// Mandatory launch gates defer an external action. Once the shell is available, an explicit Home
     /// Screen choice supersedes any ordinary shell sheet; choosing the already-open destination simply
