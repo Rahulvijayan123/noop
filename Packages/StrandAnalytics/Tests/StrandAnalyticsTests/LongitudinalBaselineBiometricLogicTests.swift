@@ -17,12 +17,18 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
         case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean,
              .awakeActiveSpO2Mean, .continuousSpO2Mean: return 16
         case .wakingImuEnergy: return 90
+        case .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR, .awakeSeatedHRVLn,
+             .awakeUprightHR, .awakeUprightHRVLn, .walkingHR, .sleepHR: return 200
         default: return nil
         }
     }
 
     func typical(_ s: LBSeries) -> Double {
         switch s {
+        case .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return 70
+        case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return 50
+        case .walkingHR: return 100
+        case .sleepHR: return 60
         case .sleepRHR: return 60
         case .awakeRestHR: return 70
         case .awakeActiveHR: return 100
@@ -41,6 +47,10 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
     /// Week level, still in-range, far enough from typical that the copies stay distinct.
     func weekNative(_ s: LBSeries) -> Double {
         switch s {
+        case .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return 84
+        case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return 32
+        case .walkingHR: return 118
+        case .sleepHR: return 72
         case .sleepRHR: return 72
         case .awakeRestHR: return 84
         case .awakeActiveHR: return 118
@@ -58,6 +68,10 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
 
     func tonightNative(_ s: LBSeries) -> Double {
         switch s {
+        case .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return 102
+        case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return 18
+        case .walkingHR: return 150
+        case .sleepHR: return 88
         case .sleepRHR: return 88
         case .awakeRestHR: return 102
         case .awakeActiveHR: return 150

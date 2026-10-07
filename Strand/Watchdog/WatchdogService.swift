@@ -47,6 +47,10 @@ final class WatchdogService {
         let now = Int(Date().timeIntervalSince1970)
         let liveAlerts = !model.live.backfilling
         let days = model.repo.days
+        // v2 context strata (posture / walking / sleep HR) come from the stored activity-context intervals;
+        // refreshed at most every 30 min, off the main actor.
+        await model.baseline.refreshContextStrata(repo: model.repo)
+        if Task.isCancelled { return }
         let promptEvals = model.baseline.watchdogPromptEvaluations(days: days)
         let prompt = UniTSPrompt.from(evaluations: promptEvals)
         let window: Result<WatchdogWindow, WatchdogUnavailable>

@@ -123,6 +123,9 @@ public struct WatchdogWindow: Equatable, Sendable {
     public var sleepIntervals: [WatchdogSleepInterval] = []
     /// Last bind of the 20-col block. Reconstruct rebuilds from imu/steps/sleep if this is empty.
     public var activityFeatures: [[Double]] = []
+    /// v2 sensor-quality metadata for the alert-verification stage (`WatchdogVerification.swift`). Empty means
+    /// UNKNOWN, never good.
+    public var quality: WatchdogQualityFeed = .empty
 
     public var seqLen: Int { hr.count }
 
