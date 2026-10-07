@@ -23,6 +23,9 @@ final class GaitWindowStore: @unchecked Sendable {
     struct DayRecord: Codable, Equatable {
         var day: String
         var resultRevision: String
+        /// The server's gait lane mode for the day (`shadow`, `candidate`, `production`). A `shadow` day is the
+        /// server saying the windows must not enter a decode, so the phone never decodes with it; the phone
+        /// promotes `candidate` windows itself (pinned to `Pins`), and records the mode in the ledger's config tag.
         var mode: String
         var model: GaitQualityModelInfo
         /// The `gait-windows-1` object, kept as the JSON text it arrived as.
@@ -34,7 +37,7 @@ final class GaitWindowStore: @unchecked Sendable {
     private let scopeSource: () -> ActivityEncoderWindowStore.Scope?
     private var parsed: [String: (record: DayRecord, columns: GaitWindowColumns?)?] = [:]
     private var parsedScope: ActivityEncoderWindowStore.Scope?
-    private var newestModel: GaitQualityModelInfo??
+    private var newestModel: DayRecord??
 
     init(directory: URL? = nil,
          scope: @escaping () -> ActivityEncoderWindowStore.Scope? = { ActivityEncoderWindowStore.shared.currentScope }) {
@@ -72,16 +75,19 @@ final class GaitWindowStore: @unchecked Sendable {
         return true
     }
 
-    /// The model of the newest stored day, which the decoder config is built around (nil until any day is stored).
+    static let shadowMode = "shadow"
+
+    /// The model of the newest stored day the decoder may use (not `shadow`), which the decoder config is built
+    /// around (nil until any such day is stored).
     var latestModel: GaitQualityModelInfo? {
         lock.lock(); defer { lock.unlock() }
-        guard let scope = currentScope() else { return nil }
-        if let cached = newestModel { return cached }
-        let days = (try? FileManager.default.contentsOfDirectory(atPath: scopeDirectory(scope)?.path ?? ""))?
-            .filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)) }.sorted() ?? []
-        let model = days.last.flatMap { entry(day: $0, scope: scope)?.record.model }
-        newestModel = .some(model)
-        return model
+        return newestUsableRecord()?.model
+    }
+
+    /// The server mode of that same day (`candidate` / `production`), for provenance.
+    var latestMode: String? {
+        lock.lock(); defer { lock.unlock() }
+        return newestUsableRecord()?.mode
     }
 
     /// The windows ending inside `[from, to)` from `model`, across every stored UTC day overlapping it; nil when
@@ -92,7 +98,8 @@ final class GaitWindowStore: @unchecked Sendable {
         guard let scope = currentScope() else { return nil }
         var windows: [GaitQualityWindow] = []
         for day in ActivityEncoderWindowStore.utcDays(from: from, to: to) {
-            guard let hit = entry(day: day, scope: scope), hit.record.model == model, let columns = hit.columns
+            guard let hit = entry(day: day, scope: scope), hit.record.mode != Self.shadowMode,
+                  hit.record.model == model, let columns = hit.columns
             else { continue }
             windows += columns.trackWindows(from: from, to: to)
         }
@@ -108,6 +115,17 @@ final class GaitWindowStore: @unchecked Sendable {
     }
 
     // MARK: Private (lock held)
+
+    private func newestUsableRecord() -> DayRecord? {
+        guard let scope = currentScope() else { return nil }
+        if let cached = newestModel { return cached }
+        let days = (try? FileManager.default.contentsOfDirectory(atPath: scopeDirectory(scope)?.path ?? ""))?
+            .filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)) }.sorted() ?? []
+        let record = days.reversed().lazy.compactMap { self.entry(day: $0, scope: scope)?.record }
+            .first { $0.mode != Self.shadowMode }
+        newestModel = .some(record)
+        return record
+    }
 
     private func currentScope() -> ActivityEncoderWindowStore.Scope? {
         let scope = scopeSource()

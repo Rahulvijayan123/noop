@@ -8,6 +8,11 @@ import StrandAnalytics
 struct DayStreams {
     /// Stable key for the data source (the ids the day was read from), used to name on-disk caches.
     let sourceKey: String
+    /// The raw id the day's context belongs to: the first id (active strap, other registered WHOOPs, canonical
+    /// history) holding heart rate in the day — the same rule `Repository.activityContextOwner` uses. nil when
+    /// no id has any. Server windows (HART, ElderNet) are produced from the active strap's uploads, so they are
+    /// attached only to a day this id owns.
+    var ownerId: String? = nil
     let start: Int
     let end: Int
     /// True while the day is still in progress (`end` is "now", not the next midnight).
@@ -45,28 +50,48 @@ extension Repository {
         let hr = await hrSamples(from: from, to: end, limit: 200_000)
         let gravity = await gravitySamplesUnion(from: from, to: end)
         var steps: [StepSample] = []
-        for id in importedReadIds {
+        for id in rawPhysiologyReadIds(store: store) {
             steps = (try? await store.stepSamples(deviceId: id, from: from, to: end, limit: 200_000)) ?? []
             if !steps.isEmpty { break }
         }
         return StretchSignals(hr: hr, gravity: gravity, steps: steps)
     }
 
-    /// The streams for `[dayStart, min(dayStart + 24h, now))`; nothing is read for the future.
-    func dayStreams(dayStart: Date) async -> DayStreams? {
+    /// The local day that starts at `dayStart` ends here: the next local midnight (23 or 25 hours later on a
+    /// daylight-saving change), or 24 h later for a start that is not a local midnight.
+    nonisolated static func localDayEnd(startingAt start: Int, calendar: Calendar = .current) -> Int {
+        let date = Date(timeIntervalSince1970: TimeInterval(start))
+        guard Int(calendar.startOfDay(for: date).timeIntervalSince1970) == start,
+              let next = calendar.date(byAdding: .day, value: 1, to: date) else { return start + 86_400 }
+        return Int(next.timeIntervalSince1970)
+    }
+
+    /// The streams for `[dayStart, min(dayEnd, now))`; nothing is read for the future. `dayEnd` defaults to the
+    /// local day's end, so a 25-hour fall-back day is read whole (the materializer passes its `Day.end`).
+    ///
+    /// Every stream — heart rate, motion, the step counter and the wrist on/off events — is read over the same
+    /// raw-physiology ids (`rawPhysiologyReadIds`), so a day recorded by a retained strap that is neither the
+    /// active one nor the canonical history decodes with its wear and step evidence too.
+    func dayStreams(dayStart: Date, dayEnd: Date? = nil) async -> DayStreams? {
         guard let store = await storeHandle() else { return nil }
         let start = Int(dayStart.timeIntervalSince1970)
         let now = Int(Date().timeIntervalSince1970)
-        let end = min(start + 86_400, now)
+        let dayEndTs = dayEnd.map { Int($0.timeIntervalSince1970) } ?? Self.localDayEnd(startingAt: start)
+        let end = min(dayEndTs, now)
         guard end > start else { return nil }
 
+        let rawIds = rawPhysiologyReadIds(store: store)
         let hr = await hrSamples(from: start, to: end, limit: 200_000)
         let gravity = await gravitySamplesUnion(from: start, to: end)
+        var ownerId: String?
+        for id in rawIds where ownerId == nil {
+            if (try? await store.newestHeartRateTs(deviceId: id, from: start, to: end)) != nil { ownerId = id }
+        }
 
         var stepByTs: [Int: StepSample] = [:]
         var counter: [StepSample] = []
         var events: [WhoopEvent] = []
-        for id in importedReadIds {
+        for id in rawIds {
             let samples = (try? await store.stepSamples(deviceId: id, from: start, to: end, limit: 200_000)) ?? []
             if counter.isEmpty { counter = samples }
             for s in samples where stepByTs[s.ts] == nil { stepByTs[s.ts] = s }
@@ -92,8 +117,8 @@ extension Repository {
                 .map { DayStateSpan(start: $0.start, end: $0.end) }
         }.value
 
-        return DayStreams(sourceKey: importedReadIds.joined(separator: "+"), start: start, end: end,
-                          isLiveDay: now < start + 86_400, hr: hr, gravity: gravity,
+        return DayStreams(sourceKey: importedReadIds.joined(separator: "+"), ownerId: ownerId, start: start, end: end,
+                          isLiveDay: now < dayEndTs, hr: hr, gravity: gravity,
                           stepLabels: Array(stepByTs.values), stepCounter: counter,
                           sleep: sleep, inBed: inBed, workouts: workouts, offWrist: offWrist)
     }
