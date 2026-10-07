@@ -564,6 +564,35 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
             dayStart: dayStart, sleepKnownOutsideSessions: true, encoderVersion: "x"))
     }
 
+    /// Walking that stops seconds before midnight leaves a fresh walk_stop in the lookback's snapshot; the
+    /// resumed day may re-emit it with its pre-midnight stamp, which publish_activity_context_day rejects
+    /// (`invalid_activity_day_event`). Every published event must fall inside the day.
+    func testALookbackEventBeforeMidnightNeverReachesTheDocument() throws {
+        var leakedIntoTheTrack = 0
+        for endsBefore in stride(from: 1, through: 40, by: 3) {
+            var sim = DaySim(start: dayStart - 1_200)
+            sim.still(600)
+            sim.walk(600 - endsBefore)
+            sim.still(endsBefore + 600)
+            let day = input(sim, from: dayStart, to: dayEnd)
+            let (_, before) = ActivityContextDays.split(sim.streams, at: dayStart)
+            let lookback = ActivityContextDays.lookbackInput(
+                windows: sim.windows, streams: before, sleep: [], inBed: [], exercise: [], dayStart: dayStart,
+                sleepKnownOutsideSessions: true, encoderVersion: "hart-activity-1")
+            let built = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd, lookback: lookback)
+            if built.track.events.contains(where: { $0.ts < dayStart }) { leakedIntoTheTrack += 1 }
+            XCTAssertTrue(built.document.events.allSatisfy { $0.ts >= dayStart && $0.ts < dayEnd },
+                          "walking ending \(endsBefore) s before midnight")
+            let payload = try ActivityContextDays.build(
+                input: day, day: "2026-09-15", modelVersion: "m", preprocessingVersion: "p",
+                generatedAt: dayEnd, lookback: lookback).payloadText
+            let document = try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
+            let events = (document?["document"] as? [String: Any])?["events"] as? [[String: Any]] ?? []
+            XCTAssertTrue(events.allSatisfy { (($0["ts"] as? Int) ?? Int.min) >= dayStart })
+        }
+        XCTAssertGreaterThan(leakedIntoTheTrack, 0, "the scenario must exercise a pre-midnight event")
+    }
+
     func testStreamsLoadedWithTheLookbackSplitAtTheDayStart() {
         var sim = DaySim(start: dayStart - 10)
         sim.still(20)

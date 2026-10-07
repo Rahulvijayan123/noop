@@ -277,8 +277,8 @@ enum ActivityContextDays {
     /// The decode behind every day document. With a `lookback` input that observed anything, the day resumes
     /// from the decoder state at the end of the lookback (`resuming:`), so the first minutes after midnight are
     /// decoded with the belief, dwell and evidence buffers the preceding half hour built instead of the prior
-    /// (audit D2-11). The lookback's own states and events are never part of the document, and its observed
-    /// seconds are not counted: only the day's own observations are.
+    /// (audit D2-11). The lookback's own states and events are never part of the document (events are clipped
+    /// to the day like runs), and its observed seconds are not counted: only the day's own observations are.
     static func dayDocumentAndTrack(input: ActivityContextTrackInput, generatedAt: Int,
                                     config: ActivityDecoderConfig = ActivityDecoderConfig(),
                                     lookback: ActivityContextTrackInput? = nil)
@@ -296,6 +296,10 @@ enum ActivityContextDays {
             clipped.end = min(run.end, input.dayEnd)
             return clipped.end > clipped.start ? clipped : nil
         }
+        // The resumed snapshot carries the lookback's recent transition events, and the first in-day state
+        // may re-emit one stamped up to the event hold before midnight. Those belong to the previous day's
+        // document (publish_activity_context_day rejects an event outside the day), so keep only the day's.
+        document.events = document.events.filter { $0.ts >= input.dayStart && $0.ts < input.dayEnd }
         document.summary = ActivityContextDaySummary(runs: document.runs)
         return (document, track)
     }
