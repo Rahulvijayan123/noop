@@ -859,6 +859,7 @@ final class AppModel: ObservableObject {
     }
 
     init() {
+        UnitPrefs.enforceUnitedStates()
         let live = LiveState()
         self.live = live
         // SEED every subsystem with the same id (`deviceId`, "my-whoop" at launch). The store/registry
@@ -2692,7 +2693,7 @@ final class AppModel: ObservableObject {
     /// what unit the same number is in.
     private var displayTemperatureUnit: TemperatureUnit {
         let d = UserDefaults.standard
-        let system = UnitSystem(rawValue: d.string(forKey: UnitPrefs.systemKey) ?? "") ?? .metric
+        let system = UnitSystem(rawValue: d.string(forKey: UnitPrefs.systemKey) ?? "") ?? .imperial
         return UnitPrefs.resolveTemperature(system: system,
                                             override: d.string(forKey: UnitPrefs.temperatureKey) ?? "")
     }

@@ -44,8 +44,8 @@ struct LiftProgramItemSheet: View {
 
     /// The app's existing metric/imperial preference — the Lift Log never adds a second weight unit
     /// setting of its own, so the plan is typed in the same unit the session records in.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
     private var weightLabel: LocalizedStringKey {
         unitSystem == .imperial ? "Weight (lb)" : "Weight (kg)"
     }

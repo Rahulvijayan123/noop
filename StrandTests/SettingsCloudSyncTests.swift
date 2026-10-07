@@ -50,13 +50,14 @@ final class SettingsCloudSyncTests: XCTestCase {
     func testTheSyncedSettingsAreTheAccountWideOnes() {
         let keys = Set(SyncedSetting.all.map(\.defaultsKey))
         XCTAssertEqual(SyncedSetting.all.count, keys.count, "one cloud name per preference")
-        for kept in [UnitPrefs.systemKey, "noop.coachEnabled", AppModel.wristAlertsMasterKey,
+        for kept in ["noop.coachEnabled", AppModel.wristAlertsMasterKey,
                      BehaviorStore.K.batteryAlerts, HapticPrefs.liftRest, InactivityPrefs.K.threshold] {
             XCTAssertTrue(keys.contains(kept), kept)
         }
         // Names something on this phone, or a consent given here.
         for local in [BehaviorStore.K.dtAction, BehaviorStore.K.dtShortcut, BehaviorStore.K.wristOffShortcut,
-                      AppModel.cycleAwarenessKey, RhythmConsent.enabledKey, SensorBiomarkerFeature.enabledKey] {
+                      AppModel.cycleAwarenessKey, RhythmConsent.enabledKey, SensorBiomarkerFeature.enabledKey,
+                      UnitPrefs.systemKey /* always US units; there is no choice to carry */] {
             XCTAssertFalse(keys.contains(local), local)
         }
     }
@@ -107,14 +108,14 @@ final class SettingsCloudSyncTests: XCTestCase {
     // MARK: The exchange
 
     func testAnEmptyAccountIsSeededWithWhatThisPhoneHasStored() async {
-        defaults.set("imperial", forKey: UnitPrefs.systemKey)
+        defaults.set(true, forKey: BehaviorStore.K.zoneCoaching)
         defaults.set(false, forKey: BehaviorStore.K.batteryAlerts)
         defaults.set(45, forKey: InactivityPrefs.K.threshold)
         let route = FakeRoute()
         await makeSync(route).reconcile()
 
         XCTAssertEqual(route.saves.count, 1)
-        XCTAssertEqual(route.saves.first?["units"] as? String, "imperial")
+        XCTAssertEqual(route.saves.first?["zoneCoaching"] as? Bool, true)
         XCTAssertEqual(route.saves.first?["batteryAlerts"] as? Bool, false)
         XCTAssertEqual(route.saves.first?["moveReminderMinutes"] as? Int, 45)
         XCTAssertEqual(route.saves.first?.count, 3, "a preference nobody set stays the default everywhere")
@@ -122,45 +123,45 @@ final class SettingsCloudSyncTests: XCTestCase {
 
     func testAFreshInstallRestoresTheAccountsSettings() async {
         let route = FakeRoute()
-        route.stored = ["units": "imperial", "batteryAlerts": false, "moveReminderMinutes": 45, "hapticLiftRest": false]
+        route.stored = ["zoneCoaching": true, "batteryAlerts": false, "moveReminderMinutes": 45, "hapticLiftRest": false]
         var applied: [String] = []
         let posted = expectation(forNotification: .syncedSettingsDidApply, object: nil)
         await makeSync(route, onApplied: { applied = $0 }).reconcile()
 
         await fulfillment(of: [posted], timeout: 1)
-        XCTAssertEqual(defaults.string(forKey: UnitPrefs.systemKey), "imperial")
+        XCTAssertEqual(defaults.object(forKey: BehaviorStore.K.zoneCoaching) as? Bool, true)
         XCTAssertEqual(defaults.object(forKey: BehaviorStore.K.batteryAlerts) as? Bool, false)
         XCTAssertEqual(defaults.object(forKey: InactivityPrefs.K.threshold) as? Int, 45)
         XCTAssertEqual(defaults.object(forKey: HapticPrefs.liftRest) as? Bool, false)
-        XCTAssertEqual(applied, ["batteryAlerts", "hapticLiftRest", "moveReminderMinutes", "units"])
+        XCTAssertEqual(applied, ["batteryAlerts", "hapticLiftRest", "moveReminderMinutes", "zoneCoaching"])
         XCTAssertTrue(route.saves.isEmpty, "nothing to send back")
     }
 
     func testEditsOnEitherSideTravelAfterTheFirstExchange() async {
-        defaults.set("metric", forKey: UnitPrefs.systemKey)
+        defaults.set(false, forKey: BehaviorStore.K.zoneCoaching)
         let route = FakeRoute()
         let sync = makeSync(route)
         await sync.reconcile()
 
         defaults.set(false, forKey: "noop.coachEnabled")
-        route.stored?["units"] = "imperial"
+        route.stored?["zoneCoaching"] = true
         await sync.reconcile()
         XCTAssertEqual(route.saves.last?.keys.sorted(), ["sanaEnabled"])
-        XCTAssertEqual(defaults.string(forKey: UnitPrefs.systemKey), "imperial")
+        XCTAssertEqual(defaults.object(forKey: BehaviorStore.K.zoneCoaching) as? Bool, true)
     }
 
     func testAnotherAccountOnThisPhoneStartsFromItsOwnSettings() async {
-        defaults.set("metric", forKey: UnitPrefs.systemKey)
+        defaults.set(false, forKey: BehaviorStore.K.zoneCoaching)
         let route = FakeRoute()
         var owner = "owner-a"
         let sync = makeSync(route, owner: { owner })
         await sync.reconcile()
 
-        // Account B saved imperial elsewhere. Account A's exchange is no base for it, so B's value wins.
+        // Account B saved zone coaching on elsewhere. Account A's exchange is no base for it, so B's value wins.
         owner = "owner-b"
-        route.stored = ["units": "imperial"]
+        route.stored = ["zoneCoaching": true]
         await sync.reconcile()
-        XCTAssertEqual(defaults.string(forKey: UnitPrefs.systemKey), "imperial")
+        XCTAssertEqual(defaults.object(forKey: BehaviorStore.K.zoneCoaching) as? Bool, true)
     }
 
     func testAnOfflineExchangeIsRetriedLater() async {
@@ -182,20 +183,20 @@ final class SettingsCloudSyncTests: XCTestCase {
     func testInvalidCloudValuesAreIgnored() async {
         defaults.set(30, forKey: InactivityPrefs.K.threshold)
         let route = FakeRoute()
-        route.stored = ["moveReminderMinutes": 500, "units": "nautical", "batteryAlerts": "no"]
+        route.stored = ["moveReminderMinutes": 500, "zoneCoaching": "nautical", "batteryAlerts": "no"]
         await makeSync(route).reconcile()
         XCTAssertEqual(defaults.object(forKey: InactivityPrefs.K.threshold) as? Int, 30)
-        XCTAssertNil(defaults.string(forKey: UnitPrefs.systemKey))
+        XCTAssertNil(defaults.object(forKey: BehaviorStore.K.zoneCoaching))
         XCTAssertNil(defaults.object(forKey: BehaviorStore.K.batteryAlerts))
         XCTAssertEqual(route.saves.first?["moveReminderMinutes"] as? Int, 30)
     }
 
     func testNothingIsExchangedWithoutAnAccountThatOwnsThisPhone() async {
-        defaults.set("imperial", forKey: UnitPrefs.systemKey)
+        defaults.set(true, forKey: BehaviorStore.K.zoneCoaching)
         let route = FakeRoute()
-        route.stored = ["units": "metric"]
+        route.stored = ["zoneCoaching": false]
         await makeSync(route, available: { false }).reconcile()
-        XCTAssertEqual(defaults.string(forKey: UnitPrefs.systemKey), "imperial")
+        XCTAssertEqual(defaults.object(forKey: BehaviorStore.K.zoneCoaching) as? Bool, true)
         XCTAssertTrue(route.saves.isEmpty)
     }
 

@@ -43,7 +43,6 @@ struct SyncedSetting: Equatable, Sendable {
     /// name things on this device), light or dark (like the system's own), cycle awareness and Rhythm (consents
     /// given here) and sensor biomarkers.
     static let all: [SyncedSetting] = [
-        SyncedSetting("units", UnitPrefs.systemKey, .choice(UnitSystem.allCases.map(\.rawValue))),
         SyncedSetting("sanaEnabled", "noop.coachEnabled", .bool),
         SyncedSetting("wristAlerts", AppModel.wristAlertsMasterKey, .bool),
         SyncedSetting("moveReminder", InactivityPrefs.K.enabled, .bool),

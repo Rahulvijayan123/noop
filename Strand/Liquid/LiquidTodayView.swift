@@ -1681,8 +1681,8 @@ struct LiquidTodayView: View {
     // HealthView): the explicit override when set, else derived from the unit system. Liquid Today was
     // the ONLY one of them missing it — which is why its Skin Temp card could not honour the preference
     // even once it had a value to show (#1627).
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(system: unitSystem, override: distanceSystemRaw)

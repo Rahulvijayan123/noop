@@ -34,11 +34,11 @@ struct WorkoutDetailView: View {
     @StateObject private var profile = ProfileStore()
     @Environment(\.dismiss) private var dismiss
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(
-            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
             override: distanceSystemRaw)
     }
 

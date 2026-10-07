@@ -138,7 +138,7 @@ final class NaraSettingsSyncEndToEndTests: XCTestCase {
         XCTAssertEqual(phone.weightKg, 66, "the empty row did not overwrite the phone")
     }
 
-    /// Settings → units, alerts, haptics and the Sana switch reach the account's `user_settings` row through the
+    /// Settings → alerts, haptics and the Sana switch reach the account's `user_settings` row through the
     /// `coach` function's settings route, and a fresh install shows them again. The row sign-up created holds
     /// column defaults ('imperial'), which must not read as anyone's choice, and a key another client keeps in
     /// `extra_settings` survives the write.
@@ -160,7 +160,6 @@ final class NaraSettingsSyncEndToEndTests: XCTestCase {
         let suites = ["phone", "reinstalled"].map { "nara-e2e-settings-\($0)-\(UUID().uuidString)" }
         defer { suites.forEach { UserDefaults.standard.removePersistentDomain(forName: $0) } }
         let phone = try XCTUnwrap(UserDefaults(suiteName: suites[0]))
-        phone.set("metric", forKey: UnitPrefs.systemKey)
         phone.set(false, forKey: "noop.coachEnabled")
         phone.set(false, forKey: BehaviorStore.K.batteryAlerts)
         phone.set(true, forKey: BehaviorStore.K.zoneCoaching)
@@ -170,22 +169,21 @@ final class NaraSettingsSyncEndToEndTests: XCTestCase {
 
         let rows = try await server.rows("user_settings", "\(owner)&select=units,extra_settings")
         let row = try XCTUnwrap(rows.first)
-        XCTAssertEqual(row["units"] as? String, "metric", "units is mirrored to the typed column")
+        XCTAssertEqual(row["units"] as? String, "imperial", "units is not carried: the column keeps its default")
         let extra = try XCTUnwrap(row["extra_settings"] as? [String: Any])
         XCTAssertEqual(extra["wear_location"] as? String, "wrist", "another client's key is left alone")
         let saved = try XCTUnwrap(extra["nara"] as? [String: Any])
-        XCTAssertEqual(saved["units"] as? String, "metric")
+        XCTAssertNil(saved["units"], "there is no unit choice to save")
         XCTAssertEqual(saved["sanaEnabled"] as? Bool, false)
         XCTAssertEqual(saved["batteryAlerts"] as? Bool, false)
         XCTAssertEqual(saved["zoneCoaching"] as? Bool, true)
         XCTAssertEqual(saved["moveReminderMinutes"] as? Int, 40)
         XCTAssertEqual(saved["hapticLiftRest"] as? Bool, false)
-        XCTAssertEqual(saved.count, 6, "only what the phone stored")
+        XCTAssertEqual(saved.count, 5, "only what the phone stored")
 
         // A fresh install: an empty preferences domain, so Settings starts from its defaults.
         let reinstalled = try XCTUnwrap(UserDefaults(suiteName: suites[1]))
         await sync(reinstalled).reconcile()
-        XCTAssertEqual(reinstalled.string(forKey: UnitPrefs.systemKey), "metric")
         XCTAssertEqual(reinstalled.object(forKey: "noop.coachEnabled") as? Bool, false)
         XCTAssertEqual(reinstalled.object(forKey: BehaviorStore.K.batteryAlerts) as? Bool, false)
         XCTAssertEqual(reinstalled.object(forKey: BehaviorStore.K.zoneCoaching) as? Bool, true)
@@ -193,13 +191,14 @@ final class NaraSettingsSyncEndToEndTests: XCTestCase {
         XCTAssertEqual(reinstalled.object(forKey: HapticPrefs.liftRest) as? Bool, false)
 
         // An edit on the reinstalled phone travels back, and the first phone picks it up.
-        reinstalled.set("imperial", forKey: UnitPrefs.systemKey)
+        reinstalled.set(30, forKey: InactivityPrefs.K.threshold)
         await sync(reinstalled).syncIfChanged()
         await sync(phone).reconcile()
-        XCTAssertEqual(phone.string(forKey: UnitPrefs.systemKey), "imperial")
-        let afterRows = try await server.rows("user_settings", "\(owner)&select=units")
-        let after = try XCTUnwrap(afterRows.first)
-        XCTAssertEqual(after["units"] as? String, "imperial")
+        XCTAssertEqual(phone.object(forKey: InactivityPrefs.K.threshold) as? Int, 30)
+        let afterRows = try await server.rows("user_settings", "\(owner)&select=extra_settings")
+        let afterExtra = try XCTUnwrap(afterRows.first?["extra_settings"] as? [String: Any])
+        let afterSaved = try XCTUnwrap(afterExtra["nara"] as? [String: Any])
+        XCTAssertEqual(afterSaved["moveReminderMinutes"] as? Int, 30)
     }
 
     /// Settings → Wear placement reaches `placement_intervals`, and a reinstall reads it back.

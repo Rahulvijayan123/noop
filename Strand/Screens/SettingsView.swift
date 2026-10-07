@@ -1,6 +1,8 @@
 import SwiftUI
 #if os(macOS)
 import AppKit
+#elseif os(iOS)
+import UIKit
 #endif
 import PhotosUI
 import StrandDesign
@@ -31,7 +33,7 @@ struct SettingsView: View {
     /// The current manual strap placement (G4), loaded when Settings appears and updated by the editor.
     @State private var currentPlacement = StrapPlacement.unknown
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     /// Light or dark for the whole app; the app roots apply it. Onboarding asks first.
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
     /// The Sana master switch, under the same `noop.` key Android writes. Off removes the tab and the
@@ -40,7 +42,7 @@ struct SettingsView: View {
     /// Read through the key (not `SensorBiomarkerFeature.isEnabled`) so the row updates when the page flips it.
     @AppStorage(SensorBiomarkerFeature.enabledKey) private var sensorBiomarkersOn = false
 
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
 
     var body: some View {
         ScreenScaffold(title: "Settings") {
@@ -55,6 +57,10 @@ struct SettingsView: View {
                 aboutGroup
             }
         }
+        // The app root applies the scheme with `.preferredColorScheme`, which repaints the screens behind but
+        // not a sheet that is already open, and Settings opens as a sheet. Setting the window's style as well
+        // repaints the open sheet and every page pushed in it the moment the choice changes.
+        .modifier(WindowAppearanceSync(raw: appearanceRaw))
         .alert(dataAlert?.title ?? "", isPresented: Binding(get: { dataAlert != nil },
                                                            set: { if !$0 { dataAlert = nil } }),
                presenting: dataAlert) { _ in
@@ -161,10 +167,6 @@ struct SettingsView: View {
 
     private var displayGroup: some View {
         SettingsGroup("Display") {
-            navRow("Units", unitSystem == .imperial ? String(localized: "Imperial") : String(localized: "Metric"), id: "units") {
-                unitsEditor
-            }
-            SettingsDivider()
             navRow("Appearance", AppearanceMode.resolve(appearanceRaw).label, id: "appearance") {
                 appearanceEditor
             }
@@ -261,14 +263,6 @@ struct SettingsView: View {
         SettingsEditPage("Sex") {
             SettingsOptions(selection: $profile.sex, options: [
                 ("male", "Male"), ("female", "Female"), ("nonbinary", "Non-binary"),
-            ])
-        }
-    }
-
-    private var unitsEditor: some View {
-        SettingsEditPage("Units") {
-            SettingsOptions(selection: $unitSystemRaw, options: [
-                (UnitSystem.metric.rawValue, "Metric"), (UnitSystem.imperial.rawValue, "Imperial"),
             ])
         }
     }
@@ -677,5 +671,30 @@ private struct PlacementEditorView: View {
         // Best-effort upload of the journal. A failure leaves the rows unsynced; the next app activation
         // or save retries them (`AppModel.syncPlacement`).
         await model.syncPlacement()
+    }
+}
+
+/// Pushes the light/dark choice onto the app's windows the moment it changes (iOS). See the call site in
+/// `SettingsView` for why the root `.preferredColorScheme` is not enough for an open sheet.
+private struct WindowAppearanceSync: ViewModifier {
+    let raw: String
+
+    func body(content: Content) -> some View {
+        #if os(iOS)
+        content.onChange(of: raw) { _, newValue in
+            let style: UIUserInterfaceStyle
+            switch AppearanceMode.resolve(newValue) {
+            case .system: style = .unspecified
+            case .light: style = .light
+            case .dark: style = .dark
+            }
+            for scene in UIApplication.shared.connectedScenes {
+                guard let windowScene = scene as? UIWindowScene else { continue }
+                for window in windowScene.windows { window.overrideUserInterfaceStyle = style }
+            }
+        }
+        #else
+        content
+        #endif
     }
 }

@@ -51,8 +51,8 @@ struct AppleHealthView: View {
 
     // Imperial/Metric display preference (D#103). Weight and lean mass (stored kg) re-label to lb here;
     // every other Apple Health metric is unit-agnostic. Display-only.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
     /// kg value → the active mass unit, full string with label (e.g. "74.5 kg" / "164.2 lb").
     private func massLabel(_ kg: Double) -> String { UnitFormatter.massFromKilograms(kg, system: unitSystem) }
 

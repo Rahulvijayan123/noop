@@ -28,9 +28,8 @@ final class SettingsUITests: XCTestCase {
             ("settings.name", app.textFields["settings.name.field"]),
             ("settings.dateOfBirth", app.datePickers.firstMatch),
             ("settings.sex", app.buttons["Non-binary"]),
-            ("settings.height", app.steppers["Height in centimetres"]),
-            ("settings.weight", app.steppers["Weight in kilograms"]),
-            ("settings.units", app.buttons["Imperial"]),
+            ("settings.height", app.steppers["Height"]),
+            ("settings.weight", app.steppers["Weight in pounds"]),
             ("settings.appearance", app.buttons["Dark"]),
             ("settings.strap", app.staticTexts["None of these actions delete your recorded data."]),
             ("settings.placement", app.buttons["Bicep"]),
@@ -77,11 +76,8 @@ final class SettingsUITests: XCTestCase {
         app.launch()
         openSettings()
 
-        // Units and appearance.
-        tapRow("settings.units")
-        app.buttons["Imperial"].tap()
-        goBack()
-        XCTAssertTrue(element("settings.units").label.contains("Imperial"))
+        // Appearance. There is no units row: Nara is US units only.
+        XCTAssertFalse(app.buttons["settings.units"].exists, "there is no unit choice")
         tapRow("settings.appearance")
         app.buttons["Dark"].tap()
         goBack()
@@ -133,7 +129,6 @@ final class SettingsUITests: XCTestCase {
         app.launch()
         XCTAssertFalse(app.tabBars.buttons["Sana"].waitForExistence(timeout: 3), "Sana stays off")
         openSettings()
-        XCTAssertTrue(element("settings.units").label.contains("Imperial"))
         XCTAssertTrue(element("settings.appearance").label.contains("Dark"))
         XCTAssertTrue(waitForLabel(element("settings.placement"), containing: "Bicep"))
         XCTAssertTrue(element("settings.name").label.contains("UI Test"))
@@ -148,7 +143,6 @@ final class SettingsUITests: XCTestCase {
         goBack()
 
         // Put everything back so the next run starts from the defaults.
-        tapRow("settings.units"); app.buttons["Metric"].tap(); goBack()
         tapRow("settings.appearance"); app.buttons["System"].tap(); goBack()
         tapRow("settings.placement"); app.buttons["Wrist"].tap(); goBack()
         tapRow("settings.name"); app.textFields["settings.name.field"].tap()
@@ -194,15 +188,12 @@ final class SettingsUITests: XCTestCase {
         tapRow("settings.height")
         let height = app.steppers.firstMatch
         XCTAssertTrue(height.waitForExistence(timeout: 5))
-        for _ in 0..<4 { height.buttons.element(boundBy: 1).tap() }   // +4 cm
+        for _ in 0..<2 { height.buttons.element(boundBy: 1).tap() }   // +2 inches
         goBack()
-        XCTAssertTrue(waitForLabel(element("settings.height"), containing: "182 cm"),
-                      "178 cm default + 4: \(element("settings.height").label)")
+        XCTAssertTrue(waitForLabel(element("settings.height"), containing: "6′ 0″"),
+                      "178 cm default (5′ 10″) + 2 inches: \(element("settings.height").label)")
 
         // Preferences that follow the account.
-        tapRow("settings.units")
-        app.buttons["Imperial"].tap()
-        goBack()
         tapRow("settings.alerts")
         setSwitch(app.switches["automations.battery"], on: false)
         goBack()
@@ -233,8 +224,6 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(waitForLabel(element("settings.name"), containing: account.displayName, timeout: 30),
                       "restored name: \(element("settings.name").label)")
         XCTAssertTrue(element("settings.sex").label.contains("Female"))
-        XCTAssertTrue(waitForLabel(element("settings.units"), containing: "Imperial", timeout: 30),
-                      "restored units: \(element("settings.units").label)")
         XCTAssertTrue(element("settings.height").label.contains("6′ 0″"), "182 cm in feet and inches")
         tapRow("settings.alerts")
         XCTAssertEqual(switchValue(app.switches["automations.battery"]), false)

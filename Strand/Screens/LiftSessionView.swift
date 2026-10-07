@@ -45,8 +45,8 @@ struct LiftSessionView: View {
     private enum UnfinishedChoice: Hashable { case complete, discard }
     private enum ProgramChoice: Hashable { case update, keep }
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
 
     @FocusState private var focused: FocusTarget?
     private enum FocusTarget: Hashable {
