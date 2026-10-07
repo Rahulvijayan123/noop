@@ -252,19 +252,25 @@ public enum ReadinessEngine {
         }
 
         // Training Stress Balance (ACWR) + monotony --------------------------
-        let strainSeries = sorted.compactMap { $0.strain }
+        // BaselineStandard rules 2 and 7: acute = the 7 CALENDAR days ending today, chronic = the 28 ending
+        // today, and nothing after today (the row windows read the newest rows even when `today` was an
+        // earlier day, and stretched across wear gaps). The history gate is unchanged: ≥ 14 strain days.
+        let strainUpToToday = sorted.filter { $0.day <= latest.day }.compactMap { d in d.strain.map { (d.day, $0) } }
+        func strainWindow(_ n: Int) -> [Double] {
+            let start = BaselineStandard.shift(latest.day, by: -n) ?? ""
+            return strainUpToToday.filter { $0.0 > start }.map { $0.1 }
+        }
         var acwr: Double? = nil
         var monotony: Double? = nil
-        if strainSeries.count >= minChronic {
-            let acute = mean(Array(strainSeries.suffix(acuteWindow)))!
-            let chronic = mean(Array(strainSeries.suffix(chronicWindow)))!
+        if strainUpToToday.count >= minChronic,
+           let acute = mean(strainWindow(acuteWindow)), let chronic = mean(strainWindow(chronicWindow)) {
             if chronic > 0 {
                 let ratio = acute / chronic
                 acwr = ratio
                 signals.append(acwrSignal(ratio, acute: acute, chronic: chronic))
             }
             // Foster monotony over the last week of strain.
-            let week = Array(strainSeries.suffix(acuteWindow))
+            let week = strainWindow(acuteWindow)
             if week.count >= 4, let sd = sampleSD(week), sd > 0, let m = mean(week) {
                 let mono = m / sd
                 monotony = mono
