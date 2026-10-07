@@ -135,6 +135,19 @@ struct LiquidTodayView: View {
     /// Flips true once the first load() completes. Until then the hero gauges + sky render STATIC so the
     /// launch data-churn (refresh publish + BLE/HR notifies) isn't fighting 4 live canvases + CoreMotion.
     @State private var dataLoaded = false
+    /// The reload key Today last published a load for, and when. A reference held in `@State`, so recording it
+    /// never re-renders the screen.
+    private final class LoadMemo {
+        var key = ""
+        var at = Date.distantPast
+    }
+    @State private var loadMemo = LoadMemo()
+    /// How long a return to Today keeps what it shows when nothing in `loadKey` changed.
+    private static let unchangedReloadFloor: TimeInterval = 60
+    /// Everything a load depends on that can change while Today stays mounted (see the G1 note at its `.task`).
+    private var loadKey: String {
+        "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.dayRolloverSeq)-\(repo.zoneContextSeq)-\(dayCycleModeRaw)"
+    }
 
     // Custom liquid pull-to-refresh: a vessel that FILLS as you drag, releases into a refresh (replaces
     // the system spinner). Driven by the scroll's top overscroll offset.
@@ -434,8 +447,13 @@ struct LiquidTodayView: View {
         // join the reload key so the liquid Today re-keys to the new local-midnight day within ~1s even
         // at an unchanged refreshSeq (no data refresh, sensor reading, network, or DB revision), and
         // re-keys day-scoped bounds on a same-day timezone change.
-        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.dayRolloverSeq)-\(repo.zoneContextSeq)-\(dayCycleModeRaw)") {
-            await load()
+        .task(id: loadKey) {
+            // `.task` restarts on every return to Today (a tab switch, a pop from a detail page), not only when
+            // the key changes. Within `unchangedReloadFloor` of a load for this same key there is nothing new
+            // to read, and reloading rebuilt the whole screen as the user arrived.
+            let key = loadKey
+            if loadMemo.key == key, Date().timeIntervalSince(loadMemo.at) < Self.unchangedReloadFloor { return }
+            if await load() { loadMemo.key = key; loadMemo.at = Date() }
         }
         // G1 (T03): clamp a persisted past-day selection into the current navigable range on appear so a
         // stored offset can never strand the user past the earliest banked day.
@@ -1290,26 +1308,32 @@ struct LiquidTodayView: View {
 
     // MARK: - Data
 
-    private func load() async {
+    /// Read everything Today shows for the selected day, then publish it.
+    ///
+    /// Three publishes: what is already in memory at once, then every read result in one block, then the two
+    /// tiles that scan raw samples. Assigning each value as its read landed rebuilt and laid out the whole screen
+    /// about ten times per load, across the awaits in between. A load cancelled after its reads (the day or the
+    /// data changed under it) does not publish them, so it never overwrites the newer load that replaced it.
+    /// Returns whether it published its reads.
+    @discardableResult
+    private func load() async -> Bool {
         // Resolve the O(days) lookups ONCE here (not on every body re-render): the selected day and the
         // readiness verdict. Both scan repo.days (up to 599 rows); doing it per-render was the stutter.
         let day = resolveDisplayDay()
-        cachedDisplayDay = day
-        cachedReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
+        let newReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
         // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
         // echo today's still-forming row; only on today (a past day's own row is the whole story).
-        let tkey = cachedDisplayDay?.day ?? selectedDayKey
-        cachedVitalsDay = (selectedDayOffset == 0) ? Repository.lastVitalsDay(days: repo.days, todayKey: tkey) : nil
-        cachedRespDay = (selectedDayOffset == 0) ? Repository.lastRespDay(days: repo.days, todayKey: tkey) : nil
-        cachedHrvDay = (selectedDayOffset == 0) ? Repository.lastHrvDay(days: repo.days, todayKey: tkey) : nil
-        cachedRestingHrDay = (selectedDayOffset == 0) ? Repository.lastRestingHrDay(days: repo.days, todayKey: tkey) : nil
-        cachedSkinTempReadingDay = (selectedDayOffset == 0) ? Repository.lastSkinTempReadingDay(days: repo.days, todayKey: tkey) : nil
+        let tkey = day?.day ?? selectedDayKey
+        let newVitalsDay = (selectedDayOffset == 0) ? Repository.lastVitalsDay(days: repo.days, todayKey: tkey) : nil
+        let newRespDay = (selectedDayOffset == 0) ? Repository.lastRespDay(days: repo.days, todayKey: tkey) : nil
+        let newHrvDay = (selectedDayOffset == 0) ? Repository.lastHrvDay(days: repo.days, todayKey: tkey) : nil
+        let newRestingHrDay = (selectedDayOffset == 0) ? Repository.lastRestingHrDay(days: repo.days, todayKey: tkey) : nil
+        let newSkinTempReadingDay = (selectedDayOffset == 0) ? Repository.lastSkinTempReadingDay(days: repo.days, todayKey: tkey) : nil
         // Charge carry (#543) + the honest label, resolved here for the same reason as the two above: the
         // selector below scans repo.days. Calibration nights come from the SAME `RecoveryScorer` helper the
         // classic Today reads, so the two screens agree on when a wearer is genuinely mid-calibration
         // rather than simply lacking a scored night.
         let baselineNights = Self.baselineNightlyHrv(days: repo.days, sleeps: repo.sleeps)
-        cachedBaselineNights = baselineNights
         let calNights = (selectedDayOffset == 0)
             ? RecoveryScorer.calibrationNights(nightlyHrv: baselineNights.hrv,
                                                dayKeys: baselineNights.dayKeys,
@@ -1321,11 +1345,22 @@ struct LiquidTodayView: View {
             todayScored: day?.recovery != nil,
             isCalibrating: calNights != nil
         )
-        cachedChargeDisplay = ChargeDisplay.resolve(
+        let newChargeDisplay = ChargeDisplay.resolve(
             todayRecovery: day?.recovery,
             priorScored: priorScored,
             calibrationNights: calNights,
             todayKey: tkey)
+        // These come from what is already in memory, before anything is awaited, so they show at once (a day
+        // swipe moves the heroes immediately); everything below is read and then published together.
+        cachedDisplayDay = day
+        cachedReadiness = newReadiness
+        cachedVitalsDay = newVitalsDay
+        cachedRespDay = newRespDay
+        cachedHrvDay = newHrvDay
+        cachedRestingHrDay = newRestingHrDay
+        cachedSkinTempReadingDay = newSkinTempReadingDay
+        cachedBaselineNights = baselineNights
+        cachedChargeDisplay = newChargeDisplay
 
         let cal = Calendar.current
         let dayStart = cal.startOfDay(for: selectedLogicalDay)
@@ -1360,12 +1395,14 @@ struct LiquidTodayView: View {
             // maximum is above it. See `ProfileStore.effortHRmax`.
             let maxHR = profile.effortHRmax
             let restHR = day?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
-            liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
-                                                  method: PuffinExperiment.effortMethod, sex: profile.sex)
+            let method = PuffinExperiment.effortMethod, sex = profile.sex
+            // Off the main actor: it walks every heart-rate sample of the day so far.
+            liveStrainLocal = await Task.detached(priority: .userInitiated) {
+                StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR, method: method, sex: sex)
+            }.value
         } else {
             liveStrainLocal = nil
         }
-        liveTodayStrain = liveStrainLocal
 
         async let restA = repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
         async let stepsA = repo.exploreSeries(key: "steps_est", source: "my-whoop")
@@ -1383,7 +1420,7 @@ struct LiquidTodayView: View {
         // gravity ⇒ no sleep_performance point ever written) used to pin Rest to the weeks-old series tail
         // forever while Charge advanced; freshness-gate the tail-fallback so a stale tail falls through to
         // the Rest hero's No-Data/calibrating state (same empty treatment Effort uses) instead of freezing.
-        restScore = TodayView.freshRestScore(
+        let newRestScore = TodayView.freshRestScore(
             todayValue: restByDay[selectedDayKey], lastDay: restSeries.last?.day,
             lastValue: restSeries.last?.value, isTodaySelected: selectedDayOffset == 0,
             todayKey: selectedDayKey)
@@ -1405,7 +1442,7 @@ struct LiquidTodayView: View {
         // Queue 11a: SpO₂ candidate fallback — day-keyed for the tile's value lookup, windowed for its
         // detailed-mode sparkline below (same shape as `restByDay`/`kSparks["spo2"]` above).
         let spo2CandSeries = await spo2CandA
-        spo2CandidateByDay = Dictionary(spo2CandSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        let newSpo2CandidateByDay = Dictionary(spo2CandSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         var winImportedKcal: [String: Double] = [:]
         for r in appleRowsForSpark where r.day >= sparkCutoff && r.day <= selectedDayKey {
             if let k = r.activeKcal { winImportedKcal[r.day] = max(winImportedKcal[r.day] ?? 0, k) }
@@ -1414,7 +1451,7 @@ struct LiquidTodayView: View {
         for r in sparkRows { if let k = r.activeKcalEst { winOnDeviceKcal[r.day] = k } }
         let energyKcalSpark: [(String, Double)] = Set(winImportedKcal.keys).union(winOnDeviceKcal.keys).sorted()
             .compactMap { day in (winImportedKcal[day] ?? winOnDeviceKcal[day]).map { (day, $0) } }
-        kSparks = [
+        let newKSparks: [String: [(String, Double)]] = [
             "recovery": sparkRows.compactMap { r in r.recovery.map { (r.day, $0) } },
             "strain": sparkRows.compactMap { r in r.strain.map { (r.day, $0) } },
             "hrv": sparkRows.compactMap { r in r.avgHrv.map { (r.day, $0) } },
@@ -1440,30 +1477,30 @@ struct LiquidTodayView: View {
         // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
         // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
         let stepsByDay = Dictionary(stepsSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
-        stepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
+        let newStepsEst = stepsByDay[selectedDayKey] ?? (selectedDayOffset == 0 ? stepsSeries.last?.value : nil)
         // Imported Apple Health steps for the SELECTED day (max across rows), the middle tier between the
         // measured strap count and the motion estimate. Health Connect is Android-only, so apple-health is
         // the sole import source on iOS. Mirrors Android `stepsForDay` (#377).
-        importedStepsDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.steps }.max()
+        let newImportedStepsDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.steps }.max()
         // #616: same-day imported active energy — the calorie fallback when the strap banked no on-device
         // HR estimate for the day, so the tile/card/detail agree (imported-first, mirrors steps).
-        importedActiveKcalDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.activeKcal }.max()
+        let newImportedActiveKcalDay = (await appleA).filter { $0.day == selectedDayKey }.compactMap { $0.activeKcal }.max()
 
         // Weight for the SELECTED day: prefers a real Apple-Health reading (today's daily, else the
         // "weight" series' newest point so a sparse-but-recent value still renders). Falls back to the
         // user's profile weight in the renderer (weightTile).
         let appleRows = await appleA
         let weightSeries = await weightA
-        weightKg = appleRows.filter { $0.day == selectedDayKey }.compactMap { $0.weightKg }.max()
+        let newWeightKg = appleRows.filter { $0.day == selectedDayKey }.compactMap { $0.weightKg }.max()
             ?? weightSeries.last(where: { $0.day <= selectedDayKey })?.value
 
         // Awaited ONCE: the timestamps and the means have to come from the same read, or the segments
         // would describe a different series than the one drawn.
         let hrBuckets = await hrA
-        hrValues = hrBuckets.map { $0.bpm }
-        hrSegments = hrGapSegments(bucketTs: hrBuckets.map { $0.ts }, bucketSeconds: 300)
-        hrTimes = hrBuckets.map { Double($0.ts) }
-        workouts = (await wkA).filter { $0.startTs >= from && $0.startTs < to }
+        let newHrValues = hrBuckets.map { $0.bpm }
+        let newHrSegments = hrGapSegments(bucketTs: hrBuckets.map { $0.ts }, bucketSeconds: 300)
+        let newHrTimes = hrBuckets.map { Double($0.ts) }
+        let newWorkouts = (await wkA).filter { $0.startTs >= from && $0.startTs < to }
 
         // #today-hosted-cards: build the shared SleepModel that backs the hosted sleep cards, but ONLY when
         // at least one sleep-origin card is actually hosted — otherwise Today pays no extra Repository cost.
@@ -1471,11 +1508,12 @@ struct LiquidTodayView: View {
         // Sleep tab loads them, then handed to the SAME pure `SleepModel.build`, so a hosted card renders
         // numbers byte-identical to the Sleep tab. Reused by every SleepModel-backed hosted card (built once).
         let sleepOrigin = String(localized: "Sleep")
+        let newHostedSleepModel: SleepModel?
         if HostedCardPrefs.decodeEnabled(hostedCardsRaw).contains(where: { $0.origin == sleepOrigin }) {
             let hostedSessions = await repo.allSleepSessions()
             let hostedHabitual = await repo.habitualMidsleepSec()
             let hostedMotion = await repo.sessionMotions(sessions: hostedSessions)
-            hostedSleepModel = SleepModel.build(SleepModelInputs(
+            newHostedSleepModel = SleepModel.build(SleepModelInputs(
                 days: repo.days,
                 sleeps: repo.sleeps,
                 allSessions: hostedSessions,
@@ -1483,21 +1521,41 @@ struct LiquidTodayView: View {
                 habitualMidsleepSec: hostedHabitual,
                 motionByStart: hostedMotion))
         } else {
-            hostedSleepModel = nil
+            newHostedSleepModel = nil
         }
 
         // #2040: and today's stress, on the same "only when hosted" rule.
+        let newHostedStressHours: [DaytimeStress.HourPoint]
+        let newHostedStressActivityMaskedHours: Int
         if HostedCardPrefs.decodeEnabled(hostedCardsRaw).contains(.stressToday) {
             let result = await StressDayCurve.today(
                 repo: repo,
                 personalBaseline: PuffinExperiment.stressPersonalBaselineEnabled
             )?.result
-            hostedStressHours = result?.timeline ?? []
-            hostedStressActivityMaskedHours = result?.activityMaskedHours ?? 0
+            newHostedStressHours = result?.timeline ?? []
+            newHostedStressActivityMaskedHours = result?.activityMaskedHours ?? 0
         } else {
-            hostedStressHours = []
-            hostedStressActivityMaskedHours = 0
+            newHostedStressHours = []
+            newHostedStressActivityMaskedHours = 0
         }
+
+        // Publish it all at once (see above).
+        guard !Task.isCancelled else { return false }
+        liveTodayStrain = liveStrainLocal
+        restScore = newRestScore
+        spo2CandidateByDay = newSpo2CandidateByDay
+        kSparks = newKSparks
+        stepsEst = newStepsEst
+        importedStepsDay = newImportedStepsDay
+        importedActiveKcalDay = newImportedActiveKcalDay
+        weightKg = newWeightKg
+        hrValues = newHrValues
+        hrSegments = newHrSegments
+        hrTimes = newHrTimes
+        workouts = newWorkouts
+        hostedSleepModel = newHostedSleepModel
+        hostedStressHours = newHostedStressHours
+        hostedStressActivityMaskedHours = newHostedStressActivityMaskedHours
 
         // First load done — bring the hero gauges + sky to life now the launch churn has settled.
         if !dataLoaded { withAnimation(.easeIn(duration: 0.4)) { dataLoaded = true } }
@@ -1506,14 +1564,19 @@ struct LiquidTodayView: View {
         // reading count, straight from the banked samples, so the two tiles do not wait for a nightly score.
         // After the first-paint flip above, and only for a tile that is actually on the grid: the SpO₂ read
         // scans up to a day of per-second rows.
-        currentSkinTemp = (selectedDayOffset == 0 && enabledKeyMetrics.contains(.skinTemp))
+        let newSkinTemp = (selectedDayOffset == 0 && enabledKeyMetrics.contains(.skinTemp))
             ? await repo.currentSkinTemp() : nil
+        let newSpo2NightReadings: KeyMetricReadings.Spo2Readings?
         if enabledKeyMetrics.contains(.bloodOxygen) {
             let night = KeyMetricReadings.spo2NightWindow(dayStart: dayStart, now: Date())
-            spo2NightReadings = await repo.spo2Readings(from: night.from, to: night.to)
+            newSpo2NightReadings = await repo.spo2Readings(from: night.from, to: night.to)
         } else {
-            spo2NightReadings = nil
+            newSpo2NightReadings = nil
         }
+        guard !Task.isCancelled else { return true }
+        currentSkinTemp = newSkinTemp
+        spo2NightReadings = newSpo2NightReadings
+        return true
     }
 
     // MARK: - Derived (sync, off repo.today / repo.days)

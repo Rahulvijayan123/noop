@@ -5103,6 +5103,15 @@ public final class BLEManager: NSObject, ObservableObject {
         backfillTimer = t
     }
 
+    /// Whether the app is in the foreground (always true on macOS, where the Mac app has no background lifecycle).
+    static var appIsOnScreen: Bool {
+        #if os(iOS)
+        UIApplication.shared.applicationState == .active
+        #else
+        true
+        #endif
+    }
+
     /// The single gated entry point for every historical-offload kick. Applies the connection/state
     /// gate AND the BackfillPolicy rate-limiter for the trigger. On a go: records the attempt time
     /// (persisted) and starts the offload.
@@ -5116,7 +5125,13 @@ public final class BLEManager: NSObject, ObservableObject {
         // live HR lapses. Feed the already-tracked future-dated signal into BackfillPolicy, which SKIPS
         // the .strap/.periodic triggers entirely for such a strap (the .connect pass still re-checks it).
         let clockUntrusted = BackfillContinuation.isFutureDatedNewest(strapNewestTs, wallNowUnix: Int(now))
-        guard BackfillPolicy.shouldRun(trigger: trigger, now: now, lastBackfillAt: last,
+        // Off screen a strap event waits out the periodic floor, not the 90 s event floor. Every EVENT counts
+        // as "may have new data" (FrameRouter), battery levels and the strap's answers to our own realtime and
+        // raw-capture toggles included, and the raw-IMU duty cycle alone produces several in a few minutes, so
+        // the background offload ran every few minutes instead of on its cadence. The strap banks days of
+        // history, and the next foreground asks for a sync at once.
+        let policyTrigger: BackfillTrigger = (trigger == .strap && !Self.appIsOnScreen) ? .periodic : trigger
+        guard BackfillPolicy.shouldRun(trigger: policyTrigger, now: now, lastBackfillAt: last,
                                        // #battery: back off on EITHER a console-only streak (clock-lost) OR a
                                        // plain empty-offload streak incl. idle-timeout stalls — the latter is
                                        // what stops the 15-min poll spinning on a caught-up strap.
