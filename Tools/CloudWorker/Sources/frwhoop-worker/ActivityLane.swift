@@ -505,8 +505,11 @@ struct ActivityLane {
         if let last = lastStreamEnqueueAt,
            Date().timeIntervalSince(last) < Self.streamEnqueueIntervalSeconds { return }
         lastStreamEnqueueAt = Date()
-        reconcileVersions(algorithm: ActivityContextDays.streamsAlgorithmVersion,
-                          versions: ActivityContextDays.lanesVersions(), limit: Self.versionReconcileStreamLimit)
+        // Register first, so the enqueue folds this build's versions in; sweep after it, so the sweep (which
+        // re-queues any day whose fingerprint is not today's) never takes a day whose scoring just changed
+        // from the enqueue and its rebuild spacing.
+        let versions = ActivityContextDays.lanesVersions()
+        reconcileVersions(algorithm: ActivityContextDays.streamsAlgorithmVersion, versions: versions, limit: 0)
         do {
             let out = try db.callFunctionForJSON(
                 Self.streamEnqueueSQL,
@@ -514,9 +517,12 @@ struct ActivityLane {
             stats.streamDaysEnqueued += Int(out ?? "") ?? 0
         } catch let e as PostgresClient.Error where e.kind == .connectionLost {
             record(e)
+            return
         } catch {
             noteStreamDayFailure(ActivityContextDays.safeReason(error))
         }
+        reconcileVersions(algorithm: ActivityContextDays.streamsAlgorithmVersion, versions: versions,
+                          limit: Self.versionReconcileStreamLimit)
     }
 
     /// Register this build's versions for a lane and re-derive, bounded, the days another decoder wrote
@@ -601,10 +607,7 @@ struct ActivityLane {
             throw PostgresClient.Error(message: "activity lease lost before the stream day decode",
                                        sqlstate: "55000", kind: .stale)
         }
-        let nights = try loadPublishedNights(user: job.userId, device: job.deviceId,
-                                             dayStart: dayBounds.start, dayEnd: dayBounds.end)
-        let exercise = try loadWorkouts(user: job.userId, device: job.deviceId,
-                                        dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        let (nights, exercise) = try daySpans(userId: job.userId, deviceId: job.deviceId, dayBounds: dayBounds)
         let streams = try ActivityContextDays.loadStreams(
             db: db, userId: job.userId, deviceId: job.deviceId,
             dayStart: dayBounds.start, dayEnd: dayBounds.end, lookback: true)
@@ -744,13 +747,10 @@ struct ActivityLane {
         }
         let runs = Self.splitRuns(seconds: timeline.seconds)
 
-        // 4. The published nights + workout records for the day's epochs.
-        let nights = try loadPublishedNights(user: job.userId, device: job.deviceId,
-                                             dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        // 4. The published nights + workout records for the day's epochs (and its decode's lookback).
+        let (nights, exercise) = try daySpans(userId: job.userId, deviceId: job.deviceId, dayBounds: dayBounds)
         let asleep = ActivityContextDays.asleepSpans(nights)
         let inBed = nights.map { (start: $0.start, end: $0.end) }
-        let exercise = try loadWorkouts(user: job.userId, device: job.deviceId,
-                                        dayStart: dayBounds.start, dayEnd: dayBounds.end)
 
         // 4b. Wear evidence (G3/G7): WRIST_ON/OFF rows from noop_events feed the shared fold so
         // epochs carry an EVIDENCED wear_state (unknown where no event covers) instead of the
@@ -800,10 +800,11 @@ struct ActivityLane {
         let dataThrough = timeline.seconds.max().map { Int($0) + 1 } ?? dayBounds.start
         var doc = try Self.activityDocument(
             windows: windows,
-            sleepIntervals: asleep,
+            // The v1 fold reads the day's own spans only, exactly as before the lookback (D2-11) widened them.
+            sleepIntervals: asleep.filter { $0.end > dayBounds.start },
             // The v1 epoch fold reads only start/end (ExerciseSession has no sport); the sport
             // goes to the v2 decoder through `buildContextDay` below. audit WS-11-F08.
-            exerciseIntervals: exercise.map { (start: $0.start, end: $0.end) },
+            exerciseIntervals: exercise.filter { $0.end > dayBounds.start }.map { (start: $0.start, end: $0.end) },
             dayStart: dayBounds.start, dayEnd: dayBounds.end,
             inputRevision: job.inputRevision,
             modelVersion: versions.model,
@@ -1552,6 +1553,17 @@ struct ActivityLane {
     /// `scoring_snapshots_v2`, so that table stopped receiving sleep and every stream day decoded as if
     /// the wearer never slept. Stream-day jobs are queued off scoring completions for the neighbouring
     /// days, so a newly published night re-dirties the day that reads it.
+    /// The published nights and workouts a day's decode reads: every span overlapping the day or the
+    /// `ActivityContextDays.lookbackSeconds` before it, so the warm-up decode knows about a night or a workout
+    /// that ended just before midnight instead of decoding those minutes as awake and idle (audit D2-11). The
+    /// day decode and its fingerprint clip spans to the day themselves.
+    func daySpans(userId: String, deviceId: String, dayBounds: (start: Int, end: Int)) throws
+        -> (nights: [ActivityContextDays.Night], exercise: [(start: Int, end: Int, sport: String)]) {
+        let from = dayBounds.start - ActivityContextDays.lookbackSeconds
+        return (try loadPublishedNights(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end),
+                try loadWorkouts(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end))
+    }
+
     private func loadPublishedNights(user: String, device: String,
                                      dayStart: Int, dayEnd: Int) throws -> [ActivityContextDays.Night] {
         let rows = try db.query("""

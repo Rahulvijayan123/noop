@@ -2145,8 +2145,16 @@ begin
   values (u,dev,base,'streams-activity-1',
           internal.activity_stream_day_fingerprint(u,dev,base,internal.activity_stream_day_marker(u,dev,base)),4,4);
   perform pg_temp.v_day_row(u,dev,base,'streams-activity-1','hsmm-1.3');
+  -- Day base+1 was built a moment ago: it is re-queued with the enqueue's rebuild spacing.
+  insert into public.activity_context_jobs(user_id,device_id,day,algorithm_version,fingerprint,input_revision,
+    completed_revision,last_completed_at)
+  values (u,dev,base+1,'streams-activity-1',repeat('0',64),2,2,clock_timestamp());
+  perform pg_temp.v_day_row(u,dev,base+1,'streams-activity-1','hsmm-1.3');
   n := public.reconcile_activity_context_versions('streams-activity-1', streams, 4);
-  assert n = 1, 'got ' || n;
+  assert n = 2, 'got ' || n;
+  assert (select not_before > clock_timestamp() + interval '9 minutes' from public.activity_context_jobs
+           where user_id=u and day=base+1 and algorithm_version='streams-activity-1'),
+    'a day built minutes ago waits out the rebuild spacing';
   assert (select input_revision = 5 and completed_revision = 4 and reason = 'versions'
              and fingerprint = internal.activity_stream_day_fingerprint(u,dev,base,internal.activity_stream_day_marker(u,dev,base))
           from public.activity_context_jobs where user_id=u and day=base and algorithm_version='streams-activity-1'),

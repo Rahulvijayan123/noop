@@ -337,8 +337,12 @@ begin
       perform public.enqueue_activity_context(r.user_id, r.device_id, r.day, r.input_object_ids,
         r.input_digests, r.fp);
     else
+      -- The enqueue's default rebuild spacing: a day built minutes ago waits, as it would for new scoring.
       update public.activity_context_jobs set fingerprint = r.fp, input_revision = input_revision + 1,
-        dirty_at = clock_timestamp(), not_before = clock_timestamp(), consecutive_failures = 0,
+        dirty_at = clock_timestamp(),
+        not_before = greatest(clock_timestamp(),
+                              coalesce(last_completed_at, '-infinity'::timestamptz) + interval '10 minutes'),
+        consecutive_failures = 0,
         dead_letter = false, last_error = null, reason = 'versions'
        where user_id = r.user_id and device_id = r.device_id and day = r.day
          and algorithm_version = 'streams-activity-1';
