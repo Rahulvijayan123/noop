@@ -1089,7 +1089,7 @@ private struct AppearanceStep: View {
     }
     var body: some View {
         StepShell(title: String(localized: "Make it yours"),
-                  subtitle: String(localized: "Choose how NOOP looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
+                  subtitle: String(localized: "Choose how Nara looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
             VStack(spacing: 28) {
                 Image(systemName: "circle.lefthalf.filled")
                     .font(.system(size: 44, weight: .regular))

@@ -40,7 +40,7 @@ public struct NaraAccountView: View {
     public var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(spacing: 20) {
-                explanationCard
+                if !isSignedIn { explanationCard }
                 if !auth.isAvailable {
                     unavailableCard
                 } else {
@@ -78,6 +78,11 @@ public struct NaraAccountView: View {
         }
     }
 
+    private var isSignedIn: Bool {
+        if case .signedIn = auth.phase { return true }
+        return false
+    }
+
     /// A flow that ended at the sign-in form (an email that already has an account, a recovery that needs
     /// a fresh sign-in) hands over the address so the person only types their password.
     private func applySuggestedEmail(_ suggested: String?) {
@@ -102,7 +107,7 @@ public struct NaraAccountView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Nara account").font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Your account keeps your strap data and scores yours alone. Nara emails you a one-time code to confirm your address, and nothing is uploaded until you are signed in.")
+                    Text("Sign in to sync your strap data and see your scores. Nothing is uploaded until you're signed in.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -115,7 +120,7 @@ public struct NaraAccountView: View {
 
     private var unavailableCard: some View {
         StrandCard {
-            Text("This build of Nara isn't set up for accounts yet.")
+            Text("Accounts aren't available in this version of Nara.")
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.statusWarning)
                 .fixedSize(horizontal: false, vertical: true)
@@ -443,7 +448,7 @@ public struct NaraAccountView: View {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text("Sync with your account").font(StrandFont.headline)
                                     .foregroundStyle(StrandPalette.textPrimary)
-                                Text("Measured strap data is uploaded to your account, where it is scored on the server.")
+                                Text("Uploads your strap data so it can be scored.")
                                     .font(StrandFont.subhead)
                                     .foregroundStyle(StrandPalette.textSecondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -454,7 +459,7 @@ public struct NaraAccountView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text("Synced with your account").font(StrandFont.headline)
                                 .foregroundStyle(StrandPalette.textPrimary)
-                            Text("Measured strap data is saved to your own private space and scored on the server. Only this account can see it.")
+                            Text("Your strap data is saved privately to this account and scored there.")
                                 .font(StrandFont.subhead)
                                 .foregroundStyle(StrandPalette.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)

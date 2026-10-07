@@ -59,8 +59,8 @@ struct RootTabView: View {
     /// a no-op). Threaded into each tab's root via `\.scrollToTopSignal`; ScreenScaffold / LiquidTodayView
     /// scroll to their top anchor when their tab's token changes.
     @State private var scrollTop: [Int] = Array(repeating: 0, count: 5)
-    /// V8 liquid redesign is the default Today; the Settings toggle lets a user fall back to the classic
-    /// Today if they prefer it (keyed identically to the SettingsView toggle). Default ON.
+    /// V8 liquid redesign is the default Today. The classic Today stays behind this key (default ON) for
+    /// installs that switched before the Settings toggle was removed.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
 
     /// The Today tab root, honouring the liquid/classic preference.

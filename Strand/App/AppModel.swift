@@ -76,6 +76,9 @@ final class AppModel: ObservableObject {
     let profile = ProfileStore()
     /// Mirrors the Settings profile to the cloud `profiles` row (cloud mode only).
     private(set) lazy var profileSync = ProfileCloudSync(profile: profile)
+    private(set) lazy var settingsSync = SettingsCloudSync(onApplied: { [weak self] keys in
+        self?.syncedSettingsApplied(keys)
+    })
     /// What the activity classifier does after each sync: the rolling-window stand reminder and saving the
     /// day's activity context to the store (see `ActivityContextCoordinator`).
     private(set) lazy var activityContext = ActivityContextCoordinator(
@@ -345,6 +348,8 @@ final class AppModel: ObservableObject {
         let runJobs = claimCloudJobs(for: CloudPushRuntime.shared.runningScope)
         if runJobs {
             Task { await profileSync.reconcile() }
+            Task { await settingsSync.reconcile() }
+            Task { await syncPlacement() }   // wear-placement changes saved while offline
             StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
             Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
             Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved while offline
@@ -377,6 +382,43 @@ final class AppModel: ObservableObject {
         return true
     }
 
+    /// Preferences just arrived from the account: bring the in-memory store along, and do what turning each
+    /// one on from Settings does (ask for notification permission, evaluate now rather than at the next sync).
+    private func syncedSettingsApplied(_ keys: [String]) {
+        behavior.reloadFromDefaults()
+        if keys.contains("batteryAlerts"), behavior.batteryAlerts { BatteryNotifier.requestAuthorization() }
+        if keys.contains("illnessSigns") {
+            reevaluateIllness()
+            if behavior.illnessWatch { IllnessNotifier.requestAuthorization() }
+        }
+        if keys.contains("effortTarget"), behavior.strainTargetNudge {
+            StrainTargetNotifier.requestAuthorization()
+            evaluateStrainTarget()
+        }
+    }
+
+    /// Upload the wear-placement changes that have not reached the server yet, then pull the server's
+    /// copy back. Runs when the cloud path comes up and after each placement change, so a change made
+    /// offline is retried instead of waiting for the next one (a pending change also blocks every pull).
+    func syncPlacement() async {
+        guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil,
+              let store = await repo.storeHandle(),
+              let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
+        let sync = placementSync(placementStore)
+        _ = try? await sync.pushPending()
+        _ = try? await sync.reconcile()
+    }
+
+    /// The placement sync for this phone's strap, translating between its local id and the one the cloud
+    /// files the strap under, so a pulled placement lands where Settings reads it.
+    func placementSync(_ store: PlacementStore) -> PlacementCloudSync {
+        let local = repo.deviceId
+        let cloud = CloudDeviceIdentity.cloudId(localId: local,
+                                                serial: CloudStrapSerialStore.shared.serial(forLocalId: local))
+        return PlacementCloudSync(store: { store },
+                                  localDevices: { [PlacementCloudSync.LocalDevice(local: local, cloud: cloud)] })
+    }
+
     /// Wire the Nara account layer into the app. It owns "who is signed in" and "is the upload path linked
     /// to them"; these callbacks are how the rest of the app follows it.
     private func configureNaraAccount() {
@@ -407,6 +449,8 @@ final class AppModel: ObservableObject {
             return
         }
         Task { await profileSync.reconcile() }
+        Task { await settingsSync.reconcile() }
+        Task { await syncPlacement() }   // wear-placement changes saved before the account was ready
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
         Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
         Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved before the account was ready

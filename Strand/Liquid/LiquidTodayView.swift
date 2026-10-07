@@ -79,7 +79,6 @@ struct LiquidTodayView: View {
     // sheets / expanders
     @State private var guideSection: ScoreSection?
     @State private var customizationDestination: TodayCustomizationDestination?
-    @State private var showSettings = false
     @State private var synthesisExpanded = false
     // #today-layout (parity with Android): the user-chosen section order, persisted under the byte-identical
     // "today.sectionOrder" key the Android TodayLayoutPrefs uses. Reordered via the Arrange sheet (native
@@ -468,13 +467,6 @@ struct LiquidTodayView: View {
                 keyMetricsWindowDays: $keyMetricsWindowDays,
                 hostedCardsRaw: $hostedCardsRaw
             )
-        }
-        .sheet(isPresented: $showSettings) {
-            NavigationStack {
-                SettingsView()
-                    .background(StrandPalette.surfaceBase.ignoresSafeArea())
-                    .liquidSheetDoneChrome { showSettings = false }
-            }
         }
         #if os(macOS)
         // Hide the mac window toolbar's vibrant material so the full-bleed day-of-sky reads dark + edge-to-edge
@@ -2747,24 +2739,6 @@ private struct LiquidStrapBatteryRow: View {
 // don't exist on macOS, and `presentationCompactAdaptation` is an iOS phone-width concern. These keep the
 // exact iOS behaviour while giving macOS the platform-correct equivalent.
 private extension View {
-    /// A sheet's trailing "Done" button (inline title on iOS; the confirmation-action toolbar slot on macOS).
-    @ViewBuilder func liquidSheetDoneChrome(done: @escaping () -> Void) -> some View {
-        #if os(iOS)
-        self.navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done", action: done).foregroundStyle(StrandPalette.accent)
-                }
-            }
-        #else
-        self.toolbar {
-            ToolbarItem(placement: .confirmationAction) {
-                Button("Done", action: done).foregroundStyle(StrandPalette.accent)
-            }
-        }
-        #endif
-    }
-
     /// Keep a popover a popover in compact width (iOS 16.4+); a no-op on macOS where popovers never adapt.
     @ViewBuilder func liquidPopoverAdaptation() -> some View {
         #if os(iOS)
