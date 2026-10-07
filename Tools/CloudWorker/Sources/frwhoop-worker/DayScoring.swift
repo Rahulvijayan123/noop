@@ -270,9 +270,12 @@ struct DayScorer {
 
         // User edits for the day (one bounded query; the same rows the
         // candidate lane reads). A session overlapping an accepted edit's
-        // original span is marked user_edited.
-        let edits = (try? loadSleepEdits(userId: claim.userId, deviceId: claim.deviceId,
-                                         day: claim.day)) ?? []
+        // original span is marked user_edited. On the v2 path this runs inside
+        // the claim/publish transaction, so the read is isolated: a failure
+        // must not abort the transaction the snapshot publishes in.
+        let edits = (try? db.isolatingFailures {
+            try loadSleepEdits(userId: claim.userId, deviceId: claim.deviceId, day: claim.day)
+        }) ?? []
 
         // Skin temperature in °C, the same family-aware conversion the app
         // renders (WhoopProtocol.skinTempCelsius; the 4.0's per-device anchor
@@ -298,35 +301,28 @@ struct DayScorer {
 
         // The 31-day sleep/wake history for the regularity block (two bounded
         // queries; nil when there is no published history yet).
-        let history = try? SleepFeatureEnrichment.loadHistory(
-            db: db, userId: claim.userId, deviceId: claim.deviceId,
-            days: 31, todayDay: claim.day, ianaTimezone: claim.timezoneId,
-            algorithmVersion: v2StageAlgorithmVersion)
+        let history = try? db.isolatingFailures {
+            try SleepFeatureEnrichment.loadHistory(
+                db: db, userId: claim.userId, deviceId: claim.deviceId,
+                days: 31, todayDay: claim.day, ianaTimezone: claim.timezoneId,
+                algorithmVersion: v2StageAlgorithmVersion)
+        }
 
-        // The MAIN session (longest, same selector the candidate lane uses) is
-        // the night; every other session the day detected (naps) is labelled
-        // is_nap so schedule metrics (bed time, onset, midsleep) read the night,
-        // not the nap (contract §1).
-        let main = Self.mainSleepSession(sessions)
-        var nights: [SleepFeatureNightInput] = []
-        for session in sessions {
-            // The main session (longest span; first on a tie, matching
-            // mainSleepSession's selector) is the night; ties keep only the
-            // FIRST match a night so exactly one session is the night.
-            let isMain = main.map { mainSpan in
-                (session.end - session.start) == (mainSpan.end - mainSpan.start)
-            } == true && !nights.contains(where: { !$0.isNap })
-            let nightId = "sleep-\(claim.deviceId)-\(session.start)"
-            let userEdited = edits.contains { edit in
+        let tz = TimeZone(identifier: claim.timezoneId) ?? TimeZone(identifier: "UTC")!
+        let offsetSec = tz.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(dayStart)))
+        let edited: (Int, Int) -> Bool = { start, end in
+            edits.contains { edit in
                 guard let originalStart = edit.payload.member("originalStart")?.doubleValue.map({ Int($0) }),
                       let originalEnd = edit.payload.member("originalEnd")?.doubleValue.map({ Int($0) }) else {
                     return false
                 }
-                return session.start < originalEnd && originalStart < session.end
+                return start < originalEnd && originalStart < end
             }
-            nights.append(SleepFeatureNightInput(
-                nightId: nightId, start: session.start, end: session.end,
-                isNap: !isMain, userEdited: userEdited, stages: session.stages))
+        }
+        let nights = Self.sleepFeatureNights(sessions, offsetSec: offsetSec).map { night in
+            SleepFeatureNightInput(nightId: "sleep-\(claim.deviceId)-\(night.start)",
+                                   start: night.start, end: night.end, isNap: night.isNap,
+                                   userEdited: edited(night.start, night.end), stages: night.stages)
         }
 
         let request = SleepFeatureEnrichment.buildRequest(SleepFeatureEnrichment.AssemblyInput(
@@ -340,6 +336,50 @@ struct DayScorer {
             return nil
         }
         return response
+    }
+
+    /// The sidecar's per-night span limit (contract §2: ≤ 16 h per night).
+    static let sleepFeatureMaxNightSeconds = 16 * 3600
+
+    /// The enrichment's nights: the canonical main-night GROUP (`AnalyticsEngine.analyzeDay`'s
+    /// `SleepStageTotals.mainNightGroupIndices`, at the claimed day's offset and with no habitual
+    /// midsleep, as the server scorer calls it) as ONE non-nap night, and every other session as a
+    /// nap. A split night's out-of-bed gaps are `wake`, which is how the canonical aggregate counts
+    /// them (`interFragmentAwakeSeconds`), so continuity describes the same night the Sleep tab
+    /// shows. A group whose bridged span exceeds the sidecar's limit falls back to its longest
+    /// fragment, so the request still validates.
+    static func sleepFeatureNights(_ sessions: [SleepSession], offsetSec: Int)
+        -> [(start: Int, end: Int, isNap: Bool, stages: [StageSegment])] {
+        guard !sessions.isEmpty else { return [] }
+        let blocks = sessions.map { SleepStageTotals.NightBlock(start: $0.start, end: $0.end) }
+        var group = SleepStageTotals.mainNightGroupIndices(blocks, offsetSec: offsetSec,
+                                                           habitualMidsleepSec: nil) ?? []
+        let longest = sessions.indices.max { lhs, rhs in
+            (sessions[lhs].end - sessions[lhs].start) < (sessions[rhs].end - sessions[rhs].start)
+        }!
+        if group.isEmpty { group = [longest] }
+        let groupSpan = (group.map { sessions[$0].end }.max() ?? 0) - (group.map { sessions[$0].start }.min() ?? 0)
+        if group.count > 1, groupSpan > sleepFeatureMaxNightSeconds {
+            group = [group.max { (sessions[$0].end - sessions[$0].start) < (sessions[$1].end - sessions[$1].start) }!]
+        }
+        let mainSet = Set(group)
+        let fragments = group.map { sessions[$0] }.sorted { $0.start < $1.start }
+        var stages: [StageSegment] = []
+        var reach = fragments[0].start
+        for fragment in fragments {
+            if fragment.start > reach {
+                stages.append(StageSegment(start: reach, end: fragment.start, stage: "wake"))
+            }
+            stages.append(contentsOf: fragment.stages)
+            reach = max(reach, fragment.end)
+        }
+        var nights: [(start: Int, end: Int, isNap: Bool, stages: [StageSegment])] = [
+            (fragments[0].start, reach, false, stages)
+        ]
+        for (index, session) in sessions.enumerated() where !mainSet.contains(index) {
+            nights.append((session.start, session.end, true, session.stages))
+        }
+        return nights.sorted { $0.start < $1.start }
     }
 
     // MARK: - SpO₂ strap estimate

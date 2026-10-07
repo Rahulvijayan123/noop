@@ -59,8 +59,7 @@ final class SleepFeatureDocumentTests: XCTestCase {
         // architecture (A2)
         let arch = try XCTUnwrap(night.architecture)
         XCTAssertEqual(arch.transitionCounts.count, 4)
-        XCTAssertEqual(arch.transitionCounts.flatMap { $0 }.reduce(0, +), 86)
-        XCTAssertEqual(arch.transitionProbabilities.count, 4)
+        XCTAssertEqual(arch.transitionCounts.flatMap { $0 }.reduce(0, +), 86)        XCTAssertEqual(arch.transitionProbabilities.count, 4)
         XCTAssertEqual(arch.remLatencyFromOnsetMin ?? -1, 82, accuracy: 0.01)
         XCTAssertEqual(arch.deepLatencyFromOnsetMin ?? -1, 11, accuracy: 0.01)
         XCTAssertEqual(arch.deepFrontLoadFraction ?? -1, 0.61, accuracy: 0.01)
@@ -148,9 +147,8 @@ final class SleepFeatureDocumentTests: XCTestCase {
         let start = try XCTUnwrap(night.startAtUnix)
         let end = try XCTUnwrap(night.endAtUnix)
         XCTAssertEqual(doc.night(matchingStart: start + 60, end: end - 60)?.nightId, "night-2026-10-03-main")
-        // No overlap still resolves to the longest non-nap night (the "main night" fallback).
-        XCTAssertEqual(doc.night(matchingStart: start - 200_000, end: start - 100_000)?.nightId,
-                       "night-2026-10-03-main")
+        XCTAssertNil(doc.night(matchingStart: start - 200_000, end: start - 100_000))
+        XCTAssertEqual(doc.night(matchingStart: nil, end: nil)?.nightId, "night-2026-10-03-main")
     }
 
     // MARK: - Tolerant decoding (never a crash, day intact)

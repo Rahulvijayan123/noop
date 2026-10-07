@@ -129,17 +129,18 @@ public struct SleepFeatureDocument: Codable, Equatable, Sendable {
         case durationMs = "duration_ms"
     }
 
-    /// The non-nap night whose bed window overlaps `[startTs, endTs)`, or the longest non-nap
-    /// night when none overlaps (the same "main night" selector the app uses everywhere else).
-    /// nil when every night is a nap or there are no nights.
+    /// The non-nap night whose bed window overlaps `[startTs, endTs)`. With a window given and no
+    /// overlapping night, nil: the document describes a different window (an edited or locally
+    /// re-detected night), and its numbers must not be shown against this one. Without a window,
+    /// the longest non-nap night. nil when every night is a nap or there are no nights.
     public func night(matchingStart startTs: Int?, end endTs: Int?) -> SleepFeatureNight? {
         let mains = nights.filter { !$0.isNap }
         guard !mains.isEmpty else { return nil }
         if let start = startTs, let end = endTs {
-            if let hit = mains.first(where: { night in
+            return mains.first(where: { night in
                 guard let ns = night.startAtUnix, let ne = night.endAtUnix else { return false }
                 return ns < end && ne > start
-            }) { return hit }
+            })
         }
         return mains.max { lhs, rhs in
             (lhs.endAtUnix ?? 0) - (lhs.startAtUnix ?? 0)

@@ -11,6 +11,45 @@ import WhoopProtocol
 
 final class SleepFeatureEnrichmentTests: XCTestCase {
 
+    // MARK: - Night assembly (canonical main-night group)
+
+    private func session(_ start: Int, _ end: Int, stage: String = "light") -> SleepSession {
+        SleepSession(start: start, end: end, efficiency: 0.9,
+                     stages: [StageSegment(start: start, end: end, stage: stage)],
+                     restingHR: nil, avgHRV: nil)
+    }
+
+    func testSplitNightIsOneMainNightWithTheGapAsWake() {
+        let midnight = 1_789_948_800
+        let first = session(midnight - 3_600, midnight + 7_200)
+        let second = session(midnight + 9_000, midnight + 25_200, stage: "deep")
+        let nap = session(midnight + 50_400, midnight + 52_800)
+
+        let nights = DayScorer.sleepFeatureNights([first, second, nap], offsetSec: 0)
+
+        XCTAssertEqual(nights.count, 2)
+        let main = try? XCTUnwrap(nights.first { !$0.isNap })
+        XCTAssertEqual(main?.start, midnight - 3_600)
+        XCTAssertEqual(main?.end, midnight + 25_200)
+        XCTAssertEqual(main?.stages.map(\.stage), ["light", "wake", "deep"])
+        XCTAssertEqual(main?.stages[1].start, midnight + 7_200)
+        XCTAssertEqual(main?.stages[1].end, midnight + 9_000)
+        XCTAssertEqual(nights.filter(\.isNap).map(\.start), [midnight + 50_400])
+    }
+
+    func testSingleNightHasNoInventedWake() {
+        let midnight = 1_789_948_800
+        let night = session(midnight - 3_600, midnight + 25_200)
+        let nights = DayScorer.sleepFeatureNights([night], offsetSec: 0)
+        XCTAssertEqual(nights.count, 1)
+        XCTAssertEqual(nights[0].isNap, false)
+        XCTAssertEqual(nights[0].stages.map(\.stage), ["light"])
+    }
+
+    func testNoSessionsYieldsNoNights() {
+        XCTAssertTrue(DayScorer.sleepFeatureNights([], offsetSec: 0).isEmpty)
+    }
+
     private func makeNight(start: Int, end: Int,
                            stages: [(Int, Int, String)] = [(0, 3600, "light")]) -> SleepFeatureNightInput {
         SleepFeatureNightInput(
