@@ -24,6 +24,17 @@ import Foundation
 
 extension PhysiologyContext {
 
+    /// One row of the dose-scaled post-bout exclusion: a bout of `kind` (nil = any kind) lasting at least
+    /// `minDurationS` excludes stable awake rest for `exclusionS` after it ends.
+    public struct PostBoutDose: Codable, Equatable, Sendable {
+        public var kind: String?
+        public var minDurationS: Int
+        public var exclusionS: Int
+        public init(kind: String? = nil, minDurationS: Int, exclusionS: Int) {
+            self.kind = kind; self.minDurationS = minDurationS; self.exclusionS = exclusionS
+        }
+    }
+
     public struct EligibilityConfig: Codable, Equatable, Sendable {
         public var version = "pc-eligibility-3"
         public var motion = MotionEvidenceConfig()
@@ -38,8 +49,22 @@ extension PhysiologyContext {
         /// Stable awake rest: locomotion that ended less than this before the support excludes it
         /// (ActivityPolicyConfig.postActivityWindowS).
         public var postActivityWindowS = 600
-        /// Stable awake rest: a supported bout that ended less than this before the support excludes it (0 disables).
+        /// Stable awake rest: a supported bout that ended less than this before the support excludes it (0 disables
+        /// every post-bout exclusion). The floor of the dose-scaled exclusion below.
         public var postBoutExclusionS = 600
+        /// Dose-scaled post-bout exclusion (D8-06): the longest matching row applies, never below
+        /// `postBoutExclusionS`. Bouts carry no intensity (they are heart-rate free), so the kind stands in for it:
+        /// running is vigorous, a logged workout of unknown intensity is treated as moderate, walking as light
+        /// unless long. Supine HRV recovers in 5-10 min after light exercise, ~30 min after threshold work and
+        /// 90 min or more after hard or long work (Seiler 2007).
+        public var postBoutDoses: [PostBoutDose] = [
+            PostBoutDose(minDurationS: 3600, exclusionS: 1800),
+            PostBoutDose(kind: ExertionBouts.kindWorkout, minDurationS: 0, exclusionS: 1800),
+            PostBoutDose(kind: ExertionBouts.kindWorkout, minDurationS: 3600, exclusionS: 3600),
+            PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 0, exclusionS: 1800),
+            PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 1200, exclusionS: 3600),
+            PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 3600, exclusionS: 5400),
+        ]
         /// Stable awake rest: optional exclusion when the trailing 24 h locomotion exceeds this (nil = record only).
         public var maxLocomotion24hS: Int? = nil
         /// Activity response: a support starting within this many seconds after a bout ended follows that bout.
@@ -553,10 +578,13 @@ extension PhysiologyContext {
                                                                                 : activityEvidenceUnavailable)
             }
             exertionEvidence(&b, exertion: exertion, recentBouts: recentBouts)
-            if config.postBoutExclusionS > 0,
-               let last = recentBouts.min(by: { $0.secondsBeforeMeasurement < $1.secondsBeforeMeasurement }),
-               last.secondsBeforeMeasurement < config.postBoutExclusionS {
-                b.fail(recentExertionBout)
+            if config.postBoutExclusionS > 0 {
+                // Every recent bout is checked: a long run two hours ago can still exclude after a short walk.
+                let excluding = recentBouts.filter { $0.secondsBeforeMeasurement < postBoutExclusionS($0, config) }
+                if let deciding = excluding.max(by: { postBoutExclusionS($0, config) < postBoutExclusionS($1, config) }) {
+                    b.diag("post_bout_exclusion_s", Double(postBoutExclusionS(deciding, config)))
+                    b.fail(recentExertionBout)
+                }
             }
             if let limit = config.maxLocomotion24hS, let w = exertion.first(where: { $0.windowH == 24 }),
                w.locomotionS > limit {
@@ -593,6 +621,13 @@ extension PhysiologyContext {
             let share = Double(w.poorS) / Double(max(1, support.duration))
             b.diag("wear_signal_poor_share", share)
             if w.poorS > 0 && share > config.wearSignalPoorMaxShare { b.unknown(wearSignalPoor) }
+        }
+
+        /// The post-bout exclusion of one bout: the longest matching dose row, never below the floor.
+        public static func postBoutExclusionS(_ bout: BoutRef, _ config: EligibilityConfig) -> Int {
+            config.postBoutDoses
+                .filter { ($0.kind == nil || $0.kind == bout.kind) && bout.durationS >= $0.minDurationS }
+                .map(\.exclusionS).reduce(config.postBoutExclusionS, max)
         }
 
         private static func exertionEvidence(_ b: inout Builder, exertion: [ExertionWindowSummary],

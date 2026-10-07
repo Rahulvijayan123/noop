@@ -625,6 +625,43 @@ final class PCEligibilityContextTests: XCTestCase {
         XCTAssertEqual(verdict(track: hart(0.9)).state, .eligible)
     }
 
+    func testPostBoutExclusionScalesWithTheBoutsDose() {
+        func bout(_ kind: String, minutes: Int, endedMinutesAgo: Int) -> PC.BoutRef {
+            PC.BoutRef(boutId: "\(kind)\(minutes)", kind: kind, endedAt: F.t0 - endedMinutesAgo * 60,
+                       secondsBeforeMeasurement: endedMinutesAgo * 60, durationS: minutes * 60)
+        }
+        func state(_ bouts: [PC.BoutRef]) -> PC.EligibilityState {
+            B.evaluate(.stableAwakeRest, metric: .heartRate, support: support, validity: F.validSignal,
+                       activity: PC.IntervalAlgebra.composition(over: support, track: quiet),
+                       preceding: PC.IntervalAlgebra.precedingHistory(before: support.start, track: quiet, lookbackS: 1800),
+                       sleepWear: F.awakeWorn, exertion: [], recentBouts: bouts, config: .init()).state
+        }
+        // A short walk: the fixed 10-minute floor, as before.
+        XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 9)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 11)]), .eligible)
+        // A 70-minute walk: 30 minutes.
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 20)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 31)]), .eligible)
+        // A 40-minute run: 60 minutes; a 75-minute run: 90 minutes.
+        XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 45)]), .ineligible)
+        XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 61)]), .eligible)
+        XCTAssertEqual(state([bout("running", minutes: 75, endedMinutesAgo: 80)]), .ineligible)
+        // An older long run still excludes after a later short walk that no longer does.
+        XCTAssertEqual(state([bout("walking", minutes: 5, endedMinutesAgo: 15),
+                              bout("running", minutes: 75, endedMinutesAgo: 80)]), .ineligible)
+        XCTAssertEqual(B.postBoutExclusionS(bout("workout", minutes: 30, endedMinutesAgo: 0), .init()), 1800)
+        // The floor still disables everything.
+        var off = PC.EligibilityConfig()
+        off.postBoutExclusionS = 0
+        XCTAssertEqual(B.evaluate(.stableAwakeRest, metric: .heartRate, support: support, validity: F.validSignal,
+                                  activity: PC.IntervalAlgebra.composition(over: support, track: quiet),
+                                  preceding: PC.IntervalAlgebra.precedingHistory(before: support.start, track: quiet,
+                                                                                 lookbackS: 1800),
+                                  sleepWear: F.awakeWorn, exertion: [],
+                                  recentBouts: [bout("running", minutes: 75, endedMinutesAgo: 5)], config: off).state,
+                       .eligible)
+    }
+
     func testPoorWearSignalMakesTheSupportUnknown() {
         func wear(_ state: WearSignalState, seconds: Int) -> PC.WearSignalSummary? {
             let epochs = [
