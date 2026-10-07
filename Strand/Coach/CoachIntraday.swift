@@ -32,16 +32,31 @@ enum CoachIntraday {
     }
 
     /// What the buckets are, said once, so the model never describes these as once-a-day values.
+    /// Resting HR: the lowest qualifying 5-minute mean over the trailing 12 buckets (the bucket included),
+    /// so each point's real support is the hour ending with its bucket — the worker's
+    /// `ContextInputs.restingSeriesMethod`, support `[b − 3300, b + 300)`.
+    static let restingTrailingBuckets = 12
+
     static func provenance(_ metric: IntradayMetric, bucketSeconds: Int = 300) -> String {
-        let base = "Computed on the server from the strap's data and recomputed about every 5 minutes as new data syncs; "
-            + "each reading covers a \(bucketWording(bucketSeconds)) bucket. A time with no reading means no valid one was possible then "
-            + "(strap off, phone not yet synced"
+        let computed = "Computed on the server from the strap's data and recomputed about every 5 minutes as new data syncs; "
+        let gaps = " A time with no reading means no valid one was possible then (strap off, phone not yet synced"
+        let base = computed + "each reading covers a \(bucketWording(bucketSeconds)) bucket." + gaps
         switch metric {
         case .hrv: return base + ", or the wrist moving, since HRV is only read when the wrist is still)."
-        case .restingHeartRate: return base + ", or the wrist moving)."
+        case .restingHeartRate:
+            // D3-14: the shown bucket is not the support. The minimum can come from any 5-min bin of the hour.
+            let support = bucketSeconds * restingTrailingBuckets
+            return computed + "each reading at a time T is the LOWEST \(bucketWording(bucketSeconds)) mean heart rate over the "
+                + "\(durationWording(support)) ending with T's bucket, so it can come from any part of that hour and does not "
+                + "describe what the wearer was doing at T." + gaps + ", or the wrist moving)."
         case .respiratoryRate: return base + ", the wrist moving, or too few clean beats; each reading pools about the last 2 minutes of breaths)."
         case .steps, .calories: return base + "). Each value is that bucket's share of the day's total."
         }
+    }
+
+    /// "60 minutes" / "90 seconds".
+    static func durationWording(_ seconds: Int) -> String {
+        seconds % 60 == 0 ? "\(seconds / 60) minutes" : "\(seconds) seconds"
     }
 
     /// "5-minute" / "1-minute" (or "90-second" for anything that is not a whole minute).
