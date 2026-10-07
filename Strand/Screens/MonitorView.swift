@@ -36,7 +36,7 @@ struct MonitorBaseline: Identifiable, Hashable, Codable {
     var series: [Double]
 }
 
-struct WatchdogEpisode: Identifiable, Hashable, Codable {
+struct LegacyMonitorWatchdogEpisode: Identifiable, Hashable, Codable {
     let id: String
     var start: Date
     var label: String
@@ -74,7 +74,7 @@ struct MonitoringQuality: Hashable, Codable {
 
 struct MonitorSnapshot: Hashable, Codable {
     var baselines: [MonitorBaseline]
-    var episodes: [WatchdogEpisode]
+    var episodes: [LegacyMonitorWatchdogEpisode]
     var quality: MonitoringQuality
 }
 
@@ -113,21 +113,21 @@ extension MonitorSnapshot {
                                 usualText: "Usual 7–9 h", series: series(8, 0.8, 2.8)),
             ],
             episodes: [
-                WatchdogEpisode(id: "ep-1", start: when(daysAgo: 2, 13, 32), label: "Elevated resting HR",
+                LegacyMonitorWatchdogEpisode(id: "ep-1", start: when(daysAgo: 2, 13, 32), label: "Elevated resting HR",
                                 duration: 12 * 60, tone: .alert),
-                WatchdogEpisode(id: "ep-2", start: when(daysAgo: 4, 10, 14), label: "Low HRV",
+                LegacyMonitorWatchdogEpisode(id: "ep-2", start: when(daysAgo: 4, 10, 14), label: "Low HRV",
                                 duration: 18 * 60, tone: .alert),
-                WatchdogEpisode(id: "ep-3", start: when(daysAgo: 6, 15, 48), label: "Higher than usual HR",
+                LegacyMonitorWatchdogEpisode(id: "ep-3", start: when(daysAgo: 6, 15, 48), label: "Higher than usual HR",
                                 duration: 25 * 60, tone: .notice),
-                WatchdogEpisode(id: "ep-4", start: when(daysAgo: 8, 22, 6), label: "Elevated respiratory rate",
+                LegacyMonitorWatchdogEpisode(id: "ep-4", start: when(daysAgo: 8, 22, 6), label: "Elevated respiratory rate",
                                 duration: 9 * 60, tone: .notice),
-                WatchdogEpisode(id: "ep-5", start: when(daysAgo: 11, 9, 41), label: "Low HRV",
+                LegacyMonitorWatchdogEpisode(id: "ep-5", start: when(daysAgo: 11, 9, 41), label: "Low HRV",
                                 duration: 32 * 60, tone: .alert),
-                WatchdogEpisode(id: "ep-6", start: when(daysAgo: 14, 17, 20), label: "Elevated resting HR",
+                LegacyMonitorWatchdogEpisode(id: "ep-6", start: when(daysAgo: 14, 17, 20), label: "Elevated resting HR",
                                 duration: 15 * 60, tone: .alert),
-                WatchdogEpisode(id: "ep-7", start: when(daysAgo: 19, 12, 3), label: "Higher than usual HR",
+                LegacyMonitorWatchdogEpisode(id: "ep-7", start: when(daysAgo: 19, 12, 3), label: "Higher than usual HR",
                                 duration: 21 * 60, tone: .notice),
-                WatchdogEpisode(id: "ep-8", start: when(daysAgo: 24, 3, 55), label: "Low HRV",
+                LegacyMonitorWatchdogEpisode(id: "ep-8", start: when(daysAgo: 24, 3, 55), label: "Low HRV",
                                 duration: 47 * 60, tone: .alert),
             ],
             quality: MonitoringQuality(coverage: 0.96, validWear: 0.98, status: .good))
@@ -418,6 +418,25 @@ struct MonitorView: View {
     var body: some View {
         ScreenScaffold(title: "Monitor", subtitle: "Nara pipeline diagnostics", trailing: { HeaderSettingsButton() }) {
             VStack(alignment: .leading, spacing: 24) {
+                NavigationLink(value: TabRoute.layer1) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Day & night usuals")
+                                .font(StrandFont.subhead.weight(.semibold))
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text("Layer 1. Separate from Charge.")
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                    .padding(16)
+                    .naraCard()
+                }
+                .buttonStyle(.plain)
                 toolbar
                 if let diagnostics {
                     surface(diagnostics)
@@ -634,8 +653,8 @@ struct MonitorView: View {
 
 // MARK: - Watchdog page
 
-struct WatchdogEpisodeRow: View {
-    let episode: WatchdogEpisode
+struct LegacyMonitorWatchdogEpisodeRow: View {
+    let episode: LegacyMonitorWatchdogEpisode
     var showsChevron = false
 
     var body: some View {
@@ -668,10 +687,10 @@ struct WatchdogEpisodeRow: View {
 }
 
 /// Every watchdog episode, newest first, with the totals across them.
-struct WatchdogView: View {
+struct LegacyMonitorWatchdogView: View {
     var snapshot: MonitorSnapshot = .sample
 
-    private var episodes: [WatchdogEpisode] { snapshot.episodes.sorted { $0.start > $1.start } }
+    private var episodes: [LegacyMonitorWatchdogEpisode] { snapshot.episodes.sorted { $0.start > $1.start } }
 
     var body: some View {
         ScreenScaffold(title: "Watchdog", subtitle: "Episodes in the last 30 days") {
@@ -684,7 +703,7 @@ struct WatchdogView: View {
                 VStack(spacing: 0) {
                     ForEach(Array(episodes.enumerated()), id: \.element.id) { index, episode in
                         if index > 0 { Divider().overlay(StrandPalette.hairline) }
-                        WatchdogEpisodeRow(episode: episode)
+                        LegacyMonitorWatchdogEpisodeRow(episode: episode)
                     }
                     if episodes.isEmpty {
                         Text("No episodes")

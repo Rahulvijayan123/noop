@@ -346,6 +346,8 @@ targets:
           # the re-score task, which is submitted only when a re-score is OWED, and a missing strap owes
           # none, so that task would never run in the one case the warning exists for.
           - $(PRODUCT_BUNDLE_IDENTIFIER).stalebattery
+          # On-device Watchdog tick. Not the hosted Charge worker.
+          - $(PRODUCT_BUNDLE_IDENTIFIER).watchdog
         # Cloud mode is OFF by default and opt-in, so these strings describe the default (on-device)
         # behaviour first and name the cloud case explicitly rather than claiming nothing ever leaves the
         # device. A build with no configured receiver cannot enable cloud mode at all (see FORK_SCOPE.md).

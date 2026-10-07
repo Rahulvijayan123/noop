@@ -622,12 +622,12 @@ struct LiquidTodayView: View {
                           tint: chargeDisplay.pct.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.chargeColor,
                           animated: dataLoaded, onGuide: { guideSection = .charge },
                           status: chargeDisplay.ringStatus,
-                          detailRoute: .metric(HeroRingMetric.charge))
+                          detailRoute: .baselineCharts, labelRoute: .baselineCharts)
             HeroScoreCell(label: String(localized: "Watchdog"), score: watchdogLoad,
                           tint: StrandPalette.effortColor, animated: dataLoaded,
                           onGuide: { guideSection = .effort },
                           status: HeroRings.watchdogStatus(load: watchdogLoad),
-                          detailRoute: .watchdog)
+                          detailRoute: .watchdog, labelRoute: .watchdog)
             HeroScoreCell(label: String(localized: "Recovery"), score: restScore, tint: StrandPalette.restColor,
                           animated: dataLoaded, onGuide: { guideSection = .rest },
                           status: HeroRings.recoveryStatus(score: restScore),
@@ -1808,6 +1808,9 @@ private struct HeroScoreCell: View {
     /// the same score land on the identical dossier rather than diverging. The LABEL keeps its own job:
     /// it opens the scoring guide, which is this screen's only route to that explainer.
     var detailRoute: TabRoute? = nil
+    /// When set, the word under the ring opens this route instead of the scoring guide.
+    /// Used so the homepage words Baseline and Watchdog open those graphs.
+    var labelRoute: TabRoute? = nil
 
     /// The gauge, linked when there is somewhere to go.
     ///
@@ -1852,22 +1855,35 @@ private struct HeroScoreCell: View {
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .lineLimit(1).minimumScaleFactor(0.7)
-            Button(action: onGuide) {
-                HStack(spacing: 3) {
-                    // #74: one line, shrink-to-fit rather than wrap under large Dynamic Type (mirrors the
-                    // score number above) so CHARGE/EFFORT/REST never grow the hero card to two lines.
-                    Text(label).font(StrandFont.overline)
-                        .lineLimit(1).minimumScaleFactor(0.7)
-                    Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).opacity(0.6)
-                }
-                // Theme-aware hero label (#1160): normal text token — readable on Dark and Light
-                // panel surfaces alike (was onDark* when the hero fill was pinned dark).
-                .foregroundStyle(StrandPalette.textSecondary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text("\(label), \(spokenScore). See how it is scored."))
+            labelControl
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var labelRow: some View {
+        HStack(spacing: 3) {
+            // #74: one line, shrink-to-fit rather than wrap under large Dynamic Type (mirrors the
+            // score number above) so CHARGE/EFFORT/REST never grow the hero card to two lines.
+            Text(label).font(StrandFont.overline)
+                .lineLimit(1).minimumScaleFactor(0.7)
+            Image(systemName: "chevron.right").font(.system(size: 9, weight: .semibold)).opacity(0.6)
+        }
+        // Theme-aware hero label (#1160): normal text token — readable on Dark and Light
+        // panel surfaces alike (was onDark* when the hero fill was pinned dark).
+        .foregroundStyle(StrandPalette.textSecondary)
+    }
+
+    @ViewBuilder
+    private var labelControl: some View {
+        if let labelRoute {
+            NavigationLink(value: labelRoute) { labelRow }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("\(label), \(spokenScore). Opens the graphs."))
+        } else {
+            Button(action: onGuide) { labelRow }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text("\(label), \(spokenScore). See how it is scored."))
+        }
     }
 }
 

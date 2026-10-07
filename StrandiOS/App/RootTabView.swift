@@ -121,7 +121,7 @@ struct RootTabView: View {
         // the corresponding system material and safe-area behaviour from the same TabView.
         TabView(selection: nativeTabSelection) {
             tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            tab(MonitorView(), "Monitor", "waveform.path.ecg", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            tab(BaselineMonitorView(), "Monitor", "waveform.path.ecg", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
             tab(EventsView(), "Events", "calendar", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
             tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
             // Conditional on the master switch. The tags stay LITERAL rather than being renumbered when
@@ -206,7 +206,7 @@ struct RootTabView: View {
             case .devices:
                 showDevices = true
                 router.requestedDestination = nil
-            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms, .trends:
+            case .insightsHub, .labBook, .fusedRecord, .rhythm, .alarms, .trends, .baseline, .treatment:
                 routedPillar = dest
                 router.requestedDestination = nil
             case .coach:
@@ -333,6 +333,8 @@ struct RootTabView: View {
                 // it ever reaches the host.
                 case .coach: CoachChatView()
                 case .alarms: SmartAlarmView()
+                case .baseline: BaselineMonitorView()
+                case .treatment: TreatmentCaregiverView()
                 }
             }
             // The Trends/Today fallbacks above emit TabRoute value pushes (#198), which need a

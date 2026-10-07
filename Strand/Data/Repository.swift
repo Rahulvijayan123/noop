@@ -878,6 +878,19 @@ final class Repository: ObservableObject {
     /// Expose the shared store handle (used by the importer to persist mapped rows).
     func storeHandle() async -> WhoopStore? { await ensureStore() }
 
+    /// Live Watchdog windows use the active strap id this repository is bound to.
+    func watchdogSourceIds() async -> [String] {
+        [deviceId]
+    }
+
+    /// Sleep intervals for live Watchdog: this strap and its computed sibling only.
+    /// Dashboard `sleepSessions` still unions every registered WHOOP.
+    func watchdogSleepSessions(from: Int, to: Int, limit: Int = 40) async -> [CachedSleepSession] {
+        guard let store = await ensureStore() else { return [] }
+        let ids = [deviceId, computedDeviceId]
+        return Self.dedupBlocks(await unionRawSleepBlocks(store: store, ids: ids, from: from, to: to, limit: limit))
+    }
+
     /// CAPTURE-D (#797): the on-device DATA VOLUME read FRESH from the STORE (never the `@Published`
     /// dashboard caches), for the Display & Performance test mode's `dataVolume` line. dbRows is the raw
     /// decoded-stream footprint; importedDays is the count of imported daily-metric rows under the active
