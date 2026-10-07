@@ -102,6 +102,14 @@ class JobTools:
         return ev.sleep_context(self.sources.scores(), self.anchor, self.zone, int(args.get("nights", 7)),
                                 self._context())
 
+    def state_breakdown(self, args: dict[str, Any]) -> dict[str, Any]:
+        return ev.state_breakdown(self.sources.scores(), self.metric, self.anchor, self._context(),
+                                  self.sources.snapshots(), self.zone)
+
+    def movement_patterns(self, args: dict[str, Any]) -> dict[str, Any]:
+        return ev.movement_patterns(self.sources.previous_context()[0], self._context(), self.sources.scores(),
+                                    self.anchor, self.zone, self.sources.activity_runs())
+
     def workout_context(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.workout_context(self._context())
 
@@ -159,6 +167,12 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
     Tool("get_metric_summary", "Latest value, previous night, personal baseline and usual range, last 7 nights, "
          "the context layer's comparison and change episode, and whether the latest night is unusual for this person.",
          _object(), JobTools.metric_summary),
+    Tool("get_state_breakdown", "This metric in each measured state (during sleep, at calm awake rest, around "
+         "movement) and by time of day, each against its own usual value and usual band (the threshold).",
+         _object(), JobTools.state_breakdown),
+    Tool("get_movement_patterns", "Movement bouts the evening before the night and on the day (local times, "
+         "minutes), recent training load, and how long before sleep the last movement ended (estimated).",
+         _object(), JobTools.movement_patterns),
     Tool("get_related_metrics", "Other nightly signals vs their own medians (HRV, resting HR, respiratory rate, "
          "skin temperature, sleep), each marked measured or estimated.",
          _object({"metrics": {"type": "array", "maxItems": 8, "items": {"type": "string", "enum": sorted(SIGNALS)}}}),
@@ -206,6 +220,8 @@ VARIABLES: tuple[Variable, ...] = (
     Variable("manifest", "get_context_manifest", "meta"),
     Variable("metric_summary", "get_metric_summary", "physiological"),
     Variable("metric_series", "get_metric_series", "physiological"),
+    Variable("state_breakdown", "get_state_breakdown", "physiological"),
+    Variable("movement_patterns", "get_movement_patterns", "movement"),
     Variable("related_metrics", "get_related_metrics", "physiological"),
     Variable("sleep_context", "get_sleep_context", "physiological"),
     Variable("workout_context", "get_workout_context", "movement"),

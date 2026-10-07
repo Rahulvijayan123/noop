@@ -341,10 +341,30 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
       const withMemory = await fingerprint(USER_A);
       assert.notEqual(withMemory, noted, 'a memory item\'s topic is input too');
 
+      // The hosted day snapshots (HRV slots by activity) and the activity documents around the night count too.
+      await db.sql(`insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,
+          computed_at, payload) values ('${USER_A}', '${DEVICE_A}', '2026-10-07', 'frwhoop-server-1', 1, now(),
+          '{"daily": {"hrv_series": {"slot_s": 900, "points": [[1791400000, 61.2, 400]]}}}')`);
+      const withSnapshot = await fingerprint(USER_A);
+      assert.notEqual(withSnapshot, withMemory, 'the hosted snapshot is not an input');
+      await db.sql(`insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,
+          computed_at, payload) values ('${USER_A}', '${DEVICE_A}', '2026-10-07', 'frwhoop-server-1', 2, now(),
+          '{"daily": {"hrv_series": {"slot_s": 900, "points": [[1791400000, 64.0, 410]]}}}')`);
+      const rescored = await fingerprint(USER_A);
+      assert.notEqual(rescored, withSnapshot, 'a newer snapshot result did not move the inputs');
+      await db.sql(`insert into public.activity_context_days(user_id, device_id, day, algorithm_version, schema_version,
+          ontology_version, decoder_version, feature_schema, model_version, preprocessing_version, job_fingerprint,
+          input_revision, publish_interval_s, observed_s, run_count, event_count, unclear_s, mean_confidence, document,
+          result_revision, computed_at) values ('${USER_A}', '${DEVICE_A}', '2026-10-06', 'hart-activity-1', 2, 'v1',
+          'd1', 'f1', 'm1', 'p1', '${'a'.repeat(64)}', 1, 60, 3600, 1, 0, 0, 0.9,
+          '{"runs": [{"s": 1791300000, "e": 1791301200, "activity_class": "walking"}]}', 1, now())`);
+      const withActivity = await fingerprint(USER_A);
+      assert.notEqual(withActivity, rescored, 'the activity document is not an input');
+
       // Another user's data never moves this user's inputs.
       await db.sql(`insert into public.coach_memory_items(user_id, content, importance) values ('${USER_B}', 'Other user', 5)`);
       await score(USER_B, '2026-10-07', 60, 40, DEVICE_B);
-      assert.equal(await fingerprint(USER_A), withMemory);
+      assert.equal(await fingerprint(USER_A), withActivity);
 
       // ... and every change above re-queues the analysis on the next visit.
       const requeued = await request(USER_A);

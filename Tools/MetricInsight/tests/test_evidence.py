@@ -128,3 +128,95 @@ def test_sleep_events_and_quality():
     quality = ev.data_quality(rows, RHR, ANCHOR, 90, None, None)
     assert quality["measured_nights"] == 7 and quality["tracked_nights"] == 7 and quality["missing_nights"] == 0
     assert quality["first_measured"] == "2026-09-30" and quality["longest_gap_nights"] == 0
+
+
+def test_layer1_baseline_rules():
+    anchor = date(2026, 10, 6)
+    values = {anchor - timedelta(days=i): 60.0 + (i % 5) for i in range(1, 61)}  # 60 nights before the anchor
+    base = ev.layer1_baseline(values, anchor, series='resting_hr', decimals=0)
+    long = base["long"]
+    assert long["from"] == "2026-08-07" and long["to"] == "2026-09-28" and long["nights"] == 53
+    assert long["shown"] and not long["stale"]
+    assert long["low"] < long["center"] < long["high"]
+    assert base["week"]["nights"] == 7 and base["week"]["shown"]
+    # the newest week never enters the long copy: a jump in it moves the week copy only
+    jumped = dict(values)
+    jumped.update({anchor - timedelta(days=i): 90.0 for i in range(1, 8)})
+    assert ev.layer1_baseline(jumped, anchor, series='resting_hr', decimals=0)["long"] == long
+    assert ev.layer1_baseline(jumped, anchor, series='resting_hr', decimals=0)["week"]["center"] == 90
+    # HRV on ln(RMSSD): the band is multiplicative, wider above than below
+    spread = {d: 60.0 * (1 + 0.04 * ((i * 7) % 11 - 5)) for i, d in enumerate(sorted(values))}
+    hrv = ev.layer1_baseline(spread, anchor, series='hrv_rmssd', decimals=1)
+    assert hrv["long"]["high"] - hrv["long"]["center"] > hrv["long"]["center"] - hrv["long"]["low"]
+    assert hrv["long"]["spread_floored"] is False
+    # whole-bpm nights that mostly repeat: the spread is floored at Layer 1's 2 bpm, so the band stays real
+    flat = ev.layer1_baseline({d: 52.0 for d in values}, anchor, series='resting_hr', decimals=0)["long"]
+    assert flat["spread_floored"] is True and flat["center"] == 52
+    assert flat["low"] <= 49 and flat["high"] >= 55 and 1.5 <= flat["band_width_k"] <= 2.8
+    # readiness and staleness
+    few = {anchor - timedelta(days=i): 60.0 for i in (8, 9, 10)}
+    few_long = ev.layer1_baseline(few, anchor, series='resting_hr', decimals=0)["long"]
+    assert few_long["shown"] is False and few_long["established"] is False
+    four = {anchor - timedelta(days=i): 60.0 for i in (8, 9, 10, 11)}
+    assert ev.layer1_baseline(four, anchor, series='resting_hr', decimals=0)["long"]["shown"] is True
+    # outside Layer 1's plausible range (resting HR 30-120) a night is not trained
+    implausible = dict(values)
+    implausible.update({anchor - timedelta(days=i): 200.0 for i in range(8, 30)})
+    assert ev.layer1_baseline(implausible, anchor, series='resting_hr', decimals=0)["long"]["nights"] == 31
+    old = {anchor - timedelta(days=i): 60.0 for i in range(20, 50)}
+    assert ev.layer1_baseline(old, anchor, series='resting_hr', decimals=0)["long"]["stale"] is True
+    assert ev.position(70, long) in ("above_usual_band", "within_usual_band")
+    assert ev.position(None, long) == "not_measured" and ev.position(60, {"shown": False}) == "no_usual_yet"
+
+
+def _snapshot_day(points, slots, sleep):
+    return {"daily": {"hrv_series": {"slot_s": 900, "points": points},
+                      "activity_context": {"contexts": {"hrv_slots": slots, "sleep_sessions": []}}},
+            "sleep": sleep}
+
+
+def test_hrv_through_the_day_is_grouped_by_what_the_person_was_doing():
+    zone = ZoneInfo("America/Los_Angeles")
+    night_start = int(datetime(2026, 10, 5, 23, 0, tzinfo=zone).timestamp())
+    walk = int(datetime(2026, 10, 5, 18, 0, tzinfo=zone).timestamp())
+    points = [[night_start + i * 900, 80.0 + i, 900] for i in range(4)]            # asleep
+    points += [[walk, 30.0, 300], [walk + 900, 41.0, 400], [walk + 3600, 52.0, 600]]
+    slots = [{"slot_s": walk, "shares": {"walking": 0.7, "stationary": 0.3}, "unknown_share": 0, "recent_activity_s": None,
+              "post_activity": False},
+             {"slot_s": walk + 900, "shares": {"stationary": 1.0}, "unknown_share": 0, "recent_activity_s": 300,
+              "post_activity": True},
+             {"slot_s": walk + 3600, "shares": {"stationary": 0.95}, "unknown_share": 0, "recent_activity_s": 3000,
+              "post_activity": False}]
+    sleep = [{"start_at": "2026-10-06T06:00:00Z", "end_at": "2026-10-06T13:00:00Z", "is_nap": False}]
+    result = ev.hrv_slot_states({date(2026, 10, 5): _snapshot_day(points, slots, sleep)}, zone)
+    states = {s["state"]: s for s in result["states"]}
+    assert states["sleep"]["median_ms"] == 82 and states["sleep"]["readings"] == 4
+    assert states["while_moving"]["median_ms"] == 30 and states["while_moving"]["from_local"] == "18:00"
+    assert states["after_movement"]["median_ms"] == 41
+    assert states["calm_awake"]["median_ms"] == 52
+    assert list(states) == ["sleep", "calm_awake", "after_movement", "while_moving"]
+
+
+def test_movement_patterns_from_activity_runs_and_the_gap_before_sleep():
+    zone = ZoneInfo("America/Los_Angeles")
+    t = lambda h, m=0: int(datetime(2026, 10, 5, h, m, tzinfo=zone).timestamp())  # noqa: E731
+    runs = [{"start_ts": t(18), "end_ts": t(18, 20), "activity_class": "walking", "source_rank": 1},
+            {"start_ts": t(18, 21), "end_ts": t(18, 40), "activity_class": "walking", "source_rank": 1},  # merged
+            {"start_ts": t(19), "end_ts": t(19, 30), "activity_class": "sitting", "source_rank": 1},
+            {"start_ts": t(21), "end_ts": t(21, 25), "activity_class": "cycling", "source_rank": 1}]
+    scores = {date(2026, 10, 6): {"sleep_onset_at": datetime(2026, 10, 5, 23, 0, tzinfo=zone)}}
+    out = ev.movement_patterns(None, None, scores, date(2026, 10, 6), zone, runs)
+    assert out["before_the_night"] == [{"kind": "walking", "start_local": "18:00", "end_local": "18:40", "minutes": 40},
+                                       {"kind": "cycling", "start_local": "21:00", "end_local": "21:25", "minutes": 25}]
+    assert out["minutes_by_kind_before_the_night"] == {"walking": 40, "cycling": 25}
+    assert out["last_movement_before_sleep_min"] == 95 and out["estimated"] is True
+
+
+def test_logged_medications_are_never_named():
+    zone = ZoneInfo("UTC")
+    start = int(datetime(2026, 10, 5, 8, 0, tzinfo=zone).timestamp())
+    events = ev.recent_events([{"kind": "medication", "label": "Brand-name pill", "occurred_start": start,
+                                "occurred_end": start + 60, "time_precision": "exact", "confirmation": "confirmed",
+                                "dose_amount": 20, "dose_unit": "mg"}], None, zone)
+    assert events["events"][0]["label"] is None and "dose" not in events["events"][0]
+    assert "never name it" in events["events"][0]["note"]

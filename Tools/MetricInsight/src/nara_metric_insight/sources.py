@@ -58,23 +58,30 @@ class Sources:
 
     def context(self) -> tuple[dict[str, Any] | None, str | None]:
         """The current context document of the anchor day's scoring device: retrospective first, else live."""
-        def load() -> tuple[dict[str, Any] | None, str | None]:
-            if self.anchor is None:
-                return None, None
-            device = (self.scores().get(self.anchor) or {}).get("source_device_id")
-            if device is None:
-                return None, None
+        return self._get("context", lambda: self._context_of(self.anchor))
 
-            def read(cur):
-                cur.execute(
-                    "select mode, document from public.physiology_context_days "
-                    "where user_id = %s and device_id = %s and day = %s and superseded_by is null "
-                    "order by (mode = 'retrospective') desc limit 1",
-                    (self.user_id, device, self.anchor))
-                row = cur.fetchone()
-                return (row["document"], row["mode"]) if row else (None, None)
-            return self.db.as_owner(self.user_id, read)
-        return self._get("context", load)
+    def previous_context(self) -> tuple[dict[str, Any] | None, str | None]:
+        """The day before the anchor: the movement that came before the anchor night (a night is scored on the
+        day it ends)."""
+        return self._get("previous_context",
+                         lambda: self._context_of(self.anchor - timedelta(days=1)) if self.anchor else (None, None))
+
+    def _context_of(self, day: date | None) -> tuple[dict[str, Any] | None, str | None]:
+        if day is None or self.anchor is None:
+            return None, None
+        device = (self.scores().get(self.anchor) or {}).get("source_device_id")
+        if device is None:
+            return None, None
+
+        def read(cur):
+            cur.execute(
+                "select mode, document from public.physiology_context_days "
+                "where user_id = %s and device_id = %s and day = %s and superseded_by is null "
+                "order by (mode = 'retrospective') desc limit 1",
+                (self.user_id, device, day))
+            row = cur.fetchone()
+            return (row["document"], row["mode"]) if row else (None, None)
+        return self.db.as_owner(self.user_id, read)
 
     def exposures(self) -> list[dict[str, Any]]:
         def load() -> list[dict[str, Any]]:
@@ -103,6 +110,52 @@ class Sources:
                 return list(cur.fetchall())
             return self.db.service(read, read_only=True)
         return self._get("memory", load)
+
+    def snapshots(self) -> dict[date, dict[str, Any]]:
+        """The hosted day snapshots of the night's two local days (the evening before and the morning of), through
+        the owner's own RPC (get_server_score_snapshot_v2 derives the owner from auth.uid()): the 15-minute HRV
+        slots, their activity composition, the sleep sessions and sleep analytics."""
+        def load() -> dict[date, dict[str, Any]]:
+            if self.anchor is None:
+                return {}
+            out = {}
+            for day in (self.anchor - timedelta(days=1), self.anchor):
+                def read(cur, day=day):
+                    cur.execute("select public.get_server_score_snapshot_v2(%s) as s", (day,))
+                    row = cur.fetchone()
+                    return row["s"] if row else None
+                payload = self.db.as_owner(self.user_id, read)
+                if isinstance(payload, dict) and isinstance(payload.get("daily"), dict):
+                    out[day] = payload
+            return out
+        return self._get("snapshots", load)
+
+    def activity_runs(self) -> list[dict[str, Any]]:
+        """Decoded activity runs (activity_context_runs) from the morning before the night to the end of the
+        anchor day, for the scoring device; the best source per UTC day (raw-IMU HART before strap streams)."""
+        def load() -> list[dict[str, Any]]:
+            if self.anchor is None:
+                return []
+            device = (self.scores().get(self.anchor) or {}).get("source_device_id")
+            if device is None:
+                return []
+            low = int(datetime.combine(self.anchor - timedelta(days=1), time(), self.zone).timestamp())
+            high = int(datetime.combine(self.anchor + timedelta(days=1), time(), self.zone).timestamp())
+
+            def read(cur):
+                cur.execute(
+                    "select day, source_rank, start_ts, end_ts, activity_class, class_confidence, sleep_state, "
+                    "wear_state from public.activity_context_runs where user_id = %s and device_id = %s "
+                    "and day between %s and %s and start_ts < %s and end_ts > %s order by start_ts",
+                    (self.user_id, device, self.anchor - timedelta(days=2), self.anchor + timedelta(days=1),
+                     high, low))
+                return list(cur.fetchall())
+            rows = self.db.as_owner(self.user_id, read)
+            best = {}
+            for row in rows:
+                best[row["day"]] = min(best.get(row["day"], 9), row["source_rank"])
+            return [row for row in rows if row["source_rank"] == best[row["day"]]]
+        return self._get("activity_runs", load)
 
     # Not connected yet. Each becomes an owner-scoped read here (Database.as_owner) once its table exists, and the
     # table joins internal.metric_insight_inputs so a change re-analyses; the tools and the prompt stay the same.

@@ -331,6 +331,46 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
             f.count(signal.get("baseline_nights"))
             if signal.get("estimated"):
                 f.estimated.add(SIGNAL_GROUP.get(str(signal.get("metric")), str(signal.get("metric"))))
+    for breakdown in _listed(evidence.get("get_state_breakdown")):
+        for state in breakdown.get("states") or []:
+            unit = state.get("units") or ""
+            f.add(unit, state.get("value"))
+            f.dated(unit, breakdown.get("night"), state.get("value")) if state.get("state") == "sleep" else None
+            for band in (state.get("usual") or {}, state.get("week") or {}):
+                for key in ("center", "low", "high"):
+                    f.add(unit, band.get(key))
+                f.count(band.get("nights"))
+            for slot in state.get("time_of_day") or []:
+                f.add(unit, slot.get("value"))
+            if state.get("value") is not None and _num(_get(state, "usual", "center")) is not None:
+                f.change(unit, round(state["value"] - state["usual"]["center"], 1))
+    for breakdown in _listed(evidence.get("get_state_breakdown")):
+        for state in (breakdown.get("through_the_day") or {}).get("states") or []:
+            for key in ("median_ms", "low_ms", "high_ms"):
+                f.add("ms", state.get(key))
+            f.count(state.get("readings"))
+            f.add("min", state.get("minutes"))
+            f.add("h", round(state["minutes"] / 60.0, 1) if state.get("minutes") is not None else None)
+            for key in ("from_local", "to_local"):
+                if state.get(key):
+                    f.clocks.add(_clock_key(state[key]))
+        f.count((breakdown.get("through_the_day") or {}).get("slot_minutes"))
+    for movement in _listed(evidence.get("get_movement_patterns")):
+        for minutes in (movement.get("minutes_by_kind_before_the_night") or {}).values():
+            f.add("min", minutes)
+        for bout in (movement.get("before_the_night") or []) + (movement.get("on_the_day") or []):
+            f.add("min", bout.get("minutes"))
+            for key in ("start_local", "end_local"):
+                if bout.get(key):
+                    f.clocks.add(_clock_key(bout[key]))
+        f.add("min", movement.get("last_movement_before_sleep_min"))
+        f.add("h", round((movement.get("last_movement_before_sleep_min") or 0) / 60.0, 1)
+              if movement.get("last_movement_before_sleep_min") is not None else None)
+        for window in movement.get("load") or []:
+            f.count(window.get("hours"))
+            f.add("h", window.get("hours"))
+            f.count(window.get("bouts"))
+            f.add("min", window.get("locomotion_min"))
     for sleep in _listed(evidence.get("get_sleep_context")):
         for night in sleep.get("nights") or []:
             f.add("h", night.get("duration_h"))

@@ -9,7 +9,8 @@
 --   metric_insights       one immutable row per published analysis; the current one has superseded_at NULL
 --
 -- Caching: an analysis is keyed by an input fingerprint (internal.metric_insight_inputs): the scores of the 90
--- days ending at the metric's latest measured day, the whole context document the worker reads for that day,
+-- days ending at the metric's latest measured day, the whole context documents the worker reads (that day and the
+-- day before), the hosted day snapshots and activity documents around the night,
 -- the exposure events around it and the coach memory the worker may read. Changing what the worker does with
 -- them (prompt, tools, validator) must bump internal.metric_insight_version() so cached analyses are redone. The scores
 -- route calls metric_insight_request_v1 when the detail screen opens: an insight whose fingerprint matches is
@@ -155,6 +156,7 @@ declare
   v_device uuid;
   v_zone text;
   v_doc jsonb;
+  v_previous jsonb;
   v_lo bigint;
   v_hi bigint;
 begin
@@ -172,8 +174,10 @@ begin
   v_hi := extract(epoch from ((v_anchor + 1)::timestamp at time zone v_zone))::bigint;
   -- The whole selected document: the worker reads many of its sections (comparisons, episodes, availability,
   -- sleep, exertion, bouts, daily values, exposure categories), and a republish of any of them is new input.
+  -- And the day before: the movement that came before the anchor night (a night is scored on the day it ends).
   if v_device is not null then
     v_doc := internal.metric_insight_context_document(p_user, v_device, v_anchor);
+    v_previous := internal.metric_insight_context_document(p_user, v_device, v_anchor - 1);
   end if;
   return query select v_anchor, encode(pg_catalog.sha256(convert_to(
     internal.metric_insight_version() || E'\n' || p_user::text || E'\n' || p_metric
@@ -184,7 +188,22 @@ begin
            from public.server_daily_scores s
           where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1'
             and s.day between v_anchor - 89 and v_anchor), '')
-    || E'\ncontext:' || coalesce(md5(v_doc::text), '-')
+    || E'\ncontext:' || coalesce(md5(v_doc::text), '-') || ':' || coalesce(md5(v_previous::text), '-')
+    -- The hosted day snapshots of the night's two days (HRV slots, their activity composition, sleep sessions):
+    -- the latest result of the active algorithm, as get_server_score_snapshot_v2 serves it.
+    || E'\nsnapshots:' || coalesce((
+         select string_agg(x.day::text || ':' || md5(x.payload::text), ',' order by x.day)
+           from (select distinct on (n.day) n.day, n.payload from public.scoring_snapshots_v2 n
+                  where n.user_id = p_user and n.device_id = v_device and n.day between v_anchor - 1 and v_anchor
+                    and n.algorithm_version = (select a.algorithm_version from public.scoring_algorithms_v2 a
+                                                where a.active)
+                  order by n.day, n.result_revision desc) x), '')
+    -- The decoded activity documents around the night (activity_context_runs reads them; UTC days).
+    || E'\nactivity:' || coalesce((
+         select string_agg(c.day::text || ':' || c.algorithm_version || ':' || md5(c.document::text), ','
+                           order by c.day, c.algorithm_version)
+           from public.activity_context_days c
+          where c.user_id = p_user and c.device_id = v_device and c.day between v_anchor - 2 and v_anchor + 1), '')
     || E'\nexposures:' || coalesce((
          select string_agg(e.event_id || ':' || e.revision::text, ',' order by e.event_id collate "C")
            from public.exposure_events e

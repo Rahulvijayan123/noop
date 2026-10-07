@@ -50,10 +50,15 @@ their latest value and its history. The latest measured night is {latest_day}: {
 2. Find the story in the data, using only those variables:
    - what changed: the latest value against the person's usual value and usual range (metric_summary.baseline:
      the range is the threshold for "higher or lower than usual") and against the previous night;
-   - when and in which state it was measured: during sleep, at calm awake rest, or around movement, and the time
-     of day, wherever the variables say so;
-   - which movement, sleep or logged patterns came before it (workout_context, activity_context, sleep_context,
-     recent_events, user_context);
+   - in which state: state_breakdown gives the value during sleep, at calm awake rest and around movement, and by
+     time of day, each with its own usual value and usual band (the threshold). Compare a state only with its own
+     usual, and say which states are higher, lower or as usual; skip states that are not available.
+     state_breakdown.through_the_day (HRV) groups the 15-minute readings of the night's two days by what the
+     person was doing (asleep, calm and awake, just after moving, while moving): compare those states with each
+     other ("lower while you were walking, back up once you settled"), never with the nightly usual;
+   - which movement came before it: movement_patterns lists the bouts the evening before the night and on the
+     day (local times, minutes) and how long before sleep the last one ended; also workout_context,
+     activity_context, sleep_context, recent_events and user_context;
    - the most likely explanation in the data, said with care ("likely because…", "this can happen after…");
    - what limits confidence (missing nights, a short history, estimated signals, the comparison status).
 3. Search peer-reviewed research for the main pattern you describe, with generic scientific words only:
