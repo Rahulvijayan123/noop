@@ -51,6 +51,7 @@ struct SmartAlarmView: View {
                 windowHero
                 strapAlarmCard
                 strapRejectedCard   // #34: only shows when the strap keeps refusing the alarm
+                AlarmDiagnosticsCard()
                 honestyCard
                 windDownCard
             }
@@ -278,15 +279,10 @@ struct SmartAlarmView: View {
                     // was truth-synced once a real 4.0 wake was confirmed (PR #535: official-app wire
                     // capture + on-device buzz by the capture author); 5/MG remains experimental, so this
                     // gated branch keeps its backup-alarm wording.
-                    if model.whoop5Detected && !PuffinExperiment.isEnabled {
-                        Text("WHOOP 5/MG strap alarms require Protocol probes (Test Centre → 5/MG protocol diagnostics). Your wake time is saved, but the strap is not armed yet. Keep a backup alarm.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.statusWarning)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if model.whoop5Detected {
-                        // 5/MG with Protocol probes ON: the rev-4 command arms the strap. One wake was
-                        // captured on an MG (#864) and one reported on a 5.0 without a log (#2464);
-                        // neither repeated, so the copy simplifies both to "reported" and promises none.
+                    if model.whoop5Detected {
+                        // The rev-4 command arms the strap. One wake was captured on an MG (#864) and one
+                        // reported on a 5.0 without a log (#2464); neither repeated, so the copy
+                        // simplifies both to "reported" and promises none.
                         Text("Armed on the strap with an experimental 5/MG command. Strap-driven wakes have been reported on 5.0 and MG, but are not guaranteed. Keep a backup alarm for anything you cannot miss.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
@@ -499,9 +495,7 @@ struct SmartAlarmView: View {
     ///
     /// A strap that is merely disconnected is NOT excluded here: `armStrapAlarm` queues and arms on
     /// reconnect, so the alarm is real and the countdown to it is true.
-    private var strapAlarmWillArm: Bool {
-        !(model.whoop5Detected && !PuffinExperiment.isEnabled)
-    }
+    private var strapAlarmWillArm: Bool { true }
 
     /// The one moment every alarm readout on this screen is derived from, or nil when nothing will fire.
     ///
@@ -779,5 +773,92 @@ struct SmartAlarmView: View {
         case 7: return String(localized: "Sat")
         default: return "?"
         }
+    }
+}
+
+/// Live alarm diagnostics, on the Alarms screen itself. The alarm used to be debuggable only from a
+/// full debug export, so "it didn't buzz" had no visible evidence on the screen that arms it.
+///
+/// Observes only the coalesced `logRevision` (not the whole `LiveState`), so the 1 Hz heart-rate tick
+/// never re-renders this card or its parent.
+private struct AlarmDiagnosticsCard: View {
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var behavior: BehaviorStore
+
+    @State private var stateLines: [String] = []
+    @State private var logLines: [String] = []
+
+    var body: some View {
+        StrandCard(padding: 20) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Diagnostics").strandOverline()
+                    Text("Alarm log")
+                        .font(StrandFont.title2)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+
+                diagnosticsBlock(title: "State", lines: stateLines, emptyText: "No alarm state yet.")
+                Divider().overlay(StrandPalette.hairline)
+                diagnosticsBlock(title: "Recent alarm log",
+                                 lines: logLines,
+                                 emptyText: "Nothing logged yet. Turn the alarm on, or tap Re-send, with the strap connected.")
+
+                Button {
+                    model.applySmartAlarm()
+                    refresh()
+                } label: {
+                    Text("Re-send alarm to strap")
+                }
+                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+                .disabled(!behavior.smartAlarmEnabled)
+
+                Button {
+                    model.ble.buzzStrapOnce()
+                } label: {
+                    Text("Test buzz now")
+                }
+                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+
+                Text("Test buzz tells you whether the strap can vibrate at all. If it buzzes but the alarm does not, the alarm was not accepted or armed — the log above shows which.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .onAppear { refresh() }
+        .onReceive(model.live.$logRevision) { _ in refresh() }
+    }
+
+    @ViewBuilder
+    private func diagnosticsBlock(title: LocalizedStringKey, lines: [String], emptyText: LocalizedStringKey) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+            if lines.isEmpty {
+                Text(emptyText)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            } else {
+                ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
+                    Text(line)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+            }
+        }
+    }
+
+    private func refresh() {
+        stateLines = DebugDataDiagnostics.alarmLines().filter { !$0.hasPrefix("─") && $0 != "Alarm" }
+        let relevant = model.live.log.filter {
+            $0.contains("Alarm") || $0.contains("Smart alarm") || $0.contains("SET_ALARM_TIME")
+                || $0.contains("Buzz:")
+        }
+        logLines = Array(relevant.suffix(20))
     }
 }
