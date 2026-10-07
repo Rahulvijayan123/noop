@@ -39,7 +39,7 @@ def test_real_training_and_evaluation_blocked(tmp_path):
 def test_experiments_preregistered_and_standin():
     assert set(DECLARED) == set(EXPERIMENTS)
     for e in EXPERIMENTS.values():
-        assert e.encoder.startswith("standin:") or e.encoder.startswith("inertia-1/")
+        assert e.encoder.startswith(("standin:", "inertia-1/", "actinet/"))
         assert e.bundle_id.startswith("shadow-")
         if e.arch.startswith("from:"):
             assert e.arch[5:] in EXPERIMENTS

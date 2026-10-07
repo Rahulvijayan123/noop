@@ -338,3 +338,11 @@ for training, evaluation or any committed number; role pooled_ablation_non_wrist
   The crosswalk also lists label names of datasets that are EXCLUDED from all use (DSADS, RealWorld 2016,
   ExtraSensory, UT Complex [no licence stated], UCI HMP [conflicting licence], RecoFit) so the exclusion is
   auditable; no data of theirs is used. (GOTOV and WEAR were in this list until the 2026-10-06 decision.)
+
+## ssl-wearables / ActiNet (Oxford Wearables Group)
+
+`activity_context/inertia/vendor/ssl_wearables_resnet.py` is an inference-only copy of the harnet30 ResNet from
+https://github.com/OxWearables/ssl-wearables (tag v1.0.0, `sslearning/models/accNet.py`). The pinned weights are
+converted from ssl-wearables `mtl_30_best.mdl` and ActiNet's `ssl-ukb-c24-mw-30s-20260128` classifier
+(https://github.com/OxWearables/actinet). Upstream licence: CC BY-NC 4.0 (non-commercial). Used for an internal,
+non-commercial project; the weights are not redistributed from this repository.

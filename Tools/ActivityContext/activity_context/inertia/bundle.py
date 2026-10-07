@@ -67,8 +67,8 @@ import numpy as np
 from . import (CALIBRATION_SCHEMA, CLASSIFIER_HEADS, HEADS_SCHEMA, MULTILABEL_HEADS, OOD_SCHEMA, SOFTMAX_HEADS,
                TEST_GATE_SCHEMA)
 from . import bundle_math as bm
-from .bundle_schema import (REQUIRED_FILES, TEST_GATE_FILE, BundleError, supported_classes, validate_all,
-                            validate_manifest, validate_test_gate)
+from .bundle_schema import (SEAL_PROMOTED_FROM, REQUIRED_FILES, TEST_GATE_FILE, BundleError, supported_classes,
+                            validate_all, validate_manifest, validate_test_gate)
 from .contract import sha256_bytes
 
 _RESERVED = set(REQUIRED_FILES) | {"manifest.json", TEST_GATE_FILE}
@@ -404,7 +404,9 @@ def load_bundle(bundle_dir: str) -> HeadBundle:
 def presealed_sha256(manifest: Mapping[str, Any]) -> str:
     """bundle_sha256 of the bundle before :func:`seal_bundle` (manifest without ``seal``/gate entry)."""
     m = copy.deepcopy(dict(manifest))
-    m.pop("seal", None)
+    seal = m.pop("seal", None)
+    if isinstance(seal, Mapping) and SEAL_PROMOTED_FROM in seal:
+        m["evidence_tier_max"] = seal[SEAL_PROMOTED_FROM]
     m["files"] = {k: v for k, v in m["files"].items() if k != TEST_GATE_FILE}
     return compute_bundle_sha256(m["files"], json_bytes(m))
 
@@ -459,6 +461,21 @@ def gate_document(bundle: HeadBundle, evaluation: Mapping[str, Any]) -> Dict[str
             "status_rule": A.SET_RULE}
 
 
+def promotable(manifest: Mapping[str, Any]) -> bool:
+    """A shadow bundle whose encoder is a pinned inertia1 / actinet checkpoint, trained from a clean, committed
+    source tree with the provenance files, becomes ``candidate`` when sealed (INERTIA1.md §8). Stand-ins never."""
+    from .bundle_schema import PROVENANCE_FILES
+    from .registry import is_pinned
+    enc = manifest.get("encoder") or {}
+    tr = manifest.get("training") or {}
+    clean = (tr.get("git_commit") is not None and tr.get("tools_activity_context_dirty") is False
+             and tr.get("source_dirty") is not True and not tr.get("allow_dirty"))
+    return (manifest.get("evidence_tier_max") == "shadow" and clean
+            and all(f in manifest.get("files", {}) for f in PROVENANCE_FILES)
+            and isinstance(enc.get("checkpoint_sha256"), str)
+            and is_pinned(enc["checkpoint_sha256"], enc.get("encoder_id", "")))
+
+
 def seal_bundle(bundle_dir: str, evaluation: Mapping[str, Any]) -> HeadBundle:
     """Bind the one-shot test gate to the served artifact (G-3): write ``test_gate.json``, list it in
     ``files``, add ``manifest.seal`` and re-write the manifest; returns the re-loaded (verified) bundle.
@@ -478,6 +495,9 @@ def seal_bundle(bundle_dir: str, evaluation: Mapping[str, Any]) -> HeadBundle:
     m["files"] = dict(m["files"], **{TEST_GATE_FILE: sha256_bytes(gate_bytes)})
     m["seal"] = {"evaluated_bundle_sha256": b.bundle_sha256, "test_gate_sha256": m["files"][TEST_GATE_FILE],
                  "test_sha256": gate["test_sha256"]}
+    if promotable(m):
+        m["evidence_tier_max"] = "candidate"
+        m["seal"][SEAL_PROMOTED_FROM] = "shadow"
     validate_manifest(m)
     validate_test_gate(m, gate)
     with open(os.path.join(bundle_dir, TEST_GATE_FILE), "wb") as f:
@@ -489,5 +509,5 @@ def seal_bundle(bundle_dir: str, evaluation: Mapping[str, Any]) -> HeadBundle:
     return load_bundle(bundle_dir)
 
 
-__all__ = ["write_bundle", "load_bundle", "seal_bundle", "gate_document", "presealed_sha256", "HeadBundle",
+__all__ = ["write_bundle", "load_bundle", "seal_bundle", "promotable", "gate_document", "presealed_sha256", "HeadBundle",
            "HeadOutputs", "BundleError", "compute_bundle_sha256", "encoder_block", "json_bytes", "npz_bytes"]

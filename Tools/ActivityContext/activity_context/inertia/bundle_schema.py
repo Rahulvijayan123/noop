@@ -15,7 +15,8 @@ import numpy as np
 
 from . import (ALL_HEADS, ALLOWED_HOP_S, ALLOWED_WINDOW_S, BUNDLE_TIERS, CALIBRATION_SCHEMA, CLASSIFIER_HEADS,
                HEAD_CLASS_ORDERS, HEADS_SCHEMA, INERTIA_AXES, INERTIA_RATE_HZ, MULTILABEL_HEADS, OOD_SCHEMA,
-               PREPROCESSING_VERSION, REAL_ENCODER_PREFIX, SOFTMAX_HEADS, STANDIN_PREFIX, TEST_GATE_SCHEMA)
+               PREPROCESSING_VERSION, PINNED_ENCODER_PREFIXES, SOFTMAX_HEADS, STANDIN_PREFIX,
+               TEST_GATE_SCHEMA)
 from .bundle_math import MULTILABEL_CALIBRATION_METHODS, OOD_METHODS, SOFTMAX_CALIBRATION_METHODS
 from .contract import is_sha256_hex
 
@@ -24,6 +25,9 @@ REQUIRED_FILES = ("heads.npz", "calibration.json", "ood_reference.npz", "ood_ref
 PROVENANCE_FILES = ("label_mappings.json", "split_manifest.json")
 TEST_GATE_FILE = "test_gate.json"
 SEAL_KEYS = ("evaluated_bundle_sha256", "test_gate_sha256", "test_sha256")
+# Optional seal key: a shadow bundle of a pinned encoder (inertia1 / actinet) built from a clean tree is promoted
+# to ``candidate`` when sealed; ``promoted_from`` records the tier the evaluated (pre-seal) manifest carried.
+SEAL_PROMOTED_FROM = "promoted_from"
 HEAD_ARCHS = ("linear", "mlp")
 CLASS_STATUSES = ("strong", "weak", "abstain")
 _ARCH_KEYS = {"linear": ("W", "b"), "mlp": ("ln_g", "ln_b", "W1", "b1", "W2", "b2")}
@@ -103,7 +107,11 @@ def validate_manifest(m: Mapping[str, Any]) -> None:
     _require((seal is None) == (TEST_GATE_FILE not in files),
              "manifest.seal and files['test_gate.json'] must be present together")
     if seal is not None:
-        _require(isinstance(seal, Mapping) and set(seal) == set(SEAL_KEYS) and all(is_sha256_hex(seal[k]) for k in SEAL_KEYS)
+        promoted = isinstance(seal, Mapping) and SEAL_PROMOTED_FROM in seal
+        _require(not promoted or (seal[SEAL_PROMOTED_FROM] == "shadow" and tier == "candidate"),
+                 "manifest.seal.promoted_from must be 'shadow' on a candidate bundle")
+        _require(isinstance(seal, Mapping) and set(seal) - {SEAL_PROMOTED_FROM} == set(SEAL_KEYS)
+                 and all(is_sha256_hex(seal[k]) for k in SEAL_KEYS)
                  and seal["test_gate_sha256"] == files[TEST_GATE_FILE],
                  f"manifest.seal must be {{{', '.join(SEAL_KEYS)}}} (sha256 hex) matching files['test_gate.json']")
 
@@ -111,16 +119,16 @@ def validate_manifest(m: Mapping[str, Any]) -> None:
 def _validate_encoder_block(enc: Any, tier: str) -> None:
     _require(isinstance(enc, Mapping), "manifest.encoder must be an object")
     eid = enc.get("encoder_id")
-    _require(isinstance(eid, str) and (eid.startswith(REAL_ENCODER_PREFIX) or eid.startswith(STANDIN_PREFIX)),
-             "manifest.encoder.encoder_id must start with 'inertia-1/' or 'standin:'")
+    _require(isinstance(eid, str) and eid.startswith(PINNED_ENCODER_PREFIXES + (STANDIN_PREFIX,)),
+             "manifest.encoder.encoder_id must start with 'inertia-1/', 'actinet/' or 'standin:'")
     _require(isinstance(enc.get("embedding_dim"), int) and not isinstance(enc.get("embedding_dim"), bool)
              and enc["embedding_dim"] >= 1, "manifest.encoder.embedding_dim must be a positive int")
     for key in ("checkpoint_sha256", "config_sha256"):
         v = enc.get(key)
         _require(v is None or is_sha256_hex(v), f"manifest.encoder.{key} must be sha256 hex or null")
     if tier in ("candidate", "production"):
-        _require(eid.startswith(REAL_ENCODER_PREFIX) and enc.get("checkpoint_sha256") is not None,
-                 f"a {tier} bundle needs a real inertia-1 encoder with a checkpoint sha256")
+        _require(eid.startswith(PINNED_ENCODER_PREFIXES) and enc.get("checkpoint_sha256") is not None,
+                 f"a {tier} bundle needs a pinned inertia-1 / actinet encoder with a checkpoint sha256")
 
 
 def _validate_preprocessing(p: Any) -> None:
@@ -393,6 +401,6 @@ def validate_all(manifest: Mapping[str, Any], heads: Mapping[str, np.ndarray], c
     validate_ood(manifest, ood_meta, ood_arrays)
 
 
-__all__ = ["BundleError", "REQUIRED_FILES", "PROVENANCE_FILES", "TEST_GATE_FILE", "SEAL_KEYS", "HEAD_ARCHS",
+__all__ = ["BundleError", "REQUIRED_FILES", "PROVENANCE_FILES", "TEST_GATE_FILE", "SEAL_KEYS", "SEAL_PROMOTED_FROM", "HEAD_ARCHS",
            "CLASS_STATUSES", "supported_classes", "head_array_keys", "validate_manifest", "validate_heads_arrays",
            "validate_calibration", "validate_ood", "validate_merge", "validate_test_gate", "validate_all"]

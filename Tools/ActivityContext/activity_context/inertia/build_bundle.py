@@ -261,14 +261,15 @@ def train_bundle(exp: Experiment, data, out_dir: str, cw, enc_info: Dict[str, An
     manifest = {
         "bundle_id": exp.bundle_id, "evidence_tier_max": tier,
         "encoder": {"encoder_id": enc_info["encoder_id"], "embedding_dim": int(mu.shape[0]), "kind": enc_info["kind"],
-                    "encoder_version": emb_info["encoder_version"], "checkpoint_sha256": None,
+                    "encoder_version": emb_info["encoder_version"],
+                    "checkpoint_sha256": enc_info.get("checkpoint_sha256"),
                     "config_sha256": enc_info["config_sha256"], "inertia_repo_commit": UPSTREAM_COMMIT,
                     "extraction_point": enc_info.get("extraction_point")},
         "preprocessing": {"version": PREPROCESSING_VERSION, "window_s": window_s, "hop_s": SERVE_HOP_S, "rate_hz": 20,
                           "axes": list(INERTIA_AXES), "units": "g", "gravity": "kept"},
         "heads": heads, "ood": {}, "training": training,
         # spec §20 names, explicit at top level
-        "inertia_repo_commit": UPSTREAM_COMMIT, "inertia_checkpoint_sha256": None, "inertia_config": enc_info.get("config"),
+        "inertia_repo_commit": UPSTREAM_COMMIT, "inertia_checkpoint_sha256": enc_info.get("checkpoint_sha256"), "inertia_config": enc_info.get("config"),
         "embedding_dimension": int(mu.shape[0]), "input_rate": 20, "window_seconds": window_s, "hop_seconds": SERVE_HOP_S,
         "axis_order": list(INERTIA_AXES), "unit_contract": unit_contract,
         "head_architecture": {h: m["arch"] for h, m in heads.items()},
@@ -293,6 +294,10 @@ def _encoder_info(exp: Experiment, cache_root: str) -> Dict[str, Any]:
     js = sorted(f for f in os.listdir(d) if f.endswith(".json"))[0]
     with open(os.path.join(d, js)) as f:
         info = json.load(f)["info"]
+    from .actinet import encoder_config as actinet_config, is_actinet_id
+    if is_actinet_id(exp.encoder):
+        info["config"] = actinet_config(exp.encoder)       # no weights needed: the config is a constant
+        return info
     from .registry import build_encoder
     enc = build_encoder(exp.encoder, window_s=SPECS[exp.window].window_s)
     info["config"] = dict(enc.info.config)

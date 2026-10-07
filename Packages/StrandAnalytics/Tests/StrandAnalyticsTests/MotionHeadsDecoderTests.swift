@@ -540,6 +540,12 @@ final class MotionHeadsDecoderTests: XCTestCase {
         XCTAssertNil(standIn.motionHeads!.evidenceRefusal)
         XCTAssertTrue(standIn.motionHeads!.provenanceStamp!.hasPrefix("standin-test:"))
         XCTAssertFalse(MotionHeadsEvidenceConfig.candidate(bundle: MotionHeadsKit.bundle()).allowStandInEvidenceForTesting)
+        // A pinned ActiNet bundle at candidate tier feeds the decoder like Inertia-1, stamped as actinet.
+        let acti = MotionHeadsKit.config(MotionHeadsKit.bundle(kind: .actinet, windowS: 30)).motionHeads!
+        XCTAssertNil(acti.evidenceRefusal)
+        XCTAssertTrue(acti.provenanceStamp!.hasPrefix("actinet:"))
+        XCTAssertEqual(MotionHeadsKit.config(MotionHeadsKit.bundle(kind: .actinet, tier: .shadow, windowS: 30))
+                        .motionHeads!.evidenceRefusal, "evidence_tier_shadow")
     }
 
     func testARefusedBundleIsIgnoredAndReported() throws {

@@ -12,11 +12,11 @@ process can report them on the wire without guessing.
 
 Identity rules (INERTIA1.md §2):
 
-* ``encoder_id`` starting with ``inertia-1/`` <=> ``kind == "inertia1"``; every other id must start with
-  ``standin:`` and has ``kind == "standin"``.
-* ``production_eligible`` only when ``kind == "inertia1"`` *and* the checkpoint sha256 is a verified entry
-  of ``registry.PINNED_CHECKPOINTS`` (empty today). ``wire_kind`` — the ``encoder_kind`` reported on the
-  wire — is ``"inertia1"`` exactly when production-eligible, otherwise ``"standin"``.
+* ``encoder_id`` starting with ``inertia-1/`` <=> ``kind == "inertia1"``; ``actinet/`` <=> ``kind ==
+  "actinet"``; every other id must start with ``standin:`` and has ``kind == "standin"``.
+* ``production_eligible`` only when ``kind`` is ``inertia1`` or ``actinet`` *and* the checkpoint sha256 is a
+  verified entry of ``registry.PINNED_CHECKPOINTS`` for that id. ``wire_kind`` — the ``encoder_kind``
+  reported on the wire — is the id's kind exactly when production-eligible, otherwise ``"standin"``.
 
 Pure numpy; no torch import here.
 """
@@ -30,11 +30,21 @@ from typing import Any, Dict, Mapping, Optional, Protocol, Tuple, runtime_checka
 
 import numpy as np
 
-from . import (INERTIA_AXES, INERTIA_RATE_HZ, PREPROCESSING_VERSION, REAL_ENCODER_PREFIX,
-               STANDIN_PREFIX)
+from . import (ACTINET_ENCODER_PREFIX, INERTIA_AXES, INERTIA_RATE_HZ, PREPROCESSING_VERSION,
+               REAL_ENCODER_PREFIX, STANDIN_PREFIX)
 
 UNAVAILABLE_KINDS: Tuple[str, ...] = ("model_missing", "checkpoint_mismatch", "config_mismatch", "internal")
-ENCODER_KINDS: Tuple[str, ...] = ("inertia1", "standin")
+ENCODER_KINDS: Tuple[str, ...] = ("inertia1", "actinet", "standin")
+# kind -> the id prefix that is exactly that kind
+KIND_PREFIXES: Dict[str, str] = {"inertia1": REAL_ENCODER_PREFIX, "actinet": ACTINET_ENCODER_PREFIX,
+                                 "standin": STANDIN_PREFIX}
+
+
+def kind_of_id(encoder_id: str) -> Optional[str]:
+    for kind, prefix in KIND_PREFIXES.items():
+        if isinstance(encoder_id, str) and encoder_id.startswith(prefix):
+            return kind
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -134,12 +144,12 @@ class EncoderInfo:
     def __post_init__(self):
         if self.kind not in ENCODER_KINDS:
             raise ValueError(f"encoder kind must be one of {ENCODER_KINDS}, got {self.kind!r}")
-        is_real = self.encoder_id.startswith(REAL_ENCODER_PREFIX)
-        if is_real != (self.kind == "inertia1"):
+        id_kind = kind_of_id(self.encoder_id)
+        if id_kind is None:
+            raise ValueError(f"encoder ids must start with one of {sorted(KIND_PREFIXES.values())}: {self.encoder_id!r}")
+        if id_kind != self.kind:
             raise ValueError(f"encoder id {self.encoder_id!r} and kind {self.kind!r} disagree "
-                             f"(ids starting {REAL_ENCODER_PREFIX!r} are exactly the inertia1 kind)")
-        if not is_real and not self.encoder_id.startswith(STANDIN_PREFIX):
-            raise ValueError(f"stand-in encoder ids must start with {STANDIN_PREFIX!r}: {self.encoder_id!r}")
+                             f"(ids starting {KIND_PREFIXES[id_kind]!r} are exactly the {id_kind} kind)")
         if self.checkpoint_sha256 is not None and not is_sha256_hex(self.checkpoint_sha256):
             raise ValueError("checkpoint_sha256 must be 64 lowercase hex chars or None")
         if self.config_sha256 != sha256_bytes(canonical_json_bytes(dict(self.config))):
@@ -151,8 +161,8 @@ class EncoderInfo:
 
     @property
     def production_eligible(self) -> bool:
-        """True only for a real Inertia-1 id whose checkpoint is a verified pinned entry."""
-        if self.kind != "inertia1" or self.checkpoint_sha256 is None:
+        """True only for an inertia1 / actinet id whose checkpoint is a verified pinned entry."""
+        if self.kind == "standin" or self.checkpoint_sha256 is None:
             return False
         from .registry import PINNED_CHECKPOINTS  # lazy: registry imports adapters
         entry = PINNED_CHECKPOINTS.get(self.checkpoint_sha256)
@@ -160,8 +170,8 @@ class EncoderInfo:
 
     @property
     def wire_kind(self) -> str:
-        """``encoder_kind`` on the wire (INERTIA1.md §2): inertia1 iff production-eligible."""
-        return "inertia1" if self.production_eligible else "standin"
+        """``encoder_kind`` on the wire (INERTIA1.md §2): the id's kind iff production-eligible, else standin."""
+        return self.kind if self.production_eligible else "standin"
 
     def to_dict(self) -> Dict[str, Any]:
         return {

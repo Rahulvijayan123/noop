@@ -26,10 +26,18 @@ from __future__ import annotations
 import os
 from typing import Any, Dict
 
-from . import REAL_ENCODER_PREFIX
+from . import ACTINET_ENCODER_PREFIX, REAL_ENCODER_PREFIX
+from .actinet import WEIGHTS as _ACTINET_WEIGHTS
 from .contract import Encoder, InertiaUnavailable
 
-PINNED_CHECKPOINTS: Dict[str, Dict[str, Any]] = {}
+# Inertia-1: none (no public checkpoint). ActiNet: the two converted harnet30 weight files (actinet.WEIGHTS,
+# reproduced byte-for-byte by actinet.convert from the upstream artifacts on 2026-10-06).
+PINNED_CHECKPOINTS: Dict[str, Dict[str, Any]] = {
+    w["sha256"]: {"encoder_id": eid, "size": w["size"], "source_url": w["source_url"],
+                  "source_sha256": w["source_sha256"], "license": "CC BY-NC 4.0 (internal non-commercial use)",
+                  "verified_by": "actinet.convert reproduction", "verified_on": "2026-10-06"}
+    for eid, w in _ACTINET_WEIGHTS.items()
+}
 
 _ARCH_PREFIX = "standin:inertia-arch-random-init/"
 
@@ -44,6 +52,10 @@ def build_encoder(spec: str, **kw: Any) -> Encoder:
     if spec == IMU_FEAT_ID:
         return ImuFeatAccelEncoder(window_s=window_s)
     loader_kw = {k: kw[k] for k in ("threads", "expected_preprocessing", "max_batch") if k in kw}
+    if isinstance(spec, str) and spec.startswith(ACTINET_ENCODER_PREFIX):
+        from .actinet import ActiNetEncoder
+        return ActiNetEncoder(spec, kw.get("ckpt_path"), window_s=window_s, device=kw.get("device", "cpu"),
+                              **loader_kw)
     if isinstance(spec, str) and spec.endswith(".json") and os.path.isfile(spec):
         from .adapter import Inertia1Encoder
         return Inertia1Encoder(kw.get("ckpt_path"), spec, **loader_kw)
