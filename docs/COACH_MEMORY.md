@@ -273,7 +273,7 @@ After applying the ops:
 |---|---|
 | `GET messages?limit=N` | Unchanged: the latest N across the whole user, oldest first. It now skips rows whose `client_id` is null (there are none after the backfill). |
 | `GET messages?threadId=<uuid>&limit=1..200(60)&cursor=<opaque>` | New: one page of a thread, oldest first. Returns `{messages:[{id, clientId, threadId, role, content, meta, createdAt}], hasMore, nextCursor}`. The cursor encodes `(created_at, id)`. |
-| `POST messages` | Each message may carry `threadId`, plus an optional `threadTitle` for a new thread. Up to 40 messages per call. Goes through `coach_messages_save_v1`. Returns `{saved, rejected:[{clientId, reason}]}`, with 2xx even when some rows were rejected. |
+| `POST messages` | Each message may carry `threadId`, plus an optional `threadTitle` for a new thread. Up to 40 messages per call. Goes through `coach_messages_save_v1`. Returns `{saved, rejected:[{clientId, reason}]}`, with 2xx even when some rows were rejected. Values PostgreSQL would refuse are repaired rather than failing the batch (which the outbox would retry forever): NUL characters are stripped from content, title and meta, and `createdAt` is re-rendered as ISO, with an unparseable time or one outside 2000..2200 replaced by now. |
 | `DELETE messages` | No query: tombstones and deletes all of the user's threads and messages. `?threadId=`: that thread only. |
 | `GET memories?q=&topic=&limit=` | Without `q`, the default order and the limit of 50 are unchanged. With `q`, ranked through `coach_memories_ranked_v1`. `limit` goes up to 200. Rows gain optional `updatedAt, source, confirmations, pinned`. |
 | `POST memories {content, topic?, importance?, threadId?}` | The dedupe (§6) either confirms an existing row (`{memory, deduped:true}`) or applies `add` (`{memory, kept}`). Content that near-matches a tombstone is still saved, because the user asked explicitly. |
@@ -365,6 +365,10 @@ All passes go through `callUtility` (`_shared/coach_llm.ts`).
 - Each follow-up is the user's next question, 8–80 characters, specific to what the answer covered (its metric, plan or claim).
 - Rules: no diagnosis or dosage questions, and nothing about models or vendors.
 - Validation: normalised dedupe against the asked questions and against each other, plus the length bounds.
+- **Title retry.** With `wantTitle`, when the combined reply failed or carried no usable title, the title pass
+  runs once in the time left of an 11 s route deadline (the phone waits 12 s), costing one more unit. The
+  phone only asks for a title with the first answer, so without this a single provider fault would leave the
+  first-words title for good.
 
 **Starter suggestions**
 - Input:
@@ -412,6 +416,10 @@ All passes go through `callUtility` (`_shared/coach_llm.ts`).
    - No ops is the preferred outcome.
 7. **Deterministic guards** (§6) run before publishing.
 8. `coach_thread_publish_v1` applies the summary and the ops together. `curated_through` and `summary_through` advance only for the work that actually ran.
+   Blocked rows are never folded, but they count as handled: when they directly follow the last folded
+   message (or lead the pending ones), both cursors move over them and `summary_messages` includes them, even
+   on a `skipped` pass. Otherwise a chat ending on a blocked turn would keep `pendingMessages > 0` and be
+   offered for maintenance on every launch.
 9. **Consolidation**, when `coach_consolidation_claim_v1` succeeds:
    - Input: every active memory (≤ 200), labelled `m1…`.
    - Output: `{"ops":[≤12 of {"op":"merge","refs":[…],"content","topic","importance"} | {"op":"retire","ref","reason":"superseded|duplicate"}]}`.
@@ -666,9 +674,19 @@ Values are bands, not raw readings, so the fingerprint stays stable.
   - the lease;
   - quotas;
   - revokes.
-- `tests/coach_memory_e2e_test.ts` runs the full HTTP flow over real PostgREST with a scripted fake model.
+- `tests/coach_memory_e2e_test.ts` runs the full HTTP flow over real PostgREST with a scripted fake model:
+  the handler on a loopback port, Supabase-Auth installation bearers for two accounts, and an
+  OpenAI-compatible stand-in (`tests/coach_e2e_support.ts`) that streams chat answers and recognises every
+  cheap-model pass by its prompt. It also asserts that no PostgREST call failed, including the best-effort
+  ones whose failures the routes swallow.
 
-**Real-model smoke:** `supabase/functions/tests/coach_memory_smoke.ts` runs against Fireworks on synthetic data. It is not part of the default run.
+**Real-model smoke:** `supabase/functions/tests/coach_memory_smoke.ts` runs against Fireworks on synthetic data. It is not part of the default run:
+`deno run -A --no-lock tests/coach_memory_smoke.ts` with `FIREWORKS_AI_API_KEY` set (only that key and the
+`COACH_*` settings are read).
+
+**Simulator dev server:** `supabase/tests/e2e/coach_dev_server.ts [--seed]` serves the same stack on
+`127.0.0.1:54460/functions/v1/coach` (Fireworks when the key is set, otherwise the scripted stand-in) and
+prints the `SIMCTL_CHILD_NARA_COACH_URL`, `_TOKEN` and `_OWNER` values for the §7.1 DEBUG seam.
 
 **StrandTests:**
 - `CoachThreadsTests`: sections, title fallback, dates, local store, owner isolation.
