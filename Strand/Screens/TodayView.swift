@@ -4511,7 +4511,7 @@ struct TodayView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Data sources")
-        .accessibilityHint("Show what NOOP is synced from")
+        .accessibilityHint("Show what Nara is synced from")
     }
 
     /// PURE: the "Synced from: …" summary string for the collapsed footer (S5). Names the sources with

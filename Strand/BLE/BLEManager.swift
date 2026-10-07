@@ -192,7 +192,7 @@ struct BondRefusalGiveUp {
     /// #747: the honest user-facing hint shown when auto-reconnect pauses. Tells them WHY it stopped and how
     /// to get going again. Pure; no em-dash. Byte-identical to the Android twin.
     static func pausedHint() -> String {
-        "NOOP stopped retrying because your strap keeps refusing to pair. It is likely still held by the official WHOOP app, or your phone is holding an old pairing. Close the WHOOP app, put the strap in pairing mode (tap until the LEDs flash blue), and if it is listed in your Bluetooth settings choose Forget This Device. Then tap Connect to try again."
+        "Nara stopped retrying because your strap keeps refusing to pair. It is likely still held by the official WHOOP app, or your phone is holding an old pairing. Close the WHOOP app, put the strap in pairing mode (tap until the LEDs flash blue), and if it is listed in your Bluetooth settings choose Forget This Device. Then tap Connect to try again."
     }
 
     /// #1635: the log epitaph for the SUPPRESSION path.
@@ -220,7 +220,7 @@ struct BondRefusalGiveUp {
     ///
     /// Pure. Byte-identical to the Kotlin `BondRefusalGiveUp.helloSuppressedHint`.
     static func helloSuppressedHint() -> String {
-        "The secure handshake with your strap never completes, and the attempt itself is what drops the link. NOOP has switched it off for this strap so live heart rate keeps streaming. History sync stays unavailable until it pairs, and so do motion, skin temperature, SpO₂ and respiratory rate, so sleep is staged from heart rate alone. Some straps have paired again after being put in pairing mode. Tap until the LEDs flash blue, then tap Connect."
+        "The secure handshake with your strap never completes, and the attempt itself is what drops the link. Nara has switched it off for this strap so live heart rate keeps streaming. History sync stays unavailable until it pairs, and so do motion, skin temperature, SpO₂ and respiratory rate, so sleep is staged from heart rate alone. Some straps have paired again after being put in pairing mode. Tap until the LEDs flash blue, then tap Connect."
     }
 
     /// The paused hint for a bond that failed WITHOUT the strap ever answering (#1635).
@@ -234,7 +234,7 @@ struct BondRefusalGiveUp {
     ///
     /// Pure. Byte-identical to the Kotlin `BondRefusalGiveUp.pausedHintHandshakeUnanswered`.
     static func pausedHintHandshakeUnanswered() -> String {
-        "NOOP stopped retrying because the secure handshake with your strap never completes: the strap does not answer, and the link drops a few seconds later. Auto-reconnect is paused so it stops draining both batteries. Tap Connect to try again, and if it keeps happening please share your strap log."
+        "Nara stopped retrying because the secure handshake with your strap never completes: the strap does not answer, and the link drops a few seconds later. Auto-reconnect is paused so it stops draining both batteries. Tap Connect to try again, and if it keeps happening please share your strap log."
     }
 
     /// #750: a short OPAQUE token from a CoreBluetooth-local peripheral UUID for the epitaph. The CB UUID is
@@ -3428,7 +3428,7 @@ public final class BLEManager: NSObject, ObservableObject {
     nonisolated static func futureDatedStrapBanner(strapNewestTs: Int?, wallNowUnix: Int) -> String? {
         guard BackfillContinuation.isFutureDatedNewest(strapNewestTs, wallNowUnix: wallNowUnix) else { return nil }
         return "Synced, but your strap's clock is set in the future - its banked history is dated ahead of "
-            + "today, so NOOP can't trust those timestamps and didn't import them (importing them would "
+            + "today, so Nara can't trust those timestamps and didn't import them (importing them would "
             + "misfile your data days or years ahead). Fully charge the strap to 100% and power-cycle it so "
             + "its clock re-syncs, then reconnect."
     }
@@ -6390,7 +6390,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
             }
             if state.reconnectGuide == nil {
                 state.reconnectGuide = """
-                Your strap keeps connecting and then dropping a second later. This is almost always a stale Bluetooth pairing - usually after a WHOOP firmware update, or the official WHOOP app holding the strap. NOOP works fine once it's re-paired:
+                Your strap keeps connecting and then dropping a second later. This is almost always a stale Bluetooth pairing - usually after a WHOOP firmware update, or the official WHOOP app holding the strap. Nara works fine once it's re-paired:
 
                 1. Quit the official WHOOP app (or turn off Bluetooth on that phone).
                 2. Open System Settings → Bluetooth and Forget your WHOOP if it's listed.
@@ -6614,7 +6614,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // close the gap with a name match. Kotlin twin: `StaleBondRemoval.kt`.
         if let cbErr = error as? CBError, cbErr.code == .peerRemovedPairingInformation {
             state.reconnectGuide = """
-            Your strap's Bluetooth pairing was reset - usually by a WHOOP firmware update, or the official WHOOP app reconnecting. NOOP works fine on the new firmware; you just need to re-pair:
+            Your strap's Bluetooth pairing was reset - usually by a WHOOP firmware update, or the official WHOOP app reconnecting. Nara works fine on the new firmware; you just need to re-pair:
 
             1. Quit the official WHOOP app (or turn off Bluetooth on that phone).
             2. Open System Settings → Bluetooth and Forget “WHOOP MG” if it's listed.

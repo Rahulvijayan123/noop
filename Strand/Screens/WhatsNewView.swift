@@ -58,7 +58,7 @@ struct WhatsNewView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("What's new").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
-                Text("NOOP \(AppChangelog.currentVersion)")
+                Text("Nara \(AppChangelog.currentVersion)")
                     .font(StrandFont.rounded(26, weight: .semibold))
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text("Release notes").font(StrandFont.caption)

@@ -195,7 +195,7 @@ public struct OnboardingWizard: View {
         case .importData: return String(localized: "Continue")
         case .notifications: return String(localized: "Continue")
         case .appearance: return String(localized: "Continue")
-        case .done:       return String(localized: "Enter NOOP")
+        case .done:       return String(localized: "Enter Nara")
         }
     }
 
@@ -326,7 +326,7 @@ private struct WhatItDoesStep: View {
     ]
 
     var body: some View {
-        StepShell(title: String(localized: "What NOOP does"), subtitle: String(localized: "Three quiet promises.")) {
+        StepShell(title: String(localized: "What Nara does"), subtitle: String(localized: "Three quiet promises.")) {
             VStack(spacing: 14) {
                 ForEach(Array(slides.enumerated()), id: \.element.id) { index, slide in
                     SlideRow(slide: slide, index: index)
@@ -409,7 +409,7 @@ private struct ExpectationsStep: View {
                 expectationRow(
                     icon: "iphone.gen3",
                     title: String(localized: "Installed outside the App Store"),
-                    body: String(localized: "On iPhone this is a sideloaded build. Re-sign it about every 7 days on a free Apple ID (longer on a paid account). After your phone reboots, unlock it once so NOOP can read and sync its data.")
+                    body: String(localized: "On iPhone this is a sideloaded build. Re-sign it about every 7 days on a free Apple ID (longer on a paid account). After your phone reboots, unlock it once so Nara can read and sync its data.")
                 )
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown ? 0 : 8)
@@ -476,10 +476,10 @@ private struct BluetoothStep: View {
                     icon: "lock.fill",
                     tint: StrandPalette.statusPositive,
                     title: String(localized: "Nothing leaves your \(Platform.deviceNoun)"),
-                    message: String(localized: "NOOP talks to your strap directly over Bluetooth Low Energy. There's no server in the middle. The connection is local, and so is every reading it pulls in.")
+                    message: String(localized: "Nara talks to your strap directly over Bluetooth Low Energy. There's no server in the middle. The connection is local, and so is every reading it pulls in.")
                 )
 
-                Text("When the system prompt appears, choose Allow so NOOP can find your strap.")
+                Text("When the system prompt appears, choose Allow so Nara can find your strap.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .multilineTextAlignment(.center)
@@ -535,7 +535,7 @@ private struct ScanStep: View {
     private var selectedModel: WhoopModel { WhoopModel.resolve(selectedModelRaw) }
 
     private static let bondedSubtitle = String(localized: "Bonded. You're set.")
-    private static let scanSubtitle = String(localized: "Pick your strap below, then tap Scan. NOOP will find it.")
+    private static let scanSubtitle = String(localized: "Pick your strap below, then tap Scan. Nara will find it.")
     private static let whoop4Note = String(localized: "A WHOOP 4.0 only talks to one app at a time. If nothing's found, fully close the official WHOOP app, then Scan.")
     private static let whoop5Note = String(localized: "WHOOP 5.0/MG pairs with one app at a time. If nothing's found, unpair it in the official WHOOP app and fully close that app, then Scan.")
 
@@ -648,7 +648,7 @@ private struct ScanStep: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
 
-                Text("WHOOP straps don't appear in your \(Platform.deviceNoun)'s Bluetooth settings. They advertise on a custom profile that only apps like NOOP can find, so there's nothing to pair there, and you shouldn't try.")
+                Text("WHOOP straps don't appear in your \(Platform.deviceNoun)'s Bluetooth settings. They advertise on a custom profile that only apps like Nara can find, so there's nothing to pair there, and you shouldn't try.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -977,7 +977,7 @@ private struct NotificationsStep: View {
     private var poseStill: Bool { motion.poseStill(reduceMotion) }
     var body: some View {
         StepShell(title: String(localized: "Stay in the loop"),
-                  subtitle: String(localized: "NOOP can tap your wrist when your \(Platform.deviceNoun) needs you. No glance at the screen required.")) {
+                  subtitle: String(localized: "Nara can tap your wrist when your \(Platform.deviceNoun) needs you. No glance at the screen required.")) {
             VStack(spacing: 24) {
                 ZStack {
                     Circle()
@@ -1003,7 +1003,7 @@ private struct NotificationsStep: View {
                     icon: "applewatch.radiowaves.left.and.right",
                     tint: StrandPalette.statusPositive,
                     title: String(localized: "A buzz, not a banner"),
-                    message: String(localized: "NOOP taps your strap so an alert lands on your wrist instead of your screen. No need to reach for it. Everything stays on \(Platform.deviceNounPhrase).")
+                    message: String(localized: "Nara taps your strap so an alert lands on your wrist instead of your screen. No need to reach for it. Everything stays on \(Platform.deviceNounPhrase).")
                 )
 
                 VStack(spacing: 12) {
@@ -1016,7 +1016,7 @@ private struct NotificationsStep: View {
                     icon: "applewatch.radiowaves.left.and.right",
                     tint: StrandPalette.statusPositive,
                     title: String(localized: "A buzz, not a banner"),
-                    message: String(localized: "When the \(Platform.deviceNoun) apps you choose send a notification, NOOP taps your strap: Slack, Calendar, Messages, whatever matters. Everything stays on \(Platform.deviceNounPhrase).")
+                    message: String(localized: "When the \(Platform.deviceNoun) apps you choose send a notification, Nara taps your strap: Slack, Calendar, Messages, whatever matters. Everything stays on \(Platform.deviceNounPhrase).")
                 )
 
                 VStack(spacing: 12) {
@@ -1061,7 +1061,7 @@ private struct DoneStep: View {
                     Text("Your thread starts here.")
                         .font(StrandFont.brandDisplay(28))
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Every beat, every night, every day, woven into one quiet picture of you. Welcome to NOOP.")
+                    Text("Every beat, every night, every day, woven into one quiet picture of you. Welcome to Nara.")
                         .font(StrandFont.body)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .multilineTextAlignment(.center)

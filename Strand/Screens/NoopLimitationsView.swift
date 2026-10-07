@@ -88,7 +88,7 @@ struct NoopLimitationsView: View {
     private var tableCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: 14) {
-                Text("What NOOP reads").font(StrandFont.overline)
+                Text("What Nara reads").font(StrandFont.overline)
                     .foregroundStyle(StrandPalette.textTertiary)
                 // Column header.
                 HStack {
