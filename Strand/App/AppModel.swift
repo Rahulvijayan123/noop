@@ -395,7 +395,6 @@ final class AppModel: ObservableObject {
             hostedLastReadAt = [:]
             hostedRetry = HostedRetryLedger()
             hostedAccountScope = identity.scope
-            cloudJobsRan = nil
         }
         applyPowerSaving()
         historyGate?.evaluateSoon()
@@ -549,7 +548,8 @@ final class AppModel: ObservableObject {
         // `hostedUnannouncedReadSeconds` has passed. Re-reading both every half minute downloaded the same
         // 100–150 KB results again on every pass.
         var days = [dayKey(daysBack: 1), today].filter { day in
-            hostedLastReadAt[day].map { now.timeIntervalSince($0) >= Self.hostedUnannouncedReadSeconds } ?? true
+            // `abs`: a clock set back must not hold the backstop off until it catches up again.
+            hostedLastReadAt[day].map { abs(now.timeIntervalSince($0)) >= Self.hostedUnannouncedReadSeconds } ?? true
         }
         // Once per launch, also re-read the last week. The change cursor advances as soon as it is polled, so a
         // day the server rescored while the app was closed (or beyond the per-poll cap) was never fetched again

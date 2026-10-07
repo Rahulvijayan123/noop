@@ -363,13 +363,13 @@ final class WatchdogService {
     /// One `PlacementStore` per database. Its initializer writes (`CREATE TABLE IF NOT EXISTS`), and building one
     /// every tick put a synchronous write on the shared writer on the main actor, where it waited behind any
     /// offload insert or activity-context rewrite in flight.
-    private static var placementStore: (writer: ObjectIdentifier, store: PlacementStore)?
+    private static var cachedPlacementStore: (writer: ObjectIdentifier, store: PlacementStore)?
 
     private static func placementStore(for store: WhoopStore) -> PlacementStore? {
         let writer = ObjectIdentifier(store.registryWriter as AnyObject)
-        if let cached = placementStore, cached.writer == writer { return cached.store }
+        if let cached = cachedPlacementStore, cached.writer == writer { return cached.store }
         guard let created = try? PlacementStore(dbQueue: store.registryWriter) else { return nil }
-        placementStore = (writer, created)
+        cachedPlacementStore = (writer, created)
         return created
     }
 

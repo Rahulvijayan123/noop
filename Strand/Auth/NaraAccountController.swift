@@ -473,7 +473,7 @@ public final class NaraAccountController: ObservableObject {
                 self.wearableConfirmFailures[attempt] = failures
                 self.wearableConfirmRetryAt[attempt] = Date().addingTimeInterval(
                     Self.wearableConfirmBackoff(failures: failures, error: error))
-                if case CloudReceiverError.credentialRejected = error {
+                if let receiverError = error as? CloudReceiverError, receiverError == .credentialRejected {
                     self.credentialRejected(scope: identity.scope, status: 401)
                 }
                 return false
@@ -486,7 +486,9 @@ public final class NaraAccountController: ObservableObject {
     /// How long to wait after the `failures`-th failed confirm in a row: a minute, doubling to half an hour, or
     /// what the server asked for when it rate-limited.
     static func wearableConfirmBackoff(failures: Int, error: Error) -> TimeInterval {
-        if case CloudReceiverError.rateLimited(let retryAfter?) = error { return max(retryAfter, 60) }
+        if let receiverError = error as? CloudReceiverError, case .rateLimited(let retryAfter?) = receiverError {
+            return max(retryAfter, 60)
+        }
         return min(60 * pow(2, Double(max(0, failures - 1))), 1_800)
     }
 

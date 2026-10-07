@@ -1060,7 +1060,10 @@ final class Repository: ObservableObject {
     }
 
     private func runRefreshPass(days nDays: Int) async {
-        let pass = Task { [weak self] in await self?.refreshPass(days: nDays) }
+        let pass = Task { [weak self] in
+            guard let self else { return }
+            await self.refreshPass(days: nDays)
+        }
         refreshRunning = pass
         await pass.value
         if refreshRunning == pass { refreshRunning = nil }
