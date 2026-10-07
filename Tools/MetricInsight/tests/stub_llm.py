@@ -86,6 +86,10 @@ def answer(evidence: dict[str, Any], *, bad: bool = False) -> str:
         change = previous["change"]
         observed.append(f"That is {abs(change)} bpm {'lower' if change < 0 else 'higher'} than on "
                         f"{_short(previous['day'])}.")
+    call = (summary.get("baseline") or {}).get("call") or {}
+    if call.get("state") in ("in_range", "off"):  # the app's own call, with the band it shows
+        where = "within" if call["state"] == "in_range" else call["side"]
+        observed.append(f"That is {where} your usual range of {call['low']}-{call['high']} bpm.")
     interpretation = ["Night-to-night differences of a few bpm are common and can follow changes in routine."]
     if bad:
         interpretation = ["This drop suggests you are less stressed and fully recovered."]

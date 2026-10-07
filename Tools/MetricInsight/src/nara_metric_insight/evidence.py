@@ -4,9 +4,9 @@ Pure functions over the sources loaded for one job (sources.py). Conventions:
 * A night without a plausible measurement is `None` — missing, never zero, never interpolated.
 * Values are display values (metrics.Signal.scale) rounded to the signal's display precision; statistics are
   computed on unrounded values and rounded once at the end.
-* The context layer's own judgments (reference comparisons and change episodes, chosen with the app's rules:
-  MeasurementContextSelection.headlineReference / .episode) come first. When the context layer has no usable
-  reference yet (a new account), a personal-range fallback over the measured nights is used and labelled as such.
+* The person's usual for a night vital, and the call for the night ("in range", "off usual"), are the app's Baseline
+  (layer1.py, pinned to the app's own results). The context layer's judgments (reference comparisons and change
+  episodes, chosen with the app's rules: MeasurementContextSelection.headlineReference / .episode) sit next to them.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ from statistics import median
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from . import layer1
 from .metrics import (BASELINE_NIGHTS, EPISODE_RANK, INSIGHT_METRICS, REFERENCE_ORDER, SIGNALS, WINDOW_DAYS,
                       InsightMetric, Signal, plausible)
 
@@ -173,79 +174,68 @@ def availability_estimated(document: dict[str, Any] | None, signal: Signal) -> b
     return signal.estimated
 
 
-# --------------------------------------------------------------------------- Layer 1 baseline rules (mirrored)
+# --------------------------------------------------------------------------- the person's usual (the app's Baseline)
 #
-# The phone's Layer 1 Baseline (Packages/StrandAnalytics LongitudinalBaseline, parameter set v1.review; see
-# docs/LAYER1_WATCHDOG_IN_NARA.md and docs/PORT_LAYER1_WATCHDOG.md §6) keeps its snapshots on the device. The same
-# published rules are applied here to the server's nightly values, so an explanation speaks about "your usual"
-# the way the Baseline card does. Inputs differ (nightly scores here, the minute tape there), so the two can
-# differ slightly; the payload says which it is.
+# The app's Baseline (Layer 1: LongitudinalBaseline, parameter set v1.review) runs here as layer1.py, pinned to the
+# app's own results (tests/test_layer1.py), so an explanation calls a night inside or outside its usual exactly as
+# the Home ring and the Monitor do from the same nightly values, replayed over the whole history as the phone does.
+# Day logs, confounders and treatment trials live on the phone; they are neutral here, as on a phone with none logged.
 
-L1_WEEK_ALPHA = 2 / (7 + 1)     # 0.25
-L1_WEEK_MIN_NIGHTS = 4
-L1_LONG_FROM, L1_LONG_TO = 60, 8  # nights T-60 .. T-8 (53 slots): the newest week is never inside the long copy
-L1_LONG_SHOWN, L1_LONG_ESTABLISHED = 4, 14
-L1_BAND_K, L1_K_RANGE = 2.0, (1.5, 2.8)  # band = center +/- k*spread; after 14 nights k = p95 of clean |z|
-L1_MAD_SCALE = 1.4826
-L1_TRIM_Z, L1_TRIM_KEEP = 2.0, 0.65      # nights with |z| >= 2 are trimmed if at least 65% remain
-L1_STALE_DAYS = 14
-# Per series (LongitudinalBaseline.swift, v1.review): plausible range and spread floor (on the series' own scale:
-# bpm for resting HR, ln(RMSSD) for HRV).
-L1_SERIES = {"resting_hr": {"range": (30.0, 120.0), "floor": 2.0, "log": False},
-             "hrv_rmssd": {"range": (5.0, 250.0), "floor": 0.08, "log": True}}
+LAYER1_SERIES = {"resting_hr": "sleep_rhr", "hrv_rmssd": "sleep_hrv_ln", "resp_rate": "sleep_resp",
+                 "spo2": "sleep_spo2_mean"}
+# The Home ring's night vitals (BaselineStore.vitalsCheckSeries), in its order: the Layer 1 series, the app's name for
+# it, the label and unit here, the decimals the Monitor prints, and the signal whose availability says measured or
+# estimated.
+NIGHT_VITALS = (("sleep_rhr", "Resting HR", "Resting heart rate", "bpm", 0, "resting_hr"),
+                ("sleep_hrv_ln", "HRV", "HRV", "ms", 0, "hrv_rmssd"),
+                ("sleep_temp", "Wrist temp", "Wrist temperature", "°C", 1, "skin_temp_dev"),
+                ("sleep_resp", "Resp", "Respiratory rate", "breaths/min", 1, "resp_rate"),
+                ("sleep_spo2_mean", "SpO₂", "Blood oxygen", "%", 0, "spo2"))
+APP_LABELS = {layer1.IN_RANGE: "In range", layer1.OFF: "Off usual", layer1.LEARNING: "Learning",
+              layer1.NO_READING: "No reading"}
+# The call in the words `position` uses for the other states (off: above_ or below_usual_band).
+CALL_POSITION = {layer1.IN_RANGE: "within_usual_band", layer1.LEARNING: "no_usual_yet",
+                 layer1.NO_READING: "not_measured"}
 
 
-def layer1_baseline(values: dict[date, float], anchor: date, *, series: str, decimals: int) -> dict[str, Any]:
-    """The two copies, never mixed: a 7-day finite EWMA of the 7 completed nights before the anchor, and the long
-    copy (median and k-spread band of nights T-60..T-8, outliers trimmed). HRV is handled on ln(RMSSD), shown in ms.
-    Tonight is scored, never trained."""
-    spec = L1_SERIES[series]
-    low_ok, high_ok = spec["range"]
-    log_scale = spec["log"]
-    values = {d: v for d, v in values.items() if v is not None and low_ok <= v <= high_ok}
+def app_rounded(value: float | None, decimals: int) -> float | int | None:
+    """A Baseline number as the app prints it (String(format: "%.0f"): the binary value rounded, ties to even), so a
+    band said in an explanation is the band on the Monitor."""
+    if value is None or not math.isfinite(value):
+        return None
+    shown = float(format(value, f".{max(decimals, 0)}f")) + 0.0
+    return int(shown) if decimals <= 0 else shown
 
-    def fwd(v: float) -> float:
-        return math.log(v) if log_scale else v
 
-    def inv(v: float) -> float:
-        return math.exp(v) if log_scale else v
+def app_baseline(history: dict[date, dict[str, Any]], series: str, night: date, decimals: int) -> dict[str, Any]:
+    """One night vital against the person's usual as the app's Baseline computes and shows it: the week usual and the
+    60-day usual (each with its band, its nights and whether the app trusts it enough to show it) and the app's call
+    for the night, with the band it shows next to it."""
+    ev = layer1.evaluate_rows(history, night, series)
+    call = layer1.verdict(ev)
 
-    week_days = [anchor - timedelta(days=i) for i in range(1, 8)]          # newest first
-    week = [(i, fwd(values[d])) for i, d in enumerate(week_days) if values.get(d) is not None]
-    out: dict[str, Any] = {"rules": "Layer 1 v1.review, applied to nightly values on the server"}
-    if week:
-        weights = [L1_WEEK_ALPHA * (1 - L1_WEEK_ALPHA) ** i for i, _ in week]
-        center = sum(w * v for w, (_, v) in zip(weights, week)) / sum(weights)
-        out["week"] = {"center": rounded(inv(center), decimals), "nights": len(week),
-                       "shown": len(week) >= L1_WEEK_MIN_NIGHTS,
-                       "method": "weighted average of the 7 nights before, newest weighted most"}
-    long_days = [anchor - timedelta(days=i) for i in range(L1_LONG_TO, L1_LONG_FROM + 1)]
-    long_values = [fwd(values[d]) for d in long_days if values.get(d) is not None]
-    trained = [d for d in values if d < anchor]
-    if long_values:
-        center = median(long_values)
-        spread = max(L1_MAD_SCALE * median([abs(v - center) for v in long_values]), spec["floor"])
-        kept = [v for v in long_values if abs(v - center) / spread < L1_TRIM_Z]
-        if len(kept) >= L1_TRIM_KEEP * len(long_values) and len(kept) < len(long_values):
-            center = median(kept)
-            spread = max(L1_MAD_SCALE * median([abs(v - center) for v in kept]), spec["floor"])
-        else:
-            kept = long_values
-        floored = spread <= spec["floor"]
-        k = L1_BAND_K
-        if len(long_values) >= L1_LONG_ESTABLISHED:
-            k = min(max(quantile([abs(v - center) / spread for v in kept], 0.95), L1_K_RANGE[0]), L1_K_RANGE[1])
-        out["long"] = {"center": rounded(inv(center), decimals), "low": rounded(inv(center - k * spread), decimals),
-                       "high": rounded(inv(center + k * spread), decimals), "nights": len(long_values),
-                       "band_width_k": round(k, 2), "spread_floored": floored,
-                       "from": (anchor - timedelta(days=L1_LONG_FROM)).isoformat(),
-                       "to": (anchor - timedelta(days=L1_LONG_TO)).isoformat(),
-                       "shown": len(long_values) >= L1_LONG_SHOWN,
-                       "established": len(long_values) >= L1_LONG_ESTABLISHED,
-                       "stale": bool(trained) and (anchor - max(trained)).days > L1_STALE_DAYS,
-                       "method": "median of nights 60 to 8 days before; the usual band is k robust spreads either "
-                                 "side (k fitted to this person's own nights once 14 are in)"}
-    return out
+    def copy(c: layer1.Copy | None, shown: bool, trust: int, method: str, **extra: Any) -> dict[str, Any] | None:
+        if c is None:
+            return None
+        return {"center": app_rounded(c.center_display, decimals), "low": app_rounded(c.band_lo_display, decimals),
+                "high": app_rounded(c.band_hi_display, decimals), "nights": c.n,
+                "shown_by_the_app": shown and trust >= layer1.TRUST_HIDE_THRESHOLD, "method": method, **extra}
+
+    nights = layer1.SERIES[series].span7
+    week = copy(ev.copy7, ev.show7, ev.trust7, f"weighted average of the {nights} nights before, newest weighted most")
+    long = copy(ev.copy_long, ev.show_long, ev.trust_long,
+                "median of the nights 60 to 8 days before; the band is k robust spreads either side, k fitted to the "
+                "person's own nights once 14 are in", established=ev.established_long,
+                follows_a_slow_trend=ev.slope_usable, held_after_a_change=ev.regime_shift)
+    outside = [name for name, off in (("this_week", call.off_week), ("60_days", call.off_long)) if off]
+    z = ev.z7 if call.off_week else ev.z_long
+    return {"night": night.isoformat(), "value": app_rounded(call.value, decimals),
+            "call": {"state": call.state, "app_label": APP_LABELS[call.state],
+                     "shown_usual": None if call.band_lo is None else "this_week" if call.from_week else "60_days",
+                     "low": app_rounded(call.band_lo, decimals), "high": app_rounded(call.band_hi, decimals),
+                     "outside": outside, "side": ("above" if z > 0 else "below") if outside and z is not None else None},
+            "week": week, "long": long,
+            "rules": "the app's Baseline (Layer 1, v1.review) on the server's nightly values"}
 
 
 def position(value: float | None, band: dict[str, Any] | None) -> str:
@@ -284,7 +274,7 @@ def metric_series(scores: dict[date, dict[str, Any]], metric: InsightMetric, anc
 
 
 def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date, window_days: int,
-                   document: dict[str, Any] | None) -> dict[str, Any]:
+                   document: dict[str, Any] | None, history: dict[date, dict[str, Any]] | None = None) -> dict[str, Any]:
     signal = metric.signal
     series = nights(scores, signal, anchor - timedelta(days=window_days - 1), anchor)
     measured = [(d, v) for d, v in series if v is not None]
@@ -302,20 +292,17 @@ def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, an
         prev_day, prev = measured[-2]
         out["previous"] = {"day": prev_day.isoformat(), "value": rounded(prev, d),
                            "change": shown_difference(latest, prev, d)}
-    # The person's usual, by Layer 1's rules (the phone Baseline's): the 60-day copy once it is shown, else the
-    # 7-night copy. One definition everywhere, so an explanation never shows two different "usual ranges".
-    layer1 = layer1_baseline({day: v for day, v in measured if day < latest_day}, latest_day, series=metric.key,
-                             decimals=d)
-    long, week = layer1.get("long"), layer1.get("week")
-    chosen = ("long", long) if long and long.get("shown") else ("week", week) if week and week.get("shown") else None
-    baseline: dict[str, Any] = {"week": week, "long": long, "rules": layer1["rules"]}
-    if chosen:
-        name, copy = chosen
-        change = shown_difference(latest, copy["center"], d)
-        baseline.update(usual=name, usual_value=copy["center"], change_vs_usual=change,
+    # The person's usual and the call for the night as the app's Baseline shows them: the week usual when the app
+    # trusts it, else the 60-day one. One definition everywhere, so an explanation never shows a "usual range" the
+    # app does not.
+    baseline = app_baseline(scores if history is None else history, LAYER1_SERIES[metric.key], latest_day, d)
+    shown = _shown_usual(baseline)
+    if shown:
+        change = rounded(float(rounded(latest, d)) - float(shown["center"]), d)
+        baseline.update(usual="week" if baseline["call"]["shown_usual"] == "this_week" else "long",
+                        usual_value=shown["center"],
+                        usual_low=shown["low"], usual_high=shown["high"], change_vs_usual=change,
                         direction=_direction(change, signal.flat))
-        if name == "long":
-            baseline.update(usual_low=long["low"], usual_high=long["high"])
     out["baseline"] = baseline
     recent = [v for day, v in measured if day > anchor - timedelta(days=RECENT_NIGHTS)]
     if recent:
@@ -323,32 +310,38 @@ def metric_summary(scores: dict[date, dict[str, Any]], metric: InsightMetric, an
                                 "low": rounded(min(recent), d), "high": rounded(max(recent), d)}
     context = context_judgment(document, metric)
     out["context_layer"] = context
-    out["assessment"] = _assessment(rounded(latest, d), baseline, context)
+    out["assessment"] = _assessment(baseline, context)
     return out
 
 
-def _assessment(latest: float | int | None, baseline: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
-    """Whether the latest night is unusual for this person, and on what basis: the context layer's own change
-    detection when its reference is ready, else Layer 1's usual band, else the 7-night usual alone."""
+def _shown_usual(baseline: dict[str, Any]) -> dict[str, Any] | None:
+    """The usual whose band the app shows next to its call (None while it is still learning)."""
+    return {"this_week": baseline["week"], "60_days": baseline["long"]}.get(baseline["call"]["shown_usual"])
+
+
+def _assessment(baseline: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
+    """Whether the night is unusual for this person: the app's own call (the Home ring and the Monitor: in range, off
+    usual, still learning, no reading) and, when its reference is ready, the context layer's change detection over
+    the recent weeks (a persistent shift, a recurring or a transient deviation)."""
+    call = baseline["call"]
+    out: dict[str, Any] = {
+        "basis": "app_baseline", "state": call["state"], "app_label": call["app_label"], "side": call["side"],
+        "outside": call["outside"], "shown_usual": call["shown_usual"],
+        "note": "the app's call for this night: in_range = inside the band it shows; off = outside the band of a usual "
+                "it trusts (outside names which: this_week, 60_days; side says above or below); learning = no usual "
+                "it trusts yet; no_reading = the night was not measured"}
     reference = context.get("reference") or {}
-    episode = context.get("episode") or {}
     if reference.get("status") == "ready" and reference.get("difference") is not None:
-        return {"basis": "context_layer", "state": episode.get("state") or "no_change_episode",
-                "robust_distance": reference.get("robust_distance"),
-                "note": "the app's own change detection against its personal reference"}
-    long = baseline.get("long") or {}
-    if long.get("shown"):
-        return {"basis": "usual_band", "state": position(latest, long), "established": bool(long.get("established")),
-                "note": "the 60-day usual band (Layer 1); before 14 older nights it is provisional"}
-    if baseline.get("usual") == "week":
-        return {"basis": "week_usual", "state": "compared_with_recent_nights",
-                "note": "only the 7-night usual exists yet; a usual band needs older nights"}
-    return {"basis": "insufficient_history", "nights_needed": L1_WEEK_MIN_NIGHTS,
-            "note": "too few earlier measured nights to say what is usual for this person"}
+        out["change_detection"] = {"state": (context.get("episode") or {}).get("state") or "no_change_episode",
+                                   "robust_distance": reference.get("robust_distance"),
+                                   "note": "the context layer's change detection against its personal reference"}
+    return out
 
 
 def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date, window_days: int,
-                    document: dict[str, Any] | None, keys: list[str] | None = None) -> dict[str, Any]:
+                    document: dict[str, Any] | None, keys: list[str] | None = None,
+                    history: dict[date, dict[str, Any]] | None = None) -> dict[str, Any]:
+    history = scores if history is None else history
     out = []
     for key in keys or list(metric.related):
         signal = SIGNALS.get(key)
@@ -367,11 +360,13 @@ def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         entry["latest"] = {"day": latest_day.isoformat(), "value": rounded(latest, signal.decimals)}
         entry["same_night_as_metric"] = latest_day == anchor
         usual, nights_used = None, 0
-        if key in L1_SERIES:  # resting HR and HRV: the same Layer 1 usual as the metric itself
-            layer1 = layer1_baseline({d: v for d, v in measured[:-1]}, latest_day, series=key, decimals=signal.decimals)
-            copy = next((c for c in (layer1.get("long"), layer1.get("week")) if c and c.get("shown")), None)
-            if copy:
-                usual, nights_used = copy["center"], copy["nights"]
+        if key in LAYER1_SERIES:  # a night vital: the app's own usual and call, as for the metric itself
+            baseline = app_baseline(history, LAYER1_SERIES[key], latest_day, signal.decimals)
+            entry["app_call"] = baseline["call"]["state"]
+            shown = _shown_usual(baseline)
+            if shown:
+                usual, nights_used = shown["center"], shown["nights"]
+                entry.update(usual_low=shown["low"], usual_high=shown["high"])
         else:  # the other nightly signals: the median of their recent nights
             stats = robust([v for _, v in measured[:-1][-BASELINE_NIGHTS:]])
             if stats:
@@ -383,8 +378,27 @@ def related_metrics(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         else:
             entry["direction"] = "unknown"
         out.append(entry)
-    return {"anchor_day": anchor.isoformat(), "signals": out,
+    return {"anchor_day": anchor.isoformat(), "signals": out, "night_vitals": night_vitals(history, anchor, document),
             "note": "estimated=true signals are model estimates, not direct measurements; say so when mentioning them"}
+
+
+def night_vitals(history: dict[date, dict[str, Any]], night: date, document: dict[str, Any] | None) -> dict[str, Any]:
+    """The Home ring for the night: each night vital against its own usual, exactly as the app shows it, and the
+    ring's line (BaselineVitalsCheck.statusLine: "4 of 5 in range")."""
+    vitals = []
+    for series, app_name, label, units, decimals, signal in NIGHT_VITALS:
+        baseline = app_baseline(history, series, night, decimals)
+        call = baseline["call"]
+        vitals.append({"vital": series, "app_name": app_name, "label": label, "units": units,
+                       "value": baseline["value"], "state": call["state"], "app_label": call["app_label"],
+                       "usual_low": call["low"], "usual_high": call["high"], "shown_usual": call["shown_usual"],
+                       "side": call["side"], "estimated": availability_estimated(document, SIGNALS[signal])})
+    counted = [v for v in vitals if v["state"] in (layer1.IN_RANGE, layer1.OFF)]
+    in_range = sum(v["state"] == layer1.IN_RANGE for v in vitals)
+    line = (f"{in_range} of {len(counted)} in range" if counted
+            else "Learning" if any(v["state"] == layer1.LEARNING for v in vitals) else "No reading")
+    return {"night": night.isoformat(), "vitals": vitals, "status_line": line,
+            "note": "the app's Home ring and Monitor list for this night; each vital against its own usual only"}
 
 
 def _local_time(value: Any, zone: ZoneInfo) -> str | None:
@@ -474,9 +488,9 @@ def _reference_band(comparisons: list[dict[str, Any]], decimals: int) -> dict[st
 
 def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date,
                     document: dict[str, Any] | None, snapshots: dict[date, dict[str, Any]] | None = None,
-                    zone: ZoneInfo | None = None) -> dict[str, Any]:
+                    zone: ZoneInfo | None = None, history: dict[date, dict[str, Any]] | None = None) -> dict[str, Any]:
     """The metric in each state the measurements define (sleep, calm awake rest, around movement) and by time of
-    day, each against its own usual: Layer 1's rules for the nightly value, the context layer's personal reference
+    day, each against its own usual: the app's Baseline for the nightly value, the context layer's personal reference
     for the others. A state the server does not measure is listed as such, never filled in."""
     signal, d = metric.signal, metric.signal.decimals
     nightly = {day: v for day, v in nights(scores, signal, anchor - timedelta(days=WINDOW_DAYS), anchor) if v is not None}
@@ -485,11 +499,13 @@ def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, a
         entry: dict[str, Any] = {"state": state, "label": label}
         if state == "sleep":
             value = nightly.get(anchor)
-            usual = layer1_baseline({k: v for k, v in nightly.items() if k < anchor}, anchor,
-                                    series=metric.key, decimals=d)
+            baseline = app_baseline(scores if history is None else history, LAYER1_SERIES[metric.key], anchor, d)
+            call = baseline["call"]
             entry.update(value=rounded(value, d), units=signal.units, available=value is not None,
-                         source="the night's score", usual=usual.get("long"), week=usual.get("week"),
-                         position=position(rounded(value, d), usual.get("long")))
+                         source="the night's score", usual=_shown_usual(baseline), week=baseline["week"],
+                         long=baseline["long"], app_call=call["state"],
+                         position=CALL_POSITION[call["state"]] if call["state"] != layer1.OFF
+                         else f"{call['side']}_usual_band")
         else:
             daily = _daily_value(document, key)
             value = _num((daily or {}).get("value"))

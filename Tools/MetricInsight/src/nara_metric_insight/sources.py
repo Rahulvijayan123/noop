@@ -12,10 +12,12 @@ from datetime import date, datetime, time, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
+from . import layer1
 from .db import Database
 from .metrics import ALGORITHM_VERSION, BASELINE_NIGHTS, SIGNALS, WINDOW_DAYS
 
 SCORE_COLUMNS = sorted({s.column for s in SIGNALS.values()} | {"sleep_onset_at", "wake_onset_at", "source_device_id"})
+VITAL_COLUMNS = sorted(layer1.COLUMNS.values())  # the app's Baseline night vitals (layer1.COLUMNS)
 EXPOSURE_DAYS = 14
 MEMORY_ITEMS = 12
 
@@ -55,6 +57,22 @@ class Sources:
                 return {row["day"]: row for row in cur.fetchall()}
             return self.db.as_owner(self.user_id, read)
         return self._get("scores", load)
+
+    def vital_history(self) -> dict[date, dict[str, Any]]:
+        """The night vitals of every scored night up to the anchor: the app's Baseline replays the whole history (the
+        phone loads all of it), so the usual and its call need it too."""
+        def load() -> dict[date, dict[str, Any]]:
+            if self.anchor is None:
+                return layer1.History()
+
+            def read(cur):
+                cur.execute(
+                    f"select day, {', '.join(VITAL_COLUMNS)} from public.server_daily_scores "
+                    "where user_id = %s and algorithm_version = %s and day <= %s order by day",
+                    (self.user_id, ALGORITHM_VERSION, self.anchor))
+                return layer1.History({row["day"]: row for row in cur.fetchall()})
+            return self.db.as_owner(self.user_id, read)
+        return self._get("vital_history", load)
 
     def context(self) -> tuple[dict[str, Any] | None, str | None]:
         """The current context document of the anchor day's scoring device: retrospective first, else live."""

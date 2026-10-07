@@ -27,11 +27,11 @@ owner, one metric and one analysis night (no tool accepts a user, device or date
 | variable | source | what it holds |
 | --- | --- | --- |
 | `manifest` | — | every source, whether it is connected |
-| `metric_summary` | `server_daily_scores` + context document | latest night, previous night, the person's usual (below), the assessment |
+| `metric_summary` | `server_daily_scores` + context document | latest night, previous night, the person's usual and the app's call for the night (below), the assessment |
 | `metric_series` | `server_daily_scores` | the nightly values, missing nights as null |
 | `state_breakdown` | scores, context documents, hosted snapshots | the metric during sleep, at calm awake rest and around movement, by time of day, each against its own usual; HRV through the night's two days by activity (15-minute slots) |
 | `movement_patterns` | `activity_context_runs`, context bouts | movement the day and evening before the night and on the day, minutes by kind, how long before sleep the last one ended |
-| `related_metrics` | scores + context availability | HRV / resting HR / breathing / skin temperature / sleep against their usual, marked measured or estimated |
+| `related_metrics` | scores + context availability | HRV / resting HR / breathing / blood oxygen / skin temperature / sleep against their usual, marked measured or estimated; the Home ring's night vitals for the night ("4 of 5 in range") |
 | `sleep_context`, `workout_context`, `activity_context` | scores, context documents | sleep timing and duration, exertion windows, daily activity |
 | `recent_events` | `exposure_events` | what the person logged (medications are never named) |
 | `data_quality` | scores + context | tracked, measured and missing nights |
@@ -46,11 +46,22 @@ Every owner read is a READ ONLY transaction as `authenticated` with the owner's 
 `get_server_score_snapshot_v2`). The inputs fingerprint (`internal.metric_insight_inputs`) covers everything these
 read, so an unchanged night is served from the cache and a changed one is re-analysed.
 
-**The person's usual** follows the phone Baseline's Layer 1 rules (`LongitudinalBaseline`, v1.review), applied to
-the server's nightly values: the 60-day copy (median of nights T-60..T-8, spread floor 2 bpm / 0.08 ln, outliers
-trimmed, band k spreads wide with k fitted to the person once 14 nights are in, shown at 4 nights) and the 7-night
-weighted copy. Layer 1's own snapshots stay on the phone by design (docs/PORT_LAYER1_WATCHDOG.md §7), so the two can
-differ slightly. The context layer's change detection (episodes, |z| >= 2.5) is used when its reference is ready.
+**The person's usual** is the app's Baseline (Layer 1, `LongitudinalBaseline` v1.review), run here by `layer1.py`
+on the server's nightly values and replayed over the whole history as the phone does: the week usual (the 7 nights
+before, 10 for HRV, newest weighted most) and the 60-day usual (nights T-60..T-8), each with its band, and the call
+the Home ring and the Monitor make for the night: *In range*, *Off usual* (above or below), *Learning* (no usual the
+app trusts yet) or *No reading*. The explanation states the band the app shows (the week usual when the app trusts
+it, else the 60-day one), printed as the Monitor prints it, and the validator rejects "within / outside your usual
+range" wording that disagrees with the call. Nothing of Layer 1 is stored on the server (its snapshots stay on the
+phone, docs/PORT_LAYER1_WATCHDOG.md §7); day logs, confounders and treatment trials are on the phone only, so the
+server's call is the phone's for a person who logged none. The context layer's change detection (episodes,
+|z| >= 2.5) is given next to the call when its reference is ready.
+
+`layer1.py` is a port, so it is pinned to the app: `tests/data/layer1_cases.json` (invented tapes,
+`scripts/make_layer1_cases.py`) and `tests/data/layer1_expected.json` (what the app's own `evaluate` and
+`vitalVerdict` return for them). `StrandAnalyticsTests/LayerOneServerMirrorTests` fails as soon as Layer 1 changes;
+re-record with `LAYER1_MIRROR_RECORD=1 swift test --filter LayerOneServerMirrorTests` (in
+`Packages/StrandAnalytics`), then change the port until `tests/test_layer1.py` passes.
 
 Adding a source (labs, medications, EHR, genomics, conversation memory) = a loader in `sources.py`, a tool and a
 variable in `tools.py`, and its table in the fingerprint. The prompt contract, the validator and Prime do not change.
@@ -110,7 +121,7 @@ environment: `db_url` (a direct Postgres URL; the role must be able to `SET ROLE
 
 ```
 uv sync
-uv run pytest                       # unit, plumbing, PostgreSQL and end-to-end tests (34)
+uv run pytest                       # unit, plumbing, Layer 1 parity, PostgreSQL and end-to-end tests (67)
 NARA_TEST_PRIME_BIN=... NARA_TEST_KERNEL_PYTHON=... uv run pytest -m prime   # end to end with Prime Agent
 ```
 

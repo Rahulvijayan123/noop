@@ -1038,7 +1038,8 @@ missing or failed explanation never affects the rest of the screen.
 
 - Migration `20261008000000_metric_insights.sql`: `metric_insight_jobs` (queue, one row per owner and metric) and
   `metric_insights` (one immutable row per published analysis; owners can read only their own). An analysis is keyed
-  by an inputs fingerprint (the metric's 90 measured days, its own context comparisons and episodes, exposures around
+  by an inputs fingerprint (the metric's 90 measured days, the night vitals of every earlier night (the person's usual
+  is the app's Baseline, which replays the whole history), its own context comparisons and episodes, exposures around
   the latest night, coach memory). `POST /scores/insights` calls `metric_insight_request_v1`: unchanged inputs are
   served from the cache with no work queued; changed inputs queue the worker and the previous explanation is served
   marked stale. Bounded to 8 analyses per owner, metric and UTC day; 3 failures dead-letter the inputs until they change.

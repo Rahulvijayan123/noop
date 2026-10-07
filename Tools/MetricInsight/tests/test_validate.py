@@ -246,3 +246,31 @@ def test_sentences_a_real_model_wrote_that_are_correct_are_accepted():
     flipped = text.replace("The 51 ms during sleep was below your usual sleep band of 58-74 ms.",
                            "It was 15 ms higher than your usual.")
     assert "direction" in validate.check(flipped, evidence, lit).codes
+
+
+def test_the_usual_range_wording_follows_the_apps_call():
+    evidence = json.loads(json.dumps(EVIDENCE))
+    evidence["get_metric_summary"]["baseline"].update(
+        usual_low=46, usual_high=54, call={"state": "off", "side": "below", "low": 46, "high": 54,
+                                           "outside": ["this_week"], "shown_usual": "this_week"})
+    evidence["get_related_metrics"]["night_vitals"] = {"night": "2026-10-06", "vitals": [
+        {"vital": "sleep_hrv_ln", "units": "ms", "value": 85, "state": "in_range", "usual_low": 60, "usual_high": 90,
+         "side": None, "estimated": False},
+        {"vital": "sleep_resp", "units": "breaths/min", "value": 14.2, "state": "learning", "usual_low": None,
+         "usual_high": None, "side": None, "estimated": True}]}
+    agrees = answer(observed=["Your resting heart rate was 45 bpm on Oct 6, below your usual range of 46-54 bpm.",
+                              "Your HRV stayed within its usual range."])
+    result = validate.check(agrees, evidence, RETRIEVED)
+    assert result.ok, result.errors
+    contradictions = {
+        "Your resting heart rate was 45 bpm on Oct 6, within your usual range.": "Off usual",
+        "Your resting heart rate was 45 bpm on Oct 6, above your usual range.": "below its usual range, not above",
+        "Your resting heart rate was 45 bpm on Oct 6, and your HRV was outside its usual range.": "hrv_rmssd In range",
+        "Your estimated respiratory rate was inside its usual range on Oct 6.": "Learning",
+    }
+    for sentence, reason in contradictions.items():
+        result = validate.check(answer(observed=[sentence]), evidence, RETRIEVED)
+        assert not result.ok and "usual" in result.codes and any(reason in e for e in result.errors), result.errors
+    # Negated, it agrees: "not within your usual range" is the app's "Off usual".
+    negated = answer(observed=["Your resting heart rate of 45 bpm on Oct 6 was not within your usual range."])
+    assert validate.check(negated, evidence, RETRIEVED).ok

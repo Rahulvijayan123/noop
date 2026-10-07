@@ -382,6 +382,7 @@ Nara scores Charge on a **VPS worker** after `POST /functions/v1/push`. UI may t
 | 100 Hz IMU files | Optional cloud object `rawImuSession` | Downsample locally if needed; do not score on the worker |
 | Charge | Worker | Never average |
 | Layer 1 snapshots | **On device only** | `BaselineStore` |
+| Layer 1 for metric explanations | Worker recomputes per analysis from nightly scores; nothing stored | `Tools/MetricInsight` `layer1.py`, pinned by `LayerOneServerMirrorTests` |
 | Watchdog tick | **On device only** | `WatchdogService` every `WatchdogConfig.tickSeconds` |
 | Severe page | Local notification | Not the ingest token path |
 

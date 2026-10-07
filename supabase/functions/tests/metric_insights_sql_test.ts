@@ -361,10 +361,21 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
       const withActivity = await fingerprint(USER_A);
       assert.notEqual(withActivity, rescored, 'the activity document is not an input');
 
+      // The usual replays the whole history: an earlier night's vitals are input, its other columns are not.
+      await score(USER_A, '2026-05-01', 55, 50);
+      const withHistory = await fingerprint(USER_A);
+      assert.notEqual(withHistory, withActivity, 'a night before the 90-day window is not an input');
+      await db.sql(`update public.server_daily_scores set sleep_total_min = 400 where user_id = '${USER_A}' and day = '2026-05-01'`);
+      assert.equal(await fingerprint(USER_A), withHistory, "an earlier night's sleep moved the inputs");
+      await db.sql(`update public.server_daily_scores set skin_temp_c = 33.9 where user_id = '${USER_A}' and day = '2026-05-01'`);
+      const withTemperature = await fingerprint(USER_A);
+      assert.notEqual(withTemperature, withHistory, "an earlier night's wrist temperature is not an input");
+
       // Another user's data never moves this user's inputs.
       await db.sql(`insert into public.coach_memory_items(user_id, content, importance) values ('${USER_B}', 'Other user', 5)`);
       await score(USER_B, '2026-10-07', 60, 40, DEVICE_B);
-      assert.equal(await fingerprint(USER_A), withActivity);
+      await score(USER_B, '2026-05-01', 60, 40, DEVICE_B);
+      assert.equal(await fingerprint(USER_A), withTemperature);
 
       // ... and every change above re-queues the analysis on the next visit.
       const requeued = await request(USER_A);

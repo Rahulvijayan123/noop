@@ -40,35 +40,48 @@ def test_missing_nights_are_none_never_zero():
     assert payload["measured_nights"] == 2 and payload["missing_nights"] == 3
 
 
-def test_summary_without_context_uses_the_labelled_fallback_and_says_history_is_short():
+def test_summary_gives_the_apps_usual_and_its_call_for_the_night():
     summary = ev.metric_summary(week(), RHR, ANCHOR, 90, None)
     assert summary["latest"] == {"day": "2026-10-06", "value": 45}
     assert summary["previous"] == {"day": "2026-10-05", "value": 48, "change": -3}
-    # Six earlier nights, all in the last week: Layer 1's 7-night usual (weighted, newest most) is the usual,
-    # 50 bpm, so the shown change is 45 - 50; there is no 60-day band yet (it needs nights 8+ days old).
+    # Six earlier nights, all in the last week: the app trusts its week usual (weighted, newest most) and shows its
+    # band, 46-54 bpm; 45 bpm is outside it, below ("Off usual"). There is no 60-day usual yet (nights 8+ days old).
     baseline = summary["baseline"]
     assert baseline["usual"] == "week" and baseline["week"]["nights"] == 6 and baseline["usual_value"] == 50
+    assert (baseline["usual_low"], baseline["usual_high"]) == (46, 54) and baseline["long"] is None
     assert baseline["change_vs_usual"] == -5 and baseline["direction"] == "down"
-    assert baseline["long"] is None and "usual_low" not in baseline
-    assert summary["assessment"]["basis"] == "week_usual"
+    assert baseline["call"] == {"state": "off", "app_label": "Off usual", "shown_usual": "this_week", "low": 46,
+                                "high": 54, "outside": ["this_week"], "side": "below"}
+    assessment = summary["assessment"]
+    assert (assessment["basis"], assessment["state"], assessment["side"]) == ("app_baseline", "off", "below")
+    assert "change_detection" not in assessment
     assert summary["context_layer"] == {"available": False, "reason": "no_context_document"}
     assert summary["last_7_nights"] == {"measured": 7, "median": 50, "low": 45, "high": 53}
     assert ev.rounded(50.5, 0) == 51 and ev.rounded(-5.5, 0) == -6 and ev.rounded(0.05, 1) == 0.1
 
 
-def test_personal_range_fallback_with_enough_nights():
+def test_the_60_day_usual_counts_once_the_app_trusts_it():
     rows = {}
     for i in range(20):
         rows[ANCHOR - timedelta(days=20 - i)] = {"resting_hr_bpm": 50 + (i % 3)}
     rows[ANCHOR] = {"resting_hr_bpm": 60}
     summary = ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)
-    # 13 nights 8-20 days old: the 60-day band is shown (not yet established); spread floored at 2 bpm, k = 2
-    assert summary["baseline"]["usual"] == "long"
-    assert (summary["baseline"]["usual_low"], summary["baseline"]["usual_high"]) == (47, 55)
-    assert summary["assessment"] == {"basis": "usual_band", "state": "above_usual_band", "established": False,
-                                     "note": summary["assessment"]["note"]}
+    # 13 nights 8-20 days old: the 60-day usual is computed, but the app does not trust it yet (13 of its 53
+    # nights); the week usual it trusts is the one shown, 47-55 bpm, and 60 bpm is above it.
+    base = summary["baseline"]
+    assert base["long"]["nights"] == 13 and not base["long"]["shown_by_the_app"] and not base["long"]["established"]
+    assert base["usual"] == "week" and (base["usual_low"], base["usual_high"]) == (47, 55)
+    assert (summary["assessment"]["state"], summary["assessment"]["side"]) == ("off", "above")
     rows[ANCHOR] = {"resting_hr_bpm": 51}
-    assert ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)["assessment"]["state"] == "within_usual_band"
+    assert ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)["assessment"]["state"] == "in_range"
+    # A thin last week (two nights): the 60-day usual is the one the app shows.
+    thin = {ANCHOR - timedelta(days=i): {"resting_hr_bpm": 55 + (i % 3)} for i in range(8, 61)}
+    thin.update({ANCHOR - timedelta(days=2): {"resting_hr_bpm": 56}, ANCHOR - timedelta(days=5): {"resting_hr_bpm": 55},
+                 ANCHOR: {"resting_hr_bpm": 63}})
+    summary = ev.metric_summary(scores(thin), RHR, ANCHOR, 90, None)
+    assert summary["baseline"]["week"] is None and summary["baseline"]["usual"] == "long"
+    assert summary["baseline"]["call"] == {"state": "off", "app_label": "Off usual", "shown_usual": "60_days",
+                                           "low": 53, "high": 59, "outside": ["60_days"], "side": "above"}
 
 
 def test_context_layer_rules_match_the_app():
@@ -96,8 +109,11 @@ def test_context_layer_rules_match_the_app():
                 "episodes": episodes, "status": "available"}
     summary = ev.metric_summary(week(), RHR, ANCHOR, 90, document)
     assert summary["context_layer"]["reference"]["difference"] == -4
-    assert summary["assessment"] == {"basis": "context_layer", "state": "persistent_shift", "robust_distance": -2.3,
-                                     "note": "the app's own change detection against its personal reference"}
+    # The app's own call for the night leads; the context layer's change detection sits next to it.
+    assert summary["assessment"]["state"] == "off"
+    assert summary["assessment"]["change_detection"] == {
+        "state": "persistent_shift", "robust_distance": -2.3,
+        "note": "the context layer's change detection against its personal reference"}
 
 
 def test_related_signals_carry_estimated_from_the_document():
@@ -134,43 +150,72 @@ def test_sleep_events_and_quality():
     assert quality["first_measured"] == "2026-09-30" and quality["longest_gap_nights"] == 0
 
 
-def test_layer1_baseline_rules():
+def test_the_apps_baseline_on_nightly_rows():
     anchor = date(2026, 10, 6)
-    values = {anchor - timedelta(days=i): 60.0 + (i % 5) for i in range(1, 61)}  # 60 nights before the anchor
-    base = ev.layer1_baseline(values, anchor, series='resting_hr', decimals=0)
-    long = base["long"]
-    assert long["from"] == "2026-08-07" and long["to"] == "2026-09-28" and long["nights"] == 53
-    assert long["shown"] and not long["stale"]
+    rows = {anchor - timedelta(days=i): {"resting_hr_bpm": 60.0 + (i % 5)} for i in range(1, 61)}
+    rows[anchor] = {"resting_hr_bpm": 62}
+    base = ev.app_baseline(rows, "sleep_rhr", anchor, 0)
+    long, week_usual = base["long"], base["week"]
+    assert (long["nights"], long["shown_by_the_app"], long["established"]) == (53, True, True)
     assert long["low"] < long["center"] < long["high"]
-    assert base["week"]["nights"] == 7 and base["week"]["shown"]
-    # the newest week never enters the long copy: a jump in it moves the week copy only
-    jumped = dict(values)
-    jumped.update({anchor - timedelta(days=i): 90.0 for i in range(1, 8)})
-    assert ev.layer1_baseline(jumped, anchor, series='resting_hr', decimals=0)["long"] == long
-    assert ev.layer1_baseline(jumped, anchor, series='resting_hr', decimals=0)["week"]["center"] == 90
-    # HRV on ln(RMSSD): the band is multiplicative, wider above than below
-    spread = {d: 60.0 * (1 + 0.04 * ((i * 7) % 11 - 5)) for i, d in enumerate(sorted(values))}
-    hrv = ev.layer1_baseline(spread, anchor, series='hrv_rmssd', decimals=1)
-    assert hrv["long"]["high"] - hrv["long"]["center"] > hrv["long"]["center"] - hrv["long"]["low"]
-    assert hrv["long"]["spread_floored"] is False
-    # whole-bpm nights that mostly repeat: the spread is floored at Layer 1's 2 bpm, so the band stays real
-    flat = ev.layer1_baseline({d: 52.0 for d in values}, anchor, series='resting_hr', decimals=0)["long"]
-    assert flat["spread_floored"] is True and flat["center"] == 52
-    assert flat["low"] <= 49 and flat["high"] >= 55 and 1.5 <= flat["band_width_k"] <= 2.8
-    # readiness and staleness
-    few = {anchor - timedelta(days=i): 60.0 for i in (8, 9, 10)}
-    few_long = ev.layer1_baseline(few, anchor, series='resting_hr', decimals=0)["long"]
-    assert few_long["shown"] is False and few_long["established"] is False
-    four = {anchor - timedelta(days=i): 60.0 for i in (8, 9, 10, 11)}
-    assert ev.layer1_baseline(four, anchor, series='resting_hr', decimals=0)["long"]["shown"] is True
-    # outside Layer 1's plausible range (resting HR 30-120) a night is not trained
-    implausible = dict(values)
-    implausible.update({anchor - timedelta(days=i): 200.0 for i in range(8, 30)})
-    assert ev.layer1_baseline(implausible, anchor, series='resting_hr', decimals=0)["long"]["nights"] == 31
-    old = {anchor - timedelta(days=i): 60.0 for i in range(20, 50)}
-    assert ev.layer1_baseline(old, anchor, series='resting_hr', decimals=0)["long"]["stale"] is True
-    assert ev.position(70, long) in ("above_usual_band", "within_usual_band")
-    assert ev.position(None, long) == "not_measured" and ev.position(60, {"shown": False}) == "no_usual_yet"
+    assert week_usual["nights"] == 7 and week_usual["shown_by_the_app"]
+    assert base["call"]["state"] == "in_range" and base["call"]["shown_usual"] == "this_week" and base["value"] == 62
+    # The newest week never enters the 60-day usual, and nights far from an established usual barely train the
+    # week usual: it holds near the old level, so tonight's 62 bpm is still in range.
+    jumped = dict(rows)
+    jumped.update({anchor - timedelta(days=i): {"resting_hr_bpm": 88 + (i * 2) % 5} for i in range(1, 8)})
+    moved = ev.app_baseline(jumped, "sleep_rhr", anchor, 0)
+    assert moved["long"] == long and moved["week"]["center"] < 70 and moved["call"]["state"] == "in_range"
+    # HRV on ln(RMSSD): the band is multiplicative, wider above than below; the week usual is 10 nights.
+    hrv = {anchor - timedelta(days=i): {"hrv_rmssd_ms": 60.0 * (1 + 0.04 * ((i * 7) % 11 - 5))} for i in range(1, 61)}
+    hrv[anchor] = {"hrv_rmssd_ms": 58.0}
+    band = ev.app_baseline(hrv, "sleep_hrv_ln", anchor, 0)
+    assert band["long"]["high"] - band["long"]["center"] > band["long"]["center"] - band["long"]["low"]
+    assert band["week"]["nights"] == 10
+    # Not measured tonight, with a usual the app trusts: "No reading", the band still shown. Too few nights:
+    # "Learning", no band. A night outside Layer 1's plausible range (resting HR 30-120) is not a reading.
+    missing = dict(rows)
+    missing[anchor] = {"resting_hr_bpm": None}
+    assert ev.app_baseline(missing, "sleep_rhr", anchor, 0)["call"]["state"] == "no_reading"
+    few = {anchor - timedelta(days=i): {"resting_hr_bpm": 60} for i in range(4)}
+    assert ev.app_baseline(few, "sleep_rhr", anchor, 0)["call"] == {
+        "state": "learning", "app_label": "Learning", "shown_usual": None, "low": None, "high": None, "outside": [],
+        "side": None}
+    implausible = dict(rows)
+    implausible[anchor] = {"resting_hr_bpm": 25}
+    assert ev.app_baseline(implausible, "sleep_rhr", anchor, 0)["call"]["state"] == "no_reading"
+    # Numbers as the Monitor prints them (ties to even), unlike the half-up rounding of the other figures.
+    assert [ev.app_rounded(v, 0) for v in (48.5, 56.5, 49.5, 52.4)] == [48, 56, 50, 52] and ev.rounded(48.5, 0) == 49
+    assert ev.app_rounded(33.95, 1) == 34.0 and ev.app_rounded(-0.4, 0) == 0
+
+
+def test_night_vitals_are_the_home_ring():
+    anchor = date(2026, 10, 6)
+    rows = {anchor - timedelta(days=i): {"resting_hr_bpm": 52 + (i % 3), "hrv_rmssd_ms": 70.0 + (i % 4),
+                                         "skin_temp_c": 33.8 + 0.1 * (i % 3), "resp_rate_bpm": 14.2 + 0.1 * (i % 2),
+                                         "spo2_pct": None} for i in range(0, 40)}
+    rows[anchor]["resp_rate_bpm"] = 16.5
+    document = {"availability": [{"metric": "respiratory_rate", "state": "supported", "reasons": ["rsa_only_estimate"]}]}
+    ring = ev.night_vitals(rows, anchor, document)
+    by = {v["vital"]: v for v in ring["vitals"]}
+    assert [v["app_name"] for v in ring["vitals"]] == ["Resting HR", "HRV", "Wrist temp", "Resp", "SpO₂"]
+    assert by["sleep_resp"]["state"] == "off" and by["sleep_resp"]["side"] == "above" and by["sleep_resp"]["estimated"]
+    assert by["sleep_rhr"]["state"] == "in_range" and not by["sleep_rhr"]["estimated"]
+    assert by["sleep_temp"]["units"] == "°C" and by["sleep_temp"]["value"] == 33.8
+    assert by["sleep_spo2_mean"]["state"] == "learning" and by["sleep_spo2_mean"]["value"] is None  # never measured
+    counted = [v for v in ring["vitals"] if v["state"] in ("in_range", "off")]
+    assert ring["status_line"] == f"{len(counted) - 1} of {len(counted)} in range"
+    # The related signals use the same usual and call as the ring.
+    hrv = INSIGHT_METRICS["hrv_rmssd"]
+    related = ev.related_metrics(scores(rows), hrv, anchor, 90, document)
+    rhr = next(s for s in related["signals"] if s["metric"] == "resting_hr")
+    assert rhr["app_call"] == "in_range" and (rhr["usual_low"], rhr["usual_high"]) == (by["sleep_rhr"]["usual_low"],
+                                                                                     by["sleep_rhr"]["usual_high"])
+    assert related["night_vitals"]["status_line"] == ring["status_line"]
+    # The night's state in the breakdown carries the same call, in the words the other states use.
+    states = ev.state_breakdown(scores(rows), RHR, anchor, None)["states"]
+    sleep = next(s for s in states if s["state"] == "sleep")
+    assert sleep["app_call"] == "in_range" and sleep["position"] == "within_usual_band" and sleep["usual"]["low"] < 54
 
 
 def _snapshot_day(points, slots, sleep):

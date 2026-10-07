@@ -92,11 +92,12 @@ class JobTools:
         return ev.metric_series(self.sources.scores(), self.metric, self.anchor, int(args.get("days", WINDOW_DAYS)))
 
     def metric_summary(self, args: dict[str, Any]) -> dict[str, Any]:
-        return ev.metric_summary(self.sources.scores(), self.metric, self.anchor, WINDOW_DAYS, self._context())
+        return ev.metric_summary(self.sources.scores(), self.metric, self.anchor, WINDOW_DAYS, self._context(),
+                                 self.sources.vital_history())
 
     def related_metrics(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.related_metrics(self.sources.scores(), self.metric, self.anchor, WINDOW_DAYS, self._context(),
-                                  args.get("metrics"))
+                                  args.get("metrics"), self.sources.vital_history())
 
     def sleep_context(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.sleep_context(self.sources.scores(), self.anchor, self.zone, int(args.get("nights", 7)),
@@ -104,7 +105,7 @@ class JobTools:
 
     def state_breakdown(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.state_breakdown(self.sources.scores(), self.metric, self.anchor, self._context(),
-                                  self.sources.snapshots(), self.zone)
+                                  self.sources.snapshots(), self.zone, self.sources.vital_history())
 
     def movement_patterns(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.movement_patterns(self.sources.previous_context()[0], self._context(), self.sources.scores(),
@@ -151,11 +152,14 @@ class JobTools:
         summary, states = e.get("get_metric_summary") or {}, e.get("get_state_breakdown") or {}
         movement, quality = e.get("get_movement_patterns") or {}, e.get("get_data_quality") or {}
         base = summary.get("baseline") or {}
+        related = e.get("get_related_metrics") or {}
+        vitals = related.get("night_vitals") or {}
         return {
             "metric": summary.get("label"), "units": summary.get("units"), "latest": summary.get("latest"),
             "previous": summary.get("previous"),
             "usual": {k: base.get(k) for k in ("usual", "usual_value", "usual_low", "usual_high", "change_vs_usual",
                                                "direction") if base.get(k) is not None},
+            "app_call": base.get("call"),
             "assessment": summary.get("assessment"),
             "states": [{k: s.get(k) for k in ("state", "label", "value", "units", "position", "available")}
                        | ({"usual": {k: (s.get("usual") or {}).get(k) for k in ("center", "low", "high")}}
@@ -164,8 +168,13 @@ class JobTools:
                                 for s in (states.get("through_the_day") or {}).get("states") or []],
             "movement_before_the_night": movement.get("before_the_night"),
             "last_movement_before_sleep_min": movement.get("last_movement_before_sleep_min"),
-            "related": [{k: r.get(k) for k in ("label", "latest", "usual", "change_vs_usual", "direction", "estimated")}
-                        for r in (e.get("get_related_metrics") or {}).get("signals") or [] if r.get("latest")],
+            "related": [{k: r.get(k) for k in ("label", "latest", "usual", "usual_low", "usual_high", "change_vs_usual",
+                                               "direction", "app_call", "estimated") if k in r}
+                        for r in related.get("signals") or [] if r.get("latest")],
+            "night_vitals": {"status_line": vitals.get("status_line"),
+                             "vitals": [{k: v.get(k) for k in ("label", "value", "units", "state", "usual_low",
+                                                               "usual_high", "estimated")}
+                                        for v in vitals.get("vitals") or []]},
             "recorded_events": [{k: v for k, v in ev_.items() if k in ("kind", "label", "local_day", "local_time")}
                                 for ev_ in (e.get("get_recent_events") or {}).get("events") or []],
             "notes_from_the_person": len((e.get("get_user_context") or {}).get("items") or []),
@@ -194,17 +203,18 @@ class JobTools:
 TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
     Tool("get_metric_series", "This metric's nightly values (oldest first), null where a night was not measured.",
          _object({"days": {"type": "integer", "minimum": 7, "maximum": WINDOW_DAYS}}), JobTools.metric_series),
-    Tool("get_metric_summary", "Latest value, previous night, personal baseline and usual range, last 7 nights, "
-         "the context layer's comparison and change episode, and whether the latest night is unusual for this person.",
-         _object(), JobTools.metric_summary),
+    Tool("get_metric_summary", "Latest value, previous night, the person's usual and the app's call for the night "
+         "(in range or off usual, exactly as the Home ring and the Monitor show it), last 7 nights, and the context "
+         "layer's comparison and change episode.", _object(), JobTools.metric_summary),
     Tool("get_state_breakdown", "This metric in each measured state (during sleep, at calm awake rest, around "
          "movement) and by time of day, each against its own usual value and usual band (the threshold).",
          _object(), JobTools.state_breakdown),
     Tool("get_movement_patterns", "Movement bouts the evening before the night and on the day (local times, "
          "minutes), recent training load, and how long before sleep the last movement ended (estimated).",
          _object(), JobTools.movement_patterns),
-    Tool("get_related_metrics", "Other nightly signals vs their own medians (HRV, resting HR, respiratory rate, "
-         "skin temperature, sleep), each marked measured or estimated.",
+    Tool("get_related_metrics", "Other nightly signals against their own usual (HRV, resting HR, respiratory rate, "
+         "blood oxygen and wrist temperature by the app's Baseline; sleep by its recent median), each marked measured "
+         "or estimated, and the Home ring's night vitals for the night.",
          _object({"metrics": {"type": "array", "maxItems": 8, "items": {"type": "string", "enum": sorted(SIGNALS)}}}),
          JobTools.related_metrics),
     Tool("get_sleep_context", "Recent nights' estimated sleep duration, efficiency and local sleep/wake times, and "

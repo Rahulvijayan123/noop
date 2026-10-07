@@ -38,6 +38,9 @@ class FakeSources:
     def scores(self):
         return self._scores
 
+    def vital_history(self):
+        return self._scores
+
     def context(self):
         return None, None
 

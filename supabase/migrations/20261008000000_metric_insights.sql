@@ -188,6 +188,12 @@ begin
            from public.server_daily_scores s
           where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1'
             and s.day between v_anchor - 89 and v_anchor), '')
+    -- The usual and its call (the app's Baseline) replay every earlier night: their night vitals are input too.
+    || E'\nhistory:' || coalesce((
+         select md5(string_agg((s.day, s.resting_hr_bpm, s.hrv_rmssd_ms, s.skin_temp_c, s.resp_rate_bpm,
+                                s.spo2_pct)::text, E'\n' order by s.day))
+           from public.server_daily_scores s
+          where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1' and s.day < v_anchor - 89), '')
     || E'\ncontext:' || coalesce(md5(v_doc::text), '-') || ':' || coalesce(md5(v_previous::text), '-')
     -- The hosted day snapshots of the night's two days (HRV slots, their activity composition, sleep sessions):
     -- the latest result of the active algorithm, as get_server_score_snapshot_v2 serves it.

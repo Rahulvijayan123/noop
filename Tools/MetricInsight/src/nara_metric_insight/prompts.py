@@ -52,15 +52,22 @@ their latest value and its history. The latest measured night is {latest_day}: {
    The printed digest holds the key computed facts of every variable ({names}); open a full variable in
    Python only when you need more detail. Write your answer from those facts.
 2. Find the story in the data, using only those variables:
-   - what changed: the latest value against the person's usual (metric_summary.baseline, the same rules as the
-     app's Baseline: usual_low-usual_high is the 60-day usual band, the threshold for "higher or lower than
-     usual"; before it exists, usual_value is the 7-night usual) and against the previous night;
+   - what changed, and whether it is unusual for this person: metric_summary.assessment.state is the app's own
+     call for the night, exactly as the Home ring and the Monitor show it: in_range, off (side: above or below;
+     outside: which usual, this_week or 60_days), learning (no usual the app trusts yet) or no_reading. The band
+     the app shows with it is metric_summary.baseline usual_low-usual_high (the week usual when the app trusts it,
+     else the 60-day one; both usuals are listed with their nights). Compare with the previous night too.
+     assessment.change_detection, when present, is the context layer's view over recent weeks (a persistent
+     shift, a recurring or a transient deviation);
    - in which state: state_breakdown gives the value during sleep, at calm awake rest and around movement, and by
      time of day, each with its own usual value and usual band (the threshold). Compare a state only with its own
      usual, and say which states are higher, lower or as usual; skip states that are not available.
      state_breakdown.through_the_day (HRV) groups the 15-minute readings of the night's two days by what the
      person was doing (asleep, calm and awake, just after moving, while moving): compare those states with each
      other ("lower while you were walking, back up once you settled"), never with the nightly usual;
+   - the other night vitals: related_metrics.night_vitals is the Home ring for the night (status_line such as
+     "4 of 5 in range"), each vital against its own usual and with its own call; compare a vital only with its
+     own usual;
    - which movement came before it: movement_patterns lists the bouts the evening before the night and on the
      day (local times, minutes) and how long before sleep the last one ended; also workout_context,
      activity_context, sleep_context, recent_events and user_context;
@@ -83,6 +90,9 @@ Rules the reply is checked against:
   "higher/lower" must match the sign of the change in the tool results.
 - A sentence stating the person's sleep, respiratory rate, blood oxygen, movement or training load (or any
   signal marked estimated) must say "estimated".
+- "within your usual range" only for a call of in_range; "above / below / outside your usual range" only for off,
+  on its side; while the app is learning, say Nara is still learning the usual. The same for each other vital
+  (its state in related_metrics.night_vitals). Never state the app's internal trust or band-width numbers.
 - "because" only when hedged ("likely because"). Never use these words: {", ".join(FORBIDDEN_TERMS + CLAIM_TERMS)}.
 - No literature ids inside the sentences; only in "citations".
 """

@@ -61,7 +61,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "hrv_rmssd": ("heart rate variability", "hrv", "rmssd"),
     "resp_rate": ("respiratory rate", "breathing rate", "breaths per minute", "breaths/min", "breathing"),
     "spo2": ("blood oxygen", "oxygen saturation", "oxygen level", "spo2", "oxygen"),
-    "skin_temp_dev": ("skin temperature", "skin temp"),
+    "skin_temp_dev": ("skin temperature", "skin temp", "wrist temperature", "wrist temp"),
     # An estimated sleep MEASURE (not "during sleep", which names the state an HRV or heart-rate reading was in).
     "sleep": ("sleep duration", "sleep efficiency", "sleep timing", "sleep length", "sleep was", "sleep is",
               "shorter sleep", "longer sleep", "less sleep", "more sleep", "hours of sleep", "slept", "bedtime",
@@ -70,6 +70,11 @@ ALIASES: dict[str, tuple[str, ...]] = {
                  "steps", "training"),
 }
 SIGNAL_GROUP = {"sleep_total": "sleep", "sleep_efficiency": "sleep"}
+# The signals the app makes a call for (its Baseline night vitals), by their names here.
+SIGNAL_CALLS = frozenset({"resting_hr", "hrv_rmssd", "resp_rate", "spo2", "skin_temp_dev"})
+# The Home ring's night vitals (evidence.NIGHT_VITALS) by the signal whose wording they share.
+VITAL_GROUP = {"sleep_rhr": "resting_hr", "sleep_hrv_ln": "hrv_rmssd", "sleep_temp": "skin_temp_dev",
+               "sleep_resp": "resp_rate", "sleep_spo2_mean": "spo2"}
 # Phrases that only state the person's own value after "your" ("your sleep was short"); a number near them is
 # usually some other reading taken during sleep ("the 51 ms during sleep was below ...").
 YOUR_ONLY = frozenset({"sleep was", "sleep is", "shorter sleep", "longer sleep", "less sleep", "more sleep",
@@ -223,6 +228,11 @@ class Facts:
     # The value of a unit on a night, where the tools state it (the metric's nights, each signal's latest night,
     # the sleep nights): "59 bpm on Oct 6" must be Oct 6's value, not any bpm value.
     on_day: dict[tuple[str, date], set[float]] = field(default_factory=dict)
+    # The app's call for each signal on the analysed night (in_range, off, learning, no_reading) and, when off, the
+    # side; `metric` is the screen's own signal, the subject of a sentence that names none.
+    calls: dict[str, str] = field(default_factory=dict)
+    sides: dict[str, str] = field(default_factory=dict)
+    metric: str | None = None
 
     def dated(self, unit: str, day: Any, value: Any) -> None:
         number = _num(value)
@@ -304,13 +314,31 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
     """What the tools said, by unit. Free text (the person's notes, exposure labels, earlier headlines) is not read."""
     f = Facts()
     summaries = _listed(evidence.get("get_metric_summary"))
+    for related in _listed(evidence.get("get_related_metrics"))[:1]:  # the default call: every signal, the night
+        elsewhere = {s.get("metric") for s in related.get("signals") or [] if s.get("same_night_as_metric") is False}
+        for vital in _get(related, "night_vitals", "vitals") or []:
+            key = VITAL_GROUP.get(str(vital.get("vital")))
+            if key and key not in elsewhere and vital.get("state"):
+                f.calls[key] = vital["state"]
+                if vital.get("side"):
+                    f.sides[key] = vital["side"]
+    for summary in summaries[:1]:
+        f.metric = summary.get("metric")
+        call = _get(summary, "baseline", "call") or {}
+        if f.metric and call.get("state"):
+            f.calls[f.metric] = call["state"]
+            f.sides.pop(f.metric, None)
+            if call.get("side"):
+                f.sides[f.metric] = call["side"]
     for summary in summaries:
         unit = summary.get("units") or ""
         for path in (("latest",), ("previous",)):
             node = _get(summary, *path) or {}
             f.dated(unit, node.get("day"), node.get("value"))
         for path in (("latest", "value"), ("previous", "value"), ("baseline", "usual_value"),
-                     ("baseline", "usual_low"), ("baseline", "usual_high"), ("baseline", "week", "center"),
+                     ("baseline", "usual_low"), ("baseline", "usual_high"), ("baseline", "value"),
+                     ("baseline", "call", "low"), ("baseline", "call", "high"), ("baseline", "week", "center"),
+                     ("baseline", "week", "low"), ("baseline", "week", "high"),
                      ("baseline", "long", "center"), ("baseline", "long", "low"), ("baseline", "long", "high"),
                      ("last_7_nights", "median"), ("last_7_nights", "low"), ("last_7_nights", "high"),
                      ("context_layer", "reference", "center")):
@@ -334,18 +362,27 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
             unit = signal.get("units") or ""
             f.add(unit, _get(signal, "latest", "value"))
             f.dated(unit, _get(signal, "latest", "day"), _get(signal, "latest", "value"))
-            f.add(unit, signal.get("usual"))
+            for key in ("usual", "usual_low", "usual_high"):
+                f.add(unit, signal.get(key))
             f.change(unit, signal.get("change_vs_usual"))
             f.count(signal.get("measured_nights"))
             f.count(signal.get("usual_nights"))
             if signal.get("estimated"):
                 f.estimated.add(SIGNAL_GROUP.get(str(signal.get("metric")), str(signal.get("metric"))))
+        night = _get(related, "night_vitals", "night")
+        for vital in _get(related, "night_vitals", "vitals") or []:
+            unit = vital.get("units") or ""
+            for key in ("value", "usual_low", "usual_high"):
+                f.add(unit, vital.get(key))
+            f.dated(unit, night, vital.get("value"))
+            if vital.get("estimated"):
+                f.estimated.add(VITAL_GROUP.get(str(vital.get("vital")), str(vital.get("vital"))))
     for breakdown in _listed(evidence.get("get_state_breakdown")):
         for state in breakdown.get("states") or []:
             unit = state.get("units") or ""
             f.add(unit, state.get("value"))
             f.dated(unit, breakdown.get("night"), state.get("value")) if state.get("state") == "sleep" else None
-            for band in (state.get("usual") or {}, state.get("week") or {}):
+            for band in (state.get("usual") or {}, state.get("week") or {}, state.get("long") or {}):
                 for key in ("center", "low", "high"):
                     f.add(unit, band.get(key))
                 f.count(band.get("nights"))
@@ -523,6 +560,54 @@ def _dated_errors(sentence: str, f: Facts) -> list[str]:
     return errors
 
 
+# Placing a night inside or outside the usual range (not "2 bpm higher than your usual", which is a change).
+_OUT_OF_USUAL = re.compile(r"\b(?:outside|beyond|out of|above|below|higher than|lower than)\s+(?:your|the|its|their)\s+"
+                           r"(?:[\w-]+\s+)?usual\s+(?:range|band)\b|\boff\s+(?:your|the|its)\s+usual\b|"
+                           r"\bunusual(?:ly\s+\w+)?\s+for\s+you\b", re.I)
+_IN_USUAL = re.compile(r"\b(?:within|inside|in)\s+(?:your|the|its|their)\s+(?:[\w-]+\s+)?usual\s+(?:range|band)\b|"
+                       r"\b(?:normal|typical)\s+for\s+you\b|\bin\s+line\s+with\s+(?:your|the|its)\s+usual\b", re.I)
+_CLAUSE = re.compile(r"[;,]|\b(?:while|whereas|but|and)\b", re.I)
+CALL_WORDS = {"in_range": "In range", "off": "Off usual", "learning": "Learning (no usual yet)",
+              "no_reading": "No reading"}
+
+
+def _named(clause: str) -> list[str]:
+    lowered = clause.lower()
+    return [key for key, words in ALIASES.items() if key in SIGNAL_CALLS
+            and any(re.search(rf"\b{re.escape(w)}\b", lowered) for w in words)]
+
+
+def _call_errors(sentence: str, f: Facts) -> list[str]:
+    """A sentence that places a night inside or outside its usual range must say what the app shows for it."""
+    errors: list[str] = []
+    subject = f.metric
+    for clause in _CLAUSE.split(sentence):
+        named = _named(clause)
+        if len(named) > 1:
+            subject = None  # two signals in one clause: not attributable
+            continue
+        subject = named[0] if named else subject
+        call = f.calls.get(subject) if subject else None
+        if call is None:
+            continue
+        for pattern, says in ((_OUT_OF_USUAL, "off"), (_IN_USUAL, "in_range")):
+            for match in pattern.finditer(clause):
+                negated = _NEGATION.search(clause[max(0, match.start() - 14):match.start()])
+                claim = {"off": "in_range", "in_range": "off"}[says] if negated else says
+                if call in ("learning", "no_reading"):
+                    errors.append(f"usual:the app shows {subject} as {CALL_WORDS[call]} for this night; do not place "
+                                  "it inside or outside a usual range")
+                elif claim != call:
+                    errors.append(f"usual:the app shows {subject} {CALL_WORDS[call]} for this night; the text says it "
+                                  f"was {'outside' if claim == 'off' else 'within'} the usual range")
+                elif claim == "off" and not negated:
+                    side = "above" if re.search(r"above|higher", match.group(0), re.I) else \
+                        "below" if re.search(r"below|lower", match.group(0), re.I) else None
+                    if side and f.sides.get(subject) and side != f.sides[subject]:
+                        errors.append(f"usual:{subject} was {f.sides[subject]} its usual range, not {side} it")
+    return errors
+
+
 def _estimated_errors(sentence: str, f: Facts) -> list[str]:
     lowered = sentence.lower()
     if "estimat" in lowered:
@@ -598,6 +683,7 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
             if not any(d.month == month and d.day == day and (year is None or d.year == year) for d in f.days):
                 errors.append(f"dates:{month}/{day} is not a night in the tool results")
         errors += _estimated_errors(sentence, f)
+        errors += _call_errors(sentence, f)
         if _PMID_OR_DOI.search(sentence):
             errors.append("citations:put literature ids only in the citations list, not in the text")
 
