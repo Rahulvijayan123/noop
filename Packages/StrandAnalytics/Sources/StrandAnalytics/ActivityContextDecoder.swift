@@ -513,7 +513,10 @@ public struct ActivityContextDecoder: Sendable {
     private var postureEvidenceTotals: (seated: Double, recumbent: Double) {
         guard let e = tracking.postureEvidence else { return (0, 0) }
         let k = Evidence.recumbentStart
-        let su = e[0..<k].reduce(0, +), rec = e[k...].reduce(0, +)
+        // The wrist's own upright evidence (arm pattern, held orientation, a stand-up's direction) is capped on
+        // its own: it may hedge toward standing but never commit it. Learned / personal heads may go further.
+        let wrist = e[0] + e[1] + e[2]
+        let su = max(-ActivityContextModel.postureEvidenceCapUprightWrist, wrist) + e[3], rec = e[k...].reduce(0, +)
         let capRec = ActivityContextModel.postureEvidenceCapRecumbent
         return (min(postureCapSU, max(-postureCapSU, su)), min(capRec, max(-capRec, rec)))
     }

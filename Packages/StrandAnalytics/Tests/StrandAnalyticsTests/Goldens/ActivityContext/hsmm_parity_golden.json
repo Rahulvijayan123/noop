@@ -8337,22 +8337,22 @@
       "events" : [
         {
           "kind" : "sit_to_stand_like",
-          "prob" : 0.5531803340565985,
+          "prob" : 0.55349074835283352,
           "ts" : 1700000026
         },
         {
           "kind" : "walk_start",
-          "prob" : 0.69148463495646428,
+          "prob" : 0.69156769429296538,
           "ts" : 1700000036
         },
         {
           "kind" : "walk_stop",
-          "prob" : 0.76133601663598272,
+          "prob" : 0.76085756806100191,
           "ts" : 1700000052
         },
         {
           "kind" : "stand_to_sit_like",
-          "prob" : 0.58570110964404742,
+          "prob" : 0.58572969553091003,
           "ts" : 1700000076
         }
       ],
@@ -9007,186 +9007,186 @@
         },
         {
           "arm_behavior" : {
-            "active_gesturing" : 0.024098984634044866,
-            "desk_like" : 0.11956318777124748,
-            "exercise_motion" : 0.1578934090122667,
-            "fidgeting" : 0.37863537895531685,
-            "other" : 0.25533437194359199,
-            "quiet" : 0.0035889724907610613,
-            "repetitive_hand_motion" : 0.016752178619838815,
-            "unknown" : 0.044133516572932331
+            "active_gesturing" : 0.023987344513223506,
+            "desk_like" : 0.11969546577295466,
+            "exercise_motion" : 0.15793811900617999,
+            "fidgeting" : 0.37852155588102576,
+            "other" : 0.25539601039962512,
+            "quiet" : 0.0035838674159985361,
+            "repetitive_hand_motion" : 0.016731282472092147,
+            "unknown" : 0.044146354538900513
           },
           "intensity" : 0.72862756575110854,
           "locomotion" : {
-            "brisk_walking" : 0.0081774935986773795,
-            "cycling" : 6.7728873879900855e-05,
-            "other" : 0.067055150529961888,
-            "running" : 0.0012338639025716593,
-            "stairs" : 9.2910163639648832e-05,
-            "stationary" : 0.73147945835133898,
-            "unknown" : 0.058282685579184562,
-            "vehicle_motion" : 3.4581926940743163e-05,
-            "walking" : 0.13357612707380528
+            "brisk_walking" : 0.0081504936165883134,
+            "cycling" : 6.6599368725701275e-05,
+            "other" : 0.067082124214546818,
+            "running" : 0.0012230916776141988,
+            "stairs" : 9.087892159608797e-05,
+            "stationary" : 0.73161367059965288,
+            "unknown" : 0.058274728837023428,
+            "vehicle_motion" : 3.4116709560404123e-05,
+            "walking" : 0.13346429605469221
           },
-          "overall_confidence" : 0.23846475710032061,
-          "overall_uncertainty" : 0.36637560255004031,
+          "overall_confidence" : 0.23743652347202301,
+          "overall_uncertainty" : 0.36944702403675561,
           "posture" : {
-            "postural_transition" : 0.53530442064983319,
-            "recumbent" : 0.015816106704302741,
-            "seated_likely" : 0.049059290685117725,
-            "unknown" : 0.31046758485735398,
-            "upright_stationary" : 0.089352597103392439
+            "postural_transition" : 0.53554212508520349,
+            "recumbent" : 0.015804608652611667,
+            "seated_likely" : 0.059186745203940946,
+            "unknown" : 0.3100246972628839,
+            "upright_stationary" : 0.079441823795360092
           },
           "transition" : {
             "kind" : "sit_to_stand_like",
-            "prob" : 0.5531803340565985,
+            "prob" : 0.55349074835283352,
             "ts" : 1700000026
           },
           "ts" : 1700000030
         },
         {
           "arm_behavior" : {
-            "active_gesturing" : 0.0029045267592041134,
-            "desk_like" : 0.2816964608578571,
-            "exercise_motion" : 0.0057664981584133667,
-            "fidgeting" : 0.25408214204279644,
-            "other" : 0.37452375058981363,
-            "quiet" : 0.044447557067792541,
-            "repetitive_hand_motion" : 0.010389685012477246,
-            "unknown" : 0.026189379511645614
+            "active_gesturing" : 0.0029029326865618234,
+            "desk_like" : 0.28203510348828498,
+            "exercise_motion" : 0.0057663898276350762,
+            "fidgeting" : 0.25386961693413468,
+            "other" : 0.37443848850468986,
+            "quiet" : 0.044424249048128084,
+            "repetitive_hand_motion" : 0.010384264828821942,
+            "unknown" : 0.026178954681743551
           },
           "intensity" : 0.27610114017934778,
           "locomotion" : {
-            "brisk_walking" : 0.01489018151020504,
-            "cycling" : 0.00016326916993220582,
-            "other" : 0.00011455902082904351,
-            "running" : 0.00031223718945336368,
-            "stairs" : 9.0845494157735011e-05,
-            "stationary" : 0.62401151700141344,
-            "unknown" : 0.032527242832562378,
-            "vehicle_motion" : 0.00019545910239220852,
-            "walking" : 0.32769468867905455
+            "brisk_walking" : 0.014912675086541758,
+            "cycling" : 0.00016326553584938765,
+            "other" : 0.00011439963809669354,
+            "running" : 0.0003115796943906681,
+            "stairs" : 9.0833466570233013e-05,
+            "stationary" : 0.62341273031183664,
+            "unknown" : 0.032527604327502402,
+            "vehicle_motion" : 0.00019540019086459939,
+            "walking" : 0.32827151174834779
           },
-          "overall_confidence" : 0.32143006881516151,
-          "overall_uncertainty" : 0.26917528260719475,
+          "overall_confidence" : 0.32138785801284853,
+          "overall_uncertainty" : 0.26917088309129944,
           "posture" : {
-            "postural_transition" : 0.0002521568888058197,
-            "recumbent" : 0.031841740804047974,
-            "seated_likely" : 0.28048455253660265,
-            "unknown" : 0.40452383888115562,
-            "upright_stationary" : 0.28289771088938781
+            "postural_transition" : 0.0002512842376137201,
+            "recumbent" : 0.031800486220468542,
+            "seated_likely" : 0.2801696023133935,
+            "unknown" : 0.40509619362919153,
+            "upright_stationary" : 0.28268243359933271
           },
           "transition" : {
             "kind" : "walk_start",
-            "prob" : 0.69148463495646428,
+            "prob" : 0.69156769429296538,
             "ts" : 1700000036
           },
           "ts" : 1700000050
         },
         {
           "arm_behavior" : {
-            "active_gesturing" : 0.0014116081212245449,
-            "desk_like" : 0.9089710710940927,
-            "exercise_motion" : 0.0011630259325188597,
-            "fidgeting" : 0.0048466917599781379,
-            "other" : 0.062367596262693781,
-            "quiet" : 0.010690097076931688,
-            "repetitive_hand_motion" : 0.0035729735091381758,
-            "unknown" : 0.0069769362434222229
+            "active_gesturing" : 0.0014114930889686356,
+            "desk_like" : 0.90900541605583973,
+            "exercise_motion" : 0.0011629080364936905,
+            "fidgeting" : 0.0048459984546871723,
+            "other" : 0.062336705738663969,
+            "quiet" : 0.010689037828598744,
+            "repetitive_hand_motion" : 0.0035725920328743186,
+            "unknown" : 0.0069758487638737592
           },
           "intensity" : 0.28553864781043198,
           "locomotion" : {
-            "brisk_walking" : 0.00045667111957223869,
-            "cycling" : 7.7914675507061989e-05,
-            "other" : 0.00011896759881690649,
-            "running" : 8.7912770085560581e-05,
-            "stairs" : 4.7045825828432908e-05,
-            "stationary" : 0.96065177026507009,
-            "unknown" : 0.031770110861566392,
-            "vehicle_motion" : 0.00011648384527938787,
-            "walking" : 0.0066731230382738359
+            "brisk_walking" : 0.00045608361906746063,
+            "cycling" : 7.7837371558897548e-05,
+            "other" : 0.00011896670490929505,
+            "running" : 8.7735813891980178e-05,
+            "stairs" : 4.6957657497753201e-05,
+            "stationary" : 0.96065885102333481,
+            "unknown" : 0.03176976949111613,
+            "vehicle_motion" : 0.0001164441893292769,
+            "walking" : 0.0066673541292944765
           },
-          "overall_confidence" : 0.39473241482851218,
-          "overall_uncertainty" : 0.16794303066476696,
+          "overall_confidence" : 0.39473874502317902,
+          "overall_uncertainty" : 0.16793314324029779,
           "posture" : {
-            "postural_transition" : 0.00048431107310986849,
-            "recumbent" : 0.013074685466460309,
-            "seated_likely" : 0.50755589847926996,
-            "unknown" : 0.079633015998178375,
-            "upright_stationary" : 0.39925208898298142
+            "postural_transition" : 0.00048483158007116289,
+            "recumbent" : 0.013070007108772335,
+            "seated_likely" : 0.50759386790064864,
+            "unknown" : 0.079625002083915833,
+            "upright_stationary" : 0.39922629132659204
           },
           "ts" : 1700000070
         },
         {
           "arm_behavior" : {
-            "active_gesturing" : 0.010034361737456617,
-            "desk_like" : 0.027077186164071128,
-            "exercise_motion" : 0.063067202610482098,
-            "fidgeting" : 0.72528395606442486,
-            "other" : 0.14637159786442339,
-            "quiet" : 0.0028879389732771577,
-            "repetitive_hand_motion" : 0.0077790083820494776,
-            "unknown" : 0.017498748203815324
+            "active_gesturing" : 0.010034655493442993,
+            "desk_like" : 0.027084634250682495,
+            "exercise_motion" : 0.063063893364367005,
+            "fidgeting" : 0.72530473145689711,
+            "other" : 0.14634601679469164,
+            "quiet" : 0.0028880642859369209,
+            "repetitive_hand_motion" : 0.0077792951039184592,
+            "unknown" : 0.017498709250063332
           },
           "intensity" : 0.5818061633529652,
           "locomotion" : {
-            "brisk_walking" : 0.047287499884055964,
-            "cycling" : 0.00014997450046333653,
-            "other" : 0.0014079203290913447,
-            "running" : 0.015586752408368119,
-            "stairs" : 0.00018364570052679298,
-            "stationary" : 0.52223714834936186,
-            "unknown" : 0.042869614004483581,
-            "vehicle_motion" : 7.6734712139175538e-05,
-            "walking" : 0.37020071011150979
+            "brisk_walking" : 0.047252286451257501,
+            "cycling" : 0.00014998023563327312,
+            "other" : 0.0014084513129751818,
+            "running" : 0.015570668498305093,
+            "stairs" : 0.00018361785816603746,
+            "stationary" : 0.52246156367116059,
+            "unknown" : 0.042874713723905562,
+            "vehicle_motion" : 7.6738519391115914e-05,
+            "walking" : 0.3700219797292057
           },
-          "overall_confidence" : 0.31255717090786572,
-          "overall_uncertainty" : 0.30831741902006476,
+          "overall_confidence" : 0.31254529759434563,
+          "overall_uncertainty" : 0.30832593688993382,
           "posture" : {
-            "postural_transition" : 0.0091715459945647289,
-            "recumbent" : 0.047439719941245483,
-            "seated_likely" : 0.31904946901622944,
-            "unknown" : 0.4998624021955505,
-            "upright_stationary" : 0.12447686285240986
+            "postural_transition" : 0.009175525347295127,
+            "recumbent" : 0.04746024453930292,
+            "seated_likely" : 0.31921534315322481,
+            "unknown" : 0.49964660568519886,
+            "upright_stationary" : 0.12450228127497831
           },
           "transition" : {
             "kind" : "stand_to_sit_like",
-            "prob" : 0.58570110964404742,
+            "prob" : 0.58572969553091003,
             "ts" : 1700000076
           },
           "ts" : 1700000090
         },
         {
           "arm_behavior" : {
-            "active_gesturing" : 0.0017973397096833327,
-            "desk_like" : 0.65075271491181308,
-            "exercise_motion" : 0.0028851817507522205,
-            "fidgeting" : 0.048350663458562988,
-            "other" : 0.15902407914171429,
-            "quiet" : 0.10928154703387188,
-            "repetitive_hand_motion" : 0.0077859159252618238,
-            "unknown" : 0.020122558068340381
+            "active_gesturing" : 0.0017972421921596099,
+            "desk_like" : 0.65080510162344263,
+            "exercise_motion" : 0.0028851599020501338,
+            "fidgeting" : 0.048347857805743737,
+            "other" : 0.1589785829869948,
+            "quiet" : 0.10927805979041204,
+            "repetitive_hand_motion" : 0.0077857988441048312,
+            "unknown" : 0.020122196855092291
           },
           "intensity" : 0.25374211536667135,
           "locomotion" : {
-            "brisk_walking" : 0.00022966355032710381,
-            "cycling" : 6.0872536301891015e-05,
-            "other" : 8.1587258496911895e-05,
-            "running" : 6.6899950787971572e-05,
-            "stairs" : 3.0136755664011919e-05,
-            "stationary" : 0.9653031059041226,
-            "unknown" : 0.031584739098010316,
-            "vehicle_motion" : 8.3144903585388806e-05,
-            "walking" : 0.0025598500427037362
+            "brisk_walking" : 0.00022953550220693704,
+            "cycling" : 6.0854526339029819e-05,
+            "other" : 8.1568041377680662e-05,
+            "running" : 6.6876876792269297e-05,
+            "stairs" : 3.0128976660825785e-05,
+            "stationary" : 0.96530519127973891,
+            "unknown" : 0.03158461770400238,
+            "vehicle_motion" : 8.3119784912367986e-05,
+            "walking" : 0.0025581073079694525
           },
-          "overall_confidence" : 0.40093369143089869,
-          "overall_uncertainty" : 0.15681475353091429,
+          "overall_confidence" : 0.40094208900294448,
+          "overall_uncertainty" : 0.15679775156568626,
           "posture" : {
-            "postural_transition" : 0.00033146838590870361,
-            "recumbent" : 0.026508576383774986,
-            "seated_likely" : 0.62430871643412189,
-            "unknown" : 0.072136247702649217,
-            "upright_stationary" : 0.27671499109354525
+            "postural_transition" : 0.00033138715408887994,
+            "recumbent" : 0.026507022110505266,
+            "seated_likely" : 0.62436630241954438,
+            "unknown" : 0.072132437785068074,
+            "upright_stationary" : 0.27666285053079337
           },
           "ts" : 1700000110
         }

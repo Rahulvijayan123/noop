@@ -382,7 +382,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(published.last).locomotion.top?.0, .walking)
     }
 
-    func testAFifteenSecondStandShowsAsStandingAndSettlesBackToSitting() throws {
+    func testAFifteenSecondStandIsFlaggedNotHiddenAndSettlesBackToSitting() throws {
         // hsmm-1.8: the stand lets the arm hang and the sit brings it back to the desk, so both directions are
         // visible on the forearm axis (a pure roll about the forearm would leave the direction open).
         var sim = ActivitySim()
@@ -393,9 +393,15 @@ final class ActivityContextDecoderTests: XCTestCase {
         sim.postureShift(netDegrees: 75, seconds: 3, toForearm: 0.2)
         sim.desk(120)
         let (_, published) = decode(sim)
-        let stand = states(in: published, from: up, to: up + 45)
-        XCTAssertTrue(stand.contains { ActivityDisplay.group($0.displayContext ?? "") == "upright" },
-                      "a short stand between two flagged position changes should be shown")
+        // hsmm-1.8 review: the wrist alone no longer commits "Standing" (in free living, Capture-24, 7 % of the
+        // standing claims a stand-up's direction made were right), so the short stand is kept as its two
+        // flagged position changes, and the display only stops saying "sitting" while it lasts.
+        let stand = states(in: published, from: up + 10, to: up + 20)
+        XCTAssertFalse(stand.isEmpty)
+        XCTAssertFalse(stand.contains { ActivityDisplay.group($0.displayContext ?? "") == "seated" },
+                       "the stand must not be shown as sitting")
+        let kinds = Set(published.flatMap { $0.history.recentEvents }.filter { $0.ts >= up - 2 && $0.ts <= up + 30 }.map(\.kind))
+        XCTAssertTrue(kinds.isSuperset(of: [.sitToStandLike, .standToSitLike]), "both changes are flagged: \(kinds)")
         let settled = try XCTUnwrap(states(in: published, from: up + 60, to: up + 120).last)
         XCTAssertEqual(ActivityDisplay.group(settled.displayContext ?? ""), "seated")
         let shown = published.filter { $0.ts >= up - 5 }.compactMap(\.displayContext)

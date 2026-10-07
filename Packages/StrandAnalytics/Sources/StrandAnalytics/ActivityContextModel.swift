@@ -466,6 +466,12 @@ enum ActivityContextModel {
     /// Seated-vs-upright evidence a wearer's adopted personal profile is allowed to carry (log-odds); the
     /// population cap is `postureEvidenceCapSU`.
     static let postureEvidenceCapSU = log(8.0), postureEvidenceCapSUPersonal = log(12.0)
+    /// The upright side of the wrist-only sources together (arm pattern, held orientation, a shift's direction):
+    /// below the lean at which "Standing" is committed. In free living (Capture-24) standing still is about a
+    /// tenth of still time and most stand-ups lead straight into walking: the standing claims these sources
+    /// committed were right 7 % of the time (75 of 1075; 4 % to 15 % across evidence strengths), while the lab
+    /// sets (FORTH) say 100 %. Without a learned or personal head, the wrist hedges toward standing only.
+    static let postureEvidenceCapUprightWrist = log(1.6)
     /// Recumbent evidence cap (log-odds over the no-evidence ceiling `recumbentShareFloor`). Held orientation
     /// alone reaches at most its own source cap (ln 2.5, recumbent ≤ ~23 % of the stationary mass: a hedge,
     /// never a lying claim); a lie-down's direction and the staged night may go further.
