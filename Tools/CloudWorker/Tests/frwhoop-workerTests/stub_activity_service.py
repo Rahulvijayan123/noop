@@ -29,6 +29,10 @@ Test knobs (fields on any request):
   "transition": "plain"      -> per-window "transition" evidence + transition_schema/version
   "transition": "null"       -> "transition" key present but JSON null (fail-open nil)
   "transition": "bad"        -> malformed "transition" object (fail-open nil, window intact)
+
+Argv:
+  --ping-status S            -> ping reports model_status S (e.g. hart_unavailable, the real serve.py's
+                                answer for a HART manifest whose checkpoint does not load); default "loaded"
 """
 import json
 import sys
@@ -36,6 +40,9 @@ import time
 
 
 def main():
+    ping_status = "loaded"
+    if "--ping-status" in sys.argv:
+        ping_status = sys.argv[sys.argv.index("--ping-status") + 1]
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -60,7 +67,7 @@ def main():
             resp = {
                 "id": rid,
                 "ok": True,
-                "model_status": "loaded",
+                "model_status": ping_status,
                 "model_version": "stub-model",
                 "preprocessing_version": "stub-preprocess",
                 # A01: the stub has no model, so it is never calibrated.

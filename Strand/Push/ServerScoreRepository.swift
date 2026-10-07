@@ -312,6 +312,72 @@ public actor ServerScoreRepository {
         }
     }
 
+    // MARK: - gait windows
+
+    /// One UTC day of `GET scores/gait-windows`: ElderNet's gait detection and gait quality, or `unchanged`
+    /// when the day was listed in `known` at its current revision.
+    public struct GaitWindowsDay: Sendable {
+        public var day: String
+        public var resultRevision: String
+        public var mode: String
+        public var modelVersion: String
+        /// The `gait-windows-1` columns; nil when `unchanged` or when the server withheld an oversized day.
+        public var windows: GaitWindowColumns?
+        public var unchanged: Bool
+        /// The model the windows came from, when the server named it and its weights digest checks out.
+        public var model: GaitQualityModelInfo? = nil
+        /// The `gait-windows-1` object as it arrived, for the on-disk store.
+        public var windowsJSON: String? = nil
+    }
+
+    /// ElderNet's per-window output for up to three UTC days (same `known` rule as `activityWindows`).
+    public func gaitWindows(days: [String], deviceId: String,
+                            known: [String: String] = [:]) async throws -> [GaitWindowsDay] {
+        guard let endpoint else { throw ReadError.notConfigured }
+        guard let identity = identity() else { throw ReadError.missingIdentity }
+        guard !days.isEmpty else { return [] }
+        var components = URLComponents(url: endpoint.appendingPathComponent("gait-windows"),
+                                       resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "deviceId", value: deviceId),
+                     URLQueryItem(name: "days", value: days.joined(separator: ","))]
+        let held = days.compactMap { day in known[day].map { "\(day):\($0)" } }
+        if !held.isEmpty { items.append(URLQueryItem(name: "known", value: held.joined(separator: ","))) }
+        components?.queryItems = items
+        guard let url = components?.url else { throw ReadError.malformed("gait-windows endpoint") }
+        let body = try await get(url: url, identity: identity)
+        return Self.gaitWindowsDays(from: body)
+    }
+
+    static func gaitWindowsDays(from body: [String: Any]) -> [GaitWindowsDay] {
+        ((body["days"] as? [[String: Any]]) ?? []).compactMap { entry in
+            guard let day = entry["day"] as? String,
+                  let revision = (entry["result_revision"] as? String)
+                    ?? (entry["result_revision"] as? NSNumber)?.stringValue else { return nil }
+            let unchanged = (entry["unchanged"] as? Bool) == true
+            let windowsJSON = unchanged ? nil : (entry["windows"] as? [String: Any]).flatMap { object in
+                (try? JSONSerialization.data(withJSONObject: object)).map { String(decoding: $0, as: UTF8.self) }
+            }
+            return GaitWindowsDay(day: day, resultRevision: revision,
+                                  mode: entry["mode"] as? String ?? "shadow",
+                                  modelVersion: entry["model_version"] as? String ?? "unknown",
+                                  windows: unchanged ? nil : GaitWindowColumns(entry["windows"]),
+                                  unchanged: unchanged,
+                                  model: unchanged ? nil : gaitModel(entry["model"]),
+                                  windowsJSON: windowsJSON)
+        }
+    }
+
+    /// The route's `model` object as the decoder's model info. Its `weights_digest` is not part of the model's
+    /// wire form; it must equal the digest of the per-head weights, or the model is not trusted.
+    static func gaitModel(_ object: Any?) -> GaitQualityModelInfo? {
+        guard var o = object as? [String: Any] else { return nil }
+        let digest = o.removeValue(forKey: "weights_digest") as? String
+        guard let data = try? JSONSerialization.data(withJSONObject: o),
+              let model = try? JSONDecoder().decode(GaitQualityModelInfo.self, from: data),
+              digest == nil || digest == model.weightsDigest else { return nil }
+        return model
+    }
+
     // MARK: - intraday series
 
     /// The dense intraday series between two instants (`GET scores/series`), cached under `cacheKey`.

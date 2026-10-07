@@ -57,6 +57,67 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   IMU at 100 Hz with sitting/standing/lying protocol states; transitions derived
   from state boundaries. Used as wrist-domain transition training data.
 
+## Activity context (Inertia-1 motion heads)
+- **`yang-ai-lab/Inertia-1`** (MIT, "Copyright (c) 2026 The Inertia-1 Authors") — the ART and PatchTST
+  encoder architectures. Only the encoder-side `encode()` path is narrowly vendored into
+  `Tools/ActivityContext/activity_context/inertia/vendor/` (MIT header with upstream path in every file;
+  full licence in `Tools/ActivityContext/NOTICE.md`), pinned to commit
+  `afcd725314c95f4afefce118821349df7d61e7e8`. No official pretrained checkpoint is publicly available, so
+  none is used or committed; the lane runs only against an explicitly supplied, hash-verified checkpoint,
+  and the stand-ins and fixtures (including a small seeded random-init test checkpoint) are not Inertia-1.
+  Contract: `Tools/ActivityContext/INERTIA1.md`.
+- **Public activity datasets (CC BY 4.0, plus GOTOV and WEAR under CC BY-NC-SA 4.0)** used offline to train and
+  evaluate the stand-in heads — never committed or redistributed; only aggregate metrics and label vocabularies
+  are recorded. Full
+  creator lists, titles, DOIs, introductory papers and the changes made (unit conversion to g, 10 Hz
+  low-pass, resampling to 20 Hz, windowing, frozen subject splits, label mapping to Nara classes) are in
+  `Tools/ActivityContext/NOTICE.md`:
+  - **CAPTURE-24** — Chan Chang, Walmsley, Gershuny, Harms, Thomas, Milton, Kelly, Foster, Wong, Gray,
+    Haque, Hollowell & Doherty (2021), University of Oxford, doi:10.5287/bodleian:NGx0JOMP5.
+  - **HHAR** — Blunck, Bhattacharya, Prentow, Kjærgaard & Dey (2015), UCI, doi:10.24432/C5689X.
+  - **PAMAP2** — Reiss (2012), UCI, doi:10.24432/C5NW2H.
+  - **MHEALTH** — Banos, Garcia & Saez (2014), UCI, doi:10.24432/C5TW22.
+  - **OPPORTUNITY** — Roggen, Calatroni, Nguyen-Dinh, Chavarriaga & Sagha (2010), UCI, doi:10.24432/C5M027.
+  - **Daphnet Freezing of Gait** (out-of-distribution probe only) — Roggen, Plotnik & Hausdorff (2010), UCI,
+    doi:10.24432/C56K78.
+  - **WISDM-2019** (also used by the HART path above) — Weiss (2019), UCI, doi:10.24432/C5HK59.
+  - **CC BY-NC-SA 4.0 — non-commercial use approved by the owner on 2026-10-06** (Nara is non-commercial): head
+    bundles trained on these record `training_data_licences` including "CC BY-NC-SA 4.0", stay outside git and are
+    for non-commercial use only; no raw data is committed or redistributed.
+    - **GOTOV** (older adults; right-wrist GENEActiv + COSMED measured MET) — Paraschiakos, Beekman, Knobbe, Cachucho
+      & Slagboom (2021), 4TU.ResearchData, doi:10.4121/12716081.v2; paper Paraschiakos et al. (2020), UMUAI,
+      doi:10.1007/s11257-020-09268-2.
+    - **WEAR** (outdoor workouts; Bangle.js wrists) — Bock, Kuehne, Van Laerhoven & Moeller (2024), IMWUT 8(4) 175,
+      doi:10.1145/3699776 (University of Siegen).
+  - Reference only (label vocabularies audited, no samples used): **UCI HAPT** (Reyes-Ortiz, Anguita, Oneto &
+    Parra, doi:10.24432/C54G7M), **HARTH** (Logacjov, Kongsvold, Bach, Bårdstu & Mork, doi:10.24432/C5NC90),
+    **HAR70+** (Logacjov & Ustad, doi:10.24432/C5CW3D).
+
+## Activity context (ElderNet gait quality)
+- **`yonbrand/gait-quality`** (ElderNet) — **Copyright © 2022, University of Oxford**, University of Oxford
+  SSL-wearables **Academic Use Licence** (use limited to the licensee's own internal academic, non-commercial
+  research; no service for third parties; accepted by the owner on 2026-10-05; text in
+  `Tools/ActivityContext/NOTICE.md`). Pinned to commit `437a38bcc69f42717fe73c1f7dbea7e1f7a50d23`. **Not
+  redistributed:** this repository contains no Oxford source code and no ElderNet weights. The operator fetches
+  the six fine-tuned checkpoints and the upstream source files from the pinned commit at install time
+  (`python -m activity_context.eldernet.weights fetch`, `python -m activity_context.eldernet.upstream fetch`,
+  both sha256-pinned), and `Tools/ActivityContext/activity_context/eldernet/upstream.py` imports upstream's own
+  `models.py` (ResNet-18 from OxWearables/ssl-wearables + FC heads) and `gait_quality/detection.py` /
+  `quality.py` from that checkout after verifying every file. Running it as a service on other people's data
+  (the worker lane, off by default) may fall outside the licence — see `Tools/ActivityContext/ELDERNET.md`.
+  Please cite: Brand, Y. E., Buchman, A. S., Kluge, F., Palmerini, L., Becker, C., Cereatti, A., Maetzler, W.,
+  Vereijken, B., Yarnall, A. J., Rochester, L., Del Din, S., Mueller, A., Hausdorff, J. M. & Perlman, O.
+  (2026). Continuous Assessment of Daily-Living Gait Using Self-Supervised Learning of Wrist-Worn Accelerometer
+  Data. *npj Digital Medicine*. doi:10.1038/s41746-026-02528-2. Contract: `Tools/ActivityContext/ELDERNET.md`.
+- **Mobilise-D Technical Validation Study (TVS) dataset** (v1.0.2, CC BY 4.0) — ElderNet was fine-tuned on
+  it, and 70 s of upstream's committed toy excerpt (participant PD4010, INDIP left wrist) is part of the golden
+  test fixture `Tools/ActivityContext/fixtures/eldernet/golden_gait_quality_request.json` (converted to WHOOP
+  i16 columns). Del Din, S. et al. (2025), Zenodo, doi:10.5281/zenodo.15861907.
+- **Validation-only datasets** (never committed; aggregate metrics only): **GOTOV** (Paraschiakos et al.,
+  LUMC; CC BY-NC-SA 4.0, accepted by the owner) and **OxWalk** (Small, von Fritsch, Doherty, Khalid & Price,
+  University of Oxford, 2022; CC BY 4.0; doi:10.5287/bodleian:ORQ2abnbR), plus the CC BY 4.0 sets listed
+  under Inertia-1 above.
+
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device
   SQLite layout (`DataBase/<user_id>/de/<user_id>.db`, JSON `value` columns, the `*_day`

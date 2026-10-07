@@ -318,22 +318,22 @@ final class ActivityCalibrationSessionTests: XCTestCase {
                                            transitionKind: "sit_to_stand", preState: 5, postState: 5)])
         harness.runner.begin(previousMode: .partTime)
         harness.advance(3)    // active at epoch+3; cueStop = epoch+13
-        XCTAssertEqual(harness.strap.hapticCount, 1, "start cue only")
+        XCTAssertEqual(harness.strap.hapticCount, 0, "a held pre-state starts silently")
 
         // Still inside the pre-state hold: no "do it now" cue.
         harness.advance(4)    // epoch+7, one second before the pre-state ends
-        XCTAssertEqual(harness.strap.hapticCount, 1)
+        XCTAssertEqual(harness.strap.hapticCount, 0)
         XCTAssertNil(harness.strap.bouts.last?.transitionTs)
 
         // Pre-state over -> the runner auto-fires the "do it now" cue and records the moment.
         harness.advance(1)    // epoch+8 = cueStart + pre
-        XCTAssertEqual(harness.strap.hapticCount, 2)
+        XCTAssertEqual(harness.strap.hapticCount, 1, "the only movement cue")
         XCTAssertEqual(harness.strap.bouts.count, 0, "the bout is only emitted at the stop cue")
 
         // Post-state hold runs to the stop cue; last bout finishes the session.
         harness.advance(5)    // epoch+13
         XCTAssertEqual(harness.runner.phase, .finished)
-        XCTAssertEqual(harness.strap.hapticCount, 3, "start + do-it-now + stop")
+        XCTAssertEqual(harness.strap.hapticCount, 2, "do-it-now + stop")
         let bout = try XCTUnwrap(harness.strap.bouts.first)
         XCTAssertEqual(bout.transitionKind, "sit_to_stand")
         let transitionTs = try XCTUnwrap(bout.transitionTs)
@@ -351,14 +351,14 @@ final class ActivityCalibrationSessionTests: XCTestCase {
         harness.advance(3)    // active at epoch+3
         harness.advance(2)    // epoch+5, two seconds before the auto-fire
         harness.runner.markTransitionNow()
-        XCTAssertEqual(harness.strap.hapticCount, 2, "the tap fires the do-it-now cue immediately")
+        XCTAssertEqual(harness.strap.hapticCount, 1, "the tap fires the do-it-now cue immediately")
 
         harness.advance(8)    // epoch+13, stop cue
         XCTAssertEqual(harness.runner.phase, .finished)
         let bout = try XCTUnwrap(harness.strap.bouts.first)
         XCTAssertEqual(bout.transitionKind, "stand_to_sit")
         XCTAssertEqual(bout.transitionTs, epoch + 5, "the recorded moment is the tap, not the deadline")
-        XCTAssertEqual(harness.strap.hapticCount, 3)
+        XCTAssertEqual(harness.strap.hapticCount, 2)
     }
 
     @MainActor

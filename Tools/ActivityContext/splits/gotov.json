@@ -1,0 +1,50 @@
+{
+  "dataset": "gotov",
+  "method": "Agent C split(): numpy default_rng(42).permutation of the sorted subject ids; first 20% test, next 20% val, rest train",
+  "note": "35 participants with a right-wrist GENEActiv file (frozen 2026-10-06 for the NC-SA licence decision); outdoor walking/cycling exists for 22 of them: 14 train, 6 val, 1 test (GOTOV07)",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "0da75c2ff2a3571b6249857579e5796943c67c624d99cb2832e13a28845912d4",
+  "source": "Agent C split_manifests.json (gotov)",
+  "test_subjects": [
+    "GOTOV07",
+    "GOTOV18",
+    "GOTOV22",
+    "GOTOV26",
+    "GOTOV27",
+    "GOTOV32",
+    "GOTOV36"
+  ],
+  "train_subjects": [
+    "GOTOV02",
+    "GOTOV03",
+    "GOTOV04",
+    "GOTOV05",
+    "GOTOV06",
+    "GOTOV08",
+    "GOTOV10",
+    "GOTOV11",
+    "GOTOV13",
+    "GOTOV14",
+    "GOTOV15",
+    "GOTOV16",
+    "GOTOV17",
+    "GOTOV19",
+    "GOTOV23",
+    "GOTOV24",
+    "GOTOV28",
+    "GOTOV29",
+    "GOTOV30",
+    "GOTOV34",
+    "GOTOV35"
+  ],
+  "val_subjects": [
+    "GOTOV09",
+    "GOTOV12",
+    "GOTOV20",
+    "GOTOV21",
+    "GOTOV25",
+    "GOTOV31",
+    "GOTOV33"
+  ]
+}

@@ -627,6 +627,15 @@ public struct ActivityCalibrationProtocolModel: Codable, Sendable {
         self.version = version
         self.tasks = tasks
     }
+
+    /// Wall-clock length of one run: every repetition is a countdown plus its active interval, and
+    /// every repetition except the very last is followed by its rest.
+    public func estimatedSeconds(countdownSeconds: Int) -> Int {
+        let reps = tasks.reduce(0) { $0 + $1.repetitions }
+        let perRep = tasks.reduce(0) { $0 + ($1.durationSeconds + countdownSeconds) * $1.repetitions }
+        let rests = tasks.reduce(0) { $0 + $1.restSeconds * $1.repetitions } - (tasks.last?.restSeconds ?? 0)
+        return reps == 0 ? 0 : perRep + max(0, rests)
+    }
 }
 
 /// The shipped guided-capture protocols. Editable copies are made from these; the statics stay pristine
@@ -744,5 +753,91 @@ public enum ActivityCalibrationProtocols {
         return ActivityCalibrationProtocolModel(
             version: "calibration-v1",
             tasks: postureGroup + deskGroup + locomotionGroup + transitionGroup)
+    }()
+
+    /// The protocol the guided session runs.
+    public static var current: ActivityCalibrationProtocolModel { v2 }
+
+    /// A ~9 minute run shaped like an ordinary stretch of a day. Every step ends in the state the next
+    /// one starts from (sit -> desk -> stand -> walk -> stop -> lie -> get up -> sit), so the transitions
+    /// are the real moves between steps rather than drilled repetitions, and nobody has to reset between
+    /// bouts (rest 0). One bout per class per run is deliberate: personalization needs >= 3 sessions
+    /// per class and evaluation pools transition events across sessions, so a few short runs on
+    /// different days carry more evidence than one long one. Running, stairs and cycling are left to
+    /// recorded workouts. Transition pre-states are short (3 s, >= the 2 s guard) because the step
+    /// before already holds that state. Standing is the longest static bout (70 s) so that a single run
+    /// clears `ActivityPersonalProfileFitter.minModeSeconds` after the cue guards and the fitter's own settle
+    /// and end trims: standing is the class the population profile confuses with sitting most.
+    public static let v2: ActivityCalibrationProtocolModel = {
+        let cat = ActivityCalibrationTaskCategory.self
+
+        func step(_ id: String, _ title: String, _ category: ActivityCalibrationTaskCategory,
+                  _ instructions: String, duration: Int,
+                  posture: PostureClass? = nil, locomotion: LocomotionClass? = nil,
+                  arm: ArmBehaviorClass? = nil, tag: ActivityGroundTruthSemanticTag? = nil) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, category: category.rawValue,
+                                    posture: posture?.rawValue, locomotion: locomotion?.rawValue,
+                                    armBehavior: arm?.rawValue, semanticTag: tag?.rawValue,
+                                    durationSeconds: duration, repetitions: 1, restSeconds: 0)
+        }
+
+        func move(_ id: String, _ title: String, _ kind: ActivityGroundTruthTransitionKind,
+                  _ instructions: String, duration: Int = 10) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions,
+                                    category: cat.transition.rawValue, transitionKind: kind.rawValue,
+                                    durationSeconds: duration, repetitions: 1, restSeconds: 0,
+                                    preStateSeconds: 3, postStateSeconds: duration - 6)
+        }
+
+        let tasks: [ActivityCalibrationTask] = [
+            step("posture.sitting-quietly", "Sit and relax", .posture,
+                 "Sit in a chair the way you normally would and relax. Rest your hands wherever feels natural.",
+                 duration: 40, posture: .seatedLikely),
+            step("desk.typing", "Type", .desk,
+                 "Put the phone down where you can see it and type on a keyboard at your normal pace: an email, notes, anything.",
+                 duration: 40, posture: .seatedLikely, arm: .repetitiveHandMotion, tag: .typing),
+            step("desk.desk-work", "Desk work", .desk,
+                 "Carry on at the desk as you usually would: use the mouse, read, write something by hand. Mix it up.",
+                 duration: 30, posture: .seatedLikely, arm: .deskLike, tag: .deskWork),
+            step("desk.phone-use", "Use your phone", .desk,
+                 "Still seated, pick up the phone and scroll or read as you normally would.",
+                 duration: 30, posture: .seatedLikely, arm: .quiet, tag: .phoneUse),
+            step("desk.fidgeting-seated", "Fidget", .desk,
+                 "Fidget the way you would in a long meeting: shift in your seat, stretch, tap, adjust.",
+                 duration: 20, posture: .seatedLikely, arm: .fidgeting, tag: .fidgeting),
+            move("transition.sit-to-stand", "Stand up", .sitToStand,
+                 "Stay seated. When it buzzes, stand up at your normal speed and stay standing."),
+            step("posture.standing-quietly", "Stand", .posture,
+                 "Stand relaxed, as if you were waiting in a queue. Shift your weight or move your arms if you normally would.",
+                 duration: 70, posture: .uprightStationary),
+            move("transition.stand-to-sit", "Sit down", .standToSit,
+                 "Stay standing. When it buzzes, sit back down."),
+            move("transition.sit-to-stand-2", "Stand up again", .sitToStand,
+                 "Stay seated. When it buzzes, stand up, ready to go for a short walk."),
+            move("transition.walk-start", "Start walking", .walkStart,
+                 "Stand still. When it buzzes, start walking at your normal pace. Carry the phone in the hand without the strap so you can read each next step."),
+            step("locomotion.walking", "Walk", .locomotion,
+                 "Keep walking at your usual pace: around your home, along a corridor or outside. Turn whenever you need to.",
+                 duration: 75, locomotion: .walking),
+            step("locomotion.brisk-walking", "Walk briskly", .locomotion,
+                 "Speed up as if you were running a little late. Keep it comfortable.",
+                 duration: 45, locomotion: .briskWalking),
+            move("transition.walk-stop", "Stop", .walkStop,
+                 "Ease back to your normal pace. When it buzzes, stop and stand still."),
+            move("transition.walk-start-2", "Walk to a bed or sofa", .walkStart,
+                 "Stand still. When it buzzes, start walking towards a bed or sofa."),
+            move("transition.walk-stop-2", "Stop beside it", .walkStop,
+                 "Keep walking towards the bed or sofa. When it buzzes, stop beside it and stand still."),
+            move("transition.lying-down", "Lie down", .lyingDown,
+                 "Standing by the bed or sofa: when it buzzes, lie down on your back.", duration: 12),
+            step("posture.lying-down", "Rest lying down", .posture,
+                 "Lie relaxed, as if you were resting. Keep your arms wherever is comfortable.",
+                 duration: 40, posture: .recumbent),
+            move("transition.getting-up", "Get up", .gettingUp,
+                 "Stay lying down. When it buzzes, get up and stand next to the bed or sofa.", duration: 12),
+            move("transition.stand-to-sit-2", "Sit down to finish", .standToSit,
+                 "Stay standing. When it buzzes, sit down on the bed, sofa or a chair. That's the last step."),
+        ]
+        return ActivityCalibrationProtocolModel(version: "calibration-v2", tasks: tasks)
     }()
 }

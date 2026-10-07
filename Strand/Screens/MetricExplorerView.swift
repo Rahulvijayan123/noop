@@ -1037,6 +1037,9 @@ struct MetricDetailView: View {
                         }
                     }
                     statRow(effectiveRange: effRange, windowed: win)
+                    if isStepsDetail, let latestDay = rawWin.last?.day ?? series.last?.day {
+                        WalkingInsightsSection(day: latestDay)
+                    }
                     // Steps chart summaries are bucketed, but the provenance table deliberately remains
                     // one row per underlying observed day.
                     readingsTable(windowed: isStepsDetail ? rawWin : win)

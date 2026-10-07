@@ -93,6 +93,12 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// Breath intervals behind `respRateBpm` (0 when it is nil).
     public var respBreaths: Int
 
+    // Gait (reported, not evidence)
+    /// ElderNet's gait metrics over the gait windows inside the interval. nil (and absent from the JSON) unless
+    /// the day was decoded with the ElderNet channel and the interval's runs carried gait. Not part of
+    /// `ActivityContextIntervalRow`: the phone's store does not hold it.
+    public var gait: ActivityGaitSummary?
+
     public var durationSeconds: Int { end - start }
 
     public init(start: Int, end: Int, activityClass: ActivityClass, confidence: Double,
@@ -104,7 +110,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 hrSamples: Int = 0, hrMean: Double? = nil, hrMin: Int? = nil, hrMax: Int? = nil,
                 hrSlope: Double? = nil, rmssd: Double? = nil, rrBeats: Int = 0,
                 rrDiffSqSumMs2: Double = 0, rrDiffCount: Int = 0,
-                respRateBpm: Double? = nil, respBreaths: Int = 0) {
+                respRateBpm: Double? = nil, respBreaths: Int = 0, gait: ActivityGaitSummary? = nil) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
@@ -117,6 +123,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         self.rmssd = rmssd; self.rrBeats = rrBeats
         self.rrDiffSqSumMs2 = rrDiffSqSumMs2; self.rrDiffCount = rrDiffCount
         self.respRateBpm = respRateBpm; self.respBreaths = respBreaths
+        self.gait = gait
     }
 
     /// Whether `ts` falls inside the interval.
@@ -207,6 +214,7 @@ public enum ActivityContextIntervalBuilder {
         var locomotion: [LocomotionClass: Double] = [:]
         var arm: [ArmBehaviorClass: Double] = [:]
         var intensitySum = 0.0, intensitySeconds = 0.0
+        var gait: GaitTotals?
 
         init(run: ActivityContextRun, classification k: ActivityClassification) {
             start = run.start; end = run.end
@@ -226,8 +234,13 @@ public enum ActivityContextIntervalBuilder {
             if let l = k.locomotion { locomotion[l, default: 0] += w }
             if let a = k.armBehavior { arm[a, default: 0] += w }
             if let i = run.intensity { intensitySum += i * w; intensitySeconds += w }
+            if let g = run.gait { addGait(GaitTotals(summary: g)) }
             end = max(end, run.end)
             start = min(start, run.start)
+        }
+
+        mutating func addGait(_ g: GaitTotals) {
+            if gait == nil { gait = g } else { gait!.add(g) }
         }
 
         mutating func absorb(_ other: Accumulation) {
@@ -239,6 +252,7 @@ public enum ActivityContextIntervalBuilder {
             for (k, v) in other.locomotion { locomotion[k, default: 0] += v }
             for (k, v) in other.arm { arm[k, default: 0] += v }
             intensitySum += other.intensitySum; intensitySeconds += other.intensitySeconds
+            if let g = other.gait { addGait(g) }
             start = min(start, other.start); end = max(end, other.end)
         }
 
@@ -259,6 +273,8 @@ public enum ActivityContextIntervalBuilder {
             p.locomotion = locomotion.mapValues { $0 * f }
             p.arm = arm.mapValues { $0 * f }
             p.intensitySum *= f; p.intensitySeconds *= f
+            // Gait windows carry no position inside the stretch: each part gets its share of them.
+            p.gait = gait.map { $0.scaled(f) }
             return p
         }
 
@@ -278,7 +294,8 @@ public enum ActivityContextIntervalBuilder {
                 locomotion: mode(locomotion) { $0.rawValue > $1.rawValue },
                 armBehavior: mode(arm) { $0.rawValue > $1.rawValue },
                 sleep: sleep, wear: wear,
-                intensity: intensitySeconds > 0 ? Self.round(intensitySum / intensitySeconds, 1000) : nil)
+                intensity: intensitySeconds > 0 ? Self.round(intensitySum / intensitySeconds, 1000) : nil,
+                gait: gait.flatMap { $0.isEmpty ? nil : $0.summary })
         }
 
         static func round(_ x: Double, _ scale: Double) -> Double { (x * scale).rounded() / scale }

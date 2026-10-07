@@ -48,6 +48,8 @@ public struct ActivityClassAggregate: Equatable, Sendable {
     public var respRateBpm: Double?
     public var stepTicks: Int
     public var cadenceSpm: Double?
+    /// ElderNet gait metrics over the class's intervals that carried them (reported, not evidence); nil without.
+    public var gait: ActivityGaitSummary? = nil
 }
 
 public struct ActivityWindowSummary: Equatable, Sendable {
@@ -77,6 +79,7 @@ public enum ActivityContextAggregator {
             var respSum = 0.0, respWeight = 0.0
             var ticks = 0.0
             var cadenceSum = 0.0, cadenceWeight = 0.0
+            var gait: GaitTotals?
         }
         var byClass: [ActivityClass: Acc] = [:]
         var covered = 0.0
@@ -111,6 +114,11 @@ public enum ActivityContextAggregator {
             }
             a.ticks += Double(iv.stepTicks) * share
             if let c = iv.cadenceSpm { a.cadenceSum += c * overlap; a.cadenceWeight += overlap }
+            if let g = iv.gait {
+                // The part of the interval inside the window carries its share of the gait windows.
+                let part = GaitTotals(summary: g).scaled(share)
+                if a.gait == nil { a.gait = part } else { a.gait!.add(part) }
+            }
             byClass[iv.activityClass] = a
         }
 
@@ -126,7 +134,8 @@ public enum ActivityContextAggregator {
                 rmssdWindowDominantS: dominant,
                 respRateBpm: a.respWeight > 0 ? a.respSum / a.respWeight : nil,
                 stepTicks: Int(a.ticks.rounded()),
-                cadenceSpm: a.cadenceWeight > 0 ? a.cadenceSum / a.cadenceWeight : nil)
+                cadenceSpm: a.cadenceWeight > 0 ? a.cadenceSum / a.cadenceWeight : nil,
+                gait: a.gait.flatMap { $0.isEmpty ? nil : $0.summary })
         }.sorted { l, r in
             l.seconds != r.seconds ? l.seconds > r.seconds : l.activityClass.rawValue < r.activityClass.rawValue
         }

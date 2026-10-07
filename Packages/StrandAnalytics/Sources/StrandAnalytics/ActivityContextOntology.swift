@@ -23,7 +23,9 @@ public enum ActivityContextVersions {
     /// the serve response says otherwise (A01).
     /// 1.5: adds the optional learned raw-IMU transition expert evidence channel (`ActivityContextModel`
     /// channel 4b) and the `transition` field on observations/features/windows.
-    public static let decoder = "hsmm-1.5"
+    /// 1.6: sitting and standing are separate display kinds, and a fresh, confident change-of-position event
+    /// lets the label follow without the display hold (a 15 s stand shows).
+    public static let decoder = "hsmm-1.6"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
     /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump
@@ -179,21 +181,32 @@ public struct ActivityStateVersions: Codable, Equatable, Sendable {
     public var featureSchema: String
     public var encoderId: String?
     public var encoderVersion: String?
+    /// Inertia-1 motion-head evidence that shaped the state (`inertia-1:<bundle12>:<cfgtag>`). Written only
+    /// when that evidence was active, so a state decoded without it encodes exactly the keys it always did.
+    public var motionHeads: String?
+    /// ElderNet gait evidence that shaped the state (`eldernet:<model_version>:<weights12>:<cfgtag>`). Written
+    /// only when that channel was active, so a state decoded without it encodes exactly the keys it always did.
+    public var gaitQuality: String?
 
     public init(schema: Int = ActivityContextVersions.schema,
                 ontology: String = ActivityContextVersions.ontology,
                 decoder: String = ActivityContextVersions.decoder,
                 featureSchema: String = ActivityContextVersions.featureSchema,
-                encoderId: String? = nil, encoderVersion: String? = nil) {
+                encoderId: String? = nil, encoderVersion: String? = nil, motionHeads: String? = nil,
+                gaitQuality: String? = nil) {
         self.schema = schema; self.ontology = ontology; self.decoder = decoder
         self.featureSchema = featureSchema
         self.encoderId = encoderId; self.encoderVersion = encoderVersion
+        self.motionHeads = motionHeads
+        self.gaitQuality = gaitQuality
     }
 
     enum CodingKeys: String, CodingKey {
         case schema, ontology, decoder
         case featureSchema = "feature_schema"
         case encoderId = "encoder", encoderVersion = "encoder_version"
+        case motionHeads = "motion_heads"
+        case gaitQuality = "gait_quality"
     }
 }
 
@@ -335,6 +348,9 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
     public var history: ActivityHistorySummary
     public var evidence: ActivityEvidenceSummary
     public var versions: ActivityStateVersions
+    /// ElderNet's metrics over the current walking stretch (reported, not evidence), present only while the
+    /// gait channel is active, the posterior is on the gait modes and ElderNet detects gait. Omitted otherwise.
+    public var gait: ActivityGaitSummary?
 
     public init(ts: Int,
                 posture: HeadProbabilities<PostureClass>,
@@ -350,13 +366,15 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
                 displayContext: String?,
                 history: ActivityHistorySummary,
                 evidence: ActivityEvidenceSummary,
-                versions: ActivityStateVersions) {
+                versions: ActivityStateVersions,
+                gait: ActivityGaitSummary? = nil) {
         self.ts = ts; self.posture = posture; self.locomotion = locomotion
         self.armBehavior = armBehavior; self.intensity = intensity; self.transition = transition
         self.sleep = sleep; self.wear = wear
         self.overallConfidence = overallConfidence; self.overallUncertainty = overallUncertainty
         self.headConfidence = headConfidence; self.displayContext = displayContext
         self.history = history; self.evidence = evidence; self.versions = versions
+        self.gait = gait
     }
 
     enum CodingKeys: String, CodingKey {
@@ -368,6 +386,7 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
         case headConfidence = "head_confidence"
         case displayContext = "display_context"
         case history, evidence, versions
+        case gait
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -392,5 +411,7 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
         try c.encode(history, forKey: .history)
         try c.encode(evidence, forKey: .evidence)
         try c.encode(versions, forKey: .versions)
+        // Optional block: written only when present, so a state without it encodes the keys it always did.
+        if let gait { try c.encode(gait, forKey: .gait) }
     }
 }

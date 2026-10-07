@@ -1,0 +1,243 @@
+{
+ "calibration": {
+  "gait_prob": {
+   "T": 1.0,
+   "fit": "val",
+   "method": "temperature"
+  }
+ },
+ "duration_ms": 12,
+ "gait_threshold": 0.5,
+ "hop_s": 5,
+ "id": "golden-1",
+ "model_id": "eldernet",
+ "model_version": "eldernet-437a38b",
+ "n_dropped_nonfinite": 1,
+ "ok": true,
+ "op": "infer",
+ "preprocessing_version": "eldernet-prep-1",
+ "schema": "gait-quality-1",
+ "upstream_commit": "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23",
+ "weights": {
+  "cadence": "9815c02478ad9bd653dbfe13b15ccda90b4db59a40fc27ef7d25c241fa96935d",
+  "gait_detection": "395406bdbfa00f69c1e9db2e4f21c6c873ce80a61e33be9f648c09eb7cbee0b8",
+  "gait_length": "612ec3d0ea257f7578ec4c8d01f4d2f208f1f582b29017ea80d6c9ed7c813b41",
+  "gait_speed": "0ac4195639ab22f0a7f1c07919a3ebfde36dc210e4bf676c319326c00e92c4e8",
+  "regularity": "ea78af0487180865ea87f68eaaf07b22073aa395f17d6c3653cb84d836f82d0a",
+  "step_count": "6d8dba6d0377e99dd5f38a28d7e443dd29e95886c6c1d17e60725859b993d5e8"
+ },
+ "window_s": 10,
+ "windows": [
+  {
+   "e": 1758000010,
+   "gait_prob": 0.0,
+   "is_gait": false,
+   "prefiltered": true,
+   "s": 1758000000
+  },
+  {
+   "e": 1758000015,
+   "gait_prob": 0.0,
+   "is_gait": false,
+   "prefiltered": true,
+   "s": 1758000005
+  },
+  {
+   "e": 1758000020,
+   "gait_prob": 0.0,
+   "is_gait": false,
+   "prefiltered": true,
+   "s": 1758000010
+  },
+  {
+   "e": 1758000025,
+   "gait_prob": 0.0,
+   "is_gait": false,
+   "prefiltered": true,
+   "s": 1758000015
+  },
+  {
+   "e": 1758000030,
+   "gait_prob": 0.28,
+   "is_gait": false,
+   "s": 1758000020
+  },
+  {
+   "e": 1758000035,
+   "gait_prob": 0.33,
+   "is_gait": false,
+   "s": 1758000025
+  },
+  {
+   "cadence_spm": 99.0,
+   "e": 1758000040,
+   "gait_prob": 0.9,
+   "is_gait": true,
+   "regularity": 0.792,
+   "s": 1758000030,
+   "speed_mps": 1.16,
+   "steps": 16.6,
+   "stride_m": 1.28
+  },
+  {
+   "cadence_spm": 99.5,
+   "e": 1758000045,
+   "gait_prob": 0.905,
+   "is_gait": true,
+   "regularity": 0.794,
+   "s": 1758000035,
+   "speed_mps": 1.17,
+   "steps": 16.7,
+   "stride_m": 1.285
+  },
+  {
+   "cadence_spm": 100.0,
+   "e": 1758000050,
+   "gait_prob": 0.91,
+   "is_gait": true,
+   "regularity": 0.796,
+   "s": 1758000040,
+   "speed_mps": 1.18,
+   "steps": 16.8,
+   "stride_m": 1.29
+  },
+  {
+   "cadence_spm": 100.5,
+   "e": 1758000055,
+   "gait_prob": 0.915,
+   "is_gait": true,
+   "regularity": 0.798,
+   "s": 1758000045,
+   "speed_mps": 1.19,
+   "steps": 16.9,
+   "stride_m": 1.295
+  },
+  {
+   "cadence_spm": 101.0,
+   "e": 1758000060,
+   "gait_prob": 0.92,
+   "is_gait": true,
+   "regularity": 0.8,
+   "s": 1758000050,
+   "speed_mps": 1.2,
+   "steps": 17.0,
+   "stride_m": 1.3
+  },
+  {
+   "cadence_spm": 101.5,
+   "e": 1758000065,
+   "gait_prob": 0.925,
+   "is_gait": true,
+   "regularity": 0.802,
+   "s": 1758000055,
+   "speed_mps": 1.21,
+   "steps": 17.1,
+   "stride_m": 1.305
+  },
+  {
+   "cadence_spm": 102.0,
+   "e": 1758000070,
+   "gait_prob": 0.93,
+   "is_gait": true,
+   "regularity": 0.804,
+   "s": 1758000060,
+   "speed_mps": 1.22,
+   "steps": 17.2,
+   "stride_m": 1.31
+  },
+  {
+   "cadence_spm": 102.5,
+   "e": 1758000075,
+   "gait_prob": 0.935,
+   "is_gait": true,
+   "regularity": 0.806,
+   "s": 1758000065,
+   "speed_mps": 1.23,
+   "steps": 17.3,
+   "stride_m": 1.315
+  },
+  {
+   "cadence_spm": 103.0,
+   "e": 1758000080,
+   "gait_prob": 0.94,
+   "is_gait": true,
+   "regularity": 0.808,
+   "s": 1758000070,
+   "speed_mps": 1.24,
+   "steps": 17.4,
+   "stride_m": 1.32
+  },
+  {
+   "cadence_spm": 103.5,
+   "e": 1758000085,
+   "gait_prob": 0.945,
+   "is_gait": true,
+   "regularity": 0.81,
+   "s": 1758000075,
+   "speed_mps": 1.25,
+   "steps": 17.5,
+   "stride_m": 1.325
+  },
+  {
+   "e": 1758000090,
+   "gait_prob": 0.499999,
+   "is_gait": false,
+   "s": 1758000080
+  },
+  {
+   "cadence_spm": 88.0,
+   "e": 1758000095,
+   "gait_prob": 0.5,
+   "is_gait": true,
+   "regularity": 0.6,
+   "s": 1758000085,
+   "speed_mps": 0.9,
+   "steps": 14.5,
+   "stride_m": 1.1
+  },
+  {
+   "cadence_spm": 118.0,
+   "e": 1758000100,
+   "gait_prob": 0.97,
+   "is_gait": true,
+   "regularity": 0.86,
+   "s": 1758000090,
+   "speed_mps": 1.55,
+   "steps": 19.6,
+   "stride_m": 1.52
+  },
+  {
+   "cadence_spm": 118.0,
+   "e": 1758000105,
+   "gait_prob": 0.97,
+   "is_gait": true,
+   "regularity": 0.86,
+   "s": 1758000095,
+   "speed_mps": 1.55,
+   "steps": 19.6,
+   "stride_m": 1.52
+  },
+  {
+   "cadence_spm": 118.0,
+   "e": 1758000110,
+   "gait_prob": 0.97,
+   "is_gait": true,
+   "regularity": 0.86,
+   "s": 1758000100,
+   "speed_mps": 1.55,
+   "steps": 19.6,
+   "stride_m": 1.52
+  },
+  {
+   "cadence_spm": 118.0,
+   "e": 1758000115,
+   "gait_prob": 0.97,
+   "is_gait": true,
+   "regularity": 0.86,
+   "s": 1758000105,
+   "speed_mps": 1.55,
+   "steps": 19.6,
+   "stride_m": 1.52
+  }
+ ]
+}

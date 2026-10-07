@@ -1,0 +1,230 @@
+{
+  "schema": "nara.inertia.perf/1",
+  "note": "seeded random-init weights of the vendored architectures (latency/memory do not depend on weight values); NOT Inertia-1 results",
+  "generated_utc": "2026-10-05T23:46:10Z",
+  "machine": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "machine": "arm64",
+    "cpu_count": 16,
+    "python": "3.11.15",
+    "torch": "2.8.0",
+    "numpy": "2.2.6",
+    "scipy": "1.17.1"
+  },
+  "encoders": [
+    {
+      "method": "ar_transformer",
+      "preset": "small",
+      "window_s": 30,
+      "embedding_dim": 512,
+      "params": 8442398,
+      "checkpoint_bytes": 44023182,
+      "torch_import_s": 0.386,
+      "load_s_first": 0.049,
+      "load_s_median": 0.058,
+      "threads": 1,
+      "batch": {
+        "1": {
+          "median_ms": 1.85,
+          "min_ms": 1.75,
+          "reps": 20,
+          "windows_per_s": 540.2,
+          "cpu_util": 0.97
+        },
+        "64": {
+          "median_ms": 57.16,
+          "min_ms": 50.43,
+          "reps": 5,
+          "windows_per_s": 1119.6,
+          "cpu_util": 1.52
+        },
+        "256": {
+          "median_ms": 274.93,
+          "min_ms": 212.95,
+          "reps": 3,
+          "windows_per_s": 931.2,
+          "cpu_util": 1.34
+        }
+      },
+      "thread_scan_batch64_median_ms": {
+        "1": 49.96,
+        "4": 43.78,
+        "16": 41.48
+      },
+      "peak_rss_mb": 440.0
+    },
+    {
+      "method": "ar_transformer",
+      "preset": "small",
+      "window_s": 10,
+      "embedding_dim": 512,
+      "params": 8442398,
+      "checkpoint_bytes": 44023182,
+      "torch_import_s": 0.416,
+      "load_s_first": 0.062,
+      "load_s_median": 0.06,
+      "threads": 1,
+      "batch": {
+        "1": {
+          "median_ms": 1.2,
+          "min_ms": 1.13,
+          "reps": 20,
+          "windows_per_s": 836.5,
+          "cpu_util": 1.0
+        },
+        "64": {
+          "median_ms": 17.3,
+          "min_ms": 17.1,
+          "reps": 5,
+          "windows_per_s": 3699.7,
+          "cpu_util": 1.4
+        },
+        "256": {
+          "median_ms": 73.1,
+          "min_ms": 72.84,
+          "reps": 3,
+          "windows_per_s": 3502.1,
+          "cpu_util": 1.36
+        }
+      },
+      "thread_scan_batch64_median_ms": {
+        "1": 17.37,
+        "4": 14.7,
+        "16": 16.63
+      },
+      "peak_rss_mb": 398.6
+    },
+    {
+      "method": "patchtst",
+      "preset": "small",
+      "window_s": 30,
+      "embedding_dim": 512,
+      "params": 8474146,
+      "checkpoint_bytes": 33916640,
+      "torch_import_s": 0.392,
+      "load_s_first": 0.042,
+      "load_s_median": 0.043,
+      "threads": 1,
+      "batch": {
+        "1": {
+          "median_ms": 2.4,
+          "min_ms": 2.23,
+          "reps": 20,
+          "windows_per_s": 417.5,
+          "cpu_util": 0.98
+        },
+        "64": {
+          "median_ms": 80.01,
+          "min_ms": 76.35,
+          "reps": 5,
+          "windows_per_s": 799.9,
+          "cpu_util": 1.34
+        },
+        "256": {
+          "median_ms": 359.55,
+          "min_ms": 358.44,
+          "reps": 3,
+          "windows_per_s": 712.0,
+          "cpu_util": 1.24
+        }
+      },
+      "thread_scan_batch64_median_ms": {
+        "1": 123.58,
+        "4": 50.22,
+        "16": 45.74
+      },
+      "peak_rss_mb": 441.0
+    },
+    {
+      "method": "patchtst",
+      "preset": "small",
+      "window_s": 10,
+      "embedding_dim": 512,
+      "params": 8453666,
+      "checkpoint_bytes": 33834720,
+      "torch_import_s": 0.383,
+      "load_s_first": 0.065,
+      "load_s_median": 0.047,
+      "threads": 1,
+      "batch": {
+        "1": {
+          "median_ms": 1.5,
+          "min_ms": 1.42,
+          "reps": 20,
+          "windows_per_s": 667.2,
+          "cpu_util": 0.99
+        },
+        "64": {
+          "median_ms": 30.12,
+          "min_ms": 28.21,
+          "reps": 5,
+          "windows_per_s": 2124.6,
+          "cpu_util": 1.15
+        },
+        "256": {
+          "median_ms": 121.45,
+          "min_ms": 121.18,
+          "reps": 3,
+          "windows_per_s": 2107.9,
+          "cpu_util": 1.13
+        }
+      },
+      "thread_scan_batch64_median_ms": {
+        "1": 32.53,
+        "4": 42.9,
+        "16": 23.5
+      },
+      "peak_rss_mb": 378.8
+    }
+  ],
+  "serve_request_1h_hop5": [
+    {
+      "encoder": "standin:inertia-arch-random-init/ar_transformer-small/seed0",
+      "runtime_load_s": 0.064,
+      "windows": 715,
+      "request_bytes": 5784290,
+      "response_bytes": 397308,
+      "median_ms": 706.1,
+      "reps": 3,
+      "threads": 1,
+      "max_batch": 64,
+      "peak_rss_mb": 595.4
+    },
+    {
+      "encoder": "standin:inertia-arch-random-init/ar_transformer-small/seed0",
+      "runtime_load_s": 0.061,
+      "windows": 715,
+      "request_bytes": 5784290,
+      "response_bytes": 397308,
+      "median_ms": 651.9,
+      "reps": 3,
+      "threads": 1,
+      "max_batch": 256,
+      "peak_rss_mb": 899.1
+    },
+    {
+      "encoder": "standin:inertia-arch-random-init/patchtst-small/seed0",
+      "runtime_load_s": 0.052,
+      "windows": 715,
+      "request_bytes": 5784290,
+      "response_bytes": 405333,
+      "median_ms": 1154.5,
+      "reps": 3,
+      "threads": 1,
+      "max_batch": 64,
+      "peak_rss_mb": 541.4
+    },
+    {
+      "encoder": "standin:handcrafted-stats-v1",
+      "runtime_load_s": 0.001,
+      "windows": 715,
+      "request_bytes": 5784290,
+      "response_bytes": 367127,
+      "median_ms": 153.6,
+      "reps": 3,
+      "threads": 1,
+      "max_batch": 64,
+      "peak_rss_mb": 214.6
+    }
+  ]
+}

@@ -1,0 +1,69 @@
+{
+  "dataset": "opportunity",
+  "loso_folds": [
+    {
+      "test": [
+        "S4"
+      ],
+      "train": [
+        "S1",
+        "S2"
+      ],
+      "val": [
+        "S3"
+      ]
+    },
+    {
+      "test": [
+        "S3"
+      ],
+      "train": [
+        "S1",
+        "S4"
+      ],
+      "val": [
+        "S2"
+      ]
+    },
+    {
+      "test": [
+        "S2"
+      ],
+      "train": [
+        "S3",
+        "S4"
+      ],
+      "val": [
+        "S1"
+      ]
+    },
+    {
+      "test": [
+        "S1"
+      ],
+      "train": [
+        "S2",
+        "S3"
+      ],
+      "val": [
+        "S4"
+      ]
+    }
+  ],
+  "method": "seeded subject permutation (Agent C)",
+  "note": "too few subjects for a meaningful 3-way split: report LOSO; fixed split only for the frozen model",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "2df351a0ba583c232c309e1941e3f00f10c0633c0095bb1c4b88b3b375e019b8",
+  "source": "Agent C split_manifests.json (opportunity)",
+  "test_subjects": [
+    "S4"
+  ],
+  "train_subjects": [
+    "S1",
+    "S2"
+  ],
+  "val_subjects": [
+    "S3"
+  ]
+}

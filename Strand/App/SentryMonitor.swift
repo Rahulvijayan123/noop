@@ -34,20 +34,9 @@ enum SentryMonitor {
             options.enableAppHangTracking = true
             options.appHangTimeoutInterval = hangThreshold
             // Report hangs that only delay some frames, not just full stalls, and app kills by the watchdog.
-            // NOTE (sleep-analytics Phase 1, baseline defect on main @ fae049a): the pinned
-            // Sentry 9.30.0 PREBUILT binary does not expose `enableReportNonFullyBlockingAppHangs`
-            // — on macOS NO slice implements the setter at all (the member exists only in the
-            // 9.30.0 SOURCE), so main's direct assignment cannot build against the pinned binary,
-            // and an unguarded perform() would raise "unrecognized selector" at launch. Called
-            // through a responds(to:)-guarded selector so the toggle turns ON any SDK that
-            // actually implements it (a future pin or source build) and is skipped — never a
-            // crash — on the pinned macOS binary; every other fae049a option below applies
-            // unchanged. Upstream fix: bump the Sentry pin to a release whose binaries carry the
-            // member, or link the source product, and restore the direct assignment.
-            let nonFullyBlockingHangs = Selector(("setEnableReportNonFullyBlockingAppHangs:"))
-            if (options as NSObject).responds(to: nonFullyBlockingHangs) {
-                (options as NSObject).perform(nonFullyBlockingHangs, with: true as NSNumber)
-            }
+            #if os(iOS)
+            options.enableReportNonFullyBlockingAppHangs = true
+            #endif
             options.enableWatchdogTerminationTracking = true
             options.enableAutoSessionTracking = true
 

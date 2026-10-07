@@ -433,4 +433,23 @@ final class ActivityPythonServiceTests: XCTestCase {
         XCTAssertFalse(service.isRunning)
         service.shutdown()  // no crash on double shutdown
     }
+
+    /// G-1 (worker side): a HART window time the lane would later `Int(_:)` is dropped when it is huge or
+    /// non-finite, instead of trapping the worker; ordinary windows (fractional times included) are unchanged.
+    func testHugeOrNonFiniteWindowTimesAreDroppedNotTrapped() {
+        let good: [String: Any] = ["s": 1_789_430_400.0, "e": 1_789_430_404.0, "label": "walking",
+                                   "probs": ["walking": 0.9]]
+        let fractional: [String: Any] = ["s": 1_789_430_402.5, "e": 1_789_430_406.5, "label": "walking"]
+        let result = ActivityPythonService.parseInfer([
+            "ok": true, "windows": [
+                good, fractional,
+                ["s": 1e19, "e": 1e19 + 4, "label": "walking"],
+                ["s": 1_789_430_400.0, "e": 9.3e18, "label": "walking"],
+                ["s": -1e300, "e": 0.0, "label": "walking"],
+                ["s": Double.infinity, "e": 4.0, "label": "walking"],
+            ]])
+        XCTAssertEqual(result.windows.count, 2)
+        XCTAssertEqual(result.windows.map(\.start), [1_789_430_400.0, 1_789_430_402.5])
+        for w in result.windows { _ = Int(w.start); _ = Int(w.end) }   // what the lane does next: never traps
+    }
 }

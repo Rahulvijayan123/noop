@@ -1,0 +1,45 @@
+{
+  "dataset": "uci_hapt_waist",
+  "method": "seeded subject permutation (Agent C)",
+  "note": "official test users kept",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "f8c62842d9e530fda5676577e7aac08e6e97c63af0556c61e2bfb87b37757708",
+  "source": "Agent C split_manifests.json (uci_hapt_waist)",
+  "test_subjects": [
+    "10",
+    "12",
+    "13",
+    "18",
+    "2",
+    "20",
+    "24",
+    "4",
+    "9"
+  ],
+  "train_subjects": [
+    "1",
+    "11",
+    "14",
+    "15",
+    "17",
+    "19",
+    "21",
+    "25",
+    "26",
+    "27",
+    "28",
+    "29",
+    "30",
+    "5",
+    "6",
+    "7",
+    "8"
+  ],
+  "val_subjects": [
+    "16",
+    "22",
+    "23",
+    "3"
+  ]
+}

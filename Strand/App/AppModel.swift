@@ -333,6 +333,7 @@ final class AppModel: ObservableObject {
         StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
         Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved while offline
         Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved while offline
+        Task { await refitActivityPersonalProfile() }   // no-op unless labels or their windows changed
         await confirmWearableLinkIfNeeded()
         // In cloud mode the server owns scoring, so an active scene pulls the SERVER's results into the
         // dashboard store instead of running a local pass. A no-op when cloud mode is off.
@@ -366,6 +367,7 @@ final class AppModel: ObservableObject {
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
         Task { await ExposureEventCloudSync.flush() }   // exposure revisions saved before the account was ready
         Task { try? await ActivityGroundTruthCloudSync().pushPending() }   // guided labels saved before the account was ready
+        Task { await refitActivityPersonalProfile() }
         guard cloudScoringIsAuthoritative else { return }
         await confirmWearableLinkIfNeeded()
         startHistorySeedIfNeeded()
@@ -556,6 +558,20 @@ final class AppModel: ObservableObject {
         return written
     }
 
+    /// Refit the wearer's personal activity profile from their guided calibration runs (a no-op when nothing
+    /// it reads changed). When the adopted profile changes, the decoder's cache tag does too, so the activity
+    /// pages are re-materialised with it.
+    @discardableResult
+    func refitActivityPersonalProfile(force: Bool = false) async -> ActivityPersonalProfileStore.Record? {
+        let before = ActivityPersonalProfileStore.shared.adoptedProfile?.tag
+        let record = await repo.refitActivityPersonalProfileIfNeeded(force: force)
+        if ActivityPersonalProfileStore.shared.adoptedProfile?.tag != before {
+            activityContext.requestMaterialization()
+            await repo.refresh()
+        }
+        return record
+    }
+
     /// How often HART's windows are asked for. The server reruns HART once a few minutes of raw motion have
     /// been uploaded, and every new set re-decodes the day on the phone, so asking more often buys nothing.
     static let activityWindowsRefreshSeconds: TimeInterval = 300
@@ -594,13 +610,37 @@ final class AppModel: ObservableObject {
                     modelVersion: day.modelVersion, windowsJSON: json)
                 if store.save(record, scope: scope) { changed = true }
             }
-            if changed { activityContext.requestMaterialization() }
+            if await syncGaitWindows(days: days, device: device, scope: scope, account: account) { changed = true }
+            if changed {
+                activityContext.requestMaterialization()
+                // HART reaches a calibration run minutes after it ends; the fit picks its windows up then.
+                Task { await refitActivityPersonalProfile() }
+            }
             return changed
         } catch {
             // A server without the route yet (404) or a transient failure: the decoder simply runs without
             // HART until the next pass.
             return false
         }
+    }
+
+    /// ElderNet's windows for the same days, for the decoder's gait evidence. Only days the server sent with a
+    /// model whose weights digest checks out are stored. A failure leaves the decoder on HART alone.
+    private func syncGaitWindows(days: [String], device: String, scope: ActivityEncoderWindowStore.Scope,
+                                 account: CloudDataScope) async -> Bool {
+        guard let scores = CloudPushRuntime.shared.scoreRepository() else { return false }
+        let store = GaitWindowStore.shared
+        guard let fetched = try? await scores.gaitWindows(days: days, deviceId: device,
+                                                          known: store.revisions(days: days)),
+              CloudPushRuntime.shared.runningScope == account else { return false }
+        var changed = false
+        for day in fetched {
+            guard let model = day.model, let json = day.windowsJSON else { continue }
+            let record = GaitWindowStore.DayRecord(day: day.day, resultRevision: day.resultRevision, mode: day.mode,
+                                                   model: model, windowsJSON: json)
+            if store.save(record, scope: scope) { changed = true }
+        }
+        return changed
     }
 
     /// Say what a sync pass found when it is not simply "everything is current", once per distinct state.

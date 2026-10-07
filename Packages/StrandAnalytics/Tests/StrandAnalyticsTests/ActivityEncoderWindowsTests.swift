@@ -154,6 +154,35 @@ final class ActivityEncoderWindowsTests: XCTestCase {
                        ActivityContextDayBuilder.fingerprint(input, through: nil))
     }
 
+    func testLateElderNetWindowsChangeTheFingerprintAndNoneLeaveItAsItWas() {
+        var sim = ActivitySim()
+        sim.walk(120)
+        let input = sim.trackInput()
+        let config = GaitKit.config()
+        func fp(_ i: ActivityContextTrackInput, _ c: ActivityDecoderConfig) -> String {
+            ActivityContextDayBuilder.fingerprint(i, through: nil, config: c)
+        }
+        let plain = ActivityContextDayBuilder.fingerprint(input, through: nil)
+        XCTAssertEqual(fp(input, config), plain)
+        var empty = input
+        empty.gaitQuality = GaitQualityTrackInput(model: GaitKit.model(), windows: [])
+        XCTAssertEqual(fp(empty, config), plain)
+
+        var some = input
+        let e = input.dayStart + 60
+        some.gaitQuality = GaitQualityTrackInput(model: GaitKit.model(), windows: [GaitKit.window(endingAt: e, p: 0.9)])
+        // Windows the config does not use leave the fingerprint alone.
+        XCTAssertEqual(fp(some, ActivityDecoderConfig()), plain)
+        let withGait = fp(some, config)
+        XCTAssertNotEqual(withGait, plain)
+        var more = some
+        more.gaitQuality?.windows.append(GaitKit.window(endingAt: e + 5, p: 0.8))
+        XCTAssertNotEqual(fp(more, config), withGait)
+        var reordered = more
+        reordered.gaitQuality?.windows.reverse()
+        XCTAssertEqual(fp(reordered, config), fp(more, config))
+    }
+
     // MARK: Learned transition-expert rows (additive over `hart-windows-1`)
 
     func testTransitionWindowsRoundTripThroughTheCompactDocument() throws {
