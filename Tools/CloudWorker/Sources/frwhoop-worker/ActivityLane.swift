@@ -396,13 +396,17 @@ struct ActivityLane {
             } else {
                 lastReconcileAt = Date()
                 // Register what this build runs (the HART model / preprocessing the service reported) before
-                // the reconcile folds it into the day fingerprints, then re-derive a few stale days.
-                let resolved = Self.resolvedVersions(reportedModel: service.reportedModelVersion,
-                                                     reportedPreprocessing: service.reportedPreprocessingVersion)
-                reconcileVersions(algorithm: "hart-activity-1",
-                                  versions: ActivityContextDays.lanesVersions(model: resolved.model,
-                                                                              preprocessing: resolved.preprocessing),
-                                  limit: Self.versionReconcileImuLimit)
+                // the reconcile folds it into the day fingerprints, then re-derive a few stale days. Only once
+                // the service has reported its model: a fallback stamp registered now and the real one a moment
+                // later would re-fingerprint the recent days twice.
+                if service.reportedModelVersion != nil {
+                    let resolved = Self.resolvedVersions(reportedModel: service.reportedModelVersion,
+                                                         reportedPreprocessing: service.reportedPreprocessingVersion)
+                    reconcileVersions(algorithm: "hart-activity-1",
+                                      versions: ActivityContextDays.lanesVersions(
+                                          model: resolved.model, preprocessing: resolved.preprocessing),
+                                      limit: Self.versionReconcileImuLimit)
+                }
                 _ = try? db.callFunctionForJSON(Self.reconcileSQL, [Self.reconcileLookback])
             }
             do {
