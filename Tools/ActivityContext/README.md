@@ -129,6 +129,21 @@ constants), plus per-subject (held-out test) and per-WISDM-letter breakdowns
 (the C10 disagreement cases F typing / Q writing / R clapping / S folding are
 reported per letter for the spec §12 negative-control inspection).
 
+`train` loads WISDM through `activity_context/wisdm.py` (`wisdm-watch-loader-2`):
+each (subject, activity) sensor stream is sorted by timestamp and
+de-duplicated, split into constant-rate segments (the watches record 20 Hz,
+~50 Hz accel / ~25 Hz gyro for subjects 1637–1640, and some blocks switch
+between 20 Hz and ~100 Hz), resampled from each segment's MEASURED rate to
+30 Hz with the repo polyphase design, and gyro is aligned to accel on one
+30 Hz time base through the shared clock. Nothing is zero-filled: time covered
+by only one sensor yields no windows, and recordings without gyro are
+excluded and listed in `data_report.json`. Windows follow serve.py exactly
+(4 s / 2 s grid, 1 s FIR-transient margin). `--expect-split
+<split_manifest.json>` refuses to train unless the subject split matches a
+previous run. (v0, `hart-wisdm-v0`, was trained on the older loader, which
+zero-filled the gyro of 82 % of its windows and time-stretched the 50 Hz
+subjects 2.5×; see eval/RESULTS.md.)
+
 `train` does a SUBJECT-HELD-OUT 3-way split BEFORE windowing (spec §7;
 upstream's windowed `random_split` is not used): subjects are shuffled with a
 fixed seed into disjoint train (~70%) / val (~15%) / test (~15%) groups, so
@@ -145,7 +160,14 @@ time/fft input encodings + head trainable (upstream finetune.py:121-130),
 with **early stopping on subject-held-out val macro-F1** (patience 2, bounded
 by `--epochs`) and restores the best epoch before saving. Training uses
 `ACTIVITY_TRAIN_THREADS` (default 4) CPU threads; inference/serve stay
-single-threaded and deterministic.
+single-threaded and deterministic. torch is seeded before the checkpoint
+load, so the new head's initialization and the whole run are reproducible.
+
+`python -m activity_context.hart_wisdm_eval` (offline, `[model]` extra) runs
+one or more HART artifacts on the held-out WISDM subjects under both the
+training-path windows and agent R's production-faithful replay windows,
+with calibration diagnostics (NLL / Brier / ECE) and a VAL-fit temperature
+reported (never applied to serve).
 
 ## Artifact policy
 
@@ -157,6 +179,35 @@ single-threaded and deterministic.
 - `checkpoint/`, `.venv/`, `__pycache__/`, `*.part` are gitignored (see
   `.gitignore` in this directory).
 
+## Inertia-1 motion heads (optional, separate process)
+
+`activity_context/inertia/` adds a second, independent lane: accel-only `inertia-prep-1`
+preprocessing (100 → 20 Hz, 30 s / 10 s windows), a narrowly vendored Inertia-1 encoder (ART /
+PatchTST, verify-on-load), numpy-only calibrated heads (posture, locomotion, arm behaviour, multi-label
+transitions, movement intensity) with OOD scores, and its own serve process
+(`python -m activity_context.inertia.serve`, wire schema `motion-heads-1`). It never runs inside the
+HART serve process and its failures never touch it. **The contract is
+[`INERTIA1.md`](INERTIA1.md)** — formats, versions, failure kinds, worker/decoder rules.
+
+No official pretrained Inertia-1 checkpoint is publicly available, so nothing here claims Inertia-1
+results: the encoder runs only against an explicit, sha256-pinned `--checkpoint` /
+`$INERTIA1_CKPT_PATH`, and the stand-ins (`standin:*`) run only with `--allow-standin-shadow`.
+
+```bash
+uv pip install --python .venv/bin/python -e ".[dev,inertia]"      # + ".[inertia-train]" for training
+.venv/bin/python -m pytest tests/inertia                           # skips cleanly without the extras
+.venv/bin/python -m activity_context.inertia.make_golden --check   # golden fixtures (fixtures/inertia)
+.venv/bin/python -m activity_context.inertia.bench                 # eval/inertia/perf.json
+```
+
+The offline training pipeline (`pipeline_cli windows | embed | train | evaluate | summary`) finds its data
+through environment variables only (`INERTIA_DATA_ROOT`, or `INERTIA_CACHE_DIR` / `INERTIA_BUNDLES_DIR` /
+`INERTIA_HAR_ROOT` / `WISDM_DIR`; see `activity_context/inertia/paths.py`). `train` refuses a dirty source
+tree (anything uncommitted under `Tools/ActivityContext`) unless `--allow-dirty` (bundle capped at tier
+`offline`); `evaluate` opens the test split once and seals
+the gate into the bundle (`test_gate.json`); a re-evaluation needs `--rerun-reason <code> --rerun-detail
+<text>`. Serve can pin a bundle with `--expect-bundle-sha256`.
+
 ## Licenses / attribution
 
 - **HART** (EdgeIntelligenceLab/HART) — MIT, pinned commit
@@ -166,6 +217,13 @@ single-threaded and deterministic.
   (Weiss, G., 2019, UCI id 507, DOI 10.24432/C5HK59) — CC BY 4.0. Derived
   windows/metrics may be shared with attribution; the raw archive is not
   redistributed.
+- **Inertia-1** (yang-ai-lab/Inertia-1) — MIT, pinned commit
+  `afcd725314c95f4afefce118821349df7d61e7e8`; encoder code narrowly vendored under
+  `activity_context/inertia/vendor/` (see NOTICE.md). No upstream weights are used or committed.
+- **Inertia head datasets** (CAPTURE-24, HHAR, PAMAP2, MHEALTH, OPPORTUNITY, Daphnet; UCI HAPT / HARTH /
+  HAR70+ as label-vocabulary references) — all CC BY 4.0; since 2026-10-06 also **GOTOV** and **WEAR** — CC BY-NC-SA
+  4.0, non-commercial use approved by the owner (bundles trained on them record `training_data_licences`).
+  Creators, DOIs, licences and changes made are in NOTICE.md. No raw data is committed or redistributed.
 - The package's own code is part of NOOP, licensed under the repo's PolyForm
   Noncommercial 1.0.0 (see repo LICENSE). granite-tsfm / torch / transformers
   keep their own licenses (Apache-2.0 / BSD-style) and are runtime-only deps.

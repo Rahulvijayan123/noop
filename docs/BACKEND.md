@@ -725,6 +725,165 @@ activity job (unchanged claim / download / decode / lease renewal)
   minutes: 1,075 runs, 523 events, 450 KB of JSON) is built in about 0.8 s in a release build. The same
   code takes about 19 s in a debug build, so time it with the release binary the worker runs.
 
+### Inertia-1 motion heads (shadow / candidate, off by default)
+
+A second, optional expert beside HART (contract: `Tools/ActivityContext/INERTIA1.md` §8). With
+`FRWHOOP_INERTIA_ENABLED` on (`1`/`true`/`yes`/`on`; any other value keeps it off and is logged) and
+`FRWHOOP_INERTIA_BUNDLE_DIR` set, the activity lane starts a SECOND Python child (`python -m
+activity_context.inertia.serve --bundle <dir> [--checkpoint <path>] --timeout <s> [--expect-bundle-sha256 <hex>]
+[--allow-standin-shadow]`, its own timeout, restart cap and response cap) and, after each HART chunk, renews the
+job lease and asks it for `motion-heads-1` windows (posture, locomotion, arm, transition heads, movement
+intensity, OOD) for the same chunk.
+
+```text
+activity job: HART chunk infer (unchanged) -> Inertia infer for the same chunk (isolated)
+  -> strict Swift validation (MotionHeadsResponse: schema, class keys, sums, NaN)
+  -> shadow payload (provenance + compact windows + OOD counts)
+     [candidate mode: + the day decoded a second time with Inertia evidence, or why it was withheld]
+  -> ONE transaction: publish_activity_context_day (savepoint)
+                      -> publish_activity_motion_heads_day (savepoint, fenced) -> activity_motion_heads_days
+                      -> publish_activity_context_v2 (unchanged)
+```
+
+- **Never gates, never fails a job.** Inertia is not part of the readiness gate. A missing model (ping
+  `model_available: false`), timeout, crash, malformed or invalid output is counted (`inertia_failures`,
+  `inertia_unavailable`), logged once per distinct kind, and the HART path continues. Anything that would repeat
+  on every chunk (a timeout, crash, `model_missing`, a bundle mismatch, an unknown schema, a malformed response,
+  invalid probabilities, `output_too_large`) stops Inertia for the rest of that job, so a broken child costs at most
+  one timeout; only a NaN line or a service `internal` error costs a single chunk. A per-job time budget
+  (`FRWHOOP_INERTIA_JOB_BUDGET_SECONDS`, default 600 s) caps the wall time of Inertia's calls in one job; once used,
+  Inertia is stopped for that job (`inertia_budget_exhausted`). The one exception is the lease: it is renewed
+  before Inertia's job-start readiness check (child start + ping) and before every Inertia call, exactly as before
+  every HART call, and a lost lease ends the job the same way.
+- **Timeouts.** `FRWHOOP_INERTIA_TIMEOUT_SECONDS` (default 60) is clamped to a third of
+  `FRWHOOP_ACTIVITY_LEASE_SECONDS` (logged at start-up when it is); the child's own `--timeout` is set strictly
+  below it (worker − 5 s, at least 5 s while that is still below), so the child's structured `timeout` answer
+  arrives before the worker kills the line.
+- **Bundle pin.** `FRWHOOP_INERTIA_BUNDLE_SHA256` (64 hex) names the one head bundle the worker accepts. It is
+  required in candidate mode and enforced in shadow mode when set: passed to the child as
+  `--expect-bundle-sha256`, and checked by the worker against the ping and every response. A different served
+  bundle turns Inertia off for that job (`inertia_bundle_refused`, logged); the decoder refuses it too
+  (`bundle_sha256_mismatch`).
+- **Stand-in shadow (opt-in).** `FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW=1` (default off, shadow mode only; a
+  configuration error in candidate mode) passes `--allow-standin-shadow`, so the shadow lane can be exercised
+  on real WHOOP data before an Inertia-1 checkpoint exists. Those rows are stored with
+  `encoder_kind = standin` and can never feed the decoder: the decoder refuses stand-ins and the table refuses a
+  stand-in candidate document. Without the flag a stand-in bundle answers `model_available: false` and nothing
+  is stored.
+- **The published documents are untouched.** v1 epochs and the `activity_context_days` document are
+  byte-identical with Inertia on or off; the candidate comparison is stored only in
+  `activity_motion_heads_days.candidate_document` (the read surface would otherwise rank it first).
+- **Evidence gate.** Candidate decodes run only for `encoder_kind = inertia1` (a pinned Inertia-1
+  checkpoint) with `evidence_tier_max >= candidate` and the pinned bundle; anything else (every stand-in today)
+  stores `withheld_reason` (`encoder_kind_standin`, `evidence_tier_shadow`, `bundle_sha256_mismatch`, ...).
+  `FRWHOOP_INERTIA_MODE` accepts only `shadow` (default) and `candidate`; production evidence needs a code and
+  config change.
+- **Storage.** `activity_motion_heads_days`, one row per `(user_id, device_id, day, bundle_id, mode)`,
+  migration `20261005170000_activity_motion_heads.sql`. Service role writes through the fenced
+  `publish_activity_motion_heads_day(token, revision, payload)` (live lease and current revision, else
+  NULL, counted as `inertia_shadow_fenced`; stable `invalid_motion_heads_*` errors; 16 MiB payload); owners may
+  select their own rows. Per-window predictions are columnar small integers (`mh-col-1`: per head the top-class
+  index and its probability in percent, an OOD flag, start deltas; about 0.5 MB per full day per bundle, omitted
+  above 512 KiB, refused above 1 MiB). `summary.track_report` says how the windows met the day's observed
+  seconds (attached / dropped, and in candidate mode the decode's posture omissions on the sleep route). A
+  `candidate_document` is only ever stored for `encoder_kind = 'inertia1'`, `mode = 'candidate'`, tier
+  candidate or production (table CHECK and RPC). Contract:
+  `supabase/functions/tests/activity_motion_heads_contract.sql`.
+- **Retention.** `prune_activity_motion_heads_days(keep_days default 30, max_rows default 10000)` (service role
+  only) deletes rows computed more than 30 days ago and returns the count. The lane calls it every 6 h while
+  Inertia is on (`inertia_rows_pruned`, `inertia_prune_failures`); with Inertia off nothing new is written, and
+  the remaining rows can be pruned from cron: `select public.prune_activity_motion_heads_days(30, 10000);`.
+- **Deploy order.** Migration first. A worker with Inertia on and no migration still publishes v1 and v2;
+  the shadow write fails under its savepoint and is counted (`inertia_shadow_failures`).
+- **Rollback.** Unset `FRWHOOP_INERTIA_ENABLED` and restart. Nothing reads the table.
+- **Check.**
+
+  ```sql
+  select day, mode, bundle_id, encoder_kind, evidence_tier_max, n_windows, n_ood, withheld_reason,
+         summary->'track_report'->>'attached' as attached, summary->>'windows_omitted' as windows_omitted,
+         candidate_document is not null as has_candidate, computed_at
+  from public.activity_motion_heads_days order by computed_at desc limit 10;
+  ```
+
+### ElderNet gait quality (shadow / candidate, off by default)
+
+A third, optional expert beside HART and Inertia (contract: `Tools/ActivityContext/ELDERNET.md` §6). With
+`FRWHOOP_ELDERNET_ENABLED` on (`1`/`true`/`yes`/`on`; any other value keeps it off and is logged) and
+`FRWHOOP_ELDERNET_WEIGHTS_DIR` and `FRWHOOP_ELDERNET_UPSTREAM_DIR` set, the activity lane starts a THIRD Python
+child (`python -m activity_context.eldernet.serve --weights-dir <dir> --upstream-dir <dir> --timeout <s>`, its own
+timeout, restart cap and response cap) and, after each HART chunk (and after Inertia, when that is on), renews the job lease and asks it for
+`gait-quality-1` windows (10-s windows: gait probability, gait flag, pre-filter flag and, on gait windows,
+speed, cadence, stride length, regularity and steps) for the same chunk.
+
+```text
+activity job: HART chunk infer (unchanged) [-> Inertia (isolated)] -> ElderNet infer for the same chunk (isolated)
+  -> strict Swift validation (GaitQualityResponse: schema, known keys, ranges, metrics only on gait, NaN)
+  -> shadow payload (provenance + compact windows + counts + ElderNet's own gait metrics)
+     [candidate mode: + the day decoded a second time with the gait channel, or why it was withheld]
+  -> ONE transaction: publish_activity_context_day (savepoint)
+                      -> publish_activity_motion_heads_day (savepoint, when Inertia is on)
+                      -> publish_activity_gait_windows_day (savepoint, fenced) -> activity_gait_windows_days
+                      -> publish_activity_context_v2 (unchanged)
+```
+
+- **Never gates, never fails a job.** ElderNet is not part of the readiness gate. A missing model or bad weights
+  (ping `model_available: false`), a pin mismatch, timeout, crash, malformed or invalid output is counted
+  (`eldernet_failures`, `eldernet_unavailable`, `eldernet_pin_refused`), logged once per distinct kind, and the
+  HART path continues. Anything that would repeat on every chunk (a timeout, crash, `model_missing`,
+  `weights_mismatch`, a pin refusal, an unknown schema, a malformed response, invalid values, `output_too_large`)
+  stops ElderNet for the rest of that job; only a NaN line or a service `internal` error costs a single chunk. A
+  per-job time budget (`FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS`, default 600 s) caps the wall time of ElderNet's calls
+  in one job (readiness check included); once used, ElderNet is stopped for that job (`eldernet_budget_exhausted`)
+  and the chunks it answered are still stored. The lease is renewed before ElderNet's job-start readiness check
+  (child start + ping, which can take up to a request timeout) and before every ElderNet infer call, and a lost
+  lease ends the job exactly as before a HART call. Only HART answers are cached on the host: a chunk whose HART answer comes from the cache is
+  still sent to ElderNet.
+- **Timeouts.** `FRWHOOP_ELDERNET_TIMEOUT_SECONDS` (default 60) is clamped to a third of
+  `FRWHOOP_ACTIVITY_LEASE_SECONDS`; the child's `--timeout` is set strictly below it, as for Inertia.
+- **Upstream source.** The serve process imports upstream ElderNet's own modules from a sha-verified upstream source
+  checkout, fetched by an operator with `python -m activity_context.eldernet.upstream fetch --dest DIR` and named by
+  `FRWHOOP_ELDERNET_UPSTREAM_DIR` (passed as `--upstream-dir`). It is required when ElderNet is on (a configuration
+  error otherwise, ElderNet stays off); a child without it reports `model_missing`. The ping's extra
+  `weights_digest` and `upstream_source` keys are tolerated.
+- **Pins.** `FRWHOOP_ELDERNET_MODEL_VERSION` (the served `model_version`) and `FRWHOOP_ELDERNET_WEIGHTS_SHA256`
+  (the weights digest: sha256 of `eldernet-weights-1\n` followed by `name=sha256\n` for every served head in name
+  order, the same value the decoder and the table compute) are required in candidate mode and enforced in shadow
+  mode when set: checked against the ping (its `model_version` and `weights`) and every response. A different
+  model turns ElderNet off for that job (`eldernet_pin_refused`); the decoder refuses it too
+  (`model_version_mismatch`, `weights_digest_mismatch`). `FRWHOOP_ELDERNET_GAIT_PRIOR` (π in [0.01, 0.99]: the mean
+  served `gait_prob` over the VAL windows the decoder sees, which makes the channel neutral on average; 0.085 for
+  the served defaults, ELDERNET.md §5) is required in candidate mode.
+- **The published documents are untouched.** v1 epochs and the `activity_context_days` document are byte-identical
+  with ElderNet on or off; the candidate comparison is stored only in `activity_gait_windows_days.candidate_document`.
+  `FRWHOOP_ELDERNET_MODE` accepts only `shadow` (default) and `candidate`; production evidence needs a code and
+  config change.
+- **Storage.** `activity_gait_windows_days`, one row per `(user_id, device_id, day, model_version, mode)`, migration
+  `20261006090000_activity_gait_windows.sql` (its own table: `activity_encoder_windows` is read by the phone and the
+  stream days as HART evidence). Service role writes through the fenced `publish_activity_gait_windows_day(token,
+  revision, payload)` (live lease and current revision, else NULL, counted as `eldernet_shadow_fenced`; stable
+  `invalid_gait_windows_*` errors; 16 MiB payload; the weights digest is recomputed from the stored weights and a
+  mismatch is refused); owners may select their own rows. Per-window outputs are columnar small integers
+  (`gait-windows-1`: gait probability per mille, gait / pre-filter flags, speed cm/s, cadence steps/min, stride cm,
+  regularity %, steps × 10, -1 where absent; about 0.45 MB per full day at a 5-s hop, omitted above 512 KiB,
+  refused above 1 MiB). `summary` carries the counts, ElderNet's own gait metrics over its gait windows and
+  `track_report` (how the windows met the day's observed seconds). A `candidate_document` must carry its
+  `versions.gait_quality` stamp (table CHECK and RPC), and stored `windows` must say `format: gait-windows-1` (the
+  CHECK uses `is not distinct from`, so a missing key is refused too). Contract:
+  `supabase/functions/tests/activity_gait_windows_contract.sql`.
+- **Retention.** `prune_activity_gait_windows_days(keep_days default 30, max_rows default 10000)` (service role
+  only); the lane calls it every 6 h while ElderNet is on (`eldernet_rows_pruned`, `eldernet_prune_failures`).
+- **Deploy order.** Migration first. A worker with ElderNet on and no migration still publishes v1 and v2; the
+  shadow write fails under its savepoint and is counted (`eldernet_shadow_failures`).
+- **Rollback.** Unset `FRWHOOP_ELDERNET_ENABLED` and restart. Nothing reads the table.
+- **Check.**
+
+  ```sql
+  select day, mode, model_version, left(weights_digest, 12) as weights12, hop_s, n_windows, n_gait, n_prefiltered,
+         withheld_reason, summary->'gait'->>'cadence_spm' as cadence, summary->>'windows_omitted' as windows_omitted,
+         candidate_document is not null as has_candidate, computed_at
+  from public.activity_gait_windows_days order by computed_at desc limit 10;
+  ```
+
 ### Stream days (a document for every day with measurements)
 
 Raw IMU is uploaded for only a handful of sessions, but heart rate, gravity, steps and wear events are

@@ -1,0 +1,179 @@
+{
+  "dataset": "pamap2",
+  "loso_folds": [
+    {
+      "test": [
+        "subject104"
+      ],
+      "train": [
+        "subject102",
+        "subject103",
+        "subject105",
+        "subject106",
+        "subject107",
+        "subject108",
+        "subject109"
+      ],
+      "val": [
+        "subject101"
+      ]
+    },
+    {
+      "test": [
+        "subject101"
+      ],
+      "train": [
+        "subject102",
+        "subject103",
+        "subject104",
+        "subject105",
+        "subject106",
+        "subject107",
+        "subject109"
+      ],
+      "val": [
+        "subject108"
+      ]
+    },
+    {
+      "test": [
+        "subject108"
+      ],
+      "train": [
+        "subject101",
+        "subject102",
+        "subject104",
+        "subject105",
+        "subject106",
+        "subject107",
+        "subject109"
+      ],
+      "val": [
+        "subject103"
+      ]
+    },
+    {
+      "test": [
+        "subject103"
+      ],
+      "train": [
+        "subject101",
+        "subject102",
+        "subject104",
+        "subject106",
+        "subject107",
+        "subject108",
+        "subject109"
+      ],
+      "val": [
+        "subject105"
+      ]
+    },
+    {
+      "test": [
+        "subject105"
+      ],
+      "train": [
+        "subject101",
+        "subject102",
+        "subject103",
+        "subject104",
+        "subject106",
+        "subject108",
+        "subject109"
+      ],
+      "val": [
+        "subject107"
+      ]
+    },
+    {
+      "test": [
+        "subject107"
+      ],
+      "train": [
+        "subject101",
+        "subject103",
+        "subject104",
+        "subject105",
+        "subject106",
+        "subject108",
+        "subject109"
+      ],
+      "val": [
+        "subject102"
+      ]
+    },
+    {
+      "test": [
+        "subject102"
+      ],
+      "train": [
+        "subject101",
+        "subject103",
+        "subject104",
+        "subject105",
+        "subject107",
+        "subject108",
+        "subject109"
+      ],
+      "val": [
+        "subject106"
+      ]
+    },
+    {
+      "test": [
+        "subject106"
+      ],
+      "train": [
+        "subject101",
+        "subject102",
+        "subject103",
+        "subject104",
+        "subject105",
+        "subject107",
+        "subject108"
+      ],
+      "val": [
+        "subject109"
+      ]
+    },
+    {
+      "test": [
+        "subject109"
+      ],
+      "train": [
+        "subject101",
+        "subject102",
+        "subject103",
+        "subject105",
+        "subject106",
+        "subject107",
+        "subject108"
+      ],
+      "val": [
+        "subject104"
+      ]
+    }
+  ],
+  "method": "seeded subject permutation (Agent C)",
+  "note": "too few subjects for a meaningful 3-way split: report LOSO; fixed split only for the frozen model; subject109 has optional activities only; subject108 is left-handed (wrist_left)",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "4aeb6af05b41c67b3a82724026ddb7e8b633c5270c4d00fc0f580f4adea53715",
+  "source": "Agent C split_manifests.json (pamap2)",
+  "test_subjects": [
+    "subject101",
+    "subject104"
+  ],
+  "train_subjects": [
+    "subject102",
+    "subject103",
+    "subject105",
+    "subject106",
+    "subject107",
+    "subject109"
+  ],
+  "val_subjects": [
+    "subject108"
+  ]
+}

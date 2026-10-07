@@ -1,0 +1,173 @@
+{
+  "heads": {
+    "arm_behavior": {
+      "bias": [
+        0.283102,
+        0.10269,
+        0.01873,
+        null,
+        0.204705,
+        -0.008088,
+        null
+      ],
+      "class_order": [
+        "quiet",
+        "desk_like",
+        "fidgeting",
+        "repetitive_hand_motion",
+        "active_gesturing",
+        "exercise_motion",
+        "other"
+      ],
+      "class_prior": {
+        "active_gesturing": 0.2,
+        "desk_like": 0.2,
+        "exercise_motion": 0.2,
+        "fidgeting": 0.2,
+        "quiet": 0.2
+      },
+      "fit": {
+        "note": "FIXTURE: fixed seeded random head weights; NOT trained; NOT Inertia-1; shadow only",
+        "split": "val",
+        "val_split_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "method": "vector",
+      "support_mask": [
+        true,
+        true,
+        true,
+        false,
+        true,
+        true,
+        false
+      ],
+      "weight": [
+        0.975945,
+        0.758274,
+        0.656135,
+        null,
+        1.211621,
+        1.344111,
+        null
+      ]
+    },
+    "locomotion": {
+      "T": 1.5,
+      "bias": [
+        -0.223585,
+        0.135674,
+        null,
+        -0.131951,
+        null,
+        -0.185629,
+        null,
+        0.21777
+      ],
+      "class_order": [
+        "stationary",
+        "walking",
+        "brisk_walking",
+        "running",
+        "stairs",
+        "cycling",
+        "vehicle_motion",
+        "other"
+      ],
+      "class_prior": {
+        "cycling": 0.2,
+        "other": 0.2,
+        "running": 0.2,
+        "stationary": 0.2,
+        "walking": 0.2
+      },
+      "fit": {
+        "note": "FIXTURE: fixed seeded random head weights; NOT trained; NOT Inertia-1; shadow only",
+        "split": "val",
+        "val_split_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "method": "temp_bias",
+      "support_mask": [
+        true,
+        true,
+        false,
+        true,
+        false,
+        true,
+        false,
+        true
+      ]
+    },
+    "posture": {
+      "T": 1.5,
+      "class_order": [
+        "recumbent",
+        "seated_likely",
+        "upright_stationary",
+        "postural_transition"
+      ],
+      "class_prior": {
+        "postural_transition": 0.25,
+        "recumbent": 0.25,
+        "seated_likely": 0.25,
+        "upright_stationary": 0.25
+      },
+      "fit": {
+        "note": "FIXTURE: fixed seeded random head weights; NOT trained; NOT Inertia-1; shadow only",
+        "split": "val",
+        "val_split_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "method": "temperature",
+      "support_mask": [
+        true,
+        true,
+        true,
+        true
+      ]
+    },
+    "transition": {
+      "T": [
+        1.706142,
+        1.382153,
+        null,
+        null,
+        1.650443,
+        1.180615,
+        null,
+        null
+      ],
+      "class_order": [
+        "sit_to_stand_like",
+        "stand_to_sit_like",
+        "lying_down_like",
+        "getting_up_like",
+        "walk_start",
+        "walk_stop",
+        "run_start",
+        "run_stop"
+      ],
+      "class_prior": {
+        "sit_to_stand_like": 0.05,
+        "stand_to_sit_like": 0.05,
+        "walk_start": 0.05,
+        "walk_stop": 0.05
+      },
+      "fit": {
+        "note": "FIXTURE: fixed seeded random head weights; NOT trained; NOT Inertia-1; shadow only",
+        "split": "val",
+        "val_split_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "method": "temperature_per_event",
+      "support_mask": [
+        true,
+        true,
+        false,
+        false,
+        true,
+        true,
+        false,
+        false
+      ]
+    }
+  },
+  "schema": "nara.inertia.calibration/1"
+}

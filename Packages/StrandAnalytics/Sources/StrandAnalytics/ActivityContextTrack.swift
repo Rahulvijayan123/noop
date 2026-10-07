@@ -42,6 +42,12 @@ public struct ActivityContextTrackInput {
     /// 4-s window, model-agnostic. Attached by end second exactly like `encoderWindows`; absent when
     /// the expert did not run for the day (the decoder's no-model fallback then stays in charge).
     public var transitionWindows: [ActivityTransitionWindow]
+    /// Optional Inertia-1 motion-head windows and their bundle. Used only when the decode's
+    /// `ActivityDecoderConfig.motionHeads` accepts the same bundle; otherwise nothing is attached.
+    public var motionHeads: MotionHeadsTrackInput?
+    /// Optional ElderNet gait-quality windows and their model. Used only when the decode's
+    /// `ActivityDecoderConfig.gaitQuality` accepts the same model; otherwise nothing is attached.
+    public var gaitQuality: GaitQualityTrackInput?
 
     public init(dayStart: Int, dayEnd: Int,
                 hr: [HRSample] = [], gravity: [GravitySample] = [], steps: [StepSample] = [],
@@ -50,13 +56,15 @@ public struct ActivityContextTrackInput {
                 encoderWindows: [ActivityWindowPrediction] = [],
                 encoderId: String = "hart", encoderVersion: String = "unknown",
                 imuWindows: [ImuWindowFeatures] = [],
-                transitionWindows: [ActivityTransitionWindow] = []) {
+                transitionWindows: [ActivityTransitionWindow] = [], motionHeads: MotionHeadsTrackInput? = nil,
+                gaitQuality: GaitQualityTrackInput? = nil) {
         self.dayStart = dayStart; self.dayEnd = dayEnd
         self.hr = hr; self.gravity = gravity; self.steps = steps
         self.sleep = sleep; self.inBed = inBed; self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
         self.workouts = workouts; self.offWrist = offWrist
         self.encoderWindows = encoderWindows; self.encoderId = encoderId; self.encoderVersion = encoderVersion
         self.imuWindows = imuWindows; self.transitionWindows = transitionWindows
+        self.motionHeads = motionHeads; self.gaitQuality = gaitQuality
     }
 }
 
@@ -72,6 +80,10 @@ public struct ActivityContextTrack: Sendable {
     public var observedSeconds: Int
     /// Last second fed to the decoder.
     public var lastTs: Int?
+    /// How Inertia-1 windows were attached and used, or why they were not (nil without a motion-heads config).
+    public var motionHeads: MotionHeadsTrackReport? = nil
+    /// How ElderNet windows were attached and used, or why they were not (nil without a gait config).
+    public var gaitQuality: GaitQualityTrackReport? = nil
 
     /// This track followed by one that continued it from `snapshot` (events the decoder keeps flagging
     /// across the join are listed once).
@@ -84,9 +96,13 @@ public struct ActivityContextTrack: Sendable {
                 merged.append(e)
             }
         }
+        var report = motionHeads
+        if let n = next.motionHeads { report = report?.merged(with: n) ?? n }
+        var gait = gaitQuality
+        if let n = next.gaitQuality { gait = gait?.continued(by: n) ?? n }
         return ActivityContextTrack(states: states + next.states, events: merged, snapshot: next.snapshot,
                                     restore: restore, observedSeconds: observedSeconds + next.observedSeconds,
-                                    lastTs: next.lastTs ?? lastTs)
+                                    lastTs: next.lastTs ?? lastTs, motionHeads: report, gaitQuality: gait)
     }
 }
 
@@ -99,7 +115,56 @@ public enum ActivityContextTrackBuilder {
     public static func build(_ input: ActivityContextTrackInput,
                              config: ActivityDecoderConfig = ActivityDecoderConfig(),
                              resuming snapshot: ActivityDecoderSnapshot? = nil) -> ActivityContextTrack {
-        decode(observations(for: input), config: config, resuming: snapshot)
+        let prepared = observationsWithReports(for: input, config: config)
+        var track = decode(prepared.observations, config: effectiveConfig(for: input, config: config), resuming: snapshot)
+        if let attach = prepared.motionHeads {
+            track.motionHeads = attach.merged(with: track.motionHeads ?? MotionHeadsTrackReport())
+        }
+        if let attach = prepared.gaitQuality {
+            track.gaitQuality = attach.continued(by: track.gaitQuality ?? GaitQualityTrackReport())
+        }
+        return track
+    }
+
+    /// Whether `config`'s ElderNet evidence is actually accepted for `input`: the config accepts its model and the
+    /// input carries windows from exactly that model.
+    public static func acceptsGaitQuality(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> Bool {
+        guard let gait = config.gaitQuality, gait.evidenceRefusal == nil, let g = input.gaitQuality else { return false }
+        return g.model == gait.model
+    }
+
+    /// Whether `config`'s Inertia evidence is actually accepted for `input`: the config accepts its bundle and
+    /// the input carries windows from exactly that bundle.
+    public static func acceptsMotionHeads(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> Bool {
+        guard let heads = config.motionHeads, heads.evidenceRefusal == nil, let mh = input.motionHeads else { return false }
+        return mh.bundle.bundleSha256 == heads.bundle.bundleSha256 && mh.bundle == heads.bundle
+    }
+
+    /// The config a decode of `input` actually runs with: `config` itself when it has no motion-heads entry or
+    /// when its Inertia evidence is accepted for this input (`acceptsMotionHeads`), and otherwise `config`
+    /// without the entry. So the `inertia-1:` / `standin-test:` stamp, the held window in the snapshot and the
+    /// cache-tag suffix appear only on a track Inertia evidence really shaped; a refused config, a bundle
+    /// mismatch or an input without windows decodes (and is keyed) exactly like Inertia off.
+    ///
+    /// The same holds for the ElderNet entry (`acceptsGaitQuality`): no `eldernet:` stamp, held window, gait
+    /// block or `-eg` suffix unless its evidence really shaped the track.
+    public static func effectiveConfig(for input: ActivityContextTrackInput, config: ActivityDecoderConfig)
+        -> ActivityDecoderConfig {
+        var plain = config
+        if config.motionHeads != nil, !acceptsMotionHeads(for: input, config: config) { plain.motionHeads = nil }
+        if config.gaitQuality != nil, !acceptsGaitQuality(for: input, config: config) { plain.gaitQuality = nil }
+        return plain
+    }
+
+    /// What attaching `windows` to `input`'s observed seconds would do, whatever any config says (the worker's
+    /// shadow rows report it so window/second alignment can be checked before Inertia is ever evidence).
+    public static func attachmentReport(for input: ActivityContextTrackInput,
+                                        windows: [MotionHeadsWindow]) -> MotionHeadsTrackReport {
+        var report = MotionHeadsTrackReport()
+        report.windowsIn = windows.count
+        var out = observations(for: input)
+        attachMotionHeads(windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
+        return report
     }
 
     /// Feed ready-made observations (one per second, time ordered) through a decoder.
@@ -129,7 +194,109 @@ public enum ActivityContextTrackBuilder {
         }
         return ActivityContextTrack(states: states, events: events, snapshot: decoder.snapshot(),
                                     restore: decoder.restoreOutcome, observedSeconds: accepted,
-                                    lastTs: decoder.lastObservationTs)
+                                    lastTs: decoder.lastObservationTs, motionHeads: decoder.motionHeadsReport,
+                                    gaitQuality: decoder.gaitQualityReport)
+    }
+
+    /// The observations for `input` with its Inertia windows attached when `config.motionHeads` accepts their
+    /// bundle (the same digest) — exactly `observations(for:)` otherwise. The report says what was attached
+    /// and dropped, or why nothing was (nil when the config has no motion-heads entry at all).
+    ///
+    /// ElderNet windows are attached the same way when `config.gaitQuality` accepts their model
+    /// (`observationsWithReports` also returns that report).
+    public static func observations(for input: ActivityContextTrackInput, config: ActivityDecoderConfig)
+        -> (observations: [ActivityObservation], report: MotionHeadsTrackReport?) {
+        let prepared = observationsWithReports(for: input, config: config)
+        return (prepared.observations, prepared.motionHeads)
+    }
+
+    /// `observations(for:config:)` with both attachment reports: Inertia's (nil without a motion-heads entry) and
+    /// ElderNet's (nil without a gait entry).
+    public static func observationsWithReports(for input: ActivityContextTrackInput, config: ActivityDecoderConfig)
+        -> (observations: [ActivityObservation], motionHeads: MotionHeadsTrackReport?,
+            gaitQuality: GaitQualityTrackReport?) {
+        var out = observations(for: input)
+        var motionReport: MotionHeadsTrackReport?
+        if let heads = config.motionHeads {
+            // The stamp is set only once the evidence is accepted for THIS input (config accepted, same bundle).
+            var report = MotionHeadsTrackReport(stamp: nil, refusal: heads.evidenceRefusal)
+            if let mh = input.motionHeads {
+                report.windowsIn = mh.windows.count
+                if report.refusal == nil {
+                    if acceptsMotionHeads(for: input, config: config) {
+                        report.stamp = heads.provenanceStamp
+                        attachMotionHeads(mh.windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
+                    } else {
+                        report.refusal = "bundle_mismatch"
+                    }
+                }
+            } else if report.refusal == nil {
+                report.refusal = "no_motion_heads_input"
+            }
+            motionReport = report
+        }
+        var gaitReport: GaitQualityTrackReport?
+        if let gait = config.gaitQuality {
+            var report = GaitQualityTrackReport(stamp: nil, refusal: gait.evidenceRefusal)
+            if let g = input.gaitQuality {
+                report.windowsIn = g.windows.count
+                if report.refusal == nil {
+                    if acceptsGaitQuality(for: input, config: config) {
+                        report.stamp = gait.provenanceStamp
+                        attachGaitQuality(g.windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
+                    } else {
+                        report.refusal = "model_mismatch"
+                    }
+                }
+            } else if report.refusal == nil {
+                report.refusal = "no_gait_quality_input"
+            }
+            gaitReport = report
+        }
+        return (out, motionReport, gaitReport)
+    }
+
+    /// ElderNet never creates an observation second either: the same attachment rule as Inertia's (the first
+    /// on-wrist observed second in `[e, e + 2]` inside `[lo, hi)`, the later of two windows on one second).
+    static func attachGaitQuality(_ windows: [GaitQualityWindow], to out: inout [ActivityObservation],
+                                  lo: Int, hi: Int, report: inout GaitQualityTrackReport) {
+        guard !windows.isEmpty, hi > lo else { return }
+        var indexAt: [Int: Int] = [:]
+        for (i, o) in out.enumerated() where o.wear != .offWrist { indexAt[o.ts] = i }
+        let ordered = windows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        for w in ordered {
+            guard w.endTs < hi, w.endTs + 2 >= lo else { report.droppedOutOfRange += 1; continue }
+            var target: Int?
+            for ts in max(w.endTs, lo)...min(w.endTs + 2, hi - 1) {
+                if let i = indexAt[ts] { target = i; break }
+            }
+            guard let i = target else { report.droppedNoObservation += 1; continue }
+            if out[i].gaitQuality != nil { report.droppedSuperseded += 1; report.attached -= 1 }
+            out[i].gaitQuality = w
+            report.attached += 1
+        }
+    }
+
+    /// Inertia never creates an observation second: each window is attached to the first on-wrist observed
+    /// second in `[e, e + 2]` inside `[lo, hi)`, or dropped and counted. Two windows on one second keep the
+    /// later one (it supersedes the other, as it would a second later).
+    static func attachMotionHeads(_ windows: [MotionHeadsWindow], to out: inout [ActivityObservation],
+                                  lo: Int, hi: Int, report: inout MotionHeadsTrackReport) {
+        guard !windows.isEmpty, hi > lo else { return }
+        var indexAt: [Int: Int] = [:]
+        for (i, o) in out.enumerated() where o.wear != .offWrist { indexAt[o.ts] = i }
+        let ordered = windows.sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+        for w in ordered {
+            guard w.endTs < hi, w.endTs + 2 >= lo else { report.droppedOutOfRange += 1; continue }
+            var target: Int?
+            for ts in max(w.endTs, lo)...min(w.endTs + 2, hi - 1) {
+                if let i = indexAt[ts] { target = i; break }
+            }
+            guard let i = target else { report.droppedNoObservation += 1; continue }
+            if out[i].motionHeads != nil { report.droppedSuperseded += 1; report.attached -= 1 }
+            out[i].motionHeads = w
+            report.attached += 1
+        }
     }
 
     /// Step ticks per second = counter delta between consecutive samples 1–2 s apart, bounded by the gait
@@ -270,17 +437,20 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     public var wear: WearContextState
     /// Published states merged into the run.
     public var count: Int
+    /// ElderNet's gait metrics over every gait window the run's states counted (reported, not evidence). nil
+    /// (and absent from the JSON) unless the decode had the gait channel and its states carried a gait block.
+    public var gait: ActivityGaitSummary?
 
     public init(start: Int, end: Int, posture: HeadProbabilities<PostureClass>,
                 locomotion: HeadProbabilities<LocomotionClass>, armBehavior: HeadProbabilities<ArmBehaviorClass>,
                 intensity: Double?, overallConfidence: Double, overallUncertainty: Double,
                 displayContext: String?, sleep: SleepContextState, inBed: Bool = false,
-                wear: WearContextState, count: Int) {
+                wear: WearContextState, count: Int, gait: ActivityGaitSummary? = nil) {
         self.start = start; self.end = end; self.posture = posture; self.locomotion = locomotion
         self.armBehavior = armBehavior; self.intensity = intensity
         self.overallConfidence = overallConfidence; self.overallUncertainty = overallUncertainty
         self.displayContext = displayContext; self.sleep = sleep; self.inBed = inBed; self.wear = wear
-        self.count = count
+        self.count = count; self.gait = gait
     }
 
     enum CodingKeys: String, CodingKey {
@@ -292,6 +462,7 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         // Derived on write from the fields above (`ActivityClassifier`), never read back: the document
         // carries them so SQL and other readers get the canonical class without re-implementing the mapping.
         case activityClass = "activity_class", classConfidence = "class_confidence"
+        case gait
     }
 
     public init(from decoder: Decoder) throws {
@@ -309,6 +480,7 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed) ?? false
         wear = try c.decode(WearContextState.self, forKey: .wear)
         count = try c.decode(Int.self, forKey: .count)
+        gait = try c.decodeIfPresent(ActivityGaitSummary.self, forKey: .gait)
     }
 
     /// The canonical class of the run (see `ActivityClassifier`).
@@ -335,6 +507,8 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
         let k = classification
         try c.encode(k.activityClass.rawValue, forKey: .activityClass)
         try c.encode((k.confidence * 100).rounded() / 100, forKey: .classConfidence)
+        // Written only when present, so a run decoded without ElderNet encodes as it always did.
+        if let gait { try c.encode(gait, forKey: .gait) }
     }
 
     /// The run as the canonical published-state shape (provenance fields are carried by the document).
@@ -370,17 +544,32 @@ public enum ActivityContextRuns {
     /// sleep context, and the body heads (posture, locomotion) within `headTolerance` of the run's mean.
     /// The arm head is a fast hand pattern that flips between desk-like, quiet and fidgeting every few
     /// seconds inside one situation, so it does not split a run: the run keeps its average.
+    ///
+    /// A state's `gait` block is its walking stretch so far, so a run counts what each state ADDED to the stretch
+    /// (the windows since the previous state of the same stretch): a stretch that spans two runs is split
+    /// between them, never counted twice.
     public static func coalesce(_ states: [ActivityContextState], intervalS: Int = 5) -> [ActivityContextRun] {
         var runs: [ActivityContextRun] = []
         var acc: Accumulator?
         let maxGap = max(intervalS, 1) * 2
+        var previousGait: GaitTotals?
         for s in states {
+            var added: GaitTotals?
+            if let g = s.gait {
+                let now = GaitTotals(summary: g)
+                if let p = previousGait, p.since == now.since, p.provenance == now.provenance, now.windows >= p.windows {
+                    added = now.minus(p)
+                } else {
+                    added = now
+                }
+            }
+            previousGait = s.gait.map(GaitTotals.init(summary:))
             if var a = acc, a.accepts(s, maxGap: maxGap) {
-                a.add(s)
+                a.add(s, gait: added)
                 acc = a
             } else {
                 if let a = acc { runs.append(a.run(intervalS: intervalS)) }
-                acc = Accumulator(first: s)
+                acc = Accumulator(first: s, gait: added)
             }
         }
         if let a = acc { runs.append(a.run(intervalS: intervalS)) }
@@ -436,6 +625,7 @@ public enum ActivityContextRuns {
         last.overallUncertainty = (first.overallUncertainty * a + second.overallUncertainty * b) / n
         last.end = second.end
         last.count = first.count + second.count
+        last.gait = ActivityGaitSummary.combine(first.gait, second.gait)
         return last
     }
 
@@ -488,10 +678,11 @@ public enum ActivityContextRuns {
         var arm: [ArmBehaviorClass: Double] = [:]
         var intensitySum = 0.0, intensityN = 0
         var confidenceSum = 0.0, uncertaintySum = 0.0
+        var gait: GaitTotals?
 
-        init(first: ActivityContextState) {
+        init(first: ActivityContextState, gait: GaitTotals? = nil) {
             self.first = first; self.lastTs = first.ts
-            add(first)
+            add(first, gait: gait)
         }
 
         func accepts(_ s: ActivityContextState, maxGap: Int) -> Bool {
@@ -506,7 +697,10 @@ public enum ActivityContextRuns {
             return !(far(s.posture, posture) || far(s.locomotion, locomotion))
         }
 
-        mutating func add(_ s: ActivityContextState) {
+        mutating func add(_ s: ActivityContextState, gait added: GaitTotals? = nil) {
+            if let added {
+                if gait == nil { gait = added } else { gait!.add(added) }
+            }
             count += 1
             lastTs = s.ts
             for c in PostureClass.allCases { posture[c, default: 0] += s.posture[c] }
@@ -533,7 +727,7 @@ public enum ActivityContextRuns {
                 intensity: intensityN > 0 ? intensitySum / Double(intensityN) : nil,
                 overallConfidence: confidenceSum / n, overallUncertainty: uncertaintySum / n,
                 displayContext: first.displayContext, sleep: first.sleep.state, inBed: first.sleep.inBed,
-                wear: first.wear.state, count: count)
+                wear: first.wear.state, count: count, gait: gait.flatMap { $0.isEmpty ? nil : $0.summary })
         }
     }
 }
@@ -795,10 +989,12 @@ public enum ActivityContextDayBuilder {
                               chunkObservations: Int = 3_600,
                               progress: ((ActivityContextDayDocument) -> Void)? = nil)
         -> (document: ActivityContextDayDocument, how: ActivityContextDayUpdate) {
-        let all = ActivityContextTrackBuilder.observations(for: input)
+        let all = ActivityContextTrackBuilder.observations(for: input, config: config).observations
+        // Decoded without the Inertia entry unless its evidence is accepted for this input (no stamp otherwise).
+        let decodeConfig = ActivityContextTrackBuilder.effectiveConfig(for: input, config: config)
 
         func fresh(_ reason: String) -> (ActivityContextDayDocument, ActivityContextDayUpdate) {
-            let document = decodeFromStart(all, input: input, now: now, config: config,
+            let document = decodeFromStart(all, input: input, now: now, config: decodeConfig,
                                            chunkObservations: chunkObservations, progress: progress)
             return (document, .recomputed(reason: reason))
         }
@@ -822,7 +1018,7 @@ public enum ActivityContextDayBuilder {
             return (same, .reused)
         }
 
-        let track = ActivityContextTrackBuilder.decode(newer, config: config, resuming: snapshot)
+        let track = ActivityContextTrackBuilder.decode(newer, config: decodeConfig, resuming: snapshot)
         guard track.restore == .resumed else { return fresh("restore_\(track.restore)") }
 
         var doc = cached

@@ -1,0 +1,37 @@
+{
+  "dataset": "harth",
+  "method": "seeded subject permutation (Agent C)",
+  "note": "",
+  "schema": "nara-split-1",
+  "seed": 42,
+  "sha256": "4ce71ce7580e723621ba034a5e3308da7ca8a4c648e6beeda0dc4327de30bbf5",
+  "source": "Agent C split_manifests.json (harth)",
+  "test_subjects": [
+    "S018",
+    "S024",
+    "S025",
+    "S029"
+  ],
+  "train_subjects": [
+    "S006",
+    "S008",
+    "S009",
+    "S010",
+    "S012",
+    "S013",
+    "S016",
+    "S017",
+    "S019",
+    "S021",
+    "S022",
+    "S026",
+    "S027",
+    "S028"
+  ],
+  "val_subjects": [
+    "S014",
+    "S015",
+    "S020",
+    "S023"
+  ]
+}

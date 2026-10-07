@@ -1,0 +1,43 @@
+{
+  "arch": {
+    "d_ff": 32,
+    "d_model": 16,
+    "dropout": 0.0,
+    "n_heads": 2,
+    "n_layers": 1,
+    "patch_len": 10,
+    "stride": 10
+  },
+  "checkpoint": {
+    "file": "encoder_tiny.ckpt",
+    "sha256": "7a1677c8b74de3ac97b637e24d686133ad397fc6de5433accd4b3ff343ce7dad",
+    "size": 339171,
+    "source": "make_test_checkpoint (seeded random init; NOT Inertia-1)",
+    "url": null
+  },
+  "data": {
+    "axes": 3,
+    "axis_reduce": "l2",
+    "hz": 20,
+    "window_sec": 30
+  },
+  "embedding_dim": 16,
+  "encoder_id": "standin:inertia-arch-random-init/ar_transformer-tiny/seed0",
+  "extraction_point": "inertia1/methods/ar_transformer_module.py:ARTransformerModule.encode (all patches, no causal mask, mean over patch tokens)",
+  "inertia_repo_commit": "afcd725314c95f4afefce118821349df7d61e7e8",
+  "input_contract": {
+    "axes": [
+      "ax",
+      "ay",
+      "az"
+    ],
+    "gravity": "kept",
+    "normalization": "none",
+    "rate_hz": 20,
+    "units": "g"
+  },
+  "method": "ar_transformer",
+  "notes": "GOLDEN FIXTURE ONLY: seeded random init of the vendored ART (tiny); NOT Inertia-1",
+  "preset": "tiny",
+  "schema": "nara.inertia.encoder/1"
+}
