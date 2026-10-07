@@ -230,10 +230,17 @@ final class LongitudinalBaselineTests: XCTestCase {
         let ev = LongitudinalBaseline.evaluate(asOf: asOf, series: .sleepRHR,
                                                observations: obs, replay: true)
         XCTAssertEqual(ev.copyLong?.center ?? 0, 60, accuracy: 0.01, ev.consoleReport)
-        XCTAssertFalse(ev.regimeShift, "seven fever nights trim; they do not declare a new usual\n\(ev.consoleReport)")
-        XCTAssertLessThan(ev.pChange, 0.90, ev.consoleReport)
+        // v2.clinical (audit 2026-10-07): a week of +12 bpm nights is a real episode and must be detected while it
+        // happens (v1 deliberately never fired). It closes ≈ 7 in-control days after the evidence stops, and it
+        // never becomes the new usual.
+        XCTAssertFalse(ev.regimeShift, "episode closes after the fever week\n\(ev.consoleReport)")
         XCTAssertGreaterThan(ev.cusumS, 0, ev.consoleReport)
         XCTAssertGreaterThanOrEqual(ev.nLong, 14)
+        let during = LongitudinalBaseline.evaluate(asOf: iso(t - 8), series: .sleepRHR,
+                                                   observations: obs, replay: true)
+        XCTAssertTrue(during.change.open, "the fever week opens a change episode\n\(during.consoleReport)")
+        XCTAssertEqual(during.change.direction, 1)
+        XCTAssertTrue(during.change.worse)
     }
 
     func testCusumFourteenFeverDaysHoldsWhenWell() {
@@ -447,7 +454,10 @@ final class LongitudinalBaselineTests: XCTestCase {
         } + [ok(iso(t), 17.5)]
         let evR = LongitudinalBaseline.evaluate(asOf: asOf, series: .sleepResp,
                                                 observations: resp, replay: false)
-        XCTAssertEqual(evR.copy7?.spread ?? 0, 0.5, accuracy: 1e-9, evR.consoleReport)
+        // v2: small-sample MAD factor (Rousseeuw & Croux) lifts a 5-night MAD of 0.2 to ~0.30 → floor 0.5 still
+        // governs within rounding of the corrected scale.
+        XCTAssertGreaterThanOrEqual(evR.copy7?.spread ?? 0, 0.5 - 1e-9, evR.consoleReport)
+        XCTAssertLessThan(evR.copy7?.spread ?? 9, 0.52, evR.consoleReport)
     }
 
     func testAwakeRestUnder30StillMinutesDoesNotTrain() {

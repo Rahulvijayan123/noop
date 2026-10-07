@@ -302,13 +302,19 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
             if sp.span7 == 7 {
                 XCTAssertEqual(c.center, w.center7, accuracy: w.centerTol,
                                "\(row.planName) center_7\n\(ev.consoleReport)")
-                XCTAssertEqual(c.spread, w.spread, accuracy: w.spreadTol,
-                               "\(row.planName) spread_7\n\(ev.consoleReport)")
-                XCTAssertEqual(ev.z7 ?? 0, w.z7, accuracy: w.zTol,
-                               "\(row.planName) z_7\n\(ev.consoleReport)")
+                // v2.clinical: the 7-day spread is the small-sample-corrected MAD (×1.14 at n = 7, Rousseeuw &
+                // Croux), so it is ≥ the plan's v1 worked value and at most ×1.37 (n = 4). The worked deviation
+                // in native units (z × spread) is unchanged.
+                XCTAssertGreaterThanOrEqual(c.spread, w.spread - w.spreadTol,
+                                            "\(row.planName) spread_7\n\(ev.consoleReport)")
+                XCTAssertLessThanOrEqual(c.spread, w.spread * 1.37 + w.spreadTol,
+                                         "\(row.planName) spread_7\n\(ev.consoleReport)")
+                XCTAssertEqual((ev.z7 ?? 0) * c.spread, w.z7 * w.spread,
+                               accuracy: w.zTol * w.spread + abs(w.z7) * w.spreadTol + 1e-6,
+                               "\(row.planName) z_7 × spread_7\n\(ev.consoleReport)")
             }
             XCTAssertGreaterThan(c.bandHiDisplay, c.bandLoDisplay)
-            XCTAssertEqual(ev.paramSet, "v1.review")
+            XCTAssertEqual(ev.paramSet, LongitudinalBaseline.V2.paramSet)
             XCTAssertEqual(c.version, LongitudinalBaseline.Params.version7)
             XCTAssertFalse(ev.alertEligible, "\(row.planName): week-only tape is not alert_eligible")
         }

@@ -161,7 +161,7 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
             XCTAssertTrue(LongitudinalBaseline.isOffUsual(z: ev.z7, k: k)
                           || abs(ev.z7 ?? 0) >= k * 0.9,
                           "\(name) tonight should sit off the week usual\n\(ev.consoleReport)")
-            XCTAssertEqual(ev.paramSet, "v1.review", name)
+            XCTAssertEqual(ev.paramSet, LongitudinalBaseline.V2.paramSet, name)
             XCTAssertEqual(ev.copy7?.version, LongitudinalBaseline.Params.version7, name)
             XCTAssertEqual(ev.copyLong?.version, LongitudinalBaseline.Params.versionLong, name)
             XCTAssertGreaterThanOrEqual(ev.nLong, LongitudinalBaseline.nLongEstablished(for: s), name)

@@ -80,12 +80,20 @@ final class LongitudinalBaselineReviewTests: XCTestCase {
             obs.append(ok(iso(e), v))
         }
         let ev = LongitudinalBaseline.evaluate(asOf: asOf, series: .sleepRHR, observations: obs)
+        // v2.clinical (audit 2026-10-07): v1 moved the comparison center along the fitted slope, so a 12.5 bpm
+        // ramp was absorbed and never shown. The center now stays the robust median; the ramp is reported as a
+        // significant trend and as drift from the frozen anchor, and today sits outside the usual band.
         XCTAssertTrue(ev.slopeUsable,
-                      "three-week ramp must produce a usable slope\n\(ev.consoleReport)")
-        XCTAssertFalse(LongitudinalBaseline.isOffUsual(z: ev.zLong,
-                                                       k: LongitudinalBaseline.params(for: .sleepRHR).kBand),
-                       "off is vs the moving path, not flat 68\n\(ev.consoleReport)")
-        XCTAssertLessThan(ev.pChange, 0.90, ev.consoleReport)
+                      "three-week ramp must produce a significant, usable slope\n\(ev.consoleReport)")
+        XCTAssertTrue(ev.trend28?.significant ?? false, ev.consoleReport)
+        XCTAssertEqual(ev.trend28?.direction, -1)
+        XCTAssertTrue(LongitudinalBaseline.isOffUsual(z: ev.zLong, k: ev.kBandUsed),
+                      "a 12.5 bpm ramp is not silently absorbed\n\(ev.consoleReport)")
+        XCTAssertEqual(ev.expectedLong ?? 0, ev.copyLong?.center ?? -1, accuracy: 1e-9,
+                       "the slope never moves the comparison center")
+        XCTAssertTrue(ev.drift?.significant ?? false, "drift from the anchor is reported\n\(ev.consoleReport)")
+        XCTAssertEqual(ev.drift?.direction, -1)
+        XCTAssertFalse(ev.drift?.worse ?? true, "falling resting HR is not the worse direction")
     }
 
     func testTrustMovesAndHowOffHiddenWhenLow() {
@@ -290,7 +298,11 @@ final class LongitudinalBaselineReviewTests: XCTestCase {
             trial: LBTrialRequest(dayLogsByDay: logs))
         XCTAssertLessThan(clean.nCleanLong, mixed.nLong, clean.consoleReport)
         XCTAssertEqual(clean.copyLong?.center ?? -1, 60, accuracy: 0.8, clean.consoleReport)
-        XCTAssertLessThan(clean.kBandUsed, mixed.kBandUsed, mixed.consoleReport + "\n" + clean.consoleReport)
+        // v2: k is a predictive multiplier (t_df × √(1 + SE²/s²)) and honestly grows when only 26 non-consecutive
+        // clean nights remain (φ cannot be estimated → conservative fallback). What confounded nights must not do
+        // is inflate the usual's scale: the clean robust spread never exceeds the mixed one.
+        XCTAssertLessThanOrEqual(clean.copyLong?.spread ?? 99, (mixed.copyLong?.spread ?? 0) + 1e-9,
+                                 mixed.consoleReport + "\n" + clean.consoleReport)
         XCTAssertGreaterThanOrEqual(clean.nCleanLong, 14)
     }
 
