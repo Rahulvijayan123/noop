@@ -31,8 +31,14 @@ final class HRVWindowTests: XCTestCase {
         return out
     }
 
-    private func interval(_ s: Int, _ e: Int, _ c: ActivityClass) -> ActivityContextInterval {
-        ActivityContextInterval(start: s, end: e, activityClass: c, confidence: 0.9)
+    private func interval(_ s: Int, _ e: Int, _ c: ActivityClass, sleep: SleepContextState = .unknown,
+                          wear: WearContextState = .onWrist) -> ActivityContextInterval {
+        ActivityContextInterval(start: s, end: e, activityClass: c, confidence: 0.9, sleep: sleep, wear: wear)
+    }
+
+    /// Awake, on-wrist sitting over a wide span: the decoded context a resting-eligible window needs.
+    private func awakeSitting(_ from: Int, _ to: Int) -> ActivityContextLookup {
+        ActivityContextLookup(intervals: [interval(from, to, .sitting)])
     }
 
     // MARK: Canonical windowing
@@ -147,10 +153,21 @@ final class HRVWindowTests: XCTestCase {
         ])
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
                                                       activity: lookup).first)
-        // Measured from the window's own right edge (t0 + 300), matching `ActivityHistorySummary`'s
-        // "as of now" convention.
-        XCTAssertEqual(w.secondsSinceLocomotion, (t0 + 300) - (t0 - 50))
-        XCTAssertEqual(w.secondsSinceExercise, (t0 + 300) - (t0 - 800))
+        // Measured from the window START (t0): a walk that ended inside the window, or just before it,
+        // must not look further away because the window ran on after it (D3-03).
+        XCTAssertEqual(w.secondsSinceLocomotion, t0 - (t0 - 50))
+        XCTAssertEqual(w.secondsSinceExercise, t0 - (t0 - 800))
+    }
+
+    func testLocomotionOverlappingTheWindowReadsZero() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let lookup = ActivityContextLookup(intervals: [
+            interval(t0 - 100, t0 + 100, .walking), interval(t0 + 100, t0 + 300, .sitting),
+        ])
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: lookup, transitionEvents: []).first)
+        XCTAssertEqual(w.secondsSinceLocomotion, 0)
+        XCTAssertFalse(w.eligibleForBaseline, "a walk inside the window is not resting physiology")
     }
 
     func testNoActivityLookupLeavesContextFieldsNilRatherThanGuessing() throws {
@@ -160,6 +177,9 @@ final class HRVWindowTests: XCTestCase {
         XCTAssertNil(w.activityConfidence)
         XCTAssertNil(w.secondsSinceLocomotion)
         XCTAssertNil(w.secondsSinceExercise)
+        XCTAssertNil(w.asleep, "no lookup: sleep is unknown, not awake")
+        XCTAssertNil(w.wear, "no lookup: wear is unknown, not on-wrist")
+        XCTAssertFalse(w.eligibleForBaseline)
     }
 
     // MARK: Transition / recovery / steady-state
@@ -168,35 +188,174 @@ final class HRVWindowTests: XCTestCase {
         let rr = beats(constantMs: 800, from: t0, seconds: 10_000)
         let transitionTs = t0 + 500
         let events = [ActivityTransitionEvent(kind: .standToSitLike, probability: 0.9, ts: transitionTs)]
+        let lookup = awakeSitting(t0 - 1_000, t0 + 11_000)
 
         func window(startOffset: Int) throws -> HRVWindow {
             let start = t0 + startOffset
             return try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: start, dayEnd: start + 300,
-                                                        rr: rr, transitionEvents: events).first)
+                                                        rr: rr, activity: lookup, transitionEvents: events).first)
         }
 
-        // Window ending 10 s after the transition: deep inside the transition guard.
-        let justAfter = try window(startOffset: 500 + 10 - 300)
+        // Window STARTING 10 s after the transition: deep inside the transition guard.
+        let justAfter = try window(startOffset: 500 + 10)
         XCTAssertEqual(justAfter.phase, .transition)
+        XCTAssertEqual(justAfter.secondsSinceTransition, 10)
         XCTAssertFalse(justAfter.eligibleForBaseline)
 
-        // Window ending 60 s after: past the 30 s transition guard, inside the 120 s recovery guard.
-        let recovering = try window(startOffset: 500 + 60 - 300)
+        // Window starting 60 s after: past the 30 s transition guard, inside the 120 s recovery guard.
+        let recovering = try window(startOffset: 500 + 60)
         XCTAssertEqual(recovering.phase, .recovery)
         XCTAssertFalse(recovering.eligibleForBaseline, "recovery is real physiology, but not a baseline observation")
 
-        // Window ending 200 s after: past both guards.
-        let steady = try window(startOffset: 500 + 200 - 300)
+        // Window starting 200 s after: past both guards.
+        let steady = try window(startOffset: 500 + 200)
         XCTAssertEqual(steady.phase, .steadyState)
+        XCTAssertEqual(steady.transitionsInWindow, 0)
         XCTAssertTrue(steady.eligibleForBaseline)
     }
 
-    func testNoKnownTransitionReadsAsSteadyStateNotExcluded() throws {
+    func testTransitionInsideTheWindowIsNeverSteadyState() throws {
+        // D3-03: [t, t+300) with a stand-up at t+100. Measured from the window END this read 200 s →
+        // steadyState and eligible, although 100 s of the RMSSD is seated and 200 s standing.
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
-        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr).first)
+        let events = [ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.8, ts: t0 + 100)]
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: awakeSitting(t0 - 600, t0 + 600),
+                                                      transitionEvents: events).first)
+        XCTAssertEqual(w.transitionsInWindow, 1)
+        XCTAssertEqual(w.secondsSinceTransition, 0, "a transition inside the window is 0 s away")
+        XCTAssertEqual(w.phase, .transition)
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
+    func testTransitionBeforeTheWindowStartIsRecovery() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let events = [ActivityTransitionEvent(kind: .standToSitLike, probability: 0.8, ts: t0 - 60)]
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: awakeSitting(t0 - 600, t0 + 600),
+                                                      transitionEvents: events).first)
+        XCTAssertEqual(w.transitionsInWindow, 0)
+        XCTAssertEqual(w.secondsSinceTransition, 60)
+        XCTAssertEqual(w.phase, .recovery)
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
+    func testEventFlaggedJustAfterTheWindowEndCountsAsInsideIt() throws {
+        // The causal decoder flags a transition a few seconds after its onset; one flagged 3 s after the
+        // window end began inside it.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let events = [ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.8, ts: t0 + 303)]
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: awakeSitting(t0 - 600, t0 + 600),
+                                                      transitionEvents: events).first)
+        XCTAssertEqual(w.transitionsInWindow, 1)
+        XCTAssertEqual(w.phase, .transition)
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
+    func testPosturalAndLocomotionSecondsSinceAreSeparate() throws {
+        // D2-16: events [walk_stop@0, stand_to_sit@170], window start 200.
+        let start = t0 + 200
+        let rr = beats(constantMs: 800, from: start, seconds: 300)
+        let events = [ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: t0),
+                      ActivityTransitionEvent(kind: .standToSitLike, probability: 0.7, ts: t0 + 170)]
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: start, dayEnd: start + 300,
+                                                      rr: rr, activity: awakeSitting(t0 - 600, t0 + 1_000),
+                                                      transitionEvents: events).first)
+        XCTAssertEqual(w.secondsSincePosturalTransition, 30)
+        XCTAssertEqual(w.secondsSinceLocomotionTransition, 200)
+        XCTAssertEqual(w.secondsSinceTransition, 30, "the combined value is the nearer of the two")
+        XCTAssertEqual(w.phase, .recovery, "30 s after the stand-to-sit: settling, not steady")
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
+    func testDecodedSpanWithNoTransitionsReadsSteadyState() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: awakeSitting(t0 - 600, t0 + 600),
+                                                      transitionEvents: []).first)
         XCTAssertNil(w.secondsSinceTransition)
+        XCTAssertTrue(w.transitionEventsAvailable)
         XCTAssertEqual(w.phase, .steadyState, "absence of a transition event is not evidence one just happened")
+        XCTAssertEqual(w.asleep, false)
+        XCTAssertEqual(w.wear, .onWrist)
         XCTAssertTrue(w.eligibleForBaseline)
+    }
+
+    func testNoEventDataIsUnknownPhaseNotSteadyState() throws {
+        // D6-03 correction: "no events in the lookback" (above) is not "no event data available".
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: awakeSitting(t0 - 600, t0 + 600)).first)
+        XCTAssertFalse(w.transitionEventsAvailable)
+        XCTAssertEqual(w.phase, .unknown)
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
+    func testAsleepWindowIsNotAnAwakeBaselineObservation() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let asleepLookup = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .sleeping, sleep: .asleep)])
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      activity: asleepLookup, transitionEvents: []).first)
+        XCTAssertEqual(w.asleep, true)
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
+    func testUnknownOrOffWristWearIsNotEligible() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let unknownWear = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .stationary, wear: .unknown)])
+        let w1 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                       activity: unknownWear, transitionEvents: []).first)
+        XCTAssertEqual(w1.wear, .unknown)
+        XCTAssertFalse(w1.eligibleForBaseline)
+
+        // Mostly uncovered by the lookup (decoder gap): wear not known for most of the window.
+        let thin = awakeSitting(t0, t0 + 100)
+        let w2 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                       activity: thin, transitionEvents: []).first)
+        XCTAssertEqual(w2.wear, .unknown)
+        XCTAssertFalse(w2.eligibleForBaseline)
+
+        let off = ActivityContextLookup(intervals: [interval(t0, t0 + 250, .sitting),
+                                                    interval(t0 + 250, t0 + 300, .offWrist, wear: .offWrist)])
+        let w3 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                       activity: off, transitionEvents: []).first)
+        XCTAssertEqual(w3.wear, .offWrist)
+        XCTAssertFalse(w3.eligibleForBaseline)
+    }
+
+    func testTooSoonAfterLocomotionOrExerciseIsNotEligible() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        func window(_ intervals: [ActivityContextInterval]) throws -> HRVWindow {
+            try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                 activity: ActivityContextLookup(intervals: intervals),
+                                                 transitionEvents: []).first)
+        }
+        // Walk ended 100 s before the window: under the 300 s locomotion floor.
+        let recentWalk = try window([interval(t0 - 400, t0 - 100, .walking), interval(t0 - 100, t0 + 600, .sitting)])
+        XCTAssertEqual(recentWalk.secondsSinceLocomotion, 100)
+        XCTAssertFalse(recentWalk.eligibleForBaseline)
+        // Walk ended 400 s before: settled.
+        let oldWalk = try window([interval(t0 - 700, t0 - 400, .walking), interval(t0 - 400, t0 + 600, .sitting)])
+        XCTAssertTrue(oldWalk.eligibleForBaseline)
+        // Vigorous effort ended 400 s before: under the 600 s exercise floor.
+        let recentEffort = try window([interval(t0 - 900, t0 - 400, .vigorousActivity),
+                                       interval(t0 - 400, t0 + 600, .sitting)])
+        XCTAssertEqual(recentEffort.secondsSinceExercise, 400)
+        XCTAssertFalse(recentEffort.eligibleForBaseline)
+    }
+
+    func testWindowPhaseRules() {
+        XCTAssertEqual(ActivityTransitionProximity.windowPhase(secondsSinceTransitionAtStart: nil,
+                                                               transitionsInWindow: 0, eventsAvailable: false), .unknown)
+        XCTAssertEqual(ActivityTransitionProximity.windowPhase(secondsSinceTransitionAtStart: nil,
+                                                               transitionsInWindow: 0, eventsAvailable: true), .steadyState)
+        XCTAssertEqual(ActivityTransitionProximity.windowPhase(secondsSinceTransitionAtStart: 500,
+                                                               transitionsInWindow: 1, eventsAvailable: true), .transition)
+        // The moment-level convention is unchanged: nil is steady state.
+        XCTAssertEqual(ActivityTransitionProximity.phase(secondsSinceTransition: nil), .steadyState)
+        XCTAssertTrue(ActivityTransitionProximity.isPostural(.lyingDownLike))
+        XCTAssertFalse(ActivityTransitionProximity.isPostural(.walkStop))
     }
 
     // MARK: Eligibility is motion/quality-gated, not semantic-class-gated
@@ -237,6 +396,26 @@ final class HRVWindowTests: XCTestCase {
     func testEligibilityFailsWhenNotSteadyState() {
         XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(phase: .transition)))
         XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(phase: .recovery)))
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(phase: .unknown)))
+    }
+
+    func testEligibilityFailsOnHandBuiltContextGates() {
+        var w = baseEligibleWindow(); w.transitionsInWindow = 1
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "a transition inside the window")
+        w = baseEligibleWindow(); w.transitionEventsAvailable = false
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "no event data")
+        w = baseEligibleWindow(); w.asleep = true
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "asleep")
+        w = baseEligibleWindow(); w.asleep = nil
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "sleep unknown")
+        w = baseEligibleWindow(); w.wear = .unknown
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "wear unknown")
+        w.wearSignal = .onWristGood
+        XCTAssertTrue(HRVWindowBuilder.isEligibleForBaseline(w), "a good wear signal makes wear known")
+        w = baseEligibleWindow(); w.secondsSinceLocomotion = 60
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "a minute after walking")
+        w = baseEligibleWindow(); w.secondsSinceExercise = 300
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w), "five minutes after vigorous effort")
     }
 
     func testEligibilityFailsOnHighMotionOrGyroEvenUnderAStillLabel() {

@@ -23,6 +23,10 @@ public enum ActivityContextJoin {
     public static let restingStationaryFloor: Double = 0.90
     /// Resting-eligibility coverage floor (C4: >= 90% qualified temporal coverage).
     public static let restingCoverageFloor: Double = 0.90
+    /// Largest gap between two epochs across which a label change still counts as a transition — the
+    /// interval builder's own merge gap (`ActivityContextIntervalBuilder.Config.mergeGapS`), so a sit/stand
+    /// that straddles a few dropped seconds is not silently uncounted (D3-06).
+    public static let transitionGapS: Int = ActivityContextIntervalBuilder.Config().mergeGapS
 
     /// Full-support duration-weighted activity composition over `[start, end)` (spec §9 / A02).
     ///
@@ -36,8 +40,10 @@ public enum ActivityContextJoin {
     ///
     /// - Returns: shares keyed by motion label (valid seconds only; `.unknown` never appears as a
     ///   key), `unknownShare`, `transitions` (label changes between consecutive overlapping
-    ///   epochs), `recentActivity` (seconds from the interval end since the last supported
-    ///   non-stationary epoch ended; nil when none), `postureSource` ("user_confirmed" | "none"
+    ///   epochs, including across a gap of at most `transitionGapS`), `recentActivity` (seconds from
+    ///   the last supported non-stationary epoch's end to the interval START; 0 when such an epoch
+    ///   overlaps the interval, i.e. the activity is ongoing or happened inside it; nil when none),
+    ///   `postureSource` ("user_confirmed" | "none"
     ///   in v1; "model" reserved), and derived `qualityReasons`.
     public static func context(for interval: [Int],
                                epochs: [ActivityEpoch],
@@ -66,21 +72,24 @@ public enum ActivityContextJoin {
         for key in shares.keys { shares[key] = shares[key]! / duration }
         let unknownShare = accounting.unknownSeconds / duration
 
-        // Transitions between CONSECUTIVE overlapping epochs (adjacent on the grid only).
+        // Transitions between CONSECUTIVE overlapping epochs: adjacent on the grid, or separated by a
+        // gap no longer than `transitionGapS` (label -> short gap -> other label is still a change).
         let ordered = overlapping.sorted { $0.startTs < $1.startTs }
         var transitions = 0
-        for i in 1..<ordered.count where ordered[i - 1].endTs == ordered[i].startTs
+        for i in 1..<ordered.count where (0...transitionGapS).contains(ordered[i].startTs - ordered[i - 1].endTs)
             && ordered[i - 1].motion != ordered[i].motion {
             transitions += 1
         }
 
-        // Recent supported non-stationary activity, measured from the interval end. This scans ALL
-        // provided epochs (not only the overlapping ones): an HRV slot's interpretation needs the
-        // activity that ended just before the slot began, which shares none of its bucket.
+        // Recent supported non-stationary activity, measured from the interval START (run1 D3-17): a
+        // walk that ended right as a 15-min slot began is 0 s before it, not 900 s. An activity epoch
+        // overlapping the interval (still going at its end, or inside it) is ongoing and reads 0. This
+        // scans ALL provided epochs (not only the overlapping ones): an HRV slot's interpretation needs
+        // the activity that ended just before the slot began, which shares none of its bucket.
         var recentActivity: Int? = nil
-        for e in epochs.sorted(by: { $0.startTs < $1.startTs })
-        where e.isSupportedNonStationary && e.endTs <= end {
-            recentActivity = end - e.endTs
+        for e in epochs where e.isSupportedNonStationary && e.startTs < end {
+            let since = max(0, start - e.endTs)
+            if recentActivity == nil || since < recentActivity! { recentActivity = since }
         }
 
         let postureSource: String = ordered.contains { $0.posture != .unknown } ? "user_confirmed" : "none"

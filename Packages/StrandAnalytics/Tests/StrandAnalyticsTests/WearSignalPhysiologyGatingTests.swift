@@ -95,9 +95,19 @@ final class WearSignalPhysiologyGatingTests: XCTestCase {
 
     // MARK: - build() threads the wear signal through
 
+    /// A decoded, awake, on-wrist context with no transitions: since D3-03/D6-03 `build` refuses
+    /// baseline eligibility without decoded context (no event data → phase unknown; no lookup → sleep
+    /// and wear unknown), so the build-level wear tests below supply it explicitly.
+    private var awake: ActivityContextLookup {
+        ActivityContextLookup(intervals: [ActivityContextInterval(start: t0 - 600, end: t0 + 600,
+                                                                  activityClass: .sitting, confidence: 0.9,
+                                                                  sleep: .unknown, wear: .onWrist)])
+    }
+
     func testBuildWithoutWearSignalKeepsNilAndEligibility() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
-        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr).first)
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                     activity: awake, transitionEvents: []).first)
         XCTAssertNil(w.wearSignal)
         XCTAssertTrue(w.eligibleForBaseline)
     }
@@ -105,6 +115,7 @@ final class WearSignalPhysiologyGatingTests: XCTestCase {
     func testBuildWithOffWristWearSignalIsNotEligible() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                     activity: awake, transitionEvents: [],
                                                      wearSignal: .offWrist).first)
         XCTAssertEqual(w.wearSignal, .offWrist)
         XCTAssertFalse(w.eligibleForBaseline)
@@ -113,6 +124,7 @@ final class WearSignalPhysiologyGatingTests: XCTestCase {
     func testBuildWithOnWristGoodWearSignalStaysEligible() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                     activity: awake, transitionEvents: [],
                                                      wearSignal: .onWristGood).first)
         XCTAssertEqual(w.wearSignal, .onWristGood)
         XCTAssertTrue(w.eligibleForBaseline)

@@ -72,7 +72,7 @@ final class ActivityContextJoinTests: XCTestCase {
         XCTAssertEqual(s.unknownShare, 0, accuracy: 1e-9)
         XCTAssertEqual(s.shares[.running], nil)
         XCTAssertEqual(s.transitions, 1)
-        XCTAssertEqual(s.recentActivity, 10, "40 - (end of last walking epoch = base+30)")
+        XCTAssertEqual(s.recentActivity, 0, "the walking epoch overlaps the interval start: activity is ongoing")
         XCTAssertEqual(s.postureSource, "none")
     }
 
@@ -122,6 +122,42 @@ final class ActivityContextJoinTests: XCTestCase {
 
         let bad = ActivityContextJoin.context(for: base + 30, end: base + 30, epochs: epochs)
         XCTAssertTrue(bad.qualityReasons.contains("invalid_interval"))
+    }
+
+    func testRecentActivityIsMeasuredFromTheIntervalStart() {
+        // run1 D3-17: a walk ending 120 s before a 15-min slot. Measured from the slot END it read
+        // 1020 s (no recent_activity reason); from the START it is 120 s, inside the 600 s window.
+        let epochs = build(run(.walking, from: base - 300, to: base - 120)
+                           + run(.stationary, from: base - 120, to: base + 900),
+                           runStart: base - 300, runEnd: base + 900)
+        let s = ActivityContextJoin.context(for: base, end: base + 900, epochs: epochs)
+        XCTAssertEqual(s.recentActivity, 120)
+        XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
+    }
+
+    func testActivityOverlappingTheIntervalEndCountsAsOngoing() {
+        // A walk that starts inside the interval and is still going at its end used to be skipped
+        // (`e.endTs <= end`), leaving recentActivity nil.
+        let epochs = build(run(.stationary, from: base, to: base + 60)
+                           + run(.walking, from: base + 60, to: base + 150),
+                           runStart: base, runEnd: base + 150)
+        // The walking epoch [base+60, base+90) runs past the interval end (base+75).
+        let s = ActivityContextJoin.context(for: base, end: base + 75, epochs: epochs)
+        XCTAssertEqual(s.recentActivity, 0)
+        XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
+    }
+
+    func testTransitionAcrossAShortGapIsCounted() {
+        // D3-06: stationary [0,30), 3 s gap, walking [33,63): the label changed, a gap in between.
+        let epochs = [epoch(base, base + 30, motion: .stationary),
+                      epoch(base + 33, base + 63, motion: .walking)]
+        let s = ActivityContextJoin.context(for: base, end: base + 63, epochs: epochs)
+        XCTAssertEqual(s.transitions, 1)
+        let total = s.shares.values.reduce(0, +) + s.unknownShare
+        XCTAssertEqual(total, 1.0, accuracy: 1e-9, "the gap seconds still count unknown")
+        // A long gap is a real data hole: not counted as a transition.
+        let far = [epoch(base, base + 30, motion: .stationary), epoch(base + 90, base + 120, motion: .walking)]
+        XCTAssertEqual(ActivityContextJoin.context(for: base, end: base + 120, epochs: far).transitions, 0)
     }
 
     func testRecentActivityNilWhenNoSupportedActivity() {
@@ -294,7 +330,7 @@ final class ActivityContextJoinTests: XCTestCase {
                            + run(.stationary, from: base, to: base + 900),
                            runStart: base - 60, runEnd: base + 900)
         let slot = ActivityContextJoin.hrvSlotContexts(slots: [base], epochs: epochs)[0]
-        XCTAssertEqual(slot.recentActivityS, 900, "last supported epoch ends at slot start")
+        XCTAssertEqual(slot.recentActivityS, 0, "last supported epoch ends at slot start: 0 s before it")
         XCTAssertEqual(slot.postActivity, true, "the slot overlaps the post-activity window")
     }
 
