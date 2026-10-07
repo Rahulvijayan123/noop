@@ -79,6 +79,12 @@ extension PhysiologyContext {
                                                   source: .decoderIntervals, heartRateDependent: true,
                                                   availableBy: causal ? cutoff : nil)
             if hart.spans.isEmpty && strap.spans.isEmpty { statusReasons.append(activityUnavailable) }
+            // Heart-rate free posture evidence (gravity, sorted once), the decoder's in-bed window, its transition
+            // events and the HART lane's wear-signal quality: joined to each support below.
+            let gravity = observations.motion.sorted { $0.ts < $1.ts }
+            let inBed = PostureEvidence.inBedTrack(intervalInputs, availableBy: causal ? cutoff : nil)
+            let transitions = TransitionEvents.prepare(input.activityTransitions, causalCutoff: causal ? cutoff : nil)
+            let wearSignal = WearSignal.track(epochInputs, availableBy: causal ? cutoff : nil)
 
             let timeline = SignalValidityEngine.regimeTimeline(input, config: policy.validity)
             let episodes = SleepRhythm.episodes(sessions: input.sleepSessions, priorSleep: history.value.priorSleep,
@@ -115,11 +121,20 @@ extension PhysiologyContext {
                                                            config: policy.validity)
                 let regime = SignalValidityEngine.regime(for: m, timeline: timeline, device: input.regime)
                 registry[regime.key] = regime
-                let activity = IntervalAlgebra.composition(over: m.support, track: primary, config: policy.join)
+                var activity = IntervalAlgebra.composition(over: m.support, track: primary, config: policy.join)
                 let decoderActivity = decoder.spans.isEmpty ? nil
                     : IntervalAlgebra.composition(over: m.support, track: decoder, config: policy.join)
-                let preceding = IntervalAlgebra.precedingHistory(before: m.support.start, track: primary,
-                                                                 lookbackS: policy.join.precedingLookbackS)
+                var preceding = IntervalAlgebra.precedingHistory(before: m.support.start, track: primary,
+                                                                 lookbackS: policy.join.precedingLookbackS,
+                                                                 transitionBridgeS: policy.join.transitionBridgeS)
+                TransitionEvents.annotate(&activity, &preceding, support: m.support, events: transitions,
+                                          coverage: decoder)
+                let settling = TransitionEvents.summary(
+                    transitions, over: Interval(m.support.start - max(0, policy.eligibility.posturalSettlingS),
+                                                m.support.end), coverage: decoder)
+                let posture = PostureEvidence.context(over: m.support, motion: gravity, inBed: inBed,
+                                                      config: policy.eligibility.posture)
+                let wear = WearSignal.summary(over: m.support, track: wearSignal)
                 let sleepWear = SleepRhythm.sleepWear(for: m.support, episodes: episodes,
                                                       observations: observations, config: policy.sleep,
                                                       excludingSplitGaps: m.method.aggregation == .session)
@@ -137,7 +152,8 @@ extension PhysiologyContext {
                 let verdicts = Eligibility.comparisons(for: m.metric, method: m.method).map { kind in
                     Eligibility.evaluate(kind, metric: m.metric, support: m.support, validity: validity,
                                          activity: activity, preceding: preceding, sleepWear: sleepWear,
-                                         exertion: exertion, recentBouts: recent, config: policy.eligibility)
+                                         exertion: exertion, recentBouts: recent, config: policy.eligibility,
+                                         settlingTransitions: settling, wearSignal: wear)
                 }
                 envelopes.append(MeasurementEnvelope(
                     id: MeasurementEnvelope.makeId(method: m.method, support: m.support), metric: m.metric,
@@ -146,7 +162,8 @@ extension PhysiologyContext {
                     localTime: localTime(at: m.support.start, timezoneId: identity.timezoneId),
                     validity: validity, regimeKey: regime.key, activity: activity,
                     decoderActivity: decoderActivity, preceding: preceding, sleepWear: sleepWear, history: history,
-                    eligibility: verdicts, comparisons: [], finality: .provisional))
+                    eligibility: verdicts, comparisons: [], finality: .provisional, posture: posture,
+                    wearSignal: wear))
             }
 
             let finality = documentFinality(input, policy: policy)
@@ -271,6 +288,7 @@ extension PhysiologyContext {
             out.workouts = input.workouts.filter { ok($0.interval.start, $0.availableAt) }
             out.activityEpochs = input.activityEpochs.filter { ok($0.epoch.startTs, $0.availableAt) }
             out.activityIntervals = input.activityIntervals.filter { ok($0.interval.start, $0.availableAt) }
+            out.activityTransitions = input.activityTransitions.filter { ok($0.ts, $0.availableAt) }
             out.placements = input.placements.filter { ok($0.start, $0.recordedAt) }
             out.exposures = input.exposures.filter { $0.availableAt <= c }
             let removed = (input.heartRate.count - out.heartRate.count)
@@ -282,6 +300,7 @@ extension PhysiologyContext {
                 + (input.workouts.count - out.workouts.count)
                 + (input.activityEpochs.count - out.activityEpochs.count)
                 + (input.activityIntervals.count - out.activityIntervals.count)
+                + (input.activityTransitions.count - out.activityTransitions.count)
                 + (input.placements.count - out.placements.count)
             let exposures = input.exposures.count - out.exposures.count
             return (out, [Diagnostic("causal_excluded_observations", Double(removed)),
@@ -475,6 +494,7 @@ extension PhysiologyContext {
                 let workouts: [WorkoutInput]
                 let activityEpochs: [ActivityEpochInput]
                 let activityIntervals: [ActivityIntervalInput]
+                let activityTransitions: [TransitionEventInput]
                 let placements: [PlacementInput]
                 let regime: DeviceRegimeInput
                 let exposures: [ExposureEventRevision]
@@ -484,7 +504,7 @@ extension PhysiologyContext {
             let records = Records(identity: input.identity, measurements: measurements,
                                   sleepSessions: input.sleepSessions, workouts: input.workouts,
                                   activityEpochs: input.activityEpochs, activityIntervals: input.activityIntervals,
-                                  placements: input.placements, regime: input.regime, exposures: input.exposures,
+                                  activityTransitions: input.activityTransitions, placements: input.placements, regime: input.regime, exposures: input.exposures,
                                   inputRevisions: input.inputRevisions.sorted { ($0.input, $0.revision) < ($1.input, $1.revision) },
                                   history: history)
             h.add("|rec")

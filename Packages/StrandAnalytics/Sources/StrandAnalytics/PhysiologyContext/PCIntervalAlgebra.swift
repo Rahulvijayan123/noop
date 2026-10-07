@@ -27,12 +27,19 @@ extension PhysiologyContext {
         public var availableAt: Int?
         /// Stable identity used as the last tie-break (deterministic regardless of input order).
         public var tieBreak: String
+        /// The source's own classification confidence in [0, 1], when it has one.
+        public var confidence: Double?
+        /// Producing model / decoder (provenance), when known.
+        public var provenance: String?
 
         public init(interval: Interval, label: String?, unknownFraction: Double = 0, revision: Int = 0,
-                    availableAt: Int? = nil, tieBreak: String) {
+                    availableAt: Int? = nil, tieBreak: String, confidence: Double? = nil,
+                    provenance: String? = nil) {
             self.interval = interval; self.label = label
             self.unknownFraction = min(1, max(0, unknownFraction))
             self.revision = revision; self.availableAt = availableAt; self.tieBreak = tieBreak
+            self.confidence = confidence.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil }
+            self.provenance = provenance
         }
     }
 
@@ -42,9 +49,12 @@ extension PhysiologyContext {
         public var label: String?
         public var unknownFraction: Double
         public var revision: Int
-        public init(interval: Interval, label: String?, unknownFraction: Double, revision: Int) {
+        public var confidence: Double?
+        public var provenance: String?
+        public init(interval: Interval, label: String?, unknownFraction: Double, revision: Int,
+                    confidence: Double? = nil, provenance: String? = nil) {
             self.interval = interval; self.label = label; self.unknownFraction = unknownFraction
-            self.revision = revision
+            self.revision = revision; self.confidence = confidence; self.provenance = provenance
         }
     }
 
@@ -101,7 +111,7 @@ extension PhysiologyContext {
 
     public enum IntervalAlgebra {
 
-        public static let version = "pc-join-1"
+        public static let version = "pc-join-2"
 
         // MARK: Reason codes
         public static let invalidInterval: ReasonCode = "invalid_interval"
@@ -173,9 +183,11 @@ extension PhysiologyContext {
                     }
                 }
                 let span = ResolvedSpan(interval: Interval(lo, hi), label: w.label,
-                                        unknownFraction: w.unknownFraction, revision: w.revision)
+                                        unknownFraction: w.unknownFraction, revision: w.revision,
+                                        confidence: w.confidence, provenance: w.provenance)
                 if var last = spans.last, last.interval.end == lo, last.label == span.label,
-                   last.unknownFraction == span.unknownFraction, last.revision == span.revision {
+                   last.unknownFraction == span.unknownFraction, last.revision == span.revision,
+                   last.confidence == span.confidence, last.provenance == span.provenance {
                     last.interval.end = hi
                     spans[spans.count - 1] = last
                 } else {
@@ -197,6 +209,11 @@ extension PhysiologyContext {
         // MARK: Composition
 
         /// Duration-weighted composition of `track` over the whole `interval`.
+        ///
+        /// `transitions` counts label changes between consecutive labelled spans separated by at most
+        /// `config.transitionBridgeS` of unlabelled or uncovered time (a sit, a 3-s gap and a walk is one change; a
+        /// change across a longer gap is not observed and not counted). Decoder transition events are counted
+        /// separately (`transitionEvents`, `TransitionEvents.annotate`).
         public static func composition(over interval: Interval, track: ResolvedTrack,
                                        config: JoinConfig = .init()) -> ActivityComposition {
             guard interval.isValid else {
@@ -211,20 +228,28 @@ extension PhysiologyContext {
             var covered = 0.0
             var transitions = 0
             var previous: ResolvedSpan?
+            var confidenceSum = 0.0, confidenceS = 0.0, lowConfidence = 0.0
+            var provenance = Set<String>()
             for span in overlapping(track.spans, interval) {
                 let w = Double(span.interval.overlapSeconds(with: interval))
                 covered += w
                 if let label = span.label {
-                    seconds[label, default: 0] += w * (1 - span.unknownFraction)
+                    let labelled = w * (1 - span.unknownFraction)
+                    seconds[label, default: 0] += labelled
                     unknown += w * span.unknownFraction
+                    if let c = span.confidence, labelled > 0 {
+                        confidenceSum += c * labelled; confidenceS += labelled
+                        if c < config.lowConfidenceFloor { lowConfidence += labelled }
+                    }
+                    if let p = previous, let a = p.label, a != label,
+                       span.interval.start - p.interval.end <= max(0, config.transitionBridgeS) {
+                        transitions += 1
+                    }
+                    previous = span
                 } else {
                     unknown += w
                 }
-                if let p = previous, p.interval.end == span.interval.start,
-                   let a = p.label, let b = span.label, a != b {
-                    transitions += 1
-                }
-                previous = span
+                if let p = span.provenance { provenance.insert(p) }
             }
             let overlapInside = track.overlaps.reduce(0) { $0 + $1.overlapSeconds(with: interval) }
             let uncovered = max(0, duration - covered)
@@ -241,11 +266,17 @@ extension PhysiologyContext {
             if significant.count >= 2 { reasons.append(mixedStates) }
             if overlapInside > 0 { reasons.append(overlappingRecordsResolved) }
             if track.heartRateDependent { reasons.append(heartRateDependentSource) }
-            return ActivityComposition(interval: interval, intervalS: interval.duration, source: track.source,
-                                       heartRateDependent: track.heartRateDependent, labels: labels,
-                                       unknownS: unknown, uncoveredS: uncovered, transitions: transitions,
-                                       mixed: significant.count >= 2, dominantLabel: dominant,
-                                       resolvedOverlapS: overlapInside, reasons: reasons)
+            var out = ActivityComposition(interval: interval, intervalS: interval.duration, source: track.source,
+                                          heartRateDependent: track.heartRateDependent, labels: labels,
+                                          unknownS: unknown, uncoveredS: uncovered, transitions: transitions,
+                                          mixed: significant.count >= 2, dominantLabel: dominant,
+                                          resolvedOverlapS: overlapInside, reasons: reasons)
+            if confidenceS > 0 {
+                out.meanConfidence = (confidenceSum / confidenceS * 10_000).rounded() / 10_000
+                out.lowConfidenceS = lowConfidence
+            }
+            if !provenance.isEmpty { out.provenance = provenance.sorted() }
+            return out
         }
 
         /// True when `labels + unknown + uncovered` equals the interval within tolerance (the V01 invariant).
@@ -258,8 +289,9 @@ extension PhysiologyContext {
 
         /// History of `track` in `[start - lookback, start)`; time since supported activity scans every span before
         /// `start` so it can exceed the lookback.
-        public static func precedingHistory(before start: Int, track: ResolvedTrack,
-                                            lookbackS: Int) -> PrecedingHistory {
+        public static func precedingHistory(before start: Int, track: ResolvedTrack, lookbackS: Int,
+                                            transitionBridgeS: Int = JoinConfig().transitionBridgeS)
+            -> PrecedingHistory {
             let lookback = Interval(start - max(0, lookbackS), start)
             let prior = track.spans.filter { $0.interval.start < start }
             // Still run: walk backward through contiguous stationary spans ending at `start`.
@@ -296,7 +328,9 @@ extension PhysiologyContext {
             var previous: ResolvedSpan?
             for s in overlapping(track.spans, lookback) {
                 covered += s.interval.overlapSeconds(with: lookback)
-                if let p = previous, p.interval.end == s.interval.start, let a = p.label, let b = s.label, a != b {
+                guard let b = s.label else { continue }
+                if let p = previous, let a = p.label, a != b,
+                   s.interval.start - p.interval.end <= max(0, transitionBridgeS) {
                     transitions += 1
                 }
                 previous = s
@@ -318,7 +352,8 @@ extension PhysiologyContext {
                                    unknownFraction: unknown ? 1 : e.epoch.unknownFraction,
                                    revision: e.revision, availableAt: e.availableAt,
                                    tieBreak: "epoch:\(e.revision):\(e.epoch.startTs):\(e.epoch.endTs):"
-                                       + "\(e.epoch.motion.rawValue):\(e.epoch.observedS):\(e.epoch.validS)")
+                                       + "\(e.epoch.motion.rawValue):\(e.epoch.observedS):\(e.epoch.validS)",
+                                   confidence: unknown ? nil : e.epoch.confidence, provenance: e.provenance)
             }
         }
 
@@ -330,7 +365,8 @@ extension PhysiologyContext {
                                    unknownFraction: unknown ? 1 : 0, revision: r.revision,
                                    availableAt: r.availableAt,
                                    tieBreak: "interval:\(r.revision):\(r.interval.start):\(r.interval.end):"
-                                       + "\(r.activityClass):\(r.confidence)")
+                                       + "\(r.activityClass):\(r.confidence)",
+                                   confidence: unknown ? nil : r.confidence, provenance: r.provenance)
             }
         }
 
