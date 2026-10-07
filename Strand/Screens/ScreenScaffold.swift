@@ -109,12 +109,12 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
     /// the previous layout. `@ViewBuilder` lets the two stack types resolve to one opaque return.
     @ViewBuilder private var column: some View {
         if lazy {
-            LazyVStack(alignment: .leading, spacing: 20) {
+            LazyVStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 if title != nil || subtitle != nil { header }
                 content()
             }
         } else {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 if title != nil || subtitle != nil { header }
                 content()
             }
@@ -125,9 +125,9 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 if let title {
-                    // Match the liquid home's title face (SF Rounded 28) so every page's header reads
-                    // identically (2026-07-02 cohesion pass).
-                    Text(title).font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
+                    // The page-title role (28 semibold), the same face on every tab root.
+                    Text(title).font(StrandFont.title1).foregroundStyle(StrandPalette.textPrimary)
+                        .accessibilityAddTraits(.isHeader)
                 }
                 if let subtitle {
                     Text(subtitle).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
@@ -181,44 +181,41 @@ private struct RefreshableIfNeeded: ViewModifier {
     }
 }
 
-/// Empty / pending-data placeholder for screens still gathering history. Mirrors `DataPendingNote`'s
-/// icon-anchored card so an empty screen reads as an intentional state rather than a stray text box.
+/// The quiet empty or pending state for a screen still gathering history: one short message on the card
+/// surface, no icon tile and no headline.
+///
+/// `symbol` is accepted so the existing call sites keep compiling and ignored; the message carries the
+/// meaning (docs/DESIGN_SYSTEM.md, Loading, empty and sparse states).
 struct ComingSoon: View {
     let what: LocalizedStringKey
     var symbol: String = "sparkles"
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Image(systemName: symbol)
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.accent)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Coming together")
-                    .font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                Text(what)
-                    .font(StrandFont.body).foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(20).frame(maxWidth: .infinity, alignment: .leading)
-        .frostedCardSurface()
+        Text(what)
+            .font(StrandFont.subhead)
+            .foregroundStyle(StrandPalette.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(NoopMetrics.cardPadding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frostedCardSurface()
     }
 }
 
-/// A reusable "what shows now vs what needs an import" note. Bold title line plus a
-/// body line, with an info/sparkles SF Symbol. Used for empty/pending data states so
-/// every screen explains the live-now path and the import path with timing.
-/// Pulsing "history sync in progress" line (#77). Shown above a screen's empty state while the
-/// strap's historical offload runs, so a half-loaded screen ("No nights here yet") reads as
-/// in-progress rather than final. Shows the honest live signal — chunks pulled so far — never a
-/// percent (total pending is unknowable from the protocol, so a determinate bar would lie).
+/// "History sync in progress" (#77): one quiet line shown above a screen's empty state while the strap's
+/// historical offload runs, so a half-loaded screen ("No nights here yet") reads as in progress rather
+/// than final. Never a percent: the total pending is unknowable from the protocol, so a bar would lie.
+/// Static, because nothing on screen should loop for a background task.
 struct SyncingHistoryNote: View {
     let chunks: Int
 
     var body: some View {
-        HStack(spacing: 10) {
-            StatePill("Syncing strap history…", tone: .accent, pulsing: true)
+        Label {
+            Text("Syncing strap history…")
+        } icon: {
+            Image(systemName: "arrow.triangle.2.circlepath")
         }
+        .font(StrandFont.footnote)
+        .foregroundStyle(StrandPalette.textSecondary)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -237,30 +234,30 @@ func relativeAgo(_ epochSeconds: TimeInterval,
     }
 }
 
+/// A "what shows now vs what it is waiting for" note for an empty or pending section: a short title and
+/// one line of detail on the card surface, no icon tile.
+///
+/// `symbol` is accepted so the existing call sites keep compiling and ignored.
 struct DataPendingNote: View {
     let title: LocalizedStringKey
     let message: LocalizedStringKey
     var symbol: String = "sparkles"
 
     var body: some View {
-        StrandCard(padding: 20) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: symbol)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.accent)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(title)
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Text(message)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            Text(title)
+                .font(StrandFont.subhead.weight(.semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(message)
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .padding(NoopMetrics.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frostedCardSurface()
+        .accessibilityElement(children: .combine)
     }
 }
 

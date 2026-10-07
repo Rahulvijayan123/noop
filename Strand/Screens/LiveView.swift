@@ -869,8 +869,6 @@ private struct LiveHeartReadout: View {
         return max(0.02, min(1, Double(bpm) / Double(hrMax)))
     }
 
-    @State private var shown: Double = 0
-
     var body: some View {
         let tint = hrTint
         return VStack(alignment: .center, spacing: NoopMetrics.space2) {
@@ -882,10 +880,9 @@ private struct LiveHeartReadout: View {
                 LiquidVessel(value: hrFrac, tint: tint, animated: displayHR != nil)
                     .frame(width: 210, height: 210)
                 VStack(spacing: 0) {
-                    // The big focal HR numeral counts up to the live value (the hero number); a crisp
-                    // em-dash while there's no HR yet.
-                    if displayHR != nil {
-                        CountUpNumber(value: shown, font: StrandFont.rounded(88, weight: .semibold))
+                    // The big focal HR numeral (the hero number); a crisp em-dash while there's no HR yet.
+                    if let displayHR {
+                        CountUpNumber(value: Double(displayHR), font: StrandFont.rounded(88, weight: .semibold))
                             .foregroundStyle(tint)
                             .shadow(color: .black.opacity(0.4), radius: 6, y: 1)
                     } else {
@@ -915,14 +912,6 @@ private struct LiveHeartReadout: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
-        .onAppear { rollTo(displayHR) }
-        .onChangeCompat(of: displayHR) { rollTo($0) }
-    }
-
-    /// Roll the count-up numeral to the new HR, matching the vessel's fill animation.
-    private func rollTo(_ v: Int?) {
-        guard let v else { shown = 0; return }
-        withAnimation(.easeOut(duration: 0.6)) { shown = Double(v) }
     }
 
     private var signalTrustSummary: String {

@@ -136,19 +136,21 @@ extension MonitorSnapshot {
 
 // MARK: - Shared building blocks (also used by EventsView)
 
-/// Card surface that follows the user's card-opacity preference, like the Today cards.
+/// The `NoopCard` surface as a background, for content that lays out its own padding.
+///
+/// `radius` is accepted so the existing call sites keep compiling and ignored: every card is drawn at
+/// `NoopMetrics.cardRadius`. A surface nested inside a card uses `NoopMetrics.insetRadius` on
+/// `StrandPalette.surfaceInset` instead.
 struct NaraCardModifier: ViewModifier {
-    @AppStorage(CardAppearancePrefs.opacityKey) private var opacityPercent = CardAppearancePrefs.defaultPercent
-    var radius: CGFloat = 20
+    var radius: CGFloat = NoopMetrics.cardRadius
 
     func body(content: Content) -> some View {
-        content.background(NoopPanelSurface(cornerRadius: radius,
-                                            surfaceOpacity: max(0, min(1, Double(opacityPercent) / 100))))
+        content.background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
     }
 }
 
 extension View {
-    func naraCard(radius: CGFloat = 20) -> some View { modifier(NaraCardModifier(radius: radius)) }
+    func naraCard(radius: CGFloat = NoopMetrics.cardRadius) -> some View { modifier(NaraCardModifier(radius: radius)) }
 }
 
 /// Section title with an optional caption and a "See all" link.

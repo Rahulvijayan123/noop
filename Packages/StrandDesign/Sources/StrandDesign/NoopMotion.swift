@@ -253,43 +253,31 @@ public final class NoopMotionState: ObservableObject {
 
 // MARK: - CountUpText
 //
-// Animates a numeric value counting up (or down) to its latest value whenever `value`
-// changes, and on first appear (from 0 → value). Driven by a custom `Animatable` modifier
-// so it works on the iOS 16 / macOS 13 floor (no TimelineView spring / PhaseAnimator needed)
-// and rides whatever animation the environment supplies — by default `NoopMotion.value`.
-//
-// Reduce Motion → the final value is shown instantly, with no tick.
+// A formatted number. It used to count up from 0 on appear and roll between values; it now shows the
+// final value at once, because a rolling number is motion that carries no information
+// (docs/DESIGN_SYSTEM.md, Motion: "values swap without counting up"). The name and signature are kept so
+// the call sites need no change.
 
-/// A text view whose number animates from its previous value to the new one.
-/// Use for the big scores / hero metric read-outs.
+/// A text view showing a formatted number. Use for the big scores and hero metric readouts.
 ///
 /// ```swift
 /// CountUpText(value: score,
 ///             format: { "\(Int($0.rounded()))" },
-///             font: StrandFont.display(72),
+///             font: StrandFont.display(40),
 ///             color: StrandPalette.textPrimary)
-///     .tracking(StrandFont.displayTracking(72))
 /// ```
 public struct CountUpText: View {
     private let value: Double
     private let format: (Double) -> String
     private let font: Font
     private let color: Color
-    private let animation: Animation
-
-    /// The value currently being animated TO. `_AnimatableNumber` interpolates from the
-    /// last committed `target` to this one; on appear it starts the run from 0.
-    @State private var target: Double = 0
-    @State private var hasAppeared = false
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// - Parameters:
-    ///   - value: the number to display / animate to.
-    ///   - format: maps the (interpolated) number to its display string — round, clamp, add units here.
-    ///   - font: the text font (e.g. `StrandFont.display(72)`).
+    ///   - value: the number to display.
+    ///   - format: maps the number to its display string — round, clamp, add units here.
+    ///   - font: the text font (e.g. `StrandFont.display(40)`).
     ///   - color: the text colour (e.g. `StrandPalette.textPrimary`).
-    ///   - animation: the count-up curve. Defaults to `NoopMotion.value`.
+    ///   - animation: ignored; kept so existing call sites compile.
     public init(value: Double,
                 format: @escaping (Double) -> String,
                 font: Font,
@@ -299,107 +287,30 @@ public struct CountUpText: View {
         self.format = format
         self.font = font
         self.color = color
-        self.animation = animation
     }
 
     public var body: some View {
-        // `_AnimatableNumber` conforms to `Animatable`, so SwiftUI interpolates `number`
-        // frame-by-frame under whatever animation wraps the `target` change.
-        _AnimatableNumber(number: target, format: format, font: font, color: color)
-            .onAppear {
-                guard !hasAppeared else { return }
-                hasAppeared = true
-                if reduceMotion {
-                    target = value                      // snap, no tick
-                } else {
-                    target = 0
-                    withAnimation(animation) { target = value }
-                }
-            }
-            .onChangeCompat(of: value) { newValue in
-                if reduceMotion {
-                    var tx = Transaction(); tx.disablesAnimations = true
-                    withTransaction(tx) { target = newValue }
-                } else {
-                    withAnimation(animation) { target = newValue }
-                }
-            }
-            // Expose the formatted value to assistive tech as a single, stable label
-            // (the visual ticking is decorative; VoiceOver reads the final number).
-            .accessibilityElement()
-            .accessibilityLabel(Text(format(value)))
-    }
-}
-
-/// A `View` whose `number` is the animatable channel: SwiftUI interpolates it frame-by-frame
-/// under whatever animation wraps the value change, and `body` re-renders `format(number)`
-/// each frame. Conforming the VIEW to `Animatable` (rather than using the deprecated
-/// `AnimatableModifier`) keeps this warning-clean on the iOS-17 / macOS-14 build while still
-/// compiling on the iOS-16 / macOS-13 floor.
-private struct _AnimatableNumber: View, Animatable {
-    var number: Double
-    let format: (Double) -> String
-    let font: Font
-    let color: Color
-
-    var animatableData: Double {
-        get { number }
-        set { number = newValue }
-    }
-
-    var body: some View {
-        Text(format(number))
+        Text(format(value))
             .font(font)
             .foregroundStyle(color)
             .fixedSize()                                // never truncate the number
-            .accessibilityHidden(true)                  // CountUpText supplies the a11y label
     }
 }
 
 // MARK: - Staggered appear
 //
-// Fade-in + 8pt rise, sequenced by `index`. Runs ONCE per element (guarded by `hasAppeared`),
-// so re-renders / scroll recycling don't re-trigger it. Reduce Motion → visible instantly,
-// no offset.
-
-private struct StaggeredAppear: ViewModifier {
-    let index: Int
-    let isVisible: Bool
-
-    @State private var hasAppeared = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    func body(content: Content) -> some View {
-        // `shown` is true once we've appeared (or immediately under Reduce Motion / when the
-        // element is asked to appear without animation).
-        let shown = hasAppeared || reduceMotion
-        content
-            .opacity(isVisible ? (shown ? 1 : 0) : 1)
-            .offset(y: (isVisible && !shown) ? NoopMotion.riseOffset : 0)
-            .onAppear {
-                guard isVisible, !hasAppeared else { return }
-                if reduceMotion {
-                    hasAppeared = true                  // no animation, no delay
-                } else {
-                    let delay = Double(max(0, index)) * NoopMotion.stagger
-                    withAnimation(NoopMotion.card.delay(delay)) {
-                        hasAppeared = true
-                    }
-                }
-            }
-    }
-}
+// Content appears at once. The modifier used to fade each element in with an 8pt rise, delayed by its
+// index; entrances like that are motion without a data change, which the design system rules out. Kept as
+// a no-op so the call sites need no change.
 
 public extension View {
-    /// Fade-in + 8pt rise on first appearance, delayed by `index * 0.04s` for a sequenced
-    /// list/grid reveal. Runs ONCE per element. Honours Reduce Motion (appears instantly,
-    /// no offset).
+    /// No-op: content appears at once. Kept for source compatibility.
     ///
     /// - Parameters:
-    ///   - index: position in the sequence (0 = first / no delay).
-    ///   - isVisible: set `false` to opt an element out of the animation (it stays fully shown).
+    ///   - index: ignored.
+    ///   - isVisible: ignored.
     func staggeredAppear(index: Int, isVisible: Bool = true) -> some View {
-        modifier(StaggeredAppear(index: index, isVisible: isVisible))
+        self
     }
 }
 

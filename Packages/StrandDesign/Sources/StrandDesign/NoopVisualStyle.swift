@@ -47,7 +47,7 @@ public enum NoopVisualStyle {
     public static let pagePadding: CGFloat = 20
     public static let cardPadding: CGFloat = 16
     public static let itemGap: CGFloat = 12
-    public static let sectionGap: CGFloat = 30
+    public static let sectionGap: CGFloat = 24
 }
 
 /// Shared card/panel treatment: a quiet vertical gradient, a top-lit rim, and deep soft elevation.

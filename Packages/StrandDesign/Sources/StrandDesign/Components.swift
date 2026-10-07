@@ -7,6 +7,9 @@ import SwiftUI
 
 public enum NoopMetrics {
     public static let cardRadius: CGFloat = NoopVisualStyle.cardRadius
+    /// Corner radius of a surface nested inside a card (a stat cell, a chip row, an inset list), drawn on
+    /// `StrandPalette.surfaceInset` without a shadow.
+    public static let insetRadius: CGFloat = 12
     public static let cardPadding: CGFloat = NoopVisualStyle.cardPadding
     public static let gap: CGFloat = NoopVisualStyle.itemGap
     public static let sectionGap: CGFloat = NoopVisualStyle.sectionGap
@@ -126,9 +129,16 @@ public extension View {
 
 // MARK: - Surface
 
-/// The one card surface — now the Bevel frosted card. PUBLIC API is unchanged
-/// (padding + content); an optional `tint` was ADDED (defaulted) so callers can opt
-/// into a per-domain accent wash without breaking existing call sites.
+/// The one card: `NoopPanelSurface` at `NoopMetrics.cardRadius` with `NoopMetrics.cardPadding` inside.
+///
+/// ```swift
+/// NoopCard {
+///     Text("Resting heart rate").font(StrandFont.headline)
+/// }
+/// ```
+///
+/// `tint` is accepted for source compatibility and ignored: domain colour belongs to the data marks and
+/// icons inside a card, not its fill.
 public struct NoopCard<Content: View>: View {
     private let padding: CGFloat
     private let tint: Color?
@@ -172,20 +182,32 @@ public struct NoopCard<Content: View>: View {
 
 // MARK: - Section header
 
+/// The one section title: a single `title2` line with an optional trailing note.
+///
+/// ```swift
+/// SectionHeader("Trends")
+/// SectionHeader("Readings", trailing: "Last 7")
+/// ```
+///
+/// `overline` is accepted so the existing call sites keep compiling, and ignored: content screens no longer
+/// carry spaced-capital overlines above their section titles (docs/DESIGN_SYSTEM.md, Type).
 public struct SectionHeader: View {
-    let overline: LocalizedStringKey?; let title: LocalizedStringKey; let trailing: String?
+    let title: LocalizedStringKey; let trailing: String?
     public init(_ title: LocalizedStringKey, overline: LocalizedStringKey? = nil, trailing: String? = nil) {
-        self.title = title; self.overline = overline; self.trailing = trailing
+        self.title = title; self.trailing = trailing
     }
     public var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                if let overline { Text(overline).strandOverline() }
-                Text(title).font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
-            }
-            Spacer()
+            Text(title)
+                .font(StrandFont.title2)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: NoopMetrics.space2)
             if let trailing {
                 Text(trailing).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                    .lineLimit(1)
             }
         }
     }
@@ -402,8 +424,14 @@ public struct InsightCard: View {
     }
 }
 
-// MARK: - Range control (the ONE segmented pill control, used everywhere)
+// MARK: - Segmented control (the ONE segmented pill control, used everywhere)
 
+/// The one segmented control: a solid `surfaceInset` track with the selected segment raised on
+/// `surfaceRaised` behind a hairline. Flat, no gradients or shadows. `RangeControl` is built on it.
+///
+/// ```swift
+/// SegmentedPillControl(["Day", "Week"], selection: $mode, fillsAvailableWidth: true) { $0 }
+/// ```
 public struct SegmentedPillControl<T: Hashable>: View {
     let items: [T]
     let label: (T) -> String
@@ -485,22 +513,11 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         .padding(.horizontal, equalWidth ? NoopMetrics.space1 : 9)
                         .background {
                             if sel {
+                                // Flat: the raised surface with a hairline edge, no gradient or shadow.
                                 let selectedShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
                                 selectedShape
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surface],
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
-                                    )
-                                    .overlay(
-                                        selectedShape.strokeBorder(
-                                            NoopVisualStyle.borderHighlight.opacity(0.62),
-                                            lineWidth: 0.75
-                                        )
-                                    )
-                                    .shadow(color: NaraBrand.deepIndigo.opacity(0.12), radius: 4, x: 0, y: 1)
+                                    .fill(StrandPalette.surfaceRaised)
+                                    .overlay(selectedShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
                             }
                         }
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
@@ -516,25 +533,9 @@ public struct SegmentedPillControl<T: Hashable>: View {
         .padding(3)
         .frame(maxWidth: equalWidth ? .infinity : nil)
         .background {
-            let trackShape = RoundedRectangle(cornerRadius: 13, style: .continuous)
-            trackShape
-                .fill(
-                    LinearGradient(
-                        colors: [NoopVisualStyle.inset, NoopVisualStyle.canvas.opacity(0.78)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .overlay(
-                    trackShape.strokeBorder(
-                        LinearGradient(
-                            colors: [NoopVisualStyle.borderHighlight.opacity(0.48), NoopVisualStyle.border],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
-                )
+            // A solid inset well; the selected segment sits on it as a raised tile.
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(StrandPalette.surfaceInset)
         }
     }
 }

@@ -25,12 +25,6 @@ struct LiquidTodayView: View {
     // would re-render all of Today every second (the exact churn the LiveState leaves isolate). BLEManager
     // only publishes connect/discovery state, never HR. Injected at the app roots beside .environmentObject(model).
     @EnvironmentObject var ble: BLEManager
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Low Power Mode — and the in-app "Reduce motion in NOOP" toggle — pose the sky still too, the
-    /// behaviour the comment on the sky branch below has always described. Neither has a SwiftUI
-    /// environment key, hence the shared monitor.
-    @ObservedObject private var motion = NoopMotionState.shared
-    private var poseStill: Bool { motion.poseStill(reduceMotion) }
 
     /// #today-hosted-cards: the ordered Trends/Sleep cards the user has hosted in Today. Empty by default
     /// (opt-in); rendered by the `.addedCards` section. Shared @AppStorage key with Android.
@@ -159,15 +153,6 @@ struct LiquidTodayView: View {
     /// Content sits above the surface so it stays readable. Mirrors Kotlin `NoopPrefs.cardOpacityPercent`.
     @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
     private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
-    /// "Sky behind cards" (default ON): extend the day-cycle sky behind the WHOLE scroll so the
-    /// Card-transparency slider reveals it under every card. User-toggleable. Mirrors Kotlin `NoopPrefs.skyBehindCards`.
-    @AppStorage(SkyBehindCardsPrefs.enabledKey) private var skyBehindCards = true
-    /// Day-cycle scene backdrop (#698). Default ON. When off, the liquid Today drops the sky for the plain
-    /// dark canvas — parity with Android and the classic TodayView, which already honour this pref. Mirrors
-    /// Kotlin `NoopPrefs.showDayCycleBackground`.
-    @AppStorage(SceneBackgroundPrefs.enabledKey) private var showDayCycleBackground = true
-    /// Custom background image (#custom-background): when active it overrides the sky in the backdrop below.
-    @ObservedObject private var backgroundStore = BackgroundImageStore.shared
 
     // MARK: - Day navigation (ported from classic Today: swipe + calendar, day-keyed reads)
 
@@ -384,35 +369,10 @@ struct LiquidTodayView: View {
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         #endif
         .onPreferenceChange(PullOffsetKey.self) { handlePull($0) }
-        // The sky is a FIXED full-bleed backdrop drawn behind the scroll content, edge-to-edge under the
-        // status bar. A ScrollView background does not scroll with the content, so pulling down never
-        // moves the sky (the exact behaviour the scaffold uses on the classic Today).
+        // The flat canvas, edge-to-edge under the status bar. A ScrollView background does not scroll with
+        // the content, so pulling down never reveals anything behind it.
         .background(alignment: .top) {
-            ZStack(alignment: .top) {
-                StrandPalette.surfaceBase
-                // Custom background image (#custom-background): a picked photo OVERRIDES the sky, filling
-                // the whole backdrop (same cached image as every other tab, so it's seamless).
-                if backgroundStore.isActive {
-                    BackgroundImageBackdrop()
-                }
-                // Day-cycle scene (#698): the sky only paints when the toggle is ON AND no custom image is
-                // active; off = the plain surfaceBase canvas above (parity with Android + classic TodayView).
-                else if showDayCycleBackground {
-                    // Reduce-motion (and low-power) users get the same sky posed still — no twinkle/breath.
-                    // Also static until the first data load settles, so launch isn't fighting a live sky too.
-                    // "Sky behind cards" (opt-in): fill the whole backdrop with a softer settle so the sky
-                    // reads under every card, instead of the default 340 top band that dissolves to canvas.
-                    Group {
-                        if poseStill || !dataLoaded { LiquidSkyStatic(hour: liveHour, settleStrength: skyBehindCards ? 0.78 : 1) }
-                        else { LiquidSky(hour: liveHour, settleStrength: skyBehindCards ? 0.78 : 1) }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .frame(height: skyBehindCards ? nil : 340, alignment: .top)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-                }
-            }
-            .ignoresSafeArea()
+            StrandPalette.surfaceBase.ignoresSafeArea()
         }
         .coordinateSpace(name: Self.daySwipeSpace)
         .onPreferenceChange(LiquidHeartRateCardFrameKey.self) { heartRateCardFrame = $0 }
@@ -1579,11 +1539,6 @@ struct LiquidTodayView: View {
     private var caloriesDetailMetric: MetricDescriptor? {
         MetricCatalog.todayCaloriesMetric(hasImportedKcal: importedActiveKcalDay != nil,
                                           hasOnDeviceKcal: displayDay?.activeKcalEst != nil)
-    }
-
-    private var liveHour: Double {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-        return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
     }
 
     // MARK: - Formatting
