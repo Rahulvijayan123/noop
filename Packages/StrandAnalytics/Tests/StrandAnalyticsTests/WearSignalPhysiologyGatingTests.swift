@@ -43,7 +43,7 @@ final class WearSignalPhysiologyGatingTests: XCTestCase {
                  motionRmsG: 0.01, gyroRmsDps: nil, activityContext: activityContext,
                  activityConfidence: 0.9, secondsSinceTransition: 300, secondsSinceLocomotion: nil,
                  secondsSinceExercise: nil, phase: phase, eligibleForBaseline: false,
-                 wearSignal: wearSignal)
+                 wearSignal: wearSignal, transitionEventsAvailable: true, asleep: false, wear: .onWrist)
     }
 
     // MARK: - Existing behavior preserved (nil / good / unknown)
@@ -101,7 +101,7 @@ final class WearSignalPhysiologyGatingTests: XCTestCase {
     private var awake: ActivityContextLookup {
         ActivityContextLookup(intervals: [ActivityContextInterval(start: t0 - 600, end: t0 + 600,
                                                                   activityClass: .sitting, confidence: 0.9,
-                                                                  sleep: .unknown, wear: .onWrist)])
+                                                                  sleep: .awake, wear: .onWrist)])
     }
 
     func testBuildWithoutWearSignalKeepsNilAndEligibility() throws {

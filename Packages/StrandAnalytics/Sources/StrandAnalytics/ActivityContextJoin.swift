@@ -41,8 +41,9 @@ public enum ActivityContextJoin {
     /// - Returns: shares keyed by motion label (valid seconds only; `.unknown` never appears as a
     ///   key), `unknownShare`, `transitions` (label changes between consecutive overlapping
     ///   epochs, including across a gap of at most `transitionGapS`), `recentActivity` (seconds from
-    ///   the last supported non-stationary epoch's end to the interval START; 0 when such an epoch
-    ///   overlaps the interval, i.e. the activity is ongoing or happened inside it; nil when none),
+    ///   the end of the last supported non-stationary epoch that began by the interval start, to the
+    ///   interval START; 0 when such an epoch covers the start, i.e. the activity is ongoing as the
+    ///   interval begins; nil when none. Activity starting after the start is in `shares`),
     ///   `postureSource` ("user_confirmed" | "none"
     ///   in v1; "model" reserved), and derived `qualityReasons`.
     public static func context(for interval: [Int],
@@ -81,13 +82,16 @@ public enum ActivityContextJoin {
             transitions += 1
         }
 
-        // Recent supported non-stationary activity, measured from the interval START (run1 D3-17): a
-        // walk that ended right as a 15-min slot began is 0 s before it, not 900 s. An activity epoch
-        // overlapping the interval (still going at its end, or inside it) is ongoing and reads 0. This
-        // scans ALL provided epochs (not only the overlapping ones): an HRV slot's interpretation needs
-        // the activity that ended just before the slot began, which shares none of its bucket.
+        // Recent supported non-stationary activity PRECEDING the interval, measured from the interval
+        // START (run1 D3-17): a walk that ended right as a 15-min slot began is 0 s before it, not
+        // 900 s, and a walk still going as the interval begins (covering its start instant) is ongoing
+        // and reads 0. Only activity that began by the interval start counts: activity after it is
+        // the measurement's own composition and is reported through `shares`, so a 30-s bathroom walk
+        // at 03:00 does not make a whole night read "soon after activity". This scans ALL provided
+        // epochs (not only the overlapping ones): an HRV slot's interpretation needs the activity that
+        // ended just before the slot began, which shares none of its bucket.
         var recentActivity: Int? = nil
-        for e in epochs where e.isSupportedNonStationary && e.startTs < end {
+        for e in epochs where e.isSupportedNonStationary && e.startTs <= start {
             let since = max(0, start - e.endTs)
             if recentActivity == nil || since < recentActivity! { recentActivity = since }
         }

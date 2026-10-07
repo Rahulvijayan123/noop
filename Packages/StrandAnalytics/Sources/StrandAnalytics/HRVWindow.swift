@@ -150,8 +150,10 @@ public struct HRVWindow: Equatable, Sendable {
     public var transitionEventsAvailable: Bool
     /// Where this window sits relative to the nearest known transition, measured from its start.
     public var phase: ActivityPhysiologyPhase
-    /// Whether any part of the window was asleep (decoder sleep state or a `sleeping` stretch); nil when
-    /// no activity lookup was supplied, so sleep is unknown.
+    /// `true` when any part of the window was explicitly asleep (decoder sleep state or a `sleeping`
+    /// stretch); `false` only when explicitly AWAKE stretches cover at least half of it (the same
+    /// coverage rule as `wear`); nil otherwise, i.e. sleep unknown (no lookup, `sleep == .unknown`
+    /// stretches such as the live day's, or mostly uncovered seconds).
     public var asleep: Bool?
     /// Wear over the window from the activity lookup: `.offWrist` if any stretch was off-wrist,
     /// `.onWrist` if on-wrist stretches cover at least half of it, otherwise `.unknown`; nil without a
@@ -173,8 +175,8 @@ public struct HRVWindow: Equatable, Sendable {
                phase: ActivityPhysiologyPhase, eligibleForBaseline: Bool,
                wearSignal: WearSignalState? = nil,
                secondsSincePosturalTransition: Int? = nil, secondsSinceLocomotionTransition: Int? = nil,
-               transitionsInWindow: Int = 0, transitionEventsAvailable: Bool = true,
-               asleep: Bool? = false, wear: WearContextState? = .onWrist) {
+               transitionsInWindow: Int = 0, transitionEventsAvailable: Bool = false,
+               asleep: Bool? = nil, wear: WearContextState? = nil) {
         self.kind = kind; self.start = start; self.end = end
         self.rmssd = rmssd; self.sdnn = sdnn; self.meanNN = meanNN; self.medianNN = medianNN
         self.rrDiffSqSumMs2 = rrDiffSqSumMs2; self.rrDiffCount = rrDiffCount; self.nnM2 = nnM2
@@ -374,7 +376,13 @@ public enum HRVWindowBuilder {
             }
             sinceExercise = secondsSince(start: start, end: end, in: activity) { $0.activityClass == .vigorousActivity }
             let overlapping = activity.intervals(from: start, to: end)
-            asleep = overlapping.contains { $0.sleep == .asleep || $0.activityClass == .sleeping }
+            if overlapping.contains(where: { $0.sleep == .asleep || $0.activityClass == .sleeping }) {
+                asleep = true
+            } else {
+                let awakeS = overlapping.filter { $0.sleep == .awake }
+                    .reduce(0) { $0 + max(0, min($1.end, end) - max($1.start, start)) }
+                asleep = 2 * awakeS >= end - start ? false : nil
+            }
             if overlapping.contains(where: { $0.wear == .offWrist || $0.activityClass == .offWrist }) {
                 wear = .offWrist
             } else {
@@ -419,8 +427,10 @@ public enum HRVWindowBuilder {
     public static func isEligibleForBaseline(_ w: HRVWindow, config: Config = Config()) -> Bool {
         guard w.rmssd != nil else { return false }
         // Context gates (D3-03 / D6-03): a window with any transition inside it, with no event data to
-        // tell, asleep or of unknown sleep, of unknown wear, or too soon after locomotion/exercise is
-        // real physiology but not a resting AWAKE baseline observation.
+        // tell, explicitly asleep or of unknown sleep (`asleep == nil`: not known awake over at least
+        // half the window), of unknown wear, or too soon after locomotion/exercise is real physiology
+        // but not a resting AWAKE baseline observation. A hand-built window that does not state these
+        // fields defaults to unknown (no event data, sleep and wear nil) and is therefore ineligible.
         guard w.transitionEventsAvailable, w.transitionsInWindow == 0 else { return false }
         guard w.phase == .steadyState else { return false }
         guard w.asleep == false else { return false }

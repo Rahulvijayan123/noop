@@ -31,7 +31,7 @@ final class HRVWindowTests: XCTestCase {
         return out
     }
 
-    private func interval(_ s: Int, _ e: Int, _ c: ActivityClass, sleep: SleepContextState = .unknown,
+    private func interval(_ s: Int, _ e: Int, _ c: ActivityClass, sleep: SleepContextState = .awake,
                           wear: WearContextState = .onWrist) -> ActivityContextInterval {
         ActivityContextInterval(start: s, end: e, activityClass: c, confidence: 0.9, sleep: sleep, wear: wear)
     }
@@ -301,6 +301,51 @@ final class HRVWindowTests: XCTestCase {
         XCTAssertFalse(w.eligibleForBaseline)
     }
 
+    func testUnknownSleepOrMostlyUncoveredWindowIsNotKnownAwake() throws {
+        // Review fix: `asleep` used to be false whenever nothing was EXPLICITLY asleep, so a lookup with
+        // `sleep == .unknown` (the live day) or a window the lookup barely covers read known-awake.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let unknownSleep = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .sitting, sleep: .unknown)])
+        let w1 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                       activity: unknownSleep, transitionEvents: []).first)
+        XCTAssertNil(w1.asleep, "sleep == .unknown is not evidence of being awake")
+        XCTAssertEqual(w1.wear, .onWrist)
+        XCTAssertFalse(w1.eligibleForBaseline)
+
+        // On-wrist over the whole window, but explicitly awake over only 100 of its 300 s.
+        let partlyAwake = ActivityContextLookup(intervals: [interval(t0, t0 + 100, .sitting, sleep: .awake),
+                                                            interval(t0 + 100, t0 + 300, .sitting, sleep: .unknown)])
+        let w2 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                       activity: partlyAwake, transitionEvents: []).first)
+        XCTAssertNil(w2.asleep)
+        XCTAssertFalse(w2.eligibleForBaseline)
+
+        // Explicitly awake over exactly half the window is known awake (same boundary as wear).
+        let halfAwake = ActivityContextLookup(intervals: [interval(t0, t0 + 150, .sitting, sleep: .awake),
+                                                          interval(t0 + 150, t0 + 300, .sitting, sleep: .unknown)])
+        let w3 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                       activity: halfAwake, transitionEvents: []).first)
+        XCTAssertEqual(w3.asleep, false)
+        XCTAssertTrue(w3.eligibleForBaseline)
+    }
+
+    func testHandBuiltWindowWithoutContextArgumentsIsNotEligible() {
+        // Review fix: the init used to default to the most permissive context (events available, awake,
+        // on-wrist), so a window built by hand without them passed the context gates.
+        let w = HRVWindow(kind: .canonical5m, start: t0, end: t0 + 300, rmssd: 30, sdnn: 40, meanNN: 800,
+                          medianNN: 800, rrDiffSqSumMs2: 1_000, rrDiffCount: 100, nnM2: 2_000, validRRCount: 300,
+                          artifactFraction: 0.05,
+                          signalQuality: HRVSignalQuality(coverageVerdict: .plausible, beatAccurateFraction: 0.99,
+                                                          trustworthy: true),
+                          motionRmsG: 0.01, gyroRmsDps: nil, activityContext: .sitting, activityConfidence: 0.9,
+                          secondsSinceTransition: 300, secondsSinceLocomotion: nil, secondsSinceExercise: nil,
+                          phase: .steadyState, eligibleForBaseline: false)
+        XCTAssertFalse(w.transitionEventsAvailable)
+        XCTAssertNil(w.asleep)
+        XCTAssertNil(w.wear)
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(w))
+    }
+
     func testUnknownOrOffWristWearIsNotEligible() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
         let unknownWear = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .stationary, wear: .unknown)])
@@ -371,7 +416,8 @@ final class HRVWindowTests: XCTestCase {
                                                  trustworthy: trustworthy),
                  motionRmsG: motionRmsG, gyroRmsDps: gyroRmsDps, activityContext: activityContext,
                  activityConfidence: 0.9, secondsSinceTransition: 300, secondsSinceLocomotion: nil,
-                 secondsSinceExercise: nil, phase: phase, eligibleForBaseline: false)
+                 secondsSinceExercise: nil, phase: phase, eligibleForBaseline: false,
+                 transitionEventsAvailable: true, asleep: false, wear: .onWrist)
     }
 
     func testEligibilityPassesOnCleanSteadyStateMotion() {

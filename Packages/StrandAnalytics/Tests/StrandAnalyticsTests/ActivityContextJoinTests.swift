@@ -135,16 +135,46 @@ final class ActivityContextJoinTests: XCTestCase {
         XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
     }
 
-    func testActivityOverlappingTheIntervalEndCountsAsOngoing() {
-        // A walk that starts inside the interval and is still going at its end used to be skipped
-        // (`e.endTs <= end`), leaving recentActivity nil.
+    func testActivityOngoingAtTheIntervalStartReadsZero() {
+        // A walk that began before the interval and is still going as it starts is ongoing: 0 s.
+        let epochs = build(run(.walking, from: base - 90, to: base + 30)
+                           + run(.stationary, from: base + 30, to: base + 900),
+                           runStart: base - 90, runEnd: base + 900)
+        let s = ActivityContextJoin.context(for: base + 15, end: base + 900, epochs: epochs)
+        XCTAssertEqual(s.recentActivity, 0)
+        XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
+        // An epoch starting exactly at the interval start covers its start instant: also ongoing.
+        let aligned = ActivityContextJoin.context(for: base - 90, end: base + 900, epochs: epochs)
+        XCTAssertEqual(aligned.recentActivity, 0)
+    }
+
+    func testActivityStartingInsideTheIntervalIsNotRecentActivity() {
+        // Review fix: a walk that starts inside the interval (even one still going at its end) is the
+        // measurement's own composition, reported through `shares`, not activity PRECEDING it.
         let epochs = build(run(.stationary, from: base, to: base + 60)
                            + run(.walking, from: base + 60, to: base + 150),
                            runStart: base, runEnd: base + 150)
-        // The walking epoch [base+60, base+90) runs past the interval end (base+75).
         let s = ActivityContextJoin.context(for: base, end: base + 75, epochs: epochs)
-        XCTAssertEqual(s.recentActivity, 0)
-        XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
+        XCTAssertNil(s.recentActivity)
+        XCTAssertFalse(s.qualityReasons.contains("recent_activity"))
+        XCTAssertGreaterThan(s.share(of: .walking), 0, "the in-interval walk is still visible in shares")
+    }
+
+    func testBriefWalkInsideANightIsNotRecentActivity() {
+        // Review fix: an 8 h night (23:00-07:00) with one 30-s supported walking epoch at +3 h (a
+        // bathroom trip). Counting in-interval activity as 'ongoing' made the whole night read
+        // recentActivity 0 and 'recent_activity', so the nightly hero said "Recent activity".
+        let night = 8 * 3600
+        let epochs = build(run(.stationary, from: base, to: base + 3 * 3600)
+                           + run(.walking, from: base + 3 * 3600, to: base + 3 * 3600 + 30)
+                           + run(.stationary, from: base + 3 * 3600 + 30, to: base + night),
+                           runStart: base, runEnd: base + night)
+        XCTAssertTrue(epochs.contains { $0.motion == .walking && $0.isSupportedNonStationary },
+                      "fixture must contain a supported walking epoch")
+        let s = ActivityContextJoin.context(for: base, end: base + night, epochs: epochs)
+        XCTAssertNil(s.recentActivity)
+        XCTAssertFalse(s.qualityReasons.contains("recent_activity"))
+        XCTAssertEqual(s.share(of: .walking), 30.0 / Double(night), accuracy: 1e-9)
     }
 
     func testTransitionAcrossAShortGapIsCounted() {
