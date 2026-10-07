@@ -53,10 +53,16 @@ public enum AnalyticsEngine {
         public let restingHR: BaselineState?
         public let resp: BaselineState?
         public let skinTemp: BaselineState?
+        /// The space `hrv` was folded in (`RecoveryScorer.HRVScale`). `.ms` (the default) is the historical
+        /// raw-millisecond fold the server worker still builds; the phone's causal Charge re-score
+        /// (`ChargeBaselines.asOf`) builds `.ln` (BaselineStandard rule 1).
+        public let hrvScale: RecoveryScorer.HRVScale
         public init(hrv: BaselineState? = nil, restingHR: BaselineState? = nil,
-                    resp: BaselineState? = nil, skinTemp: BaselineState? = nil) {
+                    resp: BaselineState? = nil, skinTemp: BaselineState? = nil,
+                    hrvScale: RecoveryScorer.HRVScale = .ms) {
             self.hrv = hrv; self.restingHR = restingHR; self.resp = resp
             self.skinTemp = skinTemp
+            self.hrvScale = hrvScale
         }
     }
 
@@ -962,7 +968,8 @@ public enum AnalyticsEngine {
                 rhrBaseline: baselines.restingHR,
                 respBaseline: baselines.resp,
                 sleepPerf: sleepPerf,
-                skinTempDev: skinTempDevC)  // symmetric penalty; drops + renormalizes when nil
+                skinTempDev: skinTempDevC,  // symmetric penalty; drops + renormalizes when nil
+                hrvScale: baselines.hrvScale)
             // Driver breakdown from the identical inputs; omits any missing term, never faked.
             chargeDrivers = RecoveryScorer.chargeDrivers(
                 hrv: hrvVal,
@@ -972,7 +979,8 @@ public enum AnalyticsEngine {
                 rhrBaseline: baselines.restingHR,
                 respBaseline: baselines.resp,
                 sleepPerf: sleepPerf,
-                skinTempDev: skinTempDevC)
+                skinTempDev: skinTempDevC,
+                hrvScale: baselines.hrvScale)
         }
         // A5: skin temp as a RELATIVE deviation marker (trend, not a clinical absolute). nil
         // when no deviation is available (no baseline yet / not worn) so the UI shows nothing.
