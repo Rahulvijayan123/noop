@@ -7,10 +7,17 @@ import UniformTypeIdentifiers
 /// Holds the streaming-scroll timestamp as a class so updating it never invalidates the view body.
 private final class CoachScrollThrottle { var last: TimeInterval = 0 }
 
+/// The Sana tab (`docs/COACH_MEMORY.md` §7.6): the chat column (header, welcome or messages, composer) and the
+/// chats sidebar. On iPhone the sidebar is a drawer over a scrim; on iPad it is an inline column, open by default.
+/// Both are the same view in the same place in one tree, so a size-class change never rebuilds the chat.
 struct CoachChatView: View {
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var coachEngine: AICoachEngine
     @EnvironmentObject private var profile: ProfileStore
+    /// Whether the iPhone drawer is open; `RootTabView` reads it to pause the tab swipe.
+    @EnvironmentObject private var chrome: CoachChromeState
+    @Environment(\.horizontalSizeClass) private var sizeClass
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var vm = CoachChatViewModel()
     @FocusState private var inputFocused: Bool
     /// True while the list should chase new content. Only the wearer dragging the list upward turns it off:
@@ -18,46 +25,211 @@ struct CoachChatView: View {
     /// "I scrolled away" from "the reply just got taller".
     @State private var following = true
     @State private var throttle = CoachScrollThrottle()
+    /// The iPad column. Local rather than in `chrome`, so an open column never pauses the tab swipe.
+    @State private var inlineOpen = true
+    @State private var showMemories = false
+    /// How far a leftward drag has pulled the open drawer.
+    @GestureState private var drawerDrag: CGFloat = 0
+
+    private static let inlineWidth: CGFloat = 300
+
+    private var compact: Bool { sizeClass != .regular }
+
+    /// The sidebar and New chat need a server with threads; an old one keeps the single-chat screen.
+    private var sidebarAvailable: Bool {
+        #if DEBUG
+        if Self.debugSidebar { return true }
+        #endif
+        return vm.features.threads
+    }
+
+    #if DEBUG
+    /// `--coach-sidebar` / `--coach-demo-threads` show the sidebar without a thread-aware server (screenshots).
+    private static let debugSidebar = CommandLine.arguments.contains("--coach-sidebar") || CoachSidebarDemo.requested
+    #endif
+
+    private var sidebarOpen: Bool { sidebarAvailable && (compact ? chrome.drawerOpen : inlineOpen) }
+
+    private var motion: Animation? { NoopMotion.gated(NoopMotion.screen, reduced: reduceMotion) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            if vm.messages.isEmpty { welcome } else { messageList }
-            if let error = vm.errorMessage { errorBanner(error) }
-            CoachComposer(vm: vm, isGenerating: vm.isGenerating, pendingImage: vm.pendingImage,
-                          wasScrubbed: vm.wasScrubbed, focused: $inputFocused)
+        GeometryReader { geo in
+            let drawerWidth = compact ? min(320, geo.size.width * 0.84) : Self.inlineWidth
+            let open = sidebarOpen
+            let drawer = compact && open
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 0) {
+                    Color.clear
+                        .frame(width: !compact && open ? Self.inlineWidth : 0)
+                        .animation(motion, value: open)
+                    chatColumn
+                        .accessibilityHidden(drawer)
+                }
+
+                Button { closeDrawer() } label: {
+                    Color.black.opacity(0.32).ignoresSafeArea()
+                }
+                .buttonStyle(.plain)
+                .opacity(drawer ? 1 : 0)
+                .allowsHitTesting(drawer)
+                .accessibilityLabel("Close chats")
+                .accessibilityHidden(!drawer)
+                .accessibilityIdentifier("coachSidebarScrim")
+                .animation(motion, value: drawer)
+
+                CoachSidebar(store: vm.threadStore, chrome: chrome, compact: compact,
+                             onShowMemories: { showMemories = true })
+                    .equatable()
+                    .frame(width: drawerWidth)
+                    .frame(maxHeight: .infinity)
+                    .background {
+                        NoopChromeSurface()
+                            .overlay(alignment: .trailing) {
+                                Rectangle().fill(StrandPalette.hairline).frame(width: 0.5)
+                            }
+                            .shadow(color: .black.opacity(drawer ? 0.22 : 0), radius: 22, x: 8, y: 0)
+                            .ignoresSafeArea()
+                    }
+                    .offset(x: open ? min(0, drawerDrag) : -(drawerWidth + 32))
+                    .allowsHitTesting(open)
+                    .accessibilityHidden(!open)
+                    .accessibilityAddTraits(drawer ? .isModal : [])
+                    .accessibilityAction(.escape) { closeDrawer() }
+                    .animation(motion, value: open)
+            }
+            // The leftward close drag. A mask instead of a conditional attachment keeps one view type in both
+            // states (the same reason `RootTabView` masks its tab swipe).
+            .simultaneousGesture(closeDrag(width: drawerWidth), including: drawer ? .all : .subviews)
         }
         .background(alignment: .top) { liquidScaffoldSky().ignoresSafeArea(edges: .top) }
         .task {
             vm.attach(repo: repo, engine: coachEngine, profile: profile)
+            #if DEBUG
+            await CoachSidebarDemo.seed(vm.threadStore)
+            #endif
             await vm.start()
         }
-        // A question handed over by the Today launcher; cleared before sending so a rebuild can't send it twice.
+        // A question handed over by the Today launcher, Siri or `--coach-prompt`. It goes into a new chat (after
+        // any reply in progress) and is cleared only once the chat has taken it.
         .task(id: coachEngine.pendingPrompt) {
-            guard let prompt = coachEngine.pendingPrompt, !prompt.isEmpty else { return }
-            coachEngine.pendingPrompt = nil
+            guard let prompt = coachEngine.pendingPrompt else { return }
+            guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                coachEngine.pendingPrompt = nil
+                return
+            }
             vm.attach(repo: repo, engine: coachEngine, profile: profile)
-            vm.send(prompt)
+            chrome.drawerOpen = false
+            if vm.queuePrompt(prompt) { coachEngine.pendingPrompt = nil }
         }
+        .onChange(of: sizeClass) { _, new in
+            // The drawer belongs to the compact layout; leaving it must not leave the tab swipe paused.
+            if new == .regular { chrome.drawerOpen = false }
+        }
+        .onChange(of: vm.threadId) { _, _ in following = true }
+        .onChange(of: inputFocused) { _, focused in if focused { vm.noteUserInteraction() } }
+        .onDisappear { chrome.drawerOpen = false }
+        .sheet(isPresented: $showMemories) { CoachMemorySheet(vm: vm) }
         #if DEBUG
-        .onAppear { if CommandLine.arguments.contains("--coach-focus") { inputFocused = true } }
+        .onAppear {
+            if CommandLine.arguments.contains("--coach-focus") { inputFocused = true }
+            if CommandLine.arguments.contains("--coach-memories") { showMemories = true }
+        }
         #endif
     }
+
+    private var chatColumn: some View {
+        VStack(spacing: 0) {
+            header
+            if vm.messages.isEmpty {
+                if vm.threadPhase == .loading { loadingPlaceholder } else { welcome }
+            } else {
+                messageList
+            }
+            if let error = vm.errorMessage { errorBanner(error) }
+            CoachComposer(vm: vm, isGenerating: vm.isGenerating, pendingImage: vm.pendingImage,
+                          wasScrubbed: vm.wasScrubbed, focused: $inputFocused)
+                // A new thread starts with an empty draft.
+                .id(vm.threadId)
+        }
+    }
+
+    private func closeDrag(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 16)
+            .updating($drawerDrag) { value, state, _ in
+                let dx = value.translation.width
+                guard abs(dx) > abs(value.translation.height) else { return }
+                state = max(-width, min(0, dx))
+            }
+            .onEnded { value in
+                let dx = value.translation.width, dy = value.translation.height
+                guard abs(dx) > abs(dy) * 1.2 else { return }
+                if dx < -60 || value.predictedEndTranslation.width < -width / 2 { closeDrawer() }
+            }
+    }
+
+    private func toggleSidebar() {
+        vm.noteUserInteraction()
+        if compact {
+            inputFocused = false
+            chrome.drawerOpen.toggle()
+        } else {
+            inlineOpen.toggle()
+        }
+    }
+
+    private func closeDrawer() { chrome.drawerOpen = false }
 
     // MARK: Header
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
+            if sidebarAvailable {
+                CoachHeaderButton(symbol: "sidebar.left",
+                                  label: sidebarOpen ? "Hide chats" : "Show chats",
+                                  identifier: "coachSidebarButton",
+                                  action: toggleSidebar)
+                    .padding(.trailing, -4)
+            }
             VStack(alignment: .leading, spacing: 3) {
-                Text("Sana").font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
-                Text("Your health assistant").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                Text("Sana")
+                    .font(StrandFont.rounded(28))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+                subtitle
             }
             Spacer(minLength: 0)
+            if sidebarAvailable {
+                CoachHeaderButton(symbol: "square.and.pencil", label: "New chat", identifier: "coachNewChatButton") {
+                    inputFocused = false
+                    vm.newChat()
+                }
+                .disabled(!vm.canSwitchThreads)
+            }
             BrandMark(size: 40, style: .tile)
         }
-        .padding(.horizontal, NoopMetrics.screenPadding)
+        // The round button's 44 pt hit area overhangs its 36 pt face; the face lines up with the screen margin.
+        .padding(.leading, sidebarAvailable ? NoopMetrics.screenPadding - 4 : NoopMetrics.screenPadding)
+        .padding(.trailing, NoopMetrics.screenPadding)
         .padding(.top, 14)
         .padding(.bottom, 8)
+    }
+
+    /// The open chat's title, or "Your health assistant" until it has one.
+    private var subtitle: some View {
+        Group {
+            if let title = vm.threadTitle, !title.isEmpty {
+                Text(verbatim: title)
+            } else {
+                Text("Your health assistant")
+            }
+        }
+        .font(StrandFont.caption)
+        .foregroundStyle(StrandPalette.textTertiary)
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .contentTransition(.opacity)
+        .animation(NoopMotion.gated(NoopMotion.value, reduced: reduceMotion), value: vm.threadTitle)
+        .accessibilityIdentifier("coachThreadTitle")
     }
 
     // MARK: Empty state
@@ -78,7 +250,13 @@ struct CoachChatView: View {
 
                     if case .offline(let reason) = vm.connection { offlineCard(reason) }
 
-                    CoachSuggestionStack(prompts: suggestions) { vm.send($0) }
+                    let starters = suggestions
+                    CoachSuggestionStack(prompts: starters.map(\.text), icons: starters.map(\.symbol)) { text in
+                        guard let pick = starters.first(where: { $0.text == text }) else { return }
+                        inputFocused = false
+                        vm.selectSuggestion(pick)
+                    }
+                    .animation(NoopMotion.gated(NoopMotion.card, reduced: reduceMotion), value: starters)
                 }
                 .padding(.horizontal, NoopMetrics.screenPadding)
                 .padding(.top, 12)
@@ -87,11 +265,27 @@ struct CoachChatView: View {
             }
             .scrollBounceBehavior(.basedOnSize)
             .scrollDismissesKeyboard(.immediately)
+            // Scrolling counts as touching the screen: a late server set no longer swaps in under the reader.
+            .simultaneousGesture(DragGesture(minimumDistance: 8).onChanged { _ in vm.noteUserInteraction() })
         }
     }
 
-    private var suggestions: [String] {
-        Array(CoachPrompts.suggestions.prefix(4))
+    /// The view model's starters; the generic prompts only for the frame before it has attached.
+    private var suggestions: [CoachStarterSuggestion] {
+        if !vm.starterSuggestions.isEmpty { return vm.starterSuggestions }
+        return CoachPrompts.suggestions.prefix(4).map { CoachStarterSuggestion(text: $0, kind: .explore) }
+    }
+
+    private var loadingPlaceholder: some View {
+        VStack(spacing: 12) {
+            ProgressView().tint(StrandPalette.accent)
+            Text("Loading chat…")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("coachThreadLoading")
     }
 
     private func offlineCard(_ reason: String) -> some View {
@@ -123,16 +317,19 @@ struct CoachChatView: View {
     // MARK: Messages
 
     private var messageList: some View {
-        ScrollViewReader { proxy in
+        // The pills under the newest answer; their arrival (or the keyword fallback's) scrolls them into view.
+        let lastFollowUps = vm.messages.last.map { vm.followUps(for: $0) } ?? []
+        return ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
                 LazyVStack(spacing: 14) {
+                    if vm.hasEarlier { loadEarlierRow(proxy) }
                     ForEach(vm.messages) { message in
+                        let isLast = message.id == vm.messages.last?.id
                         CoachBubble(message: message,
                                     phase: message.isStreaming ? vm.phase : .idle,
                                     phaseLabel: message.isStreaming ? vm.phase.label : "",
                                     onRetry: message.didStall ? { vm.retryStalled() } : nil,
-                                    followUps: message.id == vm.messages.last?.id && !vm.isGenerating
-                                        ? CoachFollowUps.forAnswer(message.content) : [],
+                                    followUps: isLast && !vm.isGenerating ? lastFollowUps : [],
                                     onFollowUp: { vm.send($0) })
                             .id(message.id)
                     }
@@ -159,9 +356,14 @@ struct CoachChatView: View {
                 guard following else { return }
                 withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
-            .onChange(of: vm.messages.count) { _, _ in
+            // Keyed on the newest message, not the count: "Load earlier" adds rows above and must not jump.
+            .onChange(of: vm.messages.last?.id) { _, _ in
                 following = true
                 withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+            }
+            .onChange(of: lastFollowUps) { _, pills in
+                guard following, !pills.isEmpty else { return }
+                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: vm.isGenerating) { _, generating in
                 guard !generating else { return }
@@ -181,6 +383,42 @@ struct CoachChatView: View {
             }
             .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
         }
+        // Each thread gets its own scroll position and lazy layout.
+        .id(vm.threadId)
+    }
+
+    /// Pages in the previous messages and puts the one that was on top back on top, so the reader stays put.
+    private func loadEarlierRow(_ proxy: ScrollViewProxy) -> some View {
+        Button {
+            guard !vm.isLoadingEarlier else { return }
+            let anchor = vm.messages.first?.id
+            following = false
+            Task {
+                await vm.loadEarlier()
+                guard let anchor else { return }
+                proxy.scrollTo(anchor, anchor: .top)
+                DispatchQueue.main.async { proxy.scrollTo(anchor, anchor: .top) }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                if vm.isLoadingEarlier {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.up").font(.system(size: 11, weight: .semibold))
+                }
+                Text("Load earlier")
+            }
+            .font(StrandFont.caption)
+            .foregroundStyle(StrandPalette.accent)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(StrandPalette.accent.opacity(0.12), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(vm.isLoadingEarlier)
+        .frame(maxWidth: .infinity)
+        .id("earlier")
+        .accessibilityIdentifier("coachLoadEarlier")
     }
 
     private func errorBanner(_ message: String) -> some View {
@@ -255,6 +493,8 @@ private struct CoachComposer: View {
         }
         .padding(.horizontal, 10)
         .padding(.bottom, 4)
+        // Typing counts as touching the screen: a late server set of starters no longer swaps in.
+        .onChange(of: text) { _, new in if !new.isEmpty { vm.noteUserInteraction() } }
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             Task {

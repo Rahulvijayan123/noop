@@ -36,6 +36,9 @@ struct StrandiOSApp: App {
     /// swiping the workout sheet away must not stop the clock, silence the strap or drop the
     /// double-tap handler. See `LiftSessionController`.
     @StateObject private var liftSession: LiftSessionController
+    /// Whether the Sana chats drawer is open. Shared by the tab shell, which pauses its tab swipe while the
+    /// drawer is up, and the chat; nothing else observes it, so opening the drawer redraws only those two.
+    @StateObject private var coachChrome: CoachChromeState
     @Environment(\.scenePhase) private var scenePhase
     /// Appearance preference (System/Light/Dark). Default follows the OS; the Settings picker writes it.
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
@@ -91,6 +94,12 @@ struct StrandiOSApp: App {
         NotificationPresenter.shared.onCoachBriefTapped = { [weak router] in router?.openCoach() }
         let model = AppModel()
         _model = StateObject(wrappedValue: model)
+        #if DEBUG
+        // `--coach-sidebar`: the Sana chats drawer starts open, for screenshots.
+        _coachChrome = StateObject(wrappedValue: CoachChromeState(drawerOpen: CommandLine.arguments.contains("--coach-sidebar")))
+        #else
+        _coachChrome = StateObject(wrappedValue: CoachChromeState())
+        #endif
         #if DEBUG
         // `--probe-spo2`: run the read-only SpO2 strap probes and save the report to Documents/spo2-probe.txt.
         Spo2ProbeHarness.startIfRequested(model: model)
@@ -245,6 +254,7 @@ struct StrandiOSApp: App {
                 .environmentObject(router)
                 .environmentObject(UpdateStore.shared)
                 .environmentObject(liftSession)
+                .environmentObject(coachChrome)
                 // v5 L3: the shared stress check-in nudge surface, so the Breathe screen's passive
                 // card observes the SAME instance the central detector (AppModel.evaluateStress) posts to.
                 .environment(\.stressNudgeCenter, model.stressNudgeCenter)

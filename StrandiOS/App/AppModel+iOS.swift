@@ -20,7 +20,7 @@ enum StrapSyncShortcutOutcome {
 extension AppModel {
     /// Execute any actions queued by App Intents while the app was suspended (mark moment, buzz,
     /// ask coach). Call when the app becomes active. The optional `router` lets the ask-coach
-    /// intent navigate to the Coach tab after sending the question.
+    /// intent navigate to the Sana tab with the question.
     func drainPendingIntents(router: NavRouter? = nil) {
         for item in PendingIntents.drain() {
             switch item.action {
@@ -29,16 +29,17 @@ extension AppModel {
             // The one-shot routine sends the confirmed pattern + RUN_ALARM sequence, acked, so a
             // busy just-foregrounded BLE link can't silently drop it.
             case .buzz:       buzzStrapOnce()
-            // K9: "Ask Coach" via Siri — send the queued question to the Coach engine and navigate
-            // to the Coach tab so the user sees the response. The question is consumed from a
-            // dedicated key (one at a time).
+            // K9: "Ask Coach" via Siri. The question goes to Sana as a new chat, through the same hand-off
+            // the Today launcher uses (`AICoachEngine.pendingPrompt`, which `CoachChatView` takes), and the
+            // Sana tab opens. The question is consumed from its dedicated key whatever happens next, so one
+            // that arrived while Coach was switched off, or was queued more than ten minutes ago, is
+            // dropped rather than asked out of the blue later.
             case .askCoach:
-                if let question = PendingIntents.consumeCoachQuestion() {
-                    router?.openCoach()
-                    Task { @MainActor in
-                        await coach.send(question)
-                    }
-                }
+                guard let question = PendingIntents.consumeCoachQuestion(),
+                      CoachBriefScheduler.coachMasterEnabled,
+                      PendingIntents.isFreshCoachQuestion(queuedAt: item.date) else { break }
+                coach.pendingPrompt = question
+                router?.openCoach()
             }
         }
     }

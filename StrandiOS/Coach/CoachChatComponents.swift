@@ -149,7 +149,7 @@ struct CoachBubble: View {
     private var followUpList: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Follow-ups").strandOverline()
-            ForEach(followUps, id: \.self) { prompt in
+            ForEach(Array(followUps.enumerated()), id: \.element) { index, prompt in
                 Button { onFollowUp(prompt) } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.turn.down.right")
@@ -168,6 +168,7 @@ struct CoachBubble: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Follow-up question: \(prompt)")
+                .accessibilityIdentifier("coachFollowUp.\(index)")
             }
         }
         .frame(maxWidth: maxBubbleWidth, alignment: .leading)
@@ -269,16 +270,25 @@ struct CoachElapsedLabel: View {
 
 struct CoachSuggestionStack: View {
     let prompts: [String]
+    /// One SF Symbol per prompt (a starter's kind); without it, or past its end, the fixed rotation is used.
+    var icons: [String]? = nil
+    /// Each row is identified `<identifierPrefix>.<index>` for UI tests.
+    var identifierPrefix = "coachSuggestion"
     let onSend: (String) -> Void
 
     private static let icons = ["moon", "waveform.path.ecg", "heart", "chart.bar"]
+
+    private func icon(at index: Int) -> String {
+        if let icons, index < icons.count { return icons[index] }
+        return Self.icons[index % Self.icons.count]
+    }
 
     var body: some View {
         VStack(spacing: 10) {
             ForEach(Array(prompts.enumerated()), id: \.offset) { index, prompt in
                 Button { onSend(prompt) } label: {
                     HStack(spacing: 12) {
-                        Image(systemName: Self.icons[index % Self.icons.count])
+                        Image(systemName: icon(at: index))
                             .font(.system(size: 16))
                             .foregroundStyle(StrandPalette.accent)
                             .frame(width: 24)
@@ -299,7 +309,170 @@ struct CoachSuggestionStack: View {
                 }
                 .buttonStyle(LiquidPressStyle())
                 .accessibilityLabel("Suggested prompt: \(prompt)")
+                .accessibilityIdentifier("\(identifierPrefix).\(index)")
             }
         }
+    }
+}
+
+// MARK: - Header controls
+
+/// A round header control in the chrome the Today header buttons use: system Liquid Glass on iOS 26, a thin
+/// material circle before it. The face is 36 pt and the hit area 44 pt.
+struct CoachHeaderButton: View {
+    let symbol: String
+    let label: LocalizedStringKey
+    let identifier: String
+    let action: () -> Void
+
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .frame(width: 36, height: 36)
+                .coachHeaderGlass()
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(LiquidPressStyle())
+        .opacity(isEnabled ? 1 : StrandPalette.disabledOpacity)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func coachHeaderGlass() -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular.interactive(), in: Circle())
+        } else {
+            self
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 0.8))
+        }
+    }
+}
+
+// MARK: - Memory
+
+/// "What Sana remembers": the saved facts (up to 200, newest ranking first), each with Forget, and Forget all.
+/// Forgetting touches memory only; the chats themselves stay in the history.
+struct CoachMemorySheet: View {
+    @ObservedObject var vm: CoachChatViewModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmForgetAll = false
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if vm.memories.isEmpty {
+                    if vm.isLoadingMemories {
+                        ProgressView()
+                            .tint(StrandPalette.accent)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    } else {
+                        empty
+                    }
+                } else {
+                    list
+                }
+            }
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle("What Sana remembers")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                        .foregroundStyle(StrandPalette.accent)
+                }
+            }
+            .confirmationDialog("Forget everything Sana remembers about you?", isPresented: $confirmForgetAll,
+                                titleVisibility: .visible) {
+                Button("Forget all", role: .destructive) { Task { await vm.forgetAllMemories() } }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Sana stops using these facts in its answers. Your chats stay in your history.")
+            }
+            .task { await vm.refreshMemories() }
+        }
+    }
+
+    private var empty: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "brain").font(.system(size: 30)).foregroundStyle(StrandPalette.textTertiary)
+            Text("Nothing remembered yet").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+            Text("Tell Sana about your goals, injuries or routines and it will remember them in your next chats.")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .multilineTextAlignment(.center)
+        }
+        .padding(32)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var list: some View {
+        List {
+            Section {
+                ForEach(vm.memories) { memory in
+                    row(memory)
+                        .listRowBackground(StrandPalette.surfaceRaised)
+                        .swipeActions {
+                            Button(role: .destructive) { Task { await vm.forget(memory) } } label: {
+                                Label("Forget", systemImage: "trash")
+                            }
+                        }
+                        .contextMenu {
+                            Button(role: .destructive) { Task { await vm.forget(memory) } } label: {
+                                Label("Forget", systemImage: "trash")
+                            }
+                        }
+                        .accessibilityAction(named: "Forget") { Task { await vm.forget(memory) } }
+                }
+            } header: {
+                Text("Sana keeps these facts between chats and uses the ones that matter for each question. Forgetting one takes it out of Sana's memory; your chats stay in your history.")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .textCase(nil)
+                    .padding(.bottom, 4)
+            } footer: {
+                if vm.memories.count >= CoachChatViewModel.memoryListLimit {
+                    Text("Showing the first \(vm.memories.count) memories.")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+
+            Section {
+                Button(role: .destructive) { confirmForgetAll = true } label: {
+                    Label("Forget all", systemImage: "trash")
+                        .font(StrandFont.body)
+                }
+                .listRowBackground(StrandPalette.surfaceRaised)
+                .accessibilityIdentifier("coachForgetAllMemories")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .refreshable { await vm.refreshMemories() }
+    }
+
+    private func row(_ memory: CoachMemory) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(memory.content).font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+            HStack(spacing: 6) {
+                Text(memory.topic.capitalized)
+                if memory.pinned == true {
+                    Label("Always considered", systemImage: "pin.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+            .font(StrandFont.caption)
+            .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .padding(.vertical, 2)
+        .accessibilityElement(children: .combine)
     }
 }

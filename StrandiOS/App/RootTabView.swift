@@ -35,6 +35,9 @@ struct RootTabView: View {
     @EnvironmentObject private var router: NavRouter
     /// The scene-local receiver for actions chosen from NOOP's Home Screen icon menu.
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
+    /// The Sana chats drawer. While it is open on the Sana tab, a horizontal drag belongs to the drawer
+    /// (it closes on a leftward drag), so the tab swipe stands down.
+    @EnvironmentObject private var coachChrome: CoachChromeState
 
     /// Which quick-action screen the centre FAB is presenting (nil = sheet closed).
     @State private var quickAction: QuickAction?
@@ -163,8 +166,12 @@ struct RootTabView: View {
             // hierarchy's gestures, disable the added one" — exactly this requirement. `.none` disables
             // the subview hierarchy TOO, which on a pushed screen would take out scrolling, taps and the
             // interactive-pop itself: far worse than the bug being fixed.
+            //
+            // The Sana chats drawer stands it down the same way, by value: while the drawer is open on the
+            // Sana tab, a horizontal drag is the drawer's own close gesture.
             .simultaneousGesture(tabSwipeGesture,
-                                 including: tabPaths[selectedTab].isEmpty ? .all : .subviews)
+                                 including: (tabPaths[selectedTab].isEmpty && !(selectedTab == 4 && coachChrome.drawerOpen))
+                                     ? .all : .subviews)
         .task {
             await repo.refresh()
             // Backup & Sync: on-launch catch-up (see RootView). Detached + utility priority so a

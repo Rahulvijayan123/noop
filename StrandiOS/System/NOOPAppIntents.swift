@@ -42,6 +42,18 @@ enum PendingIntents {
         return q
     }
 
+    /// How long a Siri question stays worth asking. Opening the app later than this should not put an old
+    /// question into a new chat.
+    static let coachQuestionMaxAge: TimeInterval = 600
+
+    /// True for a question queued within `coachQuestionMaxAge` of `now`. A question with no stamp (a corrupt
+    /// entry; every queued question carries one) is not asked.
+    static func isFreshCoachQuestion(queuedAt date: Date?, now: Date = Date()) -> Bool {
+        guard let date else { return false }
+        let age = now.timeIntervalSince(date)
+        return age >= -60 && age <= coachQuestionMaxAge
+    }
+
     static func drain() -> [(action: Action, date: Date?)] {
         guard let d = defaults else { return [] }
         let raw = d.stringArray(forKey: key) ?? []
@@ -107,9 +119,9 @@ struct SyncStrapIntent: LiveActivityIntent {
     }
 }
 
-/// K9: Ask the Coach a question via Siri. Queues the question and opens the app, which sends it
-/// to the configured provider and surfaces the response. The question is spoken or typed in Siri;
-/// the app handles the actual network call using the user's saved key.
+/// K9: Ask the Coach a question via Siri. Queues the question and opens the app, which asks it in a new
+/// Sana chat on the Sana tab (`AppModel.drainPendingIntents`). The question is spoken or typed in Siri.
+/// Nothing is queued while Coach is switched off.
 struct AskCoachIntent: AppIntent {
     static var title: LocalizedStringResource = "Ask Coach"
     static var description = IntentDescription("Ask your NOOP Coach a question about your recovery, sleep, or training.")
@@ -119,9 +131,13 @@ struct AskCoachIntent: AppIntent {
     @Parameter(title: "Question")
     var question: String
 
+    @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
+        guard CoachBriefScheduler.coachMasterEnabled else {
+            return .result(dialog: "Sana is switched off. Turn it on in Settings to ask questions.")
+        }
         PendingIntents.appendAskCoach(question: question, at: Date())
-        return .result(dialog: "Opening Coach with your question: \(question)")
+        return .result(dialog: "Opening Sana with your question: \(question)")
     }
 }
 

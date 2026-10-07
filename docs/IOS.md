@@ -91,10 +91,51 @@ that belongs to the first account is left alone and is not mixed into the new ac
 
 ## Coach
 
-The **Sana** tab (`StrandiOS/Coach/`) is the health assistant chat. Each launch starts a fresh conversation, the thinking indicator is a port of `thinking-orbs` (see [ATTRIBUTION.md](../ATTRIBUTION.md)), and `Strand/Coach/` holds the prompt, safety checks
-and data tools it shares with the macOS app. It needs cloud sync to be on, because the model key lives
-in the backend's `coach` function. Debug builds can open it directly with
-`--demo-screen coach`; `--coach-prompt "<question>"` asks that question on launch and `--coach-focus` opens the keyboard.
+The **Sana** tab (`StrandiOS/Coach/`) is the health assistant chat. `Strand/Coach/` holds the prompt, safety
+checks and data tools it shares with the macOS app, and the chat view model, which lives there so the macOS tests
+can run it. The thinking indicator is a port of `thinking-orbs` (see [ATTRIBUTION.md](../ATTRIBUTION.md)). It needs cloud sync to be on,
+because the model key lives in the backend's `coach` function. [COACH_MEMORY.md](COACH_MEMORY.md) describes the
+threads, memory and context system behind it.
+
+Chats are kept. Against a server that reports `features.threads`, every conversation is saved to the account as a
+thread, and the app reopens the newest one when it was active earlier the same day; otherwise launch starts a new
+chat. The sidebar button in the header opens the chat list: a drawer over the chat on iPhone, an inline column
+(open by default) on iPad. It has search, New chat, folders, chats grouped by date, a context menu on each chat
+(Rename, Move to folder, Pin, Delete) and **What Sana remembers**, where saved memories can be forgotten one at a
+time or all at once. The header's pencil button starts a new chat, which gets a short title after its first
+answer. The suggestions on an empty chat and the follow-ups under each answer are written for this person and this
+conversation, with the phone's own suggestions as the fallback. A question from the Today launcher, Siri's "Ask
+Coach" or `--coach-prompt` always goes into a new chat; Siri's is dropped when Coach is switched off or when it
+was asked more than ten minutes before the app opened. An older server without `features.threads` keeps the
+single-chat screen: no sidebar, no New chat, no titles, and a fresh conversation on every launch.
+
+Debug builds open the chat directly with `--demo-screen coach`. Other launch arguments:
+
+- `--coach-prompt "<question>"` asks that question on launch, in a new chat.
+- `--coach-focus` opens the keyboard.
+- `--coach-sidebar` starts with the chat drawer open, and shows the sidebar even without a thread-aware server.
+- `--coach-demo-threads` fills the sidebar with a few made-up chats and a folder. It does nothing when an account is
+  configured, so it never writes into a real account's caches.
+- `--coach-memories` opens What Sana remembers on launch.
+
+For example, to capture the drawer on a simulator with no backend:
+
+```bash
+xcrun simctl launch <udid> com.noopapp.noop --demo-seed --demo-screen coach --coach-sidebar --coach-demo-threads
+```
+
+Debug builds can also point the chat at a local `coach` function instead of the account's. Set
+`NARA_COACH_URL` (a `localhost`, `127.0.0.1`, `::1` or `.local` address), `NARA_COACH_TOKEN` (a `noop_` token the
+local function accepts) and optionally `NARA_COACH_OWNER` (a UUID; a fixed test owner otherwise). `simctl launch`
+passes them through with the `SIMCTL_CHILD_` prefix:
+
+```bash
+SIMCTL_CHILD_NARA_COACH_URL=http://127.0.0.1:54321/functions/v1/coach \
+SIMCTL_CHILD_NARA_COACH_TOKEN=noop_local_test \
+  xcrun simctl launch <udid> com.noopapp.noop --demo-seed --demo-screen coach
+```
+
+Release builds ignore all of these.
 
 ## Activity context and stand reminders
 
