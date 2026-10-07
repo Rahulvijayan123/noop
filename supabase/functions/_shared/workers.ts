@@ -49,7 +49,10 @@ export const DELETION_TABLES = [
   'sleep_details', 'events', 'sessions', 'daily_metrics', 'metric_runs', 'object_manifests',
   'activity_context_jobs', 'activity_context_epochs', 'activity_encoder_windows',
   'sensor_objects', 'derived_objects', 'live_windows', 'sleep_nights', 'coach_messages',
-  'coach_sessions', 'coach_memories', 'coach_memory_items', 'coach_usage', 'user_documents', 'algorithm_results', 'user_settings',
+  // Coach threads after their messages, folders after their threads (docs/COACH_MEMORY.md §2).
+  'coach_thread_tombstones', 'coach_threads', 'coach_folders',
+  'coach_sessions', 'coach_memories', 'coach_memory_events', 'coach_memory_items', 'coach_user_state', 'coach_usage',
+  'user_documents', 'algorithm_results', 'user_settings',
   'integration_connections', 'user_sync_state', 'devices', 'profiles',
 ] as const;
 
