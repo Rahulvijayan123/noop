@@ -158,6 +158,19 @@ public enum HRVAnalyzer {
     public struct CleanSeries: Equatable, Sendable {
         public let nn: [Double]
         public let contiguous: [Bool]
+        /// Each survivor's index in the ORIGINAL series (additive, sleep-analytics Phase 1
+        /// / review P1-1): a consumer that must pair cleaned values with their original
+        /// observations (the PRV diagnostics) reads the cleaner's OWN answer instead of
+        /// re-deriving it — a re-derivation can drift (a local-median mirror differs from
+        /// `median`'s two-middle mean on even neighbour counts and flips borderline
+        /// keep/drop). Purely additive: `nn`/`contiguous` are unchanged for every caller.
+        public let keptOriginalIndices: [Int]
+
+        public init(nn: [Double], contiguous: [Bool], keptOriginalIndices: [Int] = []) {
+            self.nn = nn
+            self.contiguous = contiguous
+            self.keptOriginalIndices = keptOriginalIndices
+        }
     }
 
     /// Clean the RR series (range filter then Malik ectopic rejection, exactly like `cleanRR`) while
@@ -199,7 +212,7 @@ public enum HRVAnalyzer {
         // A survivor is contiguous with its predecessor only when their ORIGINAL indices are adjacent.
         var contiguous: [Bool] = []; contiguous.reserveCapacity(keptVal.count)
         for i in 0..<keptVal.count { contiguous.append(i > 0 && keptOrig[i] == keptOrig[i - 1] + 1) }
-        return CleanSeries(nn: keptVal, contiguous: contiguous)
+        return CleanSeries(nn: keptVal, contiguous: contiguous, keptOriginalIndices: keptOrig)
     }
 
     /// The sum of squared successive differences and the count of pairs behind a gap-aware RMSSD — the

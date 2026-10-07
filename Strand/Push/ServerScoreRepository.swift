@@ -705,6 +705,19 @@ public struct HostedDayResult: Equatable {
     /// verbatim in `rawJSON`, so `writeCache` persists it automatically — no new cache field and a
     /// cached read re-parses through `snapshot()` offline.
     public let sleepFeatures: SleepFeatureDocument?
+    /// The optional Phase-1 sleep analytics document (`daily.sleep_analytics_v1`,
+    /// docs/sleep-analytics/spec.md §8 app steps 1–5).
+    /// Nil when the payload has no key, when it is malformed, when the schema version is not the
+    /// supported v1, or when this app build has not learned a newer schema yet — never fatal. The
+    /// Sleep page renders the Sleep analytics section only when this is non-nil AND the document's
+    /// fragment fingerprint still matches the night on screen (the staleness guard), so builds
+    /// without the payload render exactly as before.
+    ///
+    /// Cache: like `activityContext`/`sleepFeatures`, this rides inside the `daily` object that
+    /// `snapshot()` keeps verbatim in `rawJSON`, so `writeCache` persists it automatically — no new
+    /// cache field and a cached read re-parses through `snapshot()` offline (owner isolation
+    /// unchanged: the per-owner cache key is untouched).
+    public let sleepAnalytics: SleepAnalyticsDocument?
 
     init?(day: String, object: [String: Any]) {
         guard let daily = object["daily"] as? [String: Any],
@@ -747,6 +760,7 @@ public struct HostedDayResult: Equatable {
         }.sorted { $0.startTs < $1.startTs }
         self.activityContext = Self.activityContext(from: daily)
         self.sleepFeatures = Self.sleepFeatures(from: daily)
+        self.sleepAnalytics = Self.sleepAnalytics(from: daily)
         self.sleep = ((object["sleep"] as? [Any]) ?? []).compactMap { entry -> CachedSleepSession? in
             guard let night = entry as? [String: Any],
                   night["is_nap"] as? Bool != true,
@@ -808,6 +822,23 @@ public struct HostedDayResult: Equatable {
         guard JSONSerialization.isValidJSONObject(raw) else { return nil }
         guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
         return try? JSONDecoder().decode(SleepFeatureDocument.self, from: data)
+    }
+
+    /// Decode the optional Phase-1 sleep analytics document (`daily.sleep_analytics_v1`) into the
+    /// SHARED StrandAnalytics schema — the same type the worker serializes with
+    /// (docs/sleep-analytics/spec.md §8 app step 1).
+    ///
+    /// Deliberately non-fatal on every failure mode: a missing key, a non-object value, a malformed
+    /// field or a future schema bump all return nil and leave the rest of the hosted result intact.
+    /// An absent/unsupported version preserves old-result behavior (the day decodes with
+    /// `sleepAnalytics == nil` exactly like a payload that never had the key).
+    static func sleepAnalytics(from daily: [String: Any]) -> SleepAnalyticsDocument? {
+        guard let raw = daily["sleep_analytics_v1"] else { return nil }
+        guard JSONSerialization.isValidJSONObject(raw) else { return nil }
+        guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
+        guard let document = try? JSONDecoder().decode(SleepAnalyticsDocument.self, from: data),
+              document.schemaVersion == SleepAnalyticsV1.schemaVersion else { return nil }
+        return document
     }
 }
 
