@@ -466,6 +466,20 @@ public struct SleepAnalyticsQuality: Codable, Equatable, Sendable {
     /// supported-duration where the group reads a raw stream); keys are closed-vocabulary.
     public let streamCounts: [String: Int]
 
+    private enum CodingKeys: String, CodingKey {
+        case status
+        case fragmentSpanSeconds = "fragment_span_seconds"
+        case groupSpanSeconds = "group_span_seconds"
+        case observedLabeledSeconds = "observed_labeled_seconds"
+        case unknownSeconds = "unknown_seconds"
+        case inferredGapAwakeSeconds = "inferred_gap_awake_seconds"
+        case inputSupportedSeconds = "input_supported_seconds"
+        case inputSupportedFraction = "input_supported_fraction"
+        case labelSupportedFraction = "label_supported_fraction"
+        case sourceResolutionSeconds = "source_resolution_seconds"
+        case streamCounts = "stream_counts"
+    }
+
     public init(status: SleepAnalyticsStatus, fragmentSpanSeconds: Double,
                 groupSpanSeconds: Double, observedLabeledSeconds: Double,
                 unknownSeconds: Double, inferredGapAwakeSeconds: Double,
@@ -492,6 +506,26 @@ public struct SleepAnalyticsContinuityGroup: Codable, Equatable, Sendable {
     public let quality: SleepAnalyticsQuality
     /// Union duration of supported light+deep+REM intervals (s); unknown excluded.
     public let observedAsleepSeconds: SleepAnalyticsMetric
+
+    private enum CodingKeys: String, CodingKey {
+        case quality
+        case observedAsleepSeconds = "observed_asleep_seconds"
+        case observedWasoSeconds = "observed_waso_seconds"
+        case inferredGapAwakeSecondsWithinSleepPeriod =
+            "inferred_gap_awake_seconds_within_sleep_period"
+        case estimatedWasoIncludingInferredGapsSeconds =
+            "estimated_waso_including_inferred_gaps_seconds"
+        case onsetDelayFromWindowSeconds = "onset_delay_from_window_seconds"
+        case sleepOnsetLatencyFromMarkerSeconds = "sleep_onset_latency_from_marker_seconds"
+        case remLatencyFromSleepOnsetSeconds = "rem_latency_from_sleep_onset_seconds"
+        case deepLatencyFromSleepOnsetSeconds = "deep_latency_from_sleep_onset_seconds"
+        case longestObservedSleepBoutSeconds = "longest_observed_sleep_bout_seconds"
+        case longestBoutCensored = "longest_bout_censored"
+        case awakeningBoutCount = "awakening_bout_count"
+        case censoredWakeStretchCount = "censored_wake_stretch_count"
+        case sleepToWakeTransitionCount = "sleep_to_wake_transition_count"
+        case sleepToWakeTransitionsPerAsleepHour = "sleep_to_wake_transitions_per_asleep_hour"
+    }
     /// Supported wake duration strictly between first and last observed asleep (s);
     /// excludes initial/terminal wake, unknown and inter-fragment gaps.
     public let observedWasoSeconds: SleepAnalyticsMetric
@@ -550,6 +584,16 @@ public struct SleepAnalyticsStageBouts: Codable, Equatable, Sendable {
     public let medianCompleteBoutSeconds: SleepAnalyticsMetric
     /// Nearest-rank p90 of complete-bout durations (s): sorted value at ceil(0.9·n)−1.
     public let p90CompleteBoutSeconds: SleepAnalyticsMetric
+
+    private enum CodingKeys: String, CodingKey {
+        case label
+        case boutCount = "bout_count"
+        case completeBoutCount = "complete_bout_count"
+        case censoredBoutCount = "censored_bout_count"
+        case longestObservedSeconds = "longest_observed_seconds"
+        case medianCompleteBoutSeconds = "median_complete_bout_seconds"
+        case p90CompleteBoutSeconds = "p90_complete_bout_seconds"
+    }
 }
 
 /// The 4×4 native epoch transition matrix. Rows are origin, columns destination, order
@@ -573,6 +617,16 @@ public struct SleepAnalyticsTransitionMatrix: Codable, Equatable, Sendable {
     /// For coarse/timed imports: the actual observed bout changes at the source's real
     /// resolution (count). Present separately; never claimed as a native epoch matrix.
     public let observedBoutChangeCount: SleepAnalyticsCount?
+
+    private enum CodingKeys: String, CodingKey {
+        case counts
+        case rowExposure = "row_exposure"
+        case rowProbabilities = "row_probabilities"
+        case epochSeconds = "epoch_seconds"
+        case eligiblePairCount = "eligible_pair_count"
+        case stageChangeCount = "stage_change_count"
+        case observedBoutChangeCount = "observed_bout_change_count"
+    }
 }
 
 public struct SleepAnalyticsStageDynamicsGroup: Codable, Equatable, Sendable {
@@ -583,12 +637,20 @@ public struct SleepAnalyticsStageDynamicsGroup: Codable, Equatable, Sendable {
     public let stageBouts: [SleepAnalyticsStageBouts]
     /// The 4×4 native epoch transition matrix (+exposure/probabilities/eligible pairs).
     public let epochTransitions: SleepAnalyticsTransitionMatrix?
+
+    private enum CodingKeys: String, CodingKey {
+        case quality
+        case stageSeconds = "stage_seconds"
+        case stageBouts = "stage_bouts"
+        case epochTransitions = "epoch_transitions"
+    }
 }
 
 /// Union duration for one label (s).
 public struct SleepAnalyticsStageSeconds: Codable, Equatable, Sendable {
     public let label: SleepAnalyticsLabel
     public let seconds: SleepAnalyticsMetric
+    private enum CodingKeys: String, CodingKey { case label; case seconds }
 }
 
 // MARK: - Movement group (spec section 6)
@@ -618,6 +680,23 @@ public struct SleepAnalyticsMovementGroup: Codable, Equatable, Sendable {
     public let sourceResolution: String
     /// Algorithm/config fingerprint of the movement computation.
     public let algorithmVersion: String
+
+    private enum CodingKeys: String, CodingKey {
+        case quality
+        case movementSeconds = "movement_seconds"
+        case eligibleSeconds = "eligible_seconds"
+        case movementPercentage = "movement_percentage"
+        case movementBoutCount = "movement_bout_count"
+        case movementBoutsPerEligibleHour = "movement_bouts_per_eligible_hour"
+        case immobilityBoutCompleteCount = "immobility_bout_complete_count"
+        case immobilityBoutCensoredCount = "immobility_bout_censored_count"
+        case longestObservedImmobilitySeconds = "longest_observed_immobility_seconds"
+        case medianCompleteImmobilityBoutSeconds = "median_complete_immobility_bout_seconds"
+        case p90CompleteImmobilityBoutSeconds = "p90_complete_immobility_bout_seconds"
+        case thresholdG = "threshold_g"
+        case sourceResolution = "source_resolution"
+        case algorithmVersion = "algorithm_version"
+    }
 }
 
 // MARK: - Thermal group (spec section 6)
@@ -637,6 +716,16 @@ public struct SleepAnalyticsSlope: Codable, Equatable, Sendable {
     public let coverage: Double?
     /// Longest missing run inside the window (s); gates require ≤ 5 min.
     public let longestMissingRunSeconds: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case value
+        case windowStart = "window_start"
+        case windowEnd = "window_end"
+        case validMinutes = "valid_minutes"
+        case eligibleMinutes = "eligible_minutes"
+        case coverage
+        case longestMissingRunSeconds = "longest_missing_run_seconds"
+    }
 }
 
 public struct SleepAnalyticsThermalGroup: Codable, Equatable, Sendable {
@@ -662,6 +751,18 @@ public struct SleepAnalyticsThermalGroup: Codable, Equatable, Sendable {
     public let rewearEventVerified: Bool
     /// The device family + anchor identity the conversion used (fingerprint string).
     public let conversionIdentity: String
+
+    private enum CodingKeys: String, CodingKey {
+        case quality
+        case nightMedianC = "night_median_c"
+        case nightIqrC = "night_iqr_c"
+        case nightP95MinusP05C = "night_p95_minus_p05_c"
+        case preOnsetSlopeCPerHour = "pre_onset_slope_c_per_hour"
+        case postWakeSlopeCPerHour = "post_wake_slope_c_per_hour"
+        case equilibrationExcludedMinutes = "equilibration_excluded_minutes"
+        case rewearEventVerified = "rewear_event_verified"
+        case conversionIdentity = "conversion_identity"
+    }
 }
 
 // MARK: - PRV diagnostics group (spec section 7)
@@ -676,6 +777,14 @@ public struct SleepAnalyticsPrvWindow: Codable, Equatable, Sendable {
     public let pairs: Int
     /// Supported interval-duration coverage fraction inside the window.
     public let coverage: Double
+
+    private enum CodingKeys: String, CodingKey {
+        case start
+        case sd1Ms = "sd1_ms"
+        case sd2Ms = "sd2_ms"
+        case pairs
+        case coverage
+    }
 }
 
 public struct SleepAnalyticsPrvDiagnosticsGroup: Codable, Equatable, Sendable {
@@ -704,6 +813,20 @@ public struct SleepAnalyticsPrvDiagnosticsGroup: Codable, Equatable, Sendable {
     public let source: String
     /// Per-window results (compact; bounded by the night's window count).
     public let windows: [SleepAnalyticsPrvWindow]
+
+    private enum CodingKeys: String, CodingKey {
+        case quality
+        case nightlySd1Ms = "nightly_sd1_ms"
+        case nightlySd2Ms = "nightly_sd2_ms"
+        case nightlyRatio = "nightly_ratio"
+        case eligibleWindowCount = "eligible_window_count"
+        case withheldWindowCount = "withheld_window_count"
+        case rejectionFraction = "rejection_fraction"
+        case validPairs = "valid_pairs"
+        case timingMethod = "timing_method"
+        case source
+        case windows
+    }
 }
 
 // MARK: - Document (spec section 8)
@@ -720,6 +843,16 @@ public struct SleepAnalyticsFragmentInfo: Codable, Equatable, Sendable {
     /// The effective bounds the fingerprint hashed (unix seconds, half-open).
     public let start: Int
     public let end: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case sourceKind = "source_kind"
+        case startAt = "start_at"
+        case endAt = "end_at"
+        case edited
+        case editRevision = "edit_revision"
+        case start, end
+    }
 }
 
 /// The additive `daily.sleep_analytics_v1` document. schema_version 1,
@@ -750,6 +883,32 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
     public let movement: SleepAnalyticsMovementGroup
     public let thermal: SleepAnalyticsThermalGroup
     public let prvDiagnostics: SleepAnalyticsPrvDiagnosticsGroup
+
+    /// Wire keys are the spec section 8 names (snake_case). Synthesized Codable
+    /// would emit camelCase (`schemaVersion`) — the spec's contract example and field
+    /// tables name `schema_version`, `observed_waso_seconds`, …, so the keys are
+    /// explicit (review deviation W3-4: the first worker adapter round-tripped the
+    /// synthesized camelCase; the spec is the source of truth).
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case algorithmVersion = "algorithm_version"
+        case configVersion = "config_version"
+        case scope
+        case timezone
+        case startAt = "start_at"
+        case endAt = "end_at"
+        case start, end
+        case fragments
+        case fingerprint
+        case stageSourceVersion = "stage_source_version"
+        case nativeEpochResolutionSeconds = "native_epoch_resolution_seconds"
+        case inputRevision = "input_revision"
+        case continuity
+        case stageDynamics = "stage_dynamics"
+        case movement
+        case thermal
+        case prvDiagnostics = "prv_diagnostics"
+    }
 
     public init(schemaVersion: Int, algorithmVersion: String, configVersion: String,
                 scope: String, timezone: String, startAt: String, endAt: String,
