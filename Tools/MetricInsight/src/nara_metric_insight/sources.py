@@ -104,6 +104,16 @@ class Sources:
             return self.db.service(read, read_only=True)
         return self._get("memory", load)
 
+    # Not connected yet. Each becomes an owner-scoped read here (Database.as_owner) once its table exists, and the
+    # table joins internal.metric_insight_inputs so a change re-analyses; the tools and the prompt stay the same.
+    def chat_history(self) -> list[dict[str, Any]] | None:
+        """The person's own coach conversations (recent turns, summarised). None: not stored for analysis yet."""
+        return None
+
+    def health_records(self) -> dict[str, Any] | None:
+        """Linked health records: conditions, medications, lab results (EHR). None: no records connected yet."""
+        return None
+
     def previous_insight(self) -> dict[str, Any] | None:
         def load() -> dict[str, Any] | None:
             def read(cur):

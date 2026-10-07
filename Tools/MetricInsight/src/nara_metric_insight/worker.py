@@ -28,7 +28,7 @@ from .literature import Literature
 from .metrics import INSIGHT_METRICS, MIN_MEASURED_NIGHTS, SIGNALS
 from .prime import AgentFailed, PrimeSession, check_work_root
 from .sources import Sources
-from .tools import JobTools
+from .tools import REQUIRED, JobTools
 
 log = logging.getLogger("nara_metric_insight")
 MAX_RELATED = 4
@@ -135,12 +135,12 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
         text = await session.ask(prompts.task(metric.signal.label, metric.signal.units,
                                               summary["latest"]["day"], summary["latest"]["value"]))
         attempts = 1
-        result = validate.check(text, tools.validation_evidence(), tools.retrieved)
+        result = validate.check(text, tools.validation_evidence(), tools.retrieved, called=set(tools.calls), required=REQUIRED)
         if not result.ok:
             rejected = result.codes
             text = await session.ask(prompts.retry(result.errors))
             attempts = 2
-            result = validate.check(text, tools.validation_evidence(), tools.retrieved)
+            result = validate.check(text, tools.validation_evidence(), tools.retrieved, called=set(tools.calls), required=REQUIRED)
         stats = session.stats()
     if not result.ok or result.answer is None:
         raise AnalysisRejected(result.codes)

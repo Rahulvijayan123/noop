@@ -20,6 +20,7 @@ import pytest
 from nara_metric_insight.config import Config
 from nara_metric_insight.db import Database, connect
 from nara_metric_insight.prompts import GUIDANCE
+from nara_metric_insight.tools import REQUIRED
 from nara_metric_insight.worker import Worker
 
 from .conftest import DEVICE_A, DEVICE_B, USER_A, USER_B
@@ -121,7 +122,7 @@ def test_rhr_explained_end_to_end_then_served_from_cache(pg, stub, worker):
 
     # Prime ran with Nara's guidance, the provider saw only the proxy's key, and the model loaded data via tools.
     system = json.dumps(stub.requests[0]["messages"][0])
-    assert "Nara's metric explanation agent" in system and GUIDANCE.splitlines()[0] in system
+    assert GUIDANCE.splitlines()[0] in system and "never give medical advice" in system
     assert set(stub.authorizations) == {f"Bearer {API_KEY}"}
     task = next(m for m in stub.requests[0]["messages"] if m.get("role") == "user")
     assert "53" not in json.dumps(task), "the series itself must not be in the prompt"
@@ -131,11 +132,15 @@ def test_rhr_explained_end_to_end_then_served_from_cache(pg, stub, worker):
     # agent learning reaches the model only as the curated, user-free harness, and nothing is added to it on disk
     assert probe.pop("harness_ids_on_disk") == ["absolute-dates", "estimates", "evidence-first", "rhr-variation",
                                                 "short-history"]
+    # the placeholders were loaded like every other variable, and report themselves as not connected
+    assert probe.pop("placeholders") == [False, False]
     assert probe == {"cross_user": "refused", "internet": "blocked", "secret_like_env": []}
     assert "B only" not in json.dumps(stub.requests) and "73" not in evidence_line
 
     stored = json.loads(pg.psql(f"select evidence from public.metric_insights where id = {insight['id']}"))
-    assert stored["tool_calls"][:4] == ["get_metric_summary", "get_data_quality", "get_related_metrics", "search_literature"]
+    # the root agent loaded every variable (the first cell), the manifest first, before answering
+    assert stored["tool_calls"][0] == "get_context_manifest"
+    assert REQUIRED <= set(stored["tool_calls"])
     assert stored["validator"] == {"attempts": 1, "rejected": []}
 
     calls = len(stub.requests)

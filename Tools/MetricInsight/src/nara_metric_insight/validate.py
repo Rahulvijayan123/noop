@@ -501,7 +501,7 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     elif len(headline) > MAX_HEADLINE:
         errors.append(f"shape:headline is longer than {MAX_HEADLINE} characters")
     sections: dict[str, list[str]] = {}
-    for key, minimum in (("observed", 1), ("interpretation", 0), ("uncertainty", 1)):
+    for key, minimum in (("observed", 1), ("interpretation", 1), ("uncertainty", 1)):
         value = answer.get(key)
         if not isinstance(value, list) or not all(isinstance(s, str) and s.strip() for s in value):
             errors.append(f"shape:{key} must be a list of non-empty strings")

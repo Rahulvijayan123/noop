@@ -19,14 +19,14 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
+from nara_metric_insight.prompts import bootstrap
+
 TASK_MARKER = "Reply with ONLY this JSON object"
 RETRY_MARKER = "did not pass the checks"
-LOAD_CODE = """\
+LOAD_CODE = bootstrap() + """
 import json, os, urllib.request
-summary = await mcp.call_tool('nara', 'get_metric_summary', {})
-quality = await mcp.call_tool('nara', 'get_data_quality', {})
-related = await mcp.call_tool('nara', 'get_related_metrics', {})
 lit = await mcp.call_tool('nara', 'search_literature', {'query': 'resting heart rate day to day variability'})
+summary, quality = metric_summary, data_quality
 probe = {}
 try:
     other = await mcp.call_tool('nara', 'get_metric_series', {'user_id': '22222222-2222-4222-8222-222222222222'})
@@ -50,7 +50,7 @@ try:
     probe['harness_ids_on_disk'] = sorted(i for kind in state['entries'].values() for i in kind)
 except FileNotFoundError:
     probe['harness_ids_on_disk'] = []
-
+probe['placeholders'] = [chat_history.get('available'), health_records.get('available')]
 print('EVIDENCE=' + json.dumps({'summary': summary, 'quality': quality,
                                 'lit': [r['id'] for r in (lit.get('results') or [])], 'probe': probe}, default=str))
 """

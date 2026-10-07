@@ -447,6 +447,22 @@ def user_context(memory: list[dict[str, Any]]) -> dict[str, Any]:
             "note": "things this person told the coach; use only when directly relevant, never as a diagnosis"}
 
 
+def chat_history(messages: list[dict[str, Any]] | None) -> dict[str, Any]:
+    if messages is None:
+        return {"available": False, "reason": "not_connected", "messages": [],
+                "note": "coach conversations are not connected for analysis yet; say nothing about them"}
+    return {"available": True, "messages": messages,
+            "note": "this person's own words; use only what is directly relevant, never as a diagnosis"}
+
+
+def health_records(records: dict[str, Any] | None) -> dict[str, Any]:
+    if records is None:
+        return {"available": False, "reason": "not_connected", "conditions": [], "medications": [], "labs": [],
+                "note": "no health records are connected yet; say nothing about conditions or medications"}
+    return {"available": True, **records,
+            "note": "context only: never name a condition or a medication as the reason for a change"}
+
+
 def previous_insight(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {"available": False}

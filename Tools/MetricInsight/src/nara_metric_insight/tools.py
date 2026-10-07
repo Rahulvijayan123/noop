@@ -121,6 +121,25 @@ class JobTools:
     def previous_insight(self, args: dict[str, Any]) -> dict[str, Any]:
         return ev.previous_insight(self.sources.previous_insight())
 
+    def chat_history(self, args: dict[str, Any]) -> dict[str, Any]:
+        return ev.chat_history(self.sources.chat_history())
+
+    def health_records(self, args: dict[str, Any]) -> dict[str, Any]:
+        return ev.health_records(self.sources.health_records())
+
+    def context_manifest(self, args: dict[str, Any]) -> dict[str, Any]:
+        """Every source this analysis can use, whether it is connected, and the variable it loads into."""
+        connected = {"get_chat_history": self.sources.chat_history() is not None,
+                     "get_health_records": self.sources.health_records() is not None}
+        return {"metric": self.metric.key, "analysis_night": self.anchor.isoformat() if self.anchor else None,
+                "sources": [{"variable": v.name, "tool": v.tool, "kind": v.kind, "about": TOOLS[v.tool].description,
+                             "connected": connected.get(v.tool, True)} for v in VARIABLES],
+                "note": "load every variable before answering; a source that is not connected stays empty"}
+
+    def missing_required(self) -> list[str]:
+        """Variables the root agent has not loaded yet (the answer is refused until it has)."""
+        return sorted(REQUIRED - set(self.calls))
+
     def search_literature(self, args: dict[str, Any]) -> dict[str, Any]:
         self.searches += 1
         if self.searches > MAX_SEARCHES:
@@ -159,12 +178,46 @@ TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
          _object(), JobTools.user_context),
     Tool("get_previous_insight", "The headline of the previous explanation of this metric, if any.",
          _object(), JobTools.previous_insight),
-    Tool("search_literature", "General scientific findings from a curated, verified corpus. Query with generic "
-         "scientific keywords only (e.g. 'resting heart rate training load'); never personal details.",
+    Tool("get_chat_history", "This person's recent coach conversations (placeholder: not connected yet).",
+         _object(), JobTools.chat_history),
+    Tool("get_health_records", "This person's linked health records: conditions, medications, labs (placeholder: "
+         "not connected yet).", _object(), JobTools.health_records),
+    Tool("get_context_manifest", "Every source this analysis can use and whether it is connected.",
+         _object(), JobTools.context_manifest, data=False),
+    Tool("search_literature", "Peer-reviewed findings: a curated, verified corpus first, then PubMed / Europe PMC "
+         "journal articles. Query with generic scientific keywords only (e.g. 'heart rate variability sleep "
+         "evening exercise'); never personal details.",
          {**_object({"query": {"type": "string", "minLength": 3, "maxLength": 200},
                      "limit": {"type": "integer", "minimum": 1, "maximum": 5}}), "required": ["query"]},
          JobTools.search_literature, data=False),
 )}
+
+
+@dataclass(frozen=True)
+class Variable:
+    name: str   # the Python variable the root agent loads it into
+    tool: str
+    kind: str   # physiological | movement | events | personal | conversation | health_records | history | quality
+
+
+# The root agent's data, in the order its first cell loads it (prompts.bootstrap). Every one is loaded for every
+# analysis, connected or not, so nothing is skipped silently; REQUIRED is what the validator insists on.
+VARIABLES: tuple[Variable, ...] = (
+    Variable("manifest", "get_context_manifest", "meta"),
+    Variable("metric_summary", "get_metric_summary", "physiological"),
+    Variable("metric_series", "get_metric_series", "physiological"),
+    Variable("related_metrics", "get_related_metrics", "physiological"),
+    Variable("sleep_context", "get_sleep_context", "physiological"),
+    Variable("workout_context", "get_workout_context", "movement"),
+    Variable("activity_context", "get_activity_context", "movement"),
+    Variable("recent_events", "get_recent_events", "events"),
+    Variable("data_quality", "get_data_quality", "quality"),
+    Variable("user_context", "get_user_context", "personal"),
+    Variable("chat_history", "get_chat_history", "conversation"),
+    Variable("health_records", "get_health_records", "health_records"),
+    Variable("previous_insight", "get_previous_insight", "history"),
+)
+REQUIRED = frozenset({v.tool for v in VARIABLES} | {"search_literature"})
 
 
 def _check_args(schema: dict[str, Any], args: dict[str, Any]) -> None:
