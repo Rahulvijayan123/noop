@@ -306,6 +306,7 @@ struct StretchDetailSheet: View {
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
+        ActivityExpertsBlock(summary: .over(start: e.start, end: e.end, runs: input.runs))
         let strap = StretchOverlap.strapStates(over: e.start, e.end, segments: input.segments)
         if !strap.isEmpty {
             Divider().opacity(0.4)

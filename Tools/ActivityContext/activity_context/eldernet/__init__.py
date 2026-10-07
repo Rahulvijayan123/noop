@@ -4,8 +4,9 @@ A separate, optional expert beside HART and Inertia: real public fine-tuned weig
 ``yonbrand/gait-quality`` (Brand et al., npj Digital Medicine 2026), University of Oxford Academic Use
 Licence ("Copyright © 2022, University of Oxford"). Nara's repository contains no Oxford code or weights: the
 operator fetches both at the pinned commit (``weights`` / ``upstream`` fetch CLIs) and this package imports
-upstream's own modules from that checkout after checking every file's sha256. Nothing here is imported by
-``activity_context`` itself, so the HART serve process never loads torch or this package.
+upstream's own modules from that checkout after checking every file's sha256. The HART serve imports this
+package only when the operator opts in (``--gait-expert eldernet``); otherwise it never loads torch or this
+package. It can also run as its own process (``python -m activity_context.eldernet.serve``).
 
 Modules
 -------

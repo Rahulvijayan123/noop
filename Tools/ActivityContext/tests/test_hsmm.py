@@ -105,6 +105,8 @@ def _assert_states_close(got, want, scenario):
 
 def test_golden_events_and_states(golden):
     """Every scenario reproduces the Swift decoder's events and checkpoint posteriors."""
+    # Generated at hsmm-1.5. hsmm-1.6 only changes scoring for inputs these scenarios never carry, and
+    # StrandAnalytics' ActivityHsmmGoldenParityTests replays this same file through the 1.6 Swift decoder.
     assert golden["decoder"] == "hsmm-1.5"
     assert len(golden["scenarios"]) <= 8
     for sc in golden["scenarios"]:

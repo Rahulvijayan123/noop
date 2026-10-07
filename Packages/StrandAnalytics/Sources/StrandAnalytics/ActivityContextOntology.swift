@@ -25,7 +25,12 @@ public enum ActivityContextVersions {
     /// channel 4b) and the `transition` field on observations/features/windows.
     /// 1.6: sitting and standing are separate display kinds, and a fresh, confident change-of-position event
     /// lets the label follow without the display hold (a 15 s stand shows).
-    public static let decoder = "hsmm-1.6"
+    /// 1.7: specialist fusion. HART's fine 18-activity distribution replaces the folded four-label channel
+    /// when present (body and arm likelihoods, and the stairs / exercise gates), and the posture-shift
+    /// heuristic is discounted while the learned transition expert speaks. An in-process ElderNet gait
+    /// channel (`f.gait`) exists for hosts that run ElderNet inside the activity service; it stands down
+    /// whenever the gait-quality channel (`f.gaitQuality`) is present, so ElderNet is never counted twice.
+    public static let decoder = "hsmm-1.7"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
     /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump
@@ -308,16 +313,34 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
     public var sleep: Bool
     /// Weighted share of the evidence the model would ideally have, in [0, 1].
     public var coverage: Double
+    /// Specialist experts that spoke at this second: HART's fine activity distribution, the learned
+    /// transition expert (not abstaining), the ElderNet gait expert. `true` or absent (nil), so a state
+    /// without them encodes exactly as before they existed.
+    public var hartFine: Bool?
+    public var transitionExpert: Bool?
+    public var gaitExpert: Bool?
 
     public init(imu: Bool, encoder: Bool, dynAccel: Bool, gravity: Bool, steps: Bool,
-                heartRate: Bool, sleep: Bool, coverage: Double) {
+                heartRate: Bool, sleep: Bool, coverage: Double,
+                hartFine: Bool? = nil, transitionExpert: Bool? = nil, gaitExpert: Bool? = nil) {
         self.imu = imu; self.encoder = encoder; self.dynAccel = dynAccel; self.gravity = gravity
         self.steps = steps; self.heartRate = heartRate; self.sleep = sleep; self.coverage = coverage
+        self.hartFine = hartFine; self.transitionExpert = transitionExpert; self.gaitExpert = gaitExpert
+    }
+
+    /// Names of the experts behind this evidence, in a fixed order (provenance for runs and consumers).
+    public var experts: [String] {
+        var out: [String] = []
+        if encoder { out.append(hartFine == true ? "hart_fine" : "encoder") }
+        if transitionExpert == true { out.append("transition") }
+        if gaitExpert == true { out.append("eldernet") }
+        return out
     }
 
     enum CodingKeys: String, CodingKey {
         case imu, encoder, steps, sleep, coverage
         case dynAccel = "dyn_accel", gravity, heartRate = "hr"
+        case hartFine = "hart_fine", transitionExpert = "transition_expert", gaitExpert = "gait_expert"
     }
 }
 
@@ -327,6 +350,31 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
 /// `overall_confidence` and `display_context` are the canonical payload; everything else is
 /// provenance and context. `display_context` is a DERIVED view of the heads — consumers must not
 /// treat it as ground truth or key logic on it.
+/// The in-process ElderNet gait expert's reading of the last 10 s of wrist gait (REPORTED as measured; the
+/// decoder fused `probability` as evidence, the quality heads are information only). Present only when a host
+/// runs ElderNet inside the activity service and the gait-quality channel did not speak; the deployed
+/// gait-quality channel reports through `ActivityContextState.gait` instead.
+public struct ActivityGaitReading: Codable, Equatable, Sendable {
+    public var probability: Double
+    public var isGait: Bool
+    public var cadenceSpm: Double?
+    public var speedMps: Double?
+    /// Seconds since the window ended.
+    public var ageS: Int
+    public var model: String
+
+    public init(probability: Double, isGait: Bool, cadenceSpm: Double? = nil, speedMps: Double? = nil,
+                ageS: Int, model: String) {
+        self.probability = probability; self.isGait = isGait; self.cadenceSpm = cadenceSpm
+        self.speedMps = speedMps; self.ageS = ageS; self.model = model
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case probability = "gait_prob", isGait = "is_gait", cadenceSpm = "cadence_spm", speedMps = "speed_mps"
+        case ageS = "age_s", model
+    }
+}
+
 public struct ActivityContextState: Codable, Equatable, Sendable {
     /// Publish time (unix seconds). The state describes the evidence up to and including this second.
     public var ts: Int
@@ -351,6 +399,8 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
     /// ElderNet's metrics over the current walking stretch (reported, not evidence), present only while the
     /// gait channel is active, the posterior is on the gait modes and ElderNet detects gait. Omitted otherwise.
     public var gait: ActivityGaitSummary?
+    /// The in-process ElderNet gait expert's current reading (absent unless that expert ran).
+    public var gaitReading: ActivityGaitReading?
 
     public init(ts: Int,
                 posture: HeadProbabilities<PostureClass>,
@@ -367,7 +417,8 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
                 history: ActivityHistorySummary,
                 evidence: ActivityEvidenceSummary,
                 versions: ActivityStateVersions,
-                gait: ActivityGaitSummary? = nil) {
+                gait: ActivityGaitSummary? = nil,
+                gaitReading: ActivityGaitReading? = nil) {
         self.ts = ts; self.posture = posture; self.locomotion = locomotion
         self.armBehavior = armBehavior; self.intensity = intensity; self.transition = transition
         self.sleep = sleep; self.wear = wear
@@ -375,6 +426,7 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
         self.headConfidence = headConfidence; self.displayContext = displayContext
         self.history = history; self.evidence = evidence; self.versions = versions
         self.gait = gait
+        self.gaitReading = gaitReading
     }
 
     enum CodingKeys: String, CodingKey {
@@ -387,6 +439,7 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
         case displayContext = "display_context"
         case history, evidence, versions
         case gait
+        case gaitReading = "gait_reading"
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -413,5 +466,6 @@ public struct ActivityContextState: Codable, Equatable, Sendable {
         try c.encode(versions, forKey: .versions)
         // Optional block: written only when present, so a state without it encodes the keys it always did.
         if let gait { try c.encode(gait, forKey: .gait) }
+        try c.encodeIfPresent(gaitReading, forKey: .gaitReading)
     }
 }

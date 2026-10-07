@@ -11,7 +11,8 @@ enum ActivityEncoderWindowsStore {
     static func windowSet(windows: [ActivityPythonService.WindowPrediction], dayStart: Int, dayEnd: Int,
                           modelVersion: String,
                           transitionVersion: String = "none",
-                          preprocessingVersion: String = "unknown") -> ActivityEncoderWindowSet {
+                          preprocessingVersion: String = "unknown",
+                          gaitWindows: [ActivityGaitWindow] = []) -> ActivityEncoderWindowSet {
         let encoderId = windows.contains { !$0.baseline } ? "hart" : "baseline"
         // Transition windows are optional: the version marker "none" is the documented
         // "no expert ran" state and produces an empty list, exactly like a set built
@@ -29,7 +30,7 @@ enum ActivityEncoderWindowsStore {
             encoderId: encoderId, encoderVersion: modelVersion,
             windows: windows.compactMap(ActivityContextDays.encoderWindow),
             features: windows.compactMap(ActivityContextDays.imuFeatures),
-            transitions: transitions)
+            transitions: transitions, gaitWindows: gaitWindows)
             .clipped(from: dayStart, to: dayEnd)
     }
 

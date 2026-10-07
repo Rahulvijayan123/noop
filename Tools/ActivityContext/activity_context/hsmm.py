@@ -1,8 +1,10 @@
-"""hsmm — deterministic Python port of the Swift ActivityContext HSMM decoder (hsmm-1.5).
+"""hsmm — deterministic Python port of the Swift ActivityContext HSMM decoder (hsmm-1.6).
 
 Python twin of ActivityContextDecoder + ActivityContextModel + ActivityContextEvidence (the
-body-scoring subset) from Packages/StrandAnalytics, at the working-tree decoder version hsmm-1.5
-that adds the learned raw-IMU transition-expert evidence channel (4b). It exists so before/after
+body-scoring subset) from Packages/StrandAnalytics, at the working-tree decoder version hsmm-1.6
+with the learned raw-IMU transition-expert evidence channel (4b) and its posture-shift discount (3b).
+HART's fine (18-activity) channel and the ElderNet gait channel added in hsmm-1.6 are not ported: the
+harness feeds coarse encoder windows and no gait windows, where hsmm-1.6 scores exactly as before. It exists so before/after
 transition-expert metrics can be benchmarked in Python and golden-validated against the real Swift
 decoder (fixtures/hsmm_golden.json, produced by the scratch Swift package /tmp/hsmm-golden).
 
@@ -236,6 +238,13 @@ W_SHIFT, W_HR_TREND = 1.0, 0.6
 W_TRANSITION = 0.6
 U_MOTION, U_GAIT, U_ORIENT, U_ENCODER, U_ARM, U_HR, U_GATE = 0.20, 0.35, 0.35, 0.30, 0.25, 0.55, 0.30
 U_SHIFT, U_TRANSITION = 0.30, 0.30
+SHIFT_WEIGHT_WITH_EXPERT = 0.5
+
+
+def _transition_age_factor(age):
+    if age is None:
+        return 1.0
+    return 1.0 if age <= 2 else (0.8 if age <= 4 else 0.5)
 
 MIN_CHANNELS = 3
 MISSING_CHANNEL_BONUS = 0.6
@@ -827,6 +836,12 @@ def _score(f: dict, temperature: float, w_transition: float = 0.0):
 
     # 3b. Posture-shift signature (net5 exists via the IMU orientation change; shiftStrength stays 0
     # without gravity, so this channel pins the transition modes to a 0.05 floor — exactly like Swift).
+    # hsmm-1.6: while the learned transition expert speaks, the share of this heuristic that reports the
+    # same burst (strength s) is discounted toward SHIFT_WEIGHT_WITH_EXPERT, scaled by the expert's age decay.
+    trans = f["transition"]
+    transition_share = 0.0
+    if w_transition > 0 and trans is not None and not trans.get("abstained", False):
+        transition_share = _transition_age_factor(f["transition_age_s"])
     if f["net5"] is not None:
         s = _shift_strength(f)
         v = [1.0] * n
@@ -836,7 +851,7 @@ def _score(f: dict, temperature: float, w_transition: float = 0.0):
                     v[m] = 0.05 + 0.95 * s
                 elif m in _STATIONARY:
                     v[m] = 1 - 0.9 * s
-        add(v, U_SHIFT, W_SHIFT)
+        add(v, U_SHIFT, W_SHIFT * (1 - (1 - SHIFT_WEIGHT_WITH_EXPERT) * s * transition_share))
 
     # 4. Short-window motion encoder.
     if f["encoder"] is not None:
@@ -895,11 +910,7 @@ def _score(f: dict, temperature: float, w_transition: float = 0.0):
                     v[m] = 0.05 + 0.95 * none_p
                 total += v[m]
                 count += 1
-        w = w_transition
-        if f["transition_age_s"] is not None:
-            age = f["transition_age_s"]
-            w *= 1.0 if age <= 2 else (0.8 if age <= 4 else 0.5)
-        add(v, total / count if count else 1.0, w)
+        add(v, total / count if count else 1.0, w_transition * _transition_age_factor(f["transition_age_s"]))
 
     # 5. Instantaneous arm pattern -> body mode compat.
     if f["m10"] is not None or f["m4"] is not None:

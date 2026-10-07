@@ -59,13 +59,20 @@ enum ActivityContextDays {
         _ result: ActivityPythonService.InferResult) -> [ActivityPythonService.WindowPrediction] {
         let featuresOK = result.featureSchema == ActivityContextVersions.featureSchema
         let transitionOK = result.transitionSchema == ActivityEncoderWindowSet.transitionSchema
-        if featuresOK && transitionOK { return result.windows }
+        let fineOK = result.fineSchema == ActivityEncoderWindowSet.fineSchema
+        if featuresOK && transitionOK && fineOK { return result.windows }
         return result.windows.map { w in
             var stripped = w
             if !featuresOK { stripped.features = [:] }
             if !transitionOK { stripped.transition = nil }
+            if !fineOK { stripped.fine = nil }
             return stripped
         }
+    }
+
+    /// The response's ElderNet gait windows, or none unless stamped with the schema this build reads.
+    static func compatibleGaitWindows(_ result: ActivityPythonService.InferResult) -> [ActivityGaitWindow] {
+        result.gaitSchema == ActivityEncoderWindowSet.gaitSchema ? result.gaitWindows : []
     }
 
     /// The service window as the decoder's optional transition-expert window. Nil when the service
@@ -117,7 +124,7 @@ enum ActivityContextDays {
         guard e > s else { return nil }
         return ActivityWindowPrediction(
             startTs: s, endTs: e, label: MotionLabel(rawValue: w.label) ?? .unknown,
-            probs: w.probs, baseline: w.baseline, calibrated: w.calibrated)
+            probs: w.probs, baseline: w.baseline, calibrated: w.calibrated, fineProbs: w.fine)
     }
 
     /// One published night: its in-bed window and the staged `[{start, end, stage}]` segments.
@@ -149,7 +156,8 @@ enum ActivityContextDays {
                            encoderVersion: String,
                            transitionVersion: String = "unknown",
                            transitionPreprocessingVersion: String = "unknown",
-                           sleepKnownOutsideSessions: Bool = false) -> ActivityContextTrackInput {
+                           sleepKnownOutsideSessions: Bool = false,
+                           gaitWindows: [ActivityGaitWindow] = []) -> ActivityContextTrackInput {
         let spanEnd = min(horizon ?? dayEnd, dayEnd)
         let offWrist = AnalyticsEngine
             .offWristIntervals(events: streams.events, windowEnd: spanEnd, hr: streams.hr)
@@ -175,7 +183,8 @@ enum ActivityContextDays {
             transitionWindows: windows.compactMap {
                 transitionWindow($0, modelVersion: transitionVersion,
                                  preprocessingVersion: transitionPreprocessingVersion)
-            })
+            },
+            gaitWindows: gaitWindows)
     }
 
     private struct Envelope: Encodable {
@@ -297,6 +306,7 @@ enum ActivityContextDays {
             // carries its own version stamps, so a stream day decodes with exactly the
             // evidence the raw-IMU lane published for it.
             input.transitionWindows = encoder.transitions
+            input.gaitWindows = encoder.gaitWindows
         }
         let built = try build(input: input, day: day, modelVersion: streamsModelVersion,
                               preprocessingVersion: streamsPreprocessingVersion, generatedAt: now)

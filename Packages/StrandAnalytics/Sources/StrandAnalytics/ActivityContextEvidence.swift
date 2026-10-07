@@ -88,13 +88,17 @@ public struct MotionEncoderOutput: Codable, Equatable, Sendable {
     public var abstained: Bool
     /// Optional pooled embedding, carried for offline benchmarking; the decoder does not use it.
     public var embedding: [Float]?
+    /// HART's full per-activity distribution (`wisdm-act-1`). When present the decoder reads it instead
+    /// of `classProbs` (which is the same softmax folded into four labels), never both.
+    public var fineProbs: [String: Double]?
 
     public init(encoderId: String, encoderVersion: String, startTs: Int, endTs: Int,
                 classProbs: [String: Double], calibrated: Bool, abstained: Bool,
-                embedding: [Float]? = nil) {
+                embedding: [Float]? = nil, fineProbs: [String: Double]? = nil) {
         self.encoderId = encoderId; self.encoderVersion = encoderVersion
         self.startTs = startTs; self.endTs = endTs; self.classProbs = classProbs
         self.calibrated = calibrated; self.abstained = abstained; self.embedding = embedding
+        self.fineProbs = fineProbs
     }
 
     /// Wraps a v1 window prediction (HART or baseline) without changing it.
@@ -112,7 +116,8 @@ public struct MotionEncoderOutput: Codable, Equatable, Sendable {
                   startTs: prediction.startTs, endTs: prediction.endTs,
                   classProbs: prediction.probs,
                   calibrated: calibrated ?? prediction.calibrated,
-                  abstained: prediction.label == .unknown)
+                  abstained: prediction.label == .unknown,
+                  fineProbs: prediction.fineProbs)
     }
 
     /// Older persisted encoder windows predate `calibrated` (A01) and decode as uncalibrated —
@@ -128,6 +133,7 @@ public struct MotionEncoderOutput: Codable, Equatable, Sendable {
         calibrated = try c.decodeIfPresent(Bool.self, forKey: .calibrated) ?? false
         abstained = try c.decodeIfPresent(Bool.self, forKey: .abstained) ?? false
         embedding = try c.decodeIfPresent([Float].self, forKey: .embedding)
+        fineProbs = try c.decodeIfPresent([String: Double].self, forKey: .fineProbs)
     }
 }
 
@@ -256,6 +262,8 @@ public struct ActivityObservation: Equatable, Sendable {
     /// A new learned transition-expert window that completed at or before `ts` (optional; absent means
     /// the expert did not speak for this second, which is exactly the pre-expert behaviour).
     public var transition: TransitionEncoderEvidence?
+    /// A new ElderNet gait window that completed at or before `ts` (optional, like `transition`).
+    public var gait: GaitExpertEvidence?
     public var wear: WearEvidence
     /// Staged sleep: `.asleep` only on a night's sleep epochs. Lying awake inside the night is `.awake`.
     public var sleep: SleepEvidence
@@ -277,13 +285,14 @@ public struct ActivityObservation: Equatable, Sendable {
     public init(ts: Int, dynAccelG: Double? = nil, gravity: [Double]? = nil, stepTicks: Int? = nil,
                 strapClass: Int? = nil, hrBpm: Int? = nil, imu: ImuWindowFeatures? = nil,
                 encoder: MotionEncoderOutput? = nil, transition: TransitionEncoderEvidence? = nil,
+                gait: GaitExpertEvidence? = nil,
                 wear: WearEvidence = .unknown,
                 sleep: SleepEvidence = .unknown, inBed: Bool = false, loggedWorkout: Bool = false,
                 workoutKind: WorkoutKind = .unspecified, motionHeads: MotionHeadsWindow? = nil,
                 gaitQuality: GaitQualityWindow? = nil) {
         self.ts = ts; self.dynAccelG = dynAccelG; self.gravity = gravity; self.stepTicks = stepTicks
         self.strapClass = strapClass; self.hrBpm = hrBpm; self.imu = imu; self.encoder = encoder
-        self.transition = transition
+        self.transition = transition; self.gait = gait
         self.wear = wear; self.sleep = sleep; self.inBed = inBed; self.loggedWorkout = loggedWorkout
         self.workoutKind = workoutKind; self.motionHeads = motionHeads; self.gaitQuality = gaitQuality
     }
@@ -351,6 +360,9 @@ struct ActivityFeatures: Equatable {
     // Learned transition expert (optional; absent == channel skipped == pre-expert behaviour).
     var transition: TransitionEncoderEvidence?
     var transitionAgeS: Int?
+    // ElderNet gait expert (optional; absent == channel skipped).
+    var gait: GaitExpertEvidence?
+    var gaitAgeS: Int?
     // Provenance (last 30 s).
     var evidence: ActivityEvidenceSummary
     /// Seconds of data in the trailing 10 s window (warm-up indicator), 0…10.
@@ -401,6 +413,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
     var imu: ImuWindowFeatures?
     var encoder: MotionEncoderOutput?
     var transition: TransitionEncoderEvidence?
+    var gait: GaitExpertEvidence?
     var lastSleep: SleepEvidence = .unknown
     var lastSleepTs: Int?
     var lastWear: WearEvidence = .unknown
@@ -426,8 +439,8 @@ struct ActivityFeatureWindow: Codable, Equatable {
     /// defaults); `ActivityContextDecoder` then rejects them on the decoder version, so the day is decoded
     /// afresh rather than the file failing to read.
     private enum CodingKeys: String, CodingKey {
-        case samples, hrBuckets, imu, encoder, transition, lastSleep, lastSleepTs, lastWear, lastWorkoutTs, lastWorkoutKind
-        case lastHrTs, lastHr, imuSeenTs, encoderSeenTs, transitionSeenTs
+        case samples, hrBuckets, imu, encoder, transition, gait, lastSleep, lastSleepTs, lastWear, lastWorkoutTs
+        case lastWorkoutKind, lastHrTs, lastHr, imuSeenTs, encoderSeenTs, transitionSeenTs
         case motionHeads, motionHeadsSeenTs
         case gaitQuality, gaitQualitySeenTs
     }
@@ -439,6 +452,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
         imu = try c.decodeIfPresent(ImuWindowFeatures.self, forKey: .imu)
         encoder = try c.decodeIfPresent(MotionEncoderOutput.self, forKey: .encoder)
         transition = try c.decodeIfPresent(TransitionEncoderEvidence.self, forKey: .transition)
+        gait = try c.decodeIfPresent(GaitExpertEvidence.self, forKey: .gait)
         lastSleep = try c.decode(SleepEvidence.self, forKey: .lastSleep)
         lastSleepTs = try c.decodeIfPresent(Int.self, forKey: .lastSleepTs)
         lastWear = try c.decode(WearEvidence.self, forKey: .lastWear)
@@ -467,6 +481,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
         if let trans = obs.transition { self.transition = trans; transitionSeenTs = obs.ts }
         if motionHeadsHoldS > 0, let heads = obs.motionHeads { self.motionHeads = heads; motionHeadsSeenTs = obs.ts }
         if gaitQualityHoldS > 0, let gait = obs.gaitQuality { self.gaitQuality = gait; gaitQualitySeenTs = obs.ts }
+        if let g = obs.gait { self.gait = g }
         lastSleep = obs.sleep
         if obs.sleep != .unknown { lastSleepTs = obs.ts }
         lastWear = obs.wear
@@ -502,6 +517,10 @@ struct ActivityFeatureWindow: Codable, Equatable {
         if gaitQualityHoldS > 0, let gait = gaitQuality, let seen = gaitQualitySeenTs,
            obs.ts >= seen, obs.ts - seen < gaitQualityHoldS {
             f.gaitQuality = gait
+            // One ElderNet voice: the gait-quality channel is the calibrated, budgeted one, so the in-process
+            // gait expert stands down on seconds where it speaks (it would count the same network twice).
+            f.gait = nil; f.gaitAgeS = nil
+            f.evidence.gaitExpert = nil
         }
         return f
     }
@@ -617,6 +636,15 @@ struct ActivityFeatureWindow: Codable, Equatable {
             cadence = hz * 60
         }
 
+        // ElderNet gait window (held for one served hop). Without a step counter, its cadence head — a
+        // network trained on wrist gait — replaces the IMU rhythm's dominant-frequency cadence. Its gait
+        // probability is its own channel, never folded into `gait` here (that would count it twice).
+        var gaitExpert: GaitExpertEvidence? = nil, gaitExpertAge: Int? = nil
+        if let g = self.gait, now - g.endTs >= 0, now - g.endTs <= GaitExpert.holdS {
+            gaitExpert = g; gaitExpertAge = now - g.endTs
+            if tickN < 4, g.isGait, let spm = g.cadenceSpm, spm.isFinite, spm > 0 { cadence = spm }
+        }
+
         // Orientation path / net change from the gravity direction.
         var path: Double? = nil
         var steps = 0.0, stepN = 0
@@ -697,8 +725,12 @@ struct ActivityFeatureWindow: Codable, Equatable {
         if hasHr { coverage += 0.10 }
         if hasImu { coverage += 0.05 }
         if hasSleep { coverage += 0.05 }
-        let evidence = ActivityEvidenceSummary(imu: hasImu, encoder: hasEnc, dynAccel: hasDyn, gravity: hasGrav,
+        var evidence = ActivityEvidenceSummary(imu: hasImu, encoder: hasEnc, dynAccel: hasDyn, gravity: hasGrav,
                                                steps: hasSteps, heartRate: hasHr, sleep: hasSleep, coverage: coverage)
+        // Which experts spoke for THIS second (absent = did not), so a state says what it stands on.
+        if let e = enc, e.fineProbs.flatMap(HartFineActivities.vector) != nil { evidence.hartFine = true }
+        if let t = trans, !t.abstained { evidence.transitionExpert = true }
+        if gaitExpert != nil { evidence.gaitExpert = true }
 
         let workout = lastWorkoutTs.map { now - $0 <= 2 } ?? false
         let slope: Double? = (hr != nil) ? hrSlope(at: now) : nil
@@ -710,6 +742,7 @@ struct ActivityFeatureWindow: Codable, Equatable {
                                 workoutKind: workout ? lastWorkoutKind : .unspecified,
                                 encoder: enc, encoderAgeS: encAge,
                                 transition: trans, transitionAgeS: transAge,
+                                gait: gaitExpert, gaitAgeS: gaitExpertAge,
                                 evidence: evidence,
                                 windowFill: min(10, w10.count))
     }

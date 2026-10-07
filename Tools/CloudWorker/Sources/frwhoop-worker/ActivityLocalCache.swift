@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 /// Disposable on-host cache for the raw-IMU lane: the downloaded objects and the model's answer for each
 /// serve request.
@@ -57,16 +58,19 @@ struct ActivityLocalCache {
 
     // MARK: Inference
 
-    /// Digest of everything a serve answer depends on: the model, preprocessing and transition-expert
-    /// versions and the exact request body (range, seconds, head and tail context).
+    /// Digest of everything a serve answer depends on: the model, preprocessing, transition-expert and
+    /// gait-expert versions and the exact request body (range, seconds, head and tail context).
+    /// `activity-infer-3`: answers now carry HART's `fine` distribution, which older entries lack.
     static func inferenceKey(request: ActivityPythonService.RunRequest, modelVersion: String,
-                             preprocessingVersion: String, transitionVersion: String = "none") -> String {
+                             preprocessingVersion: String, transitionVersion: String = "none",
+                             gaitVersion: String? = nil) -> String {
         var data = Data()
         func add(_ text: String) { data.append(contentsOf: Array(text.utf8)); data.append(0x0A) }
-        add("activity-infer-2")
+        add("activity-infer-3")
         add(modelVersion)
         add(preprocessingVersion)
         add(transitionVersion)
+        if let gaitVersion { add("g:" + gaitVersion) }
         add("\(request.startTs)-\(request.endTs)")
         add("h\(request.headB64.count)"); request.headB64.forEach(add)
         add("c\(request.columnsB64.count)"); request.columnsB64.forEach(add)
@@ -140,6 +144,11 @@ struct ActivityLocalCache {
             var feat: [String: Double]
             var calibrated: Bool?
             var transition: Transition?
+            var fine: [String: Double]?
+        }
+        struct Gait: Codable {
+            var s: Int, e: Int, p: Double, gait: Bool, pre: Bool
+            var cadence: Double?, speed: Double?, stride: Double?, regularity: Double?, steps: Double?
         }
         struct Transition: Codable {
             var probs: [String: Double]
@@ -154,6 +163,11 @@ struct ActivityLocalCache {
         var transitionSchema: String?
         var transitionVersion: String?
         var windows: [Window]
+        var fineSchema: String?
+        var gaitSchema: String?
+        var gaitModelVersion: String?
+        var gaitStatus: String?
+        var gaitWindows: [Gait]?
 
         init(_ r: ActivityPythonService.InferResult) {
             modelVersion = r.modelVersion
@@ -167,7 +181,17 @@ struct ActivityLocalCache {
                        transition: $0.transition.map {
                            Transition(probs: $0.probs, label: $0.label, confidence: $0.confidence,
                                       abstained: $0.abstained, ts: $0.ts)
-                       })
+                       },
+                       fine: $0.fine)
+            }
+            fineSchema = r.fineSchema
+            gaitSchema = r.gaitSchema
+            gaitModelVersion = r.gaitModelVersion
+            gaitStatus = r.gaitStatus
+            gaitWindows = r.gaitWindows.isEmpty ? nil : r.gaitWindows.map {
+                Gait(s: $0.startTs, e: $0.endTs, p: $0.gaitProb, gait: $0.isGait, pre: $0.prefiltered,
+                     cadence: $0.cadenceSpm, speed: $0.speedMps, stride: $0.strideM, regularity: $0.regularity,
+                     steps: $0.steps)
             }
         }
 
@@ -182,10 +206,19 @@ struct ActivityLocalCache {
                             ActivityPythonService.TransitionOutput(probs: $0.probs, label: $0.label,
                                                                    confidence: $0.confidence,
                                                                    abstained: $0.abstained, ts: $0.ts)
-                        })
+                        },
+                        fine: $0.fine)
                 },
                 error: nil, errorKind: nil, featureSchema: featureSchema,
-                transitionSchema: transitionSchema, transitionVersion: transitionVersion)
+                transitionSchema: transitionSchema, transitionVersion: transitionVersion,
+                fineSchema: fineSchema,
+                gaitWindows: (gaitWindows ?? []).map {
+                    ActivityGaitWindow(startTs: $0.s, endTs: $0.e, gaitProb: $0.p, isGait: $0.gait, prefiltered: $0.pre,
+                                       cadenceSpm: $0.cadence, speedMps: $0.speed, strideM: $0.stride,
+                                       regularity: $0.regularity, steps: $0.steps,
+                                       modelVersion: gaitModelVersion ?? "unknown")
+                },
+                gaitSchema: gaitSchema, gaitModelVersion: gaitModelVersion, gaitStatus: gaitStatus)
         }
     }
 }

@@ -743,6 +743,8 @@ struct ActivityLane {
         let windows = inferred.windows
         let versions = inferred.versions
         let transitionVersions = inferred.transitionVersion
+        // HART-service ElderNet gait windows (the optional in-process gait expert; its own 10 s grid).
+        let expertGaitWindows = inferred.expertGaitWindows
 
         // 6. Build the C10 document from the SHARED StrandAnalytics policy
         //    and join (`ActivityContextPolicy` + `ActivityContextJoin`) — the
@@ -772,11 +774,12 @@ struct ActivityLane {
         let context = try buildContextDayAndInput(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise,
-            transitionVersion: transitionVersions)
+            transitionVersion: transitionVersions, gaitWindows: expertGaitWindows)
 
         // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
         let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
-                                                   versions: versions, transitionVersion: transitionVersions)
+                                                   versions: versions, transitionVersion: transitionVersions,
+                                                   gaitWindows: expertGaitWindows)
 
         // 6d. Inertia shadow row (and candidate comparison): built from what 6b decoded, never changing it.
         let motionHeads = motionHeadsPayload(job: job, collector: inferred.motionHeads, context: context)
@@ -800,6 +803,9 @@ struct ActivityLane {
         var transitionVersion: String = "none"
         var motionHeads = MotionHeadsCollector()
         var gaitQuality = GaitQualityCollector()
+        /// The HART child's own optional ElderNet gait windows (distinct from `gaitQuality`, the standalone
+        /// ElderNet service's collector).
+        var expertGaitWindows: [ActivityGaitWindow] = []
     }
 
     /// Step 5 for a job's chunks. One request per bounded body chunk (audit P1-2): a contiguous run longer
@@ -885,10 +891,12 @@ struct ActivityLane {
             let cacheKey = cacheable
                 ? ActivityLocalCache.inferenceKey(request: request, modelVersion: out.versions.model,
                                                   preprocessingVersion: out.versions.preprocessing,
-                                                  transitionVersion: out.transitionVersion)
+                                                  transitionVersion: out.transitionVersion,
+                                                  gaitVersion: service.reportedGaitVersion)
                 : nil
             if let cacheKey, let cached = cache?.inference(key: cacheKey) {
                 out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(cached))
+                out.expertGaitWindows.append(contentsOf: ActivityContextDays.compatibleGaitWindows(cached))
                 stats.windowsReused += cached.windows.count
             } else {
                 let renewed = try renew()
@@ -909,6 +917,7 @@ struct ActivityLane {
                 if let pv = result.preprocessingVersion, !pv.isEmpty { out.versions.preprocessing = pv }
                 if let tv = result.transitionVersion, !tv.isEmpty { out.transitionVersion = tv }
                 out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
+                out.expertGaitWindows.append(contentsOf: ActivityContextDays.compatibleGaitWindows(result))
                 stats.windowsInferred += result.windows.count
                 if let cacheKey, result.modelVersion == nil || result.modelVersion == out.versions.model {
                     cache?.storeInference(result, key: cacheKey)
@@ -1240,10 +1249,11 @@ struct ActivityLane {
         asleep: [(start: Int, end: Int)],
         inBed: [(start: Int, end: Int)] = [],
         exercise: [(start: Int, end: Int, sport: String)],
-        transitionVersion: String = "none") throws -> ActivityContextDays.Built? {
+        transitionVersion: String = "none",
+        gaitWindows: [ActivityGaitWindow] = []) throws -> ActivityContextDays.Built? {
         try buildContextDayAndInput(job: job, dayBounds: dayBounds, windows: windows, versions: versions,
                                     asleep: asleep, inBed: inBed, exercise: exercise,
-                                    transitionVersion: transitionVersion).built
+                                    transitionVersion: transitionVersion, gaitWindows: gaitWindows).built
     }
 
     /// The v2 day document and the decoder input it was built from (the Inertia candidate decodes the same
@@ -1261,7 +1271,8 @@ struct ActivityLane {
         asleep: [(start: Int, end: Int)],
         inBed: [(start: Int, end: Int)] = [],
         exercise: [(start: Int, end: Int, sport: String)],
-        transitionVersion: String = "none") throws -> ContextDayBuild {
+        transitionVersion: String = "none",
+        gaitWindows: [ActivityGaitWindow] = []) throws -> ContextDayBuild {
         let started = Int(Date().timeIntervalSince1970)
         guard contextDaysEnabled else { return ContextDayBuild(built: nil, input: nil, generatedAt: started) }
         var builtInput: ActivityContextTrackInput?
@@ -1280,7 +1291,8 @@ struct ActivityLane {
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
                 encoderVersion: versions.model,
                 transitionVersion: transitionVersion,
-                transitionPreprocessingVersion: versions.preprocessing)
+                transitionPreprocessingVersion: versions.preprocessing,
+                gaitWindows: gaitWindows)
             builtInput = input
             generatedAt = now
             let built = try ActivityContextDays.build(
@@ -1300,11 +1312,13 @@ struct ActivityLane {
     private mutating func encoderWindowsPayload(job: ActivityJob, dayBounds: (start: Int, end: Int),
                                                 windows: [ActivityPythonService.WindowPrediction],
                                                 versions: (model: String, preprocessing: String),
-                                                transitionVersion: String = "none") -> String? {
+                                                transitionVersion: String = "none",
+                                                gaitWindows: [ActivityGaitWindow] = []) -> String? {
         let set = ActivityEncoderWindowsStore.windowSet(windows: windows, dayStart: dayBounds.start,
                                                         dayEnd: dayBounds.end, modelVersion: versions.model,
                                                         transitionVersion: transitionVersion,
-                                                        preprocessingVersion: versions.preprocessing)
+                                                        preprocessingVersion: versions.preprocessing,
+                                                        gaitWindows: gaitWindows)
         do {
             return try ActivityEncoderWindowsStore.payload(set: set, day: job.day, dayStart: dayBounds.start,
                                                            preprocessingVersion: versions.preprocessing)

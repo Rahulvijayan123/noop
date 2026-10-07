@@ -111,6 +111,50 @@ final class ActivityContextDaysTests: XCTestCase {
         }
     }
 
+    // MARK: - HART fine + ElderNet gait
+
+    func testFineAndGaitAreGatedOnTheirSchemasAndReachTheDecoderInput() throws {
+        var w = window(start: Double(dayStart + 100), end: Double(dayStart + 104))
+        w.fine = ["walking": 0.8, "stairs": 0.2]
+        let gait = [ActivityGaitWindow(startTs: dayStart + 100, endTs: dayStart + 110, gaitProb: 0.9, isGait: true,
+                                       cadenceSpm: 110, modelVersion: "en-1")]
+        func result(fine: String?, gaitSchema: String?) -> ActivityPythonService.InferResult {
+            ActivityPythonService.InferResult(ok: true, modelVersion: "m", preprocessingVersion: "p", windows: [w],
+                                              error: nil, errorKind: nil,
+                                              featureSchema: ActivityContextVersions.featureSchema,
+                                              fineSchema: fine, gaitWindows: gait, gaitSchema: gaitSchema)
+        }
+        let good = result(fine: "wisdm-act-1", gaitSchema: "gait-quality-1")
+        XCTAssertEqual(ActivityContextDays.windowsWithCompatibleFeatures(good).first?.fine, w.fine)
+        XCTAssertEqual(ActivityContextDays.compatibleGaitWindows(good), gait)
+        for (fine, g) in [(nil, nil), ("wisdm-act-0", "gait-quality-0")] as [(String?, String?)] {
+            let bad = result(fine: fine, gaitSchema: g)
+            XCTAssertNil(ActivityContextDays.windowsWithCompatibleFeatures(bad).first?.fine)
+            XCTAssertFalse(ActivityContextDays.windowsWithCompatibleFeatures(bad).first?.features.isEmpty ?? true,
+                           "a fine-schema mismatch strips only the fine distribution")
+            XCTAssertTrue(ActivityContextDays.compatibleGaitWindows(bad).isEmpty)
+        }
+
+        let input = ActivityContextDays.trackInput(
+            windows: ActivityContextDays.windowsWithCompatibleFeatures(good), streams: .init(), sleep: [], exercise: [],
+            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v1",
+            gaitWindows: ActivityContextDays.compatibleGaitWindows(good))
+        XCTAssertEqual(input.encoderWindows.first?.fineProbs, w.fine)
+        XCTAssertEqual(input.gaitWindows, gait)
+
+        let set = ActivityEncoderWindowsStore.windowSet(windows: [w], dayStart: dayStart, dayEnd: dayEnd,
+                                                        modelVersion: "m", gaitWindows: gait)
+        XCTAssertEqual(set.gaitWindows, gait)
+        let doc = try object(try ActivityEncoderWindowsStore.payload(set: set, day: day, dayStart: dayStart,
+                                                                    preprocessingVersion: "p"))
+        let windowsDoc = try XCTUnwrap(doc["windows"] as? [String: Any])
+        XCTAssertEqual(windowsDoc["g_schema"] as? String, "gait-quality-1")
+        XCTAssertEqual(windowsDoc["h_schema"] as? String, "wisdm-act-1")
+        let back = try XCTUnwrap(ActivityEncoderWindowSet.decode(windowsDoc, encoderId: "hart", encoderVersion: "m"))
+        XCTAssertEqual(back.gaitWindows.first?.cadenceSpm, 110)
+        XCTAssertEqual(back.windows.first?.fineProbs?["stairs"] ?? -1, 0.2, accuracy: 0.0006)
+    }
+
     // MARK: - Encoder identity
 
     func testEncoderIdFollowsTheBaselineFlag() {
