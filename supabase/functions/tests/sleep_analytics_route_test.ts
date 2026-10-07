@@ -21,37 +21,40 @@ const DAY = '2026-10-05';
 const cfg = { supabaseUrl: 'https://example.test', supabaseAnonKey: 'anon', allowLegacyEnrollment: true };
 
 /// A representative REDACTED sleep_analytics_v1 document (schema 1, five groups, no raw
-/// physiology): exactly the shape the worker adapter publishes under daily.
+/// physiology): exactly the shape the worker adapter publishes under daily — the spec
+/// section 8 snake_case wire keys (schema_version, observed_waso_seconds, …), pinned by
+/// SleepAnalyticsDocumentWireTests in the shared package.
 function redactedDocument() {
   return {
-    schemaVersion: 1,
-    algorithmVersion: 'nara-sleep-analytics-1',
-    configVersion: 'v1',
+    schema_version: 1,
+    algorithm_version: 'nara-sleep-analytics-1',
+    config_version: 'v1',
     scope: 'main_night',
     timezone: 'America/Los_Angeles',
-    startAt: '2026-10-04T23:00:00Z',
-    endAt: '2026-10-05T07:00:00Z',
+    start_at: '2026-10-04T23:00:00Z',
+    end_at: '2026-10-05T07:00:00Z',
     start: 1791334800,
     end: 1791363600,
-    fragments: [{ id: `sleep-${DEVICE}-1791334800`, sourceKind: 'native_whoop_v2',
-      startAt: '2026-10-04T23:00:00Z', endAt: '2026-10-05T07:00:00Z', edited: false,
+    fragments: [{ id: `sleep-${DEVICE}-1791334800`, source_kind: 'native_whoop_v2',
+      start_at: '2026-10-04T23:00:00Z', end_at: '2026-10-05T07:00:00Z', edited: false,
       start: 1791334800, end: 1791363600 }],
     fingerprint: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
-    stageSourceVersion: 'frwhoop-server-1',
-    nativeEpochResolutionSeconds: 30,
-    inputRevision: 7,
-    continuity: { quality: { status: 'available', fragmentSpanSeconds: 28800, groupSpanSeconds: 28800,
-      observedLabeledSeconds: 28800, unknownSeconds: 0, inferredGapAwakeSeconds: 0,
-      inputSupportedSeconds: 28800, inputSupportedFraction: 1, labelSupportedFraction: 1,
-      sourceResolutionSeconds: 30, streamCounts: { hr: 28800, beats: 28800 } },
-      observedAsleepSeconds: { value: 27000, unit: 's', status: 'available' },
-      observedWasoSeconds: { value: 1800, unit: 's', status: 'available' } },
-    stageDynamics: { quality: { status: 'available' } },
-    movement: { quality: { status: 'available' }, movementPercentage: { value: 2.5, unit: '%', status: 'available' } },
-    thermal: { quality: { status: 'available' }, nightMedianC: { value: 32.6, unit: '°C', status: 'available' } },
-    prvDiagnostics: { quality: { status: 'disabled' }, timingMethod: 'rr_seq_ord', source: 'prv_optical', windows: [] },
+    stage_source_version: 'frwhoop-server-1',
+    native_epoch_resolution_seconds: 30,
+    input_revision: 7,
+    continuity: { quality: { status: 'available', fragment_span_seconds: 28800, group_span_seconds: 28800,
+      observed_labeled_seconds: 28800, unknown_seconds: 0, inferred_gap_awake_seconds: 0,
+      input_supported_seconds: 28800, input_supported_fraction: 1, label_supported_fraction: 1,
+      source_resolution_seconds: 30, stream_counts: { hr: 28800, beats: 28800 } },
+      observed_asleep_seconds: { value: 27000, unit: 's', status: 'available' },
+      observed_waso_seconds: { value: 1800, unit: 's', status: 'available' } },
+    stage_dynamics: { quality: { status: 'available' } },
+    movement: { quality: { status: 'available' }, movement_percentage: { value: 2.5, unit: '%', status: 'available' } },
+    thermal: { quality: { status: 'available' }, night_median_c: { value: 33.2, unit: '°C', status: 'available' } },
+    prv_diagnostics: { quality: { status: 'available' }, nightly_sd1_ms: { value: 41.5, unit: 'ms', status: 'available' } },
   };
 }
+
 
 function get(query = `day=${DAY}&deviceId=${LOCAL}`) {
   return new Request(`https://example.test/functions/v1/scores?${query}`, {
@@ -141,12 +144,12 @@ Deno.test('sleep analytics: route attaches hosted_snapshot with nested document 
   assertEquals(hosted.status_reasons, []);
   assertEquals(hosted.input_revision, '7');
   assertEquals(hosted.result_revision, '9');
-  // Legacy algorithm-version reporting is untouched: the outer daily keeps its own version
-  // while the document's version stays nested under its own camelCase key.
+  // Legacy algorithm-version reporting is untouched: the outer daily keeps its own
+  // version while the document's version stays nested under its own snake_case key.
   assertEquals(hosted.daily.algorithm_version, 'frwhoop-server-1');
-  assertEquals(hosted.daily.sleep_analytics_v1.algorithmVersion, 'nara-sleep-analytics-1');
-  assert(!('algorithm_version' in hosted.daily.sleep_analytics_v1),
-    'the nested document must not leak a legacy snake_case algorithm_version into daily');
+  assertEquals(hosted.daily.sleep_analytics_v1.algorithm_version, 'nara-sleep-analytics-1');
+  assert(!('algorithmVersion' in hosted.daily.sleep_analytics_v1),
+    'the nested document must not leak a camelCase key into daily');
 });
 
 Deno.test('sleep analytics: pending is false when no newer requested revision exists', async () => {

@@ -245,10 +245,10 @@ final class SleepAnalyticsAttachTests: XCTestCase {
 
         let reencoded = try JSONEncoder().encode(document)
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: reencoded) as? [String: Any])
-        XCTAssertEqual(obj["schemaVersion"] as? Int, 1)
-        XCTAssertEqual(obj["algorithmVersion"] as? String, "nara-sleep-analytics-1")
+        XCTAssertEqual(obj["schema_version"] as? Int, 1)
+        XCTAssertEqual(obj["algorithm_version"] as? String, "nara-sleep-analytics-1")
         XCTAssertEqual(obj["scope"] as? String, "main_night")
-        for key in ["continuity", "stageDynamics", "movement", "thermal", "prvDiagnostics"] {
+        for key in ["continuity", "stage_dynamics", "movement", "thermal", "prv_diagnostics"] {
             XCTAssertNotNil(obj[key], key)
         }
         XCTAssertTrue(DayScorer.isFiniteJSON(obj))
@@ -259,7 +259,7 @@ final class SleepAnalyticsAttachTests: XCTestCase {
         // re-encodes as explicit null (never a fabricated zero).
         var dict = Self.documentDictionary(start: t0, end: t0 + 360, fingerprint: "fp")
         var continuity = dict["continuity"] as! [String: Any]
-        continuity["observedWasoSeconds"] = ["value": NSNull(), "unit": "s",
+        continuity["observed_waso_seconds"] = ["value": NSNull(), "unit": "s",
                                              "status": "unavailable", "reason": "no_samples"]
         dict["continuity"] = continuity
         let data = try JSONSerialization.data(withJSONObject: dict)
@@ -313,13 +313,13 @@ final class SleepAnalyticsAttachTests: XCTestCase {
             stageSourceVersion: "frwhoop-server-1", result: nightResult(),
             claim: makeClaim(), hr: fullHR(start: t0, end: t0 + 360), rr: [], gravity: [],
             skinTemp: [], skinFamily: .whoop5, edits: [], offWristIntervals: []))
-        XCTAssertEqual(payload["schemaVersion"] as? Int, 1)
-        XCTAssertEqual(payload["algorithmVersion"] as? String, "nara-sleep-analytics-1")
+        XCTAssertEqual(payload["schema_version"] as? Int, 1)
+        XCTAssertEqual(payload["algorithm_version"] as? String, "nara-sleep-analytics-1")
         XCTAssertEqual(payload["scope"] as? String, "main_night")
         XCTAssertEqual(payload["timezone"] as? String, "America/Los_Angeles")
         XCTAssertEqual(payload["start"] as? Int, t0)
         XCTAssertEqual(payload["end"] as? Int, t0 + 360)
-        for key in ["continuity", "stageDynamics", "movement", "thermal", "prvDiagnostics"] {
+        for key in ["continuity", "stage_dynamics", "movement", "thermal", "prv_diagnostics"] {
             XCTAssertNotNil(payload[key], key)
         }
     }
@@ -332,12 +332,12 @@ final class SleepAnalyticsAttachTests: XCTestCase {
         let fragments = try XCTUnwrap(payload["fragments"] as? [[String: Any]])
         XCTAssertEqual(fragments.count, 1)
         XCTAssertEqual(fragments[0]["id"] as? String, "sleep-\(deviceId)-\(t0)")
-        XCTAssertEqual(fragments[0]["sourceKind"] as? String, "native_whoop_v2")
+        XCTAssertEqual(fragments[0]["source_kind"] as? String, "native_whoop_v2")
         XCTAssertEqual(fragments[0]["edited"] as? Bool, false)
         XCTAssertEqual(fragments[0]["start"] as? Int, t0)
         XCTAssertEqual(fragments[0]["end"] as? Int, t0 + 360)
-        XCTAssertEqual(payload["inputRevision"] as? Int64, 7)
-        XCTAssertEqual(payload["stageSourceVersion"] as? String, "frwhoop-server-1")
+        XCTAssertEqual(payload["input_revision"] as? Int64, 7)
+        XCTAssertEqual(payload["stage_source_version"] as? String, "frwhoop-server-1")
     }
 
     func testPayloadFingerprintDeterministicAcrossCallsAndChangesWithBounds() throws {
@@ -398,12 +398,11 @@ final class SleepAnalyticsAttachTests: XCTestCase {
             stageSourceVersion: "frwhoop-server-1", result: nightResult(),
             claim: makeClaim(), hr: fullHR(start: t0, end: t0 + 360), rr: [], gravity: [],
             skinTemp: [], skinFamily: .whoop5, edits: [], offWristIntervals: []))
-        // The document's own algorithm_version lives as `algorithmVersion` (camelCase, the
-        // synthesized Codable key) INSIDE sleep_analytics_v1. It must never add the legacy
-        // snake_case `algorithm_version` (or a stray `recovery`) to the daily object.
-        XCTAssertEqual(payload["algorithmVersion"] as? String, "nara-sleep-analytics-1")
-        XCTAssertNil(payload["algorithm_version"])
-        XCTAssertNil(payload["schema_version"])
+        // The document's own algorithm_version lives NESTED inside sleep_analytics_v1
+        // (snake_case wire keys, the shared contract's CodingKeys); the payload never
+        // carries a stray `recovery` key.
+        XCTAssertEqual(payload["algorithm_version"] as? String, "nara-sleep-analytics-1")
+        XCTAssertEqual(payload["schema_version"] as? Int, 1)
         XCTAssertNil(payload["recovery"])
 
         // Simulating the DayScoring attach: the only added key is sleep_analytics_v1.
@@ -428,7 +427,7 @@ final class SleepAnalyticsAttachTests: XCTestCase {
             offWristIntervals: []))
         let fragments = try XCTUnwrap(payload["fragments"] as? [[String: Any]])
         XCTAssertEqual(fragments[0]["edited"] as? Bool, true)
-        XCTAssertEqual((fragments[0]["editRevision"] as? NSNumber)?.int64Value, 6)
+        XCTAssertEqual((fragments[0]["edit_revision"] as? NSNumber)?.int64Value, 6)
     }
 
     // MARK: - Finite-JSON validation helper
@@ -464,33 +463,33 @@ final class SleepAnalyticsAttachTests: XCTestCase {
         }
         let quality: [String: Any] = [
             "status": "available",
-            "fragmentSpanSeconds": Double(max(0, end - start)),
-            "groupSpanSeconds": Double(max(0, end - start)),
-            "observedLabeledSeconds": Double(max(0, end - start)),
-            "unknownSeconds": 0.0,
-            "inferredGapAwakeSeconds": 0.0,
-            "inputSupportedSeconds": Double(max(0, end - start)),
-            "inputSupportedFraction": 1.0,
-            "labelSupportedFraction": 1.0,
-            "sourceResolutionSeconds": 30,
-            "streamCounts": ["hr": 3600, "beats": 3600],
+            "fragment_span_seconds": Double(max(0, end - start)),
+            "group_span_seconds": Double(max(0, end - start)),
+            "observed_labeled_seconds": Double(max(0, end - start)),
+            "unknown_seconds": 0.0,
+            "inferred_gap_awake_seconds": 0.0,
+            "input_supported_seconds": Double(max(0, end - start)),
+            "input_supported_fraction": 1.0,
+            "label_supported_fraction": 1.0,
+            "source_resolution_seconds": 30,
+            "stream_counts": ["hr": 3600, "beats": 3600],
         ]
         let continuity: [String: Any] = [
             "quality": quality,
-            "observedAsleepSeconds": metric(Double(max(0, end - start)), unit: "s", status: "available"),
-            "observedWasoSeconds": metric(0, unit: "s", status: "available"),
-            "inferredGapAwakeSecondsWithinSleepPeriod": metric(0, unit: "s", status: "available"),
-            "estimatedWasoIncludingInferredGapsSeconds": metric(0, unit: "s", status: "available"),
-            "onsetDelayFromWindowSeconds": metric(30, unit: "s", status: "available"),
-            "sleepOnsetLatencyFromMarkerSeconds": metric(nil, unit: "s", status: "unavailable", reason: "missing_marker"),
-            "remLatencyFromSleepOnsetSeconds": metric(150, unit: "s", status: "available"),
-            "deepLatencyFromSleepOnsetSeconds": metric(60, unit: "s", status: "available"),
-            "longestObservedSleepBoutSeconds": metric(210, unit: "s", status: "available"),
-            "longestBoutCensored": false,
-            "awakeningBoutCount": count(1, status: "available"),
-            "censoredWakeStretchCount": count(0, status: "available"),
-            "sleepToWakeTransitionCount": count(2, status: "available"),
-            "sleepToWakeTransitionsPerAsleepHour": metric(nil, unit: "per h", status: "unavailable", reason: "insufficient_duration"),
+            "observed_asleep_seconds": metric(Double(max(0, end - start)), unit: "s", status: "available"),
+            "observed_waso_seconds": metric(0, unit: "s", status: "available"),
+            "inferred_gap_awake_seconds_within_sleep_period": metric(0, unit: "s", status: "available"),
+            "estimated_waso_including_inferred_gaps_seconds": metric(0, unit: "s", status: "available"),
+            "onset_delay_from_window_seconds": metric(30, unit: "s", status: "available"),
+            "sleep_onset_latency_from_marker_seconds": metric(nil, unit: "s", status: "unavailable", reason: "missing_marker"),
+            "rem_latency_from_sleep_onset_seconds": metric(150, unit: "s", status: "available"),
+            "deep_latency_from_sleep_onset_seconds": metric(60, unit: "s", status: "available"),
+            "longest_observed_sleep_bout_seconds": metric(210, unit: "s", status: "available"),
+            "longest_bout_censored": false,
+            "awakening_bout_count": count(1, status: "available"),
+            "censored_wake_stretch_count": count(0, status: "available"),
+            "sleep_to_wake_transition_count": count(2, status: "available"),
+            "sleep_to_wake_transitions_per_asleep_hour": metric(nil, unit: "per h", status: "unavailable", reason: "insufficient_duration"),
         ]
         let stageSeconds: [[String: Any]] = [
             ["label": "wake", "seconds": metric(90, unit: "s", status: "available")],
@@ -500,68 +499,68 @@ final class SleepAnalyticsAttachTests: XCTestCase {
         ]
         func bout(_ label: String) -> [String: Any] {
             ["label": label,
-             "boutCount": count(1, status: "available"),
-             "completeBoutCount": count(1, status: "available"),
-             "censoredBoutCount": count(0, status: "available"),
-             "longestObservedSeconds": metric(120, unit: "s", status: "available"),
-             "medianCompleteBoutSeconds": metric(120, unit: "s", status: "available"),
-             "p90CompleteBoutSeconds": metric(120, unit: "s", status: "available")]
+             "bout_count": count(1, status: "available"),
+             "complete_bout_count": count(1, status: "available"),
+             "censored_bout_count": count(0, status: "available"),
+             "longest_observed_seconds": metric(120, unit: "s", status: "available"),
+             "median_complete_bout_seconds": metric(120, unit: "s", status: "available"),
+             "p90_complete_bout_seconds": metric(120, unit: "s", status: "available")]
         }
         let stageDynamics: [String: Any] = [
-            "quality": quality, "stageSeconds": stageSeconds,
-            "stageBouts": [bout("wake"), bout("light"), bout("deep"), bout("rem")],
-            "epochTransitions": NSNull(),
+            "quality": quality, "stage_seconds": stageSeconds,
+            "stage_bouts": [bout("wake"), bout("light"), bout("deep"), bout("rem")],
+            "epoch_transitions": NSNull(),
         ]
         let movement: [String: Any] = [
             "quality": quality,
-            "movementSeconds": metric(0, unit: "s", status: "available"),
-            "eligibleSeconds": metric(300, unit: "s", status: "available"),
-            "movementPercentage": metric(0, unit: "%", status: "available"),
-            "movementBoutCount": count(0, status: "available"),
-            "movementBoutsPerEligibleHour": metric(0, unit: "per h", status: "available"),
-            "immobilityBoutCompleteCount": count(1, status: "available"),
-            "immobilityBoutCensoredCount": count(0, status: "available"),
-            "longestObservedImmobilitySeconds": metric(300, unit: "s", status: "available"),
-            "medianCompleteImmobilityBoutSeconds": metric(300, unit: "s", status: "available"),
-            "p90CompleteImmobilityBoutSeconds": metric(300, unit: "s", status: "available"),
-            "thresholdG": 0.01, "sourceResolution": "gravity_1hz_adjacent",
-            "algorithmVersion": "nara-sleep-analytics-1",
+            "movement_seconds": metric(0, unit: "s", status: "available"),
+            "eligible_seconds": metric(300, unit: "s", status: "available"),
+            "movement_percentage": metric(0, unit: "%", status: "available"),
+            "movement_bout_count": count(0, status: "available"),
+            "movement_bouts_per_eligible_hour": metric(0, unit: "per h", status: "available"),
+            "immobility_bout_complete_count": count(1, status: "available"),
+            "immobility_bout_censored_count": count(0, status: "available"),
+            "longest_observed_immobility_seconds": metric(300, unit: "s", status: "available"),
+            "median_complete_immobility_bout_seconds": metric(300, unit: "s", status: "available"),
+            "p90_complete_immobility_bout_seconds": metric(300, unit: "s", status: "available"),
+            "threshold_g": 0.01, "source_resolution": "gravity_1hz_adjacent",
+            "algorithm_version": "nara-sleep-analytics-1",
         ]
         let thermal: [String: Any] = [
             "quality": quality,
-            "nightMedianC": metric(32.5, unit: "°C", status: "available"),
-            "nightIqrC": metric(0.6, unit: "°C", status: "available"),
-            "nightP95MinusP05C": metric(1.1, unit: "°C", status: "available"),
-            "preOnsetSlopeCPerHour": NSNull(), "postWakeSlopeCPerHour": NSNull(),
-            "equilibrationExcludedMinutes": 0, "rewearEventVerified": false,
-            "conversionIdentity": "whoop5",
+            "night_median_c": metric(32.5, unit: "°C", status: "available"),
+            "night_iqr_c": metric(0.6, unit: "°C", status: "available"),
+            "night_p95_minus_p05_c": metric(1.1, unit: "°C", status: "available"),
+            "pre_onset_slope_c_per_hour": NSNull(), "post_wake_slope_c_per_hour": NSNull(),
+            "equilibration_excluded_minutes": 0, "rewear_event_verified": false,
+            "conversion_identity": "whoop5",
         ]
         let prv: [String: Any] = [
             "quality": quality,
-            "nightlySd1Ms": metric(18.5, unit: "ms", status: "available"),
-            "nightlySd2Ms": metric(42.1, unit: "ms", status: "available"),
-            "nightlyRatio": metric(0.44, unit: "", status: "available"),
-            "eligibleWindowCount": count(0, status: "available"),
-            "withheldWindowCount": count(1, status: "available"),
-            "rejectionFraction": metric(0.0, unit: "", status: "available"),
-            "validPairs": count(0, status: "available"),
-            "timingMethod": "rr_seq_ord", "source": "prv_optical", "windows": [],
+            "nightly_sd1_ms": metric(18.5, unit: "ms", status: "available"),
+            "nightly_sd2_ms": metric(42.1, unit: "ms", status: "available"),
+            "nightly_ratio": metric(0.44, unit: "", status: "available"),
+            "eligible_window_count": count(0, status: "available"),
+            "withheld_window_count": count(1, status: "available"),
+            "rejection_fraction": metric(0.0, unit: "", status: "available"),
+            "valid_pairs": count(0, status: "available"),
+            "timing_method": "rr_seq_ord", "source": "prv_optical", "windows": [],
         ]
         return [
-            "schemaVersion": 1, "algorithmVersion": "nara-sleep-analytics-1",
-            "configVersion": "v1", "scope": "main_night",
+            "schema_version": 1, "algorithm_version": "nara-sleep-analytics-1",
+            "config_version": "v1", "scope": "main_night",
             "timezone": "America/Los_Angeles",
-            "startAt": "2026-09-15T23:00:00Z", "endAt": "2026-09-16T07:00:00Z",
+            "start_at": "2026-09-15T23:00:00Z", "end_at": "2026-09-16T07:00:00Z",
             "start": start, "end": end,
-            "fragments": [["id": "sleep-d-\(start)", "sourceKind": "native_whoop_v2",
-                           "startAt": "2026-09-15T23:00:00Z", "endAt": "2026-09-16T07:00:00Z",
-                           "edited": false, "editRevision": NSNull(), "start": start, "end": end]],
+            "fragments": [["id": "sleep-d-\(start)", "source_kind": "native_whoop_v2",
+                           "start_at": "2026-09-15T23:00:00Z", "end_at": "2026-09-16T07:00:00Z",
+                           "edited": false, "edit_revision": NSNull(), "start": start, "end": end]],
             "fingerprint": fingerprint,
-            "stageSourceVersion": "frwhoop-server-1",
-            "nativeEpochResolutionSeconds": 30,
-            "inputRevision": 7,
-            "continuity": continuity, "stageDynamics": stageDynamics,
-            "movement": movement, "thermal": thermal, "prvDiagnostics": prv,
+            "stage_source_version": "frwhoop-server-1",
+            "native_epoch_resolution_seconds": 30,
+            "input_revision": 7,
+            "continuity": continuity, "stage_dynamics": stageDynamics,
+            "movement": movement, "thermal": thermal, "prv_diagnostics": prv,
         ]
     }
 }
