@@ -423,19 +423,19 @@ public enum BaselineStandard {
 
     /// The Winsorized-EWMA fold of `series` AS OF every calendar day: `before[D]` is built only from days < D
     /// (rule 2, via the cherry-picked `Baselines.foldHistoryAsOfDetailed`). The input is calendar-padded from
-    /// its first day through `through` (or its newest day) so a missing day is a missing day (rule 7), values
-    /// go to model space (rule 1), excluded days (SDNN, confounded) become missing (rules 1, 3) but are still
-    /// keys, and the fold restarts at every regime change and at the metric's reference epoch (rule 6).
-    public static func causalFold(_ series: [String: Double], metric: Metric, through: String? = nil,
-                                  context: Context = Context(), cfg overrideCfg: MetricCfg? = nil,
+    /// `from` (or its first day) through `through` (or its newest day) so a missing day is a missing day
+    /// (rule 7), values go to model space (rule 1), excluded days (SDNN, confounded) become missing (rules 1, 3)
+    /// but stay keys, and the fold restarts at every regime change and at the metric's reference epoch (rule 6).
+    public static func causalFold(_ series: [String: Double], metric: Metric, from: String? = nil,
+                                  through: String? = nil, context: Context = Context(),
+                                  cfg overrideCfg: MetricCfg? = nil,
                                   rejectHardOutliers: Bool = true) -> AsOfFold {
         let foldCfg = overrideCfg ?? cfg(metric)
-        let keys = Array(series.keys)
-        guard let first = keys.min() else {
+        let bounds = Array(series.keys) + [from, through].compactMap { $0 }
+        guard let first = bounds.min(), let last = bounds.max() else {
             let empty = Baselines.emptyState(foldCfg)
-            return AsOfFold(before: through.map { [$0: empty] } ?? [:], asOfDay: [:], end: empty, endAsOfDay: nil)
+            return AsOfFold(before: [:], asOfDay: [:], end: empty, endAsOfDay: nil)
         }
-        let last = [keys.max()!, through].compactMap { $0 }.max()!
         let days = calendarDays(from: first, through: last)
         let values: [Double?] = days.map { k in
             guard let v = series[k], !context.excludedFromReference(k, metric: metric) else { return nil }

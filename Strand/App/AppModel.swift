@@ -2543,6 +2543,14 @@ final class AppModel: ObservableObject {
         return (c.hour ?? 0) * 3600 + (c.minute ?? 0) * 60 + (c.second ?? 0)
     }
 
+    /// The BaselineStandard context the app-side baselines (illness, cycle) share: the morning logs Layer 1
+    /// already keeps (confounded days stay out of every reference, rule 3) and the manual Recalibrate epoch
+    /// per metric (`BaselineStandard.referenceEpoch`, fix J), so one Recalibrate re-anchors these too.
+    /// `repo.days` carries no Apple SDNN rows (Apple Health is never merged into it), so no SDNN days.
+    func baselineStandardContext() -> BaselineStandard.Context {
+        BaselineStandard.Context.app(dayLogs: baseline.dayLogsByDay)
+    }
+
     private func evaluateIllness(_ days: [DailyMetric]) {
         guard behavior.illnessWatch, days.count >= 14 else {
             healthAlert = nil; illnessSignal = nil; illnessDistance = nil; return
@@ -2581,78 +2589,46 @@ final class AppModel: ObservableObject {
     private func applyIllnessSignal(_ days: [DailyMetric], alcohol: Bool,
                                     hardOrLateWorkout: Bool, alreadyUnwell: Bool) {
         let previous = healthAlert
-        let recent = Array(days.suffix(2))
-        let base = Array(days.suffix(31).dropLast(3))    // ~28 days ending 3 days ago
-        func mean(_ vals: [Double]) -> Double? { vals.isEmpty ? nil : vals.reduce(0, +) / Double(vals.count) }
-        func rm(_ kp: (DailyMetric) -> Double?) -> Double? { mean(recent.compactMap(kp)) }
-
-        // Build each signal's illness-ward z against the personal baseline (Baselines.deviation). The
-        // baseline is folded over the full pre-recent history; a trusted baseline (≥14 nights) is the
-        // engine's gate for actually raising. Skin-temp is already a stored DEVIATION (°C), so it's
-        // z-scored against a zero-centred personal spread; the others z-score the raw column.
-        func signal(_ kp: (DailyMetric) -> Double?, cfgKey: String, illnessUp: Bool) -> (IllnessSignalEngine.SignalReading, Bool)? {
-            guard let cfg = Baselines.metricCfg[cfgKey], let recentMean = rm(kp) else { return nil }
-            let state = Baselines.foldHistory(base.map(kp), cfg: cfg)
-            guard state.usable else { return (IllnessSignalEngine.SignalReading(zIllnessward: 0, present: false), false) }
-            let dev = Baselines.deviation(recentMean, state: state)
-            let z = illnessUp ? dev.z : -dev.z   // HRV drop is illness-ward → negate
-            return (IllnessSignalEngine.SignalReading(zIllnessward: z), state.trusted)
-        }
-
-        let rhr = signal({ $0.restingHr.map(Double.init) }, cfgKey: "resting_hr", illnessUp: true)
-        let hrv = signal({ $0.avgHrv }, cfgKey: "hrv", illnessUp: false)
-        let resp = signal({ $0.respRateBpm }, cfgKey: "resp", illnessUp: true)
-        // Skin-temp deviation: a stored °C delta. Build a small zero-centred state from its own recent
-        // spread so a +0.6 °C reads as a meaningful z without needing a separate baseline column.
-        var skin: (IllnessSignalEngine.SignalReading, Bool)? = nil
-        if let recentSkin = rm({ $0.skinTempDevC }) {
-            let z = recentSkin / 0.3     // ~0.3 °C ≈ one personal spread (matches skin_temp floorSpread)
-            skin = (IllnessSignalEngine.SignalReading(zIllnessward: z), true)
-        }
-
-        let inputs = IllnessSignalEngine.Inputs(
-            restingHR: rhr?.0, skinTemp: skin?.0, hrv: hrv?.0, respiration: resp?.0)
+        // BaselineStandard fix C (audit 2026-10-07): the z-scores, the trust gate and the label deltas all come
+        // from ONE estimator, `IllnessBaselines.evaluate`: the last 2 CALENDAR days against the 28 calendar
+        // days ending 3 days ago, causal EWMA folds, ln HRV, confounded days out of the base, skin from
+        // DEVIATION rows only (the column also holds imported absolute °C, which read z ≈ 110 here), no z
+        // below 4 base days, and the raise gate is RHR AND HRV trusted (was OR).
+        let ill = IllnessBaselines.evaluate(days: days, context: baselineStandardContext())
+        let inputs = ill.engineInputs
 
         // PARALLEL Mahalanobis distance on the SAME illness-ward z-vector (RHR up, HRV negated, skin-temp
         // up, respiration up). This NEVER gates the alert: the IllnessSignalEngine above remains the sole
         // fire gate. We compute it here only so the Heads-Up card can show a "how strong" confidence band
         // when the engine has already raised. nil where a reading is absent / not present (dropped from the
         // distance). correlation: nil = identity, validated to agree ~100% with the z-sum detector.
-        func zIfPresent(_ r: (IllnessSignalEngine.SignalReading, Bool)?) -> Double? {
-            guard let reading = r?.0, reading.present else { return nil }
-            return reading.zIllnessward
-        }
-        let distanceFeatures = IllnessDistance.FeatureVector(
-            restingHR: zIfPresent(rhr),
-            rmssd: zIfPresent(hrv),       // hrv.zIllnessward is already the NEGATED HRV z
-            skinTemp: zIfPresent(skin),
-            respiration: zIfPresent(resp))
-        illnessDistance = IllnessDistance.evaluate(features: distanceFeatures, correlation: nil)
+        illnessDistance = IllnessDistance.evaluate(features: ill.distanceFeatures, correlation: nil)
 
-        // baselineTrusted: require the HRV/RHR baselines to be trusted before the engine may raise.
-        let trusted = (rhr?.1 ?? false) || (hrv?.1 ?? false)
+        // baselineTrusted: require BOTH the HRV and the resting-HR baselines to be trusted before the engine
+        // may raise.
         let context = IllnessSignalEngine.Context(
             alcohol: alcohol, hardOrLateWorkout: hardOrLateWorkout,
-            alreadyUnwell: alreadyUnwell, baselineTrusted: trusted)
+            alreadyUnwell: alreadyUnwell, baselineTrusted: ill.baselineTrusted)
 
-        // Caller-rendered phrases for the signals that fire (the engine surfaces only the firing ones).
+        // Caller-rendered phrases for the signals that fire (the engine surfaces only the firing ones). Each
+        // delta is recent − the SAME fold centre the z used (a geometric mean for HRV).
         var labels: [String: String] = [:]
-        if let r = rm({ $0.restingHr.map(Double.init) }), let b = mean(base.compactMap { $0.restingHr.map(Double.init) }), r > b {
+        if let r = ill.restingHR.recent, let b = ill.restingHR.baseline, r > b {
             let delta = Int((r - b).rounded())
             labels["restingHR"] = String(localized: "RHR +\(delta)")
         }
-        if let r = rm({ $0.avgHrv }), let b = mean(base.compactMap { $0.avgHrv }), b > 0, r < b {
+        if let r = ill.hrv.recent, let b = ill.hrv.baseline, b > 0, r < b {
             let percent = Int(((1 - r / b) * 100).rounded())
             labels["hrv"] = String(localized: "HRV −\(percent)%")
         }
-        if let r = rm({ $0.skinTempDevC }), r > 0 {
+        if let r = ill.skinTemp.delta, r > 0 {
             // The value is STORED in °C but must be SHOWN in the reader's unit: this label welded "°C"
             // into the translated string, so a Fahrenheit user got "+0.7 °C" from the banner while every
             // other surface rendered the same night as "+1.3 Δ°F".
             //
             // #111/#622: skinTempDevC is BIMODAL — an imported night is an ABSOLUTE wrist °C, a live one
-            // a signed DEVIATION — so neither the conversion nor the unit chip may be assumed. Kind and
-            // chip come from SkinTempDisplay, the same authority the Today and Health tiles use. The
+            // a signed DEVIATION. `IllnessBaselines` only ever hands back a deviation delta, but the kind and
+            // chip still come from SkinTempDisplay, the same authority the Today and Health tiles use. The
             // NUMBER is formatted here rather than by SkinTempDisplay because these decimals go through
             // AppLanguage.activeLocale: a German reader sees "0,7", which the package's plain
             // String(format:) would flatten to "0.7".
@@ -2662,7 +2638,7 @@ final class AppModel: ObservableObject {
                 locale: AppLanguage.activeLocale)
             labels["skinTemp"] = String(localized: "Skin temperature \(temperature)")
         }
-        if let r = rm({ $0.respRateBpm }), let b = mean(base.compactMap { $0.respRateBpm }), r > b {
+        if let r = ill.respiration.recent, let b = ill.respiration.baseline, r > b {
             labels["respiration"] = String(localized: "Respiration up")
         }
 
