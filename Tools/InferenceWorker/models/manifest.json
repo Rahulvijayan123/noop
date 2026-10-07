@@ -10,7 +10,8 @@
     "Nothing in this manifest is downloaded at inference time. Deploy-prep stages and verifies bytes; the sidecar only reads.",
     "Conditional models (wav2sleep, no-eeg-sleep-staging, RR_Estimation) are recorded with eligibility states and are NOT wired as live providers.",
     "Hashes and sizes were measured from the pinned bytes (findings/conditional-models.md, findings/sleep-boundary-stager.md, findings/hrv-neurokit.md) and re-verified locally against /tmp/frwhoop-physiology/ckpt/.",
-    "Sleep candidates (2026-10-01, W-D): sleepecg_wrn_gru_mesa is now wired as sleepecg.wrn-gru-mesa.v1 with its two artifacts required_for_readiness=true (a wired model artifact gates readiness); hypnospy is wired as hypnospy.hr-boundary.v1 from an in-repo vendored copy and therefore has no artifact and required_for_readiness=false."
+    "Sleep candidates (2026-10-01, W-D): sleepecg_wrn_gru_mesa is now wired as sleepecg.wrn-gru-mesa.v1 with its two artifacts required_for_readiness=true (a wired model artifact gates readiness); hypnospy is wired as hypnospy.hr-boundary.v1 from an in-repo vendored copy and therefore has no artifact and required_for_readiness=false.",
+    "Sensor biomarkers (2026-10-06): paradigma/deepbeat/siamaf entries are OPTIONAL research/shadow lanes (disabled by default). required_for_readiness=false: a missing or mismatched artifact never gates process readiness; sha256/size are verified at startup only when staged under the artifact root. Hashes measured from the actual downloaded bytes (W3/W4 reports); provisioning scripts: Tools/InferenceWorker/scripts/provision_{paradigma,deepbeat,siamaf}.py."
   ],
   "entries": [
     {
@@ -300,6 +301,114 @@
         }
       ],
       "required_for_readiness": false
+    },
+    {
+      "id": "paradigma",
+      "kind": "model_checkpoint",
+      "name": "ParaDigMa 1.1.2 tremor/gait/gait-filtering classifiers",
+      "revision": "1.1.2",
+      "source_url": "https://github.com/biomarkersParkinson/paradigma",
+      "tag_commit": "4735d6d21b2a62b764a0bc7e0f677577e6ce1668",
+      "license": "Apache-2.0",
+      "license_evidence": "repo LICENSE is Apache License 2.0 (Apache-2.0 classifier packages)",
+      "rights_verdict": "clear",
+      "status": "eligible",
+      "status_reason": "real pinned inference executed 2026-10-06 (subprocess venv: python 3.12, numpy 2.5.3, scipy 1.18.1, pandas 2.3.3, scikit-learn 1.6.0; the main env's scikit-learn 1.9.1 is outside paradigma's <1.6.1 range); upstream reference parity reproduced to machine precision; portability to WHOOP unverified (research tier)",
+      "provider_id": "sensor.biomarkers.paradigma.v1",
+      "wired": true,
+      "input_contract": "prepared IMU DataFrame with time (relative s), accelerometer_x/y/z (g), gyroscope_x/y/z (deg/s); run_paradigma via the narrow subprocess env; gait requires verified watch_side + device_orientation + verified WHOOP axis convention",
+      "artifacts": [
+        {
+          "name": "tremor_detection_clf_package.pkl",
+          "path": "paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/tremor_detection_clf_package.pkl",
+          "url": "https://raw.githubusercontent.com/biomarkersParkinson/paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/src/paradigma/assets/tremor_detection_clf_package.pkl",
+          "size_bytes": 1475,
+          "sha256": "4be2ac2b511c501257ea8186068f06a94d0084d653840e907be72cd103dc5b0e",
+          "verify_at_startup": true,
+          "required_for_readiness": false
+        },
+        {
+          "name": "gait_detection_clf_package.pkl",
+          "path": "paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/gait_detection_clf_package.pkl",
+          "url": "https://raw.githubusercontent.com/biomarkersParkinson/paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/src/paradigma/assets/gait_detection_clf_package.pkl",
+          "size_bytes": 11497247,
+          "sha256": "f2309bb8cff87648a54a338493db2cedb25b4a9a60cd77bbdb2d17e010a7cc25",
+          "verify_at_startup": true,
+          "required_for_readiness": false
+        },
+        {
+          "name": "gait_filtering_clf_package.pkl",
+          "path": "paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/gait_filtering_clf_package.pkl",
+          "url": "https://raw.githubusercontent.com/biomarkersParkinson/paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/src/paradigma/assets/gait_filtering_clf_package.pkl",
+          "size_bytes": 3915,
+          "sha256": "94068bca1997755e17fddae662dd0433ac06c12a3cd32869c6d9dc586ab845f4",
+          "verify_at_startup": true,
+          "required_for_readiness": false
+        }
+      ],
+      "required_for_readiness": false,
+      "accuracy_label": "unverified_accuracy",
+      "runtime_note": "optional research lane, disabled by default (FRWHOOP_PARADIGMA_ENABLED); a missing artifact never gates process readiness (verify only when staged)"
+    },
+    {
+      "id": "deepbeat",
+      "kind": "model_checkpoint",
+      "name": "DeepBeat PPG quality/rhythm network (AshleyLab)",
+      "revision": "f54004a80eaca99460d1e171c8ec203e182dacb9 (repository HEAD)",
+      "source_url": "https://github.com/AshleyLab/deepbeat",
+      "tag_commit": "f54004a80eaca99460d1e171c8ec203e182dacb9",
+      "license": "GPL-3.0",
+      "license_evidence": "repository LICENSE is GPL-3.0 (code and released weights); the training dataset (Synapse syn21985690) is a separate non-commercial DUA and is not part of this adapter",
+      "rights_verdict": "clear",
+      "status": "shadow_eligible",
+      "status_reason": "disabled-by-default research shadow adapter; loads in-env via keras.saving.load_model(h5, compile=False) with keras 3.15.1 + torch backend (numeric parity vs TF 2.16.1 verified: quality max diff 5.96e-08, rhythm 2.38e-07, argmax 8/8); the original preprocessing (bandpass + [0,1] + 128->32 Hz) settings are UNRESOLVED upstream, so rhythm outputs stay withheld preprocessing_unverified",
+      "provider_id": "sensor.biomarkers.rhythm.v1",
+      "wired": true,
+      "input_contract": "(batch, 800, 1) float32 = 25 s at 32 Hz; quality poor=0/acceptable=1/excellent=2; rhythm non-AF=0/AF=1; resampling 24/25 Hz WHOOP PPG to 32 Hz is tensor compatibility only, never accuracy evidence; no RR intervals, no HRV intervals",
+      "artifacts": [
+        {
+          "name": "deepbeat.h5",
+          "path": "deepbeat/f54004a80e/deepbeat.h5",
+          "url": "https://github.com/AshleyLab/deepbeat/raw/f54004a80eaca99460d1e171c8ec203e182dacb9/deepbeat.h5",
+          "size_bytes": 1502052,
+          "sha256": "6df126f88855388f8706ea6e158b80902752a019b1f3c26d3ceab22991e4eee3",
+          "verify_at_startup": true,
+          "required_for_readiness": false
+        }
+      ],
+      "required_for_readiness": false,
+      "accuracy_label": "unverified_accuracy_shadow_only",
+      "runtime_note": "optional shadow lane, disabled by default (FRWHOOP_DEEPBEAT_SHADOW_ENABLED); never user-facing; a missing artifact never gates process readiness"
+    },
+    {
+      "id": "siamaf",
+      "kind": "model_checkpoint",
+      "name": "SiamAF PPG rhythm comparator (chengstark)",
+      "revision": "c05be9e37d2013d0817aafc5b2e72b2f7649e95e (repository HEAD)",
+      "source_url": "https://github.com/chengstark/SiamAF",
+      "tag_commit": "c05be9e37d2013d0817aafc5b2e72b2f7649e95e",
+      "license": "MIT",
+      "license_evidence": "repository LICENSE is MIT (code and released checkpoint)",
+      "rights_verdict": "clear",
+      "status": "shadow_eligible",
+      "status_reason": "optional second rhythm adapter for comparison only; strict state-dict load (verified leading module. prefix stripped, weights_only=True, CPU, eval + inference_mode); shares DeepBeat's WHOOP/ECG release gate; lower framework integration burden does not establish clinical readiness",
+      "provider_id": "sensor.biomarkers.rhythm.v1",
+      "wired": true,
+      "input_contract": "(batch, 1, 2400) float32 = 30 s; per-segment min-max normalization; two output logits non-AF=0/AF=1; the source's PPG resampling is used; its ECG bandpass is NOT a PPG preprocessing instruction; flat segments guarded",
+      "artifacts": [
+        {
+          "name": "final_model.pt",
+          "path": "siamaf/c05be9e37d/final_model.pt",
+          "url": "https://github.com/chengstark/SiamAF/raw/c05be9e37d2013d0817aafc5b2e72b2f7649e95e/proposed/saved_models/final_model.pt",
+          "size_bytes": 10915597,
+          "sha256": "a141b91cf5a5ef8eb4a2a6142273852ee2810a36e6fba1642a4836b3402176be",
+          "verify_at_startup": true,
+          "required_for_readiness": false
+        }
+      ],
+      "required_for_readiness": false,
+      "accuracy_label": "unverified_accuracy_shadow_only",
+      "runtime_note": "optional shadow lane, disabled by default (FRWHOOP_SIAMAF_SHADOW_ENABLED); never user-facing; a missing artifact never gates process readiness"
     }
   ]
 }
