@@ -334,6 +334,7 @@ struct StretchDetailSheet: View {
             Divider().opacity(0.4)
             overlapLines(title: String(localized: "The activity model read this time as"), model)
         }
+        ActivityExpertsBlock(summary: .over(start: s.start, end: s.end, runs: input.runs))
     }
 
     private func overlapLines(title: String, _ lines: [StretchModelContext.Overlap]) -> some View {

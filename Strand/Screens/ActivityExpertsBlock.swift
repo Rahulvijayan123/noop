@@ -16,8 +16,6 @@ struct ActivityExpertsSummary: Equatable {
     var detail: ActivityDetail?
     var gait: Gait?
 
-    var isEmpty: Bool { experts.isEmpty && detail == nil && gait == nil }
-
     private static let order = ["encoder", "hart_fine", "transition", "eldernet"]
 
     /// The runs overlapping [start, end), weighted by the seconds they overlap it.
@@ -46,6 +44,7 @@ struct ActivityExpertsSummary: Equatable {
                 gaitWindows += run.gaitStates
             }
         }
+        if gaitWeight > 0 { experts.insert("eldernet") }
         let ordered = order.filter(experts.contains) + experts.subtracting(order).sorted()
         let gait = gaitWeight > 0
             ? Gait(probability: gaitProb / gaitWeight,
@@ -81,30 +80,35 @@ struct ActivityExpertsBlock: View {
     let summary: ActivityExpertsSummary
 
     var body: some View {
-        if !summary.isEmpty {
-            VStack(alignment: .leading, spacing: 8) {
-                Divider().opacity(0.4)
-                Text("Evidence used")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                if !summary.experts.isEmpty {
-                    Text(summary.experts.map(ActivityExpertsSummary.name).joined(separator: " · "))
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 8) {
+            Divider().opacity(0.4)
+            Text("Evidence used")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+            if summary.experts.isEmpty {
+                Text("Only the strap's motion, steps and heart rate. The full activity breakdown, position-change expert and ElderNet gait appear once this day's raw motion has been processed.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(summary.experts.map(ActivityExpertsSummary.name).joined(separator: " · "))
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let detail = summary.detail {
+                row(String(localized: "Specific reading"), ActivityExpertsSummary.name(detail))
+            }
+            if let gait = summary.gait {
+                row(String(localized: "ElderNet: walking"), "\(Int((gait.probability * 100).rounded()))%")
+                if let cadence = gait.cadenceSpm {
+                    row(String(localized: "ElderNet: cadence"), "\(Int(cadence.rounded())) steps/min")
                 }
-                if let detail = summary.detail {
-                    row(String(localized: "Specific reading"), ActivityExpertsSummary.name(detail))
+                if let speed = gait.speedMps {
+                    row(String(localized: "ElderNet: speed"), String(format: "%.1f m/s", speed))
                 }
-                if let gait = summary.gait {
-                    row(String(localized: "ElderNet: walking"), "\(Int((gait.probability * 100).rounded()))%")
-                    if let cadence = gait.cadenceSpm {
-                        row(String(localized: "ElderNet: cadence"), "\(Int(cadence.rounded())) steps/min")
-                    }
-                    if let speed = gait.speedMps {
-                        row(String(localized: "ElderNet: speed"), String(format: "%.1f m/s", speed))
-                    }
-                }
+            } else {
+                row(String(localized: "ElderNet gait"), String(localized: "No reading here"))
             }
         }
     }
