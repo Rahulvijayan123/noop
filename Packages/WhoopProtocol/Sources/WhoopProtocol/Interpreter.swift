@@ -423,6 +423,21 @@ private func parseFrameWhoop5(_ frame: [UInt8], collectFields: Bool) -> ParsedFr
 /// `Whoop5HistoricalLayoutMapTests` pins the set against the decoder's actual behaviour.
 public let mappedWhoop5HistoricalVersions: Set<Int> = [18, 20, 21, 26]
 
+/// The 5/MG raw sensor layouts: v20 (2140-byte optical buffer) and v21 (1244-byte IMU buffer). Both are
+/// mapped and decode losslessly, and both carry, by design, no per-second heart rate and no gravity, so a
+/// test that asks "did this record yield HR or motion?" reads every intact one as undecodable. The strap
+/// banks them only while START_RAW_DATA is on, so during raw capture they are most of an offload's bytes.
+public let whoop5RawSensorHistoricalVersions: Set<Int> = [20, 21]
+
+/// Is this an INTACT 5/MG raw sensor record (v20/v21) — envelope and CRC verified? `parsed` must be
+/// `parseFrame(frame, family: .whoop5)`; it is passed in because callers on the offload path already
+/// hold it, and a second parse of a 2 KB record per frame is the cost this exists to avoid.
+public func isIntactWhoop5RawSensorRecord(_ frame: [UInt8], parsed p: ParsedFrame) -> Bool {
+    guard frame.count > 9, Int(frame[8]) == 47,
+          whoop5RawSensorHistoricalVersions.contains(Int(frame[9])) else { return false }
+    return p.ok && p.crcOK != false
+}
+
 /// True when `frame` is a WHOOP 5/MG type-47 record whose layout version has NO field map — the
 /// records that reach the unmapped branch of `decodeWhoop5Historical` and are therefore never
 /// re-derivable from anything NOOP stores. Non-type-47 and too-short frames are false.

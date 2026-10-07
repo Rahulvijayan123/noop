@@ -1563,6 +1563,17 @@ public final class BLEManager: NSObject, ObservableObject {
                                 rejectedSink: { [weak self] frames, trim, family in
                                     await self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
                                 },
+                                // The raw v20/v21 sample shares the archive but not the reject counters,
+                                // which drive the "couldn't be decoded" sync status.
+                                rawSampleSink: { [weak self] frames, trim, family in
+                                    guard let archive = self?.rejectedHistoryArchive else { return true }
+                                    // Off the main actor, like the reject archive above.
+                                    let outcome = await Task.detached(priority: .utility) {
+                                        archive.archive(frames, trim: trim, family: family)
+                                    }.value
+                                    if case .failed = outcome { return false }
+                                    return true
+                                },
                                 onChunk: { [weak self] decoded, console in
                                     if decoded { self?.state.decodedChunksThisSession += 1 }
                                     if console { self?.state.consoleChunksThisSession += 1 }
@@ -1879,6 +1890,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // re-add and leaving a stale key behind for a strap the user removed. Re-latching costs the same
         // five refusals it always did, so a strap that genuinely cannot bond is no worse off.
         HelloSuppressionStore.setSuppressed(releasedUUID, false)
+        SuppressedHelloRetry.clear(releasedUUID)
         bondGiveUp.reset()
         autoReconnectPausedForBondLoop = false
         bondLoopPausedAt = nil
@@ -2360,6 +2372,12 @@ public final class BLEManager: NSObject, ObservableObject {
         log("Raw-data session: stopped + flushed")
     }
 
+    /// True only while `stopUnexpectedRealtimeImu` is issuing its two stop writes, so `send()` admits them.
+    private var imuFailSafeStopInFlight = false
+    /// True only while `reconcileActivityImu` is issuing the lean raw-capture OFF writes (105/107/108).
+    private var leanRawCaptureInFlight = false
+    private var leanRawCaptureLogged = false
+
     /// Stop a realtime IMU producer left armed after a crash, lost stop write, or another client.
     private func stopUnexpectedRealtimeImu(_ frame: [UInt8], isOffload: Bool, now: Date = Date()) {
         guard selectedModel.deviceFamily == .whoop5, !isOffload, frame.count > 8,
@@ -2368,8 +2386,14 @@ public final class BLEManager: NSObject, ObservableObject {
               now.timeIntervalSince(rawCaptureStoppedAt) >= 3,
               now.timeIntervalSince(unexpectedImuStopAt) >= 30 else { return }
         unexpectedImuStopAt = now
+        // The send() allowlist admits raw-data commands only while a capture flag is set, and this path runs
+        // exactly when none is, so without its own admission both writes were dropped ("no WHOOP 5/MG framing")
+        // and the strap kept streaming AND banking raw records: after a drop mid-window it carried on through
+        // the whole time away, about 3.4 KB per second of extra history to offload later.
+        imuFailSafeStopInFlight = true
         send(.stopRawData, payload: [0x01], writeType: .withResponse)
         send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
+        imuFailSafeStopInFlight = false
         log("Raw IMU fail-safe: unexpected realtime packet type \(frame[8]) while capture was off; stop requested")
     }
 
@@ -2417,6 +2441,19 @@ public final class BLEManager: NSObject, ObservableObject {
             activityImuInFlight = true
             send(.startRawData, payload: [0x01], writeType: .withResponse)
             send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+            if ActivityImuCapture.leanRawCapture() {
+                // Keep the live IMU the activity models read; stop the strap banking raw optical + IMU to
+                // flash and streaming optical nobody reads (see `ActivityImuCapture.leanRawCapture`).
+                leanRawCaptureInFlight = true
+                for w in ActivityImuCapture.leanRawCaptureCommands {
+                    send(w.command, payload: w.payload, writeType: .withResponse)
+                }
+                leanRawCaptureInFlight = false
+                if !leanRawCaptureLogged {
+                    leanRawCaptureLogged = true
+                    log("Activity motion: lean raw capture - optical saving off (107), optical live off (108), IMU saving off (105); live IMU stays on")
+                }
+            }
         } else if !want && activityImuInFlight {
             // Stop while the flag still admits the writes, then release it.
             if !UserDefaults.standard.bool(forKey: "enableRawCapture") {
@@ -2520,6 +2557,13 @@ public final class BLEManager: NSObject, ObservableObject {
                 // user-started capture window is in flight; normal sync never enables this gate.
                 || ((rawCaptureInFlight || activityImuInFlight) && (command == .startRawData
                     || command == .stopRawData || command == .toggleIMUMode))
+                // Lean raw capture: the three saving/optical-live OFF writes, and only their off body.
+                || (leanRawCaptureInFlight && payload == [0x01, 0x00]
+                    && (command == .enableOpticalData || command == .toggleOpticalLive
+                        || command == .toggleIMUSaving))
+                // The raw-IMU fail-safe's STOP only (never a start): see `stopUnexpectedRealtimeImu`.
+                || (imuFailSafeStopInFlight && (command == .stopRawData
+                    || (command == .toggleIMUMode && payload.last == 0x00)))
                 // SET_CONFIG / SET_FF_VALUE (120), ENABLE direction — the R22 deep-stream unlock. Allowed
                 // only while the deep-data experiment is opted in, and only for a KEY and a VALUE the gate
                 // recognises: one of the sixteen R22 flags carrying that key's own enable value. The clause
@@ -4958,6 +5002,24 @@ public final class BLEManager: NSObject, ObservableObject {
         keepAliveTimer = t
     }
 
+    /// #1635 follow-up: give a SUPPRESSED 5/MG one more handshake on a link that has held steady, on the
+    /// `SuppressedHelloRetry` backoff. Without it a strap latched by a run of radio drops kept history sync
+    /// off until the user found the Connect button. A genuine ack clears the latch in `didWriteValueFor`.
+    private func retrySuppressedHelloIfDue(now: Date = Date()) {
+        guard selectedModel.deviceFamily == .whoop5, !didBond, clientHelloWriteAt == nil,
+              let p = peripheral, let c = cmdCharacteristic, let since = linkUpSince,
+              let hello = selectedModel.deviceFamily.clientHello else { return }
+        let id = p.identifier.uuidString
+        guard HelloSuppressionStore.suppressed(id) else { return }
+        let upSeconds = Double(DispatchTime.now().uptimeNanoseconds &- since.uptimeNanoseconds) / 1_000_000_000
+        guard SuppressedHelloRetry.isDue(now: now, linkUpSeconds: upSeconds,
+                                         nextRetryAt: SuppressedHelloRetry.nextRetryAt(id)) else { return }
+        SuppressedHelloRetry.noteAttempt(id, now: now)
+        log("WHOOP 5/MG: retrying the CLIENT_HELLO on a link that has held for \(Int(upSeconds))s (automatic retry \(SuppressedHelloRetry.attempts(id)); the handshake was switched off after earlier drops).")
+        clientHelloWriteAt = now
+        p.writeValue(Data(hello), for: c, type: .withResponse)
+    }
+
     private func keepAliveFire() {
         // #1635: a SUPPRESSED 5/MG never bonds, so a bare `didBond` gate switches this whole timer off for
         // exactly the link that now stays up for hours - taking the liveness watchdog below with it and
@@ -5004,6 +5066,8 @@ public final class BLEManager: NSObject, ObservableObject {
             lastRssiReadAt = Date()
             p.readRSSI()
         }
+
+        retrySuppressedHelloIfDue()
 
         // The watchdog above is the whole of the keep-alive an unbonded 5/MG can use. Everything below
         // sends puffin-framed work that needs the encrypted bond.
@@ -6368,6 +6432,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 state.append(log: rejects, domain: .connection)
             }
         }
+        // Read before the clear: the unanswered-hello check further down needs to know whether this link
+        // carried traffic, or whether it was a radio drop that would have happened with or without a hello.
+        let linkInboundFrames = inboundFrames
         // Clear the tally with the link, so a second teardown for the same drop cannot re-report it.
         inboundFrames = 0; inboundBytes = 0; cmdChannelFrames = 0
         rssiReads = 0; rssiWorstDbm = nil; rssiSumDbm = 0
@@ -6477,8 +6544,17 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // Read it HERE, while `clientHelloWriteAt` and `didBond` are both still valid, and feed it in
         // through the same split the auth path uses. `countsAsBondRefusal` gates on family, so a 4.0 (which
         // bonds cleanly) can never latch the suppression.
+        // Only a drop that the hello plausibly caused counts. At the edge of range links come up, carry
+        // nothing and die on the supervision timeout with or without a hello; counting those latched the
+        // suppression on straps that pair fine, which turned a walk out of range into "history sync off".
+        let helloOutstandingMs = clientHelloWriteAt.map { Int(Date().timeIntervalSince($0) * 1000) }
+        let helloEvidence = helloUnansweredIsEvidence(helloOutstandingMs: helloOutstandingMs,
+                                                      inboundFramesOnLink: linkInboundFrames)
+        if let ms = helloOutstandingMs, !helloEvidence, !didBond, selectedModel.deviceFamily == .whoop5 {
+            log("WHOOP 5/MG: CLIENT_HELLO was unanswered when the link dropped after \(ms)ms with \(linkInboundFrames) inbound frame(s) - a radio drop, not counted as the strap refusing the handshake.")
+        }
         if countsAsBondRefusal(isAuthRefusalStatus: false,
-                               helloUnacked: clientHelloWriteAt != nil,
+                               helloUnacked: helloEvidence,
                                alreadyBonded: didBond,
                                family: selectedModel.deviceFamily) {
             recordWhoop5BondRefusal(authRefusal: false,
@@ -7102,6 +7178,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // #1635: the handshake demonstrably works on this strap - drop the latch so a later
                 // transient failure starts from a clean slate rather than inheriting an old verdict.
                 HelloSuppressionStore.setSuppressed(peripheral.identifier.uuidString, false)
+                SuppressedHelloRetry.clear(peripheral.identifier.uuidString)
                 bondGiveUp.reset()
                 state.bonded = true
                 state.encryptedBond = true   // genuine encrypted bond (not the live-HR shortcut) — #69

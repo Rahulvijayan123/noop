@@ -3124,6 +3124,15 @@ class WhoopBleClient(
                 false
             }
         },
+        // The raw v20/v21 mapping sample: same archive, its own wording, never holds the ack.
+        rawSampleSink = { frames, trim ->
+            try {
+                rawHistoryArchive.append(frames, trim, connectedFamily).ok
+            } catch (t: Throwable) {
+                log("Backfill: raw v20/v21 sample archive write failed (${t.message})")
+                false
+            }
+        },
         log = { s -> log(s) },
         // Connection & Sync test mode (Test Centre): the cheap gate + tagged sink the Backfiller checks
         // before building any .connection diagnostic line. The gate is one SharedPreferences bool; nothing
@@ -11553,6 +11562,13 @@ class WhoopBleClient(
                 " " + disconnectStatusLabel(status) + " hadLink=" + (linkUpSinceMs != null),
         )
         val helloWasUnacked = clientHelloWriteAtMs > 0L
+        // Only a drop the hello plausibly caused counts toward the give-up: a link that carried traffic and
+        // held long enough for the strap to have timed the hello out. Edge-of-range links die empty either way.
+        val helloOutstandingMs = if (clientHelloWriteAtMs > 0L) System.currentTimeMillis() - clientHelloWriteAtMs else null
+        val helloEvidence = helloUnansweredIsEvidence(helloOutstandingMs, inboundFrames)
+        if (helloWasUnacked && !helloEvidence && connectedFamily == DeviceFamily.WHOOP5 && !didBond) {
+            log("WHOOP 5/MG: CLIENT_HELLO was unanswered when the link dropped after ${helloOutstandingMs}ms with $inboundFrames inbound frame(s) - a radio drop, not counted as the strap refusing the handshake.")
+        }
         // #1635: a CLIENT_HELLO that was accepted by the stack and never completed leaves no trace at
         // all - the dominant shape in the field capture (14 of 16). Say so before the state is reset.
         if (clientHelloWriteAtMs > 0L) {
@@ -11563,7 +11579,7 @@ class WhoopBleClient(
         // #1635: and count it as a refusal so the give-up can latch. Only when the status is NOT an auth
         // rejection - those already reach noteBondRefusalForPairingHint from onCharacteristicWrite, and
         // counting the same cycle twice would trip the give-up at half the intended streak.
-        if (helloWasUnacked && !isInsufficientAuthStatus(status)) {
+        if (helloWasUnacked && helloEvidence && !isInsufficientAuthStatus(status)) {
             noteBondRefusalForPairingHint(status, lastDeviceAddress, helloUnacked = true)
         }
 

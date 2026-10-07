@@ -270,11 +270,20 @@ final class Backfiller {
     /// both platforms examine the same frames and dump the same records. Twin of Android `spo2Examined`.
     private var spo2Examined = 0
 
+    /// Intact v20/v21 raw records each session may still add to the reject archive, as a sample for the
+    /// channel mapping work. Archiving every one cost a hex-encode and fsync on about half of each chunk's
+    /// frames ahead of the ack, and kept the 5 MB archive rewriting itself at its cap.
+    static let rawSensorArchiveSampleBudget = 8
+    private var rawSensorArchiveBudget = Backfiller.rawSensorArchiveSampleBudget
+
     /// Durably archives undecodable record frames BEFORE the trim ack (#77 / #91). Returns true once
     /// the bytes are safe (written OR cap-reached — either way the chunk may be acked) and false on a
     /// genuine write failure, in which case `finishChunk` holds the cursor/ack so the strap re-sends.
     /// nil in non-production inits (tests/preview) → archiving is skipped and acks proceed as before.
     private let rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)?
+    /// Archives the rolling sample of intact v20/v21 raw records (`rawSensorArchiveSampleBudget`). nil in
+    /// tests and previews.
+    private let rawSampleSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)?
     /// Per-chunk outcome hook (#77 family): (didDecodeSensorRows, wasConsoleOnly). Lets BLEManager
     /// tally a session so a COMPLETED-but-empty offload (all console, no sensor records) can tell the
     /// user their strap isn't banking, without false-positiving a normal caught-up sync.
@@ -302,6 +311,7 @@ final class Backfiller {
          enableRawCapture: Bool = false,
          log: ((String) -> Void)? = nil,
          rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)? = nil,
+         rawSampleSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)? = nil,
          onChunk: ((_ decoded: Bool, _ console: Bool) -> Void)? = nil,
          connectionActive: @escaping () -> Bool = { false },
          connectionLog: ((String) -> Void)? = nil,
@@ -320,6 +330,7 @@ final class Backfiller {
         self.enableRawCapture = enableRawCapture
         self.log = log
         self.rejectedSink = rejectedSink
+        self.rawSampleSink = rawSampleSink
         self.onChunk = onChunk
         self.connectionActive = connectionActive
         self.connectionLog = connectionLog
@@ -372,6 +383,7 @@ final class Backfiller {
         spo2Dumped = 0
         spo2DumpedByVersion = [:]
         spo2Examined = 0
+        rawSensorArchiveBudget = Backfiller.rawSensorArchiveSampleBudget
         // #547: the range markers belong to a connection's GET_DATA_RANGE, which BLEManager re-sets per
         // connect; clear them here so a fresh session never reuses a previous strap's window. BLEManager
         // re-publishes them as soon as the range reply arrives.
@@ -628,6 +640,9 @@ final class Backfiller {
         let parsed: [ParsedFrame]
         let decoded: Streams
         let rejected: [[UInt8]]
+        /// Intact v20/v21 raw sensor records: sensor data the strap banked, not console output, even
+        /// though they yield no rows (see `whoop5RawSensorHistoricalVersions`).
+        let rawSensor: [[UInt8]]
     }
 
     private func finishChunk(unix: UInt32, trim: UInt32, endFrame: [UInt8]) async {
@@ -678,7 +693,10 @@ final class Backfiller {
                 let parsed = frames.map { parseFrame($0, family: fam) }
                 let decoded = extractFn(parsed, dev, wall, fam, oldest, newest)
                 let rejected = rejectedHistoricalRecords(frames, family: fam)
-                return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected)
+                let rawSensor = fam == .whoop5
+                    ? zip(frames, parsed).filter { isIntactWhoop5RawSensorRecord($0.0, parsed: $0.1) }.map(\.0)
+                    : []
+                return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected, rawSensor: rawSensor)
             }.value
             // A new owner's offload: whatever is dated before the pairing is read so the ack can free it, and
             // goes no further. It is cut here, after decode and before every sink below (the store, the cloud
@@ -700,7 +718,8 @@ final class Backfiller {
                     onHistoryDiscarded?(cut.report)
                 }
                 let undatable = fenced || cut.streams.isEmpty
-                d = DecodedChunk(parsed: d.parsed, decoded: cut.streams, rejected: undatable ? [] : d.rejected)
+                d = DecodedChunk(parsed: d.parsed, decoded: cut.streams, rejected: undatable ? [] : d.rejected,
+                                 rawSensor: undatable ? [] : d.rawSensor)
             }
             let parsed = d.parsed
             // #1008: per-chunk clock basis + R-R packing. The session summary logs only the FIRST chunk's
@@ -879,10 +898,14 @@ final class Backfiller {
             // caught-up one (#77 family): did it decode sensor rows, and was it console-only?
             // A chunk whose records were all cut by the fence was not console output either: it held sensor
             // records, they just were not this owner's.
-            onChunk?(!decoded.isEmpty || fenced, decoded.isEmpty && rejected.isEmpty && !fenced)
+            // Intact v20/v21 raw records count as sensor data too: they yield no rows by design, and a chunk
+            // made only of them is the strap banking, not the strap emitting console output.
+            let rawSensor = !d.rawSensor.isEmpty
+            onChunk?(!decoded.isEmpty || fenced || rawSensor,
+                     decoded.isEmpty && rejected.isEmpty && !fenced && !rawSensor)
             // A chunk that produced no rows AND held no genuine rejects was pure console output — say
             // so calmly so it doesn't read as data loss (the "rejected frames" red herring, #77/#120).
-            if decoded.isEmpty && rejected.isEmpty && !fenced {
+            if decoded.isEmpty && rejected.isEmpty && !fenced && !rawSensor {
                 log?("Backfill: \(frames.count) frame(s) this chunk carried no sensor records (strap console/diagnostic output) — normal, nothing to persist (trim=\(trim)).")
             }
             // Log + hex-sample the GENUINE rejects whenever there are any — INCLUDING a partially-decoded
@@ -977,6 +1000,17 @@ final class Backfiller {
             // copy of an unmapped firmware's records. A genuine archive write FAILURE aborts the
             // chunk (no setCursor, no ack) so the strap re-sends it next session — no data loss
             // either way. (A full archive is reported as success by the sink; we still ack.)
+            // Intact v20/v21 raw records are no longer rejects, but their channels are still being mapped,
+            // so a small rolling sample keeps going to the archive (`rawSensorArchiveSampleBudget`).
+            // Kept apart from the rejects: those drive the "couldn't be decoded" sync status, and these
+            // decode fine. A failed sample write is logged, never a reason to hold the ack.
+            if rawSensorArchiveBudget > 0, !d.rawSensor.isEmpty, let rawSampleSink {
+                let rawSample = Array(d.rawSensor.prefix(rawSensorArchiveBudget))
+                rawSensorArchiveBudget -= rawSample.count
+                if !(await rawSampleSink(rawSample, trim, family)) {
+                    log?("Backfill: could not archive the raw v20/v21 sample (trim=\(trim)) - not holding the ack for it.")
+                }
+            }
             if !rejected.isEmpty, let rejectedSink {
                 guard await rejectedSink(rejected, trim, family) else {
                     log?("Backfill: rejected-frame archive failed (trim=\(trim)) — holding ack so the strap re-sends.")

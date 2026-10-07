@@ -358,6 +358,22 @@ fun decodeHistorical(frame: ByteArray, family: DeviceFamily = DeviceFamily.WHOOP
 val MAPPED_WHOOP5_HISTORICAL_VERSIONS: Set<Int> = setOf(18, 20, 21, 26)
 
 /**
+ * The 5/MG raw sensor layouts: v20 (2140-byte optical buffer) and v21 (1244-byte IMU buffer). Mapped, and
+ * by design carrying no per-second heart rate and no gravity, so the decode-outcome test in
+ * [rejectedHistoricalRecords] read every intact one as undecodable. Twin of the Swift
+ * `whoop5RawSensorHistoricalVersions`.
+ */
+val WHOOP5_RAW_SENSOR_HISTORICAL_VERSIONS: Set<Int> = setOf(20, 21)
+
+/** Is this an INTACT 5/MG raw sensor record (v20/v21)? Twin of the Swift `isIntactWhoop5RawSensorRecord`. */
+fun isIntactWhoop5RawSensorRecord(frame: ByteArray): Boolean {
+    if (frame.size <= 9) return false
+    if ((frame[8].toInt() and 0xFF) != PacketType.HISTORICAL_DATA.rawValue) return false
+    if ((frame[9].toInt() and 0xFF) !in WHOOP5_RAW_SENSOR_HISTORICAL_VERSIONS) return false
+    return Framing.parseFrame(frame, DeviceFamily.WHOOP5).ok
+}
+
+/**
  * WHOOP 5/MG historical layouts v20 (optical) and v21 (raw 6-axis IMU). Port of the Swift
  * `decodeWhoop5HistoricalV2021`, which this platform has had the decoders for all along:
  * [Whoop5RawOptical] and [Whoop5RawImu] existed here but were wired only to the live deep-buffer route,
@@ -717,6 +733,17 @@ fun rejectedHistoricalRecords(
         // so skipping it on the version byte alone would leave it stored nowhere while its section is
         // acked anyway. Bind the skip to the verdict, not to the version. Twin of the Swift clause.
         if (family == DeviceFamily.WHOOP5 && frame.histU8(9, frame.size) == 26) {
+            return@filter !Framing.parseFrame(frame, family).ok
+        }
+        // v20 optical / v21 IMU: mapped layouts whose intact records carry no HR and no gravity BY DESIGN,
+        // so the decode-outcome test below read every one as undecodable. During raw capture that archived
+        // about half the frames of every chunk ahead of the ack and kept the archive pinned at its cap,
+        // evicting the genuinely unknown records it exists for. The Backfiller still archives a small
+        // per-session sample of them for the channel-mapping work. Same verdict-bound rule as v26: a
+        // corrupt one is still archived. Twin of the Swift clause.
+        if (family == DeviceFamily.WHOOP5 &&
+            (frame.histU8(9, frame.size) ?: -1) in WHOOP5_RAW_SENSOR_HISTORICAL_VERSIONS
+        ) {
             return@filter !Framing.parseFrame(frame, family).ok
         }
         // UNMAPPED LAYOUT (5/MG) — archive UNCONDITIONALLY, whatever it decoded.
