@@ -30,6 +30,7 @@ from .labels import (
     DEFAULT_TAU_S,
     MIN_GT_EVENTS_FOR_REPORT,
     TAUS_S,
+    TSCS_HOLD_WINDOWS,
     EvalUnit,
     LabelRecord,
     WindowPrediction,
@@ -442,12 +443,54 @@ def render_markdown(report: Dict[str, Any], inputs: Dict[str, Any]) -> str:
                 lines.append("")
                 lines.extend(_transition_rows(hr))
                 lines.append("")
+                lines.append("#### Temporal (online/streaming)")
+                lines.append("")
+                lines.extend(_temporal_rows(hr))
+                lines.append("")
                 lines.append("#### Per-session")
                 lines.append("")
                 lines.extend(_per_session_rows(hr))
                 lines.append("")
         lines.append("")
     return "\n".join(lines)
+
+
+def _temporal_rows(hr: Dict[str, Any]) -> List[str]:
+    t = hr.get("temporal")
+    if not isinstance(t, dict):
+        return []
+    out = ["| metric | value |", "|---|---|"]
+    lad = t.get("label_acquisition_delay_s")
+    if lad is None:
+        out.append("| label acquisition delay | — (no truth changes) |")
+    else:
+        out.append(
+            f"| label acquisition delay | median {_fmt(lad.get('median_s'), 1)} s"
+            f" · p90 {_fmt(lad.get('p90_s'), 1)} s"
+            f" · acquired {lad.get('n_acquired')} / censored {lad.get('n_censored')} |")
+    td = t.get("transition_delay_s")
+    if td is None:
+        out.append("| transition delay | — (no truth changes) |")
+    else:
+        out.append(
+            f"| transition delay | signed bias {_fmt(td.get('signed_bias_s'), 1)} s"
+            f" · |TD| median {_fmt(td.get('median_abs_s'), 1)} s"
+            f" · p90 {_fmt(td.get('p90_abs_s'), 1)} s · paired {td.get('n_paired')} |")
+    fr = t.get("flip_rate") or {}
+    out.append(
+        f"| flips/h | {_fmt(fr.get('flips_per_hour'), 2)}"
+        f" ({fr.get('flips')} flips over {_fmt(fr.get('monitored_hours'), 3)} h) |")
+    out.append(
+        f"| median non-unknown run length | {_fmt(fr.get('median_run_length_windows'), 1)} windows |")
+    tscs = t.get("time_to_stable_correct_s")
+    if tscs is None:
+        out.append(f"| time-to-stable-correct (K={TSCS_HOLD_WINDOWS}) | — (no truth changes) |")
+    else:
+        out.append(
+            f"| time-to-stable-correct (K={TSCS_HOLD_WINDOWS}) | median {_fmt(tscs.get('median_s'), 1)} s"
+            f" · p90 {_fmt(tscs.get('p90_s'), 1)} s"
+            f" · reached {tscs.get('n_acquired')} / never {tscs.get('n_never')} |")
+    return out
 
 
 def _compact_summary(report: Dict[str, Any]) -> str:

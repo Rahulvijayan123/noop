@@ -32,8 +32,13 @@ final class ActivityGroundTruthStore: @unchecked Sendable {
     private let lock = NSLock()
     private var cache: [ActivityGroundTruthLabel]?
     private let coverageReader: CoverageReader
+    private let currentBuild: @Sendable () -> String?
 
-    init(fileURL: URL? = nil, coverageReader: @escaping CoverageReader = ActivityGroundTruthStore.readCoverageSeconds) {
+    init(fileURL: URL? = nil, coverageReader: @escaping CoverageReader = ActivityGroundTruthStore.readCoverageSeconds,
+         currentBuild: @escaping @Sendable () -> String? = {
+             Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+         }) {
+        self.currentBuild = currentBuild
         if let fileURL {
             self.fileURL = fileURL
         } else {
@@ -99,6 +104,88 @@ final class ActivityGroundTruthStore: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         cache = []
         try? FileManager.default.removeItem(at: fileURL)
+        try? FileManager.default.removeItem(at: quarantineURL)
+    }
+
+    // MARK: - Quarantine
+
+    /// One label the server refused as malformed, parked out of the upload queue.
+    struct QuarantinedLabel: Codable, Equatable {
+        var label: ActivityGroundTruthLabel
+        var reason: String
+        /// The app build that was running when the server refused it.
+        var build: String?
+    }
+
+    private var quarantineURL: URL {
+        fileURL.deletingLastPathComponent()
+            .appendingPathComponent(fileURL.deletingPathExtension().lastPathComponent + ".quarantine.json")
+    }
+
+    /// Move labels the server refused as structurally invalid (`invalid_*`) out of the upload queue, so one
+    /// malformed label does not get re-sent on every scene activation. They are kept, not deleted: an
+    /// `invalid_*` refusal can also mean the server is older than the app (a vocabulary value it does not know
+    /// yet), and these are the user's own labels. A label edited after the refused copy was sent stays queued.
+    @discardableResult
+    func quarantine(_ refused: [(labelKey: String, updatedAt: Date, reason: String)]) -> Int {
+        guard !refused.isEmpty else { return 0 }
+        lock.lock(); defer { lock.unlock() }
+        var rows = loadLocked()
+        var parked = loadQuarantineLocked()
+        let build = currentBuild()
+        var moved = 0
+        for r in refused {
+            guard let i = rows.firstIndex(where: { $0.labelKey == r.labelKey }),
+                  rows[i].updatedAt <= r.updatedAt else { continue }
+            parked.removeAll { $0.label.labelKey == r.labelKey }
+            parked.append(QuarantinedLabel(label: rows[i], reason: r.reason, build: build))
+            rows.remove(at: i)
+            moved += 1
+        }
+        guard moved > 0 else { return 0 }
+        saveQuarantineLocked(parked)
+        saveLocked(rows)
+        return moved
+    }
+
+    func quarantined() -> [QuarantinedLabel] {
+        lock.lock(); defer { lock.unlock() }
+        return loadQuarantineLocked()
+    }
+
+    /// Put quarantined labels back in the queue once a different app build is running — the build that
+    /// built them wrong, or the server that did not know their values yet, may have been fixed since. A
+    /// label re-saved meanwhile under the same key keeps its newer copy.
+    func releaseQuarantined() {
+        lock.lock(); defer { lock.unlock() }
+        let parked = loadQuarantineLocked()
+        guard !parked.isEmpty else { return }
+        let build = currentBuild()
+        let (release, keep) = (parked.filter { $0.build != build }, parked.filter { $0.build == build })
+        guard !release.isEmpty else { return }
+        var rows = loadLocked()
+        let present = Set(rows.map(\.labelKey))
+        rows.append(contentsOf: release.map(\.label).filter { !present.contains($0.labelKey) })
+        saveLocked(rows)
+        saveQuarantineLocked(keep)
+    }
+
+    private func loadQuarantineLocked() -> [QuarantinedLabel] {
+        guard let data = try? Data(contentsOf: quarantineURL), !data.isEmpty else { return [] }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601WithFractionalSeconds
+        if let parked = try? decoder.decode([QuarantinedLabel].self, from: data) { return parked }
+        setAside(data)
+        return []
+    }
+
+    private func saveQuarantineLocked(_ parked: [QuarantinedLabel]) {
+        if parked.isEmpty { try? FileManager.default.removeItem(at: quarantineURL); return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601WithFractionalSeconds
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(parked) else { return }
+        try? data.write(to: quarantineURL, options: [.atomic])
     }
 
     /// Pure coverage over a flat second list. A second counts when it lies in the half-open interval
@@ -292,6 +379,8 @@ final class ActivityGroundTruthCloudSync: Sendable {
         var uploaded = 0
         var rejected = 0
         var blocked: Blocked?
+        /// Labels refused as structurally invalid and moved out of the queue (see `quarantine`).
+        var quarantined = 0
         /// The server's reason for each label it did not take, by label key.
         var refusals: [String: String] = [:]
     }
@@ -301,6 +390,7 @@ final class ActivityGroundTruthCloudSync: Sendable {
     @discardableResult
     func pushPending() async throws -> Outcome {
         var outcome = Outcome()
+        store.releaseQuarantined()
         let pending = store.pending()
         guard !pending.isEmpty else { return outcome }
         guard let id = identity() else { outcome.blocked = .signedOut; return outcome }
@@ -333,6 +423,11 @@ final class ActivityGroundTruthCloudSync: Sendable {
             for f in batch where !took.contains(f.labelKey) && reasons[f.labelKey] == nil {
                 reasons[f.labelKey] = "not_confirmed"
             }
+            let structural = batch.compactMap { label -> (labelKey: String, updatedAt: Date, reason: String)? in
+                guard let reason = reasons[label.labelKey], reason.hasPrefix("invalid_") else { return nil }
+                return (label.labelKey, label.updatedAt, reason)
+            }
+            outcome.quarantined += store.quarantine(structural)
             outcome.refusals.merge(reasons) { _, new in new }
         }
         return outcome

@@ -559,3 +559,44 @@ def test_head_mapping_unknown_abstains():
     assert units[1].predicted is None
     assert L.HART_LABEL_TO_HEADS["walking"] == {"locomotion": "walking"}
     assert L.HART_LABEL_TO_HEADS["unknown"] is None
+
+
+def _unit(s, e, session, truth="walking", predicted="walking"):
+    label = L.LabelRecord(start_ts=s, end_ts=e, locomotion=truth, session_id=session,
+                          sensor_quality=L.SensorQuality(expected_seconds=e - s,
+                                                         covered_seconds=e - s))
+    return L.EvalUnit(window=L.WindowPrediction(start_ts=s, end_ts=e, label=predicted or "unknown"),
+                      head="locomotion", truth=truth, predicted=predicted, session=session,
+                      model="hart", label_duration_s=e - s, label=label)
+
+
+def test_each_stretch_feedback_label_is_its_own_session():
+    # The phone's real key shape: stretch_feedback:<kind>:<stretchStart>:<labelStart>.
+    a = L._label_from_wire(wire_label("stretch_feedback:activity_context:5000:5000",
+                                      "stretch_feedback", None, 5000, 5100, "walking"))
+    b = L._label_from_wire(wire_label("stretch_feedback:activity_context:9000:9000",
+                                      "stretch_feedback", None, 9000, 9100, "walking"))
+    assert a.session == "stretch:activity_context:5000"
+    assert b.session == "stretch:activity_context:9000"
+
+
+def test_split_drops_windows_sharing_raw_seconds_across_sides():
+    # 4 s windows on a 2 s hop: the last window of A and the first of B overlap.
+    units = [_unit(0, 4, "A"), _unit(2, 6, "A"), _unit(4, 8, "B"), _unit(6, 10, "B")]
+    split = L.split_by_session([], units, holdout_sessions=1)
+    assert split.report["overlap_dropped_units"] == 2
+    assert [(u.window.start_ts, u.window.end_ts) for u in split.train_units] == [(0, 4)]
+    assert [(u.window.start_ts, u.window.end_ts) for u in split.test_units] == [(6, 10)]
+
+
+def test_split_keeps_everything_when_sides_do_not_touch():
+    units = [_unit(0, 4, "A"), _unit(100, 104, "B")]
+    split = L.split_by_session([], units, holdout_sessions=1)
+    assert split.report["overlap_dropped_units"] == 0
+    assert len(split.train_units) == 1 and len(split.test_units) == 1
+
+
+def test_brier_and_ece_score_a_prediction_outside_the_truth_classes_as_wrong():
+    units = [_unit(0, 4, "A", truth="walking", predicted="cycling")]
+    assert L.brier_per_head(units) == 1.0
+    assert L.ece_15_per_head(units) == 0.0
