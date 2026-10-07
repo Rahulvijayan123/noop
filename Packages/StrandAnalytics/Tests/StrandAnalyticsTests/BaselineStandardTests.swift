@@ -84,6 +84,9 @@ final class BaselineStandardTests: XCTestCase {
         XCTAssertEqual(BS.regimeTag(sourceId: "my-whoop", deviceModel: "WHOOP 4.0"), "whoop4")
         XCTAssertEqual(BS.regimeTag(sourceId: "whoop-abc", deviceModel: "WHOOP 5.0 / MG"), "whoop5")
         XCTAssertEqual(BS.regimeTag(sourceId: "my-whoop", deviceModel: nil), "whoop")
+        XCTAssertEqual(BS.regimeTag(sourceId: "my-whoop", deviceModel: "WHOOP"), "whoop",
+                       "the legacy label names no generation")
+        XCTAssertEqual(BS.regimeTag(sourceId: "whoop-1", deviceModel: "5.0 MG", deviceBrand: "WHOOP"), "whoop5")
         XCTAssertEqual(BS.regimeTag(sourceId: "oura-import", deviceModel: "Oura (import)"), "oura")
     }
 

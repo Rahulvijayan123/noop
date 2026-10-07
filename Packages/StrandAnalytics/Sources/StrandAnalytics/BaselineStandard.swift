@@ -1,4 +1,5 @@
 import Foundation
+import WhoopProtocol
 
 // BaselineStandard.swift — the ONE standard every personal baseline in the app follows (bw2 consistency pass,
 // 2026-10-07, branch feat/bw2-baseline-consistency).
@@ -197,15 +198,18 @@ public enum BaselineStandard {
     // MARK: - Rule 6: device regimes
 
     /// The regime tag of one day's source. The brand bucket (`Baselines.brandBucket`: WHOOP-origin ids are
-    /// one brand, each wearable export its own) refined to the WHOOP hardware family when the paired device's
-    /// model names it. An unknown WHOOP family stays "whoop" and is resolved by `resolveRegimes`, so a missing
-    /// model never opens a false era.
-    public static func regimeTag(sourceId: String, deviceModel: String? = nil) -> String {
+    /// one brand, each wearable export its own) refined to the WHOOP hardware family only on POSITIVE registry
+    /// evidence (`DeviceFamily.confirmedRegistryFamily`, the one interpreter of registry model labels; the
+    /// legacy "WHOOP" label names no generation). An unknown WHOOP family stays "whoop" and is resolved by
+    /// `resolveRegimes`, so a missing or legacy model never opens a false era.
+    public static func regimeTag(sourceId: String, deviceModel: String? = nil, deviceBrand: String? = nil) -> String {
         let brand = Baselines.brandBucket(sourceId)
-        guard brand == "whoop", let model = deviceModel?.lowercased() else { return brand }
-        if model.contains("4.0") || model.contains("whoop 4") { return "whoop4" }
-        if model.contains("5.0") || model.contains("whoop 5") || model.contains("mg") { return "whoop5" }
-        return brand
+        guard brand == "whoop", deviceModel != nil else { return brand }
+        switch DeviceFamily.confirmedRegistryFamily(model: deviceModel, brand: deviceBrand) {
+        case .whoop4?: return "whoop4"
+        case .whoop5?: return "whoop5"
+        case nil: return brand
+        }
     }
 
     /// Resolve per-day regime tags so only a POSITIVELY identified change opens an era. A nil tag (no source

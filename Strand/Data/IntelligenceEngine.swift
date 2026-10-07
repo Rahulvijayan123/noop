@@ -2091,12 +2091,13 @@ final class IntelligenceEngine: ObservableObject {
         // whose source is unknown inherit the nearest known tag (`BaselineStandard.resolveRegimes`), so only a
         // positively identified brand/family change opens an era. Generalises the respiration-only
         // `deviceEraEpoch` cut this block used to apply to every metric and every era boundary.
-        let modelById = Dictionary(regDevices.map { ($0.id, $0.model) }, uniquingKeysWith: { a, _ in a })
+        let deviceById = Dictionary(regDevices.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         var regimeByDay: [String: String] = [:]
         for (day, owner) in respSourceByDay {
             // Only this pass's freshly resolved owners know the hardware; a `hist` fallback id names the brand.
-            let model = resolvedScoreOwnerByDay[day] != nil ? modelById[owner] : nil
-            regimeByDay[day] = BaselineStandard.regimeTag(sourceId: owner, deviceModel: model)
+            let device = resolvedScoreOwnerByDay[day] != nil ? deviceById[owner] : nil
+            regimeByDay[day] = BaselineStandard.regimeTag(sourceId: owner, deviceModel: device?.model,
+                                                          deviceBrand: device?.brand)
         }
         let recoveryEpoch = Baselines.recoveryBaselineEpoch()
         // The epoch is read ONCE, here, and handed to the scored fold AND the trace below, so a diagnostic can
