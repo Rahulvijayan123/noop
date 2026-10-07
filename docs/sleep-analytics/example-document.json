@@ -1,0 +1,410 @@
+{
+  "_note": "Representative SYNTHETIC fixture output (no user data): a fully supported 8 h native night with a 10 min off-wrist interval. Truncated for documentation; the full document is ~32 KiB with the PRV window list.",
+  "schema_version": 1,
+  "algorithm_version": "nara-sleep-analytics-1",
+  "config_version": "v1",
+  "scope": "main_night",
+  "timezone": "America/Los_Angeles",
+  "start_at": "2025-11-05T23:00:00Z",
+  "end_at": "2025-11-06T07:00:00Z",
+  "fingerprint": "2d5283a2a013498f…",
+  "stage_source_version": "frwhoop-server-1",
+  "native_epoch_resolution_seconds": 30,
+  "input_revision": 7,
+  "fragments": [
+    {
+      "edited": false,
+      "end": 1762412400,
+      "end_at": "2025-11-06T07:00:00Z",
+      "id": "sleep-demo-1762383600",
+      "source_kind": "native_whoop_v2",
+      "start": 1762383600,
+      "start_at": "2025-11-05T23:00:00Z"
+    }
+  ],
+  "continuity": {
+    "quality": {
+      "fragment_span_seconds": 28800,
+      "group_span_seconds": 28800,
+      "inferred_gap_awake_seconds": 0,
+      "input_supported_fraction": 1,
+      "input_supported_seconds": 28800,
+      "label_supported_fraction": 0.9791666666666666,
+      "observed_labeled_seconds": 28200,
+      "source_resolution_seconds": 30,
+      "status": "available",
+      "stream_counts": {
+        "gravity_duplicate": 0,
+        "gravity_received": 28800,
+        "gravity_rejected": 0,
+        "gravity_valid": 28800,
+        "hr_duplicate": 0,
+        "hr_received": 28800,
+        "hr_rejected": 0,
+        "hr_valid": 28800
+      },
+      "unknown_seconds": 600
+    },
+    "observed_asleep_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 27120
+    },
+    "observed_waso_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 480
+    },
+    "inferred_gap_awake_seconds_within_sleep_period": {
+      "status": "available",
+      "unit": "s",
+      "value": 0
+    },
+    "estimated_waso_including_inferred_gaps_seconds": {
+      "status": "partial",
+      "unit": "s",
+      "value": 480
+    },
+    "rem_latency_from_sleep_onset_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 8100
+    },
+    "deep_latency_from_sleep_onset_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 3600
+    },
+    "longest_observed_sleep_bout_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 10320
+    },
+    "awakening_bout_count": {
+      "status": "available",
+      "unit": "count",
+      "value": 1
+    },
+    "sleep_to_wake_transition_count": {
+      "status": "available",
+      "unit": "count",
+      "value": 1
+    },
+    "sleep_to_wake_transitions_per_asleep_hour": {
+      "status": "available",
+      "unit": "per_h",
+      "value": 0.13274336283185842
+    }
+  },
+  "stage_dynamics": {
+    "stage_seconds": [
+      {
+        "label": "wake",
+        "seconds": {
+          "status": "available",
+          "unit": "s",
+          "value": 1080
+        }
+      },
+      {
+        "label": "light",
+        "seconds": {
+          "status": "available",
+          "unit": "s",
+          "value": 18720
+        }
+      },
+      {
+        "label": "deep",
+        "seconds": {
+          "status": "available",
+          "unit": "s",
+          "value": 3900
+        }
+      },
+      {
+        "label": "rem",
+        "seconds": {
+          "status": "available",
+          "unit": "s",
+          "value": 4500
+        }
+      },
+      {
+        "label": "unknown",
+        "seconds": {
+          "status": "available",
+          "unit": "s",
+          "value": 600
+        }
+      }
+    ],
+    "stage_bouts": [
+      {
+        "bout_count": {
+          "status": "available",
+          "unit": "count",
+          "value": 2
+        },
+        "censored_bout_count": {
+          "status": "available",
+          "unit": "count",
+          "value": 0
+        },
+        "complete_bout_count": {
+          "status": "available",
+          "unit": "count",
+          "value": 2
+        },
+        "label": "deep",
+        "longest_observed_seconds": {
+          "status": "available",
+          "unit": "s",
+          "value": 2700
+        },
+        "median_complete_bout_seconds": {
+          "reason": "insufficient_bouts",
+          "status": "unavailable",
+          "unit": "s"
+        },
+        "p90_complete_bout_seconds": {
+          "reason": "insufficient_bouts",
+          "status": "unavailable",
+          "unit": "s"
+        }
+      }
+    ],
+    "epoch_transitions": {
+      "counts": [
+        [
+          34,
+          2,
+          0,
+          0
+        ],
+        [
+          0,
+          617,
+          2,
+          3
+        ],
+        [
+          0,
+          2,
+          128,
+          0
+        ],
+        [
+          1,
+          2,
+          0,
+          147
+        ]
+      ],
+      "row_exposure": [
+        36,
+        622,
+        130,
+        150
+      ],
+      "epoch_seconds": 30,
+      "eligible_pair_count": {
+        "status": "available",
+        "unit": "count",
+        "value": 938
+      },
+      "stage_change_count": {
+        "status": "available",
+        "unit": "count",
+        "value": 12
+      }
+    }
+  },
+  "movement": {
+    "quality": {
+      "fragment_span_seconds": 28800,
+      "group_span_seconds": 28800,
+      "inferred_gap_awake_seconds": 0,
+      "input_supported_fraction": 1,
+      "input_supported_seconds": 28800,
+      "label_supported_fraction": 0.9791666666666666,
+      "observed_labeled_seconds": 28200,
+      "status": "available",
+      "stream_counts": {
+        "gravity_duplicate": 0,
+        "gravity_received": 28800,
+        "gravity_rejected": 0,
+        "gravity_valid": 28800,
+        "hr_duplicate": 0,
+        "hr_received": 28800,
+        "hr_rejected": 0,
+        "hr_valid": 28800
+      },
+      "unknown_seconds": 600
+    },
+    "movement_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 61
+    },
+    "eligible_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 28198
+    },
+    "movement_percentage": {
+      "status": "available",
+      "unit": "%",
+      "value": 0.2163273991063196
+    },
+    "movement_bout_count": {
+      "status": "available",
+      "unit": "count",
+      "value": 61
+    },
+    "immobility_bout_complete_count": {
+      "status": "available",
+      "unit": "count",
+      "value": 59
+    },
+    "longest_observed_immobility_seconds": {
+      "status": "available",
+      "unit": "s",
+      "value": 894
+    },
+    "threshold_g": 0.01,
+    "source_resolution": "gravity_1hz_adjacent"
+  },
+  "thermal": {
+    "quality": {
+      "fragment_span_seconds": 28800,
+      "group_span_seconds": 28800,
+      "inferred_gap_awake_seconds": 0,
+      "input_supported_fraction": 1,
+      "input_supported_seconds": 28800,
+      "label_supported_fraction": 0.9791666666666666,
+      "observed_labeled_seconds": 28200,
+      "status": "available",
+      "stream_counts": {
+        "gravity_duplicate": 0,
+        "gravity_received": 28800,
+        "gravity_rejected": 0,
+        "gravity_valid": 28800,
+        "hr_duplicate": 0,
+        "hr_received": 28800,
+        "hr_rejected": 0,
+        "hr_valid": 28800,
+        "temp_duplicate": 0,
+        "temp_eligible_minutes": 480,
+        "temp_implausible_rejected": 0,
+        "temp_not_worn_evidenced": 0,
+        "temp_off_wrist_rejected": 600,
+        "temp_received": 28800,
+        "temp_rejected": 600,
+        "temp_rewear_excluded_minutes": 5,
+        "temp_valid": 28200,
+        "temp_valid_minutes": 465,
+        "temp_whoop4_raw_band_rejected": 0
+      },
+      "unknown_seconds": 600
+    },
+    "night_median_c": {
+      "status": "available",
+      "unit": "°C",
+      "value": 33.44
+    },
+    "night_iqr_c": {
+      "status": "available",
+      "unit": "°C",
+      "value": 0.44999999999999574
+    },
+    "night_p95_minus_p05_c": {
+      "status": "available",
+      "unit": "°C",
+      "value": 0.7779999999999987
+    },
+    "pre_onset_slope_c_per_hour": {
+      "coverage": 0.16666666666666666,
+      "eligible_minutes": 60,
+      "longest_missing_run_seconds": 0,
+      "valid_minutes": 10,
+      "value": {
+        "reason": "insufficient_coverage",
+        "status": "unavailable",
+        "unit": "°C/h"
+      },
+      "window_end": 1762384200,
+      "window_start": 1762380600
+    },
+    "equilibration_excluded_minutes": 5,
+    "rewear_event_verified": true,
+    "conversion_identity": "whoop5-centidegree"
+  },
+  "prv_diagnostics": {
+    "quality": {
+      "fragment_span_seconds": 28800,
+      "group_span_seconds": 28800,
+      "inferred_gap_awake_seconds": 0,
+      "input_supported_fraction": 1,
+      "input_supported_seconds": 28800,
+      "label_supported_fraction": 0.9791666666666666,
+      "observed_labeled_seconds": 28200,
+      "status": "available",
+      "stream_counts": {
+        "gravity_duplicate": 0,
+        "gravity_received": 28800,
+        "gravity_rejected": 0,
+        "gravity_valid": 28800,
+        "hr_duplicate": 0,
+        "hr_received": 28800,
+        "hr_rejected": 0,
+        "hr_valid": 28800,
+        "rr_cleaned_survivors": 28800,
+        "rr_deduped": 28800,
+        "rr_in_fragments": 28800,
+        "rr_original_pairs": 28799,
+        "rr_received": 28800,
+        "rr_true_cleaned_pairs": 28799,
+        "rr_unresolved_adjacencies": 0
+      },
+      "unknown_seconds": 600
+    },
+    "nightly_sd1_ms": {
+      "status": "available",
+      "unit": "ms",
+      "value": 34.71848801963098
+    },
+    "nightly_sd2_ms": {
+      "status": "available",
+      "unit": "ms",
+      "value": 34.65715870115055
+    },
+    "nightly_ratio": {
+      "status": "available",
+      "unit": "",
+      "value": 1.0017696003013195
+    },
+    "eligible_window_count": {
+      "status": "available",
+      "unit": "count",
+      "value": 96
+    },
+    "withheld_window_count": {
+      "status": "available",
+      "unit": "count",
+      "value": 0
+    },
+    "rejection_fraction": {
+      "status": "available",
+      "unit": "",
+      "value": 0
+    },
+    "valid_pairs": {
+      "status": "available",
+      "unit": "count",
+      "value": 28704
+    },
+    "timing_method": "ts_seq_ord_chain",
+    "source": "prv_optical"
+  }
+}
