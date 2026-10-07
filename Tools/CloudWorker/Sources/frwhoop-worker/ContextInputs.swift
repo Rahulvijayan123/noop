@@ -200,6 +200,9 @@ enum ContextInputs {
         /// Nightly `daily.<field>` values (only numeric, finite ones).
         var values: [String: Double]
         var restingHRInt: Int?
+        /// `daily.hrv_provenance` of a substituted nightly HRV (`provider:<id>@<version>`), nil for the scorer's
+        /// own analyzer (D3-16).
+        var hrvProvenance: String? = nil
     }
 
     /// Everything one job read. Plain rows: the pure `assemble` step turns them into engine inputs.
@@ -217,6 +220,8 @@ enum ContextInputs {
         var workouts: [PC.WorkoutInput] = []
         var epochs: [PC.ActivityEpochInput] = []
         var intervals: [PC.ActivityIntervalInput] = []
+        /// Decoder transition events of the same chosen documents as `intervals`.
+        var transitions: [PC.TransitionEventInput] = []
         var placements: [PC.PlacementInput] = []
         var device: DeviceRow?
         var profile: ProfileRow?
@@ -247,6 +252,7 @@ enum ContextInputs {
             l.workouts.sort { ($0.interval, $0.id) < ($1.interval, $1.id) }
             l.epochs.sort { ($0.epoch.startTs, $0.revision, $0.epoch.endTs) < ($1.epoch.startTs, $1.revision, $1.epoch.endTs) }
             l.intervals.sort { ($0.interval, $0.revision, $0.activityClass) < ($1.interval, $1.revision, $1.activityClass) }
+            l.transitions.sort { ($0.ts, $0.kind, $0.revision, $0.probability) < ($1.ts, $1.kind, $1.revision, $1.probability) }
             l.placements.sort { a, b in
                 let ka = (a.start, a.end ?? Int.max, a.revision, a.recordedAt ?? -1, a.placement, a.source)
                 let kb = (b.start, b.end ?? Int.max, b.revision, b.recordedAt ?? -1, b.placement, b.source)
@@ -259,7 +265,8 @@ enum ContextInputs {
 
         var rowCount: Int {
             heartRate.count + beatIntervals.count + motion.count + steps.count + skin.count + wearEvents.count
-                + bandSleep.count + workouts.count + epochs.count + intervals.count + placements.count
+                + bandSleep.count + workouts.count + epochs.count + intervals.count + transitions.count
+                + placements.count
                 + exposures.count + historyValues.count + historyBouts.count + frozen.count
                 + otherSnapshots.count + (snapshot == nil ? 0 : 1)
         }
@@ -367,11 +374,18 @@ enum ContextInputs {
         func optional<T>(_ name: String, _ body: () throws -> T) throws -> T? {
             try optionalRead(name, unavailable: &out.unavailable) { try db.isolatingFailures(body) }
         }
+        // One revision per UTC epoch day, one chosen decoder document per UTC day (runs and events from the same
+        // document); a causal job reads what was published by its cutoff.
+        let activityCutoff = historyCutoffParameter(job)
         out.epochs = try optional("activity_epochs_unavailable") {
-            try db.query(ContextSQL.activityEpochs, read).compactMap(parseEpoch)
+            try db.query(ContextSQL.activityEpochs, read + [w.utcFrom, w.utcTo, activityCutoff]).compactMap(parseEpoch)
         } ?? []
+        let documents = read + [w.utcFrom, w.utcTo, ActivityContextVersions.decoder, activityCutoff]
         out.intervals = try optional("activity_days_unavailable") {
-            try db.query(ContextSQL.activityRuns, read + [w.utcFrom, w.utcTo]).compactMap(parseRun)
+            try db.query(ContextSQL.activityRuns, documents).compactMap(parseRun)
+        } ?? []
+        out.transitions = try optional("activity_transitions_unavailable") {
+            try db.query(ContextSQL.activityTransitions, documents).compactMap(parseTransition)
         } ?? []
         out.placements = try optional("placement_unavailable") {
             try db.query(ContextSQL.placements, read).compactMap(parsePlacement)
@@ -480,20 +494,37 @@ enum ContextInputs {
             sleepState: SleepStateLabel(rawValue: r["sleep_state"] ?? "") ?? .unknown,
             exertion: ExertionContext(rawValue: r["exertion_context"] ?? "") ?? .unknown,
             wear: WearState(rawValue: r["wear_state"] ?? "") ?? .unknown,
+            wearSignal: nonEmpty(r["wear_signal"]).flatMap(WearSignalState.init(rawValue:)),
             confidence: Double(r["confidence"] ?? "") ?? 0,
             observedS: Int(r["observed_s"] ?? "") ?? 0,
             validS: Int(r["valid_s"] ?? "") ?? 0)
-        return PC.ActivityEpochInput(epoch: epoch, revision: revision, availableAt: Int(r["at"] ?? ""))
+        return PC.ActivityEpochInput(epoch: epoch, revision: revision, availableAt: Int(r["at"] ?? ""),
+                                     modelVersion: nonEmpty(r["model_version"]),
+                                     preprocessingVersion: nonEmpty(r["preprocessing_version"]))
     }
 
     static func parseRun(_ r: [String: String]) -> PC.ActivityIntervalInput? {
         guard let s = Int(r["s"] ?? ""), let e = Int(r["e"] ?? ""), e > s,
               let revision = Int(r["revision"] ?? "") else { return nil }
         let confidence = Double(r["confidence"] ?? "").map { min(1, max(0, $0)) } ?? 0
+        // `in_bed` is written only when true (`ActivityContextRun`), so its absence is "not in bed" on a document
+        // that has the field at all; older decoders never wrote it, and the engine treats false as no evidence.
+        let inBed: Bool? = r["in_bed"].map { $0 == "true" }
         return PC.ActivityIntervalInput(interval: PC.Interval(s, e), activityClass: nonEmpty(r["class"]) ?? "unknown",
                                         confidence: confidence, sleep: nonEmpty(r["sleep"]),
                                         wear: nonEmpty(r["wear"]), revision: revision,
-                                        availableAt: Int(r["at"] ?? ""))
+                                        availableAt: Int(r["at"] ?? ""), inBed: inBed,
+                                        decoderVersion: nonEmpty(r["decoder_version"]),
+                                        algorithmVersion: nonEmpty(r["algorithm_version"]))
+    }
+
+    static func parseTransition(_ r: [String: String]) -> PC.TransitionEventInput? {
+        guard let ts = Int(r["ts"] ?? ""), let kind = nonEmpty(r["kind"]),
+              let revision = Int(r["revision"] ?? "") else { return nil }
+        let p = Double(r["probability"] ?? "").flatMap(finite).map { min(1, max(0, $0)) } ?? 0
+        return PC.TransitionEventInput(ts: ts, kind: kind, probability: p, revision: revision,
+                                       availableAt: Int(r["at"] ?? ""), decoderVersion: nonEmpty(r["decoder_version"]),
+                                       algorithmVersion: nonEmpty(r["algorithm_version"]))
     }
 
     /// Scope of a placement record (review RC-17): `device` when the row names the device, `account` for the
@@ -559,12 +590,24 @@ enum ContextInputs {
             }
             restingInt = values["resting_hr_bpm"].map { Int($0.rounded()) }
         }
-        return Snapshot(day: day, resultRevision: resultRevision, inputRevision: inputRevision,
-                        availableAt: availableAt, status: obj["status"] as? String,
-                        dataThrough: (obj["dataThrough"] as? String).flatMap(parseInstant)
-                            ?? number(obj["dataThrough"]).map { Int($0) },
-                        timezone: (obj["timezone"] as? String).flatMap(nonEmpty),
-                        sessions: sessions, values: values, restingHRInt: restingInt)
+        var snapshot = Snapshot(day: day, resultRevision: resultRevision, inputRevision: inputRevision,
+                                availableAt: availableAt, status: obj["status"] as? String,
+                                dataThrough: (obj["dataThrough"] as? String).flatMap(parseInstant)
+                                    ?? number(obj["dataThrough"]).map { Int($0) },
+                                timezone: (obj["timezone"] as? String).flatMap(nonEmpty),
+                                sessions: sessions, values: values, restingHRInt: restingInt)
+        snapshot.hrvProvenance = hrvProvenance((obj["daily"] as? [String: Any])?["hrv_provenance"])
+        return snapshot
+    }
+
+    /// `provider:<id>@<version>` when the nightly HRV was substituted from another provider
+    /// (`DayScoring.applyActiveHrvSubstitution` writes `daily.hrv_provenance`); nil otherwise.
+    static func hrvProvenance(_ any: Any?) -> String? {
+        guard let p = any as? [String: Any] else { return nil }
+        let source = (p["canonical_source"] as? String) ?? "provider"
+        let id = (p["provider_id"] as? String).flatMap(nonEmpty) ?? "unknown"
+        let version = (p["provider_version"] as? String).flatMap(nonEmpty) ?? "unknown"
+        return "\(source):\(id)@\(version)"
     }
 
     static func number(_ any: Any?) -> Double? {
@@ -774,7 +817,12 @@ enum ContextInputs {
                 if nights.mainFromNapFlagged { notes.append(mainSleepFromNapFlagged) }
             }
             let key = "daily.\(f.field)" + (notes.isEmpty ? "" : "#" + notes.sorted().joined(separator: ";"))
-            let method = PC.MethodRef(id: "snapshot.\(f.name).night", algorithmVersion: scoringAlgorithmVersion,
+            // A substituted nightly HRV is another method: its algorithm (and so its measurement regime) names the
+            // provider, so it never pools with the scorer's own nights (D3-16).
+            let provenance = f.field == "hrv_rmssd_ms" ? s.hrvProvenance : nil
+            let method = PC.MethodRef(id: "snapshot.\(f.name).night",
+                                      algorithmVersion: provenance.map { "\(scoringAlgorithmVersion)+\($0)" }
+                                          ?? scoringAlgorithmVersion,
                                       aggregation: .session, windowS: support.duration, units: f.units)
             let samples = f.field == "spo2_candidate_pct" ? s.values["spo2_candidate_samples"].map { Int($0) } : nil
             out.append(PC.MeasurementInput(
@@ -856,7 +904,7 @@ enum ContextInputs {
             steps: loaded.steps, skinTemperature: skin, wearEvents: loaded.wearEvents,
             bandSleepStates: loaded.bandSleep, sleepSessions: sleep, workouts: loaded.workouts,
             activityEpochs: loaded.epochs, activityIntervals: loaded.intervals, placements: loaded.placements,
-            regime: regime, exposures: loaded.exposures)
+            regime: regime, exposures: loaded.exposures, activityTransitions: loaded.transitions)
         // The causal view first (so transport selection and the series see only what the decision could have
         // seen); a retrospective input passes through unchanged.
         let (view, excluded) = PC.Engine.causalView(unrestricted)
@@ -888,6 +936,7 @@ enum ContextInputs {
         var visible = loaded
         visible.epochs = view.activityEpochs
         visible.intervals = view.activityIntervals
+        visible.transitions = view.activityTransitions
         visible.placements = view.placements
         visible.exposures = view.exposures
         input.inputRevisions = inputRevisions(visible)
@@ -1041,12 +1090,32 @@ enum ContextInputs {
     /// visible collections; snapshots and history are already cut off at the cutoff by their queries.
     static func inputRevisions(_ l: Loaded) -> [PC.InputRevision] {
         func maxOf(_ values: [Int]) -> String { values.max().map(String.init) ?? "none" }
+        func distinct(_ values: [String]) -> String {
+            let set = Set(values)
+            return set.isEmpty ? "none" : set.sorted().joined(separator: ",")
+        }
+        func documentKey(_ e: PC.TransitionEventInput) -> String {
+            switch (e.algorithmVersion, e.decoderVersion) {
+            case let (a?, d?): return "\(a)/\(d)"
+            case let (a?, nil): return a
+            case let (nil, d?): return d
+            default: return "unknown"
+            }
+        }
         var out: [PC.InputRevision] = [
             PC.InputRevision(input: "scoring_snapshot", revision: l.snapshot.map { String($0.resultRevision) } ?? "none"),
             PC.InputRevision(input: "scoring_input", revision: l.snapshot.map { String($0.inputRevision) } ?? "none"),
             PC.InputRevision(input: "metric_series", revision: IntradaySeries.algorithmVersion),
             PC.InputRevision(input: "activity_epochs", revision: maxOf(l.epochs.map(\.revision))),
             PC.InputRevision(input: "activity_days", revision: maxOf(l.intervals.map(\.revision))),
+            // Which documents and models the activity context came from (D5-04, D5-13, D3-10): the chosen
+            // decoder document per day (`algorithm/decoder@revision`) and the epoch model lineages.
+            PC.InputRevision(input: "activity_days_documents", revision: distinct(
+                l.intervals.map { "\($0.provenance ?? "unknown")@\($0.revision)" }
+                    + l.transitions.map { "\(documentKey($0))@\($0.revision)" })),
+            PC.InputRevision(input: "activity_epochs_models", revision: distinct(l.epochs.map { $0.provenance ?? "unknown" })),
+            PC.InputRevision(input: "activity_transitions",
+                             revision: "\(l.transitions.count):\(maxOf(l.transitions.map(\.revision)))"),
             PC.InputRevision(input: "placement", revision: "\(l.placements.count):\(maxOf(l.placements.map(\.revision)))"),
             PC.InputRevision(input: "exposures", revision: "\(l.exposures.count):\(maxOf(l.exposures.map(\.availableAt)))"),
             PC.InputRevision(input: "other_day_snapshots", revision: maxOf(l.otherSnapshots.map { Int($0.resultRevision) })),
