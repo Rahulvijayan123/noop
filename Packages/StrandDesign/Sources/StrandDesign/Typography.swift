@@ -17,9 +17,10 @@ import AppKit
 //   Section title      20 Semibold       `title2`
 //   Card title         16 Semibold       `headline`
 //   Body               16 Regular        `body`
-//   Secondary          14 Regular        `subhead`
-//   Label              13 Medium         `overline`
-//   Metadata / charts  11–12             `caption`, `footnote`, `captionNumber`
+//   Secondary / label  14 Regular        `subhead` (the Label role: `Text.strandLabel()`)
+//   Compact label      13 Medium         `overline` (older; not used on content screens)
+//   Metadata / charts  11–12             `caption`, `footnote`, `captionNumber`, `axis`
+//   Symbols            by text style     `icon(_:)`
 //
 // Metric numerals never exceed `heroMaxSize`: an oversized score implies more precision than a
 // wearable estimate has. All numeric styles use `.monospacedDigit()` so live values never reflow.
@@ -184,6 +185,34 @@ public enum StrandFont {
         scaled(max(size, 11), weight: .medium, relativeTo: .caption2)
     }
 
+    /// Chart tick labels: the metadata size (12 Regular, anchored to footnote) with tabular digits, so
+    /// a column of y-axis values stays right-aligned and the x labels do not shift while scrubbing.
+    public static var axis: Font { footnote.monospacedDigit() }
+
+    /// Where an SF Symbol sits, which decides the size it renders at. Each role follows a system text
+    /// style, so icons grow with Dynamic Type alongside the text beside them (a fixed `.system(size:)`
+    /// does not).
+    public enum IconRole: Sendable {
+        /// Inside a line of metadata or a chip (the trend arrow, a source glyph): ~11 pt.
+        case inline
+        /// Beside a tile or stat label (the `MetricTile` icon): ~13 pt.
+        case tile
+        /// The leading icon of a list row, a chevron, a header button: ~17 pt.
+        case row
+        /// A large symbol standing on its own (an empty state, a hero): ~28 pt.
+        case hero
+    }
+
+    /// The symbol font for `role`.
+    public static func icon(_ role: IconRole) -> Font {
+        switch role {
+        case .inline: return .system(.caption2, weight: .semibold)
+        case .tile:   return .system(.footnote, weight: .medium)
+        case .row:    return .system(.body, weight: .regular)
+        case .hero:   return .system(.title, weight: .regular)
+        }
+    }
+
     /// Mono 13 (SF Mono) — raw / log views only.
     public static let mono = Font.system(size: 13, weight: .regular, design: .monospaced)
 
@@ -254,6 +283,13 @@ public extension Text {
     /// from ALL-CAPS overlines.)
     func strandOverline() -> some View {
         self.font(StrandFont.overline)
+            .foregroundStyle(StrandPalette.textSecondary)
+    }
+
+    /// The Label role (docs/DESIGN_SYSTEM.md, Type): `subhead` in `textSecondary`, for the name above or
+    /// beside a value (a tile label, a stat label). Replaces `strandOverline()` on content screens.
+    func strandLabel() -> some View {
+        self.font(StrandFont.subhead)
             .foregroundStyle(StrandPalette.textSecondary)
     }
 }
