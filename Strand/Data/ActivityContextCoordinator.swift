@@ -153,8 +153,17 @@ final class ActivityContextCoordinator {
         var fingerprints: [Int: String] = [:]
         var configTags: [Int: String] = [:]
         var candidates: [ActivityContextMaterialization.Candidate] = []
+        var unanswered: Set<Int> = []
         for day in days {
-            guard let owner = await repo.activityContextOwner(store: store, ids: ids, from: day.start, to: day.end) else { continue }
+            let probed: Repository.ActivityContextOwner?
+            do {
+                probed = try await repo.activityContextOwner(store: store, ids: ids, from: day.start, to: day.end)
+            } catch {
+                unanswered.insert(day.start)
+                log("Activity context: could not read \(day.key)'s heart rate: \(error)")
+                continue
+            }
+            guard let owner = probed else { continue }
             owners[day.start] = owner
             let configTag = repo.activityContextLedgerConfigTag(dayStart: day.start)
             configTags[day.start] = configTag
@@ -173,9 +182,11 @@ final class ActivityContextCoordinator {
         }
 
         // A day that still has stored context but no heart rate under any id (samples moved out, a device's data
-        // deleted) is forgotten under every id, so nothing describes seconds that have no data behind them.
+        // deleted) is forgotten under every id, so nothing describes seconds that have no data behind them. Only a
+        // pass whose every probe was answered clears anything: a failed read is not "no heart rate".
         let ledgerDays = Set(ledgers.values.flatMap(\.keys))
-        for day in ActivityContextMaterialization.orphanedDays(days, ledgerDays: ledgerDays, owned: Set(owners.keys)) {
+        for day in ActivityContextMaterialization.orphanedDays(days, ledgerDays: ledgerDays, owned: Set(owners.keys),
+                                                               unanswered: unanswered) {
             do {
                 try await store.clearActivityContext(deviceIds: ids, from: day.start, to: day.end)
                 checks[day.start] = nil

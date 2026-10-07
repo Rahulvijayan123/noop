@@ -16,11 +16,14 @@ extension Repository {
         let newestHeartRateTs: Int
     }
 
-    func activityContextOwner(store: WhoopStore, ids: [String], from: Int, to: Int) async -> ActivityContextOwner? {
+    ///
+    /// nil means the store answered for every id and none holds heart rate in the range. A failed read throws
+    /// instead, so a caller never takes a transient error for "this day has no data" (and clears its context).
+    func activityContextOwner(store: WhoopStore, ids: [String], from: Int, to: Int) async throws -> ActivityContextOwner? {
         var owner: String?
         var newest = Int.min
         for id in ids {
-            guard let ts = try? await store.newestHeartRateTs(deviceId: id, from: from, to: to) else { continue }
+            guard let ts = try await store.newestHeartRateTs(deviceId: id, from: from, to: to) else { continue }
             owner = owner ?? id
             newest = max(newest, ts)
         }

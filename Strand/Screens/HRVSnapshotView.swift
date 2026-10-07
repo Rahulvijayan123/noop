@@ -481,12 +481,14 @@ struct HRVSnapshotView: View {
     // MARK: - Save
 
     /// Persist the snapshot twice over:
-    ///  - as a timestamped spot record (`spotHrvReading`: the capture's own start and end, its clean-beat
-    ///    support, the method, and the stored activity context over the capture when the phone has it), keyed by
-    ///    the capture's start, so a second reading the same day is a second record;
     ///  - as the day's metric point (key "hrv_snapshot", source "manual-hrv"), which the per-source explorer and
     ///    the Android twin read. That one stays a day value: a second reading the same day overwrites it, as
-    ///    every other importer's upsert does.
+    ///    every other importer's upsert does. Written first, and on its own: the spot record below can never
+    ///    keep it from being saved;
+    ///  - as a timestamped spot record (`spotHrvReading`: the capture's own start and end, its clean-beat
+    ///    support and the method), keyed by the capture's start, so a second reading the same day is a second
+    ///    record. It holds no copy of the activity context: that joins by time (`spotHrvReadingCtx`), so the
+    ///    live day's provisional label never sticks to it.
     private func save(_ result: HRVAnalyzer.HRVResult) {
         guard let rmssd = result.rmssd else { return }
         let day = Repository.dayString(Date())
@@ -499,18 +501,20 @@ struct HRVSnapshotView: View {
                 return
             }
             do {
-                if let span {
-                    let context = await model.repo.storedActivityContextWithStatus(from: span.start, to: span.end)
-                    if let reading = HRVSnapshot.reading(result: result, start: span.start, end: span.end,
-                                                         context: context, createdAt: Int(Date().timeIntervalSince1970)) {
-                        try await store.saveSpotHrvReading(reading, deviceId: model.repo.deviceId)
-                    }
-                }
                 try await store.upsertMetricSeries([point], deviceId: HRVSnapshot.sourceId)
-                await model.repo.refresh()
             } catch {
                 saved = false
+                return
             }
+            if let span, let reading = HRVSnapshot.reading(result: result, start: span.start, end: span.end,
+                                                           createdAt: Int(Date().timeIntervalSince1970)) {
+                do {
+                    try await store.saveSpotHrvReading(reading, deviceId: model.repo.deviceId)
+                } catch {
+                    NSLog("HRV snapshot: could not save the spot record: \(error)")
+                }
+            }
+            await model.repo.refresh()
         }
     }
 
@@ -554,22 +558,13 @@ enum HRVSnapshot {
     /// rejected-fraction gate. Bump when that changes, so readings from different methods are never one regime.
     static let methodVersion = "spot-rmssd-1"
 
-    /// The spot record for a finished capture over `[start, end)`; nil when it produced no RMSSD. The stored
-    /// context is the interval overlapping the capture most (a convenience copy: the time join against the
-    /// stored intervals stays canonical), with the decoder version of the day it came from.
-    static func reading(result: HRVAnalyzer.HRVResult, start: Int, end: Int,
-                        context: Repository.StoredActivityContext?, createdAt: Int) -> SpotHrvReadingRow? {
+    /// The spot record for a finished capture over `[start, end)`; nil when it produced no RMSSD. Its activity
+    /// context is not copied in: it joins by time (`spotHrvReadingCtx`).
+    static func reading(result: HRVAnalyzer.HRVResult, start: Int, end: Int, createdAt: Int) -> SpotHrvReadingRow? {
         guard let rmssd = result.rmssd, end > start else { return nil }
-        let overlap = { (iv: ActivityContextInterval) in min(iv.end, end) - max(iv.start, start) }
-        let best = context?.intervals.filter { overlap($0) > 0 }.max { overlap($0) < overlap($1) }
-        let decoder = best.flatMap { iv in
-            context?.days.first { $0.dayStart <= iv.start && iv.start < $0.dayEnd && $0.status != .stale }?.decoderVersion
-        }
         return SpotHrvReadingRow(
             startTs: start, endTs: end, rmssd: rmssd, sdnn: result.sdnn, meanNN: result.meanNN,
             cleanBeats: result.nClean, inputBeats: result.nInput, source: sourceId, methodVersion: methodVersion,
-            ctxClass: best?.activityClass.rawValue, ctxPosture: best?.posture?.rawValue,
-            ctxConfidence: best?.confidence, ctxSleep: best?.sleep.rawValue, ctxWear: best?.wear.rawValue,
-            ctxDecoderVersion: decoder, createdAt: createdAt)
+            createdAt: createdAt)
     }
 }

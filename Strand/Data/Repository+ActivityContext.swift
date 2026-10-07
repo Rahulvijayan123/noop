@@ -15,28 +15,31 @@ extension Repository {
     ///
     /// This is today's config. A day decodes with `activityDecoderConfig(forDayStart:)`, whose resting rate is
     /// taken as of that day.
-    var activityDecoderConfig: ActivityDecoderConfig { activityDecoderConfig(throughDay: nil) }
+    var activityDecoderConfig: ActivityDecoderConfig { activityDecoderConfig(beforeDay: nil) }
 
     /// The config the local day starting at `dayStart` decodes with: the resting-rate reference is the median of
-    /// the latest 14 nights up to and including that day, never nights after it (D1-14). A past day's context
+    /// the latest 14 nights BEFORE that day (D1-14). Not the day's own night either: that sleep ends on the morning
+    /// of the day, so its seconds after midnight would be judged against data from hours later, and the decode is
+    /// recorded as causal. A day with no earlier night uses the default reference. A past day's context
     /// therefore does not depend on later nights, and its config tag — which the persisted ledger compares —
     /// stays put as new nights arrive, so a moving reference re-derives only the days it actually applies to.
     func activityDecoderConfig(forDayStart dayStart: Int) -> ActivityDecoderConfig {
-        activityDecoderConfig(throughDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))))
+        activityDecoderConfig(beforeDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))))
     }
 
-    private func activityDecoderConfig(throughDay: String?) -> ActivityDecoderConfig {
-        var config = activityBaseDecoderConfig(throughDay: throughDay)
+    private func activityDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+        var config = activityBaseDecoderConfig(beforeDay: beforeDay)
         config.personalProfile = ActivityPersonalProfileStore.shared.adoptedProfile
         return config
     }
 
     /// `activityDecoderConfig` without the personal profile: what a personal fit is replayed with and has to beat.
-    var activityBaseDecoderConfig: ActivityDecoderConfig { activityBaseDecoderConfig(throughDay: nil) }
+    var activityBaseDecoderConfig: ActivityDecoderConfig { activityBaseDecoderConfig(beforeDay: nil) }
 
-    /// `throughDay` (`yyyy-MM-dd`) limits the nights the resting reference is taken from; nil uses every night.
-    private func activityBaseDecoderConfig(throughDay: String?) -> ActivityDecoderConfig {
-        let nights = throughDay.map { key in days.filter { $0.day <= key } } ?? days
+    /// `beforeDay` (`yyyy-MM-dd`) limits the resting reference to the nights keyed strictly before it; nil uses
+    /// every night.
+    private func activityBaseDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+        let nights = beforeDay.map { key in days.filter { $0.day < key } } ?? days
         var config = ActivityDecoderConfig.personalized(
             restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: nights.map(\.restingHr)),
             maxHeartRate: activityMaxHeartRate)

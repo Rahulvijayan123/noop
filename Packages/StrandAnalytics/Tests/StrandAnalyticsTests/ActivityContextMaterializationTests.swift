@@ -264,6 +264,15 @@ final class ActivityContextMaterializationTests: XCTestCase {
         XCTAssertEqual(orphans.map(\.key), ["d1", "d3"])
     }
 
+    func testAFailedOwnerProbeOrphansNothingThatPass() {
+        let days = (0...4).map(day)
+        let ledgers: Set<Int> = [day(1).start, day(2).start, day(3).start]
+        // d3's probe threw: it is not "no heart rate", and neither is any other day trusted this pass.
+        XCTAssertEqual(M.orphanedDays(days, ledgerDays: ledgers, owned: [day(2).start], unanswered: [day(3).start]).map(\.key), [])
+        XCTAssertEqual(M.orphanedDays(days, ledgerDays: ledgers, owned: [day(2).start], unanswered: []).map(\.key),
+                       ["d1", "d3"])
+    }
+
     // MARK: Planning
 
     func testTheNewestDaysComeFirstAndOldWorkIsMetered() {

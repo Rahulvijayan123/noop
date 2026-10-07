@@ -169,8 +169,14 @@ public enum ActivityContextMaterialization {
     /// Days that still have stored context but no longer any heart rate (or no owner): samples moved out by a
     /// timestamp heal, a deleted device, deleted data. Their rows describe seconds that have nothing behind them
     /// and are cleared. `ledgerDays` are the day starts holding a ledger row under any id.
-    public static func orphanedDays(_ days: [Day], ledgerDays: Set<Int>, owned: Set<Int>) -> [Day] {
-        days.filter { ledgerDays.contains($0.start) && !owned.contains($0.start) }
+    ///
+    /// Only a confirmed "no heart rate" orphans a day: when any owner probe of the pass failed (`unanswered`
+    /// holds the days whose store read threw), nothing is cleared that pass, because a transient read failure
+    /// looks exactly like a day with no data and the stored context of a whole horizon would otherwise be lost.
+    public static func orphanedDays(_ days: [Day], ledgerDays: Set<Int>, owned: Set<Int>,
+                                    unanswered: Set<Int> = []) -> [Day] {
+        guard unanswered.isEmpty else { return [] }
+        return days.filter { ledgerDays.contains($0.start) && !owned.contains($0.start) }
     }
 
     /// The materializer's input fingerprint for a day: the store's witness over the day's streams, sleep and

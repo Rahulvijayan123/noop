@@ -253,9 +253,16 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         var la = Calendar(identifier: .gregorian)
         la.timeZone = .current
         let pastStart = Int(la.date(from: DateComponents(year: 2026, month: 9, day: 10))!.timeIntervalSince1970)
-        repo.days = (1...10).map { night(String(format: "2026-09-%02d", $0), 50) }
+        // Four earlier nights, median 55 (the reference rounds it to 54); one more night at 90 would make it 60.
+        repo.days = [(6, 50), (7, 50), (8, 60), (9, 60)].map { night(String(format: "2026-09-%02d", $0.0), $0.1) }
         let before = repo.activityDecoderConfig(forDayStart: pastStart)
+        XCTAssertEqual(before.restingHeartRate, 54)
         let tagBefore = repo.activityContextLedgerConfigTag(dayStart: pastStart)
+        // The day's own night (keyed by its wake day, so it ends on the morning of the 10th) is later than the
+        // day's first seconds: a causal decode of the 10th never reads it.
+        repo.days.append(night("2026-09-10", 90))
+        XCTAssertEqual(repo.activityDecoderConfig(forDayStart: pastStart).restingHeartRate, before.restingHeartRate,
+                       "the day's own night is not part of its reference")
         repo.days += (11...30).map { night(String(format: "2026-09-%02d", $0), 70) }
         XCTAssertEqual(repo.activityDecoderConfig(forDayStart: pastStart).restingHeartRate, before.restingHeartRate,
                        "later nights never reach back into a past day's reference")
@@ -289,34 +296,22 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
 
     // MARK: Spot HRV (D3-04, D6-16)
 
-    func testASpotReadingKeepsItsOwnTimeSupportAndTheContextOverIt() {
+    func testASpotReadingKeepsItsOwnTimeSupportAndNoCopyOfTheContext() {
         let result = HRVAnalyzer.HRVResult(rmssd: 48.5, sdnn: 52, meanNN: 950, pnn50: nil, nInput: 64, nClean: 61)
         let t0 = 1_791_000_000
-        let context = Repository.StoredActivityContext(
-            intervals: [
-                ActivityContextInterval(start: t0 - 600, end: t0 + 10, activityClass: .walking, confidence: 0.9),
-                ActivityContextInterval(start: t0 + 10, end: t0 + 900, activityClass: .sitting, confidence: 0.7,
-                                        posture: .seatedLikely),
-            ],
-            through: t0 + 900,
-            days: [Repository.StoredActivityContextDay(day: "d", dayStart: t0 - 3_600, dayEnd: t0 + 80_000,
-                                                       deviceId: "s", status: .current, isProvisional: true,
-                                                       decoderVersion: "hsmm-x", configTag: nil,
-                                                       dataThrough: t0 + 900, computedAt: t0 + 900)])
-        let reading = HRVSnapshot.reading(result: result, start: t0, end: t0 + 60, context: context, createdAt: t0 + 61)
+        let reading = HRVSnapshot.reading(result: result, start: t0, end: t0 + 60, createdAt: t0 + 61)
         XCTAssertEqual(reading?.startTs, t0)
         XCTAssertEqual(reading?.endTs, t0 + 60)
         XCTAssertEqual(reading?.rmssd, 48.5)
+        XCTAssertEqual(reading?.sdnn, 52)
+        XCTAssertEqual(reading?.meanNN, 950)
         XCTAssertEqual(reading?.cleanBeats, 61)
         XCTAssertEqual(reading?.inputBeats, 64)
         XCTAssertEqual(reading?.source, "manual-hrv")
         XCTAssertEqual(reading?.methodVersion, HRVSnapshot.methodVersion)
-        XCTAssertEqual(reading?.ctxClass, "sitting", "the interval covering most of the capture")
-        XCTAssertEqual(reading?.ctxPosture, "seated_likely")
-        XCTAssertEqual(reading?.ctxDecoderVersion, "hsmm-x")
-        let bare = HRVSnapshot.reading(result: result, start: t0, end: t0 + 60, context: nil, createdAt: t0 + 61)
-        XCTAssertNil(bare?.ctxClass, "no stored context yet: the time join stays the way to it")
+        XCTAssertEqual(reading?.createdAt, t0 + 61)
+        XCTAssertNil(HRVSnapshot.reading(result: result, start: t0, end: t0, createdAt: t0), "an empty capture span")
         let none = HRVAnalyzer.HRVResult(rmssd: nil, sdnn: nil, meanNN: nil, pnn50: nil, nInput: 10, nClean: 0)
-        XCTAssertNil(HRVSnapshot.reading(result: none, start: t0, end: t0 + 60, context: nil, createdAt: t0))
+        XCTAssertNil(HRVSnapshot.reading(result: none, start: t0, end: t0 + 60, createdAt: t0))
     }
 }
