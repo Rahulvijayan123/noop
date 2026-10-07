@@ -213,7 +213,7 @@ public final class ImuSessionFileStore {
         var rows: [Record] = []
         for window in windows {
             for url in segmentFiles(window.id, overlapping: fromTs, toTs) {
-                rows += decode((try? Data(contentsOf: url)) ?? Data())
+                rows += decodedSegment(url)
                     .filter { Int64($0.ts) >= fromTs && Int64($0.ts) <= toTs }
             }
         }
@@ -298,7 +298,7 @@ public final class ImuSessionFileStore {
 
     private func readRecords(_ id: String, from: Int, to: Int, includePending: Bool) -> [Record] {
         var rows = segmentFiles(id, overlapping: Int64(from), Int64(to))
-            .flatMap { decode((try? Data(contentsOf: $0)) ?? Data()) }
+            .flatMap { decodedSegment($0) }
             .filter { $0.ts >= from && $0.ts <= to }
         if includePending { rows += pending.filter { $0.key.hasPrefix("\(id)/") }.values.flatMap { $0 }
             .filter { $0.ts >= from && $0.ts <= to } }
@@ -448,8 +448,46 @@ public final class ImuSessionFileStore {
         data.appendBigEndian(Int32(compressed.count)); data.append(compressed); return data
     }
 
-    private func windows() -> [Window] { defaults.data(forKey: key).flatMap { try? JSONDecoder().decode([Window].self, from: $0) } ?? [] }
+    /// The decoded window list, kept with the bytes it was decoded from. `append` asks for the list on every
+    /// 100 Hz frame and the Watchdog on every tick; the stored bytes are compared instead of decoded again, so a
+    /// write that bypasses `save` (a test restoring the key) is still picked up.
+    private var windowsCache: (data: Data, value: [Window])?
+    private func windows() -> [Window] {
+        guard let data = defaults.data(forKey: key) else { return [] }
+        if let cached = windowsCache, cached.data == data { return cached.value }
+        let value = (try? JSONDecoder().decode([Window].self, from: data)) ?? []
+        windowsCache = (data, value)
+        return value
+    }
     private func save(_ value: [Window]) { defaults.set(try? JSONEncoder().encode(value), forKey: key) }
+
+    /// Decoded segment files, checked against the file's size and modification date. The Watchdog reads the
+    /// last half hour every 20 s, which inflated the same one or two files (about 1,800 one-second records of
+    /// 600 samples) on the main actor each time; only the file still being appended to changes between reads.
+    private var decodedSegments: [String: (size: Int, modified: Date, records: [Record])] = [:]
+    private var decodedSegmentOrder: [String] = []
+    /// Two: the Watchdog's half hour spans at most two 30-minute segments, and each holds about 2 MB decoded for
+    /// as long as the app runs, in the background too.
+    private static let decodedSegmentLimit = 2
+
+    private func decodedSegment(_ url: URL) -> [Record] {
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        guard let size = (attributes?[.size] as? NSNumber)?.intValue,
+              let modified = attributes?[.modificationDate] as? Date else {
+            return decode((try? Data(contentsOf: url)) ?? Data())
+        }
+        if let cached = decodedSegments[url.path], cached.size == size, cached.modified == modified {
+            return cached.records
+        }
+        let records = decode((try? Data(contentsOf: url)) ?? Data())
+        decodedSegments[url.path] = (size, modified, records)
+        decodedSegmentOrder.removeAll { $0 == url.path }
+        decodedSegmentOrder.append(url.path)
+        while decodedSegmentOrder.count > Self.decodedSegmentLimit {
+            decodedSegments[decodedSegmentOrder.removeFirst()] = nil
+        }
+        return records
+    }
     private func sessionDirectory(_ id: String) -> URL { directory.appendingPathComponent(id, isDirectory: true) }
     private func segmentFile(_ id: String, _ bucket: Int64) -> URL { sessionDirectory(id).appendingPathComponent("imu-\(Self.utcName(bucket)).imus") }
     private func segmentFiles(_ id: String) -> [URL] { ((try? FileManager.default.contentsOfDirectory(at: sessionDirectory(id), includingPropertiesForKeys: nil)) ?? []).filter { $0.pathExtension == "imus" }.sorted { $0.lastPathComponent < $1.lastPathComponent } }

@@ -201,8 +201,9 @@ enum PuffinExperiment {
     static let lowRefreshKey = "noopLowRefresh"
     static var lowRefreshEnabled: Bool { UserDefaults.standard.bool(forKey: lowRefreshKey) }
 
-    /// "Fresh data": in cloud mode, a WHOOP 5.0/MG hands over its history about once a minute so steps,
-    /// calories and respiratory rate on the server (and in the app) stay current. **Default ON** (an absent
+    /// "Fresh data": in cloud mode, while the app is on screen, a WHOOP 5.0/MG hands over its history about
+    /// once a minute so steps, calories and respiratory rate on the server (and in the app) stay current (off
+    /// screen it keeps the 15-minute cadence; see `AppModel.applyPowerSaving`). **Default ON** (an absent
     /// key reads as on). It is cadence only: Power saving's Low refresh and low-battery stretch, and the
     /// known-empty-history stretch, still slow it down, and nothing is lost either way because the strap
     /// banks to flash and trims on our acknowledgement.

@@ -97,6 +97,11 @@ struct LiquidSky: View {
     /// How fully the sky dissolves into the canvas at the bottom (1 = the default seamless fade; <1 holds
     /// the atmosphere so the sky still reads under a full-height "sky behind cards" backdrop).
     var settleStrength: Double = 1
+    /// Draw the still frame even when stars are out: Today holds the sky still until its first load settles,
+    /// with this rather than by swapping in another view, which cross-faded two full-screen canvases at launch.
+    var holdsStill: Bool = false
+    /// The star layer's frame rate. A twinkle's flare lasts a second or more, so this still reads as smooth.
+    static let starFramesPerSecond: Double = 10
     @Environment(\.colorScheme) private var scheme
     /// The call site already swaps in `LiquidSkyStatic` when motion is unwanted, but this view carried
     /// no gate of its own — a second call site would have been silently ungated. `pausesFrames` makes the
@@ -113,21 +118,29 @@ struct LiquidSky: View {
                            green: dark ? 2.0 / 255.0 : 247.0 / 255.0,
                            blue: dark ? 38.0 / 255.0 : 255.0 / 255.0,
                            opacity: 1)
-        if Self.pausesFrames(hour: hour ?? liveHour(), light: !dark, poseStill: motion.poseStill(reduceMotion)) {
-            // One frame, with no timeline behind it: the breath sits at mid-cycle (`now` 0). A timeline built
-            // with `paused: true` is not the same thing. Measured on Today with the stars gone, it made the
-            // render server busier, not quieter: 46 CPU-seconds a minute against 22 while the loop animated
-            // the sky at 20 fps.
-            let h = hour ?? liveHour()
+        let h = hour ?? liveHour()
+        let twinkles = !holdsStill
+            && !Self.pausesFrames(hour: h, light: !dark, poseStill: motion.poseStill(reduceMotion))
+        // The sky itself is one frame, with no timeline behind it: the breath sits at mid-cycle (`now` 0). A
+        // timeline built with `paused: true` is not the same thing. Measured on Today with the stars gone, it
+        // made the render server busier, not quieter: 46 CPU-seconds a minute against 22 while the loop
+        // animated the sky at 20 fps.
+        //
+        // Only the stars move, so only they sit in the frame loop, on a layer of their own. The loop used to
+        // redraw the whole sky (three full-screen gradient fills) 20 times a second all night, about 22
+        // CPU-seconds a minute on Today. The breath it also animated never moves a pixel by more than 5 of
+        // 255 levels, so it stays at mid-cycle like the still frame.
+        ZStack {
             Canvas { ctx, size in
-                render(ctx, size, hour: h, now: 0, settle: settle, light: !dark)
+                render(ctx, size, hour: h, now: 0, settle: settle, light: !dark, drawsStars: !twinkles)
             }
-        } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 20.0)) { tl in
-                let now = liquidSeconds(tl.date)
-                let h = hour ?? liveHour()
-                Canvas { ctx, size in
-                    render(ctx, size, hour: h, now: now, settle: settle, light: !dark)
+            if twinkles {
+                TimelineView(.animation(minimumInterval: 1.0 / Self.starFramesPerSecond)) { tl in
+                    let now = liquidSeconds(tl.date)
+                    Canvas { ctx, size in
+                        drawStars(ctx, size, stars: liquidSkyAt(h, light: !dark).stars, now: now,
+                                  settledBelow: true)
+                    }
                 }
             }
         }
@@ -151,7 +164,7 @@ struct LiquidSky: View {
     }
 
     private func render(_ base: GraphicsContext, _ size: CGSize, hour: Double, now: Double,
-                        settle: Color, light: Bool) {
+                        settle: Color, light: Bool, drawsStars: Bool = true) {
         let S = liquidSkyAt(hour, light: light)
         let w = size.width, h = size.height
         var ctx = base
@@ -174,20 +187,29 @@ struct LiquidSky: View {
                                            startPoint: CGPoint(x: 0, y: h * 0.55), endPoint: CGPoint(x: 0, y: h)))
         }
         // stars
-        if liquidSkyHasVisibleStars(S.stars) {
-            for s in liquidStars {
-                let tw = pow(max(0, sin(s.ph + now * s.sp)), 6)
-                let o = liquidStarOpacity(stars: S.stars, depth: s.z, twinkle: tw)
-                if o < liquidStarMinOpacity { continue }
-                let sz = 0.6 + s.z * 0.8
-                ctx.fill(Path(CGRect(x: s.x * w, y: s.y * h, width: sz, height: sz)), with: .color(.white.opacity(o)))
-            }
-        }
+        if drawsStars { drawStars(ctx, size, stars: S.stars, now: now, settledBelow: false) }
         // Settle into the page: a long fade to the theme's surfaceBase over the lower half so the sky
         // dissolves seamlessly into the body — no hard cut (the light-mode dark→white slam is gone).
         ctx.fill(Path(CGRect(x: 0, y: h * 0.45, width: w, height: h * 0.55)),
                  with: .linearGradient(Gradient(colors: [settle.opacity(0), settle.opacity(settleStrength)]),
                                        startPoint: CGPoint(x: 0, y: h * 0.45), endPoint: CGPoint(x: 0, y: h)))
+    }
+
+    /// The star field. `settledBelow`: the stars are drawn over a sky that already carries the settle fade, so
+    /// each star is dimmed by that fade at its height, as the fade drawn over it in `render` would.
+    private func drawStars(_ ctx: GraphicsContext, _ size: CGSize, stars: Double, now: Double, settledBelow: Bool) {
+        guard liquidSkyHasVisibleStars(stars) else { return }
+        let w = size.width, h = size.height
+        for s in liquidStars {
+            let tw = pow(max(0, sin(s.ph + now * s.sp)), 6)
+            var o = liquidStarOpacity(stars: stars, depth: s.z, twinkle: tw)
+            if settledBelow, s.y > 0.45 {
+                o *= 1 - settleStrength * (s.y - 0.45) / 0.55
+            }
+            if o < liquidStarMinOpacity { continue }
+            let sz = 0.6 + s.z * 0.8
+            ctx.fill(Path(CGRect(x: s.x * w, y: s.y * h, width: sz, height: sz)), with: .color(.white.opacity(o)))
+        }
     }
 }
 

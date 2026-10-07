@@ -560,6 +560,10 @@ public final class LiveState: ObservableObject {
     /// True while a historical offload session is running, so screens can say "Syncing strap
     /// history…" instead of presenting half-loaded data as final (#77).
     @Published public var backfilling = false
+    /// Whether the offload `backfilling` reports was asked for by the user (Sync now, a pull on Today, the Sync
+    /// Strap shortcut) or carries on one that was. Set by `BLEManager.requestSync` before the offload starts. Not
+    /// published: the sync banner reads it on the `backfilling` edge.
+    public var backfillRequestedByUser = false
     /// #1164 — true when the strap reports banked records newer than our local HR frontier (the strap has
     /// data we haven't ingested yet), even when no offload is actively running. Set by BLEManager from the
     /// GET_DATA_RANGE newest vs. the collector's latest HR sample, with the same 5-min `behindGapSeconds`
@@ -821,7 +825,9 @@ public final class LiveState: ObservableObject {
         }
         // Onto disk as it is logged, so a restart loses nothing and an export carries the runs before it.
         // BEFORE the coalesced publish and never inside it: capture is per line, only the notification waits.
-        Self.archive.append(safe)
+        // On the archive's own serial queue, in order: a synchronous file write per line cost the main actor
+        // one or two writes a second while a strap streams. Exports drain the queue first.
+        Self.archiveQueue.async { Self.archive.append(safe) }
         publishLogCoalesced()
         // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
         // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
@@ -912,6 +918,12 @@ public final class LiveState: ObservableObject {
     /// Every line of every run, kept across restarts within a fixed size — see `StrapLogArchive`. Opened at the
     /// first line or export of the process; that first use also carries over the lines the UserDefaults ring
     /// kept before the log moved to disk, then drops the ring's keys.
+    /// Where `append(log:)` hands lines to `archive`, in order and off the main thread.
+    nonisolated static let archiveQueue = DispatchQueue(label: "noop.strap-log.archive", qos: .utility)
+
+    /// Every line handed to `archiveQueue` so far is in `archive`. Exports call this before reading it.
+    nonisolated static func drainArchiveQueue() { archiveQueue.sync {} }
+
     nonisolated static let archive: StrapLogArchive = {
         let fm = FileManager.default
         let directory = (try? StorePaths.strapLogDirectory())
@@ -953,6 +965,7 @@ public final class LiveState: ObservableObject {
         header += String(repeating: "-", count: 40) + "\n"
         // Same earlier-runs-then-current shape as `exportableLogText()`: a scheduled drop that fires after a
         // restart reports the runs before it, not only the (possibly empty) current one.
+        drainArchiveQueue()
         return header + archive.exportText()
     }
 
@@ -1093,6 +1106,33 @@ public final class LiveState: ObservableObject {
     }
 
     private static let hexRunRegex = try? NSRegularExpression(pattern: "[0-9a-fA-F]{16,}")
+    // The rules below, compiled once. `String.replacingOccurrences(of:with:options: .regularExpression)` builds a
+    // new expression on every call, and every log line went through eight of them on the main actor. Same
+    // patterns and templates; `.caseInsensitive` where the call passed it.
+    nonisolated private static let macRegex = try? NSRegularExpression(
+        pattern: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})")
+    nonisolated private static let whoopSerialRegex = try? NSRegularExpression(
+        pattern: "WHOOP (?=[0-9A-Za-z]{6,})[0-9A-Za-z]*[0-9][0-9A-Za-z]*")
+    nonisolated private static let peripheralUuidRegex = try? NSRegularExpression(
+        pattern: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
+        options: [.caseInsensitive])
+    nonisolated private static let whoopIdComputedRegex = try? NSRegularExpression(
+        pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)")
+    nonisolated private static let whoopIdRegex = try? NSRegularExpression(pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
+    nonisolated private static let ouraIdComputedRegex = try? NSRegularExpression(
+        pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)")
+    nonisolated private static let ouraIdRegex = try? NSRegularExpression(pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
+    nonisolated private static let deviceNameRegex = try? NSRegularExpression(
+        pattern: "[\\p{L}\\p{N}_.\\-]+(['\u{2019}]s\\s+(?i:whoop))")
+
+    /// `regex` replaced throughout `text` with `template` (`$n` refers to a group), as
+    /// `replacingOccurrences(of:with:options: .regularExpression)` does.
+    nonisolated private static func replacing(_ regex: NSRegularExpression?, in text: String,
+                                              with template: String) -> String {
+        guard let regex else { return text }
+        return regex.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text),
+                                              withTemplate: template)
+    }
 
     nonisolated static func redactPii(_ s: String) -> String {
         var out = s
@@ -1112,9 +1152,7 @@ public final class LiveState: ObservableObject {
                 out = rebuilt
             }
         }
-        out = out.replacingOccurrences(
-            of: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})",
-            with: "$1:••:••:••:••:$2", options: .regularExpression)
+        out = Self.replacing(Self.macRegex, in: out, with: "$1:••:••:••:••:$2")
         // #1193 field capture: the old rule required a DIGIT straight after "WHOOP ", but real serials
         // start with letters as often as digits - "WHOOP MGB0779473" sat unredacted in a log attached to
         // an issue while "WHOOP 4C1594026" beside it was masked. The rule now accepts any alnum run of 6+
@@ -1124,12 +1162,9 @@ public final class LiveState: ObservableObject {
         // service 1150" is a real diagnostic line, and PUFFIN is six alnum characters. A serial always
         // carries a digit; a word does not. "WHOOP 4.0" stays untouched for a different reason - the dot
         // stops the run at one character, short of the six the lookahead demands.
-        out = out.replacingOccurrences(
-            of: "WHOOP (?=[0-9A-Za-z]{6,})[0-9A-Za-z]*[0-9][0-9A-Za-z]*", with: "WHOOP <serial>", options: .regularExpression)
+        out = Self.replacing(Self.whoopSerialRegex, in: out, with: "WHOOP <serial>")
         // Mask a CoreBluetooth peripheral UUID, but NOT a standard-BLE / WHOOP-vendor service UUID.
-        out = out.replacingOccurrences(
-            of: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
-            with: "<device>", options: [.regularExpression, .caseInsensitive])
+        out = Self.replacing(Self.peripheralUuidRegex, in: out, with: "<device>")
         // #1303: an ADOPTED device id (`whoop-<SERIAL>`) is a device identifier in every line that prints
         // an id. Neither rule above catches it — the MAC rule wants MAC shape and the serial rule wants the
         // literal "WHOOP " then a DIGIT, while an adopted id is `whoop-` + a serial commonly starting with
@@ -1138,24 +1173,16 @@ public final class LiveState: ObservableObject {
         // what lets a reader tell derived rows from measured ones. Six-character minimum matches
         // `minSerialLength`, so `my-whoop` and `my-whoop-noop` are untouched. Kotlin twin in
         // `redactStrapLogPii`.
-        out = out.replacingOccurrences(
-            of: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)",
-            with: "whoop-$1…$2", options: .regularExpression)
-        out = out.replacingOccurrences(
-            of: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}",
-            with: "whoop-$1…", options: .regularExpression)
+        out = Self.replacing(Self.whoopIdComputedRegex, in: out, with: "whoop-$1…$2")
+        out = Self.replacing(Self.whoopIdRegex, in: out, with: "whoop-$1…")
         // #2092: an Oura device id (`oura-<serial>`) is the same #1303 gap for the OTHER brand — neither
         // rule above catches it, since the prefix isn't "whoop-". Exact same shape (3-character prefix +
         // `…`, matching `OuraSerialIdentity.logSafe`) and the same `-noop`-suffix-preserving pair, since
         // `DeviceRegistryStore.computedSuffix` is brand-agnostic — an Oura device gets a `oura-<serial>
         // -noop` sibling the same way a WHOOP strap does. Applied AFTER the WHOOP rules but that ordering
         // is not load-bearing: the two prefixes never overlap. Kotlin twin in `redactStrapLogPii`.
-        out = out.replacingOccurrences(
-            of: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)",
-            with: "oura-$1…$2", options: .regularExpression)
-        out = out.replacingOccurrences(
-            of: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}",
-            with: "oura-$1…", options: .regularExpression)
+        out = Self.replacing(Self.ouraIdComputedRegex, in: out, with: "oura-$1…$2")
+        out = Self.replacing(Self.ouraIdRegex, in: out, with: "oura-$1…")
         // The account holder's NAME, as WHOOP writes it into the advertised local name. WHOOP names a
         // strap "<FirstName>'s Whoop" by default and the scan path logs that name on every discovery, so
         // the shareable log (#445) we ask people to attach to public issues carried a real person's name.
@@ -1169,9 +1196,7 @@ public final class LiveState: ObservableObject {
         // "Ryan". A multi-token rule cannot tell a name from the surrounding log text and would swallow
         // "Discovered" with it. A fully custom name with no possessive stays a known gap. Kotlin twin in
         // `redactStrapLogPii` as `PII_DEVICE_NAME_RE`.
-        out = out.replacingOccurrences(
-            of: "[\\p{L}\\p{N}_.\\-]+(['\u{2019}]s\\s+(?i:whoop))",
-            with: "<name>$1", options: .regularExpression)
+        out = Self.replacing(Self.deviceNameRegex, in: out, with: "<name>$1")
         return out
     }
 
@@ -1207,6 +1232,7 @@ public final class LiveState: ObservableObject {
         // unchanged; then this whole run, from disk — not only the newest `maxLogLines` the screen keeps.
         // An export before this process logs anything (Report tapped right after a restart) still carries
         // the run before it (#1263).
+        Self.drainArchiveQueue()
         return header + Self.archive.exportText()
     }
 }
