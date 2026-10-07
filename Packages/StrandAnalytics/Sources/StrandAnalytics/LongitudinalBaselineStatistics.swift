@@ -103,7 +103,11 @@ extension LongitudinalBaseline {
                 dy += (y[i] - my) * (y[i] - my)
             }
             guard dx > 0, dy > 0 else { return 0 }
-            return min(maxPhi, max(0, num / (dx * dy).squareRoot()))
+            // Kendall (1954) small-sample bias of the lag-1 estimate: E[φ̂] ≈ φ − (1 + 3φ)/n. Under-estimating φ
+            // under-adjusts the CUSUM and the n_eff, i.e. too many false episodes (null simulation).
+            let raw = num / (dx * dy).squareRoot()
+            let corrected = raw + (1 + 3 * max(0, raw)) / Double(x.count)
+            return min(maxPhi, max(0, corrected))
         }
 
         /// Effective sample size of n AR(1) values: n(1-φ)/(1+φ), at least 1.
@@ -248,14 +252,18 @@ extension LongitudinalBaseline {
 
         // MARK: Two-sided CUSUM on daily predictive z (PhysiologyContext design)
 
-        /// Parameters mirror `PhysiologyContext.ChangeConfig` (pc-change-2): reference k = 0.25, decision h = 7,
+        /// Parameters follow `PhysiologyContext.ChangeConfig` (pc-change-2): reference k = 0.25, decision h (9 here),
         /// daily z clamped to ±2 (one extreme day supplies ≤ 25 % of an alarm), statistic capped at 1.25·h, input
         /// divided by the AR(1) long-run factor √((1+φ)/(1−φ)). The PC evaluation measured ≈0.03 false persistent
         /// episodes per series-week at φ ∈ {0, 0.3, 0.5}; Layer 1's own null simulation is in
         /// `LongitudinalBaselineV2CalibrationTests`.
         public struct CusumConfig: Equatable, Sendable {
             public var k = 0.25
-            public var h = 7.0
+            /// h = 10 (PC uses 7). Layer 1 runs ~8 series per person; at h = 7 the null simulation gave 2–4 false
+            /// episodes per series-year. At h = 10 Siegmund's ARL₀ ≈ 2,000 days per arm (≈ 0.35/series-year
+            /// two-sided, nominal; estimated-reference effects roughly double it — see
+            /// LongitudinalBaselineV2CalibrationTests). Cost: a 2 SD step alarms ~2 days later than at h = 7.
+            public var h = 10.0
             public var clampZ = 2.0
             public var capFactor = 1.25
             /// A gap longer than this many days between scored days resets both arms.

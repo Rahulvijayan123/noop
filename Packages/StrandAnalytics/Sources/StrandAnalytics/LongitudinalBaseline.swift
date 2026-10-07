@@ -290,6 +290,12 @@ public struct LBCarry: Equatable, Sendable {
     /// Ring of out-of-sample |predictive z| on established, clean, non-episode days (newest last). Calibrates the
     /// band multiplier for heavy tails the Gaussian/t model misses. Never in-sample.
     public var oosAbsZ: [Double] = []
+    /// |z| of recent days waiting `V2.oosDelayDays` before entering `oosAbsZ`; dropped if a change episode
+    /// opens over them, so a real change never widens the band that should detect it.
+    public var oosPending: [Int: Double] = [:]
+    /// Most recent change episode of this epoch (kept after it closes): corroborates drift from the anchor.
+    public var lastEpisodeDirection: Int = 0
+    public var lastEpisodeAlarmEpoch: Int? = nil
 
     public init(center7: Double? = nil, spread7: Double? = nil,
                 centerLong: Double? = nil, spreadLong: Double? = nil,
@@ -853,8 +859,12 @@ public enum LongitudinalBaseline {
         }
         let trialEpoch: Int? = request.freeze.flatMap { isoEpochDay($0.t0CivilDay) }
         var illnessFreeze: LBUsualFreeze? = nil
+        // v2: the felt-ill "when well" snapshot applies only to the CURRENT illness episode (onset … last logged
+        // ill day + `V2.illnessFreezeRecoveryDays`). v1 kept the newest snapshot forever, so personal comparisons
+        // months later used a stale pre-illness reference.
         if trialEpoch == nil,
            let onset = firstFeltIllOnset(dayLogs: request.dayLogsByDay, through: t),
+           illnessFreezeActive(onset: onset, dayLogs: request.dayLogsByDay, asOf: t),
            let freezeDay = freezeAsOfDay(t0CivilDay: onset), freezeDay < t {
             let preReq = LBTrialRequest(dayLogsByDay: request.dayLogsByDay)
             let pre = evaluate(asOf: freezeDay, series: series, observations: observations,
@@ -892,6 +902,9 @@ public enum LongitudinalBaseline {
                     state.heldCopyLong = nil
                     state.holdUntilEpoch = nil
                     state.oosAbsZ = []
+                    state.oosPending = [:]
+                    state.lastEpisodeDirection = 0
+                    state.lastEpisodeAlarmEpoch = nil
                     resetEpoch = true
                 }
                 let es = trialEpoch.flatMap { d >= $0 ? trialEpoch : nil }
@@ -1447,6 +1460,9 @@ public enum LongitudinalBaseline {
         next.heldCopyLong = carry.heldCopyLong
         next.holdUntilEpoch = carry.holdUntilEpoch
         next.oosAbsZ = carry.oosAbsZ
+        next.oosPending = carry.oosPending
+        next.lastEpisodeDirection = carry.lastEpisodeDirection
+        next.lastEpisodeAlarmEpoch = carry.lastEpisodeAlarmEpoch
         if let until = next.holdUntilEpoch, tEpoch > until {
             next.heldCopyLong = nil
             next.holdUntilEpoch = nil
@@ -1496,12 +1512,20 @@ public enum LongitudinalBaseline {
                 next.holdUntilEpoch = nil
             }
             next.cusumLastEpoch = tEpoch
-            // Out-of-sample tail ring: today's |z| was computed before today entered any copy. Episode days are
-            // excluded so a real change does not widen everyone's band afterwards.
-            if carry.changeDirection == 0, next.changeDirection == 0 {
-                next.oosAbsZ.append(abs(z))
-                if next.oosAbsZ.count > V2.oosRing { next.oosAbsZ.removeFirst(next.oosAbsZ.count - V2.oosRing) }
+            // Out-of-sample tail ring: today's |z| was computed before today entered any copy. It waits
+            // `oosDelayDays` in `oosPending`; an episode alarm drops every pending day from its onset, so the days
+            // that make up a real change never widen the band that must detect it.
+            if next.changeAlarmEpoch == tEpoch, let onset = next.changeOnsetEpoch {
+                next.oosPending = next.oosPending.filter { $0.key < onset }
+                next.lastEpisodeDirection = next.changeDirection
+                next.lastEpisodeAlarmEpoch = tEpoch
             }
+            if next.changeDirection == 0 { next.oosPending[tEpoch] = abs(z) }
+            for (e, v) in next.oosPending.sorted(by: { $0.key < $1.key }) where tEpoch - e >= V2.oosDelayDays {
+                next.oosPending[e] = nil
+                next.oosAbsZ.append(v)
+            }
+            if next.oosAbsZ.count > V2.oosRing { next.oosAbsZ.removeFirst(next.oosAbsZ.count - V2.oosRing) }
         }
         let cusumS = max(next.cusumPos, next.cusumNeg)
         let pChange = min(1, cusumS / cfg.h)

@@ -233,7 +233,13 @@ final class LongitudinalBaselineTests: XCTestCase {
         // v2.clinical (audit 2026-10-07): a week of +12 bpm nights is a real episode and must be detected while it
         // happens (v1 deliberately never fired). It closes ≈ 7 in-control days after the evidence stops, and it
         // never becomes the new usual.
-        XCTAssertFalse(ev.regimeShift, "episode closes after the fever week\n\(ev.consoleReport)")
+        // The arm is capped at 1.25·h, so the episode stays open ≤ (0.25·h)/k = 10 in-control days after the
+        // evidence stops; 11 normal nights after the fever it has closed.
+        let after = obs + fill(from: iso(t + 1), through: iso(t + 3), value: 60)
+        let closed = LongitudinalBaseline.evaluate(asOf: iso(t + 3), series: .sleepRHR,
+                                                   observations: after, replay: true)
+        XCTAssertFalse(closed.regimeShift, "episode closes after the fever week\n\(closed.consoleReport)")
+        XCTAssertEqual(closed.copyLong?.center ?? 0, 60, accuracy: 0.01, closed.consoleReport)
         XCTAssertGreaterThan(ev.cusumS, 0, ev.consoleReport)
         XCTAssertGreaterThanOrEqual(ev.nLong, 14)
         let during = LongitudinalBaseline.evaluate(asOf: iso(t - 8), series: .sleepRHR,

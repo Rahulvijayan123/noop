@@ -52,6 +52,8 @@ public struct LBAnchorSnapshot: Equatable, Sendable, Codable {
     public var scale: Double
     public var n: Int
     public var nEff: Double
+    /// Lag-1 autocorrelation estimated on the anchor window (bias-corrected); reused for the drift level SE.
+    public var phi: Double
     public var centerSE: Double
     public var centerDisplay: Double
     public var bandLoDisplay: Double
@@ -133,14 +135,19 @@ extension LongitudinalBaseline {
         public static let bandAlpha = 0.05
         /// Anchor rule (PhysiologyContext frozen reference): first `anchorDays` clean days that fit within
         /// `anchorMaxSpanDays` calendar days after the epoch start (+ wash-in).
-        public static let anchorDays = 14
-        public static let anchorMaxSpanDays = 42
-        /// Drift: median of the last 14 clean days vs the anchor. Significant at p < 0.001 AND ≥ 0.75 anchor
-        /// scales AND (a significant 28- or 90-day trend in the same direction OR an open change episode in the
-        /// same direction) — three independent requirements so slow drift is reported without a daily coin flip.
+        /// 28 clean days (within 56 calendar days): the anchor's own center SE then roughly matches the 14-day
+        /// level's, so a 2 SD sustained shift reaches the drift test's p < 0.005 (a 14-day anchor could not).
+        public static let anchorDays = 28
+        public static let anchorMaxSpanDays = 56
+        /// Drift: median of the last 14 clean days vs the anchor. Significant at p < 0.005 AND ≥ 0.75 anchor
+        /// scales AND corroborated (a significant 28- or 90-day trend in the same direction, or a change episode in
+        /// the same direction that is open or alarmed after the anchor window) — three requirements, so slow drift
+        /// is reported without a daily coin flip.
         public static let driftLevelDays = 14
         public static let driftMinLevelN = 7
-        public static let driftAlpha = 0.001
+        public static let driftAlpha = 0.005
+        public static let drift28Alpha = 0.001
+        public static let driftPersistAlpha = 0.05
         public static let driftMinScales = 0.75
         /// Trend: autocorrelation-corrected Mann–Kendall p < 0.01, Sen 95 % CI excluding 0, and a fitted change
         /// over the window of at least 0.5 robust scales.
@@ -151,9 +158,12 @@ extension LongitudinalBaseline {
         public static let changeHoldDays = 28
         /// Out-of-sample tail calibration: ring length, minimum samples for full weight, clamp.
         public static let oosRing = 120
+        public static let oosDelayDays = 14
         public static let oosFullWeightN = 60
         public static let oosMaxFactor = 1.6
         public static let cusum = Stats.CusumConfig()
+        /// Days after the last logged felt-ill day that the pre-illness snapshot stays the personal reference.
+        public static let illnessFreezeRecoveryDays = 14
     }
 
     // MARK: Final-day enrichment (computed once for T, not inside the replay)
@@ -256,30 +266,66 @@ extension LongitudinalBaseline {
         ev.trend28 = trendSnapshot(days: 28)
         ev.trend90 = trendSnapshot(days: 90)
 
-        // Drift: recent level vs anchor.
+        // Drift: recent level vs anchor. Two levels are tested:
+        //   • 14-day median: p < `driftAlpha` (0.005), ≥ `driftMinScales`, AND corroborated by a same-direction
+        //     significant trend or change episode (open, or alarmed after the anchor window);
+        //   • 28-day median: p < `drift28Alpha` (0.001), ≥ `driftMinScales`; a four-week sustained offset is its
+        //     own persistence evidence, so no corroboration is required.
+        // φ for both level SEs comes from the 28-day anchor window (a 14-day window cannot estimate it).
         if let a = ev.anchor {
-            var recent = pairs(tEpoch - V2.driftLevelDays + 1, tEpoch - 1)
-            if let x = todayMath, clean(tEpoch) { recent.append((tEpoch, x)) }
-            let vals = recent.map(\.value)
-            if vals.count >= V2.driftMinLevelN, let level = PhysiologyContext.RobustStats.median(vals) {
-                let phi = Stats.lagOnePhi(pairs: recent, center: level, minPairs: 6) ?? Stats.phiFallback
-                let nEff = Stats.effectiveN(vals.count, phi: phi)
-                let seLevel = PhysiologyContext.RobustStats.medianStandardErrorFactor * a.scale / nEff.squareRoot()
-                let se = (seLevel * seLevel + a.centerSE * a.centerSE).squareRoot()
-                let diff = level - a.center
+            let anchorEnd = isoEpochDay(a.toDay) ?? Int.min
+            func level(days: Int) -> (level: Double, n: Int, se: Double)? {
+                var recent = pairs(tEpoch - days + 1, tEpoch - 1).filter { $0.epoch > anchorEnd }
+                if let x = todayMath, clean(tEpoch) { recent.append((tEpoch, x)) }
+                let vals = recent.map(\.value)
+                guard vals.count >= max(V2.driftMinLevelN, days / 2),
+                      let lv = PhysiologyContext.RobustStats.median(vals) else { return nil }
+                let nEff = Stats.effectiveN(vals.count, phi: a.phi)
+                return (lv, vals.count, PhysiologyContext.RobustStats.medianStandardErrorFactor * a.scale / nEff.squareRoot())
+            }
+            func test(_ l: (level: Double, n: Int, se: Double)) -> (diff: Double, z: Double, p: Double, dir: Int) {
+                let se = (l.se * l.se + a.centerSE * a.centerSE).squareRoot()
+                let diff = l.level - a.center
                 let z = diff / max(se, 1e-12)
-                let pz = 2 * (1 - Stats.normalCDF(abs(z)))
-                let dir = diff > 0 ? 1 : (diff < 0 ? -1 : 0)
-                let trendAgrees = [ev.trend28, ev.trend90].contains { $0?.significant == true && $0?.direction == dir }
-                let changeAgrees = ev.change.open && ev.change.direction == dir
-                let sig = pz < V2.driftAlpha && abs(diff) >= V2.driftMinScales * a.scale && (trendAgrees || changeAgrees)
+                return (diff, z, 2 * (1 - Stats.normalCDF(abs(z))), diff > 0 ? 1 : (diff < 0 ? -1 : 0))
+            }
+            let l14 = level(days: V2.driftLevelDays)
+            let l28 = level(days: 28)
+            var chosen: (days: Int, l: (level: Double, n: Int, se: Double), t: (diff: Double, z: Double, p: Double, dir: Int), sig: Bool)?
+            if let l = l14 {
+                let t = test(l)
+                let trendAgrees = [ev.trend28, ev.trend90].contains { $0?.significant == true && $0?.direction == t.dir }
+                let changeAgrees = (ev.change.open && ev.change.direction == t.dir)
+                    || (ev.carry.lastEpisodeDirection == t.dir && (ev.carry.lastEpisodeAlarmEpoch ?? Int.min) > anchorEnd)
+                let sig = t.p < V2.driftAlpha && abs(t.diff) >= V2.driftMinScales * a.scale && (trendAgrees || changeAgrees)
+                chosen = (V2.driftLevelDays, l, t, sig)
+            }
+            if let l = l28 {
+                let t = test(l)
+                let sig = t.p < V2.drift28Alpha && abs(t.diff) >= V2.driftMinScales * a.scale
+                if chosen == nil || (sig && chosen?.sig != true) { chosen = (28, l, t, sig) }
+            }
+            // Two-stage persistence: a change episode already DETECTED the shift (alarmed after the anchor window,
+            // same direction); confirming that it has not reverted needs only p < 0.05 on the 28-day (else 14-day)
+            // level and ≥ `driftMinScales`. Detection and confirmation together keep the null rate ≈ 0
+            // (calibration tests) while a real sustained shift stays visible after the adaptive copies follow it.
+            if chosen?.sig != true, ev.carry.lastEpisodeDirection != 0,
+               (ev.carry.lastEpisodeAlarmEpoch ?? Int.min) > anchorEnd,
+               let l = l28 ?? l14 {
+                let t = test(l)
+                if t.dir == ev.carry.lastEpisodeDirection, t.p < V2.driftPersistAlpha,
+                   abs(t.diff) >= V2.driftMinScales * a.scale {
+                    chosen = (l28 != nil ? 28 : V2.driftLevelDays, l, t, true)
+                }
+            }
+            if let c = chosen {
                 let diffDisplay = series.usesLog
-                    ? toDisplay(level, series: series) - toDisplay(a.center, series: series) : diff
-                ev.drift = LBDriftSnapshot(levelDays: V2.driftLevelDays, levelN: vals.count, level: level,
-                                           levelDisplay: toDisplay(level, series: series), anchorCenter: a.center,
-                                           diff: diff, diffDisplay: diffDisplay, diffScales: diff / a.scale,
-                                           z: z, p: pz, significant: sig, direction: sig ? dir : 0,
-                                           worse: sig && isWorse(dir))
+                    ? toDisplay(c.l.level, series: series) - toDisplay(a.center, series: series) : c.t.diff
+                ev.drift = LBDriftSnapshot(levelDays: c.days, levelN: c.l.n, level: c.l.level,
+                                           levelDisplay: toDisplay(c.l.level, series: series), anchorCenter: a.center,
+                                           diff: c.t.diff, diffDisplay: diffDisplay, diffScales: c.t.diff / a.scale,
+                                           z: c.t.z, p: c.t.p, significant: c.sig, direction: c.sig ? c.t.dir : 0,
+                                           worse: c.sig && isWorse(c.t.dir))
             }
         }
 
@@ -309,8 +355,8 @@ extension LongitudinalBaseline {
         return (best?.0, best?.1 ?? "history_start")
     }
 
-    /// Deterministic frozen anchor: the first `anchorDays` clean trainable days on or after the epoch start that
-    /// fit inside `anchorMaxSpanDays` calendar days, all strictly before T − gap (so today's week never builds its
+    /// Deterministic frozen anchor: the first `anchorDays` (28) clean trainable days on or after the epoch start
+    /// that fit inside `anchorMaxSpanDays` (56) calendar days, all strictly before T − gap (so today's week never builds its
     /// own anchor). Recomputable from the same tape, so persistence is not required for correctness.
     public static func anchor(series: LBSeries, byDay: [Int: LBDailyObservation], dayLogs: [String: LBDayLog],
                               tEpoch: Int, epochStart: Int?, reason: String) -> LBAnchorSnapshot? {
@@ -336,12 +382,48 @@ extension LongitudinalBaseline {
             return LBAnchorSnapshot(id: "anchor-v1:\(series.rawValue):\(from)",
                                     epochStartDay: epochStart.map(isoFromEpochDay), epochReason: reason,
                                     fromDay: from, toDay: to, center: c.center, scale: c.scale, n: c.n,
-                                    nEff: c.nEff, centerSE: c.centerSE,
+                                    nEff: c.nEff, phi: c.phi, centerSE: c.centerSE,
                                     centerDisplay: toDisplay(c.center, series: series),
                                     bandLoDisplay: toDisplay(c.center - half, series: series),
                                     bandHiDisplay: toDisplay(c.center + half, series: series))
         }
         return nil
+    }
+
+    /// True while the illness episode that began at `onset` is current: through the last consecutive logged
+    /// felt-ill day after onset plus `V2.illnessFreezeRecoveryDays`.
+    static func illnessFreezeActive(onset: String, dayLogs: [String: LBDayLog], asOf t: String) -> Bool {
+        guard let o = isoEpochDay(onset), let te = isoEpochDay(t) else { return false }
+        var lastIll = o
+        var e = o + 1
+        while e <= te, dayLogs[isoFromEpochDay(e)]?.feltIll == true {
+            lastIll = e
+            e += 1
+        }
+        return te <= lastIll + V2.illnessFreezeRecoveryDays
+    }
+
+    /// Scores every civil day from the first observation through `through` in ONE pass (the same online
+    /// carry chain `evaluate` builds) and returns each day's evaluation. Days in `fullDays` (or every day when
+    /// nil) also get the final-day enrichment (90/365-day copies, anchor, trends, drift). No trial overlay; the
+    /// day logs and reference epochs are honoured. O(days) instead of `evaluate`-per-day's O(days²).
+    public static func replayDaily(series: LBSeries, observations: [LBDailyObservation], through t: String,
+                                   dayLogs: [String: LBDayLog] = [:],
+                                   referenceEpochs: [LBReferenceEpoch] = [],
+                                   fullDays: Set<String>? = nil) -> [LBEvaluation] {
+        let byDay = indexByDay(observations, series: series)
+        guard let tEpoch = isoEpochDay(t), let start = byDay.keys.min(), start <= tEpoch else { return [] }
+        var state = LBCarry.empty
+        var out: [LBEvaluation] = []
+        out.reserveCapacity(tEpoch - start + 1)
+        for d in start...tEpoch {
+            let full = fullDays.map { $0.contains(isoFromEpochDay(d)) } ?? true
+            let ev = scoreOneDay(tEpoch: d, series: series, byDay: byDay, carry: state, epochStart: nil,
+                                 dayLogs: dayLogs, final: full, referenceEpochs: referenceEpochs)
+            state = ev.carry
+            out.append(ev)
+        }
+        return out
     }
 
     /// Out-of-sample tail factor ≥ 1: how much wider the realised |z| tail is than the model's 97.5 % point,
