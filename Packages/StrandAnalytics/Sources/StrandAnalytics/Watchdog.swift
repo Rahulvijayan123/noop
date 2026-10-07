@@ -886,7 +886,8 @@ public enum Watchdog {
                                                             notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
                                                             lastNotifiedAt: carry.lastNotifiedAt,
                                                             nowUnix: nowUnix,
-                                                            notifyDelivery: carry.notifyDelivery)
+                                                            notifyDelivery: carry.notifyDelivery,
+                                                            notifyQueuedAtUnix: carry.notifyQueuedAtUnix)
         // Only a verified alert may notify (a logged confounder day keeps non-safety alerts on screen only).
         let allowNotify = notify && liveAlerts && physiologyOff && (safety || !confounded)
         if allowNotify {
@@ -1472,7 +1473,8 @@ public enum Watchdog {
             notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
             lastNotifiedAt: carry.lastNotifiedAt,
             nowUnix: nowUnix,
-            notifyDelivery: carry.notifyDelivery)
+            notifyDelivery: carry.notifyDelivery,
+            notifyQueuedAtUnix: carry.notifyQueuedAtUnix)
         let notify = liveAlerts && want
         if notify {
             carry.lastNotifiedAt = nowUnix

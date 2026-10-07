@@ -406,7 +406,8 @@ final class AppModel: ObservableObject {
     /// Device ids to read the server's results from, best first. The strap's own `whoop-<serial>` leads once
     /// its serial is known; the local id follows so a canonical device that has nothing yet does not blank
     /// out what this phone was already showing.
-    private var hostedReadCandidates: [String] {
+    /// Internal (was private): the Watchdog reads server anomaly candidates for the same hosted device.
+    var hostedReadCandidates: [String] {
         CloudStrapSerialStore.shared.readCandidates(forLocalId: hostedLocalDeviceId)
     }
 

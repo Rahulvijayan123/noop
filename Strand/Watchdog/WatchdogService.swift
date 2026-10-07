@@ -134,6 +134,15 @@ final class WatchdogService {
         let yesterdayLog = model.baseline.dayLogsByDay[BaselineStore.yesterdayKey()]
         let log = Watchdog.liveDayLog(today: todayLog, yesterday: yesterdayLog, sleepOpen: sleepOpen)
         await reconcileQueuedDelivery(model: model, now: now)
+        // Server-model anomaly windows (TimesFM 3.0 / UniTS on the VPS) for the hosted device. Candidates only:
+        // the verifier decides. Throttled inside the repository; an empty list when offline or not signed in.
+        var modelCandidates: [WatchdogModelCandidate] = []
+        if inject == nil, let device = model.hostedReadCandidates.first,
+           let repository = AnomalyCandidateRepository.runningAccountRepository() {
+            modelCandidates = await repository.candidates(deviceId: device)
+        }
+        if Task.isCancelled { return false }
+        guard key == stateKey else { return false }
         let previous = carry
         // Pure evaluation (Core ML sessions are lock-guarded) on value copies, off the main actor.
         let evaluated = await Task.detached(priority: .utility) { () -> (WatchdogResult, Data?) in
@@ -148,7 +157,8 @@ final class WatchdogService {
                                            sleepSessionOpen: sleepOpen,
                                            sleepIntervals: sleepIntervals,
                                            skipForecast: skipForecast,
-                                           liveAlerts: liveAlerts)
+                                           liveAlerts: liveAlerts,
+                                           modelCandidates: modelCandidates)
             if result.shouldNotify { result.carry.notifyQueuedAtUnix = now }
             return (result, try? JSONEncoder().encode(result.carry))
         }.value
