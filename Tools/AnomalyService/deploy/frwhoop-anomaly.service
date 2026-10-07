@@ -1,0 +1,46 @@
+[Unit]
+Description=Nara anomaly models (TimesFM 3.0 forecast + UniTS reconstruction) - candidates for the phone verifier
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+User=frwhoop-anom
+Group=frwhoop-anom
+WorkingDirectory=/opt/frwhoop-anomaly
+EnvironmentFile=/etc/frwhoop/anomaly.env
+Environment=HOME=/var/lib/frwhoop-anomaly
+Environment=PYTHONUNBUFFERED=1
+Environment=HF_HUB_OFFLINE=1
+Environment=TRANSFORMERS_OFFLINE=1
+Environment=OMP_NUM_THREADS=2
+Environment=MKL_NUM_THREADS=2
+Environment=OPENBLAS_NUM_THREADS=2
+ExecStart=/opt/frwhoop-anomaly/venv/bin/python -m frwhoop_anomaly.service
+Restart=always
+RestartSec=10
+# A hung loop (no WATCHDOG=1 for 15 min) is killed and restarted. Model load is ~1 min; one job < 5 min.
+WatchdogSec=900
+TimeoutStartSec=600
+TimeoutStopSec=60
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/frwhoop-models
+ReadWritePaths=/var/lib/frwhoop-anomaly
+# Share 4 vCPU / 8 GB with the Swift worker and the inference sidecar without starving them.
+CPUQuota=100%
+CPUWeight=30
+MemoryHigh=2300M
+MemoryMax=2800M
+MemorySwapMax=0
+TasksMax=64
+IOWeight=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
