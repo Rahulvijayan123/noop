@@ -48,6 +48,10 @@ UPSTREAM_COPYRIGHT = "Copyright (c) 2026 The Inertia-1 Authors"
 # stand-in whose id starts with ``standin:``.
 REAL_ENCODER_PREFIX = "inertia-1/"
 STANDIN_PREFIX = "standin:"
+# ActiNet / ssl-wearables harnet30 encoders (``actinet/<weights>/30s@20hz``, INERTIA1.md §4b): pinned weights,
+# eligible for evidence like a pinned Inertia-1 checkpoint.
+ACTINET_ENCODER_PREFIX = "actinet/"
+PINNED_ENCODER_PREFIXES: Tuple[str, ...] = (REAL_ENCODER_PREFIX, ACTINET_ENCODER_PREFIX)
 
 # Encoder input contract (INERTIA1.md §3/§4).
 INERTIA_RATE_HZ = 20

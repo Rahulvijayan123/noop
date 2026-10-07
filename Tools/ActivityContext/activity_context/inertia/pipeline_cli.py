@@ -57,6 +57,10 @@ def cmd_embed(a) -> int:
         kw["ckpt_path"] = a.checkpoint
     if a.encoder_config:
         kw["encoder_config"] = a.encoder_config
+    if a.device:
+        kw["device"] = a.device
+    if a.max_batch:
+        kw["max_batch"] = a.max_batch
     if a.encoder.startswith("inertia-1/") and not (a.checkpoint or os.environ.get("INERTIA1_CKPT_PATH")):
         print(json.dumps({"ok": False, "kind": "model_missing", "error": "blocked: no checkpoint — no official "
                           "Inertia-1 checkpoint is publicly available; pass --checkpoint/$INERTIA1_CKPT_PATH and "
@@ -134,6 +138,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     e.add_argument("--encoder", required=True)
     e.add_argument("--checkpoint")
     e.add_argument("--encoder-config")
+    e.add_argument("--device", help="torch device for actinet/ encoders (offline embedding only; default cpu)")
+    e.add_argument("--max-batch", type=int)
     e.add_argument("--datasets")
     e.add_argument("--specs")
     e.add_argument("--workers", type=int, default=8)

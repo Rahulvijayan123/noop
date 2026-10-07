@@ -35,8 +35,9 @@ enum MotionHeadsKit {
                        windowS: Int = 10, hopS: Int = 5,
                        heads: [MotionHead: MotionHeadSpec]? = nil, sha: String = bundleSha) -> MotionHeadsBundleInfo {
         MotionHeadsBundleInfo(
-            encoderId: kind == .inertia1 ? "inertia-1/ar_transformer-small/\(windowS)s@20hz" : "standin:handcrafted-stats-v1",
-            encoderKind: kind, encoderVersion: "test-1", checkpointSha256: kind == .inertia1 ? checkpointSha : nil,
+            encoderId: kind == .inertia1 ? "inertia-1/ar_transformer-small/\(windowS)s@20hz"
+                : kind == .actinet ? "actinet/harnet30-c24-mw/30s@20hz" : "standin:handcrafted-stats-v1",
+            encoderKind: kind, encoderVersion: "test-1", checkpointSha256: kind.isPinned ? checkpointSha : nil,
             headsVersion: "test-bundle-1", bundleSha256: sha, evidenceTierMax: tier, windowS: windowS, hopS: hopS,
             heads: heads ?? [.posture: spec(.posture), .locomotion: spec(.locomotion),
                              .armBehavior: spec(.armBehavior), .transition: spec(.transition)],

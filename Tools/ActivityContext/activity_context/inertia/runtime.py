@@ -31,7 +31,8 @@ import numpy as np
 from .. import __version__
 from ..preprocess import (MAX_HEAD_SECONDS, MAX_RUN_SECONDS, MAX_TAIL_SECONDS, PreprocessError,
                           decode_columns_b64, validate_request_units)
-from . import ALLOWED_HOP_S, ENCODER_CONFIG_SCHEMA, PREPROCESSING_VERSION, STANDIN_PREFIX, WIRE_SCHEMA
+from . import (ACTINET_ENCODER_PREFIX, ALLOWED_HOP_S, ENCODER_CONFIG_SCHEMA, PREPROCESSING_VERSION, STANDIN_PREFIX,
+               WIRE_SCHEMA)
 from .bundle import BundleError, HeadBundle, load_bundle
 from .contract import Encoder, EncoderInfo, InertiaUnavailable
 from .preprocess import stack_windows, windows_from_seconds
@@ -127,12 +128,13 @@ def _resolve_encoder(bundle: HeadBundle, encoder_config: Optional[str], checkpoi
         kw["encoder_config"] = cfg
         kw["expected_preprocessing"] = bundle.preprocessing
         return build_encoder(eid, **kw)
-    if not eid.startswith(STANDIN_PREFIX):
+    if not eid.startswith((STANDIN_PREFIX, ACTINET_ENCODER_PREFIX)):
         raise InertiaUnavailable("model_missing", f"{eid} needs its encoder.json (nara.inertia.encoder/1) and checkpoint")
-    enc = build_encoder(eid, **kw)                          # stand-in from its id (no config, no checkpoint)
+    # stand-in: from its id (no config, no checkpoint); actinet: from its id + the pinned weights (--checkpoint)
+    enc = build_encoder(eid, **kw)
     want = bundle.encoder.get("config_sha256")
     if want is None or enc.info.config_sha256 != want:
-        raise InertiaUnavailable("config_mismatch", f"stand-in {eid} built from its id has config_sha256 "
+        raise InertiaUnavailable("config_mismatch", f"{eid} built from its id has config_sha256 "
                                  f"{enc.info.config_sha256[:12]}…, the bundle records {str(want)[:12]}…")
     if card is not None:
         for key in ("encoder_id", "config_sha256", "embedding_dim"):

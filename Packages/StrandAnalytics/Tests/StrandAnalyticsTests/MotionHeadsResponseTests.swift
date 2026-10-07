@@ -245,6 +245,11 @@ final class MotionHeadsResponseTests: XCTestCase {
         // An inertia1 claim needs a real id and a checkpoint digest.
         assertRefused(.invalidValue("encoder_kind")) { $0["encoder_id"] = "standin:handcrafted-stats-v1" }
         assertRefused(.invalidValue("encoder_kind")) { $0["checkpoint_sha256"] = NSNull() }
+        // An actinet claim needs an actinet/ id and a checkpoint digest.
+        assertRefused(.invalidValue("encoder_kind")) { $0["encoder_kind"] = "actinet" }
+        assertRefused(.invalidValue("encoder_kind")) {
+            $0["encoder_kind"] = "actinet"; $0["encoder_id"] = "actinet/harnet30-c24-mw/30s@20hz"; $0["checkpoint_sha256"] = NSNull()
+        }
         assertRefused(.invalidValue("bundle_sha256")) { $0["bundle_sha256"] = "abc" }
         assertRefused(.invalidValue("preprocessing_version")) { $0["preprocessing_version"] = "inertia-prep-2" }
         assertRefused(.invalidValue("evidence_tier_max")) { $0["evidence_tier_max"] = "gold" }

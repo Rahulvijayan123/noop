@@ -65,7 +65,9 @@ def test_config_sha_is_canonical_and_checked():
 
 
 def test_production_eligibility_requires_pinned_checkpoint(monkeypatch):
-    assert registry.PINNED_CHECKPOINTS == {}
+    from activity_context.inertia import actinet
+    assert {e["encoder_id"] for e in registry.PINNED_CHECKPOINTS.values()} == set(actinet.WEIGHTS)
+    assert not any(e["encoder_id"].startswith("inertia-1/") for e in registry.PINNED_CHECKPOINTS.values())
     info = _info()
     assert not info.production_eligible and info.wire_kind == "standin"
     monkeypatch.setitem(registry.PINNED_CHECKPOINTS, SHA, {"encoder_id": "inertia-1/patchtst-small/30s@20hz"})

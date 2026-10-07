@@ -19,7 +19,7 @@ import StrandAnalytics
 //     (`activity_motion_heads_days`) through its own fenced RPC under a savepoint, so a rejection or a missing
 //     migration never reaches the v1 / v2 publishes in the same transaction;
 //   • candidate mode additionally decodes the day a second time with Inertia as decoder evidence — only for a
-//     real `inertia1` encoder whose bundle tier is at least `candidate`, otherwise the withheld reason is
+//     pinned `inertia1` / `actinet` encoder whose bundle tier is at least `candidate`, otherwise the withheld reason is
 //     stored — and keeps that comparison document beside the shadow row. It is never written to
 //     `activity_context_days` / `activity_context_epochs`: the published HART documents are byte-identical
 //     whether Inertia is enabled or not.
@@ -50,6 +50,8 @@ struct InertiaSettings: Equatable {
     /// Wall-clock seconds Inertia may spend in one job (its readiness check and every chunk call together)
     /// before it is stopped for the rest of that job (`job_time_budget`). FRWHOOP_INERTIA_JOB_BUDGET_SECONDS.
     var jobBudgetSeconds: Double = InertiaSettings.defaultJobBudgetSeconds
+    /// FRWHOOP_INERTIA_THREADS: torch CPU threads of the serve process (`--threads`, 1…16; default: serve's 1).
+    var threads: Int? = nil
 
     static let serveModule = ["-m", "activity_context.inertia.serve"]
     static let defaultTimeoutSeconds = 60.0
@@ -85,7 +87,8 @@ struct InertiaSettings: Equatable {
     /// bundle digest; required in candidate mode), FRWHOOP_INERTIA_CHECKPOINT (passed as --checkpoint and
     /// INERTIA1_CKPT_PATH), FRWHOOP_INERTIA_PYTHON (default: the activity python), FRWHOOP_INERTIA_TIMEOUT_SECONDS
     /// (default 60, clamped to at most `leaseSeconds / 3`), FRWHOOP_INERTIA_JOB_BUDGET_SECONDS (default 600),
-    /// FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW (1/true/yes/on, default off; shadow mode only). A setting that cannot be honoured switches Inertia off with a reason; it
+    /// FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW (1/true/yes/on, default off; shadow mode only), FRWHOOP_INERTIA_THREADS
+    /// (1…16, passed as --threads; default the serve process's 1). A setting that cannot be honoured switches Inertia off with a reason; it
     /// never stops the worker. An unrecognised boolean is a configuration error, never silently "off".
     static func fromEnvironment(_ env: [String: String], activityPython: String = "python3",
                                 leaseSeconds: Int = 300) -> InertiaSettings {
@@ -132,6 +135,10 @@ struct InertiaSettings: Equatable {
             if let mode = Mode(rawValue: raw.lowercased()) { settings.mode = mode }
             else { errors.append("unknown FRWHOOP_INERTIA_MODE \(raw)") }
         }
+        if let raw = value("FRWHOOP_INERTIA_THREADS") {
+            if let n = Int(raw), (1...16).contains(n) { settings.threads = n }
+            else { errors.append("invalid FRWHOOP_INERTIA_THREADS \(raw) (1…16)") }
+        }
         if let raw = value("FRWHOOP_INERTIA_BUNDLE_SHA256") {
             let sha = raw.lowercased()
             if isHex64(sha) { settings.bundleSHA256 = sha }
@@ -152,10 +159,12 @@ struct InertiaSettings: Equatable {
     }
 
     static func serveArgs(bundleDir: String, checkpoint: String?, timeoutSeconds: Double? = nil,
-                          expectBundleSHA256: String? = nil, allowStandInShadow: Bool = false) -> [String] {
+                          expectBundleSHA256: String? = nil, allowStandInShadow: Bool = false,
+                          threads: Int? = nil) -> [String] {
         var args = serveModule + ["--bundle", bundleDir]
         if let checkpoint { args += ["--checkpoint", checkpoint] }
         if let timeoutSeconds { args += ["--timeout", formatSeconds(timeoutSeconds)] }
+        if let threads { args += ["--threads", String(threads)] }
         if let expectBundleSHA256 { args += ["--expect-bundle-sha256", expectBundleSHA256] }
         if allowStandInShadow { args += ["--allow-standin-shadow"] }
         return args
@@ -179,7 +188,8 @@ struct InertiaSettings: Equatable {
             serveArgs: Self.serveArgs(bundleDir: bundleDir, checkpoint: checkpoint,
                                       timeoutSeconds: Self.serveTimeoutSeconds(workerTimeout: timeoutSeconds),
                                       expectBundleSHA256: bundleSHA256,
-                                      allowStandInShadow: allowStandInShadow && mode == .shadow),
+                                      allowStandInShadow: allowStandInShadow && mode == .shadow,
+                                      threads: threads),
             requestTimeoutSeconds: timeoutSeconds,
             maxRequestBytes: 64 * 1024 * 1024,
             maxResponseLineBytes: 16 * 1024 * 1024,

@@ -61,7 +61,7 @@ def test_registry_specs_and_failures():
     with pytest.raises(InertiaUnavailable) as ei:
         registry.build_encoder("inertia-1/ar_transformer-small/30s@20hz")
     assert ei.value.kind == "model_missing"
-    assert registry.PINNED_CHECKPOINTS == {}
+    assert not any(e["encoder_id"].startswith("inertia-1/") for e in registry.PINNED_CHECKPOINTS.values())
 
 
 def test_random_init_standin_is_seeded():

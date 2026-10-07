@@ -46,10 +46,14 @@ and the final posterior. HART, the engineered features and the 1 Hz strap stream
 | evidence tiers (wire) | `shadow` < `candidate` < `production`; bundles may also be `offline` (dirty build, never served) |
 | upstream commit | `afcd725314c95f4afefce118821349df7d61e7e8` (MIT, "Copyright (c) 2026 The Inertia-1 Authors") |
 | real encoder ids | `inertia-1/<method>-<preset>/<window>s@20hz`, e.g. `inertia-1/ar_transformer-small/30s@20hz` |
+| ActiNet encoder ids | `actinet/harnet30-c24-mw/30s@20hz`, `actinet/harnet30-ssl-ukb/30s@20hz` (§4b) |
 | stand-in encoder ids | must start with `standin:` (e.g. `standin:handcrafted-stats-v1`) |
 
-`encoder_kind` is `inertia1` iff the id starts with `inertia-1/` and the checkpoint sha256 is in
-`PINNED_CHECKPOINTS` (empty today). Everything else is `standin`.
+`encoder_kind` is `inertia1` iff the id starts with `inertia-1/`, `actinet` iff it starts with `actinet/`, and in
+both cases only when the checkpoint sha256 is a `PINNED_CHECKPOINTS` entry for that id (no Inertia-1 entry exists;
+the two ActiNet weight files are pinned). Everything else is `standin`. `inertia1` and `actinet` are the
+"pinned" kinds: the only ones the decoder, the worker's candidate decode and the database
+(`20261007100000_activity_motion_heads_actinet.sql`) accept as evidence.
 
 ## 3. Preprocessing `inertia-prep-1` (WHOOP → encoder input)
 
@@ -95,6 +99,30 @@ gravity:"kept", rate_hz:20, normalization:"none"}`.
 Stand-ins (offline/shadow only): `standin:handcrafted-stats-v1` (strong engineered baseline),
 `standin:nara-imu-feat-1-accel` (what the decoder already sees), `standin:inertia-arch-random-init/<method>-<preset>/seed<k>`
 (negative control; upstream architecture, seeded random weights — **not Inertia-1**).
+
+## 4b. ActiNet encoder (`inertia/actinet.py`, `inertia/vendor/ssl_wearables_resnet.py`)
+
+The ssl-wearables harnet30 ResNet feature extractor (tag v1.0.0, vendored inference-only, upstream names so the
+state_dict loads strictly) behind the same `[B, 3, 600]` 20 Hz input contract. Inside `embed` each window is
+upsampled with `resample_poly(up=3, down=2)` to the 900 samples @ 30 Hz the network was trained on; output is the
+flattened `[B, 1024]` feature vector. Weights are plain `{name: tensor}` files written by `actinet.convert` from the
+upstream artifacts (byte-reproducible), size + sha256 checked before `torch.load(weights_only=True)`, then
+key/shape/dtype/finite checks, frozen fp32 CPU (`--threads` / `FRWHOOP_INERTIA_THREADS`; ~37 windows/s per thread
+on the VPS). `--checkpoint` is the weights file or a directory holding it (`$ACTINET_CKPT_PATH` as fallback).
+
+| id | weights | note |
+|---|---|---|
+| `actinet/harnet30-c24-mw/30s@20hz` | `actinet-harnet30-c24-mw-20260128.pt` `46732ff2…` | ActiNet `ssl-ukb-c24-mw-30s-20260128` backbone; fine-tuned on **all** Capture-24 participants, so its Capture-24 VAL/test numbers are in-sample |
+| `actinet/harnet30-ssl-ukb/30s@20hz` | `ssl-wearables-harnet30-ukb-v1.0.0.pt` `28f8bcd7…` | self-supervised UK Biobank backbone only (no labels): the leakage-free reference |
+
+Experiments `ncsa-ood-act{c24,ukb}` / `ncsa-primary-act{c24,ukb}` (declared 2026-10-06 before their test splits were
+opened) run the `ncsa-*-hc` procedure on these embeddings. Offline embedding may use `pipeline_cli embed --device
+mps` (max |Δ| vs CPU 2e-5; the device is not part of the encoder identity).
+
+**Promotion.** `seal_bundle` promotes a `shadow` bundle to `candidate` iff its encoder checkpoint is pinned for its
+id (`registry.is_pinned`), it was trained from a clean committed tree, and it carries the provenance files.
+`manifest.seal.promoted_from = "shadow"` records the evaluated tier; `presealed_sha256` restores it, so the seal
+still binds the exact manifest the one-shot test evaluated. Stand-ins are never promoted.
 
 ## 5. Head bundle (`nara.inertia.heads/1`)
 

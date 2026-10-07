@@ -41,10 +41,12 @@ HC = "standin:handcrafted-stats-v1"
 NF = "standin:nara-imu-feat-1-accel"
 ART = "standin:inertia-arch-random-init/ar_transformer-small/seed0"
 REAL = "inertia-1/ar_transformer-small/30s@20hz"
+ACT_C24 = "actinet/harnet30-c24-mw/30s@20hz"       # ActiNet backbone (fine-tuned on ALL Capture-24 participants)
+ACT_UKB = "actinet/harnet30-ssl-ukb/30s@20hz"      # self-supervised backbone only (no labels)
 WRIST = ("capture24", "wisdm2019_watch", "hhar_watch", "pamap2", "mhealth", "opportunity")     # CC BY 4.0
 NC_SA = ("gotov", "wear")                                                                      # CC BY-NC-SA 4.0
 WRIST_NC = WRIST + NC_SA
-SHORT = {HC: "hc", NF: "nf", ART: "art", REAL: "inertia1"}
+SHORT = {HC: "hc", NF: "nf", ART: "art", REAL: "inertia1", ACT_C24: "actc24", ACT_UKB: "actukb"}
 # leave-one-dataset-out experiments whose left-out dataset is also scored as a held-out-dataset OOD probe
 HELDOUT_DATASET_OOD = {"lodo-nohhar-hc": "hhar_watch", "ncsa-lodo-nogotov-hc": "gotov", "ncsa-lodo-nowear-hc": "wear"}
 
@@ -127,6 +129,18 @@ EXPERIMENTS: Dict[str, Experiment] = {e.name: e for e in [
     Experiment(name="ncsa-lodo-nowear-hc", encoder=HC, role="lodo", arch="from:ncsa-primary-hc",
                ood_from="ncsa-ood-hc", train_datasets=WRIST + ("gotov",), eval_datasets=WRIST_NC,
                description="train without WEAR -> WEAR test (WEAR's contribution; exercise_motion)"),
+    # --- ActiNet encoders (pinned harnet30 weights), declared 2026-10-06 before any of these test evaluations.
+    # Same procedure as ncsa-ood-hc / ncsa-primary-hc. actc24's backbone saw every Capture-24 participant's labels,
+    # so its Capture-24 test numbers are in-sample; actukb (no labels) is the leakage-free reference.
+    *[Experiment(name=f"ncsa-ood-{SHORT[e]}", encoder=e, role="ood_bench", ood_holdout=True, arch="linear",
+                 train_datasets=WRIST_NC, eval_datasets=WRIST_NC,
+                 description=f"OOD benchmark bundle, ActiNet encoder ({SHORT[e]}), eight wrist sets")
+      for e in (ACT_C24, ACT_UKB)],
+    *[Experiment(name=f"ncsa-primary-{SHORT[e]}", encoder=e, role="primary", ood_from=f"ncsa-ood-{SHORT[e]}",
+                 train_datasets=WRIST_NC, eval_datasets=WRIST_NC, save_predictions=True,
+                 description=f"primary bundle, ActiNet encoder ({SHORT[e]}), eight wrist sets; CV-selected head "
+                             "archs; pinned weights -> candidate when sealed from a clean tree")
+      for e in (ACT_C24, ACT_UKB)],
 ]}
 
 

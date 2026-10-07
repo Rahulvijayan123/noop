@@ -10,7 +10,7 @@ import Foundation
 //
 // Off by default. With `ActivityDecoderConfig.motionHeads == nil` (or a config that refuses the bundle) the
 // decoder's states, snapshot JSON, `cacheTag` and `ActivityStateVersions` are byte-identical to a build
-// without this file. Only a bundle from a real Inertia-1 encoder (`encoder_kind == "inertia1"`) with an
+// without this file. Only a bundle from a pinned encoder (`encoder_kind` `inertia1` or `actinet`) with an
 // evidence tier of at least `candidate` may be used as evidence; anything else is ignored and reported.
 
 // MARK: - Wire constants
@@ -59,8 +59,15 @@ public enum MotionHead: String, CaseIterable, Codable, Sendable {
 public enum MotionHeadsEncoderKind: String, Codable, Sendable {
     /// A pinned, real Inertia-1 checkpoint (`encoder_id` starts with `inertia-1/`).
     case inertia1
+    /// Pinned ActiNet / ssl-wearables harnet30 weights (`encoder_id` starts with `actinet/`, INERTIA1.md §4b).
+    case actinet
     /// A stand-in encoder (`standin:` ids): offline / shadow only, never evidence in production.
     case standin
+}
+
+extension MotionHeadsEncoderKind {
+    /// A pinned checkpoint (inertia1 / actinet) — the only kinds that may feed the decoder.
+    public var isPinned: Bool { self != .standin }
 }
 
 /// How far the bundle's own evaluation lets it be used. Ordered weakest first.
@@ -541,10 +548,13 @@ extension MotionHeadsResponse {
             checkpoint = s
         default: throw E.wrongType("checkpoint_sha256")
         }
-        // INERTIA1.md §2: inertia1 iff a real `inertia-1/` id with a pinned checkpoint; stand-ins are `standin:`.
+        // INERTIA1.md §2: inertia1 / actinet iff an `inertia-1/` / `actinet/` id with a pinned checkpoint;
+        // stand-ins are `standin:`.
         switch kind {
         case .inertia1:
             guard encoderId.hasPrefix("inertia-1/"), checkpoint != nil else { throw E.invalidValue("encoder_kind") }
+        case .actinet:
+            guard encoderId.hasPrefix("actinet/"), checkpoint != nil else { throw E.invalidValue("encoder_kind") }
         case .standin:
             guard encoderId.hasPrefix("standin:") else { throw E.invalidValue("encoder_id") }
         }
@@ -954,7 +964,7 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
         if let expected = expectedBundleSHA256, expected != bundle.bundleSha256 { return "bundle_sha256_mismatch" }
         let required: MotionHeadsEvidenceTier = mode == .production ? .production : .candidate
         if !allowStandInEvidenceForTesting {
-            if bundle.encoderKind != .inertia1 { return "encoder_kind_\(bundle.encoderKind.rawValue)" }
+            if !bundle.encoderKind.isPinned { return "encoder_kind_\(bundle.encoderKind.rawValue)" }
             if bundle.evidenceTierMax < required { return "evidence_tier_\(bundle.evidenceTierMax.rawValue)" }
         }
         guard bundle.preprocessingVersion == MotionHeadsWire.preprocessingVersion else { return "preprocessing_mismatch" }
@@ -978,7 +988,12 @@ public struct MotionHeadsEvidenceConfig: Codable, Equatable, Sendable {
     /// A stand-in bundle (test override) never claims to be Inertia-1.
     public var provenanceStamp: String? {
         guard evidenceRefusal == nil else { return nil }
-        let prefix = bundle.encoderKind == .inertia1 ? "inertia-1" : "standin-test"
+        let prefix: String
+        switch bundle.encoderKind {
+        case .inertia1: prefix = "inertia-1"
+        case .actinet: prefix = "actinet"
+        case .standin: prefix = "standin-test"
+        }
         return "\(prefix):\(bundle.bundle12):\(configTag)"
     }
 }
