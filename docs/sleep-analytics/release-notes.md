@@ -48,8 +48,9 @@ free-form jsonb in the v2 snapshot; no DB migration; the dormant Python-sidecar
   confounders; no core temperature, DLMO or circadian phase.
 - Waveform/cycle/circadian/oxygen work stays deferred per spec §10–11.
 
-## Sentry pin note (pre-existing main defect)
+## Coexistence with `daily.sleep_features`
 
-`fae049a` calls a Sentry option the pinned 9.30.0 prebuilt binary does not
-expose; this branch builds by applying it through a runtime selector (no-op on
-the pinned binary). See rollout.md for the upstream fix.
+When a night's hosted result carries `sleep_analytics_v1`, the Sleep page hides
+the sidecar-backed `sleep_features` section so the two definitions of WASO,
+latencies, bouts and thermal slopes never appear side by side. Nights without
+the new document render the old section exactly as before.

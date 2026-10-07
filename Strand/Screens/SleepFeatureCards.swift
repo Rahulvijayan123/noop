@@ -61,11 +61,14 @@ struct SleepFeatureSection: View {
               let repository = CloudPushRuntime.shared.scoreRepository() else { loaded = nil; return }
         let day = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(endTs)))
         let deviceIds = await IntradaySeriesStore.shared.readCandidates
-        var document = repository.cachedDay(day: day, deviceIds: deviceIds)?.hostedResult?.sleepFeatures
-        if document == nil {
-            document = (try? await repository.refresh(day: day, deviceIds: deviceIds))?.hostedResult?.sleepFeatures
+        var hosted = repository.cachedDay(day: day, deviceIds: deviceIds)?.hostedResult
+        if hosted?.sleepFeatures == nil {
+            hosted = (try? await repository.refresh(day: day, deviceIds: deviceIds))?.hostedResult
         }
-        guard !Task.isCancelled, let document,
+        // `daily.sleep_analytics_v1` owns continuity/architecture/thermal; showing both would put two
+        // conflicting definitions of the same metrics on one screen.
+        guard hosted?.sleepAnalytics == nil else { loaded = nil; return }
+        guard !Task.isCancelled, let document = hosted?.sleepFeatures,
               let night = document.night(matchingStart: startTs, end: endTs) else { loaded = nil; return }
         loaded = (document, night)
     }

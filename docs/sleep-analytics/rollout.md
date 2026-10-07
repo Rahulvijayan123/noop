@@ -53,12 +53,7 @@ measured on a realistic 8 h night).
   `unresolved_adjacency`/`insufficient_coverage` on noisy nights; thermal slopes
   need their peri-sleep windows covered by the read bound.
 
-## Sentry pin follow-up (pre-existing main defect)
+## Sentry
 
-`fae049a` (main's tip at branch time) calls
-`enableReportNonFullyBlockingAppHangs`, which the pinned Sentry 9.30.0 PREBUILT
-binary does not expose (it exists in the 9.30.0 source). This branch builds by
-calling it through a runtime selector (turns on any SDK that implements it,
-no-ops on the pinned binary) — see `Strand/App/SentryMonitor.swift`. Upstream fix
-on main: bump the Sentry pin to a release whose binaries carry the member, or
-link the source product, then restore the direct assignment.
+The branch's runtime-selector workaround was dropped when merging main, which
+already guards `enableReportNonFullyBlockingAppHangs` with `#if os(iOS)`.
