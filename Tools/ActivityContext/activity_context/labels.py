@@ -57,6 +57,7 @@ Metric conventions (consistent, documented choices):
 
 from __future__ import annotations
 
+import bisect
 import json
 import math
 from dataclasses import dataclass
@@ -187,15 +188,24 @@ class LabelRecord:
 
     @property
     def session(self) -> str:
-        """Session identity: the guided ``session_id`` when present, else the
-        stretch/label_key prefix (spec: a weak label's session is its stretch
-        key, which is the part of ``label_key`` before the first ``:``)."""
+        """Session identity: the guided ``session_id`` when present; for a
+        stretch-feedback label its stretch key (spec: a weak label's session is
+        its stretch); otherwise the ``label_key`` prefix.
+
+        The phone builds stretch-feedback keys as
+        ``stretch_feedback:<kind>:<stretchStart>:<labelStart>[:<rep>]`` (the
+        stretch key ``<kind>:<stretchStart>`` itself contains a ``:``), so the
+        stretch is the second AND third component. Taking only the prefix
+        would put every stretch of every day in one session and make
+        session-held-out splits meaningless."""
         if self.session_id:
             return self.session_id
         if self.label_key:
-            prefix = self.label_key.split(":")[0]
-            if prefix:
-                return prefix
+            parts = self.label_key.split(":")
+            if parts[0] == "stretch_feedback" and len(parts) >= 4:
+                return f"stretch:{parts[1]}:{parts[2]}"
+            if parts[0]:
+                return parts[0]
         return f"{self.source}:{self.start_ts}"
 
     @property
@@ -784,6 +794,29 @@ class SplitResult:
         return [u.window for u in self.test_units]
 
 
+def _overlapping(a: Sequence[EvalUnit], b: Sequence[EvalUnit]) -> set:
+    """Indices of ``a`` whose window shares any raw second with a window of
+    ``b`` (half-open ``[start, end)`` intervals)."""
+    if not a or not b:
+        return set()
+    merged: List[List[int]] = []
+    for s, e in sorted((int(u.window.start_ts), int(u.window.end_ts)) for u in b):
+        if merged and s <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], e)
+        else:
+            merged.append([s, e])
+    starts = [m[0] for m in merged]
+    hits = set()
+    for i, u in enumerate(a):
+        s, e = int(u.window.start_ts), int(u.window.end_ts)
+        j = bisect.bisect_right(starts, s) - 1
+        if j >= 0 and merged[j][1] > s:
+            hits.add(i)
+        elif j + 1 < len(merged) and merged[j + 1][0] < e:
+            hits.add(i)
+    return hits
+
+
 def split_by_session(
     labels: Sequence[LabelRecord],
     units: Sequence[EvalUnit],
@@ -847,6 +880,17 @@ def split_by_session(
         # else: session not backed by any label -> window dropped (can't
         # happen for units, which always carry a label session).
 
+    # Sessions never straddle the split, but windows of different sessions can
+    # still share raw seconds (overlapping windows at a session boundary, or a
+    # guided bout inside a stretch). Any window on one side that overlaps a
+    # window on the other is dropped from BOTH sides, and counted.
+    train_hits = _overlapping(train, test)
+    test_hits = _overlapping(test, train)
+    overlap_dropped = len(train_hits) + len(test_hits)
+    if overlap_dropped:
+        train = [u for i, u in enumerate(train) if i not in train_hits]
+        test = [u for i, u in enumerate(test) if i not in test_hits]
+
     report = {
         "mode": mode,
         "holdout_sessions": holdout_sessions,
@@ -854,6 +898,7 @@ def split_by_session(
         "n_sessions_total": len(ordered),
         "n_train_sessions": len(train_set),
         "n_test_sessions": len(test_set),
+        "overlap_dropped_units": overlap_dropped,
         "train_sessions": sorted(train_set),
         "test_sessions": sorted(test_set),
         "n_train_units": len(train),
@@ -1121,8 +1166,11 @@ def brier_per_head(units: Sequence[EvalUnit]) -> Optional[float]:
         p = _head_probabilities(u.window, classes)
         if p is None:
             # No usable probabilities: a one-hot of the (accepted) prediction.
+            # A prediction outside the head's truth classes puts zero
+            # probability on every truth class (a maximal error, not a crash).
             p = np.zeros(len(classes), dtype=np.float64)
-            p[classes.index(u.predicted)] = 1.0
+            if u.predicted in classes:
+                p[classes.index(u.predicted)] = 1.0
         y = np.zeros(len(classes), dtype=np.float64)
         y[classes.index(u.truth)] = 1.0
         scores += float(np.sum((p - y) ** 2))
@@ -1145,9 +1193,10 @@ def ece_15_per_head(units: Sequence[EvalUnit], bins: int = 15) -> Optional[float
         p = _head_probabilities(u.window, classes)
         if p is None:
             p = np.zeros(len(classes), dtype=np.float64)
-            p[classes.index(u.predicted)] = 1.0
+            if u.predicted in classes:
+                p[classes.index(u.predicted)] = 1.0
         confs.append(float(p.max()))
-        pred_class = classes[int(p.argmax())]
+        pred_class = classes[int(p.argmax())] if p.max() > 0 else None
         accs.append(1.0 if pred_class == u.truth else 0.0)
     confs = np.asarray(confs)
     accs = np.asarray(accs)
@@ -1242,5 +1291,189 @@ def evaluate_head(units: Sequence[EvalUnit], monitored_seconds: int = 0) -> Dict
         "ece_15": ece_15_per_head(units),
         "per_session": per_session_macro_f1(units),
         "n_gt_transitions": len(gt_events),
+        "temporal": temporal_metrics(units),
     }
     return report
+
+
+# ---------------------------------------------------------------------------
+# Temporal / online metrics (methodology 4), on the decoded label stream of
+# one model+head, per window, after abstention and smoothing.
+# ---------------------------------------------------------------------------
+
+#: Windows a state must hold before time-to-stable-correct is reached
+#: (K = 3 => >= 6 s of hold at the 2 s hop).
+TSCS_HOLD_WINDOWS = 3
+
+
+def _temporal_median(values: Sequence[float]) -> Optional[float]:
+    return round(float(np.median(values)), 3) if values else None
+
+
+def _temporal_pct(values: Sequence[float], q: float) -> Optional[float]:
+    return round(float(np.percentile(values, q)), 3) if values else None
+
+
+def temporal_metrics(
+    units: Sequence[EvalUnit],
+    hop_s: float = 2.0,
+    guard_s: float = 2.0,
+) -> Dict[str, Any]:
+    """Online/streaming temporal metrics for ONE model+head.
+
+    ``units`` are sorted by window start; ``predicted is None`` is
+    abstention. The stream is cut into SEGMENTS of time-adjacent windows (a
+    gap larger than ``hop_s`` starts a new segment, e.g. the rest between two
+    guided bouts). A truth change only exists between adjacent windows of one
+    segment: across a gap there is no moment the model could have reacted
+    to. All delays are measured to the END of the first window reflecting the
+    change.
+
+      * **label acquisition delay (LAD)**: per truth change at ``change_ts``
+        (end of the last window of the previous truth run), the first window
+        of the new run predicting the new truth: ``end - change_ts``. Never
+        acquired within the run = censored (counted, not averaged).
+      * **transition delay (TD)**: each predicted change (between two
+        adjacent non-abstained windows) pairs with the nearest truth change
+        of the SAME segment: ``pred_change_end - change_ts``. A predicted
+        change in a segment with no truth change has nothing to pair with
+        and only counts toward flips. Reported: signed median (bias) and
+        median/p90 of ``|TD|``.
+      * **flip rate**: predicted changes per monitored hour whose boundary is
+        more than ``guard_s`` from every truth change of its segment; plus
+        the median run length (windows) of identical non-unknown predictions.
+      * **time to stable correct state (TSCS)**: per truth change, the end of
+        the ``TSCS_HOLD_WINDOWS``-th consecutive adjacent window predicting
+        the new truth, minus ``change_ts``. Never reached = counted.
+
+    With no truth changes the LAD / TD / TSCS blocks are ``None``;
+    ``flip_rate`` is always reported.
+    """
+    ordered = sorted(units, key=lambda u: (u.window.start_ts, u.window.end_ts))
+    rows = [(int(u.window.start_ts), int(u.window.end_ts), u.truth, u.predicted)
+            for u in ordered]
+    n = len(rows)
+
+    def adjacent(i: int) -> bool:
+        return i > 0 and rows[i][0] <= rows[i - 1][1] + hop_s
+
+    segment: List[int] = []
+    for i in range(n):
+        segment.append(segment[-1] if adjacent(i) else (segment[-1] + 1 if segment else 0))
+
+    # Truth runs: (end_ts, truth, first_idx, last_idx), split by value or gap.
+    truth_runs: List[Tuple[int, str, int, int]] = []
+    for i, (_s, e, t, _p) in enumerate(rows):
+        if truth_runs and truth_runs[-1][1] == t and adjacent(i):
+            end, _t, first, _last = truth_runs[-1]
+            truth_runs[-1] = (max(end, e), t, first, i)
+        else:
+            truth_runs.append((e, t, i, i))
+    # (change_ts, segment, first_idx, last_idx, new_truth) for each real change.
+    changes = [(truth_runs[k - 1][0], segment[truth_runs[k][2]], truth_runs[k][2], truth_runs[k][3],
+                truth_runs[k][1])
+               for k in range(1, len(truth_runs))
+               if truth_runs[k][1] != truth_runs[k - 1][1] and adjacent(truth_runs[k][2])]
+
+    # Predicted changes: (boundary_ts, change_end, segment).
+    pred_changes: List[Tuple[int, int, int]] = []
+    for i in range(1, n):
+        p, prev = rows[i][3], rows[i - 1][3]
+        if p is not None and prev is not None and p != prev and adjacent(i):
+            pred_changes.append((rows[i - 1][1], rows[i][1], segment[i]))
+
+    by_session: Dict[str, List[int]] = {}
+    for u in ordered:
+        by_session.setdefault(u.session, []).extend([int(u.window.start_ts), int(u.window.end_ts)])
+    monitored_seconds = sum(max(v) - min(v) for v in by_session.values())
+
+    lad: List[float] = []
+    lad_censored = 0
+    tscs: List[float] = []
+    tscs_never = 0
+    for change_ts, _seg, first, last, new_truth in changes:
+        match = next((rows[j][1] for j in range(first, last + 1) if rows[j][3] == new_truth), None)
+        if match is None:
+            lad_censored += 1
+        else:
+            lad.append(match - change_ts)
+
+        stable_end: Optional[int] = None
+        for j in range(first, last - TSCS_HOLD_WINDOWS + 2):
+            hold = range(j, j + TSCS_HOLD_WINDOWS)
+            if all(rows[k][3] == new_truth for k in hold) and all(adjacent(k) for k in hold if k > j):
+                stable_end = rows[j + TSCS_HOLD_WINDOWS - 1][1]
+                break
+        if stable_end is None:
+            tscs_never += 1
+        else:
+            tscs.append(stable_end - change_ts)
+
+    changes_by_segment: Dict[int, List[int]] = {}
+    for change_ts, seg, *_rest in changes:
+        changes_by_segment.setdefault(seg, []).append(change_ts)
+
+    td: List[float] = []
+    flips = 0
+    for boundary, change_end, seg in pred_changes:
+        nearby = changes_by_segment.get(seg, [])
+        if nearby:
+            nearest = min(nearby, key=lambda tc: abs(tc - change_end))
+            td.append(change_end - nearest)
+        if not any(abs(boundary - tc) <= guard_s for tc in nearby):
+            flips += 1
+
+    run_lengths: List[int] = []
+    cur = 0
+    for i, (_s, _e, _t, p) in enumerate(rows):
+        if p is None:
+            if cur:
+                run_lengths.append(cur)
+            cur = 0
+            continue
+        if cur and (p != rows[i - 1][3] or not adjacent(i)):
+            run_lengths.append(cur)
+            cur = 0
+        cur += 1
+    if cur:
+        run_lengths.append(cur)
+
+    hours = monitored_seconds / 3600.0
+    result: Dict[str, Any] = {
+        "n_units": n,
+        "n_truth_changes": len(changes),
+        "n_predicted_changes": len(pred_changes),
+        "label_acquisition_delay_s": None,
+        "transition_delay_s": None,
+        "flip_rate": {
+            "flips": flips,
+            "monitored_hours": round(hours, 6),
+            "flips_per_hour": round(flips / hours, 4) if hours > 0 else None,
+            "median_run_length_windows": _temporal_median([float(x) for x in run_lengths]),
+            "run_lengths_windows": run_lengths,
+        },
+        "time_to_stable_correct_s": None,
+    }
+    if changes:
+        result["label_acquisition_delay_s"] = {
+            "per_change": [round(x, 3) for x in lad],
+            "median_s": _temporal_median(lad),
+            "p90_s": _temporal_pct(lad, 90),
+            "n_acquired": len(lad),
+            "n_censored": lad_censored,
+        }
+        result["transition_delay_s"] = {
+            "n_paired": len(td),
+            "per_change": [round(x, 3) for x in td],
+            "signed_bias_s": _temporal_median(td),
+            "median_abs_s": _temporal_median([abs(x) for x in td]),
+            "p90_abs_s": _temporal_pct([abs(x) for x in td], 90),
+        }
+        result["time_to_stable_correct_s"] = {
+            "per_change": [round(x, 3) for x in tscs],
+            "median_s": _temporal_median(tscs),
+            "p90_s": _temporal_pct(tscs, 90),
+            "n_acquired": len(tscs),
+            "n_never": tscs_never,
+        }
+    return result

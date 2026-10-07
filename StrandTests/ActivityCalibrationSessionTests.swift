@@ -362,6 +362,34 @@ final class ActivityCalibrationSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testAnEarlyTransitionTapIsClampedToTheIntervalStart() throws {
+        let harness = try makeHarness([task(duration: 20, reps: 1, guardSeconds: 2,
+                                           transitionKind: "sit_to_stand", preState: 8, postState: 8)])
+        harness.runner.begin(previousMode: .partTime)
+        harness.advance(3)     // active at epoch+3, still inside the 2 s guard trim
+        harness.runner.markTransitionNow()
+        harness.advance(20)    // stop cue
+
+        let bout = try XCTUnwrap(harness.strap.bouts.first)
+        XCTAssertEqual(bout.transitionTs, bout.intervalStartTs)
+    }
+
+    @MainActor
+    func testALateTransitionTapIsClampedToTheIntervalEnd() throws {
+        // No pre-state, so nothing auto-fires and the tap is the only way to record the moment.
+        let harness = try makeHarness([task(duration: 20, reps: 1, guardSeconds: 2,
+                                           transitionKind: "sit_to_stand")])
+        harness.runner.begin(previousMode: .partTime)
+        harness.advance(3)     // active at epoch+3; interval ends at epoch+21, stop cue at epoch+23
+        harness.advance(19)    // epoch+22, inside the trailing guard trim
+        harness.runner.markTransitionNow()
+        harness.advance(1)     // stop cue
+
+        let bout = try XCTUnwrap(harness.strap.bouts.first)
+        XCTAssertEqual(bout.transitionTs, bout.intervalEndTs)
+    }
+
+    @MainActor
     func testMarkTransitionNowIsANoOpForNonTransitionTasks() throws {
         let harness = try makeHarness([task(duration: 10, reps: 1)])
         harness.runner.begin(previousMode: .partTime)

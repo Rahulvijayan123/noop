@@ -25,9 +25,10 @@ final class ActivityGroundTruthStoreTests: XCTestCase {
     /// A store whose coverage reader claims every second of the interval is present by default, so store
     /// round-trip tests are deterministic without touching the real IMU store.
     private func makeStore(coverageReader: @escaping ActivityGroundTruthStore.CoverageReader
-        = { _, from, to in Array(from..<to).map(Int64.init) }) -> ActivityGroundTruthStore {
+        = { _, from, to in Array(from..<to).map(Int64.init) },
+                           build: String = "100") -> ActivityGroundTruthStore {
         ActivityGroundTruthStore(fileURL: tempDir.appendingPathComponent("ground-truth-labels.json"),
-                                 coverageReader: coverageReader)
+                                 coverageReader: coverageReader, currentBuild: { build })
     }
 
     private func makeLabel(startTs: Int = 1_000, endTs: Int? = nil, labelKey: String? = nil,
@@ -458,6 +459,54 @@ final class ActivityGroundTruthStoreTests: XCTestCase {
         XCTAssertEqual(store.pending().count, 1)
     }
 
+    func testStructurallyInvalidLabelsAreQuarantinedNotDeleted() async throws {
+        let store = makeStore()
+        let a = makeLabel(startTs: 1_000)
+        store.upsert(a)
+        GroundTruthStub.reply = .invalid
+
+        let outcome = try await sync(store).pushPending()
+
+        XCTAssertEqual(outcome.quarantined, 1)
+        XCTAssertEqual(outcome.refusals[a.labelKey], "invalid_posture")
+        XCTAssertTrue(store.pending().isEmpty, "a malformed label is not re-sent on every activation")
+        XCTAssertEqual(store.quarantined().map(\.label.labelKey), [a.labelKey])
+        XCTAssertEqual(store.quarantined().first?.reason, "invalid_posture")
+
+        _ = try await sync(store).pushPending()
+        XCTAssertEqual(GroundTruthStub.requests.count, 1, "the same build does not retry it")
+    }
+
+    func testALabelEditedAfterTheRefusedCopyWasSentStaysQueued() {
+        let store = makeStore()
+        let sentAt = Date(timeIntervalSince1970: 1_000_000)
+        let a = makeLabel(startTs: 1_000, updatedAt: sentAt.addingTimeInterval(60))
+        store.upsert(a)
+
+        let moved = store.quarantine([(labelKey: a.labelKey, updatedAt: sentAt, reason: "invalid_posture")])
+
+        XCTAssertEqual(moved, 0)
+        XCTAssertEqual(store.pending().map(\.labelKey), [a.labelKey])
+        XCTAssertTrue(store.quarantined().isEmpty)
+    }
+
+    func testQuarantinedLabelsGoBackInTheQueueOnANewBuild() async throws {
+        let a = makeLabel(startTs: 1_000)
+        let old = makeStore(build: "100")
+        old.upsert(a)
+        GroundTruthStub.reply = .invalid
+        _ = try await sync(old).pushPending()
+        XCTAssertTrue(old.pending().isEmpty)
+
+        let upgraded = makeStore(build: "101")
+        GroundTruthStub.reply = .saved
+        let outcome = try await sync(upgraded).pushPending()
+
+        XCTAssertEqual(outcome.uploaded, 1)
+        XCTAssertTrue(upgraded.pending().isEmpty)
+        XCTAssertTrue(upgraded.quarantined().isEmpty)
+    }
+
     func testACredentialTheServerRefusesIsReportedAsSignedOut() async throws {
         let store = makeStore()
         store.upsert(makeLabel(startTs: 1_000))
@@ -517,7 +566,7 @@ final class ActivityGroundTruthStoreTests: XCTestCase {
 
 /// Answers the ground-truth-labels route from memory so the real request path runs with no network.
 private final class GroundTruthStub: URLProtocol {
-    enum Reply { case saved, rejected, echo, silent, garbage }
+    enum Reply { case saved, rejected, invalid, echo, silent, garbage }
 
     static var status = 200
     static var reply = Reply.saved
@@ -550,6 +599,8 @@ private final class GroundTruthStub: URLProtocol {
         switch Self.reply {
         case .saved, .echo: payload = ["saved": rows, "ignored": [], "rejected": []]
         case .rejected: payload = ["saved": [], "ignored": [], "rejected": rows]
+        case .invalid:
+            payload = ["saved": [], "ignored": [], "rejected": keys.map { ["label_key": $0, "reason": "invalid_posture"] }]
         case .silent: payload = ["saved": [], "ignored": [], "rejected": []]
         case .garbage: payload = [:]
         }

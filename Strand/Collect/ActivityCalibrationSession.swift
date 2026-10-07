@@ -256,8 +256,16 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
         guard case .active(let taskIndex, _, _) = phase else { return }
         guard model.tasks[taskIndex].transitionKind != nil else { return }
         guard transitionTs == nil else { return }
-        transitionTs = nowSeconds
+        transitionTs = clampedToInterval(nowSeconds)
         haptic()
+    }
+
+    /// A tap inside the guard trims would put `transitionTs` outside the label interval, which the
+    /// server rejects (`invalid_transition_ts`) so the label could never sync. Record the nearest
+    /// instant inside the interval instead.
+    private func clampedToInterval(_ ts: Int) -> Int {
+        guard intervalEndTs >= intervalStartTs else { return ts }
+        return min(max(ts, intervalStartTs), intervalEndTs)
     }
 
     // MARK: - Private transitions
@@ -316,7 +324,7 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
         let task = model.tasks[taskIndex]
         guard Self.hasHeldPreState(task), let pre = task.preStateSeconds else { return }
         guard nowSeconds >= cueStartTs + pre else { return }
-        transitionTs = nowSeconds
+        transitionTs = clampedToInterval(nowSeconds)
         haptic()   // "do it now" cue
     }
 
@@ -386,10 +394,12 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
     }
 
     private func teardown() {
-        ActivityCalibrationRestoreMarker.clear(defaults: defaults)
+        // Restore before clearing the marker: a crash in between leaves the marker, so the next
+        // launch restores again instead of leaving `.continuous` armed with no marker.
         if let previousMode {
             applyMode(previousMode)
         }
+        ActivityCalibrationRestoreMarker.clear(defaults: defaults)
         self.previousMode = nil
     }
 }
