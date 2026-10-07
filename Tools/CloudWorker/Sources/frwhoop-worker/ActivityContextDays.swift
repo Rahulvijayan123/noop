@@ -411,14 +411,17 @@ enum ActivityContextDays {
     /// What this worker build runs for a lane, as `reconcile_activity_context_versions` takes it: the decoder,
     /// ontology and feature schema the stored day documents are compared with, and a tag (folded into the day
     /// fingerprints) that also carries the schema, publish interval, decoder-config recipe, lookback and — for
-    /// the raw-IMU lane — the HART model and preprocessing the service reported.
+    /// the raw-IMU lane — the HART model and preprocessing the service reported. `ordinal` is
+    /// `versionsOrdinal`: the registry refuses a lower one, so an older build left running during a rolling
+    /// deploy cannot take the registration back and re-queue the recent days on every reconcile.
     static func lanesVersions(model: String? = nil, preprocessing: String? = nil) -> [String: String] {
         var parts = ["d=\(ActivityContextVersions.decoder)", "o=\(ActivityContextVersions.ontology)",
                      "f=\(ActivityContextVersions.featureSchema)", "s=\(ActivityContextVersions.schema)",
                      "i=\(ActivityDecoderConfig().publishIntervalS)", "c=\(decoderConfigRecipe)",
                      "l=\(lookbackSeconds)"]
         var out = ["decoder": ActivityContextVersions.decoder, "ontology": ActivityContextVersions.ontology,
-                   "feature_schema": ActivityContextVersions.featureSchema]
+                   "feature_schema": ActivityContextVersions.featureSchema,
+                   "ordinal": String(versionsOrdinal)]
         if let model, let preprocessing {
             parts += ["m=\(model)", "p=\(preprocessing)"]
             out["model"] = model
@@ -427,6 +430,11 @@ enum ActivityContextDays {
         out["tag"] = versionsTag(parts)
         return out
     }
+
+    /// Increases whenever a build changes anything the versions tag names (decoder, ontology, feature schema,
+    /// document schema, publish interval, decoder-config recipe, lookback). Not part of the tag: equal builds
+    /// with different ordinals would otherwise fingerprint differently.
+    static let versionsOrdinal = 1
 
     /// `parts` joined with ';', every character outside the registry's tag alphabet replaced, at most 256.
     static func versionsTag(_ parts: [String]) -> String {
@@ -491,6 +499,8 @@ enum ActivityContextDays {
     /// Whether a stored UTC day's time outside logged sleep counts as awake: once the day has been over for
     /// `streamsSleepSettleSeconds`. Shared by the stream-day and the raw-IMU decodes so a day is the same day
     /// whichever lane decoded it.
+    /// The database settles a day 10 minutes later (`internal.activity_day_settled`) and folds it into both day
+    /// fingerprints, so a day decoded before it settled is queued again, and decoded as settled, once it has.
     static func sleepKnown(now: Int, dayEnd: Int) -> Bool { now >= dayEnd + streamsSleepSettleSeconds }
 
     enum StreamDayOutcome: Equatable {

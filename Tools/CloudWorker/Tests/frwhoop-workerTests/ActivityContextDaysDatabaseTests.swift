@@ -531,8 +531,9 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
             "select internal.activity_hart_day_fingerprint(array[$1::text], $2::date) as fp", [digest, day]).first?["fp"]
         let literal = try f.db.query("""
             select public.activity_context_fingerprint(array[$1::text], $2::bigint, $3::bigint, 'hart-activity-1',
-              $4, $5, 'v1;' || $6) as fp
+              $4, $5, 'v1;' || $6 || ';settled') as fp
             """, [digest, String(dayStart), String(dayEnd - 1), model, preprocessing, versions["tag"] ?? ""]).first?["fp"]
-        XCTAssertEqual(folded, literal, "the raw-IMU fingerprint carries this build's model and full tag")
+        XCTAssertEqual(folded, literal,
+                       "the raw-IMU fingerprint carries this build's model, full tag and the settled fixture day")
     }
 }

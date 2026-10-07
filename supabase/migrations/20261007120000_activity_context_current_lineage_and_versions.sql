@@ -15,16 +15,32 @@
 --    interval, decoder-config recipe and, for the raw-IMU lane, the HART model / preprocessing it resolved
 --    from the service) as one row per lane. The registered tag is folded into the raw-IMU day fingerprint
 --    (in place of the trigger's literal 'hart-activity-v1' / 'hart-activity-preprocess-v1' / 'v1') and into
---    the stream-day fingerprint. With no row registered the fingerprints are exactly what they were, so
---    applying this migration alone re-derives nothing.
+--    the stream-day fingerprint. A newer tag re-fingerprints at once the days the existing reconcile paths
+--    already look at — the raw-IMU days whose objects ended within reconcile_activity_context's lookback (7
+--    days) and the stream days enqueue_activity_stream_days considers recent (36 h) — and leaves every older
+--    day to the bounded sweep (3). The registration carries an ordinal (the worker's
+--    `ActivityContextDays.versionsOrdinal`): an older build never overwrites a newer build's row, so two
+--    builds side by side during a rolling deploy cannot flip the tag back and forth and re-queue those days
+--    on every reconcile.
+--
+-- 2a. Settled days. A day's waking hours count as "awake" in its document only once the day has been over
+--    for 12 h (the worker's `ActivityContextDays.sleepKnown`, audit D1-02); before that they are "unknown".
+--    That decision is an input of the decode, so it is part of both day fingerprints: a day decoded before it
+--    settled gets a new fingerprint, and is decoded again, once it has. The database settles a day 10 minutes
+--    after the worker does, so a job queued by the settled fingerprint always decodes as settled even with a
+--    few minutes of clock skew between the two. Applying this migration therefore re-derives, once, the
+--    settled days those reconcile paths look at; with no versions registered an unsettled day's fingerprints
+--    are exactly what they were.
 --
 -- 3. reconcile_activity_context_versions: registers the calling worker's versions and, bounded (newest
 --    UTC day first, at most p_limit jobs per call, and only while that lane's queue holds fewer than
---    p_limit pending jobs, so a version bump never starves live days), re-fingerprints the jobs whose
---    stored day document was decoded by another decoder / ontology / feature schema. The new fingerprint
---    bumps input_revision through the normal enqueue path.
+--    p_limit pending jobs, so a version bump never starves live days), re-fingerprints the jobs with a
+--    stored day document whose fingerprint is not the one the registered versions (and the day's settled
+--    state) give today — whatever part of the tag changed: decoder, ontology, feature schema, HART model or
+--    preprocessing, decoder-config recipe, lookback or publish interval. The new fingerprint bumps
+--    input_revision through the normal enqueue path.
 --
--- Additive: one index, one view, one table, three internal helpers, one new RPC, and CREATE OR REPLACE of
+-- Additive: one index, one view, one table, four internal helpers, one new RPC, and CREATE OR REPLACE of
 -- the raw-IMU ready trigger function, reconcile_activity_context and enqueue_activity_stream_days with
 -- their signatures and grants unchanged (each body is the previous one with the fingerprint line swapped
 -- for the helper).
@@ -68,9 +84,17 @@ grant all on public.activity_context_lane_versions to service_role;
 create policy activity_context_lane_versions_service on public.activity_context_lane_versions
   for all to service_role using (true) with check (true);
 
+-- Whether a UTC day has settled as of p_now (2a): 12 h after its end, plus 10 minutes of clock-skew margin
+-- over the worker's own rule.
+create function internal.activity_day_settled(p_day date, p_now timestamptz default clock_timestamp())
+returns boolean language sql immutable set search_path = '' as $$
+  select p_now >= ((p_day + 1)::timestamp at time zone 'UTC') + interval '12 hours 10 minutes'
+$$;
+
 -- The raw-IMU day fingerprint: the trigger's historical literals until a worker registers its versions,
--- then the registered HART model / preprocessing and the full tag.
-create function internal.activity_hart_day_fingerprint(p_digests text[], p_day date)
+-- then the registered HART model / preprocessing and the full tag; ';settled' once the day has settled.
+create function internal.activity_hart_day_fingerprint(p_digests text[], p_day date,
+  p_now timestamptz default clock_timestamp())
 returns text language sql stable set search_path = '' as $$
   select public.activity_context_fingerprint(p_digests,
     extract(epoch from (p_day::timestamp at time zone 'UTC'))::bigint,
@@ -78,7 +102,8 @@ returns text language sql stable set search_path = '' as $$
     'hart-activity-1',
     coalesce(nullif(v.versions ->> 'model', ''), 'hart-activity-v1'),
     coalesce(nullif(v.versions ->> 'preprocessing', ''), 'hart-activity-preprocess-v1'),
-    case when v.versions_tag is null then 'v1' else 'v1;' || v.versions_tag end)
+    case when v.versions_tag is null then 'v1' else 'v1;' || v.versions_tag end
+      || case when internal.activity_day_settled(p_day, p_now) then ';settled' else '' end)
   from (select 1) one
   left join public.activity_context_lane_versions v on v.algorithm_version = 'hart-activity-1'
 $$;
@@ -92,19 +117,23 @@ returns text language sql stable set search_path = '' as $$
      and f.day between p_day - 1 and p_day + 1
 $$;
 
-create function internal.activity_stream_day_fingerprint(p_user uuid, p_device uuid, p_day date, p_marker text)
+create function internal.activity_stream_day_fingerprint(p_user uuid, p_device uuid, p_day date, p_marker text,
+  p_now timestamptz default clock_timestamp())
 returns text language sql stable set search_path = '' as $$
   select encode(extensions.digest(convert_to(
     'activity-streams-v1' || E'\n' || p_user::text || E'\n' || p_device::text || E'\n' ||
     p_day::text || E'\n' || p_marker ||
     coalesce(E'\n' || (select v.versions_tag from public.activity_context_lane_versions v
-                        where v.algorithm_version = 'streams-activity-1'), ''),
+                        where v.algorithm_version = 'streams-activity-1'), '') ||
+    case when internal.activity_day_settled(p_day, p_now) then E'\nsettled' else '' end,
     'UTF8'), 'sha256'), 'hex')
 $$;
 
-revoke all on function internal.activity_hart_day_fingerprint(text[], date) from public, anon, authenticated;
+revoke all on function internal.activity_day_settled(date, timestamptz) from public, anon, authenticated;
+revoke all on function internal.activity_hart_day_fingerprint(text[], date, timestamptz)
+  from public, anon, authenticated;
 revoke all on function internal.activity_stream_day_marker(uuid, uuid, date) from public, anon, authenticated;
-revoke all on function internal.activity_stream_day_fingerprint(uuid, uuid, date, text)
+revoke all on function internal.activity_stream_day_fingerprint(uuid, uuid, date, text, timestamptz)
   from public, anon, authenticated;
 
 -- 2b. The raw-IMU ready trigger and its reconcile path, with the fingerprint from the helper.
@@ -247,11 +276,14 @@ begin
   return touched;
 end $$;
 
--- 3. Register the worker's versions and re-derive, bounded, the days decoded by another version.
+-- 3. Register the worker's versions and re-derive, bounded, the days decoded by anything else.
+-- p_versions: {"tag", "decoder", "ontology", "feature_schema", optional "model" / "preprocessing" and an
+-- optional "ordinal" (a decimal string; absent counts as 0). A registration with a lower ordinal than the
+-- stored one is refused: nothing is written, nothing is swept, and the call returns 0.
 create function public.reconcile_activity_context_versions(p_algorithm text, p_versions jsonb,
   p_limit integer default 4)
 returns integer language plpgsql security definer set search_path = '' as $$
-declare r record; touched integer := 0; pending integer;
+declare r record; touched integer := 0; pending integer; stored jsonb;
 begin
   if p_algorithm is null or p_algorithm not in ('hart-activity-1', 'streams-activity-1')
     or jsonb_typeof(p_versions) is distinct from 'object'
@@ -260,6 +292,8 @@ begin
     or jsonb_typeof(p_versions -> 'decoder') is distinct from 'string'
     or jsonb_typeof(p_versions -> 'ontology') is distinct from 'string'
     or jsonb_typeof(p_versions -> 'feature_schema') is distinct from 'string'
+    or coalesce(jsonb_typeof(p_versions -> 'ordinal'), 'string') is distinct from 'string'
+    or coalesce(p_versions ->> 'ordinal', '0') !~ '^[0-9]{1,9}$'
     or p_limit is null or p_limit < 0 or p_limit > 100 then
     raise exception 'invalid_arguments';
   end if;
@@ -268,7 +302,11 @@ begin
   values (p_algorithm, p_versions, p_versions ->> 'tag')
   on conflict (algorithm_version) do update set
     versions = excluded.versions, versions_tag = excluded.versions_tag, updated_at = clock_timestamp()
-  where v.versions is distinct from excluded.versions;
+  where v.versions is distinct from excluded.versions
+    and coalesce(v.versions ->> 'ordinal', '0')::integer <= coalesce(excluded.versions ->> 'ordinal', '0')::integer;
+  -- An older build (lower ordinal) leaves the newer build's registration, and its days, alone.
+  select v.versions into stored from public.activity_context_lane_versions v where v.algorithm_version = p_algorithm;
+  if stored is distinct from p_versions then return 0; end if;
 
   if p_limit = 0 then return 0; end if;
   -- A version bump re-derives history only while the lane's queue is nearly idle.
@@ -288,8 +326,6 @@ begin
                    else internal.activity_stream_day_fingerprint(j.user_id, j.device_id, j.day,
                           internal.activity_stream_day_marker(j.user_id, j.device_id, j.day)) end as fp) c
      where d.algorithm_version = p_algorithm
-       and (d.decoder_version, d.ontology_version, d.feature_schema)
-           is distinct from (p_versions ->> 'decoder', p_versions ->> 'ontology', p_versions ->> 'feature_schema')
        and j.completed_revision = j.input_revision and not j.dead_letter
        and (j.lease_until is null or j.lease_until <= clock_timestamp())
        and c.fp is not null and c.fp is distinct from j.fingerprint

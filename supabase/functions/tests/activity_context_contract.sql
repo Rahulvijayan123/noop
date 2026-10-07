@@ -1943,8 +1943,8 @@ rollback;
 
 -- 15. Current lineage and version-driven re-derivation (20261007120000). History stays in
 -- activity_context_epochs; activity_context_epochs_current is the newest publish of each UTC day; the
--- worker's registered versions are folded into both day fingerprints; a bounded sweep re-derives the days
--- another decoder wrote.
+-- worker's registered versions and the day's settled state are folded into both day fingerprints; a bounded
+-- sweep re-derives the days whose fingerprint is not today's; an older build never takes the registry back.
 begin;
 set local statement_timeout = '120s';
 insert into auth.users(id) values
@@ -2026,18 +2026,23 @@ begin
 end;
 $$;
 
--- 15.2 Registered versions are folded into both day fingerprints; with none registered nothing changes.
+-- 15.2 Registered versions are folded into both day fingerprints; with none registered an unsettled day's
+--      fingerprint is the historical one.
 do $$
 declare
   u uuid := 'a0000000-0000-4000-8000-000000000001'; dev uuid := 'a0000000-0000-4000-8000-000000000011';
   d0 date := (clock_timestamp() at time zone 'UTC')::date - 3; lo bigint := pg_temp.v_lo(d0);
+  unsettled timestamptz := ((d0 + 1)::timestamp at time zone 'UTC') + interval '1 hour';
   dg text[] := array[repeat('d',64)]; fp_lit text; fp_stream0 text; fp_stream1 text; n integer;
 begin
   delete from public.activity_context_lane_versions;
   fp_lit := public.activity_context_fingerprint(dg,lo,lo+86399,'hart-activity-1','hart-activity-v1',
     'hart-activity-preprocess-v1','v1');
-  assert internal.activity_hart_day_fingerprint(dg, d0) = fp_lit,
-    'no registered versions: the trigger''s historical fingerprint, so the migration re-derives nothing';
+  assert internal.activity_hart_day_fingerprint(dg, d0, unsettled) = fp_lit,
+    'no registered versions, day not settled: the trigger''s historical fingerprint';
+  assert internal.activity_hart_day_fingerprint(dg, d0) = public.activity_context_fingerprint(dg,lo,lo+86399,
+    'hart-activity-1','hart-activity-v1','hart-activity-preprocess-v1','v1;settled'),
+    'a settled day''s fingerprint says so';
   insert into public.scoring_jobs_v2(user_id,device_id,day,algorithm_version,input_revision,completed_revision,last_completed_at)
   values (u,dev,d0,'frwhoop-server-1',2,2,clock_timestamp());
   n := public.enqueue_activity_stream_days(interval '36 hours', 0, interval '0');
@@ -2045,8 +2050,12 @@ begin
   select fingerprint into fp_stream0 from public.activity_context_jobs
    where user_id=u and device_id=dev and day=d0 and algorithm_version='streams-activity-1';
   assert fp_stream0 = encode(extensions.digest(convert_to('activity-streams-v1' || E'\n' || u::text || E'\n' ||
+      dev::text || E'\n' || d0::text || E'\n' || (d0::text || ':2') || E'\nsettled', 'UTF8'), 'sha256'), 'hex'),
+    'no registered versions: the historical stream-day fingerprint, marked settled';
+  assert internal.activity_stream_day_fingerprint(u, dev, d0, d0::text || ':2', unsettled) =
+    encode(extensions.digest(convert_to('activity-streams-v1' || E'\n' || u::text || E'\n' ||
       dev::text || E'\n' || d0::text || E'\n' || (d0::text || ':2'), 'UTF8'), 'sha256'), 'hex'),
-    'no registered versions: the historical stream-day fingerprint';
+    'an unsettled stream day keeps the historical fingerprint';
 
   -- The worker registers what it runs (limit 0: register only).
   assert public.reconcile_activity_context_versions('hart-activity-1', jsonb_build_object(
@@ -2055,7 +2064,7 @@ begin
   assert public.reconcile_activity_context_versions('streams-activity-1', jsonb_build_object(
     'tag','d=hsmm-1.7;o=v2.0;f=imu-feat-2','decoder','hsmm-1.7','ontology','v2.0','feature_schema','imu-feat-2'), 0) = 0;
   assert internal.activity_hart_day_fingerprint(dg, d0) = public.activity_context_fingerprint(dg,lo,lo+86399,
-    'hart-activity-1','hart-x','pre-y','v1;d=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-x;p=pre-y'),
+    'hart-activity-1','hart-x','pre-y','v1;d=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-x;p=pre-y;settled'),
     'the HART fingerprint carries the worker''s model, preprocessing and full tag, not the trigger literals';
   update public.activity_context_jobs set completed_revision = input_revision where algorithm_version='streams-activity-1';
   n := public.enqueue_activity_stream_days(interval '36 hours', 0, interval '0');
@@ -2073,8 +2082,9 @@ begin
 end;
 $$;
 
--- 15.3 The bounded sweep re-derives days another decoder wrote: newest first, at most p_limit, never a
---      pending, leased or dead-lettered job, and only while the lane's queue is nearly idle.
+-- 15.3 The bounded sweep re-derives the days whose fingerprint is not the registered versions' one (any part of
+--      the tag: here the HART model): newest first, at most p_limit, never a pending, leased or dead-lettered
+--      job, and only while the lane's queue is nearly idle.
 do $$
 declare
   u uuid := 'a0000000-0000-4000-8000-000000000001'; dev uuid := 'a0000000-0000-4000-8000-000000000011';
@@ -2086,14 +2096,21 @@ declare
 begin
   delete from public.activity_context_jobs where user_id = u;
   delete from public.activity_context_lane_versions;
-  -- Five completed raw-IMU days decoded by hsmm-1.5, one by the current decoder, one dead-lettered.
+  -- Seven completed raw-IMU days fingerprinted by an earlier build (another HART model, same decoder: the
+  -- documents' decoder_version is the current one), one dead-lettered; then day 5 is decoded by this build.
+  insert into public.activity_context_lane_versions(algorithm_version, versions, versions_tag)
+  values ('hart-activity-1', hart || '{"model":"hart-old","tag":"d=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-old;p=pre-y"}',
+          'd=hsmm-1.7;o=v2.0;f=imu-feat-2;m=hart-old;p=pre-y');
   for i in 0..6 loop
     ids := array[gen_random_uuid()]; dg := array[repeat(chr(97 + i), 64)];
     insert into public.activity_context_jobs(user_id,device_id,day,algorithm_version,input_object_ids,input_digests,
       fingerprint,input_revision,completed_revision,dead_letter)
     values (u,dev,base+i,'hart-activity-1',ids,dg,internal.activity_hart_day_fingerprint(dg, base+i),1,1,i = 6);
-    perform pg_temp.v_day_row(u,dev,base+i,'hart-activity-1', case when i = 5 then 'hsmm-1.7' else 'hsmm-1.5' end);
+    perform pg_temp.v_day_row(u,dev,base+i,'hart-activity-1','hsmm-1.7');
   end loop;
+  assert public.reconcile_activity_context_versions('hart-activity-1', hart, 0) = 0, 'register only';
+  update public.activity_context_jobs set fingerprint = internal.activity_hart_day_fingerprint(input_digests, day)
+   where user_id = u and day = base + 5 and algorithm_version = 'hart-activity-1';
   n := public.reconcile_activity_context_versions('hart-activity-1', hart, 2);
   assert n = 2, 'at most p_limit days per call; got ' || n;
   assert (select array_agg(day order by day) = array[base+3, base+4] from public.activity_context_jobs
@@ -2144,6 +2161,69 @@ begin
   assert pg_temp.v_raises($q$select public.reconcile_activity_context_versions('streams-activity-1',
     '{"tag":"t","decoder":"d","ontology":"o"}'::jsonb, 1)$q$, 'invalid_arguments'), 'every version is named';
   raise notice 'PASS 15.3 bounded re-derivation on a version change';
+end;
+$$;
+
+-- 15.5 A day decoded before it settled is queued again once it has (audit D1-02): the worker decodes a
+--      settled day's waking hours as awake, an unsettled one's as unknown.
+do $$
+declare
+  u uuid := 'a0000000-0000-4000-8000-000000000001'; dev uuid := 'a0000000-0000-4000-8000-000000000011';
+  d1 date := (clock_timestamp() at time zone 'UTC')::date - 2;
+  d_end timestamptz := (d1 + 1)::timestamp at time zone 'UTC';
+  m uuid := 'a0000000-0000-4000-8000-000000000051'; j public.activity_context_jobs; fp_early text;
+begin
+  assert not internal.activity_day_settled(d1, d_end + interval '12 hours'),
+    'the database settles a little after the worker (clock-skew margin)';
+  assert internal.activity_day_settled(d1, d_end + interval '12 hours 10 minutes');
+  insert into public.object_manifests(id,user_id,device_id,object_class,object_kind,object_key,
+    start_at,end_at,sha256,sha256_source,status,verified_at)
+  values (m,u,dev,'raw','rawImuSession','settle-obj-1',d_end - interval '2 hours',d_end - interval '1 hour',
+          repeat('9',64),'server_verified','ready',clock_timestamp());
+  select * into j from public.activity_context_jobs where user_id=u and device_id=dev and day=d1
+    and algorithm_version='hart-activity-1';
+  assert j.fingerprint = internal.activity_hart_day_fingerprint(j.input_digests, d1),
+    'an object of a settled day enqueues the settled fingerprint';
+  -- As the job was when the day was decoded an hour after it ended.
+  fp_early := internal.activity_hart_day_fingerprint(j.input_digests, d1, d_end + interval '1 hour');
+  assert fp_early <> j.fingerprint;
+  update public.activity_context_jobs set fingerprint = fp_early, completed_revision = input_revision
+   where user_id=u and device_id=dev and day=d1 and algorithm_version='hart-activity-1';
+  perform public.reconcile_activity_context(interval '7 days');
+  select * into j from public.activity_context_jobs where user_id=u and device_id=dev and day=d1
+    and algorithm_version='hart-activity-1';
+  assert j.input_revision = j.completed_revision + 1 and j.fingerprint <> fp_early,
+    'the reconcile re-queues the day once it has settled';
+  update public.activity_context_jobs set completed_revision = input_revision
+   where user_id=u and device_id=dev and day=d1 and algorithm_version='hart-activity-1';
+  perform public.reconcile_activity_context(interval '7 days');
+  assert (select completed_revision = input_revision from public.activity_context_jobs
+           where user_id=u and device_id=dev and day=d1 and algorithm_version='hart-activity-1'),
+    'and only once';
+  raise notice 'PASS 15.5 settled days are decoded again';
+end;
+$$;
+
+-- 15.6 Rolling deploys: an older build (lower ordinal) never takes the registration back, and sweeps nothing.
+do $$
+declare n integer;
+  newer jsonb := '{"tag":"d=hsmm-1.8;o=v2.0;f=imu-feat-2","decoder":"hsmm-1.8","ontology":"v2.0","feature_schema":"imu-feat-2","ordinal":"3"}';
+  older jsonb := '{"tag":"d=hsmm-1.7;o=v2.0;f=imu-feat-2","decoder":"hsmm-1.7","ontology":"v2.0","feature_schema":"imu-feat-2","ordinal":"2"}';
+begin
+  delete from public.activity_context_lane_versions where algorithm_version = 'streams-activity-1';
+  perform public.reconcile_activity_context_versions('streams-activity-1', newer, 0);
+  n := public.reconcile_activity_context_versions('streams-activity-1', older, 10);
+  assert n = 0, 'got ' || n;
+  assert (select versions_tag = 'd=hsmm-1.8;o=v2.0;f=imu-feat-2' from public.activity_context_lane_versions
+           where algorithm_version = 'streams-activity-1'), 'the newer registration stays';
+  perform public.reconcile_activity_context_versions('streams-activity-1',
+    newer || '{"tag":"d=hsmm-1.8;o=v2.0;f=imu-feat-2;m=x"}', 0);
+  assert (select versions_tag = 'd=hsmm-1.8;o=v2.0;f=imu-feat-2;m=x' from public.activity_context_lane_versions
+           where algorithm_version = 'streams-activity-1'), 'the same ordinal may register a new tag';
+  assert pg_temp.v_raises($q$select public.reconcile_activity_context_versions('streams-activity-1',
+    '{"tag":"t","decoder":"d","ontology":"o","feature_schema":"f","ordinal":"x"}'::jsonb, 0)$q$, 'invalid_arguments'),
+    'an ordinal is a decimal string';
+  raise notice 'PASS 15.6 an older build never takes the registry back';
 end;
 $$;
 
