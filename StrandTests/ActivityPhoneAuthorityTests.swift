@@ -3,7 +3,7 @@ import StrandAnalytics
 import WhoopProtocol
 @testable import Strand
 
-/// The phone side of the expert-authority policy (docs/model-integration/activity-authority-phone.md): what the stores
+/// The phone side of the expert-authority policy (docs/model-integration/activity-authority.md, "Phone side"): what the stores
 /// hold for a day reaches the decoder only through `ActivityExpertSelection`'s canonical decode, so a shadow or
 /// candidate row can never shape what the wearer sees; records stored before the release fields read as their
 /// recorded mode; and the gait windows are fetched whatever became of HART's fetch.
