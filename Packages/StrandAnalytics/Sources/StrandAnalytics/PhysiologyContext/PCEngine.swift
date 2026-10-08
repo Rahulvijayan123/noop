@@ -74,7 +74,11 @@ extension PhysiologyContext {
                                                heartRateDependent: false, availableBy: causal ? cutoff : nil)
             let strap = MotionEvidence.strapTrack(motion: observations.motion, steps: observations.steps,
                                                   window: readWindow, config: policy.eligibility.motion)
-            let intervalInputs = input.activityIntervals.filter { !causal || $0.interval.start < cutoff }
+            // Decoder records smoothed after their day was final (D8-10) are never read here, in either mode: the
+            // posture context and the display track describe what the decoder said causally.
+            let intervalInputs = input.activityIntervals.filter {
+                !$0.isRetrospective && (!causal || $0.interval.start < cutoff)
+            }
             let decoder = IntervalAlgebra.resolve(IntervalAlgebra.records(fromIntervals: intervalInputs),
                                                   source: .decoderIntervals, heartRateDependent: true,
                                                   availableBy: causal ? cutoff : nil)
@@ -134,9 +138,13 @@ extension PhysiologyContext {
                                                 m.support.end), coverage: decoder)
                 // A heart-rate or HRV measurement's posture stratum is gravity only: the in-bed window comes from the
                 // heart-rate confirmed sleep detector, so it would make that measurement's reference circular.
-                let posture = PostureEvidence.context(over: m.support, motion: gravity, inBed: inBed,
-                                                      config: policy.eligibility.posture,
-                                                      heartRateTarget: Eligibility.opticalPulseMetrics.contains(m.metric))
+                let recumbency = PostureEvidence.context(over: m.support, motion: gravity, inBed: inBed,
+                                                         config: policy.eligibility.posture,
+                                                         heartRateTarget: Eligibility.opticalPulseMetrics.contains(m.metric))
+                // The context stratum (seated / lying awake / standing still) from confident, heart-rate free decoder
+                // posture claims that the forearm's gravity does not contradict (D4-09).
+                let posture = PostureEvidence.withContext(recumbency, over: m.support, decoder: decoder, inBed: inBed,
+                                                          config: policy.eligibility.posture)
                 let wear = WearSignal.summary(over: m.support, track: wearSignal)
                 let sleepWear = SleepRhythm.sleepWear(for: m.support, episodes: episodes,
                                                       observations: observations, config: policy.sleep,
@@ -198,12 +206,16 @@ extension PhysiologyContext {
                                               units: "s", supportCount: 1, supportUnit: "day",
                                               supportS: today.observedS, mode: mode, finality: finality))
             }
+            if let quality = opticalValidShare(envelopes, identity: identity, mode: mode, finality: finality) {
+                dailyValues.append(quality)
+            }
             dailyValues.sort { ($0.seriesKey, $0.regimeKey) < ($1.seriesKey, $1.regimeKey) }
 
             let fingerprint = policy.fingerprint
-            let compared = ContextReferences.compare(dailyValues, history: history.value.dailyValues,
-                                                     frozen: history.value.frozenReferences, day: identity.day,
-                                                     policyFingerprint: fingerprint, config: policy.reference)
+            let compared = ContextReferences.compare(
+                dailyValues, history: history.value.dailyValues, frozen: history.value.frozenReferences,
+                day: identity.day, policyFingerprint: fingerprint, config: policy.reference,
+                lineage: .init(device: input.regime, predecessors: history.value.predecessors))
             attach(compared.comparisons, to: &envelopes, values: dailyValues)
 
             let dependence = dependenceNotes(sleep: sleep)
@@ -290,7 +302,11 @@ extension PhysiologyContext {
             }
             out.workouts = input.workouts.filter { ok($0.interval.start, $0.availableAt) }
             out.activityEpochs = input.activityEpochs.filter { ok($0.epoch.startTs, $0.availableAt) }
-            out.activityIntervals = input.activityIntervals.filter { ok($0.interval.start, $0.availableAt) }
+            // A retrospective record was smoothed with seconds after its own (D8-10): never causal evidence,
+            // whenever it was stored.
+            out.activityIntervals = input.activityIntervals.filter {
+                !$0.isRetrospective && ok($0.interval.start, $0.availableAt)
+            }
             out.activityTransitions = input.activityTransitions.filter { ok($0.ts, $0.availableAt) }
             out.placements = input.placements.filter { ok($0.start, $0.recordedAt) }
             out.exposures = input.exposures.filter { $0.availableAt <= c }
@@ -311,6 +327,27 @@ extension PhysiologyContext {
                           Diagnostic("causal_excluded_exposure_revisions", Double(exposures))])
         }
 
+        /// Minimum optical windows behind a day's signal-quality value (one hour of 5-minute windows).
+        static let opticalQualityMinWindows = 12
+
+        /// The day's optical signal quality (`coverage.optical_valid_share`): the share of its 5-minute heart-rate
+        /// and HRV windows whose validity is `valid`. Bookkeeping, never compared (`coverage.`); it lets a
+        /// predecessor regime be refused when its signal quality differs materially (D4-09).
+        static func opticalValidShare(_ envelopes: [MeasurementEnvelope], identity: DayIdentity, mode: ProcessingMode,
+                                      finality: Finality) -> DailyValue? {
+            var n = 0, valid = 0
+            for e in envelopes where !e.method.id.hasPrefix("snapshot.") && e.method.windowS == 300
+                && (e.metric == .heartRate || e.metric == .hrvRmssd) && identity.dayWindow.contains(e.support.start) {
+                n += 1
+                if e.validity.state == .valid { valid += 1 }
+            }
+            guard n >= opticalQualityMinWindows else { return nil }
+            let share = (Double(valid) / Double(n) * 10_000).rounded() / 10_000
+            return DailyValue(day: identity.day, seriesKey: ContextReferences.opticalValidShareSeries,
+                              regimeKey: "coverage", metric: nil, value: share, units: "share", supportCount: n,
+                              supportUnit: "window", supportS: n * 300, mode: mode, finality: finality)
+        }
+
         /// Drop any history element from the day itself or later (it could not be prior history).
         ///
         /// Frozen references are the exception in retrospective mode: every registered reference is passed on, so a
@@ -326,9 +363,18 @@ extension PhysiologyContext {
                 ? h.frozenReferences
                 : h.frozenReferences.filter { $0.toDay < day && $0.createdForDay < day }
             let sleep = h.priorSleep.filter { $0.interval.end <= dayStart || ($0.sourceDay.map { $0 < day } ?? false) }
+            // A predecessor's values are history too: only strictly earlier days, same mode.
+            var droppedPredecessor = 0
+            let predecessors = h.predecessors.map { p -> PredecessorRegimeHistory in
+                var q = p
+                q.dailyValues = p.dailyValues.filter { $0.day < day && $0.mode == mode }
+                droppedPredecessor += p.dailyValues.filter { $0.day >= day }.count
+                return q
+            }
             let dropped = (h.dailyValues.count - values.count) + (h.bouts.count - bouts.count)
-                + (h.frozenReferences.count - frozen.count) + (h.priorSleep.count - sleep.count)
-            return (HistoryInput(dailyValues: values, bouts: bouts, frozenReferences: frozen, priorSleep: sleep),
+                + (h.frozenReferences.count - frozen.count) + (h.priorSleep.count - sleep.count) + droppedPredecessor
+            return (HistoryInput(dailyValues: values, bouts: bouts, frozenReferences: frozen, priorSleep: sleep,
+                                 predecessors: predecessors),
                     dropped)
         }
 

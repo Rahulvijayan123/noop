@@ -1,4 +1,5 @@
 import Foundation
+import WhoopProtocol
 import WhoopStore
 
 // Mapping between the typed interval model and the plain-string rows `WhoopStore` persists. `WhoopStore`
@@ -23,7 +24,7 @@ extension ActivityContextInterval {
             detail: detail?.rawValue, detailConfidence: detailConfidence, precedingClass: precedingClass?.rawValue,
             settledFromTs: settledFrom, hrMeanSettled: hrMeanSettled, hrSamplesSettled: hrSamplesSettled,
             rmssdSettled: rmssdSettled, rrDiffSqSumMs2Settled: rrDiffSqSumMs2Settled,
-            rrDiffCountSettled: rrDiffCountSettled)
+            rrDiffCountSettled: rrDiffCountSettled, derivation: derivation.rawValue)
     }
 
     /// A list column: codes joined by commas, "" for an empty list (recorded: none), NULL for nil (not recorded).
@@ -62,7 +63,9 @@ extension ActivityContextInterval {
             precedingClass: row.precedingClass.flatMap(ActivityClass.init(rawValue:)),
             settledFrom: row.settledFromTs, hrMeanSettled: row.hrMeanSettled, hrSamplesSettled: row.hrSamplesSettled,
             rmssdSettled: row.rmssdSettled, rrDiffSqSumMs2Settled: row.rrDiffSqSumMs2Settled,
-            rrDiffCountSettled: row.rrDiffCountSettled)
+            rrDiffCountSettled: row.rrDiffCountSettled,
+            // An unknown code is never read as causal (it must not reach a causal consumer).
+            derivation: ActivityContextDerivation(rawValue: row.derivation) ?? .retrospective)
     }
 }
 
@@ -85,7 +88,8 @@ public enum ActivityContextPersistence {
     /// the caller planned the day from. `writtenAt` (default `computedAt`) decides finality.
     public static func dayRow(day: String, document: ActivityContextDayDocument, intervalCount: Int,
                               computedAt: Int, dayEnd: Int? = nil, configTag: String? = nil,
-                              inputFingerprint: String? = nil, writtenAt: Int? = nil) -> ActivityContextDayRow {
+                              inputFingerprint: String? = nil, writtenAt: Int? = nil,
+                              retrospectiveVersion: String? = nil) -> ActivityContextDayRow {
         let end = dayEnd ?? document.dayEnd
         let v = document.versions
         return ActivityContextDayRow(
@@ -101,7 +105,24 @@ public enum ActivityContextPersistence {
             finality: finality(sleepKnownOutsideSessions: document.sleepKnownOutsideSessions, dayEnd: end,
                                at: writtenAt ?? computedAt),
             decodeMode: ActivityContextDayRow.causal,
-            sleepKnownOutsideSessions: document.sleepKnownOutsideSessions)
+            sleepKnownOutsideSessions: document.sleepKnownOutsideSessions,
+            retrospectiveVersion: retrospectiveVersion)
+    }
+
+    /// The retrospective intervals of a day (D8-10), clipped to `[from, to)`, or none when `finality` is not
+    /// `final`: smoothing reads later seconds of the day, so it never describes a day that can still change, and
+    /// it is never read by a causal consumer. Write them with `WhoopStore.replaceActivityContext(...,
+    /// retrospective:)` and the ledger's `retrospectiveVersion = ActivityContextRetrospective.version`.
+    public static func retrospectiveIntervals(document: ActivityContextDayDocument,
+                                              events: [ActivityTransitionEvent]? = nil,
+                                              hr: [HRSample] = [], steps: [StepSample] = [], rr: [RRInterval] = [],
+                                              from: Int, to: Int, finality: String,
+                                              config: ActivityContextRetrospective.Config = .init())
+        -> [ActivityContextInterval] {
+        guard finality == ActivityContextDayRow.final else { return [] }
+        let built = ActivityContextRetrospective.intervals(runs: document.runs, events: events ?? document.events,
+                                                           hr: hr, steps: steps, rr: rr, config: config)
+        return clipped(built, from: from, to: to)
     }
 
     /// `final` once the day was decoded as a finished day (time outside logged sleep read as awake, not unknown)

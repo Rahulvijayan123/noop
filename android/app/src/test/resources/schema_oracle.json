@@ -199,6 +199,12 @@
           "affinity": "INTEGER",
           "notNull": false,
           "default": null
+        },
+        {
+          "name": "retrospectiveVersion",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
         }
       ],
       "primaryKey": [
@@ -490,6 +496,12 @@
           "affinity": "INTEGER",
           "notNull": false,
           "default": null
+        },
+        {
+          "name": "derivation",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": "'causal'"
         }
       ],
       "primaryKey": [
@@ -507,6 +519,287 @@
           ]
         }
       ]
+    },
+    "activityContextIntervalRetrospective": {
+      "platform": "ios_only",
+      "reason": "Derived (GRDB v50, D8-10): the retrospective intervals of a FINAL day, re-shaped by the retrospective smoother (it reads later seconds of the same day), stored beside the causal rows of activityContextInterval and never replacing them. Same columns and key; derivation is 'retrospective'. The Android decoder is not ported, so Room has no twin; regenerable from the sample streams.",
+      "columns": [
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "startTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "endTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "activityClass",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "confidence",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "runnerUp",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "runnerUpConfidence",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "evidenceQuality",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "posture",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "locomotion",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "armBehavior",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "sleepState",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "wearState",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "intensity",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "stepTicks",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "cadenceSpm",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrSamples",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "hrMean",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrMin",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrMax",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrSlope",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rmssd",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rrBeats",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "respRateBpm",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "respBreaths",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "rrDiffSqSumMs2",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "rrDiffCount",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": "0"
+        },
+        {
+          "name": "inBed",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "uncertainty",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "experts",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "transitionCount",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "absorbedSeconds",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "precededByGapS",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "settlingSeconds",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "absorbedClasses",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "detail",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "detailConfidence",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "precedingClass",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "settledFromTs",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrMeanSettled",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrSamplesSettled",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rmssdSettled",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rrDiffSqSumMs2Settled",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rrDiffCountSettled",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "derivation",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": "'retrospective'"
+        }
+      ],
+      "primaryKey": [
+        "deviceId",
+        "startTs"
+      ],
+      "indices": []
     },
     "activityContextTransition": {
       "platform": "ios_only",
