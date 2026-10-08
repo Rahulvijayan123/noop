@@ -97,9 +97,39 @@ export function tsKey(v: unknown): number {
   return ms * 1000 + Number((frac + '000000').slice(3, 6));
 }
 
-/** `YYYY-MM-DD` (UTC) of a timestamp, or ''. */
-export function day(v: unknown): string {
-  return iso(v)?.slice(0, 10) ?? '';
+const DAY_FORMATS = new Map<string, Intl.DateTimeFormat>();
+
+/**
+ * `YYYY-MM-DD` of a timestamp in the owner's IANA zone, or ''. Dates written into summaries and memories are kept
+ * for good, so an evening message must carry the owner's calendar day, not the next UTC one.
+ */
+export function day(v: unknown, zone = 'UTC'): string {
+  const s = iso(v);
+  if (!s) return '';
+  if (zone === 'UTC') return s.slice(0, 10);
+  let format = DAY_FORMATS.get(zone);
+  if (!format) {
+    format = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    if (DAY_FORMATS.size < 64) DAY_FORMATS.set(zone, format);
+  }
+  return format.format(new Date(s));
+}
+
+/** An IANA zone the runtime knows, else UTC. */
+export function validZone(zone: unknown): string {
+  if (typeof zone !== 'string' || !zone || zone.length > 64) return 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-CA', { timeZone: zone });
+    return zone;
+  } catch {
+    return 'UTC';
+  }
+}
+
+/** The owner's zone from the same `profiles` row the scorer reads (the phone keeps it current); UTC when unset. */
+export async function ownerZone(rest: { select(table: string, query?: string): Promise<any[]> }, userId: string): Promise<string> {
+  const rows = await rest.select('profiles', `id=eq.${userId}&select=timezone`).catch(() => []);
+  return validZone(rows?.[0]?.timezone);
 }
 
 /**

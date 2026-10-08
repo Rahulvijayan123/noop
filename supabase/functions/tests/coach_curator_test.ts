@@ -5,7 +5,7 @@ import {
   curatorLine, duplicatePairs, keywordFollowUps, maintenanceBatches, mergedAttributes, resolveConsolidationOps, resolveCuratorOps,
   validFollowUps,
 } from '../_shared/coach_curator.ts';
-import { iso, memoryTokens, Refs, tokenSet } from '../_shared/coach_llm.ts';
+import { day, iso, memoryTokens, Refs, tokenSet, validZone } from '../_shared/coach_llm.ts';
 import { type Harness, harness, type ModelCall, OTHER, reply, USER, uuidsIn } from './coach_fake.ts';
 
 const uuid = () => crypto.randomUUID();
@@ -517,6 +517,18 @@ Deno.test('coach maintain: photo turns carry what the vision model saw; batches 
   assertEquals((await h.json(`threads/${t.id}`)).body.thread.pendingMessages, 0);
   assertEquals(maintenanceBatches(Array.from({ length: 100 }, (_, i) => ({ role: 'user', content: `m${i}`, created_at: at(i) }))).map((b) => b.length), [24, 24, 24]);
   assertEquals(curatorLine({ role: 'assistant', content: ' a \n b ', created_at: at(0) }), '[2026-10-07] Sana: a b');
+});
+
+Deno.test('coach dates: prompts carry the owner\'s calendar day, not the next UTC one', () => {
+  // 02:44 UTC on the 8th is 19:44 on the 7th in Pacific time: a memory mined from it must say the 7th.
+  const evening = '2026-10-08T02:44:32.329Z';
+  assertEquals(day(evening), '2026-10-08');
+  assertEquals(day(evening, 'America/Los_Angeles'), '2026-10-07');
+  assertEquals(day('2026-10-07T15:39:53.811363-07:00', 'America/Los_Angeles'), '2026-10-07');
+  assertEquals(curatorLine({ role: 'user', content: 'hi', created_at: evening }, 'America/Los_Angeles'), '[2026-10-07] User: hi');
+  assertEquals(validZone('Europe/Berlin'), 'Europe/Berlin');
+  assertEquals(validZone('Mars/Olympus'), 'UTC');
+  assertEquals(validZone(null), 'UTC');
 });
 
 Deno.test('coach maintain: refs map back, number-aware supersede, and every §6 guard drops what it should', async () => {

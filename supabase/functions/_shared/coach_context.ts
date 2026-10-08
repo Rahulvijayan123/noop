@@ -8,7 +8,7 @@
 // answer is evidence for the chat model, never the reply, and it reports its coverage. Only recall calls a
 // model; the other three routes are database reads.
 import {
-  callUtility, type ChatTurn, clampInt, clip, collapse, type CoachDeps, day, enc, fail, isObject, iso, quoted,
+  callUtility, type ChatTurn, clampInt, clip, collapse, type CoachDeps, day, enc, fail, isObject, iso, ownerZone, quoted,
   readOptionalJson, Refs, takeUtilityUnits, tsKey, utilityConfigured, uuidOf, windowBound,
 } from './coach_llm.ts';
 import { publicMemory } from './coach_memory.ts';
@@ -234,16 +234,16 @@ const REDUCE_SYSTEM = (
   + 'order by time and point out changes or contradictions over time; use only the notes; if they do not answer the question, say what they do cover.'
 );
 
-const headerOf = (ref: string, title: string, first: unknown, last: unknown) => {
-  const a = day(first);
-  const b = day(last);
+const headerOf = (ref: string, title: string, first: unknown, last: unknown, zone: string) => {
+  const a = day(first, zone);
+  const b = day(last, zone);
   return `## [${ref}] "${title}" (${a}${b && b !== a ? ` to ${b}` : ''})`;
 };
 
 const MESSAGE_LINE = /^\d{4}-\d{2}-\d{2} (?:User|Sana): /;
 
-const messageLine = (m: any) =>
-  `${day(m.created_at)} ${m.role === 'user' ? 'User' : 'Sana'}: ${clip(collapse(String(m.content ?? '')), RECALL_MESSAGE_CHARS)}`;
+const messageLine = (m: any, zone: string) =>
+  `${day(m.created_at, zone)} ${m.role === 'user' ? 'User' : 'Sana'}: ${clip(collapse(String(m.content ?? '')), RECALL_MESSAGE_CHARS)}`;
 
 const unmark = (s: unknown) => collapse(typeof s === 'string' ? s.replace(/[«»]/g, '') : '');
 
@@ -304,7 +304,7 @@ async function hitWindows(d: CoachDeps, userId: string, threadId: string, hits: 
     + '&order=created_at.asc,id.asc&limit=120&select=id,role,content,created_at');
 }
 
-function parseNotes(raw: Record<string, any> | null, chunk: Chunk, refs: Refs): { relevant: boolean; notes: Note[] } | null {
+function parseNotes(raw: Record<string, any> | null, chunk: Chunk, refs: Refs, zone: string): { relevant: boolean; notes: Note[] } | null {
   if (!raw) return null;
   const notes: Note[] = [];
   for (const n of Array.isArray(raw.notes) ? raw.notes.slice(0, 5) : []) {
@@ -313,19 +313,19 @@ function parseNotes(raw: Record<string, any> | null, chunk: Chunk, refs: Refs): 
     const ref = /\[(t\d{1,3})\]/i.exec(text)?.[1];
     const owner = chunk.sections.find((s) => s.threadId === refs.resolve(ref)) ?? chunk.sections[0];
     text = collapse(text.replace(/\s*\[t\d{1,3}\]\s*:?/gi, ' '));
-    if (!/^\d{4}-\d{2}-\d{2}/.test(text) && owner?.at) text = `${day(owner.at)} ${text}`;
+    if (!/^\d{4}-\d{2}-\d{2}/.test(text) && owner?.at) text = `${day(owner.at, zone)} ${text}`;
     notes.push({ threadId: owner.threadId, text });
   }
   return { relevant: raw.relevant === true && notes.length > 0, notes: raw.relevant === true ? notes : [] };
 }
 
 /** The notes under `[title, date]` headers, one group per chat, in chunk order. */
-function joinNotes(notes: Note[], sections: Map<string, Section>): string {
+function joinNotes(notes: Note[], sections: Map<string, Section>, zone: string): string {
   const groups = new Map<string, string[]>();
   for (const n of notes) groups.set(n.threadId, [...(groups.get(n.threadId) ?? []), n.text]);
   return [...groups].map(([id, list]) => {
     const s = sections.get(id);
-    return `[${s?.title ?? 'Earlier chat'}, ${day(s?.at)}]\n${list.map((t) => `- ${t}`).join('\n')}`;
+    return `[${s?.title ?? 'Earlier chat'}, ${day(s?.at, zone)}]\n${list.map((t) => `- ${t}`).join('\n')}`;
   }).join('\n\n');
 }
 
@@ -340,9 +340,13 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
   const deadline = started + RECALL_DEADLINE_MS * d.timeScale;
   const left = () => deadline - performance.now();
 
-  const found = await d.rest.rpc('coach_search_v1', {
-    p_user: userId, p_query: keywords || question, p_limit: 40, p_thread_limit: 6, p_exclude_thread: exclude, p_from: from, p_to: to,
-  }) ?? {};
+  const [searched, zone] = await Promise.all([
+    d.rest.rpc('coach_search_v1', {
+      p_user: userId, p_query: keywords || question, p_limit: 40, p_thread_limit: 6, p_exclude_thread: exclude, p_from: from, p_to: to,
+    }),
+    ownerZone(d.rest, userId),
+  ]);
+  const found = searched ?? {};
   const terms: string[] = Array.isArray(found.terms) ? found.terms : [];
   const matched: any[] = terms.length && Array.isArray(found.threads) ? found.threads.filter(isObject) : [];
   const totalHits = num(found.total_hits);
@@ -370,7 +374,7 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
       if (!t) return;
       const ref = refs.ref(id);
       const title = collapse(t.title) || 'Untitled chat';
-      const head = [headerOf(ref, title, t.created_at, t.last_message_at)];
+      const head = [headerOf(ref, title, t.created_at, t.last_message_at, zone)];
       if (t.summary) head.push(`Summary: ${clip(collapse(t.summary), RECALL_MESSAGE_CHARS)}`);
       const meta = matched.find((m) => String(m.thread_id) === id);
       const loaded = windows[i];
@@ -382,11 +386,11 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
         // Not loaded (the window read is capped): reported through coverage rather than dropped silently.
         if (at < 0) { hitsLeft++; continue; }
         let group = loaded.slice(Math.max(0, at - 1), at + 2).filter((r: any) => !picked.has(r.id));
-        let add = group.reduce((n: number, r: any) => n + messageLine(r).length + 1, 0);
+        let add = group.reduce((n: number, r: any) => n + messageLine(r, zone).length + 1, 0);
         // The first hit always gets in, if need be without its neighbours, so the section stays within its share.
         if (!picked.size && size + add > share) {
           group = [loaded[at]];
-          add = messageLine(loaded[at]).length + 1;
+          add = messageLine(loaded[at], zone).length + 1;
         }
         if (size + add > share) { hitsLeft++; continue; }
         for (const r of group) picked.set(r.id, r);
@@ -394,11 +398,11 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
       }
       if (!picked.size && meta?.snippet) head.push(`Match: ${unmark(meta.snippet)}`);
       const lines = [...picked.values()].sort((a, b) => (tsKey(a.created_at) - tsKey(b.created_at)) || String(a.id).localeCompare(String(b.id)));
-      sections.push({ threadId: id, ref, title, at: t.last_message_at ?? null, text: [...head, ...lines.map(messageLine)].join('\n'), messages: lines.length, hitsLeft });
+      sections.push({ threadId: id, ref, title, at: t.last_message_at ?? null, text: [...head, ...lines.map((m) => messageLine(m, zone))].join('\n'), messages: lines.length, hitsLeft });
     });
     lexical = matched.map((m) => {
       const t = byId.get(String(m.thread_id));
-      return `[${collapse(t?.title ?? m.title) || 'Untitled chat'}, ${day(m.last_message_at)}] ${unmark(m.snippet)}`;
+      return `[${collapse(t?.title ?? m.title) || 'Untitled chat'}, ${day(m.last_message_at, zone)}] ${unmark(m.snippet)}`;
     }).join('\n');
   } else {
     // No lexical match: the summaries of the window (or of the latest chats), newest first.
@@ -414,10 +418,10 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
       const title = collapse(t.title) || 'Untitled chat';
       sections.push({
         threadId: String(t.id), ref, title, at: t.last_message_at ?? null, messages: 0, hitsLeft: 0,
-        text: `${headerOf(ref, title, t.created_at, t.last_message_at)}\nSummary: ${clip(collapse(t.summary), RECALL_MESSAGE_CHARS)}`,
+        text: `${headerOf(ref, title, t.created_at, t.last_message_at, zone)}\nSummary: ${clip(collapse(t.summary), RECALL_MESSAGE_CHARS)}`,
       });
     }
-    lexical = rows.slice(0, 8).map((t: any) => `[${collapse(t.title) || 'Untitled chat'}, ${day(t.last_message_at)}] ${clip(collapse(t.summary), 300)}`).join('\n');
+    lexical = rows.slice(0, 8).map((t: any) => `[${collapse(t.title) || 'Untitled chat'}, ${day(t.last_message_at, zone)}] ${clip(collapse(t.summary), 300)}`).join('\n');
   }
 
   const empty = { chunks: 0, subcalls: 0, messages: 0 };
@@ -460,7 +464,7 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
   ];
   const tasks = chunks.map((c, i) =>
     callUtility(d, userId, 'map', prompt(c), { prepaid: true, signal: wave.signal, timeoutMs: left() })
-      .then((raw) => { results[i] = parseNotes(raw, c, refs); }));
+      .then((raw) => { results[i] = parseNotes(raw, c, refs, zone); }));
   examined.subcalls = chunks.length;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = await Promise.race([
@@ -472,7 +476,7 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
 
   const done = results.filter((r): r is { relevant: boolean; notes: Note[] } => !!r);
   const notes = done.filter((r) => r.relevant).flatMap((r) => r.notes);
-  const joined = joinNotes(notes, sectionById);
+  const joined = joinNotes(notes, sectionById, zone);
   if (timedOut) {
     return { answer: joined || lexicalAnswer, sources: sourcesOf(notes), coverage: { ...coverage, truncated: true }, examined, status: 'partial' };
   }

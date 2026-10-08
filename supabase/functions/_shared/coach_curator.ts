@@ -8,7 +8,7 @@
 import {
   callUtility, type ChatTurn, cleanLocale, clip, collapse, type CoachDeps, covers, day, enc, fail, fallbackTitle,
   findNearDuplicate, guardMemoryContent, type GuardContext, isObject, isSensitive, languageName, likelyDuplicates,
-  lineKey, MEMORY_TOPICS, memoryTokens, memoryTopic, mentions, METRIC_READING, offLimits, quoted, readJson,
+  lineKey, MEMORY_TOPICS, memoryTokens, memoryTopic, mentions, METRIC_READING, offLimits, ownerZone, quoted, readJson,
   readOptionalJson, Refs, sameFamily, sanitizeLine, sanitizeTitle, SMALL_BODY_BYTES, takeUtilityUnits, tokenSet,
   tokensNearMatch, TRANSIENT, tsKey, uuidOf, jaccard,
 } from './coach_llm.ts';
@@ -288,12 +288,13 @@ export async function suggestionsRoute(req: Request, userId: string, d: CoachDep
     .slice(0, 12).map((text: string) => ({ text, kind: 'explore' }));
   const locale = cleanLocale(body.locale);
   const owner = `user_id=eq.${userId}`;
-  const [[row], threads, memoryRows, questionRows] = await Promise.all([
+  const [[row], threads, memoryRows, questionRows, zone] = await Promise.all([
     d.rest.select('coach_user_state', `${owner}&select=suggestions,suggestions_fingerprint,suggestions_at,recent_searches,memory_revision`),
     d.rest.select('coach_threads', `${owner}&message_count=gt.0&order=last_message_at.desc.nullslast,id.desc&limit=6`
       + '&select=id,title,last_message_at,summary_topics,open_loops'),
     d.rest.select('coach_memory_items', `${owner}&retired_at=is.null&order=importance.desc,last_confirmed_at.desc&limit=40&select=id,content,topic,importance`),
     d.rest.select('coach_messages', `${owner}&role=eq.user&blocked=is.false&order=created_at.desc,id.desc&limit=10&select=content`),
+    ownerZone(d.rest, userId),
   ]);
   const searches: string[] = (Array.isArray(row?.recent_searches) ? row.recent_searches : [])
     .filter((s: unknown) => typeof s === 'string').slice(0, 5);
@@ -317,11 +318,11 @@ export async function suggestionsRoute(req: Request, userId: string, d: CoachDep
     const loops = (Array.isArray(t.open_loops) ? t.open_loops : []).map((l: any) => (typeof l === 'string' ? l : l?.text))
       .filter((l: unknown) => typeof l === 'string').slice(0, 2);
     const topics = Array.isArray(t.summary_topics) ? t.summary_topics.slice(0, 4) : [];
-    return `[${refs.ref(t.id)}] "${collapse(t.title) || 'Untitled chat'}" (${day(t.last_message_at)})`
+    return `[${refs.ref(t.id)}] "${collapse(t.title) || 'Untitled chat'}" (${day(t.last_message_at, zone)})`
       + `${topics.length ? ` topics: ${topics.join(', ')}` : ''}${loops.length ? `; open: ${loops.map((l: string) => clip(collapse(l), 100)).join('; ')}` : ''}`;
   });
   const prompt = [
-    `Now: ${[state?.weekday, dayPart].filter((s) => typeof s === 'string' && s).join(' ') || day(d.now())}`,
+    `Now: ${[state?.weekday, dayPart].filter((s) => typeof s === 'string' && s).join(' ') || day(d.now(), zone)}`,
     state ? `State: ${JSON.stringify(state)}` : 'State: unknown',
     memories.length ? `What Sana remembers:\n${memories.map((m: any) => `- [${m.topic}] ${clip(collapse(m.content), 200)}`).join('\n')}` : '',
     threadLines.length ? `Recent chats:\n${threadLines.join('\n')}` : 'Recent chats: none',
@@ -387,10 +388,10 @@ const laterOf = (a: string | null | undefined, b: string | null | undefined) =>
   !a ? b ?? null : !b ? a : tsKey(a) >= tsKey(b) ? a : b;
 
 /** One message as the curator reads it; a photo turn carries what the vision model saw. */
-export function curatorLine(m: any): string {
+export function curatorLine(m: any, zone = 'UTC'): string {
   const seen = m.role === 'user' && typeof m.meta?.imageContext === 'string' ? collapse(m.meta.imageContext) : '';
   const text = `${seen ? `[Photo: ${clip(seen, 400)}] ` : ''}${collapse(String(m.content ?? ''))}`;
-  return `[${day(m.created_at)}] ${m.role === 'user' ? 'User' : 'Sana'}: ${clip(text, BATCH_MESSAGE_CHARS)}`;
+  return `[${day(m.created_at, zone)}] ${m.role === 'user' ? 'User' : 'Sana'}: ${clip(text, BATCH_MESSAGE_CHARS)}`;
 }
 
 /** Oldest first: at most 24 messages and 14,000 characters per batch, at most 3 batches. */
@@ -418,6 +419,7 @@ const savedHere = (m: PoolMemory, threadId: string) => m.source === 'tool' && m.
 
 function curatorPrompt(o: {
   summary: string | null; batch: any[]; candidates: PoolMemory[]; refs: Refs; wantSummary: boolean; wantMemory: boolean; threadId: string;
+  zone?: string;
 }): ChatTurn[] {
   const keys = [
     o.wantSummary ? '"summary": "...", "topics": ["..."], "open_loops": ["..."]' : '',
@@ -461,7 +463,7 @@ function curatorPrompt(o: {
   const user = [
     o.wantSummary ? `Summary so far: ${o.summary ? clip(o.summary, 2400) : '(none yet)'}` : '',
     o.wantMemory ? `Saved memories (from all of the user's chats; for memory_ops only):\n${memoryLines.join('\n') || '(none)'}` : '',
-    `New messages:\n${o.batch.map(curatorLine).join('\n')}`,
+    `New messages:\n${o.batch.map((m) => curatorLine(m, o.zone)).join('\n')}`,
   ].filter(Boolean).join('\n\n');
   return [{ role: 'system', content: rules.join('\n') }, { role: 'user', content: user }];
 }
@@ -662,9 +664,12 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
     const curatedCut: string | null = claim.curated_through ?? null;
     const mineAfter = laterOf(curatedCut, claim.memory_floor_at);
     const loadAfter = summaryCut && curatedCut ? (tsKey(summaryCut) <= tsKey(curatedCut) ? summaryCut : curatedCut) : null;
-    const loaded = await d.rest.select('coach_messages',
-      `user_id=eq.${userId}&thread_id=eq.${threadId}${loadAfter ? `&created_at=gt.${enc(loadAfter)}` : ''}`
-      + `&order=created_at.asc,id.asc&limit=${LOAD_MESSAGES}&select=id,role,content,meta,created_at,blocked`);
+    const [loaded, zone] = await Promise.all([
+      d.rest.select('coach_messages',
+        `user_id=eq.${userId}&thread_id=eq.${threadId}${loadAfter ? `&created_at=gt.${enc(loadAfter)}` : ''}`
+        + `&order=created_at.asc,id.asc&limit=${LOAD_MESSAGES}&select=id,role,content,meta,created_at,blocked`),
+      ownerZone(d.rest, userId),
+    ]);
     const rows = loaded.filter((r: any) => r.blocked !== true);
     const newForSummary = (m: any) => !summaryCut || tsKey(m.created_at) > tsKey(summaryCut);
     const newForMemory = (m: any) => m.role === 'user' && (!mineAfter || tsKey(m.created_at) > tsKey(mineAfter));
@@ -735,7 +740,7 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
       const refs = new Refs('m');
       candidates.forEach((c) => refs.ref(c.id));
       const raw = await callUtility(d, userId, 'curator',
-        curatorPrompt({ summary, batch, candidates, refs, wantSummary: batchSummary, wantMemory: batchMemory, threadId }));
+        curatorPrompt({ summary, batch, candidates, refs, wantSummary: batchSummary, wantMemory: batchMemory, threadId, zone }));
       if (!raw) break;
       if (batchSummary) {
         const next = cleanSummary(raw.summary);
@@ -827,8 +832,8 @@ export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): 
   return out;
 }
 
-const memoryLine = (refs: Refs) => (r: any) =>
-  `${refs.ref(r.id)} [${r.topic}, importance ${r.importance}, ${day(r.created_at)}] ${clip(collapse(r.content), 300)}`;
+const memoryLine = (refs: Refs, zone = 'UTC') => (r: any) =>
+  `${refs.ref(r.id)} [${r.topic}, importance ${r.importance}, ${day(r.created_at, zone)}] ${clip(collapse(r.content), 300)}`;
 
 /** Re-reviewing the same memories gains nothing: within 6 h of the last pass it takes 8 new or changed ones. */
 const CONSOLIDATION_GAP_MS = 6 * 3_600_000;
@@ -855,11 +860,11 @@ async function consolidate(d: CoachDeps, userId: string): Promise<boolean | null
     if ((await d.rest.rpc('coach_consolidation_claim_v1', { p_user: userId, p_lease_seconds: LEASE_SECONDS })) !== true) return null;
     // Without budget the lease simply expires and a later pass tries again.
     if (!(await takeUtilityUnits(d, userId, 1))) return false;
-    const rows = await activeMemories(d, userId, 200);
+    const [rows, zone] = await Promise.all([activeMemories(d, userId, 200), ownerZone(d.rest, userId)]);
     const refs = new Refs('m');
     const raw = await callUtility(d, userId, 'consolidation', [
       { role: 'system', content: consolidationSystem() },
-      { role: 'user', content: `Memories:\n${rows.map(memoryLine(refs)).join('\n')}` },
+      { role: 'user', content: `Memories:\n${rows.map(memoryLine(refs, zone)).join('\n')}` },
     ], { prepaid: true });
     // A failed pass still closes the lease, so a broken reply is not retried on every maintenance call.
     const ops = raw ? resolveConsolidationOps(raw.ops, refs, rows) : [];
@@ -913,9 +918,10 @@ async function dedupePairs(d: CoachDeps, userId: string): Promise<boolean> {
       `user_id=eq.${userId}&or=(consolidation_until.is.null,consolidation_until.lte.${enc(quoted(stamp))})&select=user_id`);
     if (!Array.isArray(leased) || !leased.length) return false;
     const refs = new Refs('m');
+    const zone = await ownerZone(d.rest, userId);
     const raw = await callUtility(d, userId, 'consolidation', [
       { role: 'system', content: `${consolidationSystem()}\n${DEDUPE_NOTE}` },
-      { role: 'user', content: `Memories:\n${picked.map(memoryLine(refs)).join('\n')}` },
+      { role: 'user', content: `Memories:\n${picked.map(memoryLine(refs, zone)).join('\n')}` },
     ]);
     if (!raw) return false;
     const ops = resolveConsolidationOps(raw.ops, refs, picked);
