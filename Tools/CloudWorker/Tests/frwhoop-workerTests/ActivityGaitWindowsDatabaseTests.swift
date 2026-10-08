@@ -45,7 +45,7 @@ final class ActivityGaitWindowsDatabaseTests: XCTestCase {
         try db.exec("insert into public.devices(id,user_id,source_kind) values ('\(device)','\(user)','noop_push')")
         addTeardownBlock {
             db.rollbackTransaction()
-            try? db.exec("delete from auth.users where id = '\(user)'")
+            try db.deleteFixtureOwners([user])
         }
         return Fixture(db: db, user: user, device: device)
     }

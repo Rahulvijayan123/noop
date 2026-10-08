@@ -286,22 +286,35 @@ enum ActivityContextDays {
         let warm = lookback.map { ActivityContextTrackBuilder.build($0, config: config) }
         let seed = (warm?.observedSeconds ?? 0) > 0 ? warm?.snapshot : nil
         let track = ActivityContextTrackBuilder.build(input, config: config, resuming: seed)
-        var document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
+        let document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
                                                   config: config, includeSnapshot: false)
-        // A run is stamped one publish interval past its last state, so the run that is still open when
-        // the data reaches midnight would spill into the next UTC day. A day document describes its own
-        // day only; the neighbour's document starts where this one stops.
+        return (clippedToDay(document), track)
+    }
+
+    /// The document restricted to its own day `[dayStart, dayEnd)`, the last step of every day decode.
+    ///
+    /// Runs: a run is stamped one publish interval past its last state, so the run that is still open when
+    /// the data reaches midnight would spill into the next UTC day. A day document describes its own day
+    /// only; the neighbour's document starts where this one stops.
+    ///
+    /// Events: the resumed snapshot carries the lookback's recent transition events, and the first in-day
+    /// state may re-emit one stamped up to the event hold before midnight. Those belong to the previous day's
+    /// document (publish_activity_context_day rejects an event whose `ts` is outside the day), so only the
+    /// day's are kept. The filter is on `ts`, the detection second (when the change became known, which is
+    /// what a causal reader filters on), not on `onsetTs`: an event detected just after midnight whose onset
+    /// was back-dated (at most `ActivityTransitionEvent.maxOnsetLeadS`) into the previous day stays in this
+    /// day's document with its onset unchanged, and the server's validator checks only `ts`.
+    static func clippedToDay(_ document: ActivityContextDayDocument) -> ActivityContextDayDocument {
+        var document = document
+        let dayEnd = document.dayEnd, dayStart = document.dayStart
         document.runs = document.runs.compactMap { run in
             var clipped = run
-            clipped.end = min(run.end, input.dayEnd)
+            clipped.end = min(run.end, dayEnd)
             return clipped.end > clipped.start ? clipped : nil
         }
-        // The resumed snapshot carries the lookback's recent transition events, and the first in-day state
-        // may re-emit one stamped up to the event hold before midnight. Those belong to the previous day's
-        // document (publish_activity_context_day rejects an event outside the day), so keep only the day's.
-        document.events = document.events.filter { $0.ts >= input.dayStart && $0.ts < input.dayEnd }
+        document.events = document.events.filter { $0.ts >= dayStart && $0.ts < dayEnd }
         document.summary = ActivityContextDaySummary(runs: document.runs)
-        return (document, track)
+        return document
     }
 
     // MARK: - Decoder config and versions (audit D1-01 / D5-12 / D5-03)

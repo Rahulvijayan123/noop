@@ -49,9 +49,15 @@
 -- re-create the three replaced functions from 20261003120000_activity_context.sql and
 -- 20261003140000_activity_context_stream_days.sql.
 --
--- Drafted as 20261007120000; renamed so it sorts after every migration production has already applied
--- (20261007140000 .. 20261008000000): `supabase db push` refuses a local version older than the remote's
--- newest one. No migration between the old and the new timestamp touches these objects.
+-- Drafted as 20261007120000; renamed so it sorts after every migration on main (`nara/main` 3b4ee16a5), whose
+-- newest are 20261007140000 .. 20261008010000 (sensor_biomarkers, sensor_biomarkers_claim_throttle,
+-- coach_threads_memory, anomaly_service, metric_insights, metric_insight_background_sweep):
+-- `supabase db push` refuses a local version older than the remote's newest one. Which of those production has
+-- applied was not re-checked here; list the remote versions immediately before any deploy. No migration between
+-- the old and the new timestamp touches these objects (metric_insights reads physiology_context_days only).
+-- Production order: main's migrations through 20261008010000, then 20261008100000, 20261008100100,
+-- 20261008100200, 20261008100300 (if present), 20261008100400; Spec 01's 20261008120000_ppg_transport_anchor
+-- touches only noop_reserve_object_manifest_lifecycle_core and sorts after all of them.
 begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '120s';
