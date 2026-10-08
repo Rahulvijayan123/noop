@@ -36,6 +36,7 @@ struct HrvSeriesChart: View {
     }
 
     private var weakNote: String? { HrvSeriesEmphasis.weakNote(points) }
+    private var pendingNote: String? { HrvSeriesEmphasis.pendingNote(points) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
@@ -86,13 +87,13 @@ struct HrvSeriesChart: View {
             .frame(height: 120)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text("Heart rate variability through the day"))
-            .accessibilityValue(Text([latestSummary.map { "Latest \($0)" }, weakNote]
+            .accessibilityValue(Text([latestSummary.map { "Latest \($0)" }, weakNote, pendingNote]
                 .compactMap { $0 }.joined(separator: ". ")))
             Text("Daytime wrist readings are noisier than overnight ones.")
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textSecondary)
-            if let weakNote {
-                Text(weakNote)
+            ForEach([weakNote, pendingNote].compactMap { $0 }, id: \.self) { note in
+                Text(note)
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -130,6 +131,18 @@ enum HrvSeriesEmphasis: Equatable {
             }
         }
         return grouped
+    }
+
+    /// A quiet note when some readings' activity context is not published yet. Those readings are drawn normally;
+    /// nil when there are none, or when every one of them is already faded for another reason.
+    static func pendingNote(_ points: [HrvSeriesPoint]) -> String? {
+        let pending = points.filter {
+            emphasis(of: $0) == .full && ($0.context?.reasons.contains(.contextPending) ?? false)
+        }
+        guard !pending.isEmpty else { return nil }
+        return pending.count == points.count
+            ? "Activity context is not available yet for these readings."
+            : "Activity context is not available yet for the latest readings."
     }
 
     /// The newest well-supported point, which the "latest" read-out names.

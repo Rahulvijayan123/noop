@@ -294,11 +294,11 @@ final class DayScoringAdapterTests: XCTestCase {
 
     // MARK: - Intraday HRV slot context (audit D6-14)
 
-    private func epochs(from start: Int, seconds: Int, motion: MotionLabel) -> [ActivityEpoch] {
+    private func epochs(from start: Int, seconds: Int, motion: MotionLabel, validS: Int = 30) -> [ActivityEpoch] {
         stride(from: start, to: start + seconds, by: 30).map {
             ActivityEpoch(startTs: $0, endTs: $0 + 30, motion: motion, posture: .unknown, exercise: .unknown,
                           sleepState: .awake, exertion: .unknown, wear: .unknown,
-                          confidence: 0.9, observedS: 30, validS: 30)
+                          confidence: 0.9, observedS: 30, validS: validS)
         }
     }
 
@@ -329,13 +329,40 @@ final class DayScoringAdapterTests: XCTestCase {
             + beats(from: day + 900, seconds: 120, channel: .whoop5Standard)             // two minutes of beats
         let readings = DayScorer.hrvSlotReadings(rr: rr, from: day, to: day + 86_400)
         XCTAssertEqual(readings.count, 2)
+        // Not published yet is pending, not unclear: flagged, but the reading is not weak for it (review R10).
         let noLane = DayScorer.hrvSlotContext(readings: readings, epochs: [])
-        XCTAssertEqual(noLane[0]["reasons"] as? [String], ["unknown_context"], "no activity is unknown, never still")
-        XCTAssertEqual(noLane[1]["reasons"] as? [String], ["unknown_context", "sparse_beats"])
+        XCTAssertEqual(noLane[0]["reasons"] as? [String], ["context_pending"], "no activity is pending, never still")
+        XCTAssertEqual(noLane[0]["weak"] as? Bool, false)
+        XCTAssertEqual(noLane[1]["reasons"] as? [String], ["context_pending", "sparse_beats"])
+        XCTAssertEqual(noLane[1]["weak"] as? Bool, true, "few clean beats still make it weak")
         let still = epochs(from: day, seconds: 1_800, motion: .stationary)
         let ctx = DayScorer.hrvSlotContext(readings: readings, epochs: still)
         XCTAssertEqual(ctx[0]["weak"] as? Bool, false)
         XCTAssertEqual(ctx[1]["reasons"] as? [String], ["sparse_beats"])
+    }
+
+    func testPendingIsKeptApartFromContextTheLaneDescribedAsUnclear() {
+        let day = 1_790_000_000 - 1_790_000_000 % 900
+        let rr = beats(from: day, seconds: 2_700, channel: .whoop5Standard)            // three full slots
+        let readings = DayScorer.hrvSlotReadings(rr: rr, from: day, to: day + 86_400)
+        XCTAssertEqual(readings.count, 3)
+        // Slot 0: the lane described it and abstained (unknown epochs). Slot 1: still for 3 minutes, then the
+        // newest published epoch ends. Slot 2: nothing published yet.
+        let activity = epochs(from: day, seconds: 900, motion: .unknown, validS: 0)   // observed, abstained
+            + epochs(from: day + 900, seconds: 180, motion: .stationary)
+        let ctx = DayScorer.hrvSlotContext(readings: readings, epochs: activity)
+        XCTAssertEqual(ctx[0]["reasons"] as? [String], ["unknown_context"])
+        XCTAssertEqual(ctx[0]["weak"] as? Bool, true, "context known to be unclear stays weak")
+        XCTAssertEqual(ctx[1]["reasons"] as? [String], ["context_pending"], "past the published horizon")
+        XCTAssertEqual(ctx[1]["weak"] as? Bool, false)
+        XCTAssertEqual(ctx[2]["reasons"] as? [String], ["context_pending"])
+        XCTAssertEqual(ctx[2]["weak"] as? Bool, false)
+        // Movement still counts on a partly published slot.
+        let walking = epochs(from: day, seconds: 900, motion: .stationary)
+            + epochs(from: day + 900, seconds: 300, motion: .walking)
+        let moved = DayScorer.hrvSlotContext(readings: readings, epochs: walking)
+        XCTAssertEqual(moved[1]["reasons"] as? [String], ["movement", "context_pending"])
+        XCTAssertEqual(moved[1]["weak"] as? Bool, true)
     }
 
     // MARK: - hrv_slots pinning for the attach path (audit P3-2)

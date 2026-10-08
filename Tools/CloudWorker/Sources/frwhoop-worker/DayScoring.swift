@@ -501,20 +501,31 @@ struct DayScorer {
 
     /// One context entry per reading, same order: `{slot_s, weak, reasons, moving_share, unknown_share,
     /// clean_coverage, post_activity}`. Shares come from the shared duration-weighted join
-    /// (`ActivityContextJoin.hrvSlotContexts`, the same fold as `contexts.hrv_slots`). With no published
-    /// activity epochs every slot's context is unknown, and it says so rather than passing as still.
+    /// (`ActivityContextJoin.hrvSlotContexts`, the same fold as `contexts.hrv_slots`).
+    ///
+    /// Context that is not published yet is not context known to be unclear (review R10): a slot no published epoch
+    /// overlaps, or one that runs past the newest published epoch with most of it uncovered, reads
+    /// `context_pending`, which does NOT make the slot weak. `unknown_context` (weak) is kept for a slot the
+    /// activity lane did describe and mostly abstained on. `movement` and `sparse_beats` apply either way.
     static func hrvSlotContext(readings: [HrvSlotReading], epochs: [ActivityEpoch]) -> [[String: Any]] {
         let contexts = ActivityContextJoin.hrvSlotContexts(slots: readings.map(\.slotStart), epochs: epochs,
                                                            slotSeconds: hrvSlotSeconds)
+        let publishedThrough = epochs.map(\.endTs).max()
         return zip(readings, contexts).map { reading, ctx in
+            let slotEnd = reading.slotStart + hrvSlotSeconds
             let moving = ["walking", "running", "other_movement"].reduce(0.0) { $0 + (ctx.shares[$1] ?? 0) }
             let coverage = reading.meanNN.map { Double(reading.cleanBeats) * $0 / (Double(hrvSlotSeconds) * 1000) } ?? 0
+            let described = epochs.contains { $0.startTs < slotEnd && $0.endTs > reading.slotStart }
+            let pastHorizon = (publishedThrough ?? Int.min) < slotEnd
+            let mostlyUnknown = ctx.unknownShare >= hrvSlotUnknownShareLimit
+            let pending = !described || (pastHorizon && mostlyUnknown)
             var reasons: [String] = []
             if moving >= hrvSlotMovingShareLimit { reasons.append("movement") }
-            if ctx.unknownShare >= hrvSlotUnknownShareLimit { reasons.append("unknown_context") }
+            if pending { reasons.append("context_pending") } else if mostlyUnknown { reasons.append("unknown_context") }
             if coverage < hrvSlotMinCleanCoverage { reasons.append("sparse_beats") }
+            let weak = reasons.contains { $0 != "context_pending" }
             func r3(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
-            return ["slot_s": reading.slotStart, "weak": !reasons.isEmpty, "reasons": reasons,
+            return ["slot_s": reading.slotStart, "weak": weak, "reasons": reasons,
                     "moving_share": r3(moving), "unknown_share": r3(ctx.unknownShare),
                     "clean_coverage": r3(min(coverage, 1)), "post_activity": ctx.postActivity] as [String: Any]
         }
