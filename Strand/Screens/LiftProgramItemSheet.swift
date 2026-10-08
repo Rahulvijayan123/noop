@@ -71,8 +71,7 @@ struct LiftProgramItemSheet: View {
 
     var body: some View {
         ScreenScaffold(
-            title: item == nil ? "Add exercise" : "Edit exercise",
-            subtitle: "Type any name you like. Nara remembers it, with the muscles you give it."
+            title: item == nil ? "Add exercise" : "Edit exercise"
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 exerciseSection
@@ -124,7 +123,7 @@ struct LiftProgramItemSheet: View {
 
     private var exerciseSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Exercise", overline: "Movement")
+            SectionHeader("Exercise")
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     TextField("Incline dumbbell press", text: $exercise)
@@ -135,7 +134,7 @@ struct LiftProgramItemSheet: View {
 
                     if !suggestions.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Used before").strandOverline()
+                            Text("Used before").strandLabel()
                             ForEach(suggestions, id: \.id) { row in
                                 HStack(spacing: 8) {
                                     Button {
@@ -152,7 +151,7 @@ struct LiftProgramItemSheet: View {
                                         forgetting = row
                                     } label: {
                                         Image(systemName: "trash")
-                                            .font(.system(size: 12, weight: .semibold))
+                                            .font(StrandFont.icon(.inline))
                                             .foregroundStyle(StrandPalette.textTertiary)
                                     }
                                     .buttonStyle(.plain)
@@ -170,7 +169,7 @@ struct LiftProgramItemSheet: View {
 
     private var targetsSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Targets", overline: "What you're aiming for")
+            SectionHeader("Targets")
             NoopCard {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack(spacing: NoopMetrics.gap) {
@@ -219,7 +218,7 @@ struct LiftProgramItemSheet: View {
 
     private var noteSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Technique note", overline: "In your words")
+            SectionHeader("Technique note")
             NoopCard {
                 TextField("Slow eccentric, pause at the bottom", text: $note, axis: .vertical)
                     // A cue read between sets, and it renders directly above the set rows — every
@@ -261,7 +260,7 @@ struct LiftProgramItemSheet: View {
     private func field<Content: View>(_ label: LocalizedStringKey,
                                       @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label).strandOverline()
+            Text(label).strandLabel()
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)

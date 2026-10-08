@@ -13,10 +13,10 @@ import Foundation
 // biggest movers, a strain-vs-recovery balance read, and 1–2 plain-English focal
 // points. No AI, no network — the engine is fully deterministic and unit-tested.
 //
-// Two surfaces are exposed so the orchestrator can wire whichever it wants:
-//   • `WeeklyDigestCard` — an embeddable card (drop into Today / Trends).
-//   • `WeeklyDigestView` — a full ScreenScaffold screen (for a sidebar `.digest`
-//      case). Both share `WeeklyDigestContent`, so they never drift.
+// Surfaces, all sharing `WeeklyDigestContent` so they never drift:
+//   • the Trends week summary (`WeeklyDigestContent(compact: true)`), stepped week by week;
+//   • `WeeklyDigestView` — the full page one tap below it;
+//   • `WeeklyDigestCard` — an embeddable card (no caller today).
 //
 // Framing is informational and non-clinical, consistent with the app DISCLAIMER.
 
@@ -70,9 +70,8 @@ struct WeeklyDigestCard: View {
         if digest.isEmpty {
             EmptyView()
         } else {
-            // Content owns its own frosted cards (the domain score row + the signals
-            // card), so it's no longer wrapped in an outer NoopCard — that would double
-            // the frost. The compact flag trims it to the three headline scores.
+            // Content owns its own card, so it is not wrapped in another one. The compact flag trims it
+            // to the three headline scores and one focal point.
             WeeklyDigestContent(digest: digest, compact: true)
         }
     }
@@ -80,36 +79,35 @@ struct WeeklyDigestCard: View {
 
 // MARK: - Full screen
 
-/// The weekly digest as a full screen (for a sidebar `.digest` case).
+/// The week in review as a full page, one tap below the Trends week summary: the three scores with their
+/// week-over-week change, every focal point, the nightly signals, and the balance read in About.
 struct WeeklyDigestView: View {
     @EnvironmentObject var repo: Repository
+    /// Any day in the week to show; the engine snaps it to that week's Monday. Today by default.
+    var anchorDay: String = Repository.localDayKey(Date())
 
     var body: some View {
-        ScreenScaffold(title: "Week in review",
-                       subtitle: "Your Monday-to-Sunday, read in one glance.",
-                       // PERF: chart-heavy column (per-score summary cards with gauges, the metric grid
-                       // and the focal-points list, all inside WeeklyDigestContent). The LazyVStack path
-                       // is byte-identical layout. The content is kept in its inner VStack(sectionGap=22)
-                       // for pixel-identical spacing (the scaffold stack is 20pt), so the win is partial
-                       // until those rows are promoted to direct children.
-                       lazy: true) {
-            if repo.days.isEmpty {
-                ComingSoon(what: repo.loaded
-                    ? "A weekly digest needs a few days of history. Wear your strap or import your WHOOP export in Data Sources."
-                    : "Loading your history…")
+        let digest = WeeklyDigestSource.digest(from: repo.days, anchorDay: anchorDay)
+        ScreenScaffold(title: "Week in review", dateLine: weeklyDigestRangeLabel(digest),
+                       titleDisplay: .navigationBar, isLoading: !repo.loaded) {
+            if repo.loaded && digest.isEmpty {
+                ComingSoon(what: "No readings this week")
             } else {
-                let digest = WeeklyDigestSource.digest(from: repo.days, anchorDay: Repository.localDayKey(Date()))
-                if digest.isEmpty {
-                    DataPendingNote(
-                        title: "No readings this week yet",
-                        message: "Once this week has a day or two of data, your week-in-review appears here.")
-                } else {
-                    VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                        WeeklyDigestContent(digest: digest, compact: false)
-                    }
-                }
+                WeeklyDigestContent(digest: digest, compact: false, showsHeader: false)
+                AboutDisclosure(paragraphs: aboutParagraphs(digest))
             }
         }
+    }
+
+    private func aboutParagraphs(_ digest: WeeklyDigest) -> [String] {
+        var out: [String] = []
+        if let sd = digest.sleepConsistencySD {
+            out.append(String(localized: "Sleep steadiness: Rest varied ±\(String(format: "%.1f", sd)) pts night to night."))
+        }
+        out.append(digest.balance.sentence)
+        out.append(String(localized: "The week in review covers Monday to Sunday. Its Rest is the nightly sleep composite, recomputed for each night."))
+        out.append(String(localized: "Informational only, not medical advice."))
+        return out
     }
 }
 
@@ -131,286 +129,193 @@ private func weeklyDigestShortDate(_ ymd: String) -> String {
     return "\(name) \(day)"
 }
 
-/// The inner content shared by the card and the full screen. `compact` trims the
-/// metric grid to the headline rows for the card; the full screen shows everything.
+/// The week's content, shared by the Trends summary (`compact`), the full page and the shared image.
+///
+/// - The three headline scores (Charge, Effort, Rest) as value columns, each with its week-over-week
+///   change as a signed number in the score's own units (points, never a percent of a percentage).
+/// - `compact`: the first focal point under them. Full page: every focal point, then HRV and resting HR.
 struct WeeklyDigestContent: View {
     let digest: WeeklyDigest
     var compact: Bool = false
     var showsHeader: Bool = true
 
-    /// The Effort display scale (#268), so the Week-in-review Effort gauge matches the Today tile
-    /// and the Trends small-multiple instead of being stuck on "of 100". Charge/Rest stay 0–100.
+    /// The Effort display scale (#268), so the week's Effort matches the Today tile and the Trends chart
+    /// instead of being stuck on the stored 0–100. Charge/Rest stay 0–100.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
-    #if os(iOS)
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    #endif
 
-    /// The three headline 0–100 scores shown as domain summaries.
+    /// The three headline 0–100 scores.
     private static let scoreOrder: [WeeklyMetric] = [.charge, .effort, .rest]
-
-    /// The shared colour world for each weekly metric — drives the summary card tint,
-    /// the gauge stroke and the secondary-signal accents.
-    private func domain(for m: WeeklyMetric) -> DomainTheme {
-        switch m {
-        case .charge: return .charge
-        case .effort: return .effort
-        case .rest:   return .rest
-        case .hrv:    return .rest    // HRV shares the Rest / periwinkle world
-        case .rhr:    return .stress
-        }
-    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            // Headline over a subtle scenic backdrop (Charge-tinted starfield).
             if showsHeader {
                 header
             }
-
-            // The three headline scores, each with a domain-tinted gauge and week-over-week context.
-            scoreRow
-
-            // Focal points + secondary signals + balance footer in one frosted card.
-            detailCard
+            scoreCard
+            if !compact {
+                focalCard
+                signalsCard
+            }
         }
     }
 
-    // MARK: Header (scenic hero)
+    // MARK: Header (the shared image only)
 
     private var header: some View {
-        ZStack(alignment: .leading) {
-            NoopPanelSurface(cornerRadius: NoopMetrics.cardRadius,
-                             elevated: true)
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
-                    Text("Week in review").strandOverline()
-                    Text(weekRangeLabel)
-                        .font(StrandFont.title2)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-                Spacer()
-                Text("\(digest.daysWithData)/7 days")
-                    .font(StrandFont.footnote)
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                Text("Week in review")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text(weeklyDigestRangeLabel(digest))
+                    .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
-                    .accessibilityLabel("\(digest.daysWithData) of 7 days had data this week")
             }
-            .padding(NoopMetrics.cardPadding)
+            Spacer()
+            Text("\(digest.daysWithData)/7 days")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .accessibilityLabel("\(digest.daysWithData) of 7 days had data this week")
         }
     }
 
-    // MARK: Score row — three domain summaries
+    // MARK: Scores
 
     @ViewBuilder
-    private var scoreRow: some View {
-        #if os(iOS)
-        if compact {
-            compactScoreRow
-        } else {
-            scoreGrid
-        }
-        #else
-        // `compact` describes the embedded digest, not a compact desktop width.
-        // Keep macOS on its original adaptive, individually surfaced score cards.
-        scoreGrid
-        #endif
-    }
-
-    #if os(iOS)
-    @ViewBuilder
-    private var compactScoreRow: some View {
+    private var scoreCard: some View {
         let summaries = Self.scoreOrder.compactMap { digest.summary($0) }
         if !summaries.isEmpty {
-            NoopCard(padding: NoopMetrics.space2) {
-                if dynamicTypeSize.isAccessibilitySize {
-                    // At accessibility text sizes, three narrow columns would either truncate
-                    // localized labels/chips or force gauge text below a readable size.
-                    VStack(spacing: 0) {
-                        ForEach(Array(summaries.enumerated()), id: \.element.metric.rawValue) { index, summary in
-                            scoreCard(summary: summary, presentation: .embedded)
-                            if index < summaries.count - 1 {
-                                Divider()
-                                    .overlay(StrandPalette.hairline)
-                                    .padding(.horizontal, NoopMetrics.space3)
-                                    .padding(.vertical, NoopMetrics.space3)
-                            }
-                        }
-                    }
-                } else {
-                    // Align from the shared label/gauge rows. Optional content below one gauge must
-                    // never shift that gauge relative to its neighbours.
-                    HStack(alignment: .top, spacing: 0) {
-                        ForEach(Array(summaries.enumerated()), id: \.element.metric.rawValue) { index, summary in
-                            scoreCard(summary: summary, presentation: .embedded)
-                            if index < summaries.count - 1 {
-                                Divider()
-                                    .overlay(StrandPalette.hairline)
-                                    .padding(.vertical, NoopMetrics.space3)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    #endif
-
-    private var scoreGrid: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: compact ? 140 : 168), spacing: NoopMetrics.gap)],
-            spacing: NoopMetrics.gap
-        ) {
-            ForEach(Self.scoreOrder, id: \.rawValue) { metric in
-                if let summary = digest.summary(metric) {
-                    scoreCard(summary: summary, presentation: .standalone)
-                }
-            }
-        }
-    }
-
-    private func scoreCard(summary: WeeklyMetricSummary,
-                           presentation: DigestScoreCard.Presentation) -> some View {
-        DigestScoreCard(summary: summary,
-                        domain: domain(for: summary.metric),
-                        deltaText: deltaText(summary),
-                        deltaTone: chipTone(summary),
-                        accessibility: rowAccessibility(summary, effortScale: effortScale),
-                        effortScale: effortScale,
-                        presentation: presentation)
-    }
-
-    // MARK: Detail card (focal points · secondary signals · footer)
-
-    @ViewBuilder
-    private var detailCard: some View {
-        let signals = secondarySignals
-        let hasFocal = !digest.focalPoints.isEmpty
-        if hasFocal || !signals.isEmpty || !compact {
             NoopCard {
-                VStack(alignment: .leading, spacing: 14) {
-                    if hasFocal {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ForEach(Array(digest.focalPoints.enumerated()), id: \.offset) { _, line in
-                                focalRow(line)
-                            }
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: NoopMetrics.space3) {
+                            ForEach(summaries, id: \.metric.rawValue) { scoreColumn($0) }
+                        }
+                        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                            ForEach(summaries, id: \.metric.rawValue) { scoreColumn($0) }
                         }
                     }
-
-                    // Secondary nightly signals (HRV / RHR) as compact rows — full screen only.
-                    if !signals.isEmpty {
-                        if hasFocal { Divider().overlay(StrandPalette.hairline) }
-                        VStack(spacing: 10) {
-                            ForEach(signals, id: \.metric.rawValue) { row in
-                                metricRow(row)
-                            }
-                        }
+                    if compact, let first = digest.focalPoints.first {
+                        Rectangle().fill(StrandPalette.hairline).frame(height: NoopMetrics.hairlineWidth)
+                        Text(first)
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-
-                    if !compact { footer }
                 }
             }
         }
     }
 
-    /// The nightly signals shown as rows beneath the score cards (HRV / RHR) — only on
-    /// the full screen; the compact card shows the three score cards alone.
-    private var secondarySignals: [WeeklyMetricSummary] {
-        guard !compact else { return [] }
-        return [WeeklyMetric.hrv, .rhr].compactMap { digest.summary($0) }
-    }
-
-    // MARK: Focal row
-
-    private func focalRow(_ line: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "sparkles")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.accent)
-                .accessibilityHidden(true)
-            Text(line)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(line)
-    }
-
-    // MARK: Metric row (secondary signals)
-
-    private func metricRow(_ s: WeeklyMetricSummary) -> some View {
-        HStack(spacing: 12) {
-            // Domain dot + label so each signal reads as part of its colour world.
-            Circle().fill(domain(for: s.metric).color)
-                .frame(width: 7, height: 7)
-                .accessibilityHidden(true)
+    private func scoreColumn(_ s: WeeklyMetricSummary) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
             Text(s.metric.label)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .frame(width: 84, alignment: .leading)
-
-            // This-week mean.
-            Text(meanText(s, effortScale: effortScale))
-                .font(StrandFont.bodyNumber)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .frame(minWidth: 56, alignment: .leading)
-
-            Spacer(minLength: 8)
-
-            // Week-over-week delta chip (color-coded by good/bad, not just up/down).
-            deltaChip(s)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(rowAccessibility(s, effortScale: effortScale))
-    }
-
-    private func deltaChip(_ s: WeeklyMetricSummary) -> some View {
-        let tone = chipTone(s)
-        let arrow = s.wowDelta > 0 ? "arrow.up" : (s.wowDelta < 0 ? "arrow.down" : "minus")
-        return HStack(spacing: 3) {
-            Image(systemName: arrow)
-                .font(.system(size: 9, weight: .semibold))
-                .accessibilityHidden(true)
-            Text(deltaText(s))
-                .font(StrandFont.captionNumber)
-        }
-        .foregroundStyle(tone)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(tone.opacity(0.12), in: Capsule())
-    }
-
-    // MARK: Footer (full screen only)
-
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Divider().overlay(StrandPalette.hairline)
-            if let sd = digest.sleepConsistencySD {
-                Text("Sleep steadiness: Rest varied ±\(fmt1(sd)) pts night to night.")
+                .strandLabel()
+                .lineLimit(1)
+            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
+                Text(numberText(s))
+                    .font(StrandFont.number(28))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                if s.thisWeek.n > 0 {
+                    Text(scaleText(s))
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                }
+            }
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            if hasComparison(s) {
+                TrendChip(text: deltaSigned(s), color: chipTone(s))
+            } else {
+                Text("new")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
-            Text(digest.balance.sentence)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("Informational only, not medical advice.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(rowAccessibility(s, effortScale: effortScale))
+    }
+
+    // MARK: Focal points + nightly signals (full page)
+
+    @ViewBuilder
+    private var focalCard: some View {
+        if !digest.focalPoints.isEmpty {
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                    ForEach(Array(digest.focalPoints.enumerated()), id: \.offset) { _, line in
+                        Text(line)
+                            .font(StrandFont.body)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var signalsCard: some View {
+        let signals = [WeeklyMetric.hrv, .rhr].compactMap { digest.summary($0) }
+        if !signals.isEmpty {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Nightly signals")
+                NoopCard {
+                    VStack(spacing: NoopMetrics.space3) {
+                        ForEach(signals, id: \.metric.rawValue) { metricRow($0) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func metricRow(_ s: WeeklyMetricSummary) -> some View {
+        HStack(spacing: NoopMetrics.space3) {
+            Text(s.metric.label)
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+            Spacer(minLength: NoopMetrics.space2)
+            Text(meanText(s, effortScale: effortScale))
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(StrandPalette.textPrimary)
+            if hasComparison(s) {
+                TrendChip(text: deltaSigned(s), color: chipTone(s))
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(rowAccessibility(s, effortScale: effortScale))
     }
 
     // MARK: - Formatting
 
-    private var weekRangeLabel: String {
-        weeklyDigestRangeLabel(digest)
+    private func hasComparison(_ s: WeeklyMetricSummary) -> Bool {
+        s.weekOverWeek.current.n > 0 && s.weekOverWeek.previous.n > 0
+    }
+
+    /// Effort reads to one decimal on the 0–21 scale and as a whole number on 0–100, like Charge and Rest.
+    private func effortText(_ v: Double) -> String {
+        effortScale == .whoop ? UnitFormatter.effortDisplay(v, scale: effortScale) : "\(Int(v.rounded()))"
+    }
+
+    private func numberText(_ s: WeeklyMetricSummary) -> String {
+        guard s.thisWeek.n > 0 else { return "—" }
+        return s.metric == .effort ? effortText(s.thisWeek.mean) : "\(Int(s.thisWeek.mean.rounded()))"
+    }
+
+    /// "of 100" for the genuine 0–100 scores; Effort follows the scale toggle ("of 100"/"of 21").
+    private func scaleText(_ s: WeeklyMetricSummary) -> String {
+        s.metric == .effort ? String(localized: "of \(UnitFormatter.effortScaleMax(effortScale))")
+                            : String(localized: "of 100")
     }
 
     private func meanText(_ s: WeeklyMetricSummary, effortScale: EffortScale) -> String {
         guard s.thisWeek.n > 0 else { return "—" }
         // #463/#268: Effort is STORED 0-100; render it on the user's chosen display scale WITH the
         // denominator ("4.6 / 21", "21.6 / 100") so VoiceOver never speaks a different number than the
-        // visible gauge. Mirrors Android meanText(s, effortScale) byte-for-byte.
+        // visible value. Mirrors Android meanText(s, effortScale) byte-for-byte.
         if s.metric == .effort {
             return "\(UnitFormatter.effortDisplay(s.thisWeek.mean, scale: effortScale)) / \(UnitFormatter.effortScaleMax(effortScale))"
         }
@@ -418,24 +323,43 @@ struct WeeklyDigestContent: View {
         return s.metric.unit.isEmpty ? "\(v)" : "\(v) \(s.metric.unit)"
     }
 
+    /// The week-over-week change in the metric's own units, unsigned: points for the 0–100 scores (a
+    /// percent change of a percentage would misstate it), the display scale for Effort, ms / bpm for the
+    /// nightly signals.
     private func deltaText(_ s: WeeklyMetricSummary) -> String {
-        guard s.weekOverWeek.current.n > 0, s.weekOverWeek.previous.n > 0 else { return String(localized: "new") }
-        // Always speak in percent so the chip's ↑/↓ + sign reads as a delta. A sub-1% mover
-        // used to fall back to a bare "0.1" which, once the card prepended "−", looked like a
-        // truncated number rather than a change.
-        if let pct = s.weekOverWeek.pctChange {
-            return abs(pct) >= 1 ? "\(Int(abs(pct).rounded()))%" : "<1%"
+        guard hasComparison(s) else { return String(localized: "new") }
+        let delta = abs(s.wowDelta)
+        if s.metric == .effort {
+            return effortText(delta)
         }
-        return "<1%"
+        let rounded = Int(delta.rounded())
+        return s.metric.unit.isEmpty ? "\(rounded)" : "\(rounded) \(s.metric.unit)"
     }
 
-    /// Tone: good moves green, bad moves rose, flat/uncomparable grey — folding in
-    /// each metric's `higherIsBetter` so a Resting-HR rise reads as a warning. A ROUGH comparison
-    /// (either side thin, engine's `isRoughComparison`, the #463 fix) keeps its arrow + % but stays
-    /// grey regardless of direction, so the chip can't frame a verdict off 1-2 days. Mirrors the
-    /// Android WeeklyDigestCard.chipTone gate byte-for-byte.
+    /// Whether the change rounds to nothing at the precision it is shown, so it reads as flat.
+    private func isFlat(_ s: WeeklyMetricSummary) -> Bool {
+        let shown = s.metric == .effort
+            ? (effortScale == .whoop ? (UnitFormatter.effortValue(abs(s.wowDelta), scale: effortScale) * 10).rounded() / 10
+                                     : abs(s.wowDelta).rounded())
+            : abs(s.wowDelta).rounded()
+        return shown == 0
+    }
+
+    /// The change carrying a +/− so the TrendChip infers its arrow; a change that rounds to zero is "0".
+    private func deltaSigned(_ s: WeeklyMetricSummary) -> String {
+        guard hasComparison(s) else { return deltaText(s) }
+        guard !isFlat(s) else { return "0" }
+        let sign = s.wowDelta > 0 ? "+" : (s.wowDelta < 0 ? "−" : "")
+        return "\(sign)\(deltaText(s))"
+    }
+
+    /// Tone: good moves green, bad moves red, flat/uncomparable grey — folding in each metric's
+    /// `higherIsBetter` so a Resting-HR rise reads as a warning. A ROUGH comparison (either side thin,
+    /// engine's `isRoughComparison`, the #463 fix) keeps its arrow + number but stays grey regardless of
+    /// direction, so the chip can't frame a verdict off 1-2 days. Mirrors the Android
+    /// WeeklyDigestCard.chipTone gate byte-for-byte.
     private func chipTone(_ s: WeeklyMetricSummary) -> Color {
-        if WeeklyDigestChipStyle.neutralizesTone(s) { return StrandPalette.textTertiary }
+        if WeeklyDigestChipStyle.neutralizesTone(s) || isFlat(s) { return StrandPalette.textTertiary }
         switch s.wowGoodness {
         case 1:  return StrandPalette.statusPositive
         case -1: return StrandPalette.statusCritical
@@ -467,8 +391,6 @@ struct WeeklyDigestContent: View {
         default: return String(localized: "\(base).")
         }
     }
-
-    private func fmt1(_ x: Double) -> String { String(format: "%.1f", x) }
 }
 
 // MARK: - Rough-comparison chip contract (#463, testable mirror of Android)
@@ -484,167 +406,6 @@ enum WeeklyDigestChipStyle {
     /// A rough comparison also drops the ", a good sign."/", worth a look." VoiceOver frame so the
     /// spoken row matches the neutral chip.
     static func dropsVerdictFrame(_ s: WeeklyMetricSummary) -> Bool { s.isRoughComparison }
-}
-
-// MARK: - Digest score summary (one headline domain: gauge + week-over-week chip)
-
-/// A summary for one 0–100 weekly score (Charge / Effort / Rest): a compact layered ring gauge for
-/// the week's mean, the domain label, and a TrendChip for the week-over-week move. It can own its
-/// domain-tinted card surface or sit inside the compact digest's shared surface. Owns its gauge
-/// draw-in @State, like Today.
-private struct DigestScoreCard: View {
-    enum Presentation: Equatable {
-        case embedded
-        case standalone
-    }
-
-    let summary: WeeklyMetricSummary
-    let domain: DomainTheme
-    let deltaText: String
-    let deltaTone: Color
-    let accessibility: String
-    /// The Effort display scale (#268). Only consulted for the Effort card; Charge/Rest are genuine
-    /// 0–100 scores and ignore it, keeping their "of 100" caption and integer mean.
-    var effortScale: EffortScale = .hundred
-    let presentation: Presentation
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
-    @State private var animatedFraction: Double = 0
-    @State private var showScaleGuide = false
-
-    /// The Effort card is the only one that follows the 0–100/0–21 toggle; the rest are fixed 0–100.
-    private var isEffort: Bool { summary.metric == .effort }
-    private var isEmbedded: Bool { presentation == .embedded }
-    private var gaugeDiameter: CGFloat {
-        isEmbedded && !dynamicTypeSize.isAccessibilitySize ? 82 : 118
-    }
-
-    private var fraction: Double {
-        guard summary.thisWeek.n > 0 else { return 0 }
-        return min(max(summary.thisWeek.mean / 100.0, 0), 1)
-    }
-    private var numberText: String {
-        guard summary.thisWeek.n > 0 else { return "—" }
-        return isEffort
-            ? UnitFormatter.effortDisplay(summary.thisWeek.mean, scale: effortScale)
-            : "\(Int(summary.thisWeek.mean.rounded()))"
-    }
-    /// "of 100" for the genuine 0–100 scores; the Effort card follows the scale toggle ("of 100"/"of 21").
-    private var captionText: String {
-        isEffort ? String(localized: "of \(UnitFormatter.effortScaleMax(effortScale))") : String(localized: "of 100")
-    }
-
-    @ViewBuilder
-    var body: some View {
-        Group {
-            if isEmbedded {
-                content
-                    .padding(.horizontal, NoopMetrics.space1)
-            } else {
-                NoopCard(padding: 14, tint: domain.color) {
-                    content
-                }
-            }
-        }
-        .onAppear {
-            withAnimation(StrandMotion.drawIn(reduced: reduceMotion)) { animatedFraction = fraction }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibility)
-        .accessibilityAddTraits(.isButton)
-        .accessibilityAction { showScaleGuide = true }
-    }
-
-    private var content: some View {
-        VStack(spacing: NoopMetrics.space2) {
-            if isEmbedded {
-                Text(summary.metric.label)
-                    .font(StrandFont.overline)
-                    .foregroundStyle(domain.color)
-                    .lineLimit(dynamicTypeSize.isAccessibilitySize ? 2 : 1)
-                    .multilineTextAlignment(.center)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            } else {
-                HStack {
-                    metricLabel
-                    Spacer(minLength: 0)
-                    if hasComparison {
-                        TrendChip(text: deltaSigned, color: deltaTone)
-                    }
-                }
-            }
-            BevelGauge(
-                fraction: fraction,
-                stops: domain.gradient.stops,
-                tipColor: domain.bright,
-                numberText: numberText,
-                // The 82pt embedded gauge would reduce its proportional caption to
-                // roughly 7pt. Render that caption below with the scalable footnote role.
-                captionText: isEmbedded ? nil : captionText,
-                stateText: nil,
-                supporting: nil,
-                diameter: gaugeDiameter,
-                lineWidth: isEmbedded && !dynamicTypeSize.isAccessibilitySize ? NoopMetrics.space2 : 11,
-                showsLabel: summary.thisWeek.n > 0,
-                animatedFraction: animatedFraction
-            )
-            .frame(maxWidth: .infinity)
-            .contentShape(Circle())
-            .onTapGesture { showScaleGuide = true }
-            .popover(isPresented: $showScaleGuide, arrowEdge: .bottom) {
-                VStack(spacing: NoopMetrics.space1) {
-                    Text(summary.metric.label)
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(domain.color)
-                    Text(captionText)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-                .padding(NoopMetrics.cardInnerPadding)
-                .frame(minWidth: 120)
-                .background(NoopPanelSurface(cornerRadius: NoopVisualStyle.compactRadius, elevated: true))
-                .accessibilityElement(children: .combine)
-                .digestScalePopoverAdaptation()
-            }
-            if isEmbedded && hasComparison {
-                TrendChip(text: deltaSigned, color: deltaTone)
-            }
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var metricLabel: some View {
-        Text(summary.metric.label)
-            .font(StrandFont.overline)
-            .foregroundStyle(domain.color)
-    }
-
-    private var hasComparison: Bool {
-        summary.weekOverWeek.current.n > 0 && summary.weekOverWeek.previous.n > 0
-    }
-
-    /// The week-over-week delta carrying a +/− so the TrendChip infers its arrow.
-    private var deltaSigned: String {
-        guard summary.weekOverWeek.current.n > 0, summary.weekOverWeek.previous.n > 0 else { return deltaText }
-        let sign = summary.wowDelta > 0 ? "+" : (summary.wowDelta < 0 ? "−" : "")
-        return "\(sign)\(deltaText)"
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func digestScalePopoverAdaptation() -> some View {
-        #if os(iOS)
-        if #available(iOS 16.4, *) {
-            presentationCompactAdaptation(.popover)
-        } else {
-            self
-        }
-        #else
-        self
-        #endif
-    }
 }
 
 #if DEBUG

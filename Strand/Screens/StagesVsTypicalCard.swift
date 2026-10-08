@@ -4,140 +4,108 @@ import WhoopStore
 
 // MARK: - Stages vs typical (#today-hosted-cards)
 //
-// The Sleep tab's "Stages vs typical" card, extracted into a standalone view so it can ALSO be hosted in
-// the Today tab. Both the Sleep tab and the Today host render THIS view from the SAME `SleepModel`, so the
-// per-stage last-night-vs-typical bars can never diverge between the two surfaces (the parity contract).
-// The card body + its `stageRow` / `stageRowAccessibilityLabel` helpers are a verbatim lift of the former
-// `SleepView.stagesVsTypical` (and its helpers); the per-stage typical means are computed once in
-// `SleepModel.build` and read here.
+// One night's time in each stage against the wearer's own typical range. Hosted by Today (`init(model:)`,
+// the latest night, with its section title) and drawn on the Sleep night page (`init(stages:)`, the night
+// on screen, under the page's own "Stages" header).
+//
+// Each row: the stage's time tonight, a bar on the row's own scale with the TYPICAL RANGE (25th–75th
+// percentile of the trailing 30 scored nights, `SleepModel.stageTypical`) as a band behind tonight's
+// value, and one line naming the range and where tonight sits in it. Below five scored nights there is no
+// range to show, and the row says so instead of inventing one.
 
-/// The "Stages vs typical" card. Renders last night's Deep/REM/Light against the wearer's personal
-/// per-stage means from the shared [SleepModel].
 struct StagesVsTypicalCard: View {
-    let model: SleepModel
+    private let stages: Stages
+    private let showsHeader: Bool
+
+    @EnvironmentObject private var repo: Repository
+
+    /// Today's host: the latest night from the shared model, with the card's section title.
+    init(model: SleepModel) {
+        self.stages = model.night.stages
+        self.showsHeader = true
+    }
+
+    /// The night page: any night's totals, without a title (the page names the section).
+    init(stages: Stages) {
+        self.stages = stages
+        self.showsHeader = false
+    }
+
+    private let order: [SleepStage] = [.deep, .rem, .light, .awake]
 
     var body: some View {
-        let s = model.night.stages
-        // Per-stage typical means are computed ONCE in the model build (each a full pass
-        // over repo.days) and read here.
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Stages vs typical", overline: "Last night")
-            NoopCard(tint: StrandPalette.restColor) {
+            if showsHeader { SectionHeader("Stages vs typical") }
+            NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                    stageRow(stage: String(localized: "Deep"),  last: s.deep,  typical: model.typicalDeepMin,  nightTotal: s.total, color: StrandPalette.sleepDeep)
-                    Divider().overlay(StrandPalette.hairline)
-                    stageRow(stage: String(localized: "REM"),   last: s.rem,   typical: model.typicalRemMin,   nightTotal: s.total, color: StrandPalette.sleepREM)
-                    Divider().overlay(StrandPalette.hairline)
-                    stageRow(stage: String(localized: "Light"), last: s.light, typical: model.typicalLightMin, nightTotal: s.total, color: StrandPalette.sleepLight)
+                    StageCompositionBar(stages: stages)
+                    ForEach(order, id: \.self) { stage in
+                        row(stage)
+                    }
                 }
             }
         }
     }
 
-    /// One stage row, WHOOP sleep-detail style: a colour swatch + UPPERCASE stage + the share-of-night %
-    /// (in the stage colour), then a bar that reads "solid = you, hatch = the context" — a diagonal-hatch
-    /// track spanning the TYPICAL (the personal mean for this stage) with the user's last-night value as a
-    /// solid coloured fill on top, plus a thin marker at the typical mean and the right-aligned duration.
-    /// Same data as before (`last` minutes, `typical` personal mean) — the hatch just renders the typical
-    /// context the prior vertical-only marker implied.
-    @ViewBuilder
-    private func stageRow(stage label: String, last: Double, typical: Double?, nightTotal: Double, color: Color) -> some View {
-        // Scale both values against a shared per-row max so the typical hatch + marker are meaningful.
-        let scaleMax = max(last, typical ?? 0) * 1.18
-        let max = scaleMax > 0 ? scaleMax : 1
-        // Share of the night this stage took (drives the WHOOP coloured %); over time-in-bed, matching the
-        // stage-breakdown rows above.
-        let sharePct = nightTotal > 0 ? Int((last / nightTotal * 100).rounded()) : 0
-        let deltaText: String = {
-            guard let typical, typical > 0 else { return "" }
-            let diff = last - typical
-            let sign = diff >= 0 ? "+" : "−"
-            return String(localized: "\(sign)\(durationText(abs(diff))) vs typ")
-        }()
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                RoundedRectangle(cornerRadius: 3, style: .continuous)
+    private func row(_ stage: SleepStage) -> some View {
+        let minutes = StageLegendRow.minutes(stage, in: stages)
+        let typical = SleepModel.stageTypical(days: repo.days, stage: stage)
+        // The row's own scale when there is a range to compare with; the night's total without one, so the
+        // bar is then the stage's share of the night rather than four bars at the same length.
+        let scale = typical.map { max(1, max(minutes, $0.hi) * 1.15) } ?? max(1, stages.total)
+        let color = StrandPalette.sleepStageColor(stage)
+        return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                RoundedRectangle(cornerRadius: 2, style: .continuous)
                     .fill(color)
-                    .frame(width: 12, height: 12)
+                    .frame(width: 8, height: 8)
                     .accessibilityHidden(true)
-                Text(label)
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("\(sharePct)%")
+                Text(stage.label)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text("\(StageLegendRow.share(stage, in: stages)) %")
                     .font(StrandFont.captionNumber)
-                    .foregroundStyle(color)
-                Spacer()
-                Text(durationText(last)).font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textPrimary)
-                if !deltaText.isEmpty {
-                    Text(deltaText)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(last >= (typical ?? last) ? StrandPalette.statusPositive : StrandPalette.statusWarning)
-                }
+                    .foregroundStyle(StrandPalette.textTertiary)
+                Spacer(minLength: NoopMetrics.space2)
+                Text(SleepFormat.duration(minutes))
+                    .font(StrandFont.bodyNumber)
+                    .foregroundStyle(StrandPalette.textPrimary)
             }
+            // A bullet bar: the typical range as a band across the full row height, tonight as a slimmer
+            // bar on top of it, so both read at once and neither hides the other.
             GeometryReader { geo in
                 let w = geo.size.width
                 ZStack(alignment: .leading) {
-                    // Last-night value as the signature liquid tube — "solid = you", now a filling liquid
-                    // capsule tinted in the stage colour (static/posed, like Today's grid tubes). It renders
-                    // its own dark capsule track, so it replaces the flat solid fill + track. The fraction
-                    // is unchanged (last / shared per-row max).
-                    LiquidTube(frac: min(1, last / max), tint: color, height: 12, animated: false)
-                    // Typical-range CONTEXT overlaid on top: a diagonal-hatch track spanning the personal
-                    // mean for this stage. "Hatch = the context" — the liquid value sits under it.
-                    if let typical, typical > 0 {
-                        DiagonalHatch(spacing: 5, lineWidth: 1)
-                            .stroke(color.opacity(0.6), lineWidth: 1)
-                            .frame(width: w * CGFloat(min(1, typical / max)))
-                            .clipShape(Capsule(style: .continuous))
+                    RoundedRectangle(cornerRadius: 3, style: .continuous).fill(StrandPalette.surfaceInset)
+                    if let typical {
+                        let x0 = w * CGFloat(typical.lo / scale), x1 = w * CGFloat(typical.hi / scale)
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(StrandPalette.textTertiary.opacity(0.3))
+                            .frame(width: max(2, x1 - x0))
+                            .offset(x: x0)
                     }
-                    // Crisp typical-mean marker so the exact mean still reads at a glance.
-                    if let typical, typical > 0 {
-                        Rectangle()
-                            .fill(StrandPalette.textPrimary)
-                            .frame(width: 2, height: 18)
-                            .position(x: w * CGFloat(min(1, typical / max)), y: 6)
-                    }
+                    Capsule(style: .continuous)
+                        .fill(color)
+                        .frame(width: max(5, w * CGFloat(minutes / scale)), height: 5)
                 }
             }
-            .frame(height: 12)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(stageRowAccessibilityLabel(label: label, last: last, sharePct: sharePct, typical: typical))
+            .frame(height: 13)
+            .accessibilityHidden(true)
+            Text(detail(minutes: minutes, typical: typical))
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(stage.label))
+        .accessibilityValue(Text("\(SleepFormat.duration(minutes)), \(detail(minutes: minutes, typical: typical))"))
     }
 
-    /// Whole-string VoiceOver label for a stage row: one key per variant, never a stitched tail fragment.
-    private func stageRowAccessibilityLabel(label: String, last: Double, sharePct: Int, typical: Double?) -> String {
-        if let typical, typical > 0 {
-            return String(localized: "\(label): \(durationText(last)) last night, \(sharePct) percent of the night, typical \(durationText(typical))")
-        }
-        return String(localized: "\(label): \(durationText(last)) last night, \(sharePct) percent of the night")
-    }
-
-    /// Minutes → "Xm" / "Yh Zm" (verbatim of `SleepView.durationText`). Kept local to the card so it renders
-    /// identically whether hosted in Today or shown in the Sleep tab.
-    private func durationText(_ minutes: Double) -> String {
-        let m = Swift.max(0, Int(minutes.rounded()))
-        if m < 60 { return String(localized: "\(m)m") }
-        return String(localized: "\(m / 60)h \(m % 60)m")
-    }
-}
-
-/// 45° diagonal-hatch fill used by the stage rows' "typical" context track (verbatim of the former
-/// file-private `SleepView.DiagonalHatch` — moved here with its only caller). The public
-/// `StrandDesign.DiagonalHatch` has no `lineWidth`, so this local shape is kept to preserve byte-identical
-/// rendering.
-private struct DiagonalHatch: Shape {
-    var spacing: CGFloat = 5
-    var lineWidth: CGFloat = 1
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        // Start well before the left edge so the 45° lines fully cover the rect after the diagonal shear.
-        var x = -rect.height
-        while x < rect.width {
-            p.move(to: CGPoint(x: x, y: rect.height))
-            p.addLine(to: CGPoint(x: x + rect.height, y: 0))
-            x += spacing
-        }
-        return p
+    private func detail(minutes: Double, typical: (lo: Double, hi: Double, mean: Double)?) -> String {
+        guard let typical else { return String(localized: "No typical range yet") }
+        let place = minutes > typical.hi ? String(localized: "above your usual")
+            : (minutes < typical.lo ? String(localized: "below your usual") : String(localized: "about your usual"))
+        return String(localized: "Typical \(SleepFormat.duration(typical.lo))–\(SleepFormat.duration(typical.hi)) · \(place)")
     }
 }

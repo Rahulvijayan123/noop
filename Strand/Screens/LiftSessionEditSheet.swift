@@ -65,11 +65,14 @@ struct LiftSessionEditSheet: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Edit sets",
-                       subtitle: "Fix numbers, or add and remove sets. Sets left at 0 reps stay out of the figures, and only this session changes — not the program.") {
+        ScreenScaffold(title: "Edit sets") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 sessionRpeCard
                 ForEach(exercises.indices, id: \.self) { exerciseCard($0) }
+                Text("Fix numbers, or add and remove sets. Sets left at 0 reps stay out of the figures, and only this session changes — not the program.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 footer
             }
         }
@@ -94,7 +97,7 @@ struct LiftSessionEditSheet: View {
     private var sessionRpeCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("How hard was the whole session? (1–10)").strandOverline()
+                Text("How hard was the whole session? (1–10)").strandLabel()
                 field(.sessionRpe, text: Binding(
                     get: { sessionRpeText },
                     set: { sessionRpeText = $0.replacingOccurrences(of: ",", with: ".") }))
@@ -110,11 +113,11 @@ struct LiftSessionEditSheet: View {
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
                 HStack(spacing: 8) {
-                    Text("Set").strandOverline()
+                    Text("Set").strandLabel()
                         .frame(width: LiftSessionView.setColumnWidth, alignment: .center)
-                    Text(weightHeading).strandOverline().frame(maxWidth: .infinity, alignment: .leading)
-                    Text("Reps").strandOverline().frame(maxWidth: .infinity, alignment: .leading)
-                    Text("RPE").strandOverline().frame(maxWidth: .infinity, alignment: .leading)
+                    Text(weightHeading).strandLabel().frame(maxWidth: .infinity, alignment: .leading)
+                    Text("Reps").strandLabel().frame(maxWidth: .infinity, alignment: .leading)
+                    Text("RPE").strandLabel().frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
@@ -159,7 +162,7 @@ struct LiftSessionEditSheet: View {
             Button { addSet(index) } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "plus.circle")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(StrandFont.icon(.row))
                     Text("Add set").font(StrandFont.caption)
                 }
                 .foregroundStyle(canAdd ? StrandPalette.effortColor : StrandPalette.textTertiary)
@@ -172,7 +175,7 @@ struct LiftSessionEditSheet: View {
 
             Button { removeSet(index) } label: {
                 Image(systemName: "minus.circle")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(StrandFont.icon(.row))
                     .foregroundStyle(canRemove ? StrandPalette.textSecondary
                                                : StrandPalette.textTertiary.opacity(0.4))
                     .contentShape(Rectangle())

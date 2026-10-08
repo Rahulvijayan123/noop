@@ -9,9 +9,8 @@ import StrandAnalytics
 // window that isn't already saved and wasn't previously dismissed.
 //
 // It only ever SUGGESTS: tapping Save creates a manual-style "Workout" for the window (via the
-// same manual-save path the edit sheet uses); the X dismisses it durably so it never re-prompts.
-// Nothing is created automatically. Design-Reset compliant — a flat NoopCard using NoopMetrics /
-// StrandPalette / StrandFont, no gold, matching the other Today cards.
+// same manual-save path the edit sheet uses); "Not a workout" dismisses it durably so it never
+// re-prompts. Nothing is created automatically. The plain NoopCard with the shared NoopButtons.
 
 struct AutoWorkoutCard: View {
 
@@ -22,7 +21,7 @@ struct AutoWorkoutCard: View {
 
     /// The current suggestion, loaded in `.task`. nil → nothing to show.
     @State private var candidate: DetectedWorkout?
-    /// Hide immediately on Save/X without waiting for the next reload (avoids a flash of the old card).
+    /// Hide immediately on Save / Not a workout without waiting for the next reload (avoids a flash of the old card).
     @State private var handledThisSession = false
     /// Guards the Save button while the write is in flight.
     @State private var saving = false
@@ -41,69 +40,53 @@ struct AutoWorkoutCard: View {
 
     @ViewBuilder
     private func card(for w: DetectedWorkout) -> some View {
-        NoopCard(tint: StrandPalette.accent) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                HStack(spacing: NoopMetrics.space2) {
+                HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
                     Image(systemName: "figure.run")
-                        .font(.system(size: 18))
-                        .foregroundStyle(StrandPalette.accent)
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.effortColor)
                         .accessibilityHidden(true)
                     Text("Looks like a workout")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer()
-                    Button {
-                        dismiss(w)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .padding(NoopMetrics.space1)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Dismiss this workout suggestion")
+                    Spacer(minLength: 0)
                 }
 
-                Text(promptText(w))
-                    .font(StrandFont.footnote)
+                Text(dataLine(w))
+                    .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                // "Not a workout" is the dismiss: it records the window as handled so it never re-prompts.
                 HStack(spacing: NoopMetrics.space3) {
-                    Button {
-                        save(w)
-                    } label: {
-                        Label("Save it", systemImage: "checkmark")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(StrandPalette.accent)
-                    .disabled(saving)
-
-                    Button("Not a workout") { dismiss(w) }
-                        .buttonStyle(.bordered)
+                    NoopButton("Save it", systemImage: "checkmark", kind: .primary) { save(w) }
                         .disabled(saving)
-                    Spacer()
+                    NoopButton("Not a workout", kind: .secondary) { dismiss(w) }
+                        .disabled(saving)
+                        .accessibilityHint(Text("Dismiss this workout suggestion"))
+                    Spacer(minLength: 0)
                 }
             }
         }
         .accessibilityElement(children: .contain)
     }
 
-    /// "Looks like a workout [yesterday ]around 14:05–14:32 (avg HR 148, 27 min). Save it?"
-    /// Three whole-phrase variants (today / yesterday / dated, #719) so translators see complete
-    /// sentences rather than a stitched day-label fragment.
-    private func promptText(_ w: DetectedWorkout) -> String {
+    /// "14:05-14:32 · 27 min · avg 148 bpm", prefixed with "Yesterday" or the date for an older bout.
+    /// Three whole-phrase variants (today / yesterday / dated, #719) so translators see complete phrases
+    /// rather than a stitched day-label fragment.
+    private func dataLine(_ w: DetectedWorkout) -> String {
         let startDate = Date(timeIntervalSince1970: TimeInterval(w.startSec))
         let start = Self.timeFmt.string(from: startDate)
         let end = Self.timeFmt.string(from: Date(timeIntervalSince1970: TimeInterval(w.endSec)))
         let cal = Calendar.current
         if cal.isDateInToday(startDate) {
-            return String(localized: "Looks like a workout around \(start)-\(end) (avg HR \(w.avgBpm), \(w.durationMin) min). Save it?")
+            return String(localized: "\(start)-\(end) · \(w.durationMin) min · avg \(w.avgBpm) bpm")
         }
         if cal.isDateInYesterday(startDate) {
-            return String(localized: "Looks like a workout yesterday around \(start)-\(end) (avg HR \(w.avgBpm), \(w.durationMin) min). Save it?")
+            return String(localized: "Yesterday \(start)-\(end) · \(w.durationMin) min · avg \(w.avgBpm) bpm")
         }
-        return String(localized: "Looks like a workout on \(Self.dateFmt.string(from: startDate)) around \(start)-\(end) (avg HR \(w.avgBpm), \(w.durationMin) min). Save it?")
+        return String(localized: "\(Self.dateFmt.string(from: startDate)) \(start)-\(end) · \(w.durationMin) min · avg \(w.avgBpm) bpm")
     }
 
     private func reload() async {

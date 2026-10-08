@@ -49,22 +49,23 @@ struct StretchFeedbackStatusLine: Equatable {
     }
 }
 
-/// The row on the Heart rate page that opens the list.
+/// The row on the Heart rate page that opens the list. A one-row card on its own; pass `inCard: false` to
+/// put it in a card of rows.
 struct StretchFeedbackLinkRow: View {
+    var inCard = true
     @ObservedObject private var center = StretchFeedbackCenter.shared
 
     var body: some View {
-        HStack(spacing: 8) {
-            Text("Your answers about stretches")
-            Spacer(minLength: 8)
-            Text(detail)
-                .foregroundStyle(center.waitingToUpload > 0 ? StrandPalette.statusWarning : StrandPalette.textTertiary)
-            Image(systemName: "chevron.right")
+        if inCard {
+            NoopCard(padding: 0) { row }
+        } else {
+            row
         }
-        .font(StrandFont.subhead)
-        .foregroundStyle(StrandPalette.accent)
-        .padding(.horizontal, NoopMetrics.space1)
-        .accessibilityElement(children: .combine)
+    }
+
+    private var row: some View {
+        NoopListRow(icon: "checkmark.bubble", title: "Your answers", value: detail,
+                    valueTone: center.waitingToUpload > 0 ? .warning : .neutral)
     }
 
     private var detail: String {
@@ -94,20 +95,18 @@ struct StretchFeedbackHistoryView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Your answers",
-                       subtitle: "What you've said about each stretch, and whether it has been sent.",
-                       lazy: true) {
-            summaryCard
+        ScreenScaffold(title: "Your answers", titleDisplay: .navigationBar, lazy: true) {
             if center.records.isEmpty {
-                DataPendingNote(title: "No answers yet",
-                                message: "Open a stretch on the Heart rate page and say whether it's right. Your answers show up here.",
-                                symbol: "checkmark.bubble")
+                Text("Open a stretch on the Heart rate page and say whether it's right. Your answers show up here.")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
+                summary
                 ForEach(days, id: \.start) { day in
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(day.start, format: .dateTime.weekday(.wide).month().day())
-                            .strandOverline()
-                        ForEach(day.records) { record in
+                    NoopListSection("\(ReadoutContent.dateLine(day.start, period: .day))") {
+                        ForEach(Array(day.records.enumerated()), id: \.element.id) { index, record in
+                            if index > 0 { NoopListDivider() }
                             AnswerRow(feedback: record, standing: center.standing(of: record))
                         }
                     }
@@ -116,37 +115,25 @@ struct StretchFeedbackHistoryView: View {
         }
     }
 
-    private var summaryCard: some View {
+    /// The counts, and whether everything has reached the server (with a way to send what has not).
+    @ViewBuilder
+    private var summary: some View {
         let total = center.records.count
         let wrong = center.records.filter { $0.verdict == .incorrect }.count
         let waiting = center.waitingToUpload
         let stuck = center.records.first(where: \.needsSync).map { StretchFeedbackStatusLine(center.standing(of: $0)) }
-        return NoopCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("\(total) answers")
-                    .font(StrandFont.rounded(24))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("\(wrong) said wrong, \(total - wrong) said right")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                if total > 0 {
-                    if waiting == 0 {
-                        Label("All of them are saved to your Nara account.", systemImage: "checkmark.icloud")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.statusPositive)
-                    } else if let stuck {
-                        Label("\(waiting) not sent yet. \(stuck.text)", systemImage: stuck.symbol)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(stuck.needsAttention ? StrandPalette.statusWarning : StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                        NoopButton(center.delivery == .sending ? "Sending…" : "Send now",
-                                   systemImage: "arrow.up.circle", kind: .secondary, fullWidth: true) {
-                            Task { await center.flushAndWait() }
-                        }
-                        .disabled(center.delivery == .sending)
-                    }
-                }
-            }
+        StatGrid([
+            StatItem(String(localized: "Answers"), value: "\(total)"),
+            StatItem(String(localized: "Said right"), value: "\(total - wrong)"),
+            StatItem(String(localized: "Said wrong"), value: "\(wrong)"),
+        ], columns: 3)
+        if waiting == 0 {
+            InlineNotice(String(localized: "All of them are saved to your Nara account."), tone: .positive)
+        } else if let stuck {
+            InlineNotice(String(localized: "\(waiting) not sent yet. \(stuck.text)"),
+                         tone: stuck.needsAttention ? .warning : .neutral,
+                         action: center.delivery == .sending ? nil
+                            : InlineNotice.Action("Send now") { Task { await center.flushAndWait() } })
         }
     }
 }
@@ -160,36 +147,37 @@ private struct AnswerRow: View {
         let to = Date(timeIntervalSince1970: TimeInterval(feedback.endTs))
         let seconds = feedback.durationSeconds < 300
         let line = StretchFeedbackStatusLine(standing)
-        NoopCard(padding: NoopMetrics.space3) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text("\(StretchFormat.clock(from, seconds: seconds)) – \(StretchFormat.clock(to, seconds: seconds))")
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .monospacedDigit()
-                    Text(StretchFormat.duration(feedback.durationSeconds))
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    Spacer(minLength: 8)
-                    StretchVerdictBadge(feedback: feedback)
-                }
-                Text("The model said: \(feedback.predictedLabel)")
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                Text("\(StretchFormat.clock(from, seconds: seconds)) – \(StretchFormat.clock(to, seconds: seconds))")
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .monospacedDigit()
+                Text(StretchFormat.duration(feedback.durationSeconds))
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
-                if let note = feedback.note, !note.isEmpty {
-                    Text("“\(note)”")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                HStack(spacing: 6) {
-                    Image(systemName: line.symbol)
-                    Text(line.text)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .font(StrandFont.footnote)
-                .foregroundStyle(line.needsAttention ? StrandPalette.statusWarning : StrandPalette.textTertiary)
+                Spacer(minLength: NoopMetrics.space2)
+                StretchVerdictBadge(feedback: feedback)
             }
+            Text("The model said: \(feedback.predictedLabel)")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+            if let note = feedback.note, !note.isEmpty {
+                Text("“\(note)”")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Label {
+                Text(line.text).fixedSize(horizontal: false, vertical: true)
+            } icon: {
+                Image(systemName: line.symbol)
+            }
+            .font(StrandFont.footnote)
+            .foregroundStyle(line.needsAttention ? StrandPalette.statusWarning : StrandPalette.textTertiary)
         }
+        .padding(.horizontal, NoopMetrics.cardPadding)
+        .padding(.vertical, NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -5,20 +5,24 @@ import StrandDesign
 //
 // The Events tab renders `[HealthEvent]`. Anything that can fill that array (the backend, the local
 // store, manual logging) drives the whole screen: grouping by day, the All / Reported / Detected filter,
-// the timeline, the featured physiology and recovery cards, the full list, and the per-event detail.
-// `HealthEvent.sample` only fills the screen until real data is wired in. Models are `Codable` so a
+// the timeline, the latest-reaction card, the full list, the per-event page and the recovery history.
+// No production source feeds the tab yet, so it shows `HealthEvent.current`: empty in a release build.
+// `HealthEvent.sample` (fabricated events, including a made-up medication) exists in DEBUG builds only and
+// appears only under `--demo-seed` or `--demo-events`, labelled as sample data. Models are `Codable` so a
 // backend payload can decode straight into them.
 
 enum EventTone: String, Codable, Hashable {
     case positive, warning, detected, alert, normal
 
+    /// The icon tint: the state colours for states, the events colour for detections, and plain secondary
+    /// text for a routine reading (nothing happened, so it is not a state).
     var color: Color {
         switch self {
-        case .positive: return Color(red: 0.25, green: 0.86, blue: 0.5)
-        case .warning: return Color(red: 1.0, green: 0.72, blue: 0.25)
+        case .positive: return StrandPalette.statusPositive
+        case .warning: return StrandPalette.statusWarning
         case .detected: return StrandPalette.metricPurple
-        case .alert: return StrandPalette.metricRose
-        case .normal: return Color(red: 0.25, green: 0.85, blue: 0.78)
+        case .alert: return StrandPalette.statusCritical
+        case .normal: return StrandPalette.textSecondary
         }
     }
 }
@@ -72,8 +76,9 @@ struct HealthEvent: Identifiable, Hashable, Codable {
     var recovery: EventRecovery?
 }
 
-// MARK: - Sample data (replace with the backend feed)
+// MARK: - Sample data (DEBUG only, never shown as the wearer's own events)
 
+#if DEBUG
 extension EventPhysiology {
     /// A drop that starts at `start`, then climbs back after `end` (hours since local midnight).
     static func sample(day: Date, start: Double, end: Double) -> EventPhysiology {
@@ -141,11 +146,26 @@ extension HealthEvent {
         return events
     }
 }
+#endif
+
+extension HealthEvent {
+    /// The events the Events tab shows. Nothing real feeds it yet, so a release build shows none; the
+    /// fabricated samples are reachable only from a DEBUG demo launch.
+    static var current: [HealthEvent] {
+        #if DEBUG
+        if DemoLaunch.showsSampleEvents { return sample }
+        #endif
+        return []
+    }
+}
+
 
 // MARK: - Screens
 
+/// The Events tab: the latest event the body reacted to, then the newest days of the timeline.
 struct EventsView: View {
-    var events: [HealthEvent] = HealthEvent.sample
+    var events: [HealthEvent] = HealthEvent.current
+    @ObservedObject private var filterState = EventFilterState.shared
 
     /// The most recent event that carries a physiology trace.
     private var featured: HealthEvent? {
@@ -153,613 +173,160 @@ struct EventsView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Events", subtitle: "Your health timeline",
-                       trailing: { HeaderSettingsButton() }) {
-            VStack(alignment: .leading, spacing: 26) {
-                if let featured, let physiology = featured.physiology {
-                    PhysiologyCard(physiology: physiology, eventDate: featured.date)
-                    if let recovery = featured.recovery {
-                        RecoveryCard(recovery: recovery, event: featured, history: events)
+        ScreenScaffold(title: "Events", trailing: { HeaderSettingsButton() }) {
+            if let featured, let physiology = featured.physiology, !physiology.metrics.isEmpty {
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    SectionHeader("Latest reaction")
+                    NavigationLink(value: TabRoute.event(featured, history: events)) {
+                        LatestReactionCard(event: featured, physiology: physiology)
                     }
+                    .buttonStyle(StrandPressableButtonStyle())
                 }
-                EventTimeline(events: events, dayLimit: 3)
             }
-        }
-    }
-}
-
-/// Every event, not just the latest few days.
-struct AllEventsView: View {
-    let events: [HealthEvent]
-
-    var body: some View {
-        ScreenScaffold(title: "All events", subtitle: "Your health timeline") {
-            EventTimeline(events: events)
-        }
-    }
-}
-
-private enum EventFilter: CaseIterable {
-    case all, reported, detected
-
-    var title: LocalizedStringKey {
-        switch self {
-        case .all: return "All"
-        case .reported: return "Reported"
-        case .detected: return "Detected"
-        }
-    }
-
-    func includes(_ event: HealthEvent) -> Bool {
-        switch self {
-        case .all: return true
-        case .reported: return event.origin == .reported
-        case .detected: return event.origin == .detected
-        }
-    }
-}
-
-/// The All / Reported / Detected filter and the day-grouped timeline under it. `dayLimit` trims the
-/// timeline to the latest days and adds a "See all" link to the full list.
-private struct EventTimeline: View {
-    let events: [HealthEvent]
-    var dayLimit: Int? = nil
-    @State private var filter: EventFilter = .all
-
-    private static let railWidth: CGFloat = 14
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            filterBar
-            timeline
-        }
-    }
-
-    private var filterBar: some View {
-        HStack(spacing: 4) {
-            ForEach(EventFilter.allCases, id: \.self) { option in
-                Button { withAnimation(.easeOut(duration: 0.2)) { filter = option } } label: {
-                    Text(option.title)
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(filter == option ? Color.white : StrandPalette.textSecondary)
-                        .frame(maxWidth: .infinity, minHeight: 36)
-                        .background(Capsule().fill(filter == option ? StrandPalette.metricPurple : Color.clear))
-                        .contentShape(Capsule())
+            if events.isEmpty {
+                // Nothing feeds this tab yet: say so once, with no filter to operate on an empty list.
+                ComingSoon(what: "No events yet.")
+            } else {
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    SectionHeader("Timeline")
+                    EventFilterControl(filter: $filterState.filter)
+                }
+                let days = EventGrouping.days(events, filter: filterState.filter, limit: 3)
+                if days.isEmpty {
+                    ComingSoon(what: filterState.filter.emptyText)
+                }
+                ForEach(days) { day in
+                    EventDaySection(day: day, history: events)
+                }
+            }
+            #if DEBUG
+            if DemoLaunch.showsSampleEvents {
+                Text("Sample events for a demo build. Not your data.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            #endif
+            if !events.isEmpty {
+                NoopListSection {
+                    NavigationLink(value: TabRoute.allEvents(events)) {
+                        NoopListRow(icon: nil, title: "All events", value: "\(events.count)")
+                    }
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(4)
-        .background(Capsule().fill(StrandPalette.surfaceInset))
-    }
-
-    private var groups: [(day: Date, events: [HealthEvent])] {
-        let cal = Calendar.current
-        let all = Dictionary(grouping: events.filter { filter.includes($0) }) { cal.startOfDay(for: $0.date) }
-            .map { (day: $0.key, events: $0.value.sorted { $0.date > $1.date }) }
-            .sorted { $0.day > $1.day }
-        return dayLimit.map { Array(all.prefix($0)) } ?? all
-    }
-
-    private func dayTitle(_ day: Date) -> String {
-        let cal = Calendar.current
-        if cal.isDateInToday(day) { return String(localized: "Today") }
-        if cal.isDateInYesterday(day) { return String(localized: "Yesterday") }
-        return day.formatted(.dateTime.weekday(.wide).month(.abbreviated).day())
-    }
-
-    private var timeline: some View {
-        VStack(alignment: .leading, spacing: 26) {
-            ForEach(Array(groups.enumerated()), id: \.element.day) { index, group in
-                VStack(alignment: .leading, spacing: 14) {
-                    HStack(spacing: 12) {
-                        Color.clear.frame(width: Self.railWidth, height: 1)
-                        NaraSectionHeader(title: dayTitle(group.day),
-                                          seeAll: index == 0 && dayLimit != nil ? TabRoute.allEvents(events) : nil)
-                    }
-                    ForEach(group.events) { event in
-                        HStack(spacing: 12) {
-                            Circle()
-                                .fill(event.tone.color)
-                                .frame(width: 10, height: 10)
-                                .background(Circle().fill(StrandPalette.surfaceBase).frame(width: 18, height: 18))
-                                .frame(width: Self.railWidth)
-                            NavigationLink(value: TabRoute.event(event, history: events)) { eventCard(event) }
-                                .buttonStyle(LiquidPressStyle())
-                        }
-                    }
-                }
-            }
-            if groups.isEmpty {
-                Text("No events yet")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-                    .padding(.vertical, 24)
-            }
-        }
-        .background(alignment: .leading) {
-            Rectangle()
-                .fill(StrandPalette.hairlineStrong.opacity(0.6))
-                .frame(width: 1)
-                .padding(.leading, Self.railWidth / 2)
-        }
-    }
-
-    private func eventCard(_ e: HealthEvent) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: e.symbol)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(e.tone.color)
-                .frame(width: 40, height: 40)
-                .background(Circle().fill(e.tone.color.opacity(0.18)))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(e.title)
-                    .font(StrandFont.subhead.weight(.semibold))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(1)
-                if let detail = e.detail {
-                    Text(detail)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 6)
-            Text(e.date.formatted(.dateTime.hour().minute()))
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .naraCard()
     }
 }
 
-// MARK: - Event detail
-
-struct EventDetailView: View {
+/// The newest event with physiology, named, with a compact before / during / after chart and one line:
+/// the change during it and the time to recover. The whole card opens the event.
+private struct LatestReactionCard: View {
     let event: HealthEvent
-    var history: [HealthEvent] = []
-
-    var body: some View {
-        ScreenScaffold(title: LocalizedStringKey(event.title),
-                       subtitle: LocalizedStringKey(event.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))) {
-            VStack(alignment: .leading, spacing: 24) {
-                if let physiology = event.physiology {
-                    PhysiologyCard(physiology: physiology, eventDate: event.date)
-                }
-                if let recovery = event.recovery {
-                    RecoveryCard(recovery: recovery, event: event, history: history)
-                }
-                if event.physiology == nil && event.recovery == nil {
-                    Text("No physiology recorded around this event")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-            }
-        }
-    }
-}
-
-private enum EventPhase {
-    case before, during, after
-
-    var color: Color {
-        switch self {
-        case .before: return Color(red: 0.25, green: 0.85, blue: 0.78)
-        case .during: return Color(red: 1.0, green: 0.80, blue: 0.25)
-        case .after: return StrandPalette.metricPurple
-        }
-    }
-
-    var title: LocalizedStringKey {
-        switch self {
-        case .before: return "Before"
-        case .during: return "During"
-        case .after: return "After"
-        }
-    }
-}
-
-private extension EventPhysiology {
-    func range(_ phase: EventPhase) -> ClosedRange<Date> {
-        switch phase {
-        case .before: return windowStart...eventStart
-        case .during: return eventStart...eventEnd
-        case .after: return eventEnd...windowEnd
-        }
-    }
-
-    func phase(of time: Date) -> EventPhase {
-        time < eventStart ? .before : (time <= eventEnd ? .during : .after)
-    }
-}
-
-private struct PhysiologyCard: View {
     let physiology: EventPhysiology
-    let eventDate: Date
-    @State private var selected = 0
 
-    /// A reading within this many percent of the "before" mean counts as back at baseline.
-    private static let nearBaseline = 5.0
+    /// The first metric, the one the event page opens on.
+    private var metric: PhysiologyMetric { physiology.metrics[0] }
 
-    private var metric: PhysiologyMetric {
-        physiology.metrics[min(selected, max(0, physiology.metrics.count - 1))]
+    private var summary: String {
+        let stats = EventPhaseStats(physiology: physiology, metric: metric)
+        var parts: [String] = []
+        if let change = stats.change(.during) {
+            parts.append(String(localized: "\(metric.name) \(EventFormat.percentChange(change)) during"))
+        }
+        if let time = event.recovery?.timeToRecover {
+            parts.append(String(localized: "recovered in \(EventFormat.duration(time))"))
+        }
+        return parts.joined(separator: " · ")
     }
 
     var body: some View {
-        if physiology.metrics.isEmpty {
-            EmptyView()
-        } else {
-            VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Text("Physiology around event")
-                        .font(StrandFont.rounded(17))
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(spacing: NoopMetrics.space3) {
+                    Image(systemName: event.symbol)
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(event.tone.color)
+                        .frame(width: 28)
+                        .accessibilityHidden(true)
+                    Text(verbatim: event.title)
+                        .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                        .lineLimit(1).minimumScaleFactor(0.8)
-                    Spacer(minLength: 8)
-                    metricPicker
+                        .lineLimit(1)
+                    Spacer(minLength: NoopMetrics.space2)
+                    Text(verbatim: EventFormat.dayAndTime(event.date))
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.right")
+                        .font(StrandFont.icon(.inline))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .accessibilityHidden(true)
                 }
-                PhysiologyChart(metric: metric, physiology: physiology, eventDate: eventDate)
-                    .frame(height: 200)
-                HStack(alignment: .top, spacing: 0) {
-                    ForEach([EventPhase.before, .during, .after], id: \.self) { phase in
-                        phaseColumn(phase)
-                    }
-                }
-            }
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .naraCard()
-        }
-    }
-
-    @ViewBuilder
-    private var metricPicker: some View {
-        if physiology.metrics.count > 1 {
-            Menu {
-                ForEach(Array(physiology.metrics.enumerated()), id: \.offset) { index, m in
-                    Button(m.name) { selected = index }
-                }
-            } label: { pickerLabel }
-        } else {
-            pickerLabel
-        }
-    }
-
-    private var pickerLabel: some View {
-        HStack(spacing: 5) {
-            Text(metric.name).font(StrandFont.caption.weight(.semibold))
-            if physiology.metrics.count > 1 {
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .bold))
-            }
-        }
-        .foregroundStyle(StrandPalette.textPrimary)
-        .padding(.horizontal, 12).padding(.vertical, 7)
-        .background(Capsule().fill(StrandPalette.surfaceInset))
-    }
-
-    // MARK: Phase read-outs
-
-    private func mean(_ phase: EventPhase) -> Double? {
-        let window = physiology.range(phase)
-        let values = metric.points.filter { window.contains($0.time) }.map(\.value)
-        return values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
-    }
-
-    /// Percent change of a phase against the "before" mean, or nil with no usable baseline.
-    private func change(_ phase: EventPhase) -> Double? {
-        guard let base = mean(.before), base > 0, let value = mean(phase) else { return nil }
-        return (value - base) / base * 100
-    }
-
-    /// Green when the move is in the healthy direction, within tolerance, or (after the event) closer
-    /// to baseline than the low point was.
-    private func isGood(_ phase: EventPhase, _ delta: Double) -> Bool {
-        if (delta >= 0) == (metric.higherIsBetter ?? true) || abs(delta) < Self.nearBaseline { return true }
-        guard phase == .after, let during = change(.during) else { return false }
-        return abs(delta) < abs(during)
-    }
-
-    private func caption(_ phase: EventPhase, _ delta: Double?) -> LocalizedStringKey {
-        guard let delta else { return phase == .before ? "Baseline" : "" }
-        switch phase {
-        case .before:
-            return "Baseline"
-        case .during:
-            if abs(delta) < Self.nearBaseline { return "Near baseline" }
-            return delta < 0 ? "Below baseline" : "Above baseline"
-        case .after:
-            if abs(delta) < Self.nearBaseline { return "Recovered" }
-            return abs(delta) < abs(change(.during) ?? .infinity) ? "Recovering" : "Not recovered"
-        }
-    }
-
-    private func pill(_ delta: Double, good: Bool) -> some View {
-        let tint = good ? StrandPalette.statusPositive : StrandPalette.statusCritical
-        return Text("\(delta < 0 ? "↓" : "↑") \(Int(abs(delta).rounded()))%")
-            .font(StrandFont.caption.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8).padding(.vertical, 3)
-            .background(Capsule().fill(tint.opacity(0.18)))
-    }
-
-    private func phaseColumn(_ phase: EventPhase) -> some View {
-        let window = physiology.range(phase)
-        let value = mean(phase)
-        let delta = phase == .before ? nil : change(phase)
-        return VStack(alignment: .leading, spacing: 5) {
-            Text(phase.title)
-                .font(StrandFont.caption.weight(.semibold))
-                .foregroundStyle(phase.color)
-            Text("\(window.lowerBound.formatted(.dateTime.hour().minute())) – \(window.upperBound.formatted(.dateTime.hour().minute()))")
-                .font(.system(size: 10))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .lineLimit(1).minimumScaleFactor(0.6)
-            (Text(value.map { String(Int($0.rounded())) } ?? "–").font(StrandFont.rounded(24)).monospacedDigit()
-                + Text(" \(metric.unit)").font(StrandFont.caption))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            if let delta {
-                pill(delta, good: isGood(phase, delta))
-            }
-            Text(caption(phase, delta))
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .lineLimit(1).minimumScaleFactor(0.8)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-/// Line chart coloured by phase, with the event window shaded and the event time marked.
-private struct PhysiologyChart: View {
-    let metric: PhysiologyMetric
-    let physiology: EventPhysiology
-    let eventDate: Date
-
-    private static let left = 30.0, right = 8.0, top = 24.0, bottom = 22.0
-    private static let steps: [Double] = [5, 10, 20, 25, 40, 50, 100, 200, 500]
-
-    var body: some View {
-        Canvas { context, size in
-            let points = metric.points.sorted { $0.time < $1.time }
-            let t0 = physiology.windowStart.timeIntervalSinceReferenceDate
-            let span = max(1, physiology.windowEnd.timeIntervalSinceReferenceDate - t0)
-            let baseY = size.height - Self.bottom
-            let plotWidth = size.width - Self.left - Self.right
-            func x(_ date: Date) -> CGFloat {
-                Self.left + CGFloat((date.timeIntervalSinceReferenceDate - t0) / span) * plotWidth
-            }
-
-            // Four whole-number gridlines (0 plus three steps) that always cover the data.
-            let maxValue = points.map(\.value).max() ?? 1
-            let step = Self.steps.first { $0 >= maxValue / 3 } ?? (maxValue / 3).rounded(.up)
-            let axisMax = step * 3
-            func y(_ v: Double) -> CGFloat {
-                baseY - CGFloat(v / axisMax) * (baseY - Self.top)
-            }
-
-            let label = StrandPalette.textTertiary
-            let dotted = StrokeStyle(lineWidth: 0.6, lineCap: .round, dash: [1.5, 3.5])
-            var grid = Path()
-            for i in 0...3 {
-                let v = step * Double(i)
-                grid.move(to: CGPoint(x: Self.left, y: y(v)))
-                grid.addLine(to: CGPoint(x: size.width - Self.right, y: y(v)))
-                context.draw(Text("\(Int(v))").font(.system(size: 10)).foregroundColor(label),
-                             at: CGPoint(x: 0, y: y(v)), anchor: .leading)
-            }
-            context.stroke(grid, with: .color(StrandPalette.hairline.opacity(0.7)), style: dotted)
-
-            let during = EventPhase.during.color
-            let shadeLeft = x(physiology.eventStart), shadeRight = x(physiology.eventEnd)
-            context.fill(Path(CGRect(x: shadeLeft, y: Self.top, width: shadeRight - shadeLeft, height: baseY - Self.top)),
-                         with: .color(during.opacity(0.12)))
-
-            for i in 0...4 {
-                let date = physiology.windowStart.addingTimeInterval(span * Double(i) / 4)
-                let anchor: UnitPoint = i == 0 ? .topLeading : (i == 4 ? .topTrailing : .top)
-                context.draw(Text(date.formatted(.dateTime.hour().minute())).font(.system(size: 10)).foregroundColor(label),
-                             at: CGPoint(x: x(date), y: baseY + 6), anchor: anchor)
-            }
-
-            // One stroke per phase. Each run reaches one point into the next phase so the colours join.
-            var start = 0
-            while start < points.count {
-                let phase = physiology.phase(of: points[start].time)
-                var end = start
-                while end + 1 < points.count, physiology.phase(of: points[end + 1].time) == phase { end += 1 }
-                let upper = min(points.count - 1, end + 1)
-                if upper > start {
-                    let run = points[start...upper].map { CGPoint(x: x($0.time), y: y($0.value)) }
-                    context.stroke(naraSmoothPath(run), with: .color(phase.color),
-                                   style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-                }
-                start = end + 1
-            }
-
-            let markerX = x(eventDate)
-            var marker = Path()
-            marker.move(to: CGPoint(x: markerX, y: Self.top))
-            marker.addLine(to: CGPoint(x: markerX, y: baseY))
-            context.stroke(marker, with: .color(during), style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-            context.fill(Path(ellipseIn: CGRect(x: markerX - 4, y: Self.top - 4, width: 8, height: 8)),
-                         with: .color(during))
-            context.draw(Text("Event").font(.system(size: 10, weight: .semibold)).foregroundColor(during),
-                         at: CGPoint(x: markerX, y: Self.top - 8), anchor: .bottom)
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-// MARK: - Recovery
-
-private struct RecoveryCard: View {
-    let recovery: EventRecovery
-    let event: HealthEvent
-    let history: [HealthEvent]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            NaraSectionHeader(title: String(localized: "Recovery"),
-                              subtitle: String(localized: "Time to return toward baseline"),
-                              seeAll: .recoveryDetails(event, history: history),
-                              seeAllLabel: "See details")
-            RecoveryTiles(recovery: recovery, timeNote: Self.range(from: event.date, lasting: recovery.timeToRecover))
-        }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .naraCard()
-    }
-
-    /// "1:32 PM – 4:20 PM" for a recovery that starts at the event.
-    static func range(from start: Date, lasting duration: TimeInterval?) -> String? {
-        guard let duration else { return nil }
-        let end = start.addingTimeInterval(duration)
-        return "\(start.formatted(.dateTime.hour().minute())) – \(end.formatted(.dateTime.hour().minute()))"
-    }
-}
-
-/// The three recovery tiles: time to recover, HRV return and activity return.
-private struct RecoveryTiles: View {
-    let recovery: EventRecovery
-    var timeNote: String?
-
-    var body: some View {
-        HStack(spacing: 10) {
-            tile("clock", "Time to recover", recovery.timeToRecover.map(naraDurationText), timeNote)
-            tile("waveform.path.ecg", "HRV return", recovery.hrvReturn.map { "\(Int(($0 * 100).rounded()))%" },
-                 String(localized: "of baseline"))
-            tile("figure.run", "Activity return", recovery.activityReturn.map(naraDurationText),
-                 String(localized: "after event"))
-        }
-    }
-
-    private func tile(_ icon: String, _ title: LocalizedStringKey, _ value: String?, _ note: String?) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text(title)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .lineLimit(2).minimumScaleFactor(0.8)
-                .frame(minHeight: 30, alignment: .topLeading)
-            Text(value ?? "–")
-                .font(StrandFont.rounded(22))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            Text(note ?? " ")
-                .font(.system(size: 10))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .lineLimit(1).minimumScaleFactor(0.6)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(StrandPalette.surfaceInset)
-                .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(StrandPalette.hairline, lineWidth: 0.5))
-        )
-    }
-}
-
-/// Recovery for one event, the averages across every event that has one, and the per-event history.
-struct RecoveryDetailsView: View {
-    let event: HealthEvent
-    let history: [HealthEvent]
-
-    private var past: [HealthEvent] {
-        history.filter { $0.recovery != nil }.sorted { $0.date > $1.date }
-    }
-
-    private var average: EventRecovery {
-        func mean(_ values: [Double]) -> Double? {
-            values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
-        }
-        let recoveries = past.compactMap(\.recovery)
-        return EventRecovery(timeToRecover: mean(recoveries.compactMap(\.timeToRecover)),
-                             hrvReturn: mean(recoveries.compactMap(\.hrvReturn)),
-                             activityReturn: mean(recoveries.compactMap(\.activityReturn)))
-    }
-
-    var body: some View {
-        ScreenScaffold(title: "Recovery", subtitle: LocalizedStringKey(event.title)) {
-            VStack(alignment: .leading, spacing: 26) {
-                if let recovery = event.recovery {
-                    VStack(alignment: .leading, spacing: 16) {
-                        NaraSectionHeader(title: event.title,
-                                          subtitle: event.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))
-                        RecoveryTiles(recovery: recovery,
-                                      timeNote: RecoveryCard.range(from: event.date, lasting: recovery.timeToRecover))
-                    }
-                    .padding(18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .naraCard()
-                }
-                if !past.isEmpty {
-                    VStack(alignment: .leading, spacing: 16) {
-                        NaraSectionHeader(title: String(localized: "Average"),
-                                          subtitle: String(localized: "Across \(past.count) events"))
-                        RecoveryTiles(recovery: average, timeNote: String(localized: "per event"))
-                    }
-                    .padding(18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .naraCard()
-                    VStack(alignment: .leading, spacing: 16) {
-                        NaraSectionHeader(title: String(localized: "History"))
-                        VStack(spacing: 0) {
-                            ForEach(Array(past.enumerated()), id: \.element.id) { index, item in
-                                if index > 0 { Divider().overlay(StrandPalette.hairline) }
-                                NavigationLink(value: TabRoute.event(item, history: history)) { row(item) }
-                                    .buttonStyle(.plain)
-                            }
-                        }
-                        .naraCard()
-                    }
-                }
-            }
-        }
-    }
-
-    private func row(_ e: HealthEvent) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: e.symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(e.tone.color)
-                .frame(width: 38, height: 38)
-                .background(Circle().fill(e.tone.color.opacity(0.18)))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(e.title)
-                    .font(StrandFont.subhead.weight(.semibold))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(1)
-                Text(e.date.formatted(.dateTime.month(.abbreviated).day().hour().minute()))
-                    .font(StrandFont.caption)
+                EventWindowChart(physiology: physiology, metric: metric, eventDate: event.date, compact: true,
+                                 selection: .constant(nil))
+                    .naraChartScrubDisabled()
+                Text(verbatim: summary.isEmpty ? " " : summary)
+                    .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
-            Spacer(minLength: 8)
-            VStack(alignment: .trailing, spacing: 3) {
-                Text(e.recovery?.timeToRecover.map(naraDurationText) ?? "–")
-                    .font(StrandFont.subhead.weight(.semibold))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text(e.recovery?.hrvReturn.map { "HRV \(Int(($0 * 100).rounded()))%" } ?? " ")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// All / Reported / Detected, full width.
+struct EventFilterControl: View {
+    @Binding var filter: EventFilter
+
+    var body: some View {
+        SegmentedPillControl(EventFilter.allCases, selection: $filter, fillsAvailableWidth: true) { $0.title }
+            .accessibilityLabel("Filter")
+    }
+}
+
+/// One day of the timeline: the day as the group's label and its events as rows in one card.
+struct EventDaySection: View {
+    let day: EventDay
+    let history: [HealthEvent]
+
+    var body: some View {
+        NoopListSection(verbatimKey(EventGrouping.dayTitle(day.day))) {
+            ForEach(Array(day.events.enumerated()), id: \.element.id) { index, event in
+                if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                NavigationLink(value: TabRoute.event(event, history: history)) {
+                    NoopListRow(icon: event.symbol, iconColor: event.tone.color, title: verbatimKey(event.title),
+                                subtitle: event.detail, value: EventFormat.time(event.date))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// Every event, grouped by month and day, with the same filter as the tab.
+struct AllEventsView: View {
+    let events: [HealthEvent]
+    @ObservedObject private var filterState = EventFilterState.shared
+
+    var body: some View {
+        let months = EventGrouping.months(EventGrouping.days(events, filter: filterState.filter))
+        ScreenScaffold(title: "All events", titleDisplay: .navigationBar, lazy: true) {
+            EventFilterControl(filter: $filterState.filter)
+            if months.isEmpty {
+                ComingSoon(what: filterState.filter.emptyText)
+            }
+            ForEach(months) { month in
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    SectionHeader(verbatimKey(EventGrouping.monthTitle(month.month)))
+                    VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                        ForEach(month.days) { day in
+                            EventDaySection(day: day, history: events)
+                        }
+                    }
+                }
+            }
+        }
     }
 }

@@ -33,53 +33,45 @@ struct WalkingInsightsSection: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            if let reading, !reading.isEmpty {
-                headline(reading)
-                pace(reading)
-                cadenceMix(reading)
-                if reading.hourlySeconds.contains(where: { $0 > 0 }) { hours(reading) }
-                quality(reading)
-                if !reading.bouts.isEmpty { walks(reading) }
-                Text("Read every 5 seconds from the strap's raw motion by a gait model (ElderNet). Steps, speed and stride are wrist estimates; they are steadiest on longer, unhurried walks.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if loaded {
-                Text(reading == nil
-                     ? "No gait reading for this day. It appears once the server has processed a raw motion session from your strap."
-                     : "No walking detected in the motion the server has processed for this day.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                header
+                if let reading, !reading.isEmpty {
+                    headline(reading)
+                    pace(reading)
+                    cadenceMix(reading)
+                    if reading.hourlySeconds.contains(where: { $0 > 0 }) { hours(reading) }
+                    quality(reading)
+                    if !reading.bouts.isEmpty { walks(reading) }
+                } else if loaded {
+                    Text(reading == nil
+                         ? "No gait reading for this day yet."
+                         : "No walking detected on this day.")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    // Loading: the headline row at its final height, redacted.
+                    HStack(alignment: .firstTextBaseline, spacing: 18) {
+                        stat("1 h 20 m", "walking")
+                        stat("8,000", "steps in walks")
+                    }
+                    .redacted(reason: .placeholder)
+                }
             }
         }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
         .task(id: "\(day)|\(offset)") { await load() }
     }
 
     // MARK: Pieces
 
+    /// The day shown, with the steps back and forward (44 pt targets, accent when they can move).
     private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "figure.walk")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(ActivityFamily.walking.color)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("How you walked")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                if let dayStart {
-                    Text(dayStart.formatted(.dateTime.weekday(.wide).month().day()))
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-            }
-            Spacer(minLength: 8)
-            if !loaded { ProgressView().controlSize(.small) }
+        HStack(spacing: NoopMetrics.space2) {
+            Text(dayStart?.formatted(.dateTime.weekday(.wide).month().day()) ?? "")
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
+            Spacer(minLength: NoopMetrics.space2)
             stepper("chevron.left", label: "Previous day", disabled: offset <= -13) { offset -= 1 }
             stepper("chevron.right", label: "Next day", disabled: offset >= 0) { offset += 1 }
         }
@@ -89,12 +81,12 @@ struct WalkingInsightsSection: View {
                          action: @escaping () -> Void) -> some View {
         Button(action: { loaded = false; reading = nil; action() }) {
             Image(systemName: symbol)
-                .font(StrandFont.caption.weight(.semibold))
-                .frame(width: 28, height: 28)
-                .background(Circle().fill(StrandPalette.surfaceInset))
+                .font(StrandFont.icon(.inline).weight(.semibold))
+                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(disabled ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+        .foregroundStyle(disabled ? StrandPalette.textTertiary : StrandPalette.accent)
         .disabled(disabled)
         .accessibilityLabel(Text(label))
     }

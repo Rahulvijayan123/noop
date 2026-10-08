@@ -126,9 +126,9 @@ enum MetricCatalog {
         // history (`KeyMetricCatalog`), so Explore never marks it empty and the series reads find nothing.
         d("stable_awake_hr", String(localized: "Stable Awake Heart Rate"), "Heart", "bpm", "my-whoop", "heart.text.square", 0, nil),
         d("energy_kcal", String(localized: "Calories"), "Heart", "kcal", "my-whoop", "flame", 0, nil),
-        d("vo2max", String(localized: "VO₂ Max"), "Heart", "", "apple-health", "lungs.fill", 1, true),
+        d("vo2max", String(localized: "VO₂ Max"), "Heart", "ml/kg/min", "apple-health", "lungs.fill", 1, true),
         d("fitness_age", String(localized: "Fitness Age"), "Heart", "yrs", "my-whoop", "figure.run", 0, false),
-        d("vo2max_est", String(localized: "VO₂ Max (estimated)"), "Heart", "", "my-whoop", "lungs", 1, true),
+        d("vo2max_est", String(localized: "VO₂ Max (estimated)"), "Heart", "ml/kg/min", "my-whoop", "lungs", 1, true),
         d("vitality", String(localized: "Vitality"), "Heart", "", "my-whoop", "sparkles", 0, true),
         d("body_age", String(localized: "Body Age"), "Heart", "yrs", "my-whoop", "figure.stand", 0, false),
 
@@ -148,8 +148,8 @@ enum MetricCatalog {
         d("sleep_total_min", String(localized: "Asleep Time"), "Rest", "min", "my-whoop", "moon.zzz", 0, true),
         d("hours_vs_needed_pct", String(localized: "Hours vs Needed"), "Rest", "%", "my-whoop", "gauge.medium", 0, true),
         d("sleep_consistency", String(localized: "Sleep Consistency"), "Rest", "%", "my-whoop", "calendar", 0, true),
-        d("restorative_pct", String(localized: "Restorative Sleep"), "Rest", "%", "my-whoop", "sparkles", 0, true),
-        d("restorative_min", String(localized: "Restorative Sleep"), "Rest", "min", "my-whoop", "sparkles", 0, true),
+        d("restorative_pct", String(localized: "Restorative Share"), "Rest", "%", "my-whoop", "sparkles", 0, true),
+        d("restorative_min", String(localized: "Restorative Time"), "Rest", "min", "my-whoop", "sparkles", 0, true),
         d("sleep_efficiency", String(localized: "Sleep Efficiency"), "Rest", "%", "my-whoop", "bed.double.fill", 0, true),
         d("sleep_deep_min", String(localized: "Deep (SWS) Sleep"), "Rest", "min", "my-whoop", "moon.fill", 0, true),
         d("sleep_rem_min", String(localized: "REM Sleep"), "Rest", "min", "my-whoop", "moon.haze", 0, true),
@@ -160,7 +160,7 @@ enum MetricCatalog {
         // ── Effort (was Strain)
         d("strain", String(localized: "Effort"), "Effort", "/100", "my-whoop", "flame", 1, nil,
           String(localized: "Cardiovascular load for the day, on a 0-100 scale (was 0-21).")),
-        d("steps", String(localized: "Steps"), "Effort", "", "apple-health", "figure.walk", 0, true),
+        d("steps", String(localized: "Steps"), "Effort", "steps", "apple-health", "figure.walk", 0, true),
         // WHOOP 5.0 / MG exposes a measured daily step count. Declared AFTER apple-health on purpose:
         // the bare-key `first { key == "steps" }` resolvers (LabBookView, CompareView, the TabRoute
         // `.metric` fallback) keep their prior apple-health default, so this entry's position never
@@ -209,7 +209,7 @@ enum MetricCatalog {
         d("sleep_rem_min", String(localized: "REM Sleep"), "Rest", "min", "xiaomi-band", "moon.haze", 0, true),
         d("sleep_light_min", String(localized: "Light Sleep"), "Rest", "min", "xiaomi-band", "moon", 0, nil),
         d("sleep_score", String(localized: "Sleep Score"), "Rest", "", "xiaomi-band", "moon.stars", 0, true),
-        d("steps", String(localized: "Steps"), "Effort", "", "xiaomi-band", "figure.walk", 0, true),
+        d("steps", String(localized: "Steps"), "Effort", "steps", "xiaomi-band", "figure.walk", 0, true),
         d("intensity_min", String(localized: "Intensity Minutes"), "Effort", "min", "xiaomi-band", "figure.run", 0, true),
         d("stress", String(localized: "Stress"), "Health", "/100", "xiaomi-band", "gauge.with.dots.needle.50percent", 0, false),
     ]
@@ -221,7 +221,7 @@ enum MetricCatalog {
 
     static func metric(key: String, source: String) -> MetricDescriptor? {
         if key == "steps", source == combinedStepsSource {
-            return d("steps", String(localized: "Steps"), "Effort", "", source, "figure.walk", 0, true)
+            return d("steps", String(localized: "Steps"), "Effort", "steps", source, "figure.walk", 0, true)
         }
         return all.first { $0.key == key && $0.source == source }
     }

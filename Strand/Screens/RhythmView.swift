@@ -68,7 +68,7 @@ public enum RhythmConsent {
 /// framing is always present, even when the rhythm "looked steady".
 private struct RhythmDisclaimerNote: View {
     var body: some View {
-        StrandCard(padding: 16) {
+        NoopCard {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "info.circle")
                     .font(StrandFont.subhead)
@@ -179,60 +179,86 @@ struct RhythmConsentGate: View {
     }
 }
 
-// MARK: - Poincaré scatter plot (Canvas, design-tokened)
+// MARK: - Poincaré scatter plot (Canvas, with millisecond axes)
 
 /// The signature visualization: a Poincaré scatter of successive (NN[i], NN[i+1]) pairs.
 /// A steady rhythm draws a tight elongated comet along the diagonal; a more variable one
 /// draws a rounder, more diffuse cloud. Purely descriptive — drawn in the calm Rest blue
-/// world (never red). The identity diagonal is shown for reference. Decorative for
-/// accessibility (the numbers + label carry the meaning).
+/// world (never red). The identity diagonal is shown for reference, both axes are labelled in ms on
+/// the same fixed scale. Canvas, because a night is thousands of points; the tick labels are text.
 private struct PoincarePlot: View {
     let points: [RhythmScreener.PoincarePoint]
-    /// The world colour the cloud + axes are drawn in (Rest blue — calm, never alarm).
+    /// The world colour the cloud is drawn in (Rest blue — calm, never alarm).
     var tint: Color = StrandPalette.restColor
-    var brightTint: Color = StrandPalette.restBright
 
     /// Fixed physiological plot bounds (ms) so the same rhythm always reads at the same
     /// scale night-to-night — 300…1500 ms covers ~40…200 bpm, the readable resting band.
     private let lo: Double = 300
     private let hi: Double = 1500
+    private let ticks: [Double] = [400, 800, 1200]
+    /// Room for the value-axis labels and the time-axis labels.
+    private let gutter: CGFloat = 40
+    private let footer: CGFloat = 18
+
+    private func frac(_ v: Double) -> CGFloat {
+        CGFloat((Swift.min(Swift.max(v, lo), hi) - lo) / (hi - lo))
+    }
 
     var body: some View {
-        GeometryReader { geo in
-            let side = min(geo.size.width, geo.size.height)
-            Canvas { ctx, size in
-                let s = min(size.width, size.height)
-                let inset: CGFloat = 8
-                let plot = s - inset * 2
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            Text("Next interval (ms)")
+                .font(NaraChartStyle.unitFont)
+                .foregroundStyle(StrandPalette.textSecondary)
+            GeometryReader { geo in
+                let side = max(0, min(geo.size.width - gutter, geo.size.height - footer))
+                ZStack(alignment: .topLeading) {
+                    Canvas { ctx, _ in
+                        // Grid at the ticks, then the identity diagonal (NN[i] == NN[i+1]) — the line a
+                        // perfectly metronomic beat would sit on.
+                        for t in ticks {
+                            var v = Path()
+                            v.move(to: CGPoint(x: gutter + frac(t) * side, y: 0))
+                            v.addLine(to: CGPoint(x: gutter + frac(t) * side, y: side))
+                            var h = Path()
+                            h.move(to: CGPoint(x: gutter, y: side - frac(t) * side))
+                            h.addLine(to: CGPoint(x: gutter + side, y: side - frac(t) * side))
+                            ctx.stroke(v, with: .color(NaraChartStyle.gridColor), lineWidth: 0.5)
+                            ctx.stroke(h, with: .color(NaraChartStyle.gridColor), lineWidth: 0.5)
+                        }
+                        var diag = Path()
+                        diag.move(to: CGPoint(x: gutter, y: side))
+                        diag.addLine(to: CGPoint(x: gutter + side, y: 0))
+                        ctx.stroke(diag, with: .color(StrandPalette.hairlineStrong),
+                                   style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
 
-                func map(_ v: Double) -> CGFloat {
-                    let clamped = Swift.min(Swift.max(v, lo), hi)
-                    let frac = (clamped - lo) / (hi - lo)
-                    return inset + CGFloat(frac) * plot
-                }
-
-                // Identity diagonal (NN[i] == NN[i+1]) — the line a perfectly metronomic
-                // beat would sit on. Faint hairline, for reference only.
-                var diag = Path()
-                diag.move(to: CGPoint(x: inset, y: s - inset))
-                diag.addLine(to: CGPoint(x: s - inset, y: inset))
-                ctx.stroke(diag, with: .color(StrandPalette.hairlineStrong), lineWidth: 1)
-
-                // The point cloud. Dots are small + semi-transparent so density reads as a
-                // cloud; the bright world colour keeps it legible on the deep canvas.
-                let r: CGFloat = 1.6
-                for p in points {
-                    let x = map(p.x)
-                    // Canvas y grows downward; invert so higher NN[i+1] sits higher.
-                    let y = s - map(p.y)
-                    let rect = CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)
-                    ctx.fill(Path(ellipseIn: rect), with: .color(brightTint.opacity(0.55)))
+                        // The point cloud: small, semi-transparent dots so density reads as a cloud.
+                        let r: CGFloat = 1.6
+                        for p in points {
+                            let x = gutter + frac(p.x) * side
+                            // Canvas y grows downward; invert so higher NN[i+1] sits higher.
+                            let y = side - frac(p.y) * side
+                            ctx.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                                     with: .color(tint.opacity(0.55)))
+                        }
+                    }
+                    ForEach(ticks, id: \.self) { t in
+                        Text("\(Int(t))")
+                            .font(NaraChartStyle.axisFont)
+                            .foregroundStyle(NaraChartStyle.axisColor)
+                            .position(x: gutter / 2, y: side - frac(t) * side)
+                        Text("\(Int(t))")
+                            .font(NaraChartStyle.axisFont)
+                            .foregroundStyle(NaraChartStyle.axisColor)
+                            .position(x: gutter + frac(t) * side, y: side + footer / 2 + 2)
+                    }
                 }
             }
-            .frame(width: side, height: side)
-            .frame(maxWidth: .infinity, alignment: .center)
+            .frame(height: NoopMetrics.chartHeightPrimary + footer)
+            Text("Beat interval (ms)")
+                .font(NaraChartStyle.unitFont)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .padding(.leading, gutter)
         }
-        .frame(height: NoopMetrics.chartHeight)
         .accessibilityHidden(true)
     }
 }
@@ -325,76 +351,38 @@ struct RhythmView: View {
     }
 
     private var visualization: some View {
-        ScreenScaffold(
-            title: "Rhythm",
-            subtitle: "An experimental picture of your beat-to-beat timing",
-            // PERF: chart-heavy column (the Poincaré beat-to-beat scatter, the stats grid and the
-            // methodology card). The LazyVStack path builds the off-screen cards — including the scatter
-            // plot's point set — on demand; byte-identical layout.
-            lazy: true,
-            // Liquid finish: the day-of-sky backdrop, so the visualization sits in the same liquid
-            // atmosphere as Today. The calm Rest-blue world of the cards stays unchanged over it.
-            topBackground: liquidScaffoldSky(),
-            trailing: { closeButton }
-        ) {
-            SourceBadge("Experimental", tint: StrandPalette.restColor)
-                .task(id: windows.count) { rhythmExportURL = buildRhythmExportURL() }
-
+        ScreenScaffold(title: "Rhythm", dateLine: allPoints.isEmpty ? nil : String(localized: "Last night"),
+                       titleDisplay: .navigationBar) {
             if allPoints.isEmpty {
                 emptyState
+                    .task(id: windows.count) { rhythmExportURL = buildRhythmExportURL() }
             } else {
                 summaryCard
-                plotCard
-                statsCard
+                    .task(id: windows.count) { rhythmExportURL = buildRhythmExportURL() }
+                NoopCard { PoincarePlot(points: allPoints) }
+                statsGrid
                 if let rhythmExportURL {
                     // #1298: hand the clinician the DATA, never a verdict. A neutral CSV export.
                     ShareLink(item: rhythmExportURL) {
                         Label("Share", systemImage: "square.and.arrow.up")
-                            .font(StrandFont.subhead)
+                            .font(StrandFont.subhead.weight(.medium))
                     }
-                    .tint(StrandPalette.restColor)
+                    .tint(StrandPalette.accent)
                 }
             }
 
-            methodologyCard
+            AboutDisclosure("How this is measured", paragraphs: [
+                String(localized: "During quiet, still, resting windows, Nara looks at the timing between your heartbeats (R-R intervals) and draws their Poincaré scatter. From the cloud it computes its short and long axes (SD1, SD2) and a few plain regularity numbers. Movement and noisy windows are skipped, not shown. These are transparent, published descriptive statistics: a picture of your timing, never a clinical measurement."),
+                String(localized: "Each dot pairs one heartbeat interval with the next. A tight line along the diagonal means a steady beat; a rounder, more spread-out cloud means the timing varied more."),
+            ])
             RhythmDisclaimerNote()
-        }
-    }
-
-    @ViewBuilder private var closeButton: some View {
-        if let onClose {
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close Rhythm")
         }
     }
 
     // MARK: Summary card — the neutral, plain-language headline (NO verdict)
 
-    /// OpenStrap-style status chip: a compact pill with an icon + the neutral regularity label. Modelled
-    /// on `SourceBadge`, but in the calm Rest-blue palette — NEVER a warn/alarm colour (§11 forbids alarm
-    /// styling; OpenStrap tints its chip amber, NOOP does not). States differ by icon + wording only, and
-    /// the short `chipLabel` sits in the pill, the sentence `headlineDetail` reads below. Non-diagnostic.
-    private var statusChip: some View {
-        let label = night?.overall ?? headlineWindow?.label ?? .unreadable
-        return HStack(spacing: 6) {
-            Image(systemName: Self.statusIcon(label))
-            Text(chipLabel(label))
-        }
-        .font(StrandFont.subhead)
-        .foregroundStyle(StrandPalette.restBright)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(StrandPalette.restColor.opacity(0.16), in: Capsule(style: .continuous))
-        .overlay(Capsule(style: .continuous).strokeBorder(StrandPalette.restColor.opacity(0.34), lineWidth: 1))
-    }
-
-    /// The SHORT neutral status word inside the chip (the sentence-length `headlineDetail` reads below).
-    /// Compact so the chip renders like OpenStrap's, not a full-width banner. Non-diagnostic wording.
+    /// The SHORT neutral status word (the sentence-length `headlineDetail` reads below it). Calm and
+    /// non-diagnostic: never a warn/alarm colour (§11 forbids alarm styling).
     private func chipLabel(_ label: RhythmRegularity) -> String {
         switch label {
         case .steady:           return String(localized: "Steady")
@@ -404,125 +392,41 @@ struct RhythmView: View {
         }
     }
 
-    /// A calm, non-alarm SF Symbol per neutral state — a check for steady, the ECG waveform for any
-    /// variation (never a warning triangle), a question mark when unread. No red, no alarm (§11).
-    private static func statusIcon(_ label: RhythmRegularity) -> String {
-        switch label {
-        case .steady:                    return "checkmark.circle.fill"
-        case .occasionalEctopy, .varied: return "waveform.path.ecg"
-        case .unreadable:                return "questionmark.circle"
-        }
-    }
-
     private var summaryCard: some View {
-        StrandCard(padding: 18, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline) {
-                    Text("Last night").strandOverline()
-                    Spacer()
-                    ScoreStatePill(confidenceState, text: confidenceText)
+        let label = night?.overall ?? headlineWindow?.label ?? .unreadable
+        return NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                    Text(chipLabel(label))
+                        .font(StrandFont.title2)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer(minLength: NoopMetrics.space2)
+                    StatePill("Experimental", tone: .neutral, showsDot: false)
+                    StatePill(confidenceText, tone: .neutral, showsDot: false)
                 }
-                statusChip
                 Text(headlineDetail)
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-
-                // Two calm liquid readouts of the night's real descriptive fractions (both 0–1, neutral —
-                // never a verdict): the beat-to-beat variation index and the extra/skipped fraction. The
-                // liquid tube idiom, drawn in the same Rest-blue world so it never reads as alarm. The
-                // stats grid below still prints every exact number; these are a descriptive picture.
-                if let hw = headlineWindow {
-                    VStack(spacing: 8) {
-                        liquidStatRow("Beat-to-beat variation", frac: hw.normRmssd,
-                                      tint: StrandPalette.restBright)
-                        liquidStatRow("Extra or skipped beats", frac: hw.ectopicFraction,
-                                      tint: StrandPalette.restColor)
-                    }
-                    .padding(.top, 2)
-                }
             }
         }
     }
 
-    /// One calm liquid readout: an UPPERCASE overline label, the fraction as a percent, and a posed
-    /// liquid tube filled to that fraction (clamped 0–1). Descriptive only — never a verdict, never red.
-    /// Static tube so a page of them costs one cached frame each. Decorative for VoiceOver (the numbers
-    /// grid carries the meaning).
-    private func liquidStatRow(_ label: LocalizedStringKey, frac: Double?, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text(label)
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Spacer()
-                Text(percent(frac))
-                    .font(StrandFont.captionNumber)
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
-            LiquidTube(frac: max(0, min(1, frac ?? 0)), tint: tint, height: 8, animated: false)
-        }
-        .accessibilityHidden(true)
-    }
+    // MARK: The descriptive numbers
 
-    // MARK: Plot card — the Poincaré scatter + the "comet vs cloud" reading note
-
-    private var plotCard: some View {
-        StrandCard(padding: 18, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Beat-to-beat scatter").strandOverline()
-                ZStack {
-                    ScenicHeroBackground(domain: .rest, starCount: 36)
-                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    PoincarePlot(points: allPoints)
-                        .padding(8)
-                }
-                .frame(height: NoopMetrics.chartHeight + 24)
-
-                Text("Each dot pairs one heartbeat interval with the next. A tight line along the diagonal means a steady beat; a rounder, more spread-out cloud means the timing varied more.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    // MARK: Stats card — the descriptive numbers (equal-height tiles)
-
-    private var statsCard: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("The numbers", overline: "Descriptive stats")
-            HStack(spacing: NoopMetrics.gap) {
-                StatTile(label: "Short axis",
-                         value: fmt(headlineWindow?.sd1, "%.0f"),
-                         caption: String(localized: "SD1 · ms"),
-                         accent: StrandPalette.restBright)
-                StatTile(label: "Long axis",
-                         value: fmt(headlineWindow?.sd2, "%.0f"),
-                         caption: String(localized: "SD2 · ms"),
-                         accent: StrandPalette.restColor)
-            }
-            HStack(spacing: NoopMetrics.gap) {
-                StatTile(label: "Cloud shape",
-                         value: fmt(headlineWindow?.sd1sd2, "%.2f"),
-                         caption: String(localized: "SD1:SD2 ratio"),
-                         accent: StrandPalette.metricCyan)
-                StatTile(label: "Beat-to-beat",
-                         value: percent(headlineWindow?.normRmssd),
-                         caption: String(localized: "variation index"),
-                         accent: StrandPalette.metricPurple)
-            }
-            HStack(spacing: NoopMetrics.gap) {
-                StatTile(label: "Extra / skipped",
-                         value: percent(headlineWindow?.ectopicFraction),
-                         caption: String(localized: "of beats"),
-                         accent: StrandPalette.restColor)
-                StatTile(label: "Beats read",
-                         value: headlineWindow.map { "\($0.nBeats)" } ?? "—",
-                         caption: String(localized: "clean intervals"),
-                         accent: StrandPalette.textSecondary)
-            }
-        }
+    private var statsGrid: some View {
+        StatGrid([
+            StatItem(String(localized: "Short axis"), value: fmt(headlineWindow?.sd1, "%.0f"), unit: "ms", detail: "SD1"),
+            StatItem(String(localized: "Long axis"), value: fmt(headlineWindow?.sd2, "%.0f"), unit: "ms", detail: "SD2"),
+            StatItem(String(localized: "Cloud shape"), value: fmt(headlineWindow?.sd1sd2, "%.2f"),
+                     detail: String(localized: "SD1:SD2 ratio")),
+            StatItem(String(localized: "Beat-to-beat"), value: percentNumber(headlineWindow?.normRmssd), unit: "%",
+                     detail: String(localized: "variation index")),
+            StatItem(String(localized: "Extra / skipped"), value: percentNumber(headlineWindow?.ectopicFraction), unit: "%",
+                     detail: String(localized: "of beats")),
+            StatItem(String(localized: "Beats read"), value: headlineWindow.map { "\($0.nBeats)" },
+                     detail: String(localized: "clean intervals")),
+        ])
     }
 
     // MARK: Empty / thin-night state
@@ -548,20 +452,6 @@ struct RhythmView: View {
         return DataPendingNote(title: title, message: message, symbol: "waveform.path")
     }
 
-    // MARK: Methodology
-
-    private var methodologyCard: some View {
-        StrandCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("How this is measured").strandOverline()
-                Text("During quiet, still, resting windows, Nara looks at the timing between your heartbeats (R-R intervals) and draws their Poincaré scatter. From the cloud it computes its short and long axes (SD1, SD2) and a few plain regularity numbers. Movement and noisy windows are skipped, not shown. These are transparent, published descriptive statistics: a picture of your timing, never a clinical measurement.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
     // MARK: - Copy mapping (neutral, non-clinical — NO verdict, NO condition name)
 
     private var headlineDetail: String {
@@ -577,15 +467,6 @@ struct RhythmView: View {
         }
     }
 
-    /// Confidence pill state from the headline window's read certainty.
-    private var confidenceState: ScoreState {
-        switch headlineWindow?.confidence ?? .calibrating {
-        case .solid:       return .solid
-        case .building:    return .building
-        case .calibrating: return .calibrating
-        }
-    }
-
     /// Honest confidence line so a thin night reads truthfully (spec §6).
     private var confidenceText: LocalizedStringKey {
         let readable = night?.readableWindows ?? windows.filter { $0.label != .unreadable }.count
@@ -598,19 +479,43 @@ struct RhythmView: View {
 
     // MARK: - Formatting
 
-    private func fmt(_ value: Double?, _ format: String) -> String {
-        guard let value else { return "—" }
+    private func fmt(_ value: Double?, _ format: String) -> String? {
+        guard let value else { return nil }
         return String(format: format, value)
     }
 
-    /// A 0…1 fraction rendered as a whole-number percent (normalised RMSSD / ectopic fraction).
-    private func percent(_ value: Double?) -> String {
-        guard let value else { return "—" }
-        return String(format: "%.0f%%", value * 100)
+    /// A 0…1 fraction as a whole-number percent, the number only (the unit sits beside it).
+    private func percentNumber(_ value: Double?) -> String? {
+        guard let value else { return nil }
+        return String(format: "%.0f", value * 100)
     }
 }
 
 #if DEBUG
+/// `--demo-screen rhythmdemo`: the visualization on a fixed synthetic night (the demo seed banks no
+/// beat-to-beat intervals), for screenshots. Pass the consent keys as launch arguments
+/// (`-noopRhythmConsentVersion 1.0 -noopRhythmScreening YES`) or the gate shows first.
+struct RhythmDemoScreen: View {
+    var body: some View {
+        RhythmView(
+            night: RhythmScreener.NightRhythmSummary(
+                readableWindows: 6, steadyWindows: 5, occasionalWindows: 1,
+                variedWindows: 0, variationRecurred: false, overall: .steady),
+            windows: [
+                RhythmScreener.WindowResult(
+                    label: .steady, sd1: 28, sd2: 74, sd1sd2: 0.38,
+                    normRmssd: 0.05, turningPointRate: 0.7, ectopicFraction: 0.01,
+                    nBeats: 1_200, confidence: .solid, agreedAcrossSources: false,
+                    poincare: (0..<1_200).map { i in
+                        let base = 960.0 + sin(Double(i) * 0.05) * 90 + Double((i * 37) % 23) - 11
+                        let next = base + sin(Double(i) * 0.9) * 26 + Double((i * 17) % 13) - 6
+                        return RhythmScreener.PoincarePoint(x: base, y: next)
+                    })
+            ]
+        )
+    }
+}
+
 #Preview("Rhythm — steady") {
     RhythmView(
         night: RhythmScreener.NightRhythmSummary(

@@ -1,6 +1,5 @@
 import Foundation
 import SwiftUI
-import Charts
 import StrandDesign
 import StrandAnalytics
 import WhoopStore
@@ -12,39 +11,23 @@ import WhoopStore
 // fitness proxy) and acute load (ATL, the 7-day fatigue proxy); the gap between the two lines IS the
 // TSB / "form" (CTL − ATL), surfaced as the headline number and a footer stat.
 //
-// Descriptive only: CTL/ATL/TSB never feed the Readiness level or any score, and the loads are NOOP's
-// daily Effort/strain — NOT TRIMP. Long-horizon by nature, so the card models the full history rather
-// than the Trends range window (14+ contiguous days are needed before anything is drawn).
+// Descriptive only: CTL/ATL/TSB never feed the Readiness level or any score, and the loads are Nara's
+// daily Effort/strain — NOT TRIMP. Long-horizon by nature, so the card MODELS the full history and only
+// DRAWS the Trends range window (14+ contiguous days are needed before anything is drawn). The kit's
+// two-line chart shows Fitness (CTL) and Fatigue (ATL); Form (TSB) is the readout.
 //
 // Isolated in its own file on purpose: TrendsView already sits near the iOS type-check budget, so this
 // keeps its own inference cost out of that body.
 struct TrainingLoadCard: View {
     let days: [DailyMetric]
 
-    // yyyy-MM-dd → Date (en_US_POSIX, UTC) — same keying TrendsView uses so the x-axis matches.
-    private static let dayParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
+    /// The range and window the Trends charts above it draw, so the two lines follow the range control.
+    /// The model itself always runs over the FULL history (chronic load is a 42-day horizon).
+    var range: ChartRange = .quarter
+    var window: ClosedRange<Date> = ChartAxis.window(.quarter, firstDataDay: nil)
+    var isLoading: Bool = false
 
-    /// `internal` (not `private`): `TrainingLoadChart` (its own file) plots these.
-    struct Row: Identifiable {
-        let date: Date
-        let ctl: Double
-        let atl: Double
-        var id: Date { date }
-    }
-
-    /// One modelled point per day of the contiguous suffix the engine returned.
-    private func rows(from result: TrainingLoadEngine.Result) -> [Row] {
-        result.points.compactMap { p in
-            guard let d = Self.dayParser.date(from: p.day) else { return nil }
-            return Row(date: d, ctl: p.chronicLoad, atl: p.acuteLoad)
-        }
-    }
+    @State private var selected: Date?
 
     /// PERF: `result` used to be a plain computed property re-running `TrainingLoadEngine.evaluate`
     /// (a full-history EWMA scan) from scratch on every access — and `body` hit it TWICE per render
@@ -101,32 +84,29 @@ struct TrainingLoadCard: View {
 
     var body: some View {
         let tl = result
-        Group {
-            if !tl.isAvailable {
-                unavailableCard(contiguousDays: tl.contiguousDays)
-            } else {
-                let latest = tl.points.last
-                let rows = rows(from: tl)
-                ChartCard(
-                    title: "Training Load",
-                    subtitle: subtitle(for: tl),
-                    trailing: latest.map { signed($0.balance) },
-                    height: NoopMetrics.chartHeight,
-                    chart: {
-                        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                            legend
-                            TrainingLoadChart(rows: rows)
-                        }
-                    },
-                    footer: {
-                        ChartFooter([
-                            ("CTL", latest.map { fmt($0.chronicLoad) } ?? "—"),
-                            ("ATL", latest.map { fmt($0.acuteLoad) } ?? "—"),
-                            ("Form", latest.map { signed($0.balance) } ?? "—"),
-                            ("Days", "\(tl.contiguousDays)"),
-                        ])
-                    }
-                )
+        let fitness = tl.points.compactMap { DailyPoint(key: $0.day, value: $0.chronicLoad, series: "fitness") }
+        let fatigue = tl.points.compactMap { DailyPoint(key: $0.day, value: $0.acuteLoad, series: "fatigue") }
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Training load", trailing: tl.state == .building
+                          ? String(localized: "Building, \(tl.contiguousDays) of \(Self.established) days") : nil)
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    readout(tl)
+                    DailyLineChart(series: [
+                                       .init(id: "fitness", name: String(localized: "Fitness"),
+                                             color: StrandPalette.effortColor, points: fitness),
+                                       .init(id: "fatigue", name: String(localized: "Fatigue"),
+                                             color: StrandPalette.metricAmber, points: fatigue),
+                                   ],
+                                   marks: .lineOnly,
+                                   state: isLoading ? .loading
+                                       : (tl.isAvailable ? .ready
+                                          : .empty(String(localized: "Needs \(Self.minimum)+ consecutive days of Effort to begin. \(tl.contiguousDays) so far."))),
+                                   window: window, xStyle: range.axisStyle,
+                                   y: ChartValueAxis(unit: nil, domain: .fitted(minSpan: 10, includeZero: true)),
+                                   selection: $selected, height: NoopMetrics.chartHeightSecondary,
+                                   accessibilityTitle: String(localized: "Training load"))
+                }
             }
         }
         // Persist the memoized result into `@State` (mirrors `CompareView`'s `.onAppear { refreshModel() }`
@@ -134,49 +114,18 @@ struct TrainingLoadCard: View {
         // instead of recomputing — `body` itself never mutates `@State` mid-evaluation.
         .onAppear { refreshResult() }
         .onChangeCompat(of: Self.modelKey(for: days)) { _ in refreshResult() }
+        .onChangeCompat(of: range) { _ in selected = nil }
     }
 
-    private var legend: some View {
-        HStack(spacing: NoopMetrics.space2 * 2) {
-            legendDot(color: StrandPalette.gold, label: "CTL · Fitness")
-            legendDot(color: StrandPalette.strain100, label: "ATL · Fatigue")
-            Spacer()
+    /// The day under the finger (fitness, fatigue and form), else the latest form.
+    private func readout(_ tl: TrainingLoadEngine.Result) -> some View {
+        if let selected, let point = tl.points.first(where: { $0.day == ChartDay.key(for: selected) }) {
+            return InsightsCardReadout(
+                value: signed(point.balance), unit: String(localized: "form"),
+                context: "\(ReadoutContent.dateLine(selected, period: .day)) · \(String(localized: "Fitness")) \(fmt(point.chronicLoad)) · \(String(localized: "Fatigue")) \(fmt(point.acuteLoad))")
         }
-    }
-
-    private func legendDot(color: Color, label: LocalizedStringKey) -> some View {
-        HStack(spacing: NoopMetrics.space2) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(label).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-        }
-    }
-
-    private func subtitle(for tl: TrainingLoadEngine.Result) -> String {
-        switch tl.state {
-        case .established:
-            return String(localized: "42-day fitness vs 7-day fatigue")
-        case .building:
-            return String(localized: "Building — \(tl.contiguousDays) of \(Self.established) days")
-        case .unavailable:
-            return ""
-        }
-    }
-
-    // Honest empty state: name exactly how many consecutive Effort days are still needed.
-    private func unavailableCard(contiguousDays: Int) -> some View {
-        ChartCard(
-            title: "Training Load",
-            subtitle: String(localized: "Chronic vs acute load"),
-            chart: {
-                VStack(spacing: NoopMetrics.space2) {
-                    Text("Needs \(Self.minimum)+ consecutive days of Effort to begin. \(contiguousDays) so far.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-            },
-            footer: { EmptyView() }
-        )
+        let latest = tl.isAvailable ? tl.points.last : nil
+        return InsightsCardReadout(value: latest.map { signed($0.balance) }, unit: String(localized: "form"),
+                                   context: latest.map { "\(String(localized: "Fitness")) \(fmt($0.chronicLoad)) · \(String(localized: "Fatigue")) \(fmt($0.acuteLoad))" } ?? "")
     }
 }

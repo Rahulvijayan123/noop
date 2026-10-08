@@ -38,8 +38,6 @@ struct CoachSettingsView: View {
         // nowhere, and a macOS sheet has no swipe-to-dismiss: that combination would leave this screen
         // with no way out. (#2206 is the same mistake in the other direction.)
         ScreenScaffold(title: "Coach settings",
-                       subtitle: "What the coach may read, how it is told to answer, and when it writes to you.",
-                       topBackground: liquidScaffoldSky(),
                        trailing: {
                            Button("Done") { dismiss() }
                                .buttonStyle(.plain)
@@ -74,7 +72,7 @@ struct CoachSettingsView: View {
     /// belongs to and is never sent anywhere else, so switching provider here would leave a key that
     /// cannot be used and a screen that cannot fix it. Kotlin twin: `CoachModelCard`.
     private var modelBar: some View {
-        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Text("\(coach.provider.displayName) · \(coach.model)")
@@ -107,7 +105,7 @@ struct CoachSettingsView: View {
     /// Explicit, revocable permission for the coach to read & send the user's data. Off by default.
     /// A frosted Charge-tinted card so it reads as part of the green Coach world, not a flat panel.
     private var consentBar: some View {
-        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+        NoopCard {
             HStack(spacing: 10) {
                 Image(systemName: coach.dataConsent ? "lock.open.fill" : "lock.fill")
                     .foregroundStyle(coach.dataConsent ? StrandPalette.accent : StrandPalette.textTertiary)
@@ -136,7 +134,7 @@ struct CoachSettingsView: View {
     /// The v5 second opt-in: include a SUMMARY of the new on-device signals (strongest n-of-1 patterns +
     /// Lab Book markers). Summary-only, never raw readings, so the no-raw-egress posture holds.
     private var onDeviceSignalsBar: some View {
-        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+        NoopCard {
             HStack(spacing: 10) {
                 Image(systemName: coach.includeOnDeviceSignals ? "checklist.checked" : "checklist")
                     .foregroundStyle(coach.includeOnDeviceSignals ? StrandPalette.accent : StrandPalette.textTertiary)
@@ -161,7 +159,7 @@ struct CoachSettingsView: View {
     /// K11: Third opt-in — send a chart image alongside the text when using Gemini's multimodal
     /// API. Only shown when the provider is Gemini. OFF by default.
     private var multimodalChartBar: some View {
-        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+        NoopCard {
             HStack(spacing: 10) {
                 Image(systemName: coach.multimodalChartEnabled ? "photo.badge.checkmark" : "photo")
                     .foregroundStyle(coach.multimodalChartEnabled ? StrandPalette.accent : StrandPalette.textTertiary)
@@ -187,7 +185,7 @@ struct CoachSettingsView: View {
     /// reveals a TextEditor bound to the engine (edits persist to UserDefaults and take effect on the
     /// next message) plus a Reset-to-default control.
     private var systemPromptBar: some View {
-        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: promptExpanded ? 10 : 0) {
                 Button {
                     withAnimation(StrandMotion.fade) {
@@ -256,7 +254,7 @@ struct CoachSettingsView: View {
     /// K5: the scheduled morning-brief notification settings — enable toggle, time-of-day picker, and an
     /// explicit "Generate now" button. Mirrors the `ScheduledDebugExport` settings row shape (TestCentreView).
     private var morningBriefBar: some View {
-        NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     Image(systemName: briefEnabled ? "sunrise.fill" : "sunrise")
@@ -279,7 +277,7 @@ struct CoachSettingsView: View {
                     CoachBriefScheduler.setEnabled(on, generateBrief: { await coach.generateBrief() }) { outcome in
                         if outcome == .denied {
                             briefEnabled = false
-                            briefStatus = "Notifications are off for Nara — enable them in Settings first."
+                            briefStatus = "Notifications are off for Nara, enable them in Settings first."
                         }
                     }
                 }

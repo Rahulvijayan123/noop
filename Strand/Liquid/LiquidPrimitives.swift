@@ -532,9 +532,10 @@ struct LiquidPressStyle: ButtonStyle {
     }
 }
 
-/// A number that animates to its value: SwiftUI interpolates `animatableData`, so the shown integer rolls
-/// smoothly frame-by-frame whenever `value` changes inside a `withAnimation` block.
-struct CountUpNumber: View, Animatable {
+/// A formatted score numeral. The name is historical: it no longer counts up. Values swap at once, even
+/// inside a `withAnimation` block, because a rolling number reads as motion that carries no information
+/// (docs/DESIGN_SYSTEM.md, Motion).
+struct CountUpNumber: View {
     var value: Double
     var font: Font
     /// Decimal places to render. 0 (default) keeps the whole-number scores (Charge/Rest/100-scale Effort)
@@ -545,10 +546,6 @@ struct CountUpNumber: View, Animatable {
     /// measured: Fitness Age arrives clamped, so a reading at the edge of the scale shows "≤20" while
     /// the count-up still runs (#2173). Empty by default, which leaves every existing caller identical.
     var prefix: String = ""
-    var animatableData: Double {
-        get { value }
-        set { value = newValue }
-    }
     var body: some View {
         Text(prefix + (decimals > 0 ? String(format: "%.\(decimals)f", value) : "\(Int(value.rounded()))"))
             .font(font).monospacedDigit()
@@ -577,8 +574,6 @@ struct LiquidScoreGauge: View {
     /// Forwarded to `LiquidVessel` so a gauge inside a link still splashes AND still navigates (#1995).
     var tapPassesThrough: Bool = false
 
-    @State private var shown: Double = 0
-
     private var frac: Double? { score.map { max(0, min(1, $0 / maxValue)) } }
     private var centerFont: Font { StrandFont.rounded(diameter * 26 / Self.homeHeroDiameter) }
     private var captionFont: Font { StrandFont.rounded(diameter * 0.085, weight: .medium) }
@@ -590,8 +585,8 @@ struct LiquidScoreGauge: View {
                 .frame(width: diameter, height: diameter)
             VStack(spacing: captionText == nil ? 0 : 1) {
                 Group {
-                    if score != nil {
-                        CountUpNumber(value: shown, font: centerFont, decimals: decimals)
+                    if let score {
+                        CountUpNumber(value: score, font: centerFont, decimals: decimals)
                     } else {
                         Text("–").font(centerFont)
                     }
@@ -609,12 +604,5 @@ struct LiquidScoreGauge: View {
             .allowsHitTesting(false)
         }
         .frame(width: diameter, height: diameter)
-        .onAppear { rollTo(score) }
-        .onChangeCompat(of: score) { rollTo($0) }
-    }
-
-    private func rollTo(_ v: Double?) {
-        guard let v else { shown = 0; return }
-        withAnimation(.easeOut(duration: 0.9)) { shown = v }
     }
 }

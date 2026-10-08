@@ -75,6 +75,9 @@ struct StrandiOSApp: App {
         // Same reason this lives here rather than StrandApp.swift: that file is the macOS @main and is
         // excluded from the iOS target. See DemoSyncHarness.swift.
         DemoSyncHarness.applyLaunchArgsIfNeeded()
+        // DEBUG-only screenshot tour: `--demo-tour` steps the frontmost page down one screenful at a time for a
+        // host script to capture. See DemoTourHarness.swift.
+        DemoTour.startIfRequested()
         #endif
         // Debug-only canary: trips if the App Group entitlement is missing on this target before any
         // silent no-op (PendingIntents, WidgetSnapshot.publish, Live Activity) can mask the issue as
@@ -682,15 +685,33 @@ enum DemoScreens {
         case "liquidtoday": return AnyView(LiquidTodayView())
         case "trends":   return AnyView(TrendsView())
         case "sleep":    return AnyView(SleepView())
+        case "alarms":   return AnyView(SmartAlarmView())
+        case "sleepcards": return AnyView(SleepHostedCardsDemo())
         case "live":     return AnyView(LiveView())
         case "stress":   return AnyView(StressView())
         case "workouts": return AnyView(WorkoutsView())
+        // Workout screens with no strap (Strand/Screens/WorkoutDemoHosts.swift). Pair the list and detail with
+        // `--demo-workouts` (per-second HR, a route and a manual row) and `--demo-workout-open <page>`.
+        case "liveworkout": return AnyView(LiveWorkoutDemoHost())
+        case "startworkout": return AnyView(StartWorkoutDemoHost())
+        case "manualworkout": return AnyView(ManualWorkoutDemoHost())
+        case "liftlog": return AnyView(LiftLogView())
         case "health":   return AnyView(HealthView())
         case "insights": return AnyView(InsightsView())
         case "explore":  return AnyView(MetricExplorerView())
         // The Heart rate day page (HR graph, Activity context, Through the day). Pair with `--demo-seed
         // --demo-intraday` so there is a day of per-second streams to decode.
         case "heartrateday": return AnyView(FullDayChartView(showsActivityTimeline: true))
+        // Activity area pages (screenshots): the Deep Timeline, Live's connection details, the Heart rate day's
+        // Walking quality / Strap signal pages (pair with --demo-activity-extras), Breathe, the interval timer,
+        // a live session (runs its own session runner) and activity calibration.
+        case "deeptimeline": return AnyView(FullDayChartView())
+        case "liveconnection": return AnyView(LiveConnectionDetailsView(activeIsWhoop: true, activeIsOura: false,
+                                                                      deviceName: "WHOOP", selectedModel: .whoop5mg))
+        case "breathe": return AnyView(BreathingView())
+        case "intervals": return AnyView(IntervalTimerView())
+        case "livesession": return AnyView(LiveSessionView(onClose: {}))
+        case "activitycalibration": return AnyView(ActivityCalibrationView())
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
         case "coach":    return AnyView(CoachDemoHost())
@@ -714,6 +735,44 @@ enum DemoScreens {
         // + self-service pairing guidance, screenshot-able WITHOUT reproducing the bond refusal on real
         // hardware.
         case "bondrefused": return AnyView(BondRefusedDemoScreen())
+        // The shared design kit on synthetic data (Strand/Screens/KitGalleryView.swift): every chart type in
+        // every state, and every component. Add `--demo-chart-select <fraction>` for the scrubbed state and
+        // `--demo-kit-only <ids>` for a few sections.
+        case "kitcharts": return AnyView(KitChartsGallery())
+        case "kitcomponents": return AnyView(KitComponentsGallery())
+        // The device, data-source and setup screens (the "more" area), each as it looks when pushed.
+        case "datasources": return AnyView(DataSourcesView())
+        case "applehealth": return AnyView(AppleHealthView())
+        case "miband": return AnyView(XiaomiBandView())
+        case "backup": return AnyView(BackupSyncView())
+        case "powersaving": return AnyView(PowerSavingView())
+        case "limitations": return AnyView(NoopLimitationsView())
+        case "testcentre": return AnyView(TestCentreView())
+        case "rawcollector": return AnyView(RawDataCollectorView())
+        case "terms": return AnyView(TermsGateView(onAccept: {}))
+        case "onboarding": return AnyView(OnboardingWizard(onFinished: {}))
+        case "applehealthrhr": return AnyView(AppleHealthSeriesDemoScreen(key: "resting_hr"))
+        case "applehealthspo2": return AnyView(AppleHealthSeriesDemoScreen(key: "spo2"))
+        case "applehealthsleep": return AnyView(AppleHealthSeriesDemoScreen(key: "asleep_min"))
+        case "devicedetail": return AnyView(DeviceDetailDemoScreen())
+        // The Health, Stress, Trends and Insights area's other screens, for screenshots.
+        case "hub":      return AnyView(InsightsHubView())
+        case "labbook":  return AnyView(LabBookView())
+        case "rhythm":   return AnyView(RhythmHost())
+        case "fused":    return AnyView(FusedRecordHost())
+        case "hydration": return AnyView(HydrationView())
+        case "coupled":  return AnyView(CoupledView())
+        case "intelligence": return AnyView(IntelligenceView())
+        case "weeklydigest": return AnyView(WeeklyDigestView())
+        case "rhythmdemo": return AnyView(RhythmDemoScreen())
+        case "labmarker": return AnyView(LabMarkerDemoScreen())
+        // The event editors (Strand/Screens/EventsDemoScreens.swift). `treatment` takes
+        // `--demo-treatment-sheet start|dose|end|edit` to open one of its sheets.
+        case "treatment": return AnyView(TreatmentCaregiverView())
+        case "exposurelist": return AnyView(EventsDemoScreens.exposureList())
+        case "exposureeditor": return AnyView(EventsDemoScreens.exposureEditor())
+        case "markereditor": return AnyView(EventsDemoScreens.markerEditor())
+        case "whatsnew": return AnyView(WhatsNewView(onClose: {}))
         default:         return nil
         }
     }

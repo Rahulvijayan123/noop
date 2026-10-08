@@ -77,33 +77,33 @@ struct NoopLimitationsView: View {
     ]
 
     var body: some View {
-        ScreenScaffold(title: "Nara Limitations", subtitle: "What each WHOOP can read") {
+        ScreenScaffold(title: "Nara limitations", titleDisplay: .navigationBar) {
             tableCard
-            legendCard
+            legend
         }
     }
 
-    // MARK: - Cards
+    // MARK: - Table
 
     private var tableCard: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("What Nara reads").font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
+        NoopCard(padding: 0) {
+            VStack(alignment: .leading, spacing: 0) {
                 // Column header.
                 HStack {
-                    Text("Feature").font(StrandFont.caption)
+                    Text("Reads").font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                    Text("4.0").font(StrandFont.caption)
+                    Text("4.0").font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
-                        .frame(width: 52)
-                    Text("5.0/MG").font(StrandFont.caption)
+                        .frame(width: 60)
+                    Text("5.0/MG").font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
-                        .frame(width: 52)
+                        .frame(width: 60)
                 }
-                ForEach(Array(rows.enumerated()), id: \.element.id) { idx, row in
-                    if idx > 0 { Divider().overlay(StrandPalette.hairline) }
+                .padding(.horizontal, NoopMetrics.cardPadding)
+                .padding(.vertical, NoopMetrics.space3)
+                ForEach(rows) { row in
+                    NoopListDivider()
                     HStack {
                         Text(row.feature).font(StrandFont.body)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -111,30 +111,32 @@ struct NoopLimitationsView: View {
                         supportCell(row.whoop4)
                         supportCell(row.whoop5)
                     }
+                    .padding(.horizontal, NoopMetrics.cardPadding)
+                    .frame(minHeight: 44)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel(a11yLabel(row))
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
-    private var legendCard: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Legend").font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                legendRow(.full, "Read live off the strap")
-                legendRow(.partial, "On-device estimate, or experimental / firmware-gated")
-                legendRow(.none, "Not from the strap. SpO₂ can be filled by importing a WHOOP or Health export.")
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+    /// What the three marks mean, as one quiet block under the table.
+    private var legend: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            legendRow(.full, "Read live off the strap")
+            legendRow(.partial, "On-device estimate, or experimental / firmware-gated")
+            legendRow(.none, "Not from the strap. SpO₂ can be filled by importing a WHOOP or Health export.")
         }
+        .padding(.horizontal, NoopMetrics.space1)
     }
 
     private func legendRow(_ state: LimitState, _ label: LocalizedStringKey) -> some View {
-        HStack(spacing: 12) {
-            supportCell(state)
+        HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+            Image(systemName: state.glyph)
+                .font(StrandFont.icon(.inline).weight(.semibold))
+                .foregroundStyle(state.tint)
+                .frame(width: 20)
+                .accessibilityHidden(true)
             Text(label).font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -144,9 +146,9 @@ struct NoopLimitationsView: View {
 
     private func supportCell(_ state: LimitState) -> some View {
         Image(systemName: state.glyph)
-            .font(.system(size: 15, weight: .semibold))
+            .font(StrandFont.icon(.row).weight(.semibold))
             .foregroundStyle(state.tint)
-            .frame(width: 52)
+            .frame(width: 60)
             .accessibilityHidden(true)
     }
 

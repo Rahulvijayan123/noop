@@ -161,20 +161,20 @@ struct TestCentreView: View {
         capture: .toggle, includesScreenshot: false, requires5MG: false)
 
     var body: some View {
-        ScreenScaffold(title: "Test Centre",
-                       subtitle: "Turn on a test for the thing that's wrong, wear the strap, then tap Report. All on \(Platform.deviceNounPhrase).") {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                domainModesCard.staggeredAppear(index: 0)
-                diagnosticToolsCard.staggeredAppear(index: 1)
-                if is5MG { rawDataCollectorCard.staggeredAppear(index: 2) }
-                if is5MG { activityCalibrationCard.staggeredAppear(index: 3) }
-                if is5MG { fiveMGProtocolDiagnosticsCard.staggeredAppear(index: 4) }
-                if ouraPaired { ouraCard.staggeredAppear(index: 2) }
-                exportCard.staggeredAppear(index: 2)
-                experimentalAlgorithmsCard.staggeredAppear(index: 3)
+        ScreenScaffold(title: "Test Centre", titleDisplay: .navigationBar) {
+            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                // Rebuilt on every appear so a mode switched on or off elsewhere reads right here. Only this
+                // section is rebuilt: the page keeps its scroll position and every other control its state.
+                domainModesCard
+                    .id(refreshToken)
+                if is5MG { fiveMGToolsSection }
+                diagnosticToolsCard
+                if is5MG { fiveMGProtocolDiagnosticsCard }
+                if ouraPaired { ouraCard }
+                exportCard
+                experimentalAlgorithmsCard
             }
         }
-        .id(refreshToken)
         .onAppear {
             refreshToken &+= 1
             ScheduledDebugExport.activateIfEnabled()
@@ -203,17 +203,54 @@ struct TestCentreView: View {
         }
     }
 
+    /// A section of this page: a sentence-case label outside one card, an optional footnote under it.
+    private func section<Content: View>(_ title: LocalizedStringKey, footer: LocalizedStringKey? = nil,
+                                        @ViewBuilder content: () -> Content) -> some View {
+        let inner = content()
+        return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            Text(title)
+                .font(StrandFont.subhead.weight(.medium))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .padding(.leading, NoopMetrics.space1)
+                .accessibilityAddTraits(.isHeader)
+            NoopCard { inner }
+            if let footer {
+                Text(footer)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, NoopMetrics.space1)
+            }
+        }
+    }
+
+    /// The two WHOOP 5/MG tools that open their own pages, as list rows.
+    private var fiveMGToolsSection: some View {
+        NoopListSection("5/MG tools") {
+            NavigationLink {
+                RawDataCollectorView()
+            } label: {
+                NoopListRow(icon: "waveform.path.ecg", iconColor: StrandPalette.accent, title: "Raw data collector",
+                            value: live.connected ? nil : String(localized: "Connect your strap"),
+                            valueTone: live.connected ? .neutral : .warning)
+            }
+            NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+            NavigationLink {
+                ActivityCalibrationView()
+            } label: {
+                NoopListRow(icon: "figure.mind.and.body", iconColor: StrandPalette.accent, title: "Activity calibration",
+                            value: live.connected ? nil : String(localized: "Connect your strap"),
+                            valueTone: live.connected ? .neutral : .warning)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
     // MARK: - Section 1: Domain test modes (rendered from the registry projection)
 
     @ViewBuilder private var domainModesCard: some View {
-        NoopCard {
+        section("Test modes", footer: "Turn on a test for what's wrong, wear the strap, then tap Share.") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("Test modes")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("Each test logs extra detail for one part of the app while you wear the strap, then bundles it for a bug report.")
-                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
                 let modes = TestCentreLayout.visibleModes(is5MG: is5MG)
                 ForEach(Array(modes.enumerated()), id: \.element.id) { idx, mode in
                     if idx > 0 { Divider().overlay(StrandPalette.hairline) }
@@ -225,59 +262,10 @@ struct TestCentreView: View {
 
     // MARK: - Section 2: Diagnostic tools (strap log + recalibrate + env dump)
 
-    @ViewBuilder private var rawDataCollectorCard: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("5/MG RAW DATA COLLECTOR")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("Record, review, export, and delete bounded 100 Hz motion sessions. Normal sync is unchanged.")
-                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                NavigationLink {
-                    RawDataCollectorView()
-                } label: {
-                    Label("Open raw-data collector", systemImage: "waveform.path.ecg")
-                }
-                .buttonStyle(NoopButtonStyle(.primary, fullWidth: true))
-                Text(live.connected ? "WHOOP 5/MG connected." : "Connect your WHOOP 5/MG to start a raw-data session.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(live.connected ? StrandPalette.textSecondary : StrandPalette.statusWarning)
-            }
-        }
-    }
-
-    @ViewBuilder private var activityCalibrationCard: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("ACTIVITY CALIBRATION")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("Guided labeled movement sessions for activity research.")
-                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                NavigationLink {
-                    ActivityCalibrationView()
-                } label: {
-                    Label("Open activity calibration", systemImage: "figure.mind.and.body")
-                }
-                .buttonStyle(NoopButtonStyle(.primary, fullWidth: true))
-                Text(live.connected ? "WHOOP 5/MG connected." : "Connect your WHOOP 5/MG to run a calibration session.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(live.connected ? StrandPalette.textSecondary : StrandPalette.statusWarning)
-            }
-        }
-    }
-
     @ViewBuilder private var fiveMGProtocolDiagnosticsCard: some View {
-        NoopCard {
+        section("5/MG protocol diagnostics",
+                footer: "Developer tools for unmapped protocol features. None are needed for normal 5/MG recording, history sync or the raw data collector.") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("5/MG PROTOCOL DIAGNOSTICS")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("Developer tools for unmapped protocol features. None of these are required for normal WHOOP 5/MG recording, history sync, or the bounded Raw Data Collector.")
-                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
 
                 Toggle("Protocol probes", isOn: $puffinExperiments)
                     .toggleStyle(.switch).tint(StrandPalette.accent)
@@ -294,7 +282,7 @@ struct TestCentreView: View {
                 Divider().overlay(StrandPalette.hairline)
                 Toggle("Legacy R22 feature-flag experiment", isOn: $deepDataEnabled)
                     .toggleStyle(.switch).tint(StrandPalette.accent)
-                Text("The strap accepts these writes, but Nara has not observed them enabling a separate live stream. This is not the Raw Data Collector.")
+                Text("The strap accepts these writes, but Nara has not seen them enable a separate live stream. This is not the Raw Data Collector.")
                     .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                 if deepDataEnabled {
                     NoopButton("Send legacy R22 enable sequence", systemImage: "bolt.badge.automatic", kind: .secondary) {
@@ -342,19 +330,16 @@ struct TestCentreView: View {
     }
 
     @ViewBuilder private var diagnosticToolsCard: some View {
-        NoopCard {
+        section("Diagnostic tools") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("Diagnostic tools")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
 
                 // Strap log, the same exportableLogText the Settings + Live strap-log cards share.
                 HStack(spacing: 12) {
-                    Text("Strap log").font(StrandFont.overline)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                    Text("Strap log").font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     Button("Copy") { PlatformPasteboard.copy(live.exportableLogText()) }
-                        .buttonStyle(.plain).font(StrandFont.mono).foregroundStyle(StrandPalette.accent)
+                        .buttonStyle(.plain).font(StrandFont.subhead.weight(.medium)).foregroundStyle(StrandPalette.accent)
                     Button("Save…") {
                         Task {
                             let extra = await DebugDataDiagnostics.dynamicLines(repo: model.repo)
@@ -362,7 +347,7 @@ struct TestCentreView: View {
                                                   suggestedName: FileExport.timestampedName("noop-strap-log", ext: "txt"))
                         }
                     }
-                    .buttonStyle(.plain).font(StrandFont.mono).foregroundStyle(StrandPalette.accent)
+                    .buttonStyle(.plain).font(StrandFont.subhead.weight(.medium)).foregroundStyle(StrandPalette.accent)
                 }
                 Text("Grab this when you report a bug. It tells me what the app saw.")
                     .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
@@ -427,11 +412,8 @@ struct TestCentreView: View {
     // MARK: - Section 2b: Oura (consolidated; only when an Oura ring is paired)
 
     @ViewBuilder private var ouraCard: some View {
-        NoopCard {
+        section("Oura") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("Oura")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
 
                 // #1284 residual 3: experimental Oura onset keying.
                 Toggle(isOn: $ouraOnsetKeying) {
@@ -638,11 +620,8 @@ struct TestCentreView: View {
     // MARK: - Section 3: Export and auto-export (manual Report + scheduled export)
 
     @ViewBuilder private var exportCard: some View {
-        NoopCard {
+        section("Export") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("Export")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
 
                 NoopButton("Report a bug with my log", systemImage: "paperplane", kind: .primary) {
                     // A generic "whole app" report: the master profile so the deep-link self-applies the
@@ -730,14 +709,8 @@ struct TestCentreView: View {
     /// Android twin reads. Hosts the HR-from-PPG sub-lag interpolation variant. Twin of the Android
     /// ExperimentalAlgorithmsCard.
     @ViewBuilder private var experimentalAlgorithmsCard: some View {
-        NoopCard {
+        section("Experimental algorithms", footer: "Research-grade alternatives. Opt-in, off by default, non-clinical.") {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                Text("Experimental algorithms")
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("Research-grade alternatives / precision tweaks. Opt-in, off by default, non-clinical.")
-                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
 
                 Toggle(isOn: $ppgHrSubLagInterpEnabled) {
                     Text("HR-from-PPG sub-lag interpolation (v26 gap-fill)")
@@ -939,7 +912,8 @@ private struct TestModeRow: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 12) {
                 Image(systemName: mode.icon)
-                    .foregroundStyle(StrandPalette.accent).frame(width: 24)
+                    .font(StrandFont.icon(.row))
+                    .foregroundStyle(StrandPalette.accent).frame(width: 28)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(mode.title).font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
                     Text(TestCentreLayout.statusText(for: mode, active: on, elapsedSeconds: elapsed,
@@ -1000,7 +974,7 @@ private struct TestModeRow: View {
                 // describes what the tap does: it builds a redacted bundle and hands it to the share
                 // sheet. Nothing is sent anywhere.
                 Button("Share") { report.start(mode: mode, live: live, repo: model.repo) }
-                    .buttonStyle(.plain).font(StrandFont.mono).foregroundStyle(StrandPalette.accent)
+                    .buttonStyle(.plain).font(StrandFont.subhead.weight(.medium)).foregroundStyle(StrandPalette.accent)
             }
         }
         .onAppear {
@@ -1260,41 +1234,48 @@ private struct ReportReviewSheet: View {
 
     var body: some View {
         let preview = report.pending?.gate.previewText ?? ""
-        return ScreenScaffold(title: "Review before sharing",
-                              subtitle: "This is exactly what your report will contain. Nothing leaves \(Platform.deviceNounPhrase) until you tap Share.") {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                if report.pending?.modeInactive == true {
-                    // #1002: the selected profile's test mode is not on, so this bundle carries no capture
-                    // for the very thing being reported (the #812 capture_check only grades ACTIVE modes,
-                    // so without this the report just looked thin with no explanation). Warn plainly, with
-                    // the fix, BEFORE the user ships a report a maintainer can't act on.
-                    Text("Heads up: this test mode is off, so the report has no capture for it. For a useful report, turn the mode on, reproduce the problem while wearing the strap, then report again.")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.statusWarning)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                NoopCard {
-                    ScrollView {
+        return NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    if report.pending?.modeInactive == true {
+                        // #1002: the selected profile's test mode is not on, so this bundle carries no capture
+                        // for the very thing being reported (the #812 capture_check only grades ACTIVE modes,
+                        // so without this the report just looked thin with no explanation). Warn plainly, with
+                        // the fix, BEFORE the user ships a report a maintainer can't act on.
+                        InlineNotice(String(localized: "This test mode is off, so the report has no capture for it. Turn the mode on, reproduce the problem while wearing the strap, then report again."),
+                                     tone: .warning)
+                    }
+                    NoopCard {
                         Text(preview.isEmpty ? String(localized: "(nothing to share yet)") : preview)
                             .font(StrandFont.mono)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .textSelection(.enabled)
                     }
-                    #if os(iOS)
-                    .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                    #endif
-                    .frame(maxHeight: 360)
+                    Text("This is exactly what your report will contain. Nothing leaves \(Platform.deviceNounPhrase) until you tap Share.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: NoopMetrics.space3) {
-                    NoopButton("Cancel", systemImage: "xmark", kind: .secondary) {
-                        report.cancel(); dismiss()
-                    }
-                    NoopButton("Share", systemImage: "square.and.arrow.up", kind: .primary) {
-                        report.confirm(); dismiss()
-                    }
+                .padding(NoopMetrics.screenHPadding)
+            }
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle(Text("Review before sharing"))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { report.cancel(); dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Share") { report.confirm(); dismiss() }
+                        .foregroundStyle(StrandPalette.accent)
                 }
             }
         }
+        #if os(macOS)
+        .frame(minWidth: 520, minHeight: 560)
+        #endif
     }
 }

@@ -323,21 +323,21 @@ struct CoachChatView: View {
                 // Streaming flushes at ~25Hz; an animated scroll per flush is wasteful, so follow at ~10Hz.
                 guard following, Date.timeIntervalSinceReferenceDate - throttle.last >= 0.1 else { return }
                 throttle.last = Date.timeIntervalSinceReferenceDate
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: vm.messages.last?.vizPhase) { _, _ in
                 // A placeholder or finished visual grows the list under the reader; keep the end of the answer in view.
                 guard following else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             // Keyed on the newest message, not the count: "Load earlier" adds rows above and must not jump.
             .onChange(of: vm.messages.last?.id) { _, _ in
                 following = true
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: lastFollowUps) { _, pills in
                 guard following, !pills.isEmpty else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: vm.isGenerating) { _, generating in
                 guard !generating else { return }
@@ -345,14 +345,14 @@ struct CoachChatView: View {
                 for delay in [0.0, 0.35] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         guard following else { return }
-                        withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
                     }
                 }
             }
             .onChange(of: inputFocused) { _, focused in
                 guard focused else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
             .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }

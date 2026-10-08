@@ -80,7 +80,7 @@ struct JournalLogCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             HStack(alignment: .center) {
-                SectionHeader("Journal", overline: "Log")
+                SectionHeader("Journal")
                 Spacer()
                 if editing {
                     pillButton("Done", selected: true) { editing = false }
@@ -110,7 +110,7 @@ struct JournalLogCard: View {
                     .onChangeCompat(of: dayOffset) { _ in proxy.scrollTo(dayOffset, anchor: .center) }
                 }
             }
-            NoopCard(tint: StrandPalette.restColor) {
+            NoopCard {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(editing
                          ? "Rename, regroup, or remove an item to tidy your list. Renaming keeps the original question behind the scenes, so a WHOOP import still lines up. Custom items are deleted; built-in ones are hidden and can be restored below."
@@ -144,14 +144,14 @@ struct JournalLogCard: View {
                 Button { toggleCollapsed(group) } label: {
                     HStack(spacing: 6) {
                         Text(group.title)
-                            .font(StrandFont.overline)
-                            .foregroundStyle(StrandPalette.textTertiary)
+                            .font(StrandFont.subhead.weight(.medium))
+                            .foregroundStyle(StrandPalette.textSecondary)
                         Text("\(groupItems.count)")
                             .font(StrandFont.caption)
                             .foregroundStyle(StrandPalette.textTertiary)
                         Spacer()
                         Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(StrandFont.icon(.inline))
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
                 }

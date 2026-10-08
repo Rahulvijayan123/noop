@@ -41,7 +41,7 @@ private struct PrivacyNote: View {
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "lock.fill")
-                .font(.system(size: 9, weight: .semibold))
+                .font(StrandFont.icon(.inline))
                 .foregroundStyle(StrandPalette.textTertiary)
                 .accessibilityHidden(true)
             Text(text)
@@ -78,7 +78,7 @@ struct CycleAwarenessCard: View {
     private var hue: Color { StrandPalette.restColor }
 
     var body: some View {
-        NoopCard(tint: hue) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 header
 
@@ -132,10 +132,9 @@ struct CycleAwarenessCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Cycle awareness").strandOverline()
-                Text("From your nightly temperature")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                Text("Cycle awareness")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
             }
             Spacer()
             ScoreStatePill(scoreState, text: confidenceLabel)
@@ -162,7 +161,7 @@ struct CycleAwarenessCard: View {
         // A probabilistic WINDOW, never a single confident date — the copy reflects that.
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "calendar")
-                .font(.system(size: 12, weight: .semibold))
+                .font(StrandFont.icon(.inline))
                 .foregroundStyle(hue)
                 .accessibilityHidden(true)
             Text("A period is likely between \(prettyDay(window.earliestDay)) and \(prettyDay(window.latestDay)) (a window, not a fixed date).")
@@ -245,11 +244,11 @@ struct CycleAwarenessOptInCard: View {
     var onEnable: () -> Void
 
     var body: some View {
-        NoopCard(tint: StrandPalette.restColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack(spacing: 8) {
                     Image(systemName: "drop.degreesign")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(StrandFont.icon(.row))
                         .foregroundStyle(StrandPalette.restColor)
                         .accessibilityHidden(true)
                     Text("Cycle awareness")
@@ -296,11 +295,11 @@ struct MenstrualCycleHomeCard: View {
     var body: some View {
         Group {
             if shouldShow {
-                NoopCard(tint: StrandPalette.restColor) {
+                NoopCard {
                     VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                         HStack(spacing: NoopMetrics.space2) {
                             Image(systemName: "drop.degreesign")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(StrandFont.icon(.row))
                                 .foregroundStyle(StrandPalette.restColor)
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
@@ -454,7 +453,7 @@ struct CycleTrackerView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                    SectionHeader("Cycle tracker", overline: "Period-start history")
+                    SectionHeader("Cycle tracker")
                     statusCard
                     logCard
                     historyCard
@@ -500,9 +499,11 @@ struct CycleTrackerView: View {
     }
 
     private var statusCard: some View {
-        NoopCard(tint: StrandPalette.restColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("Current estimate").strandOverline()
+                Text("Current estimate")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 HStack(alignment: .firstTextBaseline) {
                     Text(phaseTitle)
                         .font(StrandFont.title2)
@@ -537,9 +538,11 @@ struct CycleTrackerView: View {
     }
 
     private var logCard: some View {
-        NoopCard(tint: StrandPalette.restColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("Log a period start").strandOverline()
+                Text("Log a period start")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 DatePicker("Period started on", selection: $selectedDate, in: ...Date(),
                            displayedComponents: .date)
                     .font(StrandFont.body)
@@ -564,7 +567,9 @@ struct CycleTrackerView: View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack {
-                    Text("Logged starts").strandOverline()
+                    Text("Logged starts")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     if !starts.isEmpty {
                         Button("Delete all") { confirmDeleteAll = true }
@@ -632,7 +637,7 @@ struct BodyClockCard: View {
     private var hue: Color { StrandPalette.restColor }
 
     var body: some View {
-        NoopCard(tint: hue) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 header
 
@@ -646,7 +651,7 @@ struct BodyClockCard: View {
                 // The estimated temperature-minimum clock time — the canonical phase marker.
                 HStack(spacing: 6) {
                     Image(systemName: "moon.stars")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(StrandFont.icon(.inline))
                         .foregroundStyle(hue)
                         .accessibilityHidden(true)
                     Text("Estimated body-clock low around \(clockString(estimate.tempMinHour))")
@@ -677,10 +682,9 @@ struct BodyClockCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Body clock").strandOverline()
-                Text("Light + sleep timing only")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                Text("Body clock")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
             }
             Spacer()
             ScoreStatePill(scoreState, text: confidenceLabel)
@@ -698,7 +702,8 @@ struct BodyClockCard: View {
     private func planSummary(_ plan: CircadianEngine.JetLagPlan, firstDay: CircadianEngine.DayPlan) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Plan · \(plan.estimatedDays)-day shift")
-                .strandOverline()
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
             // Day 1's concrete light + lights-out cue — light + sleep timing only.
             Text("Day 1: bright light \(clockString(firstDay.brightLightStartHour))-\(clockString(firstDay.brightLightEndHour)), lights-out around \(clockString(firstDay.targetSleepHour)).")
                 .font(StrandFont.subhead)
@@ -777,11 +782,11 @@ struct HeadsUpCard: View {
     var distance: IllnessDistance.Result? = nil
 
     var body: some View {
-        NoopCard(padding: 14, tint: hue) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: glyph)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(StrandFont.icon(.row))
                         .foregroundStyle(hue)
                         .frame(width: 30, height: 30)
                         .background(hue.opacity(0.16), in: Circle())
@@ -826,7 +831,7 @@ struct HeadsUpCard: View {
 
     private func whyRow(label: LocalizedStringKey, values: [String], tint: Color) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label).strandOverline()
+            Text(label).strandLabel()
             // Each fired signal / confounder as a quiet chip.
             FlowChips(values: values, tint: tint)
             Spacer(minLength: 0)

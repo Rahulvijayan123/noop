@@ -118,7 +118,7 @@ struct HRVSnapshotView: View {
                     close()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18))
+                        .font(StrandFont.icon(.row))
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .buttonStyle(.plain)
@@ -130,14 +130,10 @@ struct HRVSnapshotView: View {
     // MARK: - Capture card
 
     private var captureCard: some View {
-        StrandCard(padding: 24, tint: StrandPalette.restColor) {
+        StrandCard(padding: 24) {
             VStack(spacing: 18) {
-                ZStack {
-                    ScenicHeroBackground(domain: .rest, starCount: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
-                    captureDial
-                        .padding(.vertical, 6)
-                }
+                captureDial
+                    .padding(.vertical, 6)
                 .frame(height: 260)
                 .frame(maxWidth: .infinity)
 
@@ -293,9 +289,11 @@ struct HRVSnapshotView: View {
     // MARK: - Result
 
     private func resultCard(_ result: HRVAnalyzer.HRVResult) -> some View {
-        StrandCard(padding: 18, tint: StrandPalette.restColor) {
+        StrandCard {
             VStack(alignment: .leading, spacing: 14) {
-                Text("Your reading").strandOverline()
+                Text("Your reading")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
 
                 if result.rmssd == nil {
                     HStack(spacing: 10) {
@@ -321,12 +319,12 @@ struct HRVSnapshotView: View {
 
     private func metricTile(_ label: String, _ value: String, _ unit: String, _ accent: Color) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(label).strandOverline()
+            Text(label).strandLabel()
             Spacer(minLength: 6)
             HStack(alignment: .firstTextBaseline, spacing: 4) {
                 Text(value)
                     .font(StrandFont.number(24))
-                    .foregroundStyle(accent)
+                    .foregroundStyle(StrandPalette.textPrimary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.6)
                 Text(unit)
@@ -336,7 +334,7 @@ struct HRVSnapshotView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
-        .background(NoopPanelSurface(tint: accent, cornerRadius: 10))
+        .background(NoopInsetSurface())
     }
 
     // MARK: - Methodology
@@ -346,9 +344,8 @@ struct HRVSnapshotView: View {
     /// `SpotHrvReading.caveatFor` adds the honest limits — including the noisier optical-PPG note on a
     /// WHOOP 5/MG. Single-sourced with Android via the shared helper, no em-dashes.
     private var methodologyCard: some View {
-        StrandCard(tint: StrandPalette.restColor) {
+        AboutDisclosure("How this is measured") {
             VStack(alignment: .leading, spacing: 8) {
-                Text("How this is measured").strandOverline()
                 Text("A 60-second snapshot of your beat-to-beat (R-R) intervals from the strap, cleaned (range and ectopic-beat filtering) before computing RMSSD the same way your overnight HRV is computed.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)

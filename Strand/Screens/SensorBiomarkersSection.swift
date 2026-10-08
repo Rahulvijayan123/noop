@@ -546,13 +546,7 @@ struct SensorBiomarkersSection: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("Sensor biomarkers").strandOverline()
-            Text(String(localized: "Descriptive measurements from the strap's sensors."))
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        SectionHeader("Sensor biomarkers")
     }
 
     private var loadingCard: some View {
@@ -584,7 +578,9 @@ struct SensorBiomarkersSection: View {
     private func itemCard(_ item: SensorBiomarkersViewModel.Item) -> some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                Text(item.title).strandOverline()
+                Text(item.title)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 Text(item.definition)
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)

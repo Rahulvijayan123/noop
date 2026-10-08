@@ -6,11 +6,13 @@ import Charts
 
 // MARK: - Trend Chart (§9.4 Trends)
 //
-// A line/area chart whose line is gradient-stroked by value — reusable for
-// recovery / HRV / RHR / strain trends. The gradient defaults to the recovery
-// scale (so a recovery-over-time line travels deep-gold → pale-gold by daily
-// score), but any gradient + value-range can be supplied — pass the blue sleep
-// ramp for sleep, the teal HRV scale for HRV, the amber strain ramp for strain.
+// A line/area (or bar) chart of a daily series whose line is stroked by value — reusable for recovery /
+// HRV / RHR / strain trends. The gradient defaults to the recovery scale, but any gradient + value-range
+// can be supplied. New detail pages use `DailyChart`; this view stays for its existing call sites.
+//
+// Lines are drawn with monotone interpolation, which passes through every reading and never swings past
+// one (the earlier Catmull-Rom curve overshot the data on sharp turns), and break wherever a reading is
+// missing, so a gap reads as a gap.
 
 /// The index runs that `hrGapSegments` implies: one range per unbroken stretch, in order.
 ///
@@ -153,6 +155,11 @@ public struct TrendChart: View {
     public var yDomain: ClosedRange<Double>?
     /// Optional elapsed time window for a workout trace, with workout-relative tick labels.
     public var workoutTimeAxis: ClosedRange<Date>?
+    /// The value axis's unit ("ms", "bpm", "%"), drawn as a small label above the axis. Nil draws none.
+    public var yAxisUnit: String?
+    /// Whether the line lifts across missing readings (see `gapSegments`). On by default; a workout trace
+    /// (`workoutTimeAxis`) is sampled continuously and never breaks.
+    public var breaksLinesAcrossGaps: Bool
 
     /// Mean of all point values, computed once in `init` so the area fill's gradient
     /// stop doesn't run an O(n) reduce for every mark on every render.
@@ -178,7 +185,9 @@ public struct TrendChart: View {
         workoutTimeAxis: ClosedRange<Date>? = nil,
         yAxisStep: Double? = nil,
         showsBarValues: Bool = false,
-        largeSelection: Bool = false
+        largeSelection: Bool = false,
+        yAxisUnit: String? = nil,
+        breaksLinesAcrossGaps: Bool = true
     ) {
         let sorted = points.sorted { $0.date < $1.date }
         self.points = sorted
@@ -198,6 +207,8 @@ public struct TrendChart: View {
         self.yAxisStep = yAxisStep
         self.showsBarValues = showsBarValues
         self.largeSelection = largeSelection
+        self.yAxisUnit = yAxisUnit
+        self.breaksLinesAcrossGaps = breaksLinesAcrossGaps
         let avg = sorted.isEmpty
             ? valueRange.lowerBound
             : sorted.map(\.value).reduce(0, +) / Double(sorted.count)
@@ -205,8 +216,23 @@ public struct TrendChart: View {
 
         // The point set handed to the marks: full resolution up to the threshold, else min/max-bucketed
         // to ~the plot pixel width (pixel-identical line, far fewer GPU vertices). Computed once here.
-        self.displayPoints = ChartDownsample.minMaxBucketed(sorted, threshold: ChartDownsample.markThreshold,
-                                                            targetCount: ChartDownsample.targetVertices)
+        let downsampled = ChartDownsample.minMaxBucketed(sorted, threshold: ChartDownsample.markThreshold,
+                                                         targetCount: ChartDownsample.targetVertices)
+        // Gap runs are found on the full series, so a missing day still breaks the line after downsampling
+        // has merged its neighbours into one bucket.
+        if breaksLinesAcrossGaps && workoutTimeAxis == nil {
+            let runs = TrendChart.gapSegments(dates: sorted.map(\.date), segments: sorted.map(\.segment))
+            let byDate = Dictionary(zip(sorted.map(\.date), runs), uniquingKeysWith: { a, _ in a })
+            self.displayPoints = downsampled.map {
+                TrendPoint(date: $0.date, value: $0.value, segment: byDate[$0.date] ?? $0.segment)
+            }
+        } else {
+            self.displayPoints = downsampled
+        }
+        // A reading with no neighbour in its run draws no line, so it is drawn as a point at any density.
+        var runCounts: [String: Int] = [:]
+        for p in self.displayPoints { runCounts[p.segment, default: 0] += 1 }
+        self.isolatedDates = Set(self.displayPoints.filter { runCounts[$0.segment] == 1 }.map(\.date))
 
         // VoiceOver one-liner: count + mean + range — formatted with the SAME valueFormat the
         // tooltip uses, so units match. Computed once here, not per render.
@@ -230,6 +256,26 @@ public struct TrendChart: View {
     /// Computed ONCE in `init` (not per body/hover eval), so it's memoized on `points`; hover / now-cap /
     /// accessibility stay on the full-resolution `points` so those readouts are unchanged.
     private let displayPoints: [TrendPoint]
+    /// Dates of readings that sit alone between two gaps (a line needs two points).
+    private let isolatedDates: Set<Date>
+
+    /// Line-run ids for a date-ascending series: each point keeps its own `segment` and gains a run number
+    /// that steps wherever the series skips more than its usual spacing.
+    ///
+    /// The usual spacing is the median step between readings, at least one day, so a nightly series breaks
+    /// across a missing night and a weekly one across a missing week, without either breaking at every
+    /// point. A step longer than one and a half times that spacing is a gap. Pure, for tests.
+    public static func gapSegments(dates: [Date], segments: [String]) -> [String] {
+        guard dates.count == segments.count, dates.count > 1 else { return segments }
+        let steps = zip(dates.dropFirst(), dates).map { $0.timeIntervalSince($1) }.sorted()
+        let median = steps[steps.count / 2]
+        let limit = max(86_400, median) * 1.5
+        var run = 0
+        return dates.indices.map { i in
+            if i > 0, dates[i].timeIntervalSince(dates[i - 1]) > limit { run += 1 }
+            return "\(segments[i])#\(run)"
+        }
+    }
 
     private static let sharedDateFormatter: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "EEE d MMM"; return f
@@ -243,6 +289,21 @@ public struct TrendChart: View {
 
     private static func axisNumberLabel(_ value: Double) -> String {
         value.formatted(.number.precision(.fractionLength(0)))
+    }
+
+    /// Moves the selection to the point nearest `x` (overlay coordinates) while a finger or a drag holds
+    /// the chart, with one light tick per new point.
+    private func scrub(toX rawX: CGFloat, proxy: ChartProxy, plot: CGRect) {
+        let x = min(max(rawX, plot.minX), plot.maxX)
+        let next = nearestPoint(toX: x, proxy: proxy, plot: plot)
+        if next?.date != selectedPoint?.date, next != nil { StrandHaptic.selection.play() }
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            selectedPoint = next
+            holdingBar = true
+            hoverX = largeSelection ? nil : x
+        }
     }
 
     /// The point nearest a given chart-local x, using the proxy to map back.
@@ -344,7 +405,7 @@ public struct TrendChart: View {
                             y: .value("Value", p.value),
                             series: .value("Segment", p.segment)
                         )
-                        .interpolationMethod(.catmullRom)
+                        .interpolationMethod(.monotone)
                         .foregroundStyle(
                             LinearGradient(
                                 colors: [
@@ -362,25 +423,35 @@ public struct TrendChart: View {
                         y: .value("Value", p.value),
                         series: .value("Segment", p.segment)
                     )
-                    .interpolationMethod(.catmullRom)
+                    .interpolationMethod(.monotone)
                     .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
                     .foregroundStyle(valueGradient)
                 }
                 // 18pt dots are invisible on dense series (e.g. a 365-day year) but still cost the
                 // GPU a mark each — hide them past a threshold; the line carries the data there. The gate
                 // stays on the full `points.count` (≤60 is never downsampled, so displayPoints == points).
-                if points.count <= 60 {
-                    ForEach(displayPoints) { p in
-                        PointMark(
-                            x: .value("Date", p.date),
-                            y: .value("Value", p.value)
-                        )
-                        .symbolSize(18)
-                        .foregroundStyle(StrandPalette.sample(stops: gradient.toStops(), at: unit(p.value)))
-                    }
+                // A reading alone between two gaps has no line to carry it, so it keeps its dot.
+                ForEach(displayPoints.filter { points.count <= 60 || isolatedDates.contains($0.date) }) { p in
+                    PointMark(
+                        x: .value("Date", p.date),
+                        y: .value("Value", p.value)
+                    )
+                    .symbolSize(18)
+                    .foregroundStyle(StrandPalette.sample(stops: gradient.toStops(), at: unit(p.value)))
+                }
+                // While a finger scrubs a line with the large readout, the rule and dot mark the day the
+                // readout shows (the floating tooltip is off in that mode, so nothing else would).
+                if showsHover, largeSelection, holdingBar, let selectedPoint = currentSelection {
+                    RuleMark(x: .value("Date", selectedPoint.date))
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    PointMark(x: .value("Date", selectedPoint.date), y: .value("Value", selectedPoint.value))
+                        .symbolSize(60)
+                        .foregroundStyle(StrandPalette.sample(stops: gradient.toStops(), at: unit(selectedPoint.value)))
                 }
             }
         }
+        .modifier(TrendChartYUnitLabel(unit: yAxisUnit))
         // Domain drives BOTH the axis extent and the plot clip. A caller that wants a top-of-range
         // peak (and the top axis label) to clear the clip passes a `yDomain` whose upper bound sits a
         // little above the data — pure data-space headroom, so no macOS14/iOS17 plot-dimension endPadding
@@ -392,10 +463,9 @@ public struct TrendChart: View {
         // (or below, should a caller ever plot negatives), matching Android's zero-based BarChart. The
         // upper bound (with the caller's headroom) is unchanged, so the line's domain is untouched.
         .chartYScale(domain: plotYDomain)
-        // Clip the plot to its own bounds. catmullRom interpolation overshoots past the data extremes
-        // on sharp turns, and the AreaMark gradient is drawn UNCLIPPED — so on a spiky HR curve the
-        // rose fill bled down the page behind the cards below the chart. Clipping the plot area bounds
-        // every mark (line, area, points, overshoot) to the chart rectangle.
+        // Clip the plot to its own bounds. The AreaMark gradient is drawn UNCLIPPED, so on a spiky HR
+        // curve the rose fill bled down the page behind the cards below the chart. Clipping the plot area
+        // bounds every mark (line, area, points) to the chart rectangle.
         .chartPlotStyle { plotArea in
             if showsBarValues { plotArea.padding(.top, 18) } else { plotArea.clipped() }
         }
@@ -485,17 +555,27 @@ public struct TrendChart: View {
                 }
                 .animation(StrandMotion.fade, value: hoverX)
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
+                #if canImport(UIKit) && os(iOS)
+                // A sideways drag scrubs, in line and bar mode alike; a vertical swipe that starts on the
+                // chart still scrolls the page, because the surface declines anything that is not sideways.
+                .overlay {
+                    if showsHover {
+                        HorizontalScrubSurface(
+                            onScrub: { scrub(toX: $0, proxy: proxy, plot: plot) },
+                            onEnd: { holdingBar = false; hoverX = nil }
+                        )
+                    }
+                }
+                #else
                 .contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0)
                     .onChanged { value in
                         guard showsHover, showsBars else { return }
-                        let x = min(max(value.location.x, plot.minX), plot.maxX)
-                        selectedPoint = nearestPoint(toX: x, proxy: proxy, plot: plot)
-                        holdingBar = true
-                        hoverX = largeSelection ? nil : x
+                        scrub(toX: value.location.x, proxy: proxy, plot: plot)
                     }
                     .onEnded { _ in holdingBar = false; hoverX = nil },
                     including: showsHover && showsBars ? .all : .none)
+                #endif
                 .onContinuousHover(coordinateSpace: .local) { phase in
                     guard showsHover else { return }
                     // Update the hover position in a NON-animating transaction. Otherwise entering or
@@ -534,6 +614,22 @@ public struct TrendChart: View {
             selectedPoint = nil
             holdingBar = false
             hoverX = nil
+        }
+    }
+}
+
+/// Puts the value axis's unit above the axis when there is one.
+private struct TrendChartYUnitLabel: ViewModifier {
+    let unit: String?
+    func body(content: Content) -> some View {
+        if let unit, !unit.isEmpty {
+            content.chartYAxisLabel(position: .top, alignment: .leading, spacing: 4) {
+                Text(unit)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        } else {
+            content
         }
     }
 }

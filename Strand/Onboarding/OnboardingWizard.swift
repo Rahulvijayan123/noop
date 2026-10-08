@@ -6,17 +6,17 @@ import UserNotifications
 
 // MARK: - OnboardingWizard
 //
-// A full-screen, paged onboarding + pairing flow for NOOP. Cinematic and calm:
-// a dark surfaceBase substrate with a slow ambient glow, a bottom progress "thread"
-// that fills as you advance, Back always available, and a forward CTA per step.
+// A full-screen, paged onboarding + pairing flow for Nara: the flat surfaceBase canvas, one plain progress bar
+// that fills as you advance, Back always available, and one forward CTA per step. Nothing loops except the
+// scan sweep, and only while a Bluetooth scan is really running.
 //
 // Steps:
-//  1 Welcome           — NOOP + "all your data, none of the cloud"
+//  1 Welcome           — Nara + "your data stays on your phone unless you turn on cloud features"
 //  2 What it does      — 3 calm value slides
 //  3 Bluetooth priming — explain BEFORE the OS prompt
 //  4 Wear & wake       — put your strap on, make sure it's charged
 //  5 Scan              — radar sweep; auto-scans, Scan retries via model.scan()
-//  6 Bonding           — celebration when live.bonded (a RecoveryRing blooms in)
+//  6 Bonding           — a plain tick when live.bonded
 //  7 Profile           — age / sex / weight / height bound to ProfileStore
 //  8 Import (optional)  — WHOOP / Apple Health import from the wizard
 //  9 Done              — "Your thread starts here." → onFinished()
@@ -45,22 +45,17 @@ public struct OnboardingWizard: View {
     }
 
     @State private var step: Step = .welcome
-    @State private var glow = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Low Power Mode / "Reduce motion in NOOP" pose these looping glows still too. Onboarding is
-    /// first-run only, but a `repeatForever` is a `repeatForever` wherever it lives.
-    @ObservedObject private var motion = NoopMotionState.shared
-    private var poseStill: Bool { motion.poseStill(reduceMotion) }
 
     public var body: some View {
         ZStack {
-            background
+            StrandPalette.surfaceBase.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                // Top chrome: a small back affordance + a step counter.
+                // Top chrome: a small back affordance.
                 topBar
-                    .padding(.horizontal, 36)
-                    .padding(.top, 42)
+                    .padding(.horizontal, NoopMetrics.screenHPadding)
+                    .padding(.top, NoopMetrics.space2)
 
                 // The paged content.
                 ZStack {
@@ -82,55 +77,25 @@ public struct OnboardingWizard: View {
                 .frame(maxWidth: 620, maxHeight: .infinity)
                 .transition(stepTransition)
                 .id(step)                       // re-runs the transition per step
-                .padding(.horizontal, 40)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
 
-                // Bottom: the thread (progress) + the forward CTA.
+                // Bottom: the progress bar + the forward CTA.
                 bottomBar
-                    .padding(.horizontal, 40)
-                    .padding(.top, 24)
-                    .padding(.bottom, 36)
+                    .padding(.horizontal, NoopMetrics.screenHPadding)
+                    .padding(.top, NoopMetrics.space4)
+                    .padding(.bottom, NoopMetrics.space4)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
-        // Reduce Motion: leave the ambient bloom at its resting frame (no breathing).
-        .onAppear { if !poseStill { glow = true } }
         // Isolated live observation — a hidden watcher slides Scan → celebration on bond
         // without subscribing the whole wizard to per-tick updates.
         .background(BondWatcher(onBonded: handleBond))
     }
 
     private func handleBond() {
-        if step == .scan { withAnimation(StrandMotion.hero) { step = .bonded } }
-    }
-
-    // MARK: Backgrounds
-
-    private var background: some View {
-        ZStack {
-            StrandPalette.surfaceBase
-            // A slow ambient bloom that breathes — the substrate feels alive. Kept subtle
-            // (≈⅓ the old gold opacity) so it's a minimal gold hint, not a wash.
-            RadialGradient(
-                colors: [StrandPalette.glowAmbient.opacity(0.18), .clear],
-                center: .center,
-                startRadius: 40,
-                endRadius: glow ? 620 : 480
-            )
-            .blendMode(.plusLighter)
-            .opacity(glow ? 0.4 : 0.28)
-            .animation(StrandMotion.breathe(reduced: poseStill), value: glow)
-            .ignoresSafeArea()
-
-            // A faint indigo wash from the top — instrument-grade depth.
-            LinearGradient(
-                colors: [StrandPalette.accentMuted.opacity(0.20), .clear],
-                startPoint: .top,
-                endPoint: .center
-            )
-            .ignoresSafeArea()
-        }
+        if step == .scan { withAnimation(reduceMotion ? nil : StrandMotion.gentle) { step = .bonded } }
     }
 
     // MARK: Top bar
@@ -138,25 +103,23 @@ public struct OnboardingWizard: View {
     private var topBar: some View {
         HStack {
             if step.isFirst {
-                Color.clear.frame(width: 64, height: 28)
+                Color.clear.frame(width: 64, height: NoopMetrics.minimumHitTarget)
             } else {
                 Button(action: back) {
                     HStack(spacing: 6) {
                         Image(systemName: "chevron.left")
                         Text("Back")
                     }
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(StrandFont.subhead.weight(.medium))
+                    .foregroundStyle(StrandPalette.accent)
+                    .frame(minHeight: NoopMetrics.minimumHitTarget)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Back")
             }
 
             Spacer()
-
-            Text("\(step.rawValue + 1) / \(Step.allCases.count)")
-                .font(StrandFont.captionNumber)
-                .foregroundStyle(StrandPalette.textTertiary)
         }
     }
 
@@ -164,16 +127,16 @@ public struct OnboardingWizard: View {
 
     @ViewBuilder
     private var bottomBar: some View {
-        VStack(spacing: 28) {
+        VStack(spacing: NoopMetrics.space5) {
             ThreadProgress(progress: progress)
                 .frame(height: 3)
                 .frame(maxWidth: 620)
+                .accessibilityElement()
+                .accessibilityLabel("Step \(step.rawValue + 1) of \(Step.allCases.count)")
 
-            HStack(spacing: 14) {
-                PrimaryButton(title: ctaTitle, systemImage: ctaIcon, action: primaryAction)
-                    .frame(maxWidth: .infinity)
-            }
-            .frame(maxWidth: 620)
+            NoopButton(LocalizedStringKey(ctaTitle), systemImage: ctaIcon, kind: .primary, fullWidth: true,
+                       action: primaryAction)
+                .frame(maxWidth: 620)
         }
     }
 
@@ -184,18 +147,18 @@ public struct OnboardingWizard: View {
 
     private var ctaTitle: String {
         switch step {
-        case .welcome:    return String(localized: "Get Started")
+        case .welcome:    return String(localized: "Get started")
         case .what:       return String(localized: "Continue")
         case .expectations: return String(localized: "I understand")
         case .bluetooth:  return String(localized: "Continue")
         case .wear:       return String(localized: "I'm wearing it")
         case .scan:       return String(localized: "Continue")
         case .bonded:     return String(localized: "Continue")
-        case .profile:    return String(localized: "Save & Continue")
+        case .profile:    return String(localized: "Save and continue")
         case .importData: return String(localized: "Continue")
         case .notifications: return String(localized: "Continue")
         case .appearance: return String(localized: "Continue")
-        case .done:       return String(localized: "Enter Nara")
+        case .done:       return String(localized: "Open Nara")
         }
     }
 
@@ -243,16 +206,16 @@ public struct OnboardingWizard: View {
 
     private func advanceStep() {
         guard let next = Step(rawValue: step.rawValue + 1) else { onFinished(); return }
-        withAnimation(StrandMotion.gentle) { step = next }
+        withAnimation(reduceMotion ? nil : StrandMotion.gentle) { step = next }
     }
 
     private func back() {
         guard let prev = Step(rawValue: step.rawValue - 1) else { return }
-        withAnimation(StrandMotion.gentle) { step = prev }
+        withAnimation(reduceMotion ? nil : StrandMotion.gentle) { step = prev }
     }
 
     private var stepTransition: AnyTransition {
-        .asymmetric(
+        reduceMotion ? .opacity : .asymmetric(
             insertion: .move(edge: .trailing).combined(with: .opacity),
             removal: .move(edge: .leading).combined(with: .opacity)
         )
@@ -273,29 +236,23 @@ private struct BondWatcher: View {
 // MARK: - Step 1 · Welcome
 
 private struct WelcomeStep: View {
-    @State private var appear = false
     var body: some View {
         StepShell {
-            VStack(spacing: 24) {
+            VStack(spacing: NoopMetrics.space6) {
                 Spacer()
                 BrandMark(size: 96)
-                    .scaleEffect(appear ? 1 : 0.92)
-                    .opacity(appear ? 1 : 0)
-                Text("All your data, none of the cloud")
+                Text("Your data stays on your phone unless you turn on cloud features")
                     .font(StrandFont.brandDisplay(26))
                     .foregroundStyle(StrandPalette.textPrimary)
                     .multilineTextAlignment(.center)
-                    .opacity(appear ? 1 : 0)
-                Text("A private window into your recovery, sleep and strain. Read straight from your strap, kept only on \(Platform.deviceNounPhrase).")
+                Text("Recovery, sleep and strain, read straight from your strap.")
                     .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .foregroundStyle(StrandPalette.textSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 420)
-                    .opacity(appear ? 1 : 0)
                 Spacer()
             }
         }
-        .onAppear { withAnimation(StrandMotion.hero) { appear = true } }
     }
 }
 
@@ -320,53 +277,29 @@ private struct WhatItDoesStep: View {
               title: String(localized: "Watch your heart, live"),
               body: String(localized: "Connect a WHOOP, a heart-rate strap or a gym machine and watch each beat in real time: heart rate, variability and zones as they happen. Already have history elsewhere? Import it from WHOOP, Apple Health, Oura, Fitbit or Garmin.")),
         .init(icon: "lock.shield",
-              tint: StrandPalette.statusPositive,
-              title: String(localized: "Own your data, offline"),
-              body: String(localized: "Everything lives on \(Platform.deviceNounPhrase). No account, no sync, no cloud. Your thread is yours alone.")),
+              tint: StrandPalette.accent,
+              title: String(localized: "Your data, on your phone"),
+              body: String(localized: "Your readings are stored on \(Platform.deviceNounPhrase). Cloud features, such as Sana and cloud scoring, only run if you turn them on.")),
     ]
 
     var body: some View {
-        StepShell(title: String(localized: "What Nara does"), subtitle: String(localized: "Three quiet promises.")) {
-            VStack(spacing: 14) {
-                ForEach(Array(slides.enumerated()), id: \.element.id) { index, slide in
-                    SlideRow(slide: slide, index: index)
+        StepShell(title: String(localized: "What Nara does")) {
+            NoopCard(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(slides.enumerated()), id: \.element.id) { index, slide in
+                        if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                        SlideRow(slide: slide)
+                    }
                 }
             }
+            .frame(maxWidth: 520)
         }
     }
 
     private struct SlideRow: View {
         let slide: Slide
-        let index: Int
-        @State private var shown = false
         var body: some View {
-            StrandCard {
-                HStack(spacing: 16) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(slide.tint.opacity(0.14))
-                            .frame(width: 46, height: 46)
-                        Image(systemName: slide.icon)
-                            .font(.system(size: 20, weight: .semibold))
-                            .foregroundStyle(slide.tint)
-                    }
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(slide.title)
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text(slide.body)
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-            .opacity(shown ? 1 : 0)
-            .offset(y: shown ? 0 : 14)
-            .onAppear {
-                withAnimation(StrandMotion.gentle.delay(Double(index) * 0.10)) { shown = true }
-            }
+            OnboardingInfoRow(icon: slide.icon, title: slide.title, message: slide.body)
         }
     }
 }
@@ -374,119 +307,54 @@ private struct WhatItDoesStep: View {
 // MARK: - Step 2.5 · What to expect (independent / experimental / 5-MG framing)
 
 private struct ExpectationsStep: View {
-    @State private var shown = false
     var body: some View {
-        StepShell(title: String(localized: "What to expect"),
-                  subtitle: String(localized: "A few honest words, so nothing's a surprise.")) {
-            VStack(spacing: 12) {
-                ForEach(Array(AppChangelog.expectations.enumerated()), id: \.element.id) { index, e in
-                    HStack(alignment: .top, spacing: 14) {
-                        Image(systemName: e.icon)
-                            .font(.system(size: 18, weight: .medium))
-                            .foregroundStyle(StrandPalette.accent)
-                            .frame(width: 26)
-                            .padding(.top, 2)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(e.title).font(StrandFont.headline)
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Text(e.body).font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 0)
+        StepShell(title: String(localized: "What to expect")) {
+            NoopCard(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(AppChangelog.expectations.enumerated()), id: \.element.id) { index, e in
+                        if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                        OnboardingInfoRow(icon: e.icon, title: e.title, message: e.body)
                     }
-                    .padding(14)
-                    .frame(maxWidth: 520, alignment: .leading)
-                    .background(NoopPanelSurface(cornerRadius: 14))
-                    .opacity(shown ? 1 : 0)
-                    .offset(y: shown ? 0 : 8)
-                    .animation(StrandMotion.gentle.delay(Double(index) * 0.08), value: shown)
+                    #if os(iOS)
+                    // The iPhone-only reality: this is a sideloaded build, so set the re-sign + unlock
+                    // expectation up front rather than letting it surprise people later (#222 / cert expiry).
+                    NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                    OnboardingInfoRow(
+                        icon: "iphone.gen3",
+                        title: String(localized: "Installed outside the App Store"),
+                        message: String(localized: "On iPhone this is a sideloaded build. Re-sign it about every 7 days on a free Apple ID (longer on a paid account). After your phone restarts, unlock it once so Nara can read and sync its data."))
+                    #endif
                 }
-
-                #if os(iOS)
-                // The iPhone-only reality: this is a sideloaded build, so set the re-sign + unlock
-                // expectation up front rather than letting it surprise people later (#222 / cert expiry).
-                expectationRow(
-                    icon: "iphone.gen3",
-                    title: String(localized: "Installed outside the App Store"),
-                    body: String(localized: "On iPhone this is a sideloaded build. Re-sign it about every 7 days on a free Apple ID (longer on a paid account). After your phone reboots, unlock it once so Nara can read and sync its data.")
-                )
-                .opacity(shown ? 1 : 0)
-                .offset(y: shown ? 0 : 8)
-                .animation(StrandMotion.gentle.delay(Double(AppChangelog.expectations.count) * 0.08), value: shown)
-                #endif
             }
+            .frame(maxWidth: 520)
         }
-        .onAppear { shown = true }
-    }
-
-    /// One expectation callout, matching the data-driven rows above so the iOS-only addition is visually
-    /// identical to the rest of the list.
-    private func expectationRow(icon: String, title: String, body: String) -> some View {
-        HStack(alignment: .top, spacing: 14) {
-            Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(StrandPalette.accent)
-                .frame(width: 26)
-                .padding(.top, 2)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text(body).font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .frame(maxWidth: 520, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 14))
     }
 }
 
 // MARK: - Step 3 · Bluetooth priming
 
 private struct BluetoothStep: View {
-    @State private var pulse = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Low Power Mode / "Reduce motion in NOOP" pose these looping glows still too. Onboarding is
-    /// first-run only, but a `repeatForever` is a `repeatForever` wherever it lives.
-    @ObservedObject private var motion = NoopMotionState.shared
-    private var poseStill: Bool { motion.poseStill(reduceMotion) }
     var body: some View {
         StepShell(title: String(localized: "A quick word before we connect"),
                   subtitle: String(localized: "\(Platform.deviceNoun) will ask for Bluetooth in a moment.")) {
-            VStack(spacing: 24) {
-                ZStack {
-                    Circle()
-                        .stroke(StrandPalette.accent.opacity(0.25), lineWidth: 2)
-                        .frame(width: 120, height: 120)
-                        .scaleEffect(pulse ? 1.25 : 0.9)
-                        .opacity(pulse ? 0 : 0.8)
-                    Circle()
-                        .fill(StrandPalette.accentMuted.opacity(0.5))
-                        .frame(width: 86, height: 86)
-                    Image(systemName: "wave.3.right")
-                        .font(.system(size: 34, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                }
-                .frame(height: 130)
+            VStack(spacing: NoopMetrics.space6) {
+                OnboardingHeroSymbol("wave.3.right")
 
-                InfoCard(
-                    icon: "lock.fill",
-                    tint: StrandPalette.statusPositive,
-                    title: String(localized: "Nothing leaves your \(Platform.deviceNoun)"),
-                    message: String(localized: "Nara talks to your strap directly over Bluetooth Low Energy. There's no server in the middle. The connection is local, and so is every reading it pulls in.")
-                )
+                NoopCard(padding: 0) {
+                    OnboardingInfoRow(
+                        icon: "lock",
+                        title: String(localized: "A local connection"),
+                        message: String(localized: "Nara talks to your strap directly over Bluetooth Low Energy. There's no server in the middle of that connection."))
+                }
+                .frame(maxWidth: 480)
 
                 Text("When the system prompt appears, choose Allow so Nara can find your strap.")
                     .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .foregroundStyle(StrandPalette.textSecondary)
                     .multilineTextAlignment(.center)
                     .frame(maxWidth: 460)
             }
         }
-        .onAppear { if !poseStill { withAnimation(StrandMotion.breathe) { pulse = true } } }
     }
 }
 
@@ -494,19 +362,9 @@ private struct BluetoothStep: View {
 
 private struct WearStep: View {
     var body: some View {
-        StepShell(title: String(localized: "Put your strap on"),
-                  subtitle: String(localized: "And make sure it's charged.")) {
-            VStack(spacing: 22) {
-                ZStack {
-                    Circle()
-                        .fill(StrandPalette.accent.opacity(0.16))
-                        .frame(width: 130, height: 130)
-                        .blur(radius: 24)
-                    Image(systemName: "applewatch.side.right")
-                        .font(.system(size: 44, weight: .regular))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-                .frame(height: 140)
+        StepShell(title: String(localized: "Put your strap on")) {
+            VStack(spacing: NoopMetrics.space6) {
+                OnboardingHeroSymbol("applewatch.side.right")
 
                 VStack(spacing: 12) {
                     Checkline(text: String(localized: "Wear it snug on your wrist or bicep, sensor against skin."))
@@ -535,7 +393,7 @@ private struct ScanStep: View {
     private var selectedModel: WhoopModel { WhoopModel.resolve(selectedModelRaw) }
 
     private static let bondedSubtitle = String(localized: "Bonded. You're set.")
-    private static let scanSubtitle = String(localized: "Pick your strap below, then tap Scan. Nara will find it.")
+    private static let scanSubtitle = String(localized: "Tap Scan and Nara will find your strap.")
     private static let whoop4Note = String(localized: "A WHOOP 4.0 only talks to one app at a time. If nothing's found, fully close the official WHOOP app, then Scan.")
     private static let whoop5Note = String(localized: "WHOOP 5.0/MG pairs with one app at a time. If nothing's found, unpair it in the official WHOOP app and fully close that app, then Scan.")
 
@@ -574,25 +432,25 @@ private struct ScanStep: View {
                                  textAlignment: .center)
                         .frame(maxWidth: 360)
 
-                    Button(action: { startScan() }) {
-                        Label(scanning ? "Scanning…" : "Scan", systemImage: "dot.radiowaves.left.and.right")
-                    }
-                    .buttonStyle(SecondaryButtonStyle())
-                    .disabled(scanning)
+                    NoopButton(scanning ? "Scanning…" : "Scan", systemImage: "dot.radiowaves.left.and.right",
+                               kind: .secondary) { startScan() }
+                        .disabled(scanning)
 
-                    DisclosureToggle(open: $showHelp, label: String(localized: "Don't see it?"))
-
-                    if showHelp { reassurance }
-
-                    // WHOOP is NOOP's primary band, so onboarding leads with it — but it isn't required.
+                    // WHOOP is Nara's primary band, so onboarding leads with it — but it isn't required.
                     // Make that obvious so a non-WHOOP user doesn't feel stuck here: they can continue now
-                    // and pair a heart-rate strap or import data afterwards (in Devices / Data Sources).
-                    Text("No WHOOP? You can still continue. Pair a heart-rate strap (Polar, Wahoo, Coospo, Garmin HRM…) or a gym machine under Devices, or import from WHOOP, Apple Health, Oura, Fitbit, Garmin and more under Data Sources. You can do either any time.")
+                    // and pair a heart-rate strap or import data afterwards (in Devices / Data sources).
+                    Text("No WHOOP? You can still continue, then pair a heart-rate strap in Devices or import your history in Data sources.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: 360)
+
+                    // Below everything else, so opening it (or its arriving after a quiet beat) only grows the
+                    // page downward and nothing above it moves.
+                    DisclosureToggle(open: $showHelp, label: String(localized: "Don't see it?"))
+
+                    if showHelp { reassurance }
                 }
             }
         }
@@ -605,8 +463,8 @@ private struct ScanStep: View {
         return Group {
             switch state {
             case 0: StatePill("Connected", tone: .positive)
-            case 1: StatePill("Connecting…", tone: .warning, pulsing: true)
-            case 2: StatePill("Searching", tone: .accent, pulsing: true)
+            case 1: StatePill("Connecting…", tone: .warning)
+            case 2: StatePill("Searching", tone: .accent)
             default: StatePill("Ready to scan", tone: .neutral, showsDot: false)
             }
         }
@@ -624,7 +482,7 @@ private struct ScanStep: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 12) {
             if !live.bonded {
                 scanning = false
-                withAnimation(StrandMotion.gentle) { showHelp = true }
+                withAnimation(reduceMotion ? nil : StrandMotion.gentle) { showHelp = true }
             }
         }
     }
@@ -638,42 +496,32 @@ private struct ScanStep: View {
 
     // The calm, never-alarmist "can't find it" card.
     private var reassurance: some View {
-        StrandCard {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 10) {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundStyle(StrandPalette.statusWarning)
-                    Text("Don't see it? That's normal.")
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("Don't see it? That's normal.")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
 
                 Text("WHOOP straps don't appear in your \(Platform.deviceNoun)'s Bluetooth settings. They advertise on a custom profile that only apps like Nara can find, so there's nothing to pair there, and you shouldn't try.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Divider().overlay(StrandPalette.hairline)
-
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: NoopMetrics.space2) {
                     Checkline(text: String(localized: "It's charged and worn. The sensor needs skin contact to wake."))
                     Checkline(text: String(localized: "It isn't held by the WHOOP phone app. Only one host at a time: close the app or turn off its Bluetooth."))
                     Checkline(text: String(localized: "It's within about a metre of \(Platform.deviceNounPhrase)."))
                 }
 
-                Button(action: retry) {
-                    Label("Try again", systemImage: "arrow.clockwise")
-                }
-                .buttonStyle(SecondaryButtonStyle())
-                .padding(.top, 2)
+                NoopButton("Try again", systemImage: "arrow.clockwise", kind: .secondary, action: retry)
             }
         }
         .frame(maxWidth: 480)
-        .transition(.opacity.combined(with: .move(edge: .bottom)))
+        .transition(.opacity)
     }
 
     private func retry() {
-        withAnimation(StrandMotion.gentle) { showHelp = false }
+        withAnimation(reduceMotion ? nil : StrandMotion.gentle) { showHelp = false }
         startScan()
     }
 }
@@ -682,31 +530,24 @@ private struct ScanStep: View {
 
 private struct BondedStep: View {
     @EnvironmentObject private var live: LiveState
-    @State private var bloom = false
     var body: some View {
         StepShell {
-            VStack(spacing: 26) {
+            VStack(spacing: NoopMetrics.space6) {
                 Spacer()
+                // A plain tick in a ring-sized well: no score ring, which would read as a score.
                 ZStack {
                     Circle()
-                        .fill(StrandPalette.statusPositive)
-                        .frame(width: 160, height: 160)
-                        .blur(radius: 70)
-                        .opacity(bloom ? 0.5 : 0.0)
-                        .blendMode(.plusLighter)
-                    // A ring materialises — a taste of the signature component.
-                    RecoveryRing(score: 100, supporting: nil, diameter: 200, lineWidth: 14, showsLabel: false)
-                        .scaleEffect(bloom ? 1 : 0.7)
-                        .opacity(bloom ? 1 : 0)
+                        .fill(StrandPalette.surfaceInset)
+                    Circle()
+                        .strokeBorder(StrandPalette.statusPositive, lineWidth: 3)
                     Image(systemName: "checkmark")
-                        .font(.system(size: 44, weight: .semibold))
+                        .font(StrandFont.icon(.hero).weight(.semibold))
                         .foregroundStyle(StrandPalette.statusPositive)
-                        .scaleEffect(bloom ? 1 : 0.4)
-                        .opacity(bloom ? 1 : 0)
                 }
-                .frame(height: 210)
+                .frame(width: 120, height: 120)
+                .accessibilityHidden(true)
 
-                VStack(spacing: 8) {
+                VStack(spacing: NoopMetrics.space2) {
                     Text("You're connected.")
                         .font(StrandFont.brandDisplay(28))
                         .foregroundStyle(StrandPalette.textPrimary)
@@ -714,16 +555,14 @@ private struct BondedStep: View {
                         .font(StrandFont.body)
                         .foregroundStyle(StrandPalette.textSecondary)
                 }
-                .opacity(bloom ? 1 : 0)
                 Spacer()
             }
         }
-        .onAppear { withAnimation(StrandMotion.hero) { bloom = true } }
     }
 
     private var batteryLine: String {
         if let pct = live.batteryPct {
-            return String(localized: "Your strap is bonded · \(Int(pct))% battery.")
+            return String(localized: "Your strap is bonded · \(Int(pct)) % battery.")
         }
         return String(localized: "Your strap is bonded and ready to stream.")
     }
@@ -746,8 +585,8 @@ private struct ProfileStep: View {
         StepShell(title: String(localized: "About you"),
                   subtitle: String(localized: "So your zones, calories and baselines are accurate.")) {
             VStack(spacing: 16) {
-                StrandCard {
-                    VStack(spacing: 18) {
+                NoopCard {
+                    VStack(spacing: NoopMetrics.space4) {
                         // #146: capture a date of birth so age advances on its own instead of going stale.
                         DatePicker(selection: $profile.dateOfBirth,
                                    in: ProfileStore.dateOfBirthRange,
@@ -759,15 +598,12 @@ private struct ProfileStep: View {
 
                         Divider().overlay(StrandPalette.hairline)
 
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Sex").strandOverline()
-                            Picker("Sex", selection: $profile.sex) {
-                                ForEach(sexes, id: \.0) { key, label in
-                                    Text(label).tag(key)
-                                }
+                        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                            Text("Sex").strandLabel()
+                            SegmentedPillControl(sexes.map(\.0), selection: $profile.sex, fillsAvailableWidth: true) { key in
+                                sexes.first { $0.0 == key }?.1 ?? key
                             }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
+                            .accessibilityLabel("Sex")
                         }
 
                         Divider().overlay(StrandPalette.hairline)
@@ -789,13 +625,9 @@ private struct ProfileStep: View {
                     }
                 }
 
-                HStack(spacing: 8) {
-                    Image(systemName: "bolt.heart")
-                        .foregroundStyle(StrandPalette.accent)
-                    Text("Estimated max heart rate · \(profile.hrMax) bpm")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
+                Text("Estimated max heart rate · \(profile.hrMax) bpm")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
             }
         }
     }
@@ -810,40 +642,25 @@ private struct ImportStep: View {
 
     var body: some View {
         StepShell(title: String(localized: "Bring your history"),
-                  subtitle: String(localized: "Optional: import now, or continue and return to Data Sources later.")) {
-            VStack(spacing: 18) {
-                ZStack {
-                    Circle()
-                        .fill(StrandPalette.accentMuted.opacity(0.45))
-                        .frame(width: 96, height: 96)
-                    Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 40, weight: .regular))
-                        .foregroundStyle(StrandPalette.accent)
-                }
-
-                InfoCard(
-                    icon: "clock.arrow.circlepath",
-                    tint: StrandPalette.accent,
-                    title: String(localized: "History fills the dashboard immediately"),
-                    message: String(localized: "A WHOOP export backfills recovery, strain, sleep and workouts. Apple Health can add HR, HRV, sleep, SpO₂, steps, workouts and weight.")
-                )
-
-                StrandCard {
-                    VStack(spacing: 10) {
-                        ImportActionButton(
-                            title: model.isImporting(.whoop) ? String(localized: "Importing…") : String(localized: "Import WHOOP export"),
-                            systemImage: "tray.and.arrow.down",
-                            disabled: model.hasActiveImport
-                        ) {
-                            presentImporter(.whoop)
+                  subtitle: String(localized: "Optional: import now, or continue and use Data sources later.")) {
+            VStack(spacing: NoopMetrics.space4) {
+                NoopCard(padding: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Button { presentImporter(.whoop) } label: {
+                            NoopListRow(icon: "tray.and.arrow.down", iconColor: StrandPalette.accent,
+                                        title: model.isImporting(.whoop) ? "Importing…" : "Import WHOOP export",
+                                        subtitle: String(localized: "Recovery, strain, sleep and workouts"))
                         }
-                        ImportActionButton(
-                            title: model.isImporting(.appleHealth) ? String(localized: "Working…") : String(localized: "Import Apple Health export"),
-                            systemImage: "heart.fill",
-                            disabled: model.hasActiveImport
-                        ) {
-                            presentImporter(.appleHealth)
+                        .buttonStyle(.plain)
+                        .disabled(model.hasActiveImport)
+                        NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                        Button { presentImporter(.appleHealth) } label: {
+                            NoopListRow(icon: "heart", iconColor: StrandPalette.accent,
+                                        title: model.isImporting(.appleHealth) ? "Working…" : "Import Apple Health export",
+                                        subtitle: String(localized: "Heart rate, HRV, sleep, steps and more"))
                         }
+                        .buttonStyle(.plain)
+                        .disabled(model.hasActiveImport)
                     }
                 }
                 .frame(maxWidth: 480)
@@ -934,109 +751,67 @@ private struct ImportStep: View {
 // MARK: - Step 9 · Notifications (wrist alerts priming)
 
 private struct NotificationsStep: View {
-    @State private var pulse = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Low Power Mode / "Reduce motion in NOOP" pose these looping glows still too. Onboarding is
-    /// first-run only, but a `repeatForever` is a `repeatForever` wherever it lives.
-    @ObservedObject private var motion = NoopMotionState.shared
-    private var poseStill: Bool { motion.poseStill(reduceMotion) }
     var body: some View {
         StepShell(title: String(localized: "Stay in the loop"),
-                  subtitle: String(localized: "Nara can tap your wrist when your \(Platform.deviceNoun) needs you. No glance at the screen required.")) {
-            VStack(spacing: 24) {
-                ZStack {
-                    Circle()
-                        .stroke(StrandPalette.accent.opacity(0.25), lineWidth: 2)
-                        .frame(width: 120, height: 120)
-                        .scaleEffect(pulse ? 1.2 : 0.9)
-                        .opacity(pulse ? 0 : 0.8)
-                    Circle()
-                        .fill(StrandPalette.accentMuted.opacity(0.5))
-                        .frame(width: 86, height: 86)
-                    Image(systemName: "bell.badge")
-                        .font(.system(size: 32, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                }
-                .frame(height: 130)
+                  subtitle: String(localized: "Nara can tap your wrist when it needs you.")) {
+            VStack(spacing: NoopMetrics.space6) {
+                OnboardingHeroSymbol("bell.badge")
 
                 #if os(iOS)
                 // iOS gives an app no way to observe *other* apps' notifications, and the per-app picker
                 // behind it is NSWorkspace-based (macOS-only). So drop the cross-app relay claim here and
-                // keep only what iOS genuinely does: NOOP's own strain nudges + smart alarm buzz the strap
+                // keep only what iOS genuinely does: Nara's own strain nudges + smart alarm buzz the strap
                 // directly over BLE.
-                InfoCard(
-                    icon: "applewatch.radiowaves.left.and.right",
-                    tint: StrandPalette.statusPositive,
-                    title: String(localized: "A buzz, not a banner"),
-                    message: String(localized: "Nara taps your strap so an alert lands on your wrist instead of your screen. No need to reach for it. Everything stays on \(Platform.deviceNounPhrase).")
-                )
-
-                VStack(spacing: 12) {
-                    Checkline(text: String(localized: "Strain nudges and your smart alarm tap your wrist the moment they fire."))
-                    Checkline(text: String(localized: "It all stays on your strap and \(Platform.deviceNounPhrase): no account, no cloud."))
+                NoopCard(padding: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        OnboardingInfoRow(
+                            icon: "applewatch.radiowaves.left.and.right",
+                            title: String(localized: "A buzz, not a banner"),
+                            message: String(localized: "Strain nudges and your smart alarm tap your strap, so an alert lands on your wrist instead of your screen."))
+                    }
                 }
-                .frame(maxWidth: 460)
+                .frame(maxWidth: 480)
                 #else
-                InfoCard(
-                    icon: "applewatch.radiowaves.left.and.right",
-                    tint: StrandPalette.statusPositive,
-                    title: String(localized: "A buzz, not a banner"),
-                    message: String(localized: "When the \(Platform.deviceNoun) apps you choose send a notification, Nara taps your strap: Slack, Calendar, Messages, whatever matters. Everything stays on \(Platform.deviceNounPhrase).")
-                )
-
-                VStack(spacing: 12) {
-                    Checkline(text: String(localized: "Pick which apps reach your wrist in Settings → Notifications."))
-                    Checkline(text: String(localized: "Strain nudges and your smart alarm tap your wrist the same way."))
+                NoopCard(padding: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        OnboardingInfoRow(
+                            icon: "applewatch.radiowaves.left.and.right",
+                            title: String(localized: "A buzz, not a banner"),
+                            message: String(localized: "When the \(Platform.deviceNoun) apps you choose send a notification, Nara taps your strap. Pick which apps reach your wrist in Settings → Notifications."))
+                        NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                        OnboardingInfoRow(
+                            icon: "alarm",
+                            title: String(localized: "Nudges and alarms"),
+                            message: String(localized: "Strain nudges and your smart alarm tap your wrist the same way."))
+                    }
                 }
-                .frame(maxWidth: 460)
+                .frame(maxWidth: 480)
                 #endif
             }
         }
-        .onAppear { if !poseStill { withAnimation(StrandMotion.breathe) { pulse = true } } }
     }
 }
 
 // MARK: - Step 10 · Done
 
 private struct DoneStep: View {
-    @State private var appear = false
     var body: some View {
         StepShell {
-            VStack(spacing: 22) {
+            VStack(spacing: NoopMetrics.space6) {
                 Spacer()
-                ZStack {
-                    Circle()
-                        .fill(StrandPalette.recovery100)
-                        .frame(width: 120, height: 120)
-                        .blur(radius: 64)
-                        .opacity(appear ? 0.5 : 0)
-                        .blendMode(.plusLighter)
-                    Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
-                        .font(.system(size: 44, weight: .regular))
-                        .foregroundStyle(
-                            LinearGradient(gradient: StrandPalette.recoveryGradient,
-                                           startPoint: .topLeading, endPoint: .bottomTrailing)
-                        )
-                        .scaleEffect(appear ? 1 : 0.8)
-                        .opacity(appear ? 1 : 0)
-                }
-                .frame(height: 130)
-
-                VStack(spacing: 10) {
+                OnboardingHeroSymbol("point.topleft.down.curvedto.point.bottomright.up")
+                VStack(spacing: NoopMetrics.space2) {
                     Text("Your thread starts here.")
                         .font(StrandFont.brandDisplay(28))
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Every beat, every night, every day, woven into one quiet picture of you. Welcome to Nara.")
+                    Text("Welcome to Nara.")
                         .font(StrandFont.body)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .multilineTextAlignment(.center)
-                        .frame(maxWidth: 420)
                 }
-                .opacity(appear ? 1 : 0)
                 Spacer()
             }
         }
-        .onAppear { withAnimation(StrandMotion.hero) { appear = true } }
     }
 }
 
@@ -1054,12 +829,9 @@ private struct AppearanceStep: View {
     }
     var body: some View {
         StepShell(title: String(localized: "Make it yours"),
-                  subtitle: String(localized: "Choose how Nara looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
-            VStack(spacing: 28) {
-                Image(systemName: "circle.lefthalf.filled")
-                    .font(.system(size: 44, weight: .regular))
-                    .foregroundStyle(StrandPalette.accent)
-                    .frame(height: 96)
+                  subtitle: String(localized: "You can change this in Settings.")) {
+            VStack(spacing: NoopMetrics.space6) {
+                OnboardingHeroSymbol("circle.lefthalf.filled")
                 SegmentedPillControl(AppearanceMode.allCases, selection: binding) { $0.label }
                     .frame(maxWidth: 320)
                 Text("System follows your \(Platform.deviceNoun)'s light or dark setting.")
@@ -1082,9 +854,9 @@ private struct StepShell<Content: View>: View {
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(spacing: 20) {
+            VStack(spacing: NoopMetrics.space5) {
                 if title != nil || subtitle != nil {
-                    VStack(spacing: 8) {
+                    VStack(spacing: NoopMetrics.space2) {
                         if let title {
                             Text(title)
                                 .font(StrandFont.brandDisplay(27, weight: .semibold))
@@ -1111,7 +883,7 @@ private struct StepShell<Content: View>: View {
                 content()
             }
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 24)
+            .padding(.vertical, NoopMetrics.space6)
         }
         #if os(iOS)
         // #697/#horizontal-swipe parity, see ScreenScaffold. First-run wizard, every step routes
@@ -1127,7 +899,6 @@ private struct RadarSweep: View {
     var active: Bool
     var bonded: Bool
     @State private var angle: Double = 0
-    @State private var ping = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Low Power Mode / "Reduce motion in NOOP" pose these looping glows still too. Onboarding is
     /// first-run only, but a `repeatForever` is a `repeatForever` wherever it lives.
@@ -1159,17 +930,14 @@ private struct RadarSweep: View {
 
                 // Center node — accent while searching, mint when bonded.
                 Circle()
-                    .fill(bonded ? StrandPalette.recovery100 : StrandPalette.accent)
+                    .fill(bonded ? StrandPalette.statusPositive : StrandPalette.accent)
                     .frame(width: 14, height: 14)
-                    .shadow(color: (bonded ? StrandPalette.recovery100 : StrandPalette.accent).opacity(0.8),
-                            radius: ping ? 10 : 4)
 
                 // A discovered "blip" once bonded.
                 if bonded {
                     Circle()
                         .fill(StrandPalette.statusPositive)
                         .frame(width: 12, height: 12)
-                        .shadow(color: StrandPalette.statusPositive.opacity(0.9), radius: 8)
                         .position(x: size * 0.70, y: size * 0.36)
                         .transition(.scale.combined(with: .opacity))
                 }
@@ -1178,12 +946,10 @@ private struct RadarSweep: View {
         }
         .onAppear {
             if active { startSweep() }
-            ping = true
         }
         .onChangeCompat(of: active) { isActive in
             if isActive { startSweep() }
         }
-        .animation(StrandMotion.breathe(reduced: poseStill), value: ping)
     }
 
     private func sweepWedge(size: CGFloat) -> some View {
@@ -1205,7 +971,6 @@ private struct RadarSweep: View {
             }
         )
         .frame(width: size, height: size)
-        .blendMode(.plusLighter)
     }
 
     private func startSweep() {
@@ -1229,11 +994,9 @@ private struct ThreadProgress: View {
                 Capsule()
                     .fill(StrandPalette.hairline)
                 Capsule()
-                    .fill(LinearGradient(gradient: StrandPalette.recoveryGradient,
-                                         startPoint: .leading, endPoint: .trailing))
+                    .fill(StrandPalette.accent)
                     .frame(width: max(6, geo.size.width * progress))
-                    .shadow(color: StrandPalette.recovery078.opacity(0.6), radius: 6)
-                    .animation(StrandMotion.gentle, value: progress)
+                    .animation(.easeOut(duration: 0.25), value: progress)
             }
         }
     }
@@ -1241,35 +1004,45 @@ private struct ThreadProgress: View {
 
 // MARK: - Reusable pieces
 
-private struct InfoCard: View {
+/// One explained point inside a list card: an accent symbol, a title and a sentence. No icon tile.
+private struct OnboardingInfoRow: View {
     let icon: String
-    let tint: Color
     let title: String
     let message: String
     var body: some View {
-        StrandCard {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 11, style: .continuous)
-                        .fill(tint.opacity(0.14))
-                        .frame(width: 40, height: 40)
-                    Image(systemName: icon)
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(tint)
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(title)
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text(message)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
+        HStack(alignment: .top, spacing: NoopMetrics.space3) {
+            Image(systemName: icon)
+                .font(StrandFont.icon(.row))
+                .foregroundStyle(StrandPalette.accent)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                Text(title)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text(message)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
+            Spacer(minLength: 0)
         }
-        .frame(maxWidth: 480)
+        .padding(NoopMetrics.cardPadding)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// The one large symbol a step leads with, static, in a quiet inset well.
+private struct OnboardingHeroSymbol: View {
+    private let name: String
+    init(_ name: String) { self.name = name }
+    var body: some View {
+        Image(systemName: name)
+            .font(StrandFont.icon(.hero))
+            .foregroundStyle(StrandPalette.accent)
+            .frame(width: 96, height: 96)
+            .background(Circle().fill(StrandPalette.surfaceInset))
+            .accessibilityHidden(true)
     }
 }
 
@@ -1278,7 +1051,7 @@ private struct Checkline: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 14))
+                .font(StrandFont.icon(.inline))
                 .foregroundStyle(StrandPalette.statusPositive)
                 .padding(.top, 1)
             Text(text)
@@ -1295,7 +1068,9 @@ private struct FieldRow: View {
     let value: String
     var body: some View {
         HStack {
-            Text(label).strandOverline()
+            Text(label)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
             Spacer()
             Text(value)
                 .font(StrandFont.bodyNumber)
@@ -1309,7 +1084,7 @@ private struct DisclosureToggle: View {
     let label: String
     var body: some View {
         Button {
-            withAnimation(StrandMotion.gentle) { open.toggle() }
+            withAnimation(.easeOut(duration: 0.2)) { open.toggle() }
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: open ? "chevron.up" : "chevron.down")
@@ -1319,86 +1094,6 @@ private struct DisclosureToggle: View {
             .foregroundStyle(StrandPalette.accent)
         }
         .buttonStyle(.plain)
-    }
-}
-
-private struct ImportActionButton: View {
-    let title: String
-    let systemImage: String
-    var disabled = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 10) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
-                    .frame(width: 18)
-                Text(title)
-                    .font(StrandFont.subhead.weight(.semibold))
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .buttonStyle(SecondaryButtonStyle())
-        .disabled(disabled)
-        .opacity(disabled ? 0.55 : 1)
-    }
-}
-
-// MARK: - Button styles
-
-private struct PrimaryButton: View {
-    let title: String
-    var systemImage: String? = nil
-    let action: () -> Void
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                Text(title).font(StrandFont.headline)
-                if let systemImage {
-                    Image(systemName: systemImage).font(.system(size: 14, weight: .semibold))
-                }
-            }
-        }
-        .buttonStyle(PrimaryButtonStyle())
-    }
-}
-
-private struct PrimaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .frame(maxWidth: .infinity)
-            .foregroundStyle(Color.white)
-            .padding(.vertical, 14)
-            .padding(.horizontal, 20)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(configuration.isPressed ? StrandPalette.accentHover : StrandPalette.accent)
-            )
-            .shadow(color: StrandPalette.accent.opacity(0.4), radius: 12, y: 4)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(StrandMotion.interactive, value: configuration.isPressed)
-    }
-}
-
-private struct SecondaryButtonStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(StrandFont.subhead.weight(.semibold))
-            .foregroundStyle(StrandPalette.textPrimary)
-            .padding(.vertical, 11)
-            .padding(.horizontal, 18)
-            .background(NoopPanelSurface(cornerRadius: 12))
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(configuration.isPressed ? StrandPalette.hairlineStrong : StrandPalette.hairline, lineWidth: 1)
-            )
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(StrandMotion.interactive, value: configuration.isPressed)
     }
 }
 

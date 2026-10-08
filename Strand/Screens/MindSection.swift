@@ -43,7 +43,7 @@ struct MindSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Mind", overline: "Mood, alongside your body's signals")
+            SectionHeader("Mind")
 
             checkInCard
 
@@ -64,7 +64,7 @@ struct MindSection: View {
 
     @ViewBuilder
     private var checkInCard: some View {
-        NoopCard(tint: StrandPalette.restColor) {
+        NoopCard {
             if let mood = todayMood, !editing {
                 answeredRow(mood)
             } else {
@@ -119,7 +119,7 @@ struct MindSection: View {
                 .font(StrandFont.number(24))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Today's mood").strandOverline()
+                Text("Today's mood").strandLabel()
                 Text(MoodStore.label(for: mood))
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
@@ -129,8 +129,8 @@ struct MindSection: View {
             Spacer()
             Button("Edit") { editing = true }
                 .buttonStyle(.plain)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.restBright)
+                .font(StrandFont.subhead.weight(.medium))
+                .foregroundStyle(StrandPalette.accent)
                 .accessibilityLabel("Edit today's mood")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -152,11 +152,11 @@ struct MindSection: View {
     private var insightsCard: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             Text("What tracks your mood (\(moodDayCount) check-ins)")
-                .strandOverline()
+                .strandLabel()
             // Each correlation as its own frosted Rest-tinted insight card. The indigo wash is
             // calm and carries no valence — a link is just a link, never framed as good or bad.
             ForEach(lines) { line in
-                NoopCard(tint: StrandPalette.restColor) {
+                NoopCard {
                     HStack(alignment: .top, spacing: 12) {
                         // A small liquid vessel filled to the link's strength (|r|) marks the row and reads
                         // its magnitude at a glance — the leading-gauge idiom Insights' effect cards use.

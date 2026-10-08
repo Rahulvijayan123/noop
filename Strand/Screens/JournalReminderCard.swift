@@ -12,33 +12,42 @@ import StrandDesign
 //
 // Opt-out via `PuffinExperiment.journalReminderKey` (default ON — the same key also gates the Android
 // morning sleep sheet twin). Read-only: it never writes a journal entry. Twin of Android
-// `JournalReminderCard` (android/.../ui/JournalReminder.kt). Design-Reset compliant — a flat accent-tinted
-// NoopCard, NoopMetrics / StrandPalette / StrandFont tokens, matching the other Today cards.
+// `JournalReminderCard` (android/.../ui/JournalReminder.kt). The plain NoopCard: a title row with today's
+// state word, then the strip with a weekday letter under each bar.
 
 struct JournalReminderCard: View {
 
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var router: NavRouter
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     /// Default ON so the reminder works out of the box; the Settings toggle / this key opt out.
     @AppStorage(PuffinExperiment.journalReminderKey) private var reminderEnabled = true
 
     /// Which of the last `stripDays` day-keys carry a native journal entry. nil = still loading / read
-    /// error → render nothing (never a misleading all-empty strip).
+    /// error.
     @State private var loggedDays: Set<String>?
+    /// True once the first read has finished, so a read error renders nothing (never a misleading
+    /// all-empty strip) while a first load holds the card's place, redacted, so it does not pop in.
+    @State private var hasLoaded = false
 
     private static let stripDays = 7
 
     var body: some View {
         Group {
-            if reminderEnabled, let logged = loggedDays {
-                card(logged)
+            if reminderEnabled {
+                if let logged = loggedDays {
+                    card(logged)
+                } else if !hasLoaded {
+                    card([]).loadingPlaceholder(true)
+                }
             }
         }
         // Re-read whenever a sync bumps refreshSeq or the toggle flips (mirrors AutoWorkoutCard's task id),
         // so the strip and the "logged today" state stay current after the user logs and comes back.
         .task(id: JournalReminderLoadKey(seq: repo.refreshSeq, enabled: reminderEnabled)) {
             await reload()
+            hasLoaded = true
         }
     }
 
@@ -46,29 +55,27 @@ struct JournalReminderCard: View {
         let keys = Self.dayKeys()
         let todayKey = keys.last ?? ""
         let todayLogged = logged.contains(todayKey)
-        // A recent PAST day with no entry — surfaces the tap-a-bar-to-backfill interaction once today is
-        // done (#656). Accent while anything is actionable; calm secondary once fully caught up.
-        let hasMissed = keys.contains { $0 != todayKey && !logged.contains($0) }
-        let subtitle: String = !todayLogged ? String(localized: "Log today's journal")
-            : hasMissed ? String(localized: "Tap a day to catch up")
-            : String(localized: "Logged today")
         // No outer Button: each bar is its own tap target that deep-links the journal to THAT day (#656),
-        // and nested SwiftUI buttons don't work — so header + subtitle carry their own onTapGesture (→
-        // today) and the bars carry theirs. The regions are non-overlapping in the VStack, so a tap lands
-        // on exactly one. Tapping a bar does NOT set today, so a bar's day always wins.
-        return NoopCard(tint: StrandPalette.accent) {
+        // and nested SwiftUI buttons don't work — so the title row carries its own onTapGesture (→ today)
+        // and the bars carry theirs. The regions do not overlap, so a tap lands on exactly one.
+        return NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                HStack(spacing: NoopMetrics.space2) {
+                HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
                     Image(systemName: "book.closed")
-                        .font(.system(size: 18))
-                        .foregroundStyle(StrandPalette.accent)
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.metricAmber)
                         .accessibilityHidden(true)
                     Text(String(localized: "Journal"))
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer()
+                    Spacer(minLength: NoopMetrics.space2)
+                    Text(todayLogged ? String(localized: "Logged today") : String(localized: "Not logged today"))
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+                        .multilineTextAlignment(.trailing)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(StrandFont.icon(.inline))
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }
@@ -76,43 +83,52 @@ struct JournalReminderCard: View {
                 .onTapGesture { router.openJournal() }
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel(Text(String(localized: "Journal")))
                 .accessibilityHint(Text(String(localized: "Open journal")))
-                // The last-N-days strip: one equal-width bar per day, each its own tap target. Filled =
-                // logged; today is ringed. Tapping a bar deep-links the journal to that day (#656).
+                // The last-N-days strip: one equal-width bar per day over its weekday letter, each its own
+                // tap target. Filled = logged; today is ringed. Tapping a bar deep-links the journal to that
+                // day (#656).
                 HStack(spacing: 6) {
                     ForEach(keys.indices, id: \.self) { i in
                         let key = keys[i]
                         let off = Self.stripDays - 1 - i          // keys[0] = 6 days ago … last = today
                         let isLogged = logged.contains(key)
-                        Color.clear
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 22)                    // taller invisible tap target
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 3)
-                                    .fill(isLogged ? StrandPalette.accent : StrandPalette.textTertiary.opacity(0.22))
-                                    .frame(height: 10)
-                                    .overlay {
-                                        if off == 0, !isLogged {
-                                            RoundedRectangle(cornerRadius: 3)
-                                                .strokeBorder(StrandPalette.accent, lineWidth: 1)
+                        VStack(spacing: NoopMetrics.space1) {
+                            Color.clear
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 22)                // taller invisible tap target
+                                .overlay {
+                                    RoundedRectangle(cornerRadius: 3)
+                                        .fill(isLogged ? StrandPalette.accent : StrandPalette.textTertiary.opacity(0.22))
+                                        .frame(height: 10)
+                                        .overlay {
+                                            if off == 0, !isLogged {
+                                                RoundedRectangle(cornerRadius: 3)
+                                                    .strokeBorder(StrandPalette.accent, lineWidth: 1)
+                                            }
                                         }
-                                    }
-                            }
-                            .contentShape(Rectangle())
-                            .onTapGesture { router.openJournal(day: off) }
-                            .accessibilityAddTraits(.isButton)
-                            .accessibilityLabel(Self.barLabel(off))
+                                }
+                            Text(Self.weekdayLetter(offset: off))
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(off == 0 ? StrandPalette.textSecondary : StrandPalette.textTertiary)
+                                .lineLimit(1)
+                                .accessibilityHidden(true)
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture { router.openJournal(day: off) }
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityLabel(Self.barLabel(off))
+                        .accessibilityValue(isLogged ? Text(String(localized: "Logged")) : Text(""))
                     }
                 }
-                Text(subtitle)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle((!todayLogged || hasMissed) ? StrandPalette.accent : StrandPalette.textSecondary)
-                    .contentShape(Rectangle())
-                    .onTapGesture { router.openJournal() }
-                    .accessibilityAddTraits(.isButton)   // it opens the journal — announce it as one
             }
         }
+    }
+
+    /// The one-letter weekday under a strip bar, in the user's locale.
+    private static func weekdayLetter(offset: Int) -> String {
+        let day = Calendar.current.date(byAdding: .day, value: -offset, to: Date()) ?? Date()
+        return day.formatted(.dateTime.weekday(.narrow).locale(AppLanguage.activeLocale))
     }
 
     /// Screen-reader label for a strip bar (#656): the day it deep-links to. Twin of JournalLogCard's

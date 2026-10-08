@@ -96,7 +96,7 @@ struct CoachLauncherSheet: View {
                 submitDraft()
             } label: {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 26, weight: .semibold))
+                    .font(StrandFont.icon(.hero))
                     .foregroundStyle(StrandPalette.accent)
             }
             .buttonStyle(.plain)

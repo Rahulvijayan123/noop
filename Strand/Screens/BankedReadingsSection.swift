@@ -3,16 +3,15 @@ import Charts
 import StrandDesign
 
 /// "Every reading": every skin-temperature sample or SpO₂ reading the strap banked over the last 24 hours,
-/// read from the phone's own store (`Repository.bankedSkinTemp` / `bankedSpo2`), plotted, counted and
-/// broken down by hour.
+/// read from the phone's own store (`Repository.bankedSkinTemp` / `bankedSpo2`) and plotted under the
+/// detail page's daily chart.
 ///
-/// Each signal's Key Metrics tile and its daily chart show one number per night, which hides that the strap
-/// took tens of thousands of skin-temperature samples and hundreds of SpO₂ readings behind it. This card is
-/// where they are visible. Nothing here is scored or computed beyond a 5-minute mean for drawing: the
-/// values are the strap's own.
+/// Each signal's daily chart shows one number per night, which hides that the strap took tens of thousands of
+/// skin-temperature samples and hundreds of SpO₂ readings behind it. This card is where they are visible.
+/// Nothing here is scored or computed beyond a 5-minute mean for drawing: the values are the strap's own.
 ///
 /// SpO₂ is drawn as points, not a line, because the strap writes it in short windows while the wearer
-/// sleeps; the gap through the day is the strap's schedule and the card says so.
+/// sleeps; the gap through the day is the strap's schedule (the page's About card says so).
 struct BankedReadingsSection: View {
     enum Signal { case skinTemp, bloodOxygen }
 
@@ -25,6 +24,8 @@ struct BankedReadingsSection: View {
     /// 0 = the last 24 hours ending now; each step back is the 24 hours before that.
     @State private var dayOffset = 0
     @State private var loaded: Loaded?
+    /// The time under the finger; nil reads the newest reading.
+    @State private var selected: Date?
 
     private struct Loaded {
         let offset: Int
@@ -45,8 +46,6 @@ struct BankedReadingsSection: View {
     private static let maxDayOffset = 6
     /// A hole longer than this in the skin-temperature line is the strap off the wrist or not yet synced.
     private static let skinTempGapSeconds = 15 * 60
-    /// A worn hour of skin temperature is one sample per second.
-    private static let fullHourOfSamples = 3_600
 
     private var temperatureUnit: TemperatureUnit {
         UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial, override: temperatureRaw)
@@ -54,17 +53,15 @@ struct BankedReadingsSection: View {
 
     var body: some View {
         NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 header
-                readout
                 chart
                 statsRow
-                hourlySection
-                footer
                 timelineLink
             }
         }
         .task(id: "\(signal)-\(dayOffset)-\(repo.refreshSeq)") { await load() }
+        .onChangeCompat(of: dayOffset) { _ in selected = nil }
     }
 
     // MARK: Data
@@ -92,12 +89,18 @@ struct BankedReadingsSection: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: NoopMetrics.space2) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Every reading").strandOverline()
-                Text(title)
+            VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                Text("Every reading")
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
+                Text(subtitle)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .transaction { $0.animation = nil }
             }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
             HStack(spacing: 0) {
                 stepButton(symbol: "chevron.left", label: "Earlier",
@@ -116,13 +119,30 @@ struct BankedReadingsSection: View {
         return String(localized: "\(start) to \(end)")
     }
 
+    /// The period, then the reading under the finger (or the newest one).
+    private var subtitle: String {
+        guard let series = current?.series, series.count > 0 else { return title }
+        let reading: (ts: Int, value: Double)? = {
+            if let selected, let index = ChartSelection.nearestIndex(to: selected, in: series.points.map { date($0.ts) }) {
+                return (series.points[index].ts, series.points[index].value)
+            }
+            return series.lastTs.flatMap { ts in series.lastValue.map { (ts, $0) } }
+        }()
+        guard let reading else { return title }
+        let time = date(reading.ts).formatted(date: .omitted, time: .shortened)
+        return String(localized: "\(title) · \(display(reading.value)) at \(time)")
+    }
+
     private func stepButton(symbol: String, label: LocalizedStringKey, enabled: Bool,
                             action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button {
+            StrandHaptic.selection.play()
+            action()
+        } label: {
             Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(enabled ? StrandPalette.textSecondary : StrandPalette.textTertiary.opacity(0.4))
-                .frame(width: 40, height: 40)
+                .font(StrandFont.icon(.inline).weight(.semibold))
+                .foregroundStyle(enabled ? StrandPalette.accent : StrandPalette.textTertiary)
+                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -130,51 +150,10 @@ struct BankedReadingsSection: View {
         .accessibilityLabel(label)
     }
 
-    // MARK: Read-out
-
-    private var readout: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(headline ?? "—")
-                .font(StrandFont.number(40))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-            Text(subtitle)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
     private func display(_ value: Double) -> String {
         switch signal {
         case .skinTemp: return UnitFormatter.temperatureFromCelsius(value, unit: temperatureUnit)
-        case .bloodOxygen: return "\(Int(value.rounded()))%"
-        }
-    }
-
-    /// The newest raw reading in the window.
-    private var headline: String? { current?.series.lastValue.map(display) }
-
-    private var subtitle: String {
-        guard let series = current?.series else { return String(localized: "Loading…") }
-        guard series.count > 0, let last = series.lastTs, let first = series.firstTs else {
-            return signal == .bloodOxygen
-                ? String(localized: "No readings in this period")
-                : String(localized: "No readings in this period yet")
-        }
-        let count = series.count.formatted()
-        switch signal {
-        case .skinTemp:
-            return dayOffset == 0
-                ? String(localized: "\(count) readings · newest \(relativeAgo(TimeInterval(last)))")
-                : String(localized: "\(count) readings")
-        case .bloodOxygen:
-            let span = Date.FormatStyle(date: .omitted, time: .shortened)
-            let from = Date(timeIntervalSince1970: TimeInterval(first)).formatted(span)
-            let to = Date(timeIntervalSince1970: TimeInterval(last)).formatted(span)
-            return String(localized: "\(count) readings · \(from) to \(to)")
+        case .bloodOxygen: return "\(Int(value.rounded())) %"
         }
     }
 
@@ -187,85 +166,72 @@ struct BankedReadingsSection: View {
         temperatureUnit == .fahrenheit ? UnitFormatter.celsiusToFahrenheit(celsius) : celsius
     }
 
-    private struct Run: Identifiable {
-        let id: Int
-        let points: [KeyMetricReadings.BankedSeries.Point]
-    }
-
     private var span: ClosedRange<Date> {
         let w = current.map { ($0.from, $0.to) } ?? window(offset: dayOffset)
         return date(w.0) ... date(w.1)
     }
 
+    private var chartState: ChartState {
+        guard let series = current?.series else { return .loading }
+        guard series.count > 0 else {
+            return .empty(String(localized: "No readings in this period"))
+        }
+        return .ready
+    }
+
     @ViewBuilder private var chart: some View {
         let points = current?.series.points ?? []
-        Group {
-            if signal == .skinTemp {
-                skinTempChart(points: points)
-            } else {
-                spo2Chart(points: points)
-            }
+        if signal == .skinTemp {
+            IntradayChart(samples: points.map { IntradayChart.Sample(time: date($0.ts), value: shown($0.value)) },
+                          bucketSeconds: Self.skinTempGapSeconds, color: accent, live: dayOffset == 0,
+                          state: chartState, window: span,
+                          y: ChartValueAxis(unit: UnitFormatter.temperatureUnit(temperatureUnit),
+                                            domain: .fitted(minSpan: temperatureUnit == .fahrenheit ? 1.5 : 0.8),
+                                            format: ChartValueAxis.decimals(1)),
+                          selection: $selected, height: NoopMetrics.chartHeightSecondary,
+                          accessibilityTitle: String(localized: "Skin temperature readings"))
+        } else {
+            spo2Chart(points: points)
         }
-        .frame(height: 190)
-        .overlay {
-            if let series = current?.series, series.count == 0 {
-                Text(signal == .bloodOxygen ? "None while awake" : "No readings")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(signal == .skinTemp ? "Skin temperature readings" : "Blood oxygen readings"))
-        .accessibilityValue(Text(subtitle))
     }
 
-    private func skinTempChart(points: [KeyMetricReadings.BankedSeries.Point]) -> some View {
-        let runs = KeyMetricReadings.runs(points, maxGapSeconds: Self.skinTempGapSeconds)
-            .enumerated().map { Run(id: $0.offset, points: $0.element) }
-        // Frame the data, not zero: skin temperature moves a degree or two, and an area fill (or an automatic
-        // scale that includes zero) would flatten that into a strip at the top of a 0 to 40 axis.
-        let values = points.map { shown($0.value) }
-        let lo = values.min() ?? 32
-        let hi = values.max() ?? 36
-        let pad = max(0.4, (hi - lo) * 0.2)
-        return Chart {
-            ForEach(runs) { run in
-                ForEach(run.points) { p in
-                    LineMark(x: .value("Time", date(p.ts)),
-                             y: .value("Skin temperature", shown(p.value)),
-                             series: .value("Run", run.id))
+    /// SpO₂ as points on the detail chart's fixed 85-100 % scale (widened only to show an outlier), with the
+    /// same clock axis, scrub and frame as the kit charts.
+    @ViewBuilder
+    private func spo2Chart(points: [KeyMetricReadings.BankedSeries.Point]) -> some View {
+        let axis = ChartValueAxis(unit: "%", domain: .fixed(85...100), ticks: [85, 90, 95, 100])
+        let yLayout = axis.layout(for: points.map(\.value))
+        let xLayout = ChartAxis.layout(span, style: .hours)
+        let times = points.map { date($0.ts) }
+        switch chartState {
+        case .loading:
+            ChartPlaceholder(height: NoopMetrics.chartHeightSecondary)
+        case .empty(let message):
+            EmptyChartMessage(message, height: NoopMetrics.chartHeightSecondary)
+        case .ready:
+            let selectedIndex = selected.flatMap { ChartSelection.nearestIndex(to: $0, in: times) }
+            Chart {
+                ForEach(points) { p in
+                    PointMark(x: .value("Time", date(p.ts)), y: .value("SpO₂", p.value))
+                        .foregroundStyle(accent.opacity(selectedIndex == nil ? 1 : NaraChartStyle.dimmedOpacity))
+                        .symbolSize(points.count > NaraChartStyle.densePointThreshold
+                                    ? NaraChartStyle.densePointSize : NaraChartStyle.pointSize)
+                }
+                if let selectedIndex {
+                    SelectionRule(times[selectedIndex], unit: nil)
+                    PointMark(x: .value("Time", times[selectedIndex]), y: .value("SpO₂", points[selectedIndex].value))
                         .foregroundStyle(accent)
-                        .lineStyle(StrokeStyle(lineWidth: 2))
-                        .interpolationMethod(.monotone)
+                        .symbolSize(NaraChartStyle.selectedPointSize)
                 }
             }
-        }
-        .chartXScale(domain: span)
-        .chartYScale(domain: (lo - pad) ... (hi + pad))
-        .chartYAxis { AxisMarks(position: .leading) }
-        .chartXAxis { xAxis }
-    }
-
-    private func spo2Chart(points: [KeyMetricReadings.BankedSeries.Point]) -> some View {
-        // In-band readings are 70...100; frame the data without ever drawing above the physical ceiling.
-        let low = max(70, (points.map(\.value).min() ?? 94).rounded(.down) - 3)
-        return Chart {
-            ForEach(points) { p in
-                PointMark(x: .value("Time", date(p.ts)), y: .value("SpO₂", p.value))
-                    .foregroundStyle(accent)
-                    .symbolSize(points.count > 200 ? 16 : 28)
+            .naraChartAxes(x: xLayout, y: yLayout)
+            .chartOverlay { proxy in
+                ChartScrubLayer(proxy: proxy, xs: times, selection: $selected)
             }
-        }
-        .chartXScale(domain: span)
-        .chartYScale(domain: low ... 101)
-        .chartYAxis { AxisMarks(position: .leading) }
-        .chartXAxis { xAxis }
-    }
-
-    private var xAxis: some AxisContent {
-        AxisMarks(values: IntradaySeriesSection.axisTicks(in: span)) { _ in
-            AxisGridLine()
-            AxisValueLabel(format: .dateTime.hour())
+            .frame(height: NoopMetrics.chartHeightSecondary)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Blood oxygen readings"))
+            .accessibilityValue(Text(subtitle))
         }
     }
 
@@ -273,7 +239,7 @@ struct BankedReadingsSection: View {
 
     @ViewBuilder private var statsRow: some View {
         if let series = current?.series, series.count > 0 {
-            HStack(alignment: .top, spacing: NoopMetrics.space3) {
+            HStack(alignment: .top, spacing: NoopMetrics.space4) {
                 stat(String(localized: "Readings"), series.count.formatted())
                 if let lo = series.minValue { stat(String(localized: "Lowest"), display(lo)) }
                 if let hi = series.maxValue { stat(String(localized: "Highest"), display(hi)) }
@@ -283,85 +249,29 @@ struct BankedReadingsSection: View {
     }
 
     private func stat(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).strandOverline()
+        VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+            Text(label).strandLabel()
             Text(value)
-                .font(StrandFont.headline)
+                .font(StrandFont.number(20))
                 .foregroundStyle(StrandPalette.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
-    }
-
-    // MARK: Readings per hour
-
-    private struct HourBin: Identifiable {
-        let hourStart: Int
-        let count: Int
-        var id: Int { hourStart }
-    }
-
-    @ViewBuilder private var hourlySection: some View {
-        let bins = KeyMetricReadings.hourlyCounts(current?.series.points ?? [])
-            .map { HourBin(hourStart: $0.hourStart, count: $0.count) }
-        if !bins.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Readings per hour").strandOverline()
-                hourlyChart(bins)
-                    .frame(height: 84)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Text("Readings per hour"))
-                    .accessibilityValue(Text("\(bins.map(\.count).reduce(0, +).formatted()) readings"))
-            }
-        }
-    }
-
-    @ViewBuilder private func hourlyChart(_ bins: [HourBin]) -> some View {
-        let chart = Chart(bins) { bin in
-            BarMark(x: .value("Hour", date(bin.hourStart), unit: .hour), y: .value("Readings", bin.count))
-                .foregroundStyle(accent.opacity(0.75))
-        }
-        .chartXScale(domain: span)
-        .chartYAxis { AxisMarks(position: .leading) }
-        .chartXAxis { xAxis }
-        if signal == .skinTemp {
-            // A worn hour is one sample per second, so a full bar is 3,600 and a short one is an hour the strap
-            // was off the wrist or had not synced.
-            chart.chartYScale(domain: 0 ... Self.fullHourOfSamples)
-        } else {
-            chart
-        }
-    }
-
-    // MARK: Footer
-
-    private var footer: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            switch signal {
-            case .skinTemp:
-                Text("The strap takes a skin temperature every second while it is on your wrist. The line is 5-minute averages, and a gap means it was off your wrist or had not synced yet.")
-            case .bloodOxygen:
-                Text("Your strap measures SpO₂ only while you sleep, in short windows, so there are no readings while you are awake. These are the strap's own estimate and are not verified.")
-                if let other = current?.series.statusBytes, other > 0 {
-                    Text("The strap also wrote \(other.formatted()) other values in those windows that are status codes, not percentages. They are left out.")
-                }
-            }
-        }
-        .font(StrandFont.footnote)
-        .foregroundStyle(StrandPalette.textTertiary)
-        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
     }
 
     private var timelineLink: some View {
         NavigationLink {
             FullDayChartView(initialMetric: signal == .skinTemp ? .skinTemp : .spo2)
         } label: {
-            HStack(spacing: 6) {
+            HStack(spacing: NoopMetrics.space1) {
                 Text("Open in Deep Timeline")
-                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold))
+                Image(systemName: "chevron.right").font(StrandFont.icon(.inline))
             }
-            .font(StrandFont.subhead)
-            .foregroundStyle(accent)
+            .font(StrandFont.subhead.weight(.medium))
+            .foregroundStyle(StrandPalette.accent)
+            .frame(minHeight: NoopMetrics.minimumHitTarget)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

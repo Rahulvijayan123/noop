@@ -124,22 +124,13 @@ struct PhysiologyContextHistoryView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                Picker("Range", selection: $span) {
-                    ForEach(Self.spans, id: \.self) { days in
-                        Text("\(days) days").tag(days)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                content
+        ScreenScaffold(title: "\(PhysiologyContextHistoryCopy.title)", titleDisplay: .navigationBar) {
+            SegmentedPillControl(Self.spans, selection: $span, fillsAvailableWidth: true) {
+                String(localized: "\($0) days")
             }
-            .padding(NoopMetrics.screenPadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            content
+            AboutDisclosure("About", paragraphs: [PhysiologyContextHistoryCopy.episodesFootnote])
         }
-        .background(StrandPalette.surfaceBase)
-        .navigationTitle(PhysiologyContextHistoryCopy.title)
         .task(id: "\(key.from)|\(key.to)|\(store.epoch)") { await store.loadHistory(key) }
     }
 
@@ -183,29 +174,31 @@ struct PhysiologyContextHistoryView: View {
         if let note { message(note) }
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Text("Changes in \(PhysiologyContextWording.metric(metric))").strandOverline()
+                Text("Changes in \(PhysiologyContextWording.metric(metric))")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 if model.metricEpisodes.isEmpty {
                     message(PhysiologyContextHistoryCopy.noEpisodes)
                 } else {
                     ForEach(model.metricEpisodes) { episodeRow($0) }
                 }
-                Text(PhysiologyContextHistoryCopy.episodesFootnote)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         if !model.otherEpisodes.isEmpty {
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                    Text("Other series").strandOverline()
+                    Text("Other series")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                     ForEach(model.otherEpisodes) { episodeRow($0) }
                 }
             }
         }
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Text("Activity bouts").strandOverline()
+                Text("Activity bouts")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 if model.bouts.isEmpty {
                     message(PhysiologyContextHistoryCopy.noBouts)
                 } else {

@@ -35,7 +35,8 @@ enum KeyMetric: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// The tile's display label — matches the `StatTile(label:)` text rendered on the grid.
+    /// The tile's display label: the same name on the Today tile, in the editor and (for the scores) on the
+    /// detail page. Sentence case.
     var title: String {
         switch self {
         case .charge:      return String(localized: "Charge")
@@ -43,21 +44,30 @@ enum KeyMetric: String, CaseIterable, Identifiable {
         case .rest:        return String(localized: "Rest")
         case .hrv:         return "HRV"
         case .restingHr:   return String(localized: "Resting HR")
-        case .bloodOxygen: return String(localized: "Blood Oxygen")
-        case .respiratory: return String(localized: "Respiratory")
+        case .bloodOxygen: return String(localized: "Blood oxygen")
+        case .respiratory: return String(localized: "Respiratory rate")
         case .steps:       return String(localized: "Steps")
         case .weight:      return String(localized: "Weight")
         case .calories:    return String(localized: "Calories")
         // Same short label the sibling "Your Cards" tile (`DashboardCard.skinTemp`) already uses —
         // reuses its translation key rather than adding a new "Skin Temperature" one for this tile.
-        case .skinTemp:    return String(localized: "Skin Temp")
+        case .skinTemp:    return String(localized: "Skin temp")
         }
     }
 
-    /// The original, hard-coded grid order — the default when the user hasn't customised the layout.
+    /// Every tile in its canonical order: the editor's universe (a case outside it could never be switched
+    /// on), and the order the hidden tiles are listed in.
     static let defaultOrder: [KeyMetric] = [
         .charge, .effort, .rest, .hrv, .restingHr,
         .bloodOxygen, .skinTemp, .respiratory, .steps, .weight, .calories,
+    ]
+
+    /// The tiles a fresh install shows (and "Reset layout" restores): eight, so the grid is four even rows.
+    /// Rest is already the third hero ring above the grid, and Blood oxygen and Weight are one switch away
+    /// in the editor. Display-only: nothing is computed differently for a hidden tile. The Android twin
+    /// (`KeyMetric.DEFAULT_ENABLED`) should match this list when it adopts it.
+    static let defaultEnabled: [KeyMetric] = [
+        .charge, .effort, .hrv, .restingHr, .skinTemp, .respiratory, .steps, .calories,
     ]
 }
 
@@ -71,7 +81,7 @@ enum KeyMetricPrefs {
     static let skinTempBloodOxygenMigrationKey = "today.keyMetrics.skinTempBloodOxygenShown.v1"
 
     /// The layout string a saved layout becomes when Blood Oxygen and Skin Temp are added to it, or nil when
-    /// nothing changes: no saved layout (a blank one already decodes to `defaultOrder`, which has both) or a
+    /// nothing changes: no saved layout (a blank one decodes to `defaultEnabled`, the fresh-install set) or a
     /// layout that already shows both. The missing tiles go on the END so nothing the user arranged moves.
     static func layoutAddingBloodOxygenAndSkinTemp(savedLayout raw: String) -> String? {
         guard !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
@@ -102,12 +112,12 @@ enum KeyMetricPrefs {
         metrics.map(\.rawValue).joined(separator: ",")
     }
 
-    /// Decode the stored string into an ordered list of enabled tiles. An empty/unset string yields the
-    /// full default order (so a fresh install shows every tile). Unknown tokens are ignored; this returns
+    /// Decode the stored string into an ordered list of enabled tiles. An empty/unset string yields
+    /// `KeyMetric.defaultEnabled` (what a fresh install shows). Unknown tokens are ignored; this returns
     /// ONLY the enabled tiles in their saved order — the editor pairs it with the disabled remainder.
     static func decodeEnabled(_ raw: String) -> [KeyMetric] {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else { return KeyMetric.defaultOrder }
+        guard !trimmed.isEmpty else { return KeyMetric.defaultEnabled }
         var seen = Set<KeyMetric>()
         var result: [KeyMetric] = []
         for token in trimmed.split(separator: ",") {

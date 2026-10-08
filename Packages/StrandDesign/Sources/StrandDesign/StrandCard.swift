@@ -1,72 +1,62 @@
 import SwiftUI
 
-// MARK: - Frosted card surface (Titanium & Gold) + StrandCard
+// MARK: - Card surface + StrandCard
 //
-// The card surface: a flat `surfaceRaised` fill, continuous rounded corners and a
-// single 1px `hairline` border — NO shadow (the Titanium look reads off the hairline
-// + tint, not a drop shadow). The TINTED variant deepens into a navy bevel
-// (150° #15243C → #0B1424) under a faint per-domain hue wash + a hue-biased border.
-// `.frostedCardSurface(tint:…)` is the one place the look lives so StrandCard /
-// NoopCard / ad-hoc surfaces all share it. Pass a domain tint (or nil for the neutral
-// flat raised surface).
+// Every card in the app is the same surface: `NoopPanelSurface` at `NoopMetrics.cardRadius` (20) with no
+// tint (docs/DESIGN_SYSTEM.md, Canvas and surfaces). `NoopCard`, `StrandCard`, `.frostedCardSurface()` and
+// the app's `.naraCard()` all draw it through `FrostedCardSurface`, so the look lives in one place. Domain
+// colour belongs to the data marks and icons inside a card, not to its fill, so the `tint` parameters below
+// are accepted for source compatibility and ignored.
 
 public extension View {
-    /// Apply the frosted-card surface as a background. `tint` colours the diagonal
-    /// wash + border bias; nil uses the flat raised surface with no wash.
+    /// The card surface as a background. `tint` and `washStrength` are ignored (cards carry no tint).
     func frostedCardSurface(
         tint: Color? = nil,
-        cornerRadius: CGFloat = 22,
+        cornerRadius: CGFloat = NoopMetrics.cardRadius,
         washStrength: Double = 1.0
     ) -> some View {
         background(FrostedCardSurface(tint: tint, cornerRadius: cornerRadius, washStrength: washStrength))
     }
 }
 
-/// The frosted-card background fill and border. Standalone so it can be a
-/// `.background { }` (animation never reaches the card's content subtree — #104).
-/// No drop shadow — the Titanium surface reads off the hairline + tint alone.
+/// The card background fill and border. Standalone so it can be a `.background { }` (animation never
+/// reaches the card's content subtree — #104).
+///
+/// Solid: the "Card transparency" preference (`CardAppearancePrefs`) only existed to reveal the day-cycle
+/// sky behind the cards, and the sky is gone, so the key is kept for backups and no longer read.
 public struct FrostedCardSurface: View {
     public var tint: Color?
     public var cornerRadius: CGFloat
     public var washStrength: Double
-    // "Card transparency" setting (reactive): fades the whole glass surface toward the background. 100 =
-    // solid (default). Reading it here makes every card update live when the Settings slider moves.
-    @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
 
-    public init(tint: Color? = nil, cornerRadius: CGFloat = 22, washStrength: Double = 1.0) {
+    public init(tint: Color? = nil, cornerRadius: CGFloat = NoopMetrics.cardRadius, washStrength: Double = 1.0) {
         self.tint = tint
         self.cornerRadius = cornerRadius
         self.washStrength = washStrength
     }
 
     public var body: some View {
-        let op = max(0.0, min(1.0, Double(cardOpacityPercent) / 100.0))
-        NoopPanelSurface(
-            tint: tint?.opacity(washStrength),
-            cornerRadius: cornerRadius,
-            elevated: false,
-            surfaceOpacity: op
-        )
+        NoopPanelSurface(tint: nil, cornerRadius: cornerRadius, elevated: false, surfaceOpacity: 1)
     }
 }
 
-// MARK: - StrandCard (§9.4 Cards)
+// MARK: - StrandCard
 //
-// The card container — now the Bevel frosted surface, but the PUBLIC API is
-// unchanged (padding, cornerRadius, content). Adds an optional `tint` (defaulted)
-// so callers can opt into a domain wash without breaking existing call sites.
-// Keeps the mandated hover lift via `.strandCardHover()`.
+// The older name for the card. Same surface and radius as `NoopCard`; new code uses `NoopCard`. Keeps the
+// macOS hover lift via `.strandCardHover()`.
 
+/// The card under its older name: `FrostedCardSurface` at `NoopMetrics.cardRadius`. Prefer `NoopCard`.
 public struct StrandCard<Content: View>: View {
 
     public var padding: CGFloat
     public var cornerRadius: CGFloat
+    /// Ignored: cards carry no tint.
     public var tint: Color?
     @ViewBuilder public var content: () -> Content
 
     public init(
-        padding: CGFloat = 16,
-        cornerRadius: CGFloat = 22,
+        padding: CGFloat = NoopMetrics.cardPadding,
+        cornerRadius: CGFloat = NoopMetrics.cardRadius,
         tint: Color? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
@@ -94,7 +84,7 @@ public struct StrandCardHover: ViewModifier {
     @State private var hovering = false
     @Environment(\.colorScheme) private var scheme
 
-    public init(cornerRadius: CGFloat = 22) {
+    public init(cornerRadius: CGFloat = NoopMetrics.cardRadius) {
         self.cornerRadius = cornerRadius
     }
 
@@ -127,7 +117,7 @@ public struct StrandCardHover: ViewModifier {
 
 public extension View {
     /// Apply the Strand card hover lift (shadow + -1px translate + border emphasis).
-    func strandCardHover(cornerRadius: CGFloat = 22) -> some View {
+    func strandCardHover(cornerRadius: CGFloat = NoopMetrics.cardRadius) -> some View {
         modifier(StrandCardHover(cornerRadius: cornerRadius))
     }
 }

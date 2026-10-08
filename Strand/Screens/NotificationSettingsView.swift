@@ -10,11 +10,9 @@ struct NotificationSettingsView: View {
     @StateObject private var store = NotificationSettingsStore()
 
     var body: some View {
-        ScreenScaffold(title: "Notifications",
-                       subtitle: "Buzz your strap when these apps notify you. Everything runs on \(Platform.deviceNounPhrase).") {
+        ScreenScaffold(title: "Notifications") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 masterCard
-                    .staggeredAppear(index: 0)
                 // #926: the "every pattern buzzes the same on a 5/MG" note that used to sit here is GONE —
                 // the limitation it described is fixed. overallLoop (byte 11 of the maverick haptic body)
                 // is now written as `loops - 1` by `MaverickHaptics.notificationBuzz`, which `send` builds
@@ -23,15 +21,12 @@ struct NotificationSettingsView: View {
                 // does nothing, next to a control that now works. Kotlin twin carries the same note.
                 if store.activeCategories.isEmpty {
                     emptyAppsCard
-                        .staggeredAppear(index: 1)
                 } else {
                     ForEach(Array(store.activeCategories.enumerated()), id: \.element.id) { idx, cat in
                         categoryCard(cat, apps: store.apps(in: cat))
-                            .staggeredAppear(index: idx + 1)
                     }
                 }
                 behaviourCard
-                    .staggeredAppear(index: store.activeCategories.count + 1)
             }
         }
     }
@@ -51,7 +46,7 @@ struct NotificationSettingsView: View {
                 .tint(StrandPalette.accent)
 
                 HStack(spacing: 10) {
-                    StatePill("\(strapPillTitle)", tone: strapPillTone, pulsing: live.connected)
+                    StatePill("\(strapPillTitle)", tone: strapPillTone, )
                     StatePill(store.enabledCount == 1 ? "1 app on" : "\(store.enabledCount) apps on",
                               tone: store.enabledCount > 0 ? .positive : .neutral,
                               showsDot: false)
@@ -303,18 +298,16 @@ private struct AlertSection<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        StrandCard(padding: 20, tint: StrandPalette.accent) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("\(overline)").strandOverline()
-                    HStack(spacing: NoopMetrics.space2 + 2) {
-                        Image(systemName: icon)
-                            .foregroundStyle(StrandPalette.accent)
-                            .accessibilityHidden(true)
-                        Text(title)
-                            .font(StrandFont.title2)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                    }
+                HStack(spacing: NoopMetrics.space2) {
+                    Image(systemName: icon)
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.accent)
+                        .accessibilityHidden(true)
+                    Text(title)
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                 }
                 if let blurb {
                     Text(blurb)

@@ -79,16 +79,11 @@ private struct ActivityCalibrationPage: View {
     }
 
     var body: some View {
-        ScreenScaffold(
-            title: "Activity calibration",
-            subtitle: "Teach Nara how you sit, stand and lie down."
-        ) {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                personalCard
-                liveCard
-                controls
-                savedSummary
-            }
+        ScreenScaffold(title: "Activity calibration", titleDisplay: .navigationBar) {
+            personalCard
+            liveCard
+            controls
+            savedSummary
         }
         .onAppear {
             wireBoutSink()
@@ -136,9 +131,9 @@ private struct ActivityCalibrationPage: View {
     }
 
     private var personalCard: some View {
-        StrandCard {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                Text("Personal calibration").font(StrandFont.overline).foregroundStyle(StrandPalette.textSecondary)
+                Text("Personal calibration").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                 Text(personalHeadline)
                     .font(StrandFont.subhead)
                     .foregroundStyle(personalRecord?.result.status == .adopted
@@ -146,12 +141,12 @@ private struct ActivityCalibrationPage: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = personalDetail {
                     Text(detail)
-                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 if refitting {
-                    Text("Checking your runs...")
-                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                    Text("Checking your runs…")
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                 }
             }
         }
@@ -299,7 +294,7 @@ private struct ActivityCalibrationPage: View {
     // MARK: - Live card
 
     @ViewBuilder private var liveCard: some View {
-        StrandCard {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space4) {
                 switch runner.phase {
                 case .idle:
@@ -336,25 +331,25 @@ private struct ActivityCalibrationPage: View {
 
     private var rulesText: some View {
         Text("Only move when the strap buzzes. One buzz: move now. Three buzzes: that activity is done. Each activity starts when you tap Start, and you can skip either one.")
-            .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder private var gateLine: some View {
         switch gate {
         case .ready:
-            Text("Ready. Keep the strap on your wrist for the whole session.")
-                .font(StrandFont.caption).foregroundStyle(StrandPalette.statusPositive)
+            Label("Ready. Keep the strap on your wrist for the whole session.", systemImage: "checkmark.circle.fill")
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
         case .blocked(let reason):
-            Text("Can't start: \(Self.blockReasonText(reason))")
-                .font(StrandFont.caption).foregroundStyle(StrandPalette.statusWarning)
+            Label("Can't start: \(Self.blockReasonText(reason))", systemImage: "exclamationmark.triangle.fill")
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.statusWarning)
         }
     }
 
     private func blockedContent(_ reason: ActivityCalibrationSessionRunner.BlockedReason) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
             Text("Session stopped").font(StrandFont.title2).foregroundStyle(StrandPalette.statusWarning)
-            Text("\(Self.blockReasonText(reason).prefix(1).capitalized + Self.blockReasonText(reason).dropFirst()). Steps already finished are saved; the IMU capture mode is back to its previous setting.")
+            Text("\(Self.blockReasonText(reason).prefix(1).capitalized + Self.blockReasonText(reason).dropFirst()). Steps already finished are saved; the strap's motion recording is back to its previous setting.")
                 .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -364,13 +359,13 @@ private struct ActivityCalibrationPage: View {
         let activity = protocolModel.activities[index]
         return VStack(alignment: .leading, spacing: NoopMetrics.space3) {
             Text("Activity \(index + 1) of \(protocolModel.activities.count)")
-                .font(StrandFont.overline).foregroundStyle(StrandPalette.textSecondary)
+                .strandLabel()
             Text(activity.title).font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
             Text(activity.setup)
                 .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text("Takes \(Self.duration(activity.seconds)). Tap Start once you're in position; the steps then run on their own.")
-                .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -435,7 +430,7 @@ private struct ActivityCalibrationPage: View {
         if !skipped.isEmpty {
             line += " Skipped: \(skipped.joined(separator: ", "))."
         }
-        line += " The IMU capture mode is back to its previous setting."
+        line += " The strap's motion recording is back to its previous setting."
         return line
     }
 
@@ -454,23 +449,23 @@ private struct ActivityCalibrationPage: View {
             VStack(spacing: NoopMetrics.space3) {
                 NoopButton("Start", systemImage: "play.fill", kind: .primary, fullWidth: true) { runner.start() }
                 HStack(spacing: NoopMetrics.space3) {
-                    NoopButton("Skip activity", systemImage: "forward.fill", kind: .secondary) { runner.skip() }
-                    NoopButton("Stop", systemImage: "stop.fill", kind: .secondary) { runner.finish() }
+                    NoopButton("Skip activity", systemImage: "forward.fill", kind: .secondary, fullWidth: true) { runner.skip() }
+                    NoopButton("Stop", systemImage: "stop.fill", kind: .secondary, fullWidth: true) { runner.finish() }
                 }
             }
         case .countdown, .step:
             HStack(spacing: NoopMetrics.space3) {
-                NoopButton("Skip activity", systemImage: "forward.fill", kind: .secondary) { runner.skip() }
-                NoopButton("Stop", systemImage: "stop.fill", kind: .secondary) { runner.finish() }
+                NoopButton("Skip activity", systemImage: "forward.fill", kind: .secondary, fullWidth: true) { runner.skip() }
+                NoopButton("Stop", systemImage: "stop.fill", kind: .secondary, fullWidth: true) { runner.finish() }
             }
         }
     }
 
     @ViewBuilder private var savedSummary: some View {
         if status.savedCount > 0 {
-            StrandCard {
+            NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                    Text("Ground truth").font(StrandFont.overline).foregroundStyle(StrandPalette.textSecondary)
+                    Text("Saved examples").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                     Text(savedSummaryLine)
                         .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
                 }
@@ -490,7 +485,7 @@ private struct ActivityCalibrationPage: View {
     // MARK: - Helpers
 
     private func cueOverline(_ text: String, color: Color) -> some View {
-        Text(text.uppercased()).font(StrandFont.overline).foregroundStyle(color)
+        Text(text).font(StrandFont.headline).foregroundStyle(color)
     }
 
     /// "Next: Stand up on the buzz" while a step runs; the activity's end after its last step.
@@ -502,7 +497,7 @@ private struct ActivityCalibrationPage: View {
         } else {
             text = "Last step: three buzzes when it ends."
         }
-        return Text(text).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+        return Text(text).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
     }
 
     private func previousPosture(_ tasks: [ActivityCalibrationTask], before index: Int) -> String? {
@@ -526,7 +521,7 @@ private struct ActivityCalibrationPage: View {
         if let task, activities.indices.contains(activity) {
             text += " - Step \(task + 1) of \(activities[activity].tasks.count)"
         }
-        return Text(text).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+        return Text(text).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
     }
 
     /// Whole seconds left until `deadline`, never below 1 while it is still ahead, so "0" never shows

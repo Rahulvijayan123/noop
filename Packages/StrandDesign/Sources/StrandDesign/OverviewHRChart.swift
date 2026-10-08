@@ -4,17 +4,17 @@
 import SwiftUI
 import Charts
 
-// MARK: - Overview HR Chart (§ Today — day-in-review)
+// MARK: - Overview HR Chart (the zoomable whole-day line)
 //
-// The Today screen's 24h heart-rate line, annotated like WHOOP's "Overview HR":
-// the warm HR curve overlaid with a sleep band, a recovery marker at wake, a
-// strain marker at "now", and a sport glyph at each workout's HR peak. The line +
-// hover affordance mirror `TrendChart`; this view adds the marker layers and pins
-// the x-axis to the HR window so markers never stretch the timeline.
+// The whole-day line the Deep Timeline zooms and pans (and the classic Today's HR card), annotated with a
+// sleep band, optional recovery / effort markers and a sport glyph at each workout's peak. The x-axis is
+// pinned to the window so markers never stretch the timeline.
 //
-// Colours stay in NOOP's Titanium & Gold language (burnt-orange HR line, gold
-// recovery, amber strain, blue sleep) rather than copying WHOOP's blue. Tokens
-// only — never hardcode hex.
+// Drawn in the chart kit's house style (docs/DESIGN_SYSTEM.md): one flat line in the series colour with
+// monotone segments that break wherever the series skips (`TrendPoint.segment`), no area fill, the house
+// axes with the unit above the value axis, and flat labels. New pages that do not need zoom use
+// `IntradayChart` instead. With a `selection` binding the scrub drives the page's `ValueReadout` and the
+// chart draws only the rule and the point; without one it keeps its own tooltip (classic Today).
 
 public struct OverviewHRChart: View {
 
@@ -76,8 +76,22 @@ public struct OverviewHRChart: View {
     @Binding public var zoomDomain: ClosedRange<Date>?
     public var zoomBounds: ClosedRange<Date>?
 
-    /// Tint for the workout glyph badges (NOOP's warm strain accent by default).
+    /// Tint for the workout glyph badges (the effort accent by default).
     public var workoutTint: Color
+
+    /// How the series is drawn: a line (heart rate, HRV, temperature), points (a percentage read in short
+    /// windows, SpO₂), or bars from zero (a non-negative magnitude such as wrist motion).
+    public enum Mark: Sendable { case line, points, bars }
+    public var mark: Mark
+    /// The unit above the value axis ("bpm", "ms", "°C"); nil draws none.
+    public var unit: String?
+    /// The series colour. nil takes the top stop of `gradient`, so older call sites keep their hue.
+    public var color: Color?
+    /// What VoiceOver calls the chart ("Heart rate", "Skin temperature").
+    public var accessibilityTitle: String
+    /// When bound, the hover / scrub writes the selected sample's time here (for a `ValueReadout`) and the
+    /// floating tooltip is not drawn.
+    private var selection: Binding<Date?>?
 
     private let averageValue: Double
 
@@ -97,7 +111,12 @@ public struct OverviewHRChart: View {
         zoomDomain: Binding<ClosedRange<Date>?> = .constant(nil),
         zoomBounds: ClosedRange<Date>? = nil,
         valueFormat: @escaping (Double) -> String = { String(Int($0.rounded())) },
-        dateFormat: @escaping (Date) -> String = { TrendChart.defaultDateString($0) }
+        dateFormat: @escaping (Date) -> String = { TrendChart.defaultDateString($0) },
+        mark: Mark = .line,
+        unit: String? = nil,
+        color: Color? = nil,
+        accessibilityTitle: String? = nil,
+        selection: Binding<Date?>? = nil
     ) {
         let sorted = points.sorted { $0.date < $1.date }
         self.points = sorted
@@ -116,6 +135,11 @@ public struct OverviewHRChart: View {
         self.zoomBounds = zoomBounds
         self.valueFormat = valueFormat
         self.dateFormat = dateFormat
+        self.mark = mark
+        self.unit = unit
+        self.color = color
+        self.accessibilityTitle = accessibilityTitle ?? String(localized: "Heart rate, 24 hours", bundle: .module)
+        self.selection = selection
         self.averageValue = sorted.isEmpty
             ? valueRange.lowerBound
             : sorted.map(\.value).reduce(0, +) / Double(sorted.count)
@@ -237,18 +261,12 @@ public struct OverviewHRChart: View {
         min(max(d, xDomain.lowerBound), xDomain.upperBound)
     }
 
-    /// Map a value onto 0...1 over the value range, for the gradient stops.
-    private func unit(_ value: Double) -> Double {
-        let lo = valueRange.lowerBound, hi = valueRange.upperBound
-        guard hi > lo else { return 0 }
-        return min(max((value - lo) / (hi - lo), 0), 1)
+    /// The series colour: the caller's, else the top stop of the legacy gradient.
+    private var seriesColor: Color {
+        color ?? gradient.stops.last?.color ?? StrandPalette.metricRose
     }
 
-    private var valueGradient: LinearGradient {
-        LinearGradient(gradient: gradient, startPoint: .bottom, endPoint: .top)
-    }
-
-    /// The peak HR sample inside a workout window, where its glyph is anchored.
+    /// The peak sample inside a workout window, where its glyph is anchored.
     private func peak(in w: WorkoutSpan) -> TrendPoint? {
         points
             .filter { $0.date >= w.start && $0.date <= w.end }
@@ -259,64 +277,127 @@ public struct OverviewHRChart: View {
         guard !points.isEmpty else { return nil }
         let relX = x - plot.minX
         guard let date: Date = proxy.value(atX: relX) else { return nil }
-        return points.min(by: {
-            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-        })
+        return nearestPoint(to: date)
+    }
+
+    private func nearestPoint(to date: Date) -> TrendPoint? {
+        guard let index = ChartSelection.nearestIndex(to: date, in: points.map(\.date)) else { return nil }
+        return points[index]
+    }
+
+    /// Points whose segment is a run of one: a reading alone between two gaps, drawn as a point because a
+    /// line needs two.
+    private var isolatedPoints: [TrendPoint] {
+        var counts: [String: Int] = [:]
+        for p in displayPoints { counts[p.segment, default: 0] += 1 }
+        return displayPoints.filter { counts[$0.segment] == 1 }
+    }
+
+    // MARK: Axes
+
+    /// The x-axis for the visible window: `chartTimeTicks` (with the sub-hour tiers on the zooming surface),
+    /// minus a closing tick that would repeat the first label, labelled so no label repeats and the edge
+    /// labels sit inside the plot.
+    private var xLayout: ChartXAxisLayout {
+        let window = xDomain
+        var ticks = xTicks
+        if ticks.count > 1, let first = ticks.first, let last = ticks.last, last >= window.upperBound,
+           ChartAxis.format(last, .dateTime.hour().minute(), .current) == ChartAxis.format(first, .dateTime.hour().minute(), .current) {
+            ticks.removeLast()
+        }
+        let labels = ChartAxis.labels(for: ticks, style: .hours)
+        let anchors = zip(ticks, labels).map { ChartAxis.anchor(for: $0, label: $1, in: window) }
+        return ChartXAxisLayout(window: window, style: .hours, marks: ticks, labels: labels, anchors: anchors, grid: ticks)
+    }
+
+    private var yLayout: ChartYAxisLayout {
+        ChartValueAxis(unit: unit, domain: .fixed(valueRange), format: { [valueFormat] in valueFormat($0) })
+            .layout(domain: valueRange)
     }
 
     // MARK: Mark layers
     //
-    // Only lines/bands live as Chart marks. All text labels + workout glyphs are drawn in the
-    // overlay (below) via the proxy — Swift Charts' `.annotation` overflow-clamping needs macOS 14
-    // and gets clipped by the card's fixed height on 13, so we position labels ourselves.
+    // Lines, points, bars and bands are Chart marks. Text labels and workout glyphs are drawn in the overlay
+    // via the proxy: Swift Charts' `.annotation` overflow-clamping needs macOS 14 and gets clipped by the
+    // card's fixed height on 13, so the labels are positioned by hand.
 
     @ChartContentBuilder private var marks: some ChartContent {
-        // Sleep band — shaded region behind the curve (drawn first so the HR line/area sit on top).
+        // Sleep band behind the data.
         if let sleep, sleep.end > xDomain.lowerBound {
             RectangleMark(
                 xStart: .value("Sleep start", clampX(sleep.start)),
                 xEnd: .value("Sleep end", clampX(sleep.end))
             )
-            .foregroundStyle(StrandPalette.sleepDeep.opacity(0.32))
+            .foregroundStyle(StrandPalette.sleepDeep.opacity(0.16))
+        }
+        ForEach(workouts) { w in
+            if w.end > xDomain.lowerBound, w.start < xDomain.upperBound {
+                RectangleMark(xStart: .value("Workout start", clampX(w.start)), xEnd: .value("Workout end", clampX(w.end)))
+                    .foregroundStyle(workoutTint.opacity(NaraChartStyle.bandOpacity))
+            }
         }
 
-        ForEach(displayPoints) { p in
-            AreaMark(x: .value("Time", p.date), y: .value("BPM", p.value))
-                .interpolationMethod(.catmullRom)
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [
-                            StrandPalette.sample(stops: gradient.toStops(), at: unit(averageValue)).opacity(0.28),
-                            Color.clear
-                        ],
-                        startPoint: .top, endPoint: .bottom
-                    )
-                )
-        }
-        ForEach(displayPoints) { p in
-            LineMark(x: .value("Time", p.date), y: .value("BPM", p.value))
-                .interpolationMethod(.catmullRom)
-                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-                .foregroundStyle(valueGradient)
-        }
-
-        // Wake divider — the sleep→day boundary. Always shown with a sleep band so the band reads
-        // even before recovery calibrates (when the gold recovery rule is absent).
+        // Wake divider: the sleep-to-day boundary.
         if let sleep, sleep.end > xDomain.lowerBound, sleep.end < xDomain.upperBound {
             RuleMark(x: .value("Wake", clampX(sleep.end)))
-                .foregroundStyle(StrandPalette.sleepLight.opacity(0.5))
+                .foregroundStyle(StrandPalette.sleepDeep.opacity(0.5))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
         if let recovery {
             RuleMark(x: .value("Recovery", clampX(recovery.date)))
                 .foregroundStyle(recovery.color.opacity(0.85))
-                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
         if let effort {
             RuleMark(x: .value("Effort", clampX(effort.date)))
                 .foregroundStyle(effort.color.opacity(0.85))
-                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
+
+        switch mark {
+        case .line:
+            // One flat line, broken wherever the series skips (`segment`); a lone reading is a point.
+            ForEach(displayPoints) { p in
+                LineMark(x: .value("Time", p.date), y: .value("Value", p.value), series: .value("Run", p.segment))
+                    .interpolationMethod(.monotone)
+                    .lineStyle(NaraChartStyle.line)
+                    .foregroundStyle(seriesColor)
+            }
+            ForEach(isolatedPoints) { p in
+                PointMark(x: .value("Time", p.date), y: .value("Value", p.value))
+                    .symbolSize(NaraChartStyle.pointSize)
+                    .foregroundStyle(seriesColor)
+            }
+        case .points:
+            ForEach(displayPoints) { p in
+                PointMark(x: .value("Time", p.date), y: .value("Value", p.value))
+                    .symbolSize(displayPoints.count > NaraChartStyle.densePointThreshold
+                                ? NaraChartStyle.densePointSize : NaraChartStyle.pointSize)
+                    .foregroundStyle(seriesColor)
+            }
+        case .bars:
+            ForEach(displayPoints) { p in
+                RuleMark(x: .value("Time", p.date),
+                         yStart: .value("Zero", max(valueRange.lowerBound, 0)), yEnd: .value("Value", p.value))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5))
+                    .foregroundStyle(seriesColor)
+            }
+        }
+
+        if let selected = selectedPoint {
+            RuleMark(x: .value("Selected", selected.date))
+                .lineStyle(NaraChartStyle.selectionRule)
+                .foregroundStyle(NaraChartStyle.selectionColor)
+            PointMark(x: .value("Time", selected.date), y: .value("Value", selected.value))
+                .symbolSize(NaraChartStyle.selectedPointSize)
+                .foregroundStyle(seriesColor)
+        }
+    }
+
+    /// The sample under the bound selection (pages with a `ValueReadout`).
+    private var selectedPoint: TrendPoint? {
+        guard let date = selection?.wrappedValue else { return nil }
+        return nearestPoint(to: date)
     }
 
     // MARK: Overlay helpers
@@ -340,10 +421,12 @@ public struct OverviewHRChart: View {
     @ViewBuilder
     private func markerLabels(proxy: ChartProxy, plot: CGRect) -> some View {
         let topY = plot.minY + 12
-        if let sleep, let label = sleep.label, sleep.end > xDomain.lowerBound {
-            placed(SleepBandLabel(text: label),
-                   atX: xPos(clampX(sleep.start), proxy, plot) ?? plot.minX,
-                   topY: topY, width: estWidth(label, extra: 34), plot: plot)
+        if let sleep, let label = sleep.label, sleep.end > xDomain.lowerBound,
+           let start = xPos(clampX(sleep.start), proxy, plot) {
+            // Inside the band, at its leading edge (never centred on the band's start, which at midnight sat
+            // on the value axis).
+            let width = estWidth(label, extra: 30)
+            placed(SleepBandLabel(text: label), atX: start + width / 2 + 2, topY: topY, width: width, plot: plot)
         }
         if let recovery, let rx = xPos(clampX(recovery.date), proxy, plot) {
             placed(MarkerLabel(text: recovery.label, color: recovery.color),
@@ -357,40 +440,56 @@ public struct OverviewHRChart: View {
             if let pk = peak(in: w),
                let px = xPos(pk.date, proxy, plot),
                let pyRel = proxy.position(forY: pk.value) {
-                let cx = min(max(px, plot.minX + 14), plot.maxX - 14)
+                let cx = min(max(px, plot.minX + 12), plot.maxX - 12)
                 WorkoutBadge(symbol: w.symbol, tint: workoutTint)
-                    .position(x: cx, y: max(topY + 26, pyRel + plot.minY - 20))
+                    .position(x: cx, y: max(topY + 24, pyRel + plot.minY - 18))
             }
         }
     }
 
+    /// The floating readout, only when no page-level readout is bound (classic Today).
     @ViewBuilder
     private func hoverLayer(proxy: ChartProxy, plot: CGRect, container: CGSize) -> some View {
-        if showsHover, let hx = hoverX,
+        if selection == nil, showsHover, let hx = hoverX,
            let p = nearestPoint(toX: hx, proxy: proxy, plot: plot),
            let pxRel = proxy.position(forX: p.date),
            let pyRel = proxy.position(forY: p.value) {
             let cx = pxRel + plot.minX
             let cy = pyRel + plot.minY
-            let color = StrandPalette.sample(stops: gradient.toStops(), at: unit(p.value))
             CrosshairRule(x: cx, height: container.height)
-            HighlightDot(color: color).position(x: cx, y: cy)
+            HighlightDot(color: seriesColor).position(x: cx, y: cy)
             PositionedTooltip(
                 anchor: CGPoint(x: cx, y: cy),
                 container: container,
-                tooltip: ChartTooltip(value: valueFormat(p.value), label: dateFormat(p.date), accent: color)
+                tooltip: ChartTooltip(value: valueFormat(p.value), label: dateFormat(p.date), accent: seriesColor)
             )
+        }
+    }
+
+    /// Hover / scrub position → the bound selection (snapped to the nearest sample), or the tooltip's x.
+    private func setHover(_ x: CGFloat?, proxy: ChartProxy, plot: CGRect) {
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        withTransaction(tx) {
+            if let selection {
+                let next = x.flatMap { nearestPoint(toX: $0, proxy: proxy, plot: plot)?.date }
+                if next != selection.wrappedValue {
+                    if next != nil { StrandHaptic.selection.play() }
+                    selection.wrappedValue = next
+                }
+            } else {
+                hoverX = x
+            }
         }
     }
 
     #if os(iOS)
     /// Touch-and-hold-then-drag scrub (#979 spin-off). The stationary hold (0.25 s within 8 pt) is the
-    /// gate that separates scrubbing from the pan drag (min 6 pt) and pinch that own immediate movement.
-    /// LongPressGesture reports no location, so the crosshair appears from the drag phase's coordinates —
-    /// in practice the first micro-movement of a held finger, which is immediate; the engage haptic marks
-    /// the mode switch the instant the hold lands. Drives the SAME `hoverX` the Mac pointer hover drives,
-    /// so the readout (crosshair + dot + tooltip) is byte-identical across input methods.
-    private var touchScrubGesture: some Gesture {
+    /// gate that separates scrubbing from the pan drag (min 10 pt) and pinch that own immediate movement.
+    /// LongPressGesture reports no location, so the rule appears from the drag phase's coordinates — in
+    /// practice the first micro-movement of a held finger, which is immediate; the engage haptic marks the
+    /// mode switch the instant the hold lands. Drives the same selection / `hoverX` the Mac pointer drives.
+    private func touchScrubGesture(proxy: ChartProxy, plot: CGRect) -> some Gesture {
         LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
             .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
             .onChanged { value in
@@ -399,18 +498,11 @@ public struct OverviewHRChart: View {
                     scrubEngaged = true
                     StrandHaptic.selection.play()
                 }
-                if let drag {
-                    // Non-animating transaction, same reason as hover (TrendChart #104 flicker).
-                    var tx = Transaction()
-                    tx.disablesAnimations = true
-                    withTransaction(tx) { hoverX = drag.location.x }
-                }
+                if let drag { setHover(drag.location.x, proxy: proxy, plot: plot) }
             }
             .onEnded { _ in
                 scrubEngaged = false
-                var tx = Transaction()
-                tx.disablesAnimations = true
-                withTransaction(tx) { hoverX = nil }
+                setHover(nil, proxy: proxy, plot: plot)
             }
     }
     #endif
@@ -430,27 +522,9 @@ public struct OverviewHRChart: View {
 
     public var body: some View {
         Chart { marks }
-        .chartXScale(domain: xDomain)
-        .chartYScale(domain: valueRange)
-        // catmullRom overshoots past the data on sharp turns and the area gradient draws
-        // unclipped — clip the plot so a spiky HR curve doesn't bleed past the chart (see TrendChart).
+        .naraChartAxes(x: xLayout, y: yLayout)
+        // A bar or band clamped to the window never bleeds past the plot.
         .chartPlotStyle { plotArea in plotArea.clipped() }
-        .chartXAxis {
-            // Manual ticks chosen by visible span (6h down to 1min), matching Android chartTimeTicks.
-            // Swift Charts' .automatic(desiredCount:) doesn't guarantee per-minute ticks at deep zoom.
-            AxisMarks(values: xTicks) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
-            }
-        }
         .chartOverlay { proxy in
             GeometryReader { geo in
                 let plot = proxy.plotRectCompat(in: geo)
@@ -458,30 +532,23 @@ public struct OverviewHRChart: View {
                     markerLabels(proxy: proxy, plot: plot)
                     hoverLayer(proxy: proxy, plot: plot, container: geo.size)
                 }
-                .animation(StrandMotion.fade, value: hoverX)
                 .contentShape(Rectangle())
                 .onContinuousHover(coordinateSpace: .local) { phase in
                     guard showsHover else { return }
                     // Non-animating transaction: otherwise crossing the plot edge re-runs the
                     // line's draw-on animation and flickers the curve (mirrors TrendChart #104).
-                    var tx = Transaction()
-                    tx.disablesAnimations = true
-                    withTransaction(tx) {
-                        switch phase {
-                        case .active(let location): hoverX = location.x
-                        case .ended: hoverX = nil
-                        }
+                    switch phase {
+                    case .active(let location): setHover(location.x, proxy: proxy, plot: plot)
+                    case .ended: setHover(nil, proxy: proxy, plot: plot)
                     }
                 }
                 #if os(iOS)
-                // #979 spin-off — touch scrub. onContinuousHover above is pointer-only, so on iPhone the
-                // crosshair readout was unreachable (the collapsed a11y summary was the only datum
-                // affordance; cf. CompareView's touch-scrub note). Touch-and-hold claims the touch for
-                // scrubbing, then dragging moves the crosshair; lift clears it. Gating behind the hold is
-                // what keeps zoom/pan untouched: an immediate drag exceeds the hold's max distance and
-                // still pans (ZoomPanModifier), pinch still zooms, double-tap still resets. `.subviews`
+                // #979 spin-off — touch scrub. onContinuousHover above is pointer-only. Touch-and-hold claims
+                // the touch for scrubbing, then dragging moves the rule; lift clears it. Gating behind the
+                // hold is what keeps zoom/pan untouched: an immediate drag exceeds the hold's max distance
+                // and still pans (ZoomPanModifier), pinch still zooms, double-tap still resets. `.subviews`
                 // masks the gesture entirely on the call sites that don't opt in.
-                .gesture(touchScrubGesture, including: (touchScrub && showsHover) ? .all : .subviews)
+                .gesture(touchScrubGesture(proxy: proxy, plot: plot), including: (touchScrub && showsHover) ? .all : .subviews)
                 #endif
             }
         }
@@ -494,7 +561,7 @@ public struct OverviewHRChart: View {
         // `zoomDomain`, which is nil until the user first zooms, so keying on it left the gestures unmounted
         // in exactly the state where the first pinch has to land. `apply` below normalises a window that
         // covers the full clamp bounds back to nil, so an un-zoomed drag (a pan of the whole day into
-        // itself) never flips the hint/Reset row into its "Zoomed in" state.
+        // itself) never flips the page into its "Zoomed in" state.
         .modifier(ZoomPanModifier(
             isActive: zoomBounds != nil,
             scrubActive: {
@@ -521,25 +588,28 @@ public struct OverviewHRChart: View {
                 return Self.panned(base, deltaSeconds: -dx * secPerPoint, bounds: bounds)
             }
         ))
-        // Collapse the Charts marks into ONE meaningful VoiceOver element with a summary, instead of
-        // letting VoiceOver walk every line/area/rule/rect mark as a separate, contextless axis value
-        // (matches the sibling TrendChart). The only datum affordance otherwise is hover, which is
-        // dead on touch — so on iPhone this chart spoke no heart rate at all.
+        // One VoiceOver element with a summary, instead of every mark as a separate, contextless value.
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("Heart rate, 24 hours"))
-        .accessibilityValue(Text(accessibilitySummary))
+        .accessibilityLabel(Text(accessibilityTitle))
+        .accessibilityValue(Text(selectedPoint.map { "\(dateFormat($0.date)), \(valueText($0.value))" } ?? accessibilitySummary))
     }
 
-    /// One-line VoiceOver summary: the day's HR (count, mean, range) plus the band/marker context the
-    /// chart shows visually, so the collapsed element still conveys the whole picture (cf. the Android
+    private func valueText(_ value: Double) -> String {
+        guard let unit, !unit.isEmpty else { return valueFormat(value) }
+        return "\(valueFormat(value)) \(unit)"
+    }
+
+    /// One-line VoiceOver summary: the window's readings (count, mean, range) plus the band/marker context
+    /// the chart shows visually, so the collapsed element still conveys the whole picture (cf. the Android
     /// OverviewHRChart semantics).
     private var accessibilitySummary: String {
         guard !points.isEmpty else { return String(localized: "No heart-rate data", bundle: .module) }
         let values = points.map(\.value)
         let lo = values.min() ?? valueRange.lowerBound
         let hi = values.max() ?? valueRange.upperBound
+        let average = unit.map { "\(valueFormat(averageValue)) \($0)" } ?? valueFormat(averageValue)
         var parts = [String(localized: "\(points.count) readings", bundle: .module),
-                     String(localized: "average \(valueFormat(averageValue)) bpm", bundle: .module),
+                     String(localized: "average \(average)", bundle: .module),
                      String(localized: "range \(valueFormat(lo)) to \(valueFormat(hi))", bundle: .module)]
         if let sleep {
             parts.append(String(localized: "asleep \(Self.hoursMinutes(sleep.end.timeIntervalSince(sleep.start)))", bundle: .module))
@@ -623,54 +693,50 @@ public func chartTimeTicks(start: Date, end: Date, calendar: Calendar = .current
 }
 
 // MARK: - Marker chrome
+//
+// Flat, like the kit's in-plot labels: footnote text on an 85 % card-colour plate, no shadow, no glow.
 
-/// Sport glyph in a tinted badge, anchored above a workout's HR peak.
+/// Sport glyph on a flat inset plate, anchored above a workout's peak.
 private struct WorkoutBadge: View {
     let symbol: String
     let tint: Color
     var body: some View {
         Image(systemName: symbol)
-            .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(StrandPalette.textPrimary)
-            .frame(width: 22, height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(tint)
-            )
-            .shadow(color: tint.opacity(0.5), radius: 4, y: 1)
+            .font(StrandFont.icon(.inline))
+            .foregroundStyle(tint)
+            .frame(width: 20, height: 20)
+            .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(StrandPalette.surfaceInset))
             .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
-/// Small caps read-out for the recovery / strain edge markers (e.g. "67% Recovery").
+/// The recovery / effort edge-marker label (e.g. "67% Recovery").
 private struct MarkerLabel: View {
     let text: String
     let color: Color
     var body: some View {
         Text(text)
             .font(StrandFont.footnote)
-            .fontWeight(.semibold)
             .foregroundStyle(color)
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
-            .background(NoopPanelSurface(cornerRadius: 6, elevated: true, surfaceOpacity: 0.92))
+            .padding(.horizontal, 3)
+            .background(StrandPalette.surfaceRaised.opacity(0.85), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
             .fixedSize()
             .allowsHitTesting(false)
     }
 }
 
-/// Moon glyph + sleep duration, shown at the leading corner of the sleep band.
+/// Sleep duration inside the leading edge of the sleep band.
 private struct SleepBandLabel: View {
     let text: String
     var body: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "moon.fill").font(.system(size: 9))
-            Text(text).font(StrandFont.footnote).fontWeight(.semibold)
+        HStack(spacing: 3) {
+            Image(systemName: "moon.fill").font(StrandFont.icon(.inline))
+            Text(text).font(StrandFont.footnote.monospacedDigit())
         }
-        .foregroundStyle(StrandPalette.sleepLight)
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(NoopPanelSurface(cornerRadius: 6, elevated: true, surfaceOpacity: 0.92))
+        .foregroundStyle(StrandPalette.sleepDeep)
+        .padding(.horizontal, 3)
+        .background(StrandPalette.surfaceRaised.opacity(0.85), in: RoundedRectangle(cornerRadius: 3, style: .continuous))
         .fixedSize()
         .allowsHitTesting(false)
     }

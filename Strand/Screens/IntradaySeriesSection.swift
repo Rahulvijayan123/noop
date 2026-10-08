@@ -4,7 +4,7 @@ import StrandDesign
 import WhoopStore
 import WhoopProtocol
 
-/// "Through the day": the server's dense intraday series for one metric.
+/// "Today" on a metric page: the server's dense intraday series for one metric.
 ///
 /// The hosted worker recomputes HRV, resting heart rate, respiratory rate, steps and calories as the
 /// phone uploads new strap data and publishes one value per bucket (a minute for respiratory rate, steps
@@ -29,6 +29,8 @@ struct IntradaySeriesSection: View {
     @State private var wearEvents: [(ts: Int, kind: String)] = []
     /// Persisted standard-BLE sensor-contact transitions (G3/F4) for the visible range.
     @State private var contactSamples: [(ts: Int, state: ContactEligibility)] = []
+    /// The time under the finger; nil reads the newest bucket.
+    @State private var selected: Date?
 
     private static let refreshSeconds: UInt64 = 30
     /// The re-read loop runs only while the app is on screen: a detail page left open when the phone locked
@@ -54,6 +56,7 @@ struct IntradaySeriesSection: View {
             await loadEligibilityEvidence(dayOffset)
             await keepFresh(dayOffset, onScreen: scenePhase == .active)
         }
+        .onChangeCompat(of: dayOffset) { _ in selected = nil }
     }
 
     private func keepFresh(_ offset: Int, onScreen: Bool) async {
@@ -93,13 +96,18 @@ struct IntradaySeriesSection: View {
         let bounds = IntradayRange.bounds(for: metric, dayOffset: dayOffset, now: now)
         let window = store.windows[bounds.key]
         let failed = store.failures[bounds.key] != nil
+        let samples = self.samples(window)
         return NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                header(bounds: bounds)
-                readout(window: window, bounds: bounds, failed: failed, now: now)
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                header(bounds: bounds, window: window, samples: samples)
                 eligibilityLine(window: window)
-                chart(window: window, bounds: bounds)
-                footer(window: window, failed: failed)
+                chart(window: window, bounds: bounds, samples: samples, failed: failed)
+                if failed, window != nil {
+                    Text("Showing saved readings. The server can't be reached right now.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -127,14 +135,23 @@ struct IntradaySeriesSection: View {
         }
     }
 
-    private func header(bounds: IntradayRange.Bounds) -> some View {
+    /// The card title (the day) with the value under the finger, or the latest, on the line below, and the
+    /// steps back through earlier days.
+    private func header(bounds: IntradayRange.Bounds, window: IntradaySeriesWindow?,
+                        samples: [IntradayChart.Sample]) -> some View {
         HStack(alignment: .center, spacing: NoopMetrics.space2) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Through the day").strandOverline()
+            VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
                 Text(dayTitle(bounds))
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
+                Text(readoutLine(samples: samples, window: window))
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .transaction { $0.animation = nil }
             }
+            .accessibilityElement(children: .combine)
             Spacer(minLength: 0)
             HStack(spacing: 0) {
                 stepButton(symbol: "chevron.left", label: "Earlier day",
@@ -146,11 +163,14 @@ struct IntradaySeriesSection: View {
 
     private func stepButton(symbol: String, label: LocalizedStringKey, enabled: Bool,
                             action: @escaping () -> Void) -> some View {
-        Button(action: action) {
+        Button {
+            StrandHaptic.selection.play()
+            action()
+        } label: {
             Image(systemName: symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(enabled ? StrandPalette.textSecondary : StrandPalette.textTertiary.opacity(0.4))
-                .frame(width: 40, height: 40)
+                .font(StrandFont.icon(.inline).weight(.semibold))
+                .foregroundStyle(enabled ? StrandPalette.accent : StrandPalette.textTertiary)
+                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -170,103 +190,60 @@ struct IntradaySeriesSection: View {
 
     // MARK: Read-out
 
-    private func readout(window: IntradaySeriesWindow?, bounds: IntradayRange.Bounds,
-                         failed: Bool, now: Date) -> some View {
-        let reading = headline(window)
-        return VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(reading ?? "—")
-                    .font(StrandFont.number(40))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                if reading != nil {
-                    Text(metric.unit)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-            }
-            Text(subtitle(window: window, bounds: bounds, failed: failed, now: now))
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    /// The latest reading for a line metric, the running total for an additive one; nil with no points.
-    private func headline(_ window: IntradaySeriesWindow?) -> String? {
-        guard let window, let latest = window.latest(metric) else { return nil }
-        return metric.format(metric.isCumulative ? window.total(metric) : latest.value)
-    }
-
-    private func subtitle(window: IntradaySeriesWindow?, bounds: IntradayRange.Bounds,
-                          failed: Bool, now: Date) -> String {
-        guard let window else {
-            return failed ? String(localized: "Can't reach the server right now.") : String(localized: "Loading…")
-        }
-        guard let last = window.latest(metric) else {
-            return String(localized: "No readings in this period yet.")
-        }
-        var parts: [String] = []
-        if metric.isCumulative {
-            let through = Date(timeIntervalSince1970: TimeInterval(last.start + window.bucketSeconds(for: metric)))
-                .formatted(date: .omitted, time: .shortened)
-            parts.append(bounds.isLive
-                ? String(localized: "So far today, through \(through)")
-                : String(localized: "Total for the day"))
-        } else {
-            parts.append(String(localized: "Latest at \(last.date.formatted(date: .omitted, time: .shortened))"))
-        }
-        if bounds.isLive, let computed = window.latestComputedAt {
-            parts.append(String(localized: "updated \(IntradayFormat.age(from: computed, to: now))"))
-        }
-        return parts.joined(separator: " · ")
+    /// "62 ms at 09:12" for a line metric, "4,210 steps by 09:12" for a running total: the sample under
+    /// the finger, else the newest.
+    private func readoutLine(samples: [IntradayChart.Sample], window: IntradaySeriesWindow?) -> String {
+        guard window != nil else { return " " }
+        let sample = selected.flatMap { ChartSelection.sample(for: $0, in: samples) } ?? samples.last
+        guard let sample else { return String(localized: "No readings yet") }
+        let value = "\(metric.format(sample.value)) \(metric.unit)"
+        let time = sample.time.formatted(date: .omitted, time: .shortened)
+        return metric.isCumulative ? String(localized: "\(value) by \(time)") : String(localized: "\(value) at \(time)")
     }
 
     // MARK: Chart
 
-    private struct Run: Identifiable {
-        let id: Int
-        let points: [IntradaySeriesPoint]
+    /// The buckets as chart samples: the value for a line metric, the running total (held flat across a
+    /// stretch with no buckets) for an additive one.
+    private func samples(_ window: IntradaySeriesWindow?) -> [IntradayChart.Sample] {
+        guard let window else { return [] }
+        if metric.isCumulative {
+            return window.staircase(metric).map { IntradayChart.Sample(time: $0.date, value: $0.total) }
+        }
+        return window.points(metric).map { IntradayChart.Sample(time: $0.date, value: $0.value) }
     }
 
-    private func chart(window: IntradaySeriesWindow?, bounds: IntradayRange.Bounds) -> some View {
+    private func chart(window: IntradaySeriesWindow?, bounds: IntradayRange.Bounds,
+                       samples: [IntradayChart.Sample], failed: Bool) -> some View {
         let lower = Date(timeIntervalSince1970: TimeInterval(window?.from ?? bounds.from))
         let upper = Date(timeIntervalSince1970: TimeInterval(window?.to ?? bounds.to))
-        let span = lower ... upper
-        let points = window?.points(metric) ?? []
-        let stairs = metric.isCumulative ? (window?.staircase(metric) ?? []) : []
-        let grouped: [[IntradaySeriesPoint]] = metric.isCumulative ? [] : (window?.runs(metric) ?? [])
-        let runs: [Run] = grouped.enumerated().map { Run(id: $0.offset, points: $0.element) }
-        let spoken = headline(window).map { "\($0) \(metric.unit)" } ?? ""
-        return Chart {
-            if metric.isCumulative {
-                runningTotalMarks(stairs)
-            } else {
-                lineMarks(runs: runs, points: points)
+        let state: ChartState = {
+            guard let window else {
+                return failed ? .empty(String(localized: "Can't reach the server right now")) : .loading
             }
+            return window.points(metric).isEmpty ? .empty(String(localized: "No readings yet")) : .ready
+        }()
+        // A line breaks where more than three buckets are missing (the same rule `IntradaySeriesWindow.runs`
+        // applies); a running total is held flat across a hole, so it never breaks.
+        let width = window?.bucketSeconds(for: metric) ?? IntradayRange.bucketSeconds
+        let gap = metric.isCumulative ? 86_400 : max(3 * width, 300)
+        return IntradayChart(samples: samples, bucketSeconds: gap, color: accent,
+                             interpolation: metric.isCumulative ? .linear : .monotone,
+                             live: bounds.isLive, state: state, window: lower...upper,
+                             y: ChartValueAxis(unit: metric.unit, domain: axisDomain,
+                                               format: metric.fractionDigits > 0 ? ChartValueAxis.decimals(1) : ChartValueAxis.integer),
+                             selection: $selected, height: NoopMetrics.chartHeightSecondary,
+                             accessibilityTitle: String(localized: "\(metric.unit) through the day"))
+    }
+
+    private var axisDomain: ChartDomain {
+        switch metric {
+        case .hrv: return .fitted(minSpan: 20)
+        case .restingHeartRate: return .fitted(minSpan: 10)
+        case .respiratoryRate: return .fitted(minSpan: 3)
+        case .steps: return .fitted(minSpan: 500, includeZero: true)
+        case .calories: return .fitted(minSpan: 100, includeZero: true)
         }
-        .chartXScale(domain: span)
-        .chartYScale(domain: .automatic(includesZero: metric.isCumulative))
-        .chartYAxis { AxisMarks(position: .leading) }
-        .chartXAxis {
-            AxisMarks(values: Self.axisTicks(in: span)) { _ in
-                AxisGridLine()
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
-        .frame(height: 150)
-        .overlay {
-            if points.isEmpty, window != nil {
-                Text("No readings yet")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("\(metric.unit) through the day"))
-        .accessibilityValue(Text(spoken))
     }
 
     /// Local midnight, 6 AM, noon and 6 PM inside the span, so a rolling 24-hour window is labelled at clock
@@ -287,59 +264,8 @@ struct IntradaySeriesSection: View {
         return ticks
     }
 
-    @ChartContentBuilder
-    private func runningTotalMarks(_ stairs: [IntradayCumulativePoint]) -> some ChartContent {
-        let unit = metric.unit
-        let fill = LinearGradient(colors: [accent.opacity(0.32), accent.opacity(0.03)],
-                                  startPoint: .top, endPoint: .bottom)
-        ForEach(Array(stairs.enumerated()), id: \.offset) { _, step in
-            AreaMark(x: .value("Time", step.date), y: .value(unit, step.total))
-                .foregroundStyle(fill)
-                .interpolationMethod(.linear)
-            LineMark(x: .value("Time", step.date), y: .value(unit, step.total))
-                .foregroundStyle(accent)
-                .interpolationMethod(.linear)
-        }
-    }
-
-    @ChartContentBuilder
-    private func lineMarks(runs: [Run], points: [IntradaySeriesPoint]) -> some ChartContent {
-        let unit = metric.unit
-        let dot: CGFloat = points.count > 150 ? 8 : 16
-        ForEach(runs) { run in
-            ForEach(run.points, id: \.start) { point in
-                LineMark(x: .value("Time", point.date), y: .value(unit, point.value),
-                         series: .value("Run", run.id))
-                    .foregroundStyle(accent)
-                    .interpolationMethod(.monotone)
-            }
-        }
-        ForEach(points, id: \.start) { point in
-            PointMark(x: .value("Time", point.date), y: .value(unit, point.value))
-                .foregroundStyle(accent)
-                .symbolSize(dot)
-        }
-    }
-
-    // MARK: Footer
-
-    private func footer(window: IntradaySeriesWindow?, failed: Bool) -> some View {
-        let count = window?.points(metric).count ?? 0
-        return VStack(alignment: .leading, spacing: 4) {
-            if count > 0 {
-                Text(count == 1 ? String(localized: "1 reading") : String(localized: "\(count) readings"))
-            }
-            Text(note)
-            if failed, window != nil {
-                Text("Showing saved readings. The server can't be reached right now.")
-            }
-        }
-        .font(StrandFont.footnote)
-        .foregroundStyle(StrandPalette.textTertiary)
-        .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private var note: String {
+    /// What the series is, for the detail page's About card.
+    static func note(for metric: IntradayMetric) -> String {
         switch metric {
         case .hrv:
             return String(localized: "Heart rate variability needs a still wrist, so readings fill in mostly while you rest and sleep.")

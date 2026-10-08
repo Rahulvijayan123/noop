@@ -1086,6 +1086,12 @@ final class Repository: ObservableObject {
     }
 
     private func refreshPass(days nDays: Int) async {
+        #if DEBUG
+        // `--demo-load-delay`: hold the load so the loading state can be screenshotted (DemoLaunchArgs.swift).
+        if let release = DemoLaunch.loadReleaseDate, release > Date() {
+            try? await Task.sleep(nanoseconds: UInt64(release.timeIntervalSinceNow * 1e9))
+        }
+        #endif
         guard let store = await ensureStore() else { return }
         refreshGen &+= 1
         let myGen = refreshGen

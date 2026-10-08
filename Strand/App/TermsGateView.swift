@@ -13,89 +13,95 @@ struct TermsGateView: View {
     private var allChecked: Bool { checks.allSatisfy { $0 } }
 
     var body: some View {
-        ZStack {
-            StrandPalette.surfaceBase.ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                VStack(spacing: 6) {
-                    Text("Before you use NOOP")
-                        .font(StrandFont.title1)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Please read the points below, then confirm each statement.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.top, 36)
-                .padding(.bottom, 22)
-
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        ForEach(Terms.points, id: \.0) { point in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(point.0)
-                                    .font(StrandFont.headline)
-                                    .foregroundStyle(StrandPalette.textPrimary)
-                                Text(point.1)
-                                    .font(StrandFont.footnote)
-                                    .foregroundStyle(StrandPalette.textSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-
-                        Rectangle()
-                            .fill(StrandPalette.hairline)
-                            .frame(height: 1)
-                            .padding(.vertical, 2)
-
-                        Text("Please confirm each of these:")
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                        Text("Before you use Nara")
+                            .font(StrandFont.title1)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .accessibilityAddTraits(.isHeader)
+                        Text("Read and confirm each point.")
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
-
-                        ForEach(Array(Terms.attestations.enumerated()), id: \.offset) { idx, line in
-                            Toggle(isOn: Binding(get: { checks[idx] }, set: { checks[idx] = $0 })) {
-                                Text(line)
-                                    .font(StrandFont.footnote)
-                                    .foregroundStyle(StrandPalette.textPrimary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                            #if os(macOS)
-                            .toggleStyle(.checkbox)   // iOS falls back to the default switch toggle
-                            #endif
-                        }
-
-                        Text("The full terms are in TERMS.md, shipped with NOOP. This is not legal advice.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .padding(.top, 2)
                     }
-                    .padding(.horizontal, 30)
-                    .padding(.bottom, 18)
-                }
-                #if os(iOS)
-                // #697/#horizontal-swipe parity, see ScreenScaffold. Shown before onboarding/pairing,
-                // on top of everything, so this is the very first screen a new install sees.
-                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                #endif
 
-                Rectangle()
-                    .fill(StrandPalette.hairline)
-                    .frame(height: 1)
+                    NoopCard(padding: 0) {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(Terms.points.enumerated()), id: \.offset) { index, point in
+                                if index > 0 { NoopListDivider() }
+                                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                                    Text(point.0)
+                                        .font(StrandFont.headline)
+                                        .foregroundStyle(StrandPalette.textPrimary)
+                                    Text(point.1)
+                                        .font(StrandFont.subhead)
+                                        .foregroundStyle(StrandPalette.textSecondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .padding(NoopMetrics.cardPadding)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
 
-                Button(action: onAccept) {
-                    Text("Accept & Continue")
-                        .font(StrandFont.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 9)
+                    NoopListSection("Please confirm each of these:", footer: "The full terms are in TERMS.md, shipped with the app. This summary is not legal advice.") {
+                        ForEach(Array(Terms.attestations.enumerated()), id: \.offset) { idx, line in
+                            if idx > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                            attestationRow(idx, line)
+                        }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(StrandPalette.accent)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.top, NoopMetrics.space6)
+                .padding(.bottom, NoopMetrics.space4)
+            }
+            #if os(iOS)
+            // #697/#horizontal-swipe parity, see ScreenScaffold. Shown before onboarding/pairing,
+            // on top of everything, so this is the very first screen a new install sees.
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            #endif
+
+            Rectangle()
+                .fill(StrandPalette.hairline)
+                .frame(height: NoopMetrics.hairlineWidth)
+
+            NoopButton("Accept and continue", kind: .primary, fullWidth: true, action: onAccept)
                 .disabled(!allChecked)
                 .keyboardShortcut(.defaultAction)
-                .padding(26)
-            }
-            .frame(maxWidth: 560, maxHeight: 720)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.vertical, NoopMetrics.space4)
         }
+        .frame(maxWidth: 560, maxHeight: 760)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(StrandPalette.surfaceBase.ignoresSafeArea())
+    }
+
+    /// One statement to confirm: a checkmark the person ticks themselves (never pre-ticked), the whole row the
+    /// tap target.
+    private func attestationRow(_ idx: Int, _ line: String) -> some View {
+        Button {
+            checks[idx].toggle()
+        } label: {
+            HStack(alignment: .top, spacing: NoopMetrics.space3) {
+                Image(systemName: checks[idx] ? "checkmark.circle.fill" : "circle")
+                    .font(StrandFont.icon(.row))
+                    .foregroundStyle(checks[idx] ? StrandPalette.accent : StrandPalette.textTertiary)
+                    .frame(width: 28)
+                Text(line)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, NoopMetrics.cardPadding)
+            .padding(.vertical, NoopMetrics.space3)
+            .frame(minHeight: NoopMetrics.listRowMinHeight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(MoreRowPressStyle())
+        .accessibilityAddTraits(checks[idx] ? .isSelected : [])
+        .accessibilityHint("Double-tap to confirm")
     }
 }

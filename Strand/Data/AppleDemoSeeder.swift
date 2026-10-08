@@ -18,7 +18,8 @@ enum AppleDemoSeeder {
 
     static let whoop = "my-whoop"
     static let apple = "apple-health"
-    private static let DAYS = 120
+    /// 120 unless `--demo-days` asks for a sparser history (see DemoLaunchArgs.swift).
+    private static var DAYS: Int { DemoLaunch.seedDays }
     /// Effort rescale factor: the old 0–21 strain scale → the new 0–100 Effort scale.
     private static let STRAIN_SCALE = 100.0 / 21.0
 
@@ -36,7 +37,7 @@ enum AppleDemoSeeder {
         guard requested else { return }
         seedDemoDeviceIfNeeded(into: store)
         let existing = (try? await store.dailyMetrics(deviceId: whoop, from: "0000-00-00", to: "9999-99-99")) ?? []
-        guard existing.isEmpty else { return }
+        guard existing.isEmpty, DAYS > 0 else { return }
         do { try await seed(into: store) }
         catch { NSLog("AppleDemoSeeder: seed failed — \(error)") }
     }

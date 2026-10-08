@@ -33,8 +33,7 @@ struct LiftSessionExerciseSheet: View {
     private var canAdd: Bool { !trimmedExercise.isEmpty && !adding }
 
     var body: some View {
-        ScreenScaffold(title: "Add exercise",
-                       subtitle: "Pick one you have done before, or type a new name.") {
+        ScreenScaffold(title: "Add exercise") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 exerciseSection
                 LiftMusclePicker(primary: $primary, secondaries: $secondaries)
@@ -74,7 +73,7 @@ struct LiftSessionExerciseSheet: View {
     private var exerciseSection: some View {
         let suggestions = LiftExerciseVocabulary.suggestions(vocabulary, matching: exercise, limit: 8)
         return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Exercise", overline: "Movement")
+            SectionHeader("Exercise")
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     TextField("Incline dumbbell press", text: $exercise)
@@ -84,7 +83,7 @@ struct LiftSessionExerciseSheet: View {
                         .focused($focused, equals: .exercise)
                     if !suggestions.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Used before").strandOverline()
+                            Text("Used before").strandLabel()
                             ForEach(suggestions, id: \.id) { row in
                                 Button { adopt(row) } label: { LiftExerciseSuggestionLabel(row: row) }
                                     .buttonStyle(.plain)

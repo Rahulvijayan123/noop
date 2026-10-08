@@ -58,12 +58,7 @@ struct CoachView: View {
     private var suggestions: [String] { coach.suggestions }
 
     var body: some View {
-        ScreenScaffold(title: "Coach",
-                       subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Coach sits in one atmosphere. Static + non-interactive; the frosted
-                       // message/setup cards below sit on the opaque canvas and stay legible.
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Coach") {
             if coach.isConfigured {
                 connectedHeader
                 transcript
@@ -81,8 +76,9 @@ struct CoachView: View {
                 }
                 composer
                 // K12: show a rough token estimate when the draft is non-empty.
+                // Only worth a line when the draft is long enough to matter for a small model.
                 if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let tokens = coach.estimatedTokens(forDraft: draft) {
+                   let tokens = coach.estimatedTokens(forDraft: draft), tokens > 8000 {
                     tokenEstimateBar(tokens)
                 }
                 privacyFootnote
@@ -397,16 +393,15 @@ struct CoachView: View {
         HStack(spacing: 10) {
             StatePill("\(coach.provider.displayName) · \(coach.model)", tone: .accent, showsDot: true)
             Spacer()
-            if coach.sending {
-                StatePill("Thinking", tone: .accent, pulsing: true)
-            }
             // #2243: the way through to what used to be stacked under this header.
             Button {
                 showSettings = true
             } label: {
                 Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(StrandFont.icon(.row))
                     .foregroundStyle(StrandPalette.textSecondary)
+                    .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel(String(localized: "Coach settings"))
@@ -476,7 +471,7 @@ struct CoachView: View {
     #endif
 
     private var transcript: some View {
-        StrandCard(padding: 16) {
+        NoopCard {
             if coach.messages.isEmpty {
                 emptyTranscript
             } else {
@@ -520,7 +515,8 @@ struct CoachView: View {
             Text("Ask your first question")
                 .font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.textPrimary)
-            Text("Coach reads a summary of your last two weeks plus 30-day averages and recent workouts, then answers in plain language. Try a suggestion below.")
+            // What leaves the device is disclosed where the question is asked, not only in settings.
+            Text("Sana reads a summary of your last two weeks plus 30-day averages and recent workouts, then answers in plain language.")
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -536,12 +532,12 @@ struct CoachView: View {
                 Spacer(minLength: 48)
                 Text(message.text)
                     .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.surfaceBase)
+                    .foregroundStyle(StrandPalette.goldDeepText)
                     .textSelection(.enabled)
                     .multilineTextAlignment(.leading)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 10)
-                    .background(StrandPalette.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .background(StrandPalette.accent, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     .frame(maxWidth: 520, alignment: .trailing)
             }
             .accessibilityElement(children: .combine)
@@ -556,9 +552,7 @@ struct CoachView: View {
                     .markdownTheme(.strand)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
-                    .frostedCardSurface(tint: StrandPalette.chargeColor, cornerRadius: 16)
+                    .padding(.vertical, 2)
                     .frame(maxWidth: 560, alignment: .leading)
                     // K8: Copy / Share / Save context menu on assistant replies.
                     .contextMenu {
@@ -596,9 +590,7 @@ struct CoachView: View {
                 .foregroundStyle(StrandPalette.textSecondary)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .frostedCardSurface(tint: StrandPalette.chargeColor, cornerRadius: 16)
+        .padding(.vertical, NoopMetrics.space2)
         .frame(maxWidth: 320, alignment: .leading)
         .accessibilityLabel("Coach is thinking")
     }
@@ -611,7 +603,7 @@ struct CoachView: View {
                     .accessibilityHidden(true)
                 Text(message)
                     .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.statusCritical)
+                    .foregroundStyle(StrandPalette.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
@@ -682,8 +674,8 @@ struct CoachView: View {
                         send(prompt)
                     } label: {
                         Text(prompt)
-                            .font(StrandFont.captionNumber)
-                            .foregroundStyle(StrandPalette.textSecondary)
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textPrimary)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
                             .background(StrandPalette.surfaceInset, in: Capsule(style: .continuous))
@@ -718,8 +710,8 @@ struct CoachView: View {
                         send(prompt)
                     } label: {
                         Text(prompt)
-                            .font(StrandFont.captionNumber)
-                            .foregroundStyle(StrandPalette.textSecondary)
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textPrimary)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 7)
                             .background(StrandPalette.surfaceInset, in: Capsule(style: .continuous))
@@ -739,14 +731,14 @@ struct CoachView: View {
     private func tokenEstimateBar(_ tokens: Int) -> some View {
         HStack(spacing: 4) {
             Image(systemName: "speedometer")
-                .font(.system(size: 10))
+                .font(StrandFont.icon(.inline))
                 .foregroundStyle(StrandPalette.textTertiary)
             Text("~\(tokens) tokens")
-                .font(StrandFont.captionNumber)
+                .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
             if tokens > 8000 {
                 Text("· may exceed small context windows")
-                    .font(StrandFont.captionNumber)
+                    .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
         }

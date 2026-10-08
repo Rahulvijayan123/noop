@@ -1706,15 +1706,9 @@ struct TodayView: View {
                        // Today supplies its own inner eager VStack (below), so the staggered section reveal is
                        // unchanged, this only defers building the single inner stack until it scrolls in.
                        // Byte-identical layout (LazyVStack == eager VStack alignment/spacing/header).
-                       lazy: true,
-                       // PERF (scroll stutter): the day-cycle scene is a static masked Image. CoreAnimation
-                       // already caches it as a stable image layer, so it does NOT re-rasterize on body
-                       // re-evals or scroll. NO .drawingGroup(), wrapping this 600pt masked image in a
-                       // second offscreen pass DOUBLED its cost and re-rasterised it on every TodayView
-                       // body re-eval (the masked image is itself one offscreen pass). That was a v7.0.2
-                       // lag regression; removing the flatten restores native layer caching.
-                       topBackground: showDayCycleBackground
-                           ? AnyView(SceneScreenBackground(hour: demoSceneHour)) : nil) {
+                       // The flat canvas (DESIGN_SYSTEM, Canvas and surfaces): the day-cycle scene no
+                       // longer draws behind Today.
+                       lazy: true) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 #if os(iOS)
                 // Compact top bar: profile/settings (left) · ‹ Today › day-nav (centre, bold) · strap
@@ -1878,18 +1872,18 @@ struct TodayView: View {
         #endif
         // The scoring guide, opened at a specific score from its ⓘ.
         .sheet(item: $guideSection) { section in
-            ScoringGuideView(initialSection: section, onClose: { guideSection = nil })
+            NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
         }
         // The scoring guide opened at the top (the first-run card's primary action).
         .sheet(isPresented: $showGuideTop) {
-            ScoringGuideView(onClose: { showGuideTop = false })
+            NavigationStack { ScoringGuideView(onClose: { showGuideTop = false }) }
         }
         // The Updates inbox (the header bell). Both platforms.
         .sheet(isPresented: $showCoachLauncher) {
             CoachLauncherSheet()
         }
         .sheet(isPresented: $showUpdatesInbox) {
-            UpdatesInboxView(onClose: { showUpdatesInbox = false })
+            NavigationStack { UpdatesInboxView(onClose: { showUpdatesInbox = false }) }
         }
         // H6, the steps-calibration sheet, opened from an estimated Steps tile (the same sheet Settings
         // hosts). Presented from Today so a WHOOP 4.0 user can calibrate from where the "est." caption shows.

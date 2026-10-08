@@ -75,7 +75,7 @@ private struct StrapConnectionPage: View, Equatable {
 
     var body: some View {
         let current = status
-        return ScreenScaffold(title: "Pair & connect") {
+        return ScreenScaffold(title: "Pair & connect", titleDisplay: .navigationBar) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 StrapStatusCard(status: current,
                                 link: link.inputs,
@@ -154,25 +154,25 @@ private struct StrapConnectionPage: View, Equatable {
     // MARK: Groups
 
     private func connectionGroup(_ status: StrapConnectionStatus) -> some View {
-        SettingsGroup("Connection") {
+        NoopListSection("Connection") {
             row(.reconnect, symbol: "arrow.clockwise", status, busy: status.phase == .searching, perform: connect)
-            SettingsDivider()
+            NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
             row(.disconnect, symbol: "xmark.circle", status, perform: disconnect)
         }
     }
 
     private func strapGroup(_ status: StrapConnectionStatus) -> some View {
-        SettingsGroup("Strap") {
+        NoopListSection("Strap") {
             row(.buzz, symbol: "waveform", status, perform: buzz)
-            SettingsDivider()
+            NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
             row(.restart, symbol: "power", status) { confirmingRestart = true }
         }
     }
 
     private func pairingGroup(_ status: StrapConnectionStatus) -> some View {
-        SettingsGroup("Pairing", footer: "None of these actions delete your recorded data.") {
+        NoopListSection("Pairing", footer: "None of these actions delete your recorded data.") {
             row(.repair, symbol: "link", status) { showingRepair = true }
-            SettingsDivider()
+            NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
             row(.pairDifferent, symbol: "plus.circle", status) { showingAddStrap = true }
         }
     }
@@ -222,13 +222,13 @@ private struct StrapConnectionPage: View, Equatable {
 
 // MARK: - Action row
 
-/// One tappable action: an icon tile, a title, and a line that either says what it does or, when the action
+/// One tappable action: an icon, a title, and a line that either says what it does or, when the action
 /// is unavailable, why. The reason stays at full contrast so a greyed-out row never leaves anyone guessing.
 ///
 /// `possibleDetails` is every line this row can show; the row is as tall as the tallest, so the line changing
 /// (a reason appearing, a hint turning into "Buzz sent") does not move the rows below it. `busy` is nil for a
-/// row that never shows a spinner, and otherwise keeps the spinner's width whether or not it is spinning, so
-/// the text wraps the same either way.
+/// row that never shows a spinner; every row keeps the spinner's width either way, so the text wraps the same
+/// on every row.
 struct StrapActionRow: View {
     let symbol: String
     let title: String
@@ -242,13 +242,9 @@ struct StrapActionRow: View {
         Button(action: action) {
             HStack(alignment: .center, spacing: NoopMetrics.space3) {
                 Image(systemName: symbol)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(StrandFont.icon(.row))
                     .foregroundStyle(tint)
-                    .frame(width: 34, height: 34)
-                    .background(
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(tint.opacity(0.14))
-                    )
+                    .frame(width: 28, height: 28)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
@@ -261,19 +257,19 @@ struct StrapActionRow: View {
                                  color: isEnabled ? StrandPalette.textTertiary : StrandPalette.textSecondary)
                 }
                 Spacer(minLength: NoopMetrics.space2)
-                if let busy {
-                    ZStack {
-                        if busy { ProgressView().controlSize(.small).tint(StrandPalette.accent) }
-                    }
-                    .frame(width: 20, height: 20)
+                // The spinner's slot is kept on every row, spinning or not and whether or not the row can
+                // spin, so the text wraps at the same width on every row of the page.
+                ZStack {
+                    if busy == true { ProgressView().controlSize(.small).tint(StrandPalette.accent) }
                 }
+                .frame(width: 20, height: 20)
             }
             .padding(.horizontal, NoopMetrics.space4)
             .padding(.vertical, NoopMetrics.space3)
             .frame(maxWidth: .infinity, minHeight: 60, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(SettingsRowStyle())
+        .buttonStyle(MoreRowPressStyle())
         .disabled(!isEnabled)
         .accessibilityElement(children: .combine)
     }
@@ -332,8 +328,6 @@ private struct StrapRepairSheet: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            Rectangle().fill(StrandPalette.hairline).frame(height: 1)
             ScrollView {
                 VStack(alignment: .leading, spacing: NoopMetrics.space4) {
                     Text("Use this when your strap won't connect, drops right away, or says it isn't fully paired. Your recorded data isn't touched.")
@@ -345,32 +339,14 @@ private struct StrapRepairSheet: View {
                     pairingModeStep
                     pairStep
                 }
-                .padding(NoopMetrics.space5)
+                .padding(NoopMetrics.screenHPadding)
             }
         }
-        .background(StrandPalette.surfaceBase.ignoresSafeArea())
+        .moreSheetChrome("Re-pair your strap", onDone: onClose)
         .onAppear { link.refresh() }
         #if os(macOS)
         .frame(minWidth: 460, minHeight: 620)
         #endif
-    }
-
-    private var header: some View {
-        HStack {
-            Text("Re-pair your strap")
-                .font(StrandFont.rounded(22))
-                .foregroundStyle(StrandPalette.textPrimary)
-            Spacer(minLength: 0)
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 24))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-        }
-        .padding(.horizontal, NoopMetrics.space5)
-        .padding(.vertical, NoopMetrics.space4)
     }
 
     // MARK: Steps
@@ -433,7 +409,7 @@ private struct StrapRepairSheet: View {
             HStack {
                 Group {
                     if startedPairing {
-                        StatePill("\(current.title)", tone: current.tone, pulsing: current.isBusy)
+                        StatePill("\(current.title)", tone: current.tone)
                             .id(current.phase)
                     } else {
                         StatePill("Not started yet", tone: .neutral, showsDot: false)
@@ -482,7 +458,7 @@ private struct RepairStep<Content: View>: View {
     @ViewBuilder var content: () -> Content
 
     var body: some View {
-        StrandCard(padding: NoopMetrics.space4) {
+        NoopCard {
             HStack(alignment: .top, spacing: NoopMetrics.space3) {
                 badge
                 VStack(alignment: .leading, spacing: NoopMetrics.space3) {
@@ -501,7 +477,7 @@ private struct RepairStep<Content: View>: View {
             Circle().fill(tint.opacity(0.16))
             if done {
                 Image(systemName: "checkmark")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(StrandFont.icon(.inline).weight(.bold))
                     .foregroundStyle(tint)
             } else {
                 Text("\(number)")
@@ -564,7 +540,7 @@ enum StrapDemoSeed {
             live.connected = true; live.bonded = true
         case "hint":
             live.connected = true; live.bonded = true
-            live.pairingHint = "Nara can see your strap, but it won't pair. It's probably still paired with the official WHOOP app, or held by an old Bluetooth pairing. Fully close the WHOOP app, tap the strap until its lights flash blue, and if it's listed in Bluetooth settings, forget it there. Then connect again."
+            live.pairingHint = "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP."
         case "connecting":
             live.connected = true
         case "disconnected":

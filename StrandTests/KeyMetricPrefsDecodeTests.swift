@@ -39,10 +39,18 @@ final class KeyMetricPrefsDecodeTests: XCTestCase {
                        KeyMetricPrefs.decodeEnabled("charge"))
     }
 
-    /// An empty or whitespace-only string still yields the full default order (a fresh install).
-    func testBlankStringStillYieldsTheDefaultOrder() {
-        XCTAssertEqual(KeyMetricPrefs.decodeEnabled("   "), KeyMetric.defaultOrder)
-        XCTAssertEqual(KeyMetricPrefs.decodeEnabled(""), KeyMetric.defaultOrder)
+    /// An empty or whitespace-only string yields the fresh-install set (the Today cleanup trimmed it from
+    /// every tile to eight; `defaultOrder` stays the editor's full universe).
+    func testBlankStringYieldsTheDefaultEnabledSet() {
+        XCTAssertEqual(KeyMetricPrefs.decodeEnabled("   "), KeyMetric.defaultEnabled)
+        XCTAssertEqual(KeyMetricPrefs.decodeEnabled(""), KeyMetric.defaultEnabled)
+    }
+
+    /// The fresh-install set is a subset of the editor's universe, in its order, with no duplicates.
+    func testDefaultEnabledIsAnOrderedSubsetOfTheUniverse() {
+        XCTAssertEqual(KeyMetric.defaultEnabled.count, 8)
+        XCTAssertEqual(Set(KeyMetric.defaultEnabled).count, KeyMetric.defaultEnabled.count)
+        XCTAssertEqual(KeyMetric.defaultOrder.filter(KeyMetric.defaultEnabled.contains), KeyMetric.defaultEnabled)
     }
 
     /// `.skinTemp` is a persisted case whose raw token must stay byte-identical to Kotlin's
@@ -85,7 +93,7 @@ final class KeyMetricPrefsDecodeTests: XCTestCase {
     func testLayoutAlreadyShowingBothOrNotSavedIsLeftAlone() {
         XCTAssertNil(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "skinTemp,bloodOxygen,charge"))
         XCTAssertNil(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: ""),
-                     "a blank layout already decodes to defaultOrder, which has both")
+                     "a blank layout decodes to the fresh-install set and is not rewritten")
         XCTAssertNil(KeyMetricPrefs.layoutAddingBloodOxygenAndSkinTemp(savedLayout: "   "))
     }
 

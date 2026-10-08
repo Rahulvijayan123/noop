@@ -51,6 +51,10 @@ final class QuietMotionCoverageTests: XCTestCase {
             "declares the breathe primitive; call sites are censused separately",
     ]
 
+    /// Files allowed to keep a PAUSED animation timeline for now, each with the reason.
+    /// (The Sana chart reveal that paused its clock was removed with its Metal mosaic; nothing is exempt now.)
+    private static let pausedTimelineExemptions: [String: String] = [:]
+
     private func repoRoot() throws -> URL {
         // .../Packages/StrandDesign/Tests/StrandDesignTests/QuietMotionCoverageTests.swift -> repo root
         let root = URL(fileURLWithPath: #filePath)
@@ -167,7 +171,9 @@ final class QuietMotionCoverageTests: XCTestCase {
         for (rel, text) in swiftFiles(under: root) {
             for (line, arguments) in animationScheduleArguments(in: codeLines(text)) {
                 timelines += 1
-                if arguments.contains("paused:") { offenders.append("\(rel):\(line): .animation(\(arguments))") }
+                if arguments.contains("paused:"), Self.pausedTimelineExemptions[rel] == nil {
+                    offenders.append("\(rel):\(line): .animation(\(arguments))")
+                }
             }
         }
         XCTAssertGreaterThanOrEqual(timelines, 6, "expected to find the known animation timelines, found \(timelines)")
