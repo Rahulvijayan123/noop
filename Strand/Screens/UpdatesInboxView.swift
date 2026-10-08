@@ -3,90 +3,72 @@ import StrandDesign
 
 // MARK: - Updates inbox
 //
-// The sheet behind the Today header's bell. A calm, newest-first log of what's new — release notes,
-// "new data arrived" readings, strap heads-ups, and the Today info-cards the user swiped away (which
-// can be restored from here). Tapping an actionable row routes via NavRouter; a dismissed-card row
-// offers "Restore to Today". Everything is on-device and non-clinical — informational, never a verdict.
+// A calm, newest-first log of what's new — release notes, "new data arrived" readings, strap heads-ups,
+// and the Today info-cards the user swiped away (which can be restored from here). Tapping an actionable
+// row routes via NavRouter; a dismissed-card row offers "Restore to Today". Everything is on-device and
+// non-clinical — informational, never a verdict.
 //
-// Sheet idiom matches WhatsNewView: a FIXED macOS frame (a macOS sheet hosting a ScrollView collapses
-// without one) and iOS presentationDetents via `noopSheetPresentation`.
+// Content only: the title and Done are the host navigation bar's. As a sheet the caller wraps it in a
+// NavigationStack and passes `onClose`; pushed (Browse) it passes nothing and the back button is the way out.
 struct UpdatesInboxView: View {
     @EnvironmentObject var updateStore: UpdateStore
     @EnvironmentObject var router: NavRouter
-    let onClose: () -> Void
+    /// Dismisses the presenting sheet; nil when the inbox is pushed.
+    var onClose: (() -> Void)? = nil
 
     private var unread: [UpdateItem] { updateStore.sortedItems.filter { !$0.read } }
     private var read: [UpdateItem] { updateStore.sortedItems.filter { $0.read } }
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-                .background(NoopChromeSurface())
-            Divider().overlay(StrandPalette.hairline)
             content
             if !updateStore.items.isEmpty {
-                Divider().overlay(StrandPalette.hairline)
+                Rectangle().fill(StrandPalette.hairline).frame(height: NoopMetrics.hairlineWidth)
                 footer
             }
         }
         #if os(macOS)
-        // A fixed frame is mandatory — a macOS sheet hosting a ScrollView collapses to nothing without
-        // one (same reason WhatsNewView pins 560×640).
-        .frame(width: 460, height: 640)
+        // A macOS sheet hosting a ScrollView collapses to nothing without a size (same as WhatsNewView).
+        .frame(minWidth: 460, minHeight: 640)
         #else
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .noopSheetPresentation(largeFirst: true)
         #endif
-        .background(StrandPalette.surfaceBase)
-    }
-
-    // MARK: Header
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Inbox").font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Text("Updates")
-                    .font(StrandFont.rounded(26, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text(subtitle).font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
+        .background(StrandPalette.surfaceBase.ignoresSafeArea())
+        .navigationTitle(Text("Updates"))
+        #if os(iOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
+        .toolbar {
+            if let onClose {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onClose).foregroundStyle(StrandPalette.accent)
+                }
             }
-            Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
         }
-        .padding(20)
-    }
-
-    private var subtitle: String {
-        let n = updateStore.unreadCount
-        if updateStore.items.isEmpty { return String(localized: "What's new in the app and your data") }
-        return n == 0 ? String(localized: "All caught up") : String(localized: "\(n) unread")
     }
 
     // MARK: Content
 
     @ViewBuilder private var content: some View {
         if updateStore.items.isEmpty {
-            emptyState
+            Text("You're all caught up.")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
         } else {
             ScrollView {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                     if !unread.isEmpty {
-                        section("NEW", items: unread)
+                        section("New", items: unread)
                     }
                     if !read.isEmpty {
                         section("Earlier", items: read)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.vertical, NoopMetrics.space6)
             }
             #if os(iOS)
             // #697/#horizontal-swipe parity, see ScreenScaffold.
@@ -97,48 +79,27 @@ struct UpdatesInboxView: View {
 
     private func section(_ label: LocalizedStringKey, items: [UpdateItem]) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            Text(label).font(StrandFont.overline)
-                .foregroundStyle(StrandPalette.textTertiary)
+            Text(label)
+                .font(StrandFont.subhead.weight(.medium))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .accessibilityAddTraits(.isHeader)
             ForEach(items) { item in
                 UpdateRow(item: item, onTap: { handleTap(item) }, onRestore: { restore(item) })
             }
         }
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 12) {
-            Spacer(minLength: 40)
-            Image(systemName: "bell.slash")
-                .font(.system(size: 34, weight: .regular))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .accessibilityHidden(true)
-            Text("You're all caught up.")
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text("New release notes and fresh data will land here.")
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 40)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.horizontal, 32)
-    }
-
     // MARK: Footer
 
     private var footer: some View {
-        HStack {
+        HStack(spacing: NoopMetrics.space3) {
             Button {
                 StrandHaptic.selection.play()
                 withAnimation(StrandMotion.interactive) { updateStore.clearAll() }
             } label: {
                 Label("Clear all", systemImage: "trash")
-                    .font(StrandFont.subhead)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(StrandPalette.textSecondary)
+            .buttonStyle(NoopButtonStyle(.tertiary))
             .disabled(updateStore.items.isEmpty)
 
             Spacer()
@@ -147,13 +108,13 @@ struct UpdatesInboxView: View {
                 StrandHaptic.selection.play()
                 withAnimation(StrandMotion.interactive) { updateStore.markAllRead() }
             } label: {
-                Text("Mark all read").frame(minWidth: 120).padding(.vertical, 4)
+                Text("Mark all read")
             }
-            .buttonStyle(.borderedProminent)
-            .tint(StrandPalette.accent)
+            .buttonStyle(NoopButtonStyle(.secondary))
             .disabled(updateStore.unreadCount == 0)
         }
-        .padding(16)
+        .padding(.horizontal, NoopMetrics.screenHPadding)
+        .padding(.vertical, NoopMetrics.space3)
     }
 
     // MARK: Actions
@@ -165,7 +126,7 @@ struct UpdatesInboxView: View {
         guard let key = item.deepLink, let dest = NavRouter.Destination(deepLinkKey: key) else { return }
         // Route via the shell, then close this sheet so the destination is visible.
         router.requestedDestination = dest
-        onClose()
+        onClose?()
     }
 
     /// Restore a dismissed Today card: flip its `@AppStorage` flag back (so it reappears), drop the
@@ -178,7 +139,7 @@ struct UpdatesInboxView: View {
             UserDefaults.standard.set(false, forKey: TodayCardDismissal.flagKey(payload))
         }
         updateStore.requestRestore(item)
-        onClose()
+        onClose?()
     }
 }
 
@@ -190,7 +151,7 @@ private struct UpdateRow: View {
     let onRestore: () -> Void
 
     var body: some View {
-        NoopCard(tint: item.read ? nil : tint) {
+        NoopCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: symbol)
@@ -201,7 +162,7 @@ private struct UpdateRow: View {
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(item.title)
-                            .font(StrandFont.headline.weight(.semibold))
+                            .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(item.message)
@@ -216,7 +177,7 @@ private struct UpdateRow: View {
                     }
                     Spacer(minLength: 0)
                     if !item.read {
-                        Circle().fill(StrandPalette.statusCritical)
+                        Circle().fill(StrandPalette.accent)
                             .frame(width: 8, height: 8)
                             .padding(.top, 5)
                             .accessibilityHidden(true)

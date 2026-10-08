@@ -701,6 +701,7 @@ enum DemoScreens {
         // `--demo-kit-only <ids>` for a few sections.
         case "kitcharts": return AnyView(KitChartsGallery())
         case "kitcomponents": return AnyView(KitComponentsGallery())
+        case "whatsnew": return AnyView(WhatsNewView(onClose: {}))
         default:         return nil
         }
     }

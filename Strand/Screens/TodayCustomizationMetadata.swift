@@ -18,22 +18,23 @@ extension TodaySection {
     var customizationTint: Color {
         switch self {
         case .hero: return StrandPalette.chargeColor
-        case .synthesis: return StrandPalette.accent
+        case .synthesis: return StrandPalette.textSecondary
         case .keyMetrics: return StrandPalette.metricPurple
         case .workouts: return StrandPalette.effortColor
         case .heartRate: return StrandPalette.metricRose
         case .menstrualCycle: return StrandPalette.restColor
         case .journal: return StrandPalette.metricAmber
-        case .addedCards: return StrandPalette.accent
+        case .addedCards: return StrandPalette.textSecondary
         }
     }
 }
 
 extension KeyMetric {
+    /// The tile's symbol, on the Today tile and in the editor alike.
     var customizationIcon: String {
         switch self {
         case .charge: return "bolt.heart"
-        case .effort: return "figure.run"
+        case .effort: return "bolt"
         case .rest: return "moon.stars"
         case .hrv: return "waveform.path.ecg"
         case .restingHr: return "heart.fill"
@@ -47,15 +48,17 @@ extension KeyMetric {
         }
     }
 
+    /// The metric's domain colour, on its icon only (the tile surface is never tinted). Interactive
+    /// accent is not a data colour, so no metric uses it.
     var customizationTint: Color {
         switch self {
         case .charge: return StrandPalette.chargeColor
         case .effort: return StrandPalette.effortColor
-        case .rest, .hrv: return StrandPalette.metricPurple
+        case .rest: return StrandPalette.restColor
+        case .hrv, .respiratory: return StrandPalette.metricPurple
         case .restingHr: return StrandPalette.metricRose
         case .bloodOxygen, .steps: return StrandPalette.metricCyan
-        case .respiratory, .weight: return StrandPalette.accent
-        case .calories, .skinTemp: return StrandPalette.metricAmber
+        case .calories, .skinTemp, .weight: return StrandPalette.metricAmber
         }
     }
 }

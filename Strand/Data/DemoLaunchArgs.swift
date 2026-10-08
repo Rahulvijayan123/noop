@@ -38,6 +38,7 @@ enum DemoLaunch {
         case "layer1": return .layer1
         case "baselineCharts": return .baselineCharts
         case "pipelineDiagnostics": return .pipelineDiagnostics
+        case "browse": return .browse
         default: return nil
         }
     }

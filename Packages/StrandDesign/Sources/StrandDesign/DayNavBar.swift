@@ -5,9 +5,9 @@ import SwiftUI
 
 // MARK: - DayNavBar — chevron + date-jump day selector
 //
-// The Today screen's day navigator: ◀/▶ chevrons step one day at a time (◀ older, ▶ newer,
-// disabled at today so a future day can't be selected), and the centre accent block shows the
-// selected day's label + date and opens a graphical DatePicker capped at today for a direct jump.
+// The classic Today screen's day navigator, drawn as the shared `PeriodStepper`: chevrons step one day
+// at a time (back older, forward newer, disabled at today so a future day can't be selected), and the
+// centre shows the selected day's label + date and opens a graphical DatePicker capped at today.
 // Replaces the fixed three-day strip so navigation reaches arbitrarily far back. The same control
 // renders on macOS and iOS — the DatePicker is shown in a popover on both. Mirrors the Android
 // DayNavBar (StrandComponents.kt). Offset is days-back-from-today (0 = today).
@@ -37,76 +37,35 @@ public struct DayNavBar: View {
 
     private var canGoNewer: Bool { selectedOffset > 0 }
 
-    private var label: LocalizedStringKey {
+    private var label: String {
         switch selectedOffset {
-        case 0:  return "Today"
-        case 1:  return "Yesterday"
+        case 0:  return String(localized: "Today", bundle: .module)
+        case 1:  return String(localized: "Yesterday", bundle: .module)
         default:
-            let formattedDay = selectedDay.formatted(
+            return selectedDay.formatted(
                 .dateTime.weekday(.abbreviated).day().month(.abbreviated).locale(locale)
             )
-            return LocalizedStringKey(formattedDay)
         }
     }
 
-    public var body: some View {
-        HStack(spacing: 12) {
-            Spacer(minLength: 0)
-            Button { onSelect(selectedOffset + 1) } label: {
-                Image(systemName: "chevron.left")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.accent)
-                    .frame(width: 44, height: 44)        // ≥44pt hit target (HIG); glyph stays 17pt
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text("Previous day", bundle: .module))
+    /// The full date beside the label, once you have navigated away from today (on today the label
+    /// already reads "Today").
+    private var subtitle: String? {
+        guard selectedOffset > 0 else { return nil }
+        return selectedDay.formatted(.dateTime.day().month(.abbreviated).year().locale(locale))
+    }
 
-            // Centre accent block — the selected day's label + full date, tappable to jump.
-            Button { showingPicker = true } label: {
-                VStack(spacing: 2) {
-                    Text(label, bundle: .module)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .lineLimit(1)
-                    // On today the label already reads "Today"; the full date would just duplicate the
-                    // header, so it's shown only once you've navigated to another day (for orientation).
-                    if selectedOffset > 0 {
-                        Text(selectedDay.formatted(
-                            .dateTime.day().month(.abbreviated).year().locale(locale)
-                        ))
-                            .font(StrandFont.captionNumber)
-                            .foregroundStyle(StrandPalette.accent)
-                            .lineLimit(1)
-                    }
-                }
-                .padding(.vertical, 9)
-                .padding(.horizontal, 20)
-                // Reads as one of the flat WHOOP-grey cards, not a black bar. On macOS the full-width
-                // pill sits over the bright Today day-scene, where the darker inset well read as black;
-                // surfaceRaised (the card fill) lifts it to card level so it matches the dashboard
-                // cards. No gold wash behind the date — the gold pop lives only on the date text.
-                .background(blockFill, in: blockShape)
-                .overlay(blockShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text("Pick a date", bundle: .module))
+    /// The shared `PeriodStepper` look (one stepper for days, nights and weeks), with the date jump on the
+    /// centre.
+    public var body: some View {
+        PeriodStepper(title: label, subtitle: subtitle,
+                      canGoBack: true, canGoForward: canGoNewer,
+                      onBack: { onSelect(selectedOffset + 1) },
+                      onForward: { if canGoNewer { onSelect(selectedOffset - 1) } },
+                      onTitleTap: { showingPicker = true })
             .popover(isPresented: $showingPicker) {
                 datePickerPopover
             }
-
-            Button { if canGoNewer { onSelect(selectedOffset - 1) } } label: {
-                Image(systemName: "chevron.right")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(canGoNewer ? StrandPalette.accent : StrandPalette.textTertiary)
-                    .frame(width: 44, height: 44)        // ≥44pt hit target (HIG); glyph stays 17pt
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .disabled(!canGoNewer)
-            .accessibilityLabel(Text("Next day", bundle: .module))
-            Spacer(minLength: 0)
-        }
     }
 
     /// Graphical date jump, capped at today so a future day can't be picked. Converting the chosen
@@ -133,21 +92,6 @@ public struct DayNavBar: View {
             // #840 — iPad popover needs an explicit size or the graphical picker clips. Safe on macOS 13
             // and iPhone (the popover/sheet sizes to this); avoids the macOS 13.3-only compact-adaptation API.
             .frame(minWidth: 320, minHeight: 360)
-    }
-
-    private var blockShape: RoundedRectangle { RoundedRectangle(cornerRadius: 14, style: .continuous) }
-
-    /// Fill for the centre day block. On macOS the bar spans the bright Today day-scene, so it uses the
-    /// raised WHOOP-grey card fill to read as a card rather than a black bar; iOS (which uses the compact
-    /// top-bar day-nav, not this control) keeps the inset well fill unchanged.
-    private var blockFill: Color {
-        #if os(macOS)
-        // Compact translucent pill (not a full-width bar) — the scene shows through so it reads as a
-        // floating control over the day-scene, never a solid black bar; white label stays legible at 0.72.
-        StrandPalette.surfaceBase.opacity(0.72)
-        #else
-        StrandPalette.surfaceInset
-        #endif
     }
 
 }
