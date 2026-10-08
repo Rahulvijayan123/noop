@@ -132,7 +132,8 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
     // clearly-labelled HRV lenses surfaced in their own card. Each stays null when its engine's
     // span/beat gate is not met. Faithful twin of the iOS StressView readouts.
     var stressIndex by remember { mutableStateOf<StressIndex.Components?>(null) }
-    var freqHrv by remember { mutableStateOf<HrvFreqDomain.Bands?>(null) }
+    // Frequency-domain PRV outcome (spec-02 §1): absolute band powers in ms², or the withheld reason.
+    var freqHrv by remember { mutableStateOf<HrvFreqDomain.Outcome?>(null) }
     // #2144: on the SAME interval the Today card and the widget score on, and gated the same way.
     // This used to read once, on open, which is why the screen happened to be the fresher of the two
     // when the report was filed: it had simply been opened later. Refreshing only the card would have
@@ -171,7 +172,7 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
                     val beats = core?.rr.orEmpty()
                     val lenses = if (beats.isEmpty()) null else runCatching {
                         withContext(Dispatchers.Default) {
-                            StressIndex.components(beats) to HrvFreqDomain.freqDomain(beats)
+                            StressIndex.components(beats) to HrvFreqDomain.analyze(beats)
                         }
                     }.getOrNull()
                     stressIndex = lenses?.first
@@ -295,7 +296,7 @@ private fun androidx.compose.foundation.lazy.LazyListScope.StressContent(
     daytime: DaytimeStress.Result?,
     daytimeUsesPersonalBaseline: Boolean,
     stressIndex: StressIndex.Components?,
-    freqHrv: HrvFreqDomain.Bands?,
+    freqHrv: HrvFreqDomain.Outcome?,
     onBreathe: () -> Unit,
 ) {
     // 1 · HERO — the count-up PipBar + band + one plain-English line, all in one card
@@ -479,17 +480,41 @@ private fun StressHeroCard(model: StressModel, modifier: Modifier = Modifier) {
  */
 private fun hasAdvancedReadouts(
     stressIndex: StressIndex.Components?,
-    freqHrv: HrvFreqDomain.Bands?,
+    freqHrv: HrvFreqDomain.Outcome?,
 ): Boolean {
     if (stressIndex != null) return true
-    if (freqHrv != null && (freqHrv.lfhf != null || freqHrv.hf > 0)) return true
+    // A computed outcome shows the card (values or the withheld reason) unless the day has no R-R at all.
+    if (freqHrv != null && (freqHrv.bands != null || freqHrv.unavailableReason != HrvFreqDomain.UnavailableReason.NO_INTERVALS)) return true
     return false
+}
+
+/** Frequency-domain coverage line: what the band powers came from, or why they are withheld. Twin of iOS
+ *  `StressView.freqDomainFootnote`. Optical PRV, descriptive only (no autonomic-balance claim). */
+internal fun freqDomainFootnote(outcome: HrvFreqDomain.Outcome): String {
+    val b = outcome.bands
+    if (b != null) {
+        val usedMin = (b.usedSpanSec / 60).roundToInt()
+        val observedMin = (b.observedSpanSec / 60).roundToInt()
+        return when (b.tier) {
+            HrvFreqDomain.Tier.FULL_WINDOWS ->
+                "Frequency-domain pulse-rate variability (optical) from ${b.windowCount} uninterrupted five-minute stretches: $usedMin of $observedMin min of today's R-R. Band powers are absolute (ms²), averaged across stretches; a descriptive lens, not a measure of nervous-system balance."
+            HrvFreqDomain.Tier.SHORT_WINDOW_HF_ONLY ->
+                "HF only: today's longest uninterrupted stretch of beats was ${b.usedSpanSec.roundToInt()} s, too short for the low-frequency band (needs 250 s). Optical pulse-rate variability; descriptive only."
+        }
+    }
+    return when (outcome.unavailableReason) {
+        HrvFreqDomain.UnavailableReason.NO_CONTIGUOUS_WINDOW ->
+            "Frequency-domain PRV is not shown: today's R-R has no stretch of at least a minute without gaps or dropped beats."
+        HrvFreqDomain.UnavailableReason.REJECTED_FRACTION_TOO_HIGH ->
+            "Frequency-domain PRV is not shown: too many beats were rejected as artifacts in every uninterrupted stretch today."
+        else -> "Frequency-domain PRV is not shown: no R-R intervals today."
+    }
 }
 
 @Composable
 private fun StressAdvancedCard(
     stressIndex: StressIndex.Components?,
-    freqHrv: HrvFreqDomain.Bands?,
+    freqHrv: HrvFreqDomain.Outcome?,
     modifier: Modifier = Modifier,
 ) {
     NoopCard(tint = Palette.stressColor, modifier = modifier) {
@@ -520,27 +545,28 @@ private fun StressAdvancedCard(
                     )
                 }
             }
-            // Frequency-domain HRV: prefer the LF/HF ratio; if the span was too short for LF
-            // (lfhf null) fall back to the HF (rest) band power so the lens still reads.
-            if (freqHrv != null) {
-                val ratio = freqHrv.lfhf
+            // Frequency-domain PRV (spec-02 §1): absolute band powers in ms² from qualified contiguous
+            // windows of today's OPTICAL pulse intervals. HF whenever a window qualifies; LF/HF only with a
+            // full (>= 250 s) window. Twin of iOS StressView.
+            val bands = freqHrv?.bands
+            if (bands != null) {
+                tiles.add { m ->
+                    StatTile(
+                        modifier = m,
+                        label = uiString(R.string.l10n_stress_screen_hf_power_3a9fd8c9),
+                        value = "${bands.hf.roundToInt()} ms²",
+                        caption = "0.15–0.40 Hz · optical PRV",
+                        accent = StressRamp.STEADY,
+                    )
+                }
+                val ratio = bands.lfhf
                 if (ratio != null) {
                     tiles.add { m ->
                         StatTile(
                             modifier = m,
-                            label = uiString(R.string.l10n_stress_screen_autonomic_balance_lf_hf_776cb6f7),
+                            label = "LF/HF ratio",
                             value = StressTrace.formatRatio(ratio),
-                            caption = "Sympathetic vs parasympathetic tone from frequency-domain HRV. Higher leans sympathetic (stress-ward).",
-                            accent = StressRamp.STEADY,
-                        )
-                    }
-                } else if (freqHrv.hf > 0) {
-                    tiles.add { m ->
-                        StatTile(
-                            modifier = m,
-                            label = uiString(R.string.l10n_stress_screen_hf_power_3a9fd8c9),
-                            value = "${freqHrv.hf.roundToInt()}",
-                            caption = "Parasympathetic (rest) band of your HRV.",
+                            caption = "Optical PRV · descriptive",
                             accent = StressRamp.STEADY,
                         )
                     }
@@ -554,6 +580,14 @@ private fun StressAdvancedCard(
                         if (rowTiles.size == 1) Spacer(Modifier.weight(1f))
                     }
                 }
+            }
+
+            if (freqHrv != null) {
+                Text(
+                    freqDomainFootnote(freqHrv),
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
             }
 
             Text(

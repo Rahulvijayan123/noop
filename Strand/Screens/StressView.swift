@@ -62,8 +62,9 @@ struct StressView: View {
     /// async read completes, and individually nil when their span/beat gates are not met.
     /// Baevsky Stress Index components (si / Mo / AMo / MxDMn).
     @State private var stressIndex: StressIndex.Components?
-    /// Frequency-domain HRV bands (LF / HF / LF-HF / total power).
-    @State private var freqHRV: HRVFreqDomain.Bands?
+    /// Frequency-domain PRV (spec-02 §1 repair): absolute LF / HF band powers in ms² from qualified
+    /// contiguous five-minute windows of today's optical R-R, or the reason they are withheld.
+    @State private var freqHRV: HRVFreqDomain.Outcome?
 
     /// Cached StressModel + the input signature it was built from. Rebuilding the
     /// model is expensive (z-score derivation + per-day date parsing over the full
@@ -165,9 +166,9 @@ struct StressView: View {
         }
 
         // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no
-        // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
-        // its own gate is not met (Baevsky needs >= 20 clean beats; freq-HRV needs >= 60 s span),
-        // in which case its row is simply hidden.
+        // DB / schema change, and no effect on the 0..3 score above). Baevsky returns nil below 20 clean
+        // beats (row hidden); the frequency-domain outcome carries its own withheld reason when no
+        // qualified contiguous window (>= 60 s, timestamps consistent with the intervals) exists.
         // A SECOND hop on purpose (#2181). `HRVFreqDomain` is a Lomb-Scargle periodogram: its cost is
         // (clean beats x frequency-grid steps) with a transcendental per step, and it takes whatever beat
         // count the day's read returned — the store read above is bounded at 200 000, this is not bounded
@@ -178,7 +179,7 @@ struct StressView: View {
         // is unmet. Same `runUnescalated` reasoning as above, and the default `.utility` is real here
         // because nothing escalates it: this is the phase that must yield to the UI.
         let advanced = await runUnescalated {
-            (index: StressIndex.components(rr: rr), freq: HRVFreqDomain.freqDomain(rr: rr))
+            (index: StressIndex.components(rr: rr), freq: HRVFreqDomain.analyze(rr: rr))
         }
         stressIndex = advanced.index
         freqHRV = advanced.freq
@@ -447,7 +448,9 @@ struct StressView: View {
     /// at least the HF power). Drives whether the advanced card is shown at all.
     private var hasAdvancedReadouts: Bool {
         if stressIndex != nil { return true }
-        if let f = freqHRV, f.lfhf != nil || f.hf > 0 { return true }
+        // A computed frequency-domain outcome shows the card too — with its values, or with the reason
+        // they are withheld — unless the day simply has no R-R at all.
+        if let f = freqHRV, f.bands != nil || f.unavailableReason != .noIntervals { return true }
         return false
     }
 
@@ -478,25 +481,32 @@ struct StressView: View {
                         )
                     }
 
-                    // Frequency-domain HRV: prefer the LF/HF ratio; if the span was too short for
-                    // LF (lfhf nil) fall back to the HF (rest) band power so the lens still reads.
-                    if let f = freqHRV {
-                        if let ratio = f.lfhf {
+                    // Frequency-domain PRV (spec-02 §1): absolute band powers in ms² from qualified
+                    // contiguous windows of today's OPTICAL pulse intervals. HF is shown whenever a window
+                    // qualifies; the LF/HF ratio only when a full (≥ 250 s) window exists.
+                    if let b = freqHRV?.bands {
+                        StatTile(
+                            label: "HF power",
+                            value: String(localized: "\(Int(b.hf.rounded())) ms²"),
+                            caption: String(localized: "0.15–0.40 Hz · optical PRV"),
+                            accent: StressRamp.steady
+                        )
+                        if let ratio = b.lfhf {
                             StatTile(
-                                label: "Autonomic balance (LF/HF)",
+                                label: "LF/HF ratio",
                                 value: StressTrace.formatRatio(ratio),
-                                caption: String(localized: "Sympathetic vs parasympathetic tone from frequency-domain HRV. Higher leans sympathetic (stress-ward)."),
-                                accent: StressRamp.steady
-                            )
-                        } else if f.hf > 0 {
-                            StatTile(
-                                label: "HF power",
-                                value: "\(Int(f.hf.rounded()))",
-                                caption: String(localized: "Parasympathetic (rest) band of your HRV."),
+                                caption: String(localized: "Optical PRV · descriptive"),
                                 accent: StressRamp.steady
                             )
                         }
                     }
+                }
+
+                if let f = freqHRV {
+                    Text(Self.freqDomainFootnote(f))
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Text("These are extra, on-demand HRV lenses computed from today's R-R intervals. They are informational and do not change the stress score above.")
@@ -504,6 +514,30 @@ struct StressView: View {
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// The frequency-domain coverage line: what the band powers were computed from, or why they are
+    /// withheld. Optical pulse intervals (PRV), descriptive only — no autonomic-balance claim.
+    static func freqDomainFootnote(_ outcome: HRVFreqDomain.Outcome) -> String {
+        if let b = outcome.bands {
+            let usedMin = Int((b.usedSpanSec / 60).rounded())
+            let observedMin = Int((b.observedSpanSec / 60).rounded())
+            switch b.tier {
+            case .fullWindows:
+                return String(localized: "Frequency-domain pulse-rate variability (optical) from \(b.windowCount) uninterrupted five-minute stretches: \(usedMin) of \(observedMin) min of today's R-R. Band powers are absolute (ms²), averaged across stretches; a descriptive lens, not a measure of nervous-system balance.")
+            case .shortWindowHFOnly:
+                let seconds = Int(b.usedSpanSec.rounded())
+                return String(localized: "HF only: today's longest uninterrupted stretch of beats was \(seconds) s, too short for the low-frequency band (needs 250 s). Optical pulse-rate variability; descriptive only.")
+            }
+        }
+        switch outcome.unavailableReason {
+        case .noContiguousWindow:
+            return String(localized: "Frequency-domain PRV is not shown: today's R-R has no stretch of at least a minute without gaps or dropped beats.")
+        case .rejectedFractionTooHigh:
+            return String(localized: "Frequency-domain PRV is not shown: too many beats were rejected as artifacts in every uninterrupted stretch today.")
+        case .noIntervals, .none:
+            return String(localized: "Frequency-domain PRV is not shown: no R-R intervals today.")
         }
     }
 
