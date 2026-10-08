@@ -35,6 +35,35 @@ public enum ChartSelection {
         return low
     }
 
+    /// The x a finger or pointer at `date` selects when each x is the START of a calendar `unit` (the day,
+    /// week or month a bar or point covers), which Swift Charts draws in the MIDDLE of that unit: the x whose
+    /// unit contains `date`, else (over a gap) the x whose unit's middle is nearest. Snapping to the starts
+    /// with `nearest(to:in:)` would hand the right half of every bar to the next one. A nil `unit` is the
+    /// raw-time rule (intraday samples). `xs` ascending.
+    public static func nearest(to date: Date, in xs: [Date], unit: Calendar.Component?,
+                               calendar: Calendar = .current) -> Date? {
+        guard let unit else { return nearest(to: date, in: xs) }
+        guard !xs.isEmpty else { return nil }
+        // The first x after `date`; the unit containing `date` can only start at the x before it.
+        var low = 0
+        var high = xs.count
+        while low < high {
+            let mid = (low + high) / 2
+            if xs[mid] <= date { low = mid + 1 } else { high = mid }
+        }
+        if low > 0, let start = calendar.dateInterval(of: unit, for: date)?.start, xs[low - 1] == start {
+            return xs[low - 1]
+        }
+        // Over a gap: the nearest middle. Middles ascend with the starts, so only the neighbours compete.
+        var best: (index: Int, distance: TimeInterval)?
+        for index in max(0, low - 2)...min(xs.count - 1, low + 1) {
+            let distance = abs(ChartDay.center(of: xs[index], unit: unit, calendar: calendar).timeIntervalSince(date))
+            if let current = best, current.distance <= distance { continue }
+            best = (index, distance)
+        }
+        return best.map { xs[$0.index] }
+    }
+
     /// One VoiceOver adjustment step through ascending `xs`: forward from nothing selects the first x and
     /// backward the last; stepping past either end stays there.
     public static func step(from current: Date?, in xs: [Date], forward: Bool) -> Date? {
@@ -52,7 +81,7 @@ public enum ChartSelection {
     public static func point(for selection: Date?, in points: [DailyPoint], unit: Calendar.Component = .day,
                              calendar: Calendar = .current) -> DailyPoint? {
         guard let selection, let start = calendar.dateInterval(of: unit, for: selection)?.start else { return nil }
-        return points.first { calendar.dateInterval(of: unit, for: $0.day)?.start == start }
+        return points.first { calendar.dateInterval(of: unit, for: $0.localDay(in: calendar))?.start == start }
     }
 
     /// What a tap does: tapping the x that is already selected clears it; tapping any other x selects it.
@@ -83,10 +112,14 @@ public extension View {
         environment(\.naraChartScrubEnabled, !disabled)
     }
 
-    /// Adds the kit's scrub to any Swift Charts chart over a date axis. See `ChartScrubLayer`.
-    func chartScrub(xs: [Date], selection: Binding<Date?>, pinsOnTap: Bool = true) -> some View {
+    /// Adds the kit's scrub to any Swift Charts chart over a date axis. See `ChartScrubLayer`. Pass the
+    /// `unit` the marks are plotted with (`.day` for `.value("Day", day, unit: .day)`) so a finger anywhere
+    /// on a bar selects that bar; nil for raw times.
+    func chartScrub(xs: [Date], selection: Binding<Date?>, pinsOnTap: Bool = true,
+                    unit: Calendar.Component? = nil, calendar: Calendar = .current) -> some View {
         chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: selection, pinsOnTap: pinsOnTap)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: selection, pinsOnTap: pinsOnTap,
+                            unit: unit, calendar: calendar)
         }
     }
 }
@@ -102,25 +135,36 @@ public extension View {
 /// Every new x plays one `StrandHaptic.selection` (a no-op on the Mac) and lands in a non-animating
 /// transaction, so the marks never replay their animation under a finger (#104).
 ///
+/// With `unit` (the marks' `unit:`), the xs are the starts of days, weeks or months drawn in their middle,
+/// and a finger anywhere over a bar selects that bar (`ChartSelection.nearest(to:in:unit:calendar:)`).
+///
 /// ```swift
-/// .chartOverlay { proxy in ChartScrubLayer(proxy: proxy, xs: days, selection: $selected) }
+/// .chartOverlay { proxy in ChartScrubLayer(proxy: proxy, xs: days, selection: $selected, unit: .day) }
 /// ```
 public struct ChartScrubLayer: View {
     private let proxy: ChartProxy
     private let xs: [Date]
     @Binding private var selection: Date?
     private let pinsOnTap: Bool
+    private let unit: Calendar.Component?
+    private let calendar: Calendar
     @Environment(\.naraChartScrubEnabled) private var enabled
     #if os(macOS)
     @State private var pinned = false
     #endif
 
-    /// - Parameter xs: the selectable x values, ascending (the days or samples the chart draws).
-    public init(proxy: ChartProxy, xs: [Date], selection: Binding<Date?>, pinsOnTap: Bool = true) {
+    /// - Parameters:
+    ///   - xs: the selectable x values, ascending (the days or samples the chart draws).
+    ///   - unit: the calendar unit the marks are plotted with, when each x is the start of one; nil (the
+    ///     default) snaps to the nearest raw x, for samples plotted at their own time.
+    public init(proxy: ChartProxy, xs: [Date], selection: Binding<Date?>, pinsOnTap: Bool = true,
+                unit: Calendar.Component? = nil, calendar: Calendar = .current) {
         self.proxy = proxy
         self.xs = xs
         self._selection = selection
         self.pinsOnTap = pinsOnTap
+        self.unit = unit
+        self.calendar = calendar
     }
 
     public var body: some View {
@@ -171,7 +215,7 @@ public struct ChartScrubLayer: View {
         guard plot.width > 0 else { return nil }
         let clamped = min(max(x, plot.minX), plot.maxX)
         guard let date: Date = proxy.value(atX: clamped - plot.minX) else { return nil }
-        return ChartSelection.nearest(to: date, in: xs)
+        return ChartSelection.nearest(to: date, in: xs, unit: unit, calendar: calendar)
     }
 
     private func select(_ next: Date?) {
