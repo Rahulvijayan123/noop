@@ -10,9 +10,11 @@ with a full one (k ≈ 70) ~1.2×, so an α = 1e-3 flag is not an extrapolation 
 Sustained shifts (SustainedCalibrator): the mean of the last k windows' channel scores, calibrated against rolling
 k-window means of the same user's reference sequence.
 
-Consecutive windows are dependent, so when the reference rows' window starts are known each channel's body and tail
-use the effective sample size n·(1−ρ)/(1+ρ) (ρ = lag-1 correlation over exactly-adjacent windows): a dependent
-reference gives honestly wider p-values instead of overconfident ones.
+Operating point (grid in docs/BASELINE_WATCHDOG_V2.md §5, AR(1) window scores φ 0–0.8, references 120–1400):
+* window rule: i.i.d. empirical p, 95 % tail bound — null rate at 1e-3 ≤ 4.1e-4 for every φ ≤ 0.8 and n ≥ 120;
+  an extra lag-1 effective-n correction kept α but cut power to a +4 SD window from ~0.3 to 0–0.04, so it is not used;
+* sustained rule: overlapping k-window means carry ~n/k independent values → n_eff = n/k with an 80 % tail bound —
+  null ≤ 9e-4 at 1e-3 for every φ ≤ 0.8 and n ≥ 200 (uncorrected: 1.7e-3 at φ 0.5, n 200).
 
 Channels are combined by Bonferroni over the observed channels, p = min(1, U_obs · min p_j). It is valid under any
 dependence between channels and needs no reference of its own. Measured under the null (40 references each,
@@ -30,6 +32,7 @@ import numpy as np
 
 MIN_REFERENCE = 96          # ≈ 2 days of 30-minute windows in one context bucket before any candidate
 TAIL_CONFIDENCE = 0.95
+SUSTAINED_TAIL_CONFIDENCE = 0.80
 
 
 def _chi2_lower(dof: int, alpha: float) -> float:
@@ -50,27 +53,9 @@ def _norm_upper(alpha: float) -> float:
   return (lo + hi) / 2
 
 
-def lag1_n_eff(x: np.ndarray, starts: np.ndarray | None, step_s: int = 1800, rho_max: float = 0.95) -> float:
-  """Effective sample size of a time-ordered score sequence: n·(1−ρ)/(1+ρ), ρ = lag-1 correlation over pairs that
-  are exactly one window apart (non-contiguous pairs carry no information about it). n when unknown."""
-  x = np.asarray(x, dtype=np.float64)
-  n = int(np.isfinite(x).sum())
-  if starts is None or n < 10:
-    return float(n)
-  t = np.asarray(starts, dtype=np.float64)
-  ok = np.isfinite(x[:-1]) & np.isfinite(x[1:]) & (np.abs(np.diff(t) - step_s) < 1)
-  if ok.sum() < 8:
-    return float(n)
-  a, b = x[:-1][ok], x[1:][ok]
-  sa, sb = a.std(), b.std()
-  rho = float(np.mean((a - a.mean()) * (b - b.mean())) / (sa * sb)) if sa > 0 and sb > 0 else 0.0
-  rho = min(max(rho, 0.0), rho_max)
-  return max(2.0, n * (1 - rho) / (1 + rho))
-
-
 class EmpiricalCalibrator:
   def __init__(self, reference: np.ndarray, tail_q: float = 0.95, conservative: bool = True,
-               n_eff: float | None = None):
+               n_eff: float | None = None, tail_confidence: float | None = None):
     r = np.asarray(reference, dtype=np.float64)
     self.ref = np.sort(r[np.isfinite(r)])
     n = len(self.ref)
@@ -86,7 +71,8 @@ class EmpiricalCalibrator:
         self.beta = float(exc.mean())
         if conservative:
           k = max(1.0, len(exc) * self.n_eff / n)
-          self.beta *= 2 * k / _chi2_lower(2 * k, 1 - TAIL_CONFIDENCE)
+          conf = TAIL_CONFIDENCE if tail_confidence is None else tail_confidence
+          self.beta *= 2 * k / _chi2_lower(2 * k, 1 - conf)
 
   def pvalue(self, s: np.ndarray) -> np.ndarray:
     s = np.asarray(s, dtype=np.float64)
@@ -105,11 +91,11 @@ class EmpiricalCalibrator:
 class MultiChannel:
   """ref: (n_ref, U) per-channel window scores. pvalue(S: (N, U)) -> (combined p (N,), per-channel p (N, U))."""
 
-  def __init__(self, ref: np.ndarray, starts: np.ndarray | None = None, step_s: int = 1800):
+  def __init__(self, ref: np.ndarray, n_eff: float | None = None, tail_confidence: float | None = None):
     self.ref = np.asarray(ref, dtype=np.float64)
     self.n = self.ref.shape[0] if self.ref.ndim == 2 else 0
     u = self.ref.shape[1] if self.ref.ndim == 2 else 0
-    self.channel = [EmpiricalCalibrator(self.ref[:, j], n_eff=lag1_n_eff(self.ref[:, j], starts, step_s))
+    self.channel = [EmpiricalCalibrator(self.ref[:, j], n_eff=n_eff, tail_confidence=tail_confidence)
                     for j in range(u)]
 
   @property
@@ -150,5 +136,6 @@ class SustainedCalibrator(MultiChannel):
       roll, roll_t = roll[keep], starts[:len(starts) - k + 1][keep]
     else:
       roll, roll_t = np.zeros((0, ref.shape[1] if ref.ndim == 2 else 0)), np.zeros(0)
-    # Overlapping k-window means are strongly dependent: n_eff from their own lag-1 correlation.
-    super().__init__(roll, roll_t, window_s)
+    # Overlapping k-window means: k consecutive rows share windows, so the reference carries ~n/k independent
+    # values. Body p and the tail bound use n_eff = n/k with an 80 % tail bound (SUSTAINED_TAIL_CONFIDENCE).
+    super().__init__(roll, n_eff=len(roll) / k if len(roll) else None, tail_confidence=SUSTAINED_TAIL_CONFIDENCE)

@@ -254,7 +254,7 @@ class Service:
         mine = [r for r in out if r.window.bucket == bucket]
         if not mine:
           continue
-        mc = MultiChannel(st.load_ref(scorer.name, bucket), st.load_ref_starts(scorer.name, bucket), cand.WINDOW_S)
+        mc = MultiChannel(st.load_ref(scorer.name, bucket))
         if mc.ready:
           p, per = mc.pvalue(np.stack([r.channel_scores for r in mine]))
           for r, pi, cp in zip(mine, p, per):

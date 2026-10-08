@@ -120,7 +120,7 @@ def test_sustained_calibrator_uses_only_contiguous_reference_spans():
   starts[200:] += 10 * 86400            # one big gap: spans crossing it are dropped
   sc = SustainedCalibrator(ref, starts, 4)
   assert sc.n == 400 - 3 - 3
-  assert sc.channel[0].n_eff < sc.n / 3                          # overlapping means: far fewer independent rows
+  assert abs(sc.channel[0].n_eff - sc.n / 4) < 1e-9             # overlapping means: ~n/k independent values
   assert not SustainedCalibrator(ref, np.full(400, np.nan), 4).ready   # unknown times: rule stays off
   # Null rate of the 4-window mean of AR(1) window scores, calibrated on the same process.
   rates = []
@@ -150,7 +150,7 @@ def test_window_calibration_holds_alpha_for_autocorrelated_windows():
       for i in range(1, n):
         x[i] = 0.7 * x[i - 1] + 0.71 * e[i]
       return x
-    mc = MultiChannel(ar(300), np.arange(300) * 1800.0)
+    mc = MultiChannel(ar(300))
     p, _ = mc.pvalue(ar(20000))
     rates.append([np.mean(p < 1e-2), np.mean(p < 1e-3)])
   r = np.mean(rates, axis=0)
