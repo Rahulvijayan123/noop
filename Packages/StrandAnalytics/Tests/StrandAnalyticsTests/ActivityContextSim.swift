@@ -13,6 +13,10 @@ struct ActivitySim {
     /// Where the wrist's orientation is centred (rotation about the x axis, degrees). Only deliberate
     /// posture changes and slow drift move it; per-second jitter does not accumulate.
     private var gravityDeg: Double = 0
+    /// Forearm-axis (+x) component of the gravity vector before normalisation: 0.2 (the default, a forearm
+    /// lying about flat) unless a scenario tilts the forearm (`forearm(_:)`, `postureShift(…, toForearm:)`).
+    /// 0.9 ≈ arm hanging, −0.5 ≈ hand raised above the elbow.
+    private(set) var forearmX: Double = 0.2
     private var counter: Int = 0
 
     init(start: Int = 1_760_000_000, seed: UInt64 = 7) {
@@ -30,7 +34,7 @@ struct ActivitySim {
 
     private func gravityVector(jitter: Double) -> [Double] {
         let r = (gravityDeg + jitter) * .pi / 180
-        return [0.2, cos(r) * 0.9, sin(r) * 0.9 + 0.35]
+        return [forearmX, cos(r) * 0.9, sin(r) * 0.9 + 0.35]
     }
 
     struct Options {
@@ -122,13 +126,20 @@ struct ActivitySim {
         }
     }
 
-    /// A short movement burst with a net orientation change (sit↔stand, lie down, get up).
-    mutating func postureShift(netDegrees: Double, seconds: Int = 3, opt: Options = Options()) {
+    /// A short movement burst with a net orientation change (sit↔stand, lie down, get up). `toForearm` also
+    /// tilts the forearm axis to that value over the burst (standing up lets the arm hang, lying down lays the
+    /// forearm flat …); nil keeps it, i.e. a pure roll about the forearm whose direction the axis cannot show.
+    mutating func postureShift(netDegrees: Double, seconds: Int = 3, toForearm: Double? = nil, opt: Options = Options()) {
         let step = netDegrees / Double(seconds)
-        for _ in 0..<seconds {
+        let from = forearmX
+        for i in 0..<seconds {
+            if let to = toForearm { forearmX = from + (to - from) * Double(i + 1) / Double(seconds) }
             emit(dyn: 0.22 + noise(0.06), ticks: 0, cls: 0, rotate: step, opt: opt)
         }
     }
+
+    /// Set the forearm axis without a burst (where a scenario starts).
+    mutating func forearm(_ x: Double) { forearmX = x }
 
     /// Quiet wrist while the band reports sleep.
     mutating func sleeping(_ seconds: Int, opt: Options = Options()) {

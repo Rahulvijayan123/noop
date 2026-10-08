@@ -13,16 +13,18 @@ import Foundation
 //
 //   • Sitting vs standing is NOT observable from a wrist. The wrist cannot see body height, so a still
 //     awake wearer stays `stationary` ("sitting or standing") until the heads lean clearly one way —
-//     and every committed `sitting` / `standing` is a likelihood the decoder already hedged.
+//     and every committed `sitting` / `standing` is a likelihood the decoder already hedged. Since hsmm-1.8
+//     the lean is bounded by real posture evidence (a sit-down / stand-up whose direction the forearm axis
+//     shows, desk-like hands with a resting forearm, a learned head), never by how long the stillness lasted.
 //   • Cycling is only claimed when something *names* it: the motion encoder (HART) says so, or a cycling
 //     workout covers the time. Pedalling leaves almost no wrist signature and no steps, and HR alone
 //     cannot tell it from a desk under stress — so it is never inferred from HR + stillness.
 //   • Higher-intensity activity is the honest name for "vigorous effort without a gait" (strength
 //     circuits, rowing, HIIT …): sustained high heart rate *with* vigorous arm movement and no stride.
-//   • No absolute wrist-orientation cue is used for lying down: how a strap sits on a wrist differs per
-//     person, per wrist and per day, and there is no labelled data to calibrate it. Lying is therefore
-//     the detected night (asleep on its sleep epochs, in bed on its wake ones), or a recumbent reading the
-//     decoder reaches through a lying-down movement signature.
+//   • Lying down is the detected night (asleep on its sleep epochs, in bed on its wake ones), a lie-down
+//     the forearm axis shows (it ends flat or with the hand above the elbow), or — slowly, over several
+//     minutes — a forearm held flat or raised and quiet (hsmm-1.8). That held-orientation cue is deliberately
+//     weak: a forearm resting flat on a lap or desk looks the same, and how a strap sits differs per person.
 //
 // `displayContext` strings ("Desk sitting", "Brisk walking" …) stay a *view* for people; this taxonomy is
 // what code may branch on. It is derived from the heads by the same rules as the display label
@@ -42,7 +44,11 @@ public enum ActivityClassVersions {
     /// Version of how runs become persisted intervals (merge / fold / split rules and the per-interval
     /// HR, HRV, respiration and cadence statistics). Bump when any of those rules change so stored days
     /// are derived again.
-    public static let interval = "ctx-int-1"
+    /// 2: runs split on the per-state class rather than the display label, boundaries back-dated to the flagged
+    /// event's onset, the fold never absorbs off-wrist / unknown / another context and records what it absorbed,
+    /// split parts re-derive from their own runs, and rows carry in-bed, uncertainty, experts, transition count,
+    /// gap and settling (WP2).
+    public static let interval = "ctx-int-2"
 }
 
 /// One canonical activity state per moment. Raw values are the persisted / wire codes: never rename them.
@@ -161,19 +167,19 @@ extension ActivityClass {
             evidence: "a sleep epoch of a detected night (the sleep stager's call) + stillness",
             limitation: "naps outside a detected session read as lying down; lying awake in bed is lying down, not sleeping"),
         ActivityClassCapability(activityClass: .lyingDown, basis: .sessionContext,
-            evidence: "awake inside a detected night's in-bed window, or a recumbent mode reached through a lying-down movement signature",
-            limitation: "no absolute wrist-orientation cue is used, so a daytime lie-down without a movement signature is not seen"),
+            evidence: "awake inside a detected night's in-bed window, a lie-down the forearm axis shows, or minutes of a held flat / raised quiet forearm",
+            limitation: "the held-orientation cue is weak and slow (a forearm resting flat on a lap looks the same), so a short daytime lie-down may read as stationary"),
         ActivityClassCapability(activityClass: .sitting, basis: .hedged,
-            evidence: "stationary wrist whose posture head leans seated (reached after sitting-down movement, long quiet spells)",
+            evidence: "stationary wrist whose posture head leans seated (a sit-down whose direction the forearm shows, desk-like hands)",
             limitation: "a wrist cannot see body height: sitting vs standing is a likelihood, never a measurement"),
         ActivityClassCapability(activityClass: .sittingDesk, basis: .hedged,
             evidence: "seated lean + desk-like arm behaviour (low, steady, orientation-stable movement)",
             limitation: "typing at a standing desk looks the same; the posture lean is still only a likelihood"),
         ActivityClassCapability(activityClass: .standing, basis: .hedged,
-            evidence: "stationary wrist whose posture head leans upright (typically right after walking or standing up)",
+            evidence: "stationary wrist whose posture head leans upright (a stand-up whose direction the forearm shows, an arm left hanging)",
             limitation: "needs a committed upright lean; otherwise the state stays `stationary`"),
         ActivityClassCapability(activityClass: .stationary, basis: .hedged,
-            evidence: "awake, on the wrist, no movement",
+            evidence: "awake, still, posture not resolved (including a stationary second split between lying and sitting)",
             limitation: "deliberately unresolved between sitting and standing"),
         ActivityClassCapability(activityClass: .fidgeting, basis: .streams,
             evidence: "bursty low-amplitude movement without gait, high burst-to-mean ratio",
@@ -393,6 +399,29 @@ public enum ActivityClassifier {
             locomotion: locomotion.top(excluding: .unknown)?.0,
             armBehavior: armBehavior.top(excluding: .unknown)?.0,
             detail: detail?.0, detailConfidence: min(1, max(0, detail?.1 ?? 0)))
+    }
+
+    /// The body state a canonical run holds (`ActivityContextRuns.coalesce`): the class with the distinctions only
+    /// the hand pattern makes folded together (desk vs quiet sitting, restless hands on a seated or upright body,
+    /// exercising vs moving, brisk vs ordinary walking). The arm head flips between those every few seconds inside
+    /// one situation, so splitting runs on them would fragment a sitting stretch; the run keeps the arm's average
+    /// and its own class says which wording won. Everything the body did differently (sitting, standing, still and
+    /// unresolved, lying, asleep, walking, running, cycling, off the wrist, no claim) is its own key.
+    public static func runKey(_ k: ActivityClassification) -> String {
+        switch k.activityClass {
+        case .sitting, .sittingDesk: return "seated"
+        case .standing: return "upright"
+        case .fidgeting:
+            switch k.posture {
+            case .seatedLikely: return "seated"
+            case .uprightStationary: return "upright"
+            default: return "stationary"
+            }
+        case .stationary: return "stationary"
+        case .walking, .briskWalking: return "walking"
+        case .vigorousActivity, .lightActivity: return "active"
+        case .lyingDown, .sleeping, .running, .cycling, .offWrist, .unknown: return k.activityClass.rawValue
+        }
     }
 
     public static func classify(run: ActivityContextRun) -> ActivityClassification {

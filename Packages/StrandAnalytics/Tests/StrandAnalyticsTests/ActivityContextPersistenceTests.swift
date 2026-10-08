@@ -59,6 +59,15 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertEqual(iv.confidence, 0.7)
     }
 
+    /// `iv` as the store keeps it today: the ctx-int-2 context fields `ActivityContextIntervalRow` has no columns for
+    /// (yet) not recorded (nil), which is exactly how a row reads back.
+    static func rowFieldsOnly(_ iv: ActivityContextInterval) -> ActivityContextInterval {
+        var out = iv
+        out.inBed = nil; out.uncertainty = nil; out.experts = nil; out.transitionCount = nil
+        out.absorbedClasses = nil; out.absorbedSeconds = nil; out.precededByGapS = nil; out.settlingSeconds = nil
+        return out
+    }
+
     func testADecodedDayRoundTripsThroughTheStoreAndTheLookupAgrees() async throws {
         var sim = ActivitySim(start: t0)
         sim.desk(600); sim.walk(180); sim.desk(600); sim.run(120); sim.still(300)
@@ -74,14 +83,19 @@ final class ActivityContextPersistenceTests: XCTestCase {
         try await store.replaceActivityContext(deviceId: dev, day: ledger, intervals: intervals.map(\.storeRow))
 
         let rows = try await store.activityContextIntervals(deviceId: dev, from: document.dayStart, to: document.dayEnd)
-        XCTAssertEqual(rows.map(ActivityContextInterval.init(row:)), intervals)
+        // The ctx-int-2 context fields (in-bed, uncertainty, experts, transitions, absorbed fragments, gap, settling)
+        // have no store columns until the WhoopStore row carries them: they read back as not recorded (nil), never as
+        // a measured 0 / false, and everything the row does carry round-trips exactly.
+        func stored(_ iv: ActivityContextInterval?) -> ActivityContextInterval? { iv.map(Self.rowFieldsOnly) }
+        XCTAssertTrue(intervals.allSatisfy { $0.transitionCount != nil && $0.uncertainty != nil && $0.settlingSeconds != nil })
+        XCTAssertEqual(rows.map(ActivityContextInterval.init(row:)), intervals.map(Self.rowFieldsOnly))
 
         let live = ActivityContextLookup(intervals: intervals)
-        let stored = ActivityContextLookup(rows: rows)
+        let storedLookup = ActivityContextLookup(rows: rows)
         for ts in stride(from: t0 - 30, to: t0 + 1_900, by: 7) {
-            XCTAssertEqual(stored.interval(at: ts), live.interval(at: ts), "t0+\(ts - t0)")
+            XCTAssertEqual(stored(storedLookup.interval(at: ts)), stored(live.interval(at: ts)), "t0+\(ts - t0)")
             let fromStore = try await store.activityContextInterval(deviceId: dev, at: ts)
-            XCTAssertEqual(fromStore.map(ActivityContextInterval.init(row:)), live.interval(at: ts), "t0+\(ts - t0)")
+            XCTAssertEqual(stored(fromStore.map(ActivityContextInterval.init(row:))), stored(live.interval(at: ts)), "t0+\(ts - t0)")
         }
 
         // The per-day class totals the database computes equal the in-memory composition.
