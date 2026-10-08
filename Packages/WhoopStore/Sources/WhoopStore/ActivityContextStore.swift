@@ -303,7 +303,8 @@ public enum ActivityContextIntervalReading: String, Sendable, CaseIterable {
     case causal
     /// Only the retrospective rows of final days (`activityContextIntervalRetrospective`).
     case retrospective
-    /// Historical queries: for every day whose ledger is final and holds retrospective rows, those rows; the causal
+    /// Historical queries: for every day whose ledger is final and holds retrospective rows (a day smoothed to an
+    /// empty result holds none and is served causally), those rows; the causal
     /// rows everywhere else. Deterministic: a day is served wholly by one derivation.
     case historical
 }
@@ -350,9 +351,14 @@ extension WhoopStore {
         }
         var ledger = day
         ledger.intervalCount = intervals.count
-        // The ledger names a smoother version only when it holds that smoother's rows.
-        if retrospective.isEmpty { ledger.retrospectiveVersion = nil }
-        else if ledger.retrospectiveVersion == nil { ledger.retrospectiveVersion = "unversioned" }
+        // The ledger names the smoother whose output the day holds. An empty list WITH a version is a valid result
+        // ("smoothed, nothing to store") on a final day; without a version, or on a day that is not final, no
+        // smoother is recorded. Rows without a version are stamped "unversioned".
+        if retrospective.isEmpty {
+            if !day.isFinal { ledger.retrospectiveVersion = nil }
+        } else if ledger.retrospectiveVersion == nil {
+            ledger.retrospectiveVersion = "unversioned"
+        }
         let others = otherIds.filter { $0 != deviceId }
 
         try syncWrite { db in
@@ -501,6 +507,10 @@ extension WhoopStore {
                     SELECT dayStart, dayEnd FROM activityContextDay
                     WHERE deviceId = ? AND finality = 'final' AND retrospectiveVersion IS NOT NULL
                       AND dayStart < ? AND dayEnd > ?
+                      AND EXISTS (SELECT 1 FROM activityContextIntervalRetrospective r
+                                  WHERE r.deviceId = activityContextDay.deviceId
+                                    AND r.startTs >= activityContextDay.dayStart
+                                    AND r.startTs < activityContextDay.dayEnd)
                     ORDER BY dayStart
                     """, arguments: [deviceId, to + ActivityContextStore.maxIntervalSeconds,
                                      from - ActivityContextStore.maxIntervalSeconds])

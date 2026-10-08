@@ -321,6 +321,26 @@ final class PCRegimeLineageTests: XCTestCase {
         XCTAssertTrue(b.reasons.contains(Ref.predecessorInsufficient))
     }
 
+    func testSignalQualityIsJudgedOnThePredecessorsOwnLastDays() throws {
+        // Review R8: the predecessor's quality values end two weeks before the scored day (a strap change 13 days
+        // ago, its last quality rows two days before that). They must still be compared with the new strap's.
+        var p = Self.predecessor(20, ownDays: 13, quality: 0.95)
+        let cut = Ref.dayNumber(T.day)! - 15
+        p.dailyValues = p.dailyValues.filter {
+            $0.seriesKey != Ref.opticalValidShareSeries || Ref.dayNumber($0.day)! < cut
+        }
+        let cs = Ref.compare([T.value(T.day, 72, series: Self.series)], history: Self.own(13, quality: 0.5),
+                             frozen: [], day: T.day, policyFingerprint: "fp", config: .init(),
+                             lineage: .init(device: Self.device(), predecessors: [p])).comparisons
+        let c = try XCTUnwrap(T.view(cs, .rolling, series: Self.series))
+        XCTAssertNil(c.predecessorScope)
+        XCTAssertTrue(c.reasons.contains(Ref.predecessorSignalQualityDiffers), "\(c.reasons)")
+        // With no quality on either side the borrow stands, and says the quality was not compared.
+        let unknown = try XCTUnwrap(Self.rolling(own: 3, Self.predecessor(20, ownDays: 3)))
+        XCTAssertEqual(unknown.predecessorScope, "old-strap")
+        XCTAssertTrue(unknown.reasons.contains(Ref.predecessorSignalQualityUnknown))
+    }
+
     func testInsufficientSupportOnBothSidesAbstains() throws {
         let c = try XCTUnwrap(Self.rolling(own: 2, Self.predecessor(4, ownDays: 2)))
         XCTAssertEqual(c.status, .insufficient)

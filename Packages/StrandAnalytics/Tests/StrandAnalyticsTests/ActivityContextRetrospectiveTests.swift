@@ -60,69 +60,147 @@ final class ActivityContextRetrospectiveTests: XCTestCase {
         XCTAssertFalse(ActivityContextIntervalBuilder.Config().keepEvidencedPostureFragments)
     }
 
-    func testRetrospectiveWalkThenStillIsOneStillnessIntervalNearTheTrueStop() {
+    func testRetrospectiveDemotesTheContradictedStandAndMergesTheStillnessWithoutANewClaim() {
         let s = Self.walkThenStill
+        let causal = ActivityContextIntervalBuilder.build(runs: s.runs, events: s.events)
         let retro = ActivityContextRetrospective.intervals(runs: s.runs, events: s.events)
         XCTAssertTrue(retro.allSatisfy { $0.derivation == .retrospective })
         let walking = retro.filter { $0.activityClass == .walking }
         XCTAssertEqual(walking.count, 1)
         let after = retro.filter { $0.start >= walking[0].end }
-        // One situation: every row after the walk is the same still class, contiguous; only the 900 s row cap cuts it.
-        XCTAssertEqual(Set(after.map(\.activityClass)), [.sitting], "\(after.map(\.activityClass))")
-        for (a, b) in zip(after, after.dropFirst()) { XCTAssertEqual(a.end, b.start) }
+        let causalAfter = causal.filter { $0.start >= s.stop }
+        // The "Standing (likely)" minute the rest of the stillness contradicts is demoted to still-unresolved and
+        // merges with the unresolved stretch after it; sitting stays where the causal build claimed it, and no
+        // second gains a posture claim.
+        XCTAssertFalse(after.contains { $0.activityClass == .standing })
+        XCTAssertEqual(after.first?.activityClass, .stationary)
+        XCTAssertEqual(after.first?.end, s.stop + 180)
+        XCTAssertLessThan(after.count, causalAfter.count)
         XCTAssertLessThanOrEqual(abs(after[0].start - s.stop), 5)
-        XCTAssertEqual(after.last?.end, s.stop + 1200)
-
-        // Without the row cap the stillness is exactly one interval.
-        var config = ActivityContextRetrospective.Config()
-        config.builder.maxIntervalS = 3_600
-        let one = ActivityContextRetrospective.intervals(runs: s.runs, events: s.events, config: config)
-            .filter { $0.start >= s.stop - 5 }
-        XCTAssertEqual(one.count, 1)
-        XCTAssertEqual(one.first?.activityClass, .sitting)
-        XCTAssertLessThanOrEqual(abs((one.first?.start ?? 0) - s.stop), 5)
+        for (a, b) in zip(after, after.dropFirst()) { XCTAssertEqual(a.end, b.start) }
+        Self.assertPolicy(retro: retro, causal: causal)
     }
 
-    func testRetrospectiveMovesALateWalkBoundaryBackToTheFlaggedStopOnset() {
-        // The causal decoder drew the boundary 12 s after the true stop; the stop it flagged has its onset there.
+    func testRetrospectiveMovesALateWalkBoundaryOnlyIntoARowWithoutAPostureClaim() {
         let stop = Self.t0 + 300
-        let runs = [Self.walk(Self.t0, stop + 12), Self.sitting(stop + 12, stop + 900)]
-        let events = [ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: stop + 14, onsetTs: stop + 1)]
+        let events = [ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: stop + 14, onsetTs: stop + 3)]
+        // Still-unresolved after the walk: the boundary moves back to the flagged onset.
+        let runs = [Self.walk(Self.t0, stop + 12), Self.unresolved(stop + 12, stop + 900)]
         let retro = ActivityContextRetrospective.intervals(runs: runs, events: events)
-        let still = retro.first { $0.activityClass == .sitting }
-        XCTAssertNotNil(still)
-        XCTAssertLessThanOrEqual(abs((still?.start ?? 0) - stop), 5)
-        // Causal output keeps its own boundary.
-        let causal = ActivityContextIntervalBuilder.build(runs: runs, events: events)
-        XCTAssertEqual(causal.first { $0.activityClass == .sitting }?.start, stop + 12)
+        XCTAssertEqual(retro.first { $0.activityClass == .stationary }?.start, stop + 3)
+        // Never further back than the decoder's own onset lead, and never leaving a walk shorter than 10 s.
+        let far = [ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: stop + 14, onsetTs: stop - 5)]
+        XCTAssertEqual(ActivityContextRetrospective.intervals(runs: runs, events: far)
+                        .first { $0.activityClass == .stationary }?.start, stop + 12)
+        let shortWalk = [Self.walk(stop - 2, stop + 12), Self.unresolved(stop + 12, stop + 900)]
+        XCTAssertEqual(ActivityContextRetrospective.intervals(runs: shortWalk, events: events)
+                        .first { $0.activityClass == .stationary }?.start, stop + 12)
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: runs, events: events)
+                        .first { $0.activityClass == .stationary }?.start, stop + 12, "causal keeps its own boundary")
+        // Sitting after the walk: moving the boundary would claim sitting for seconds the causal build did not.
+        let sat = [Self.walk(Self.t0, stop + 12), Self.sitting(stop + 12, stop + 900)]
+        XCTAssertEqual(ActivityContextRetrospective.intervals(runs: sat, events: events)
+                        .first { $0.activityClass == .sitting }?.start, stop + 12)
     }
 
-    func testAShortStandWithFlaggedChangesSurvivesAsAnIntervalAndTheEventsAreKept() {
+    func testAShortFlaggedStandIsNotDemotedAndFragmentsAreKeptAsTheCausalBuildKeepsThem() {
         let t = Self.t0
         let runs = [Self.sitting(t, t + 300), Self.standing(t + 300, t + 310), Self.sitting(t + 310, t + 600)]
         let events = [
             ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.6, ts: t + 303, onsetTs: t + 299),
             ActivityTransitionEvent(kind: .standToSitLike, probability: 0.6, ts: t + 313, onsetTs: t + 309),
         ]
-        // Causal: the 10 s stand is a hedge the still-dwell fold absorbs (kept only as events).
-        let causal = ActivityContextIntervalBuilder.build(runs: runs, events: events)
-        XCTAssertFalse(causal.contains { $0.activityClass == .standing })
-
+        // A flagged change on both sides: nothing carries across, the stand keeps its own reading.
         let smoothed = ActivityContextRetrospective.smooth(runs: runs, events: events)
-        XCTAssertEqual(ActivityClassifier.classify(run: smoothed[1]).activityClass, .standing,
-                       "a flagged change on both sides: nothing carries across, the stand keeps its own reading")
+        XCTAssertEqual(ActivityClassifier.classify(run: smoothed[1]).activityClass, .standing)
+        // Without the flags too: the causal row around it is sitting and the smoothed stillness supports it, so
+        // nothing is demoted (demotion is per causal row, never per run inside one).
+        let unflagged = ActivityContextRetrospective.smooth(runs: runs, events: [])
+        XCTAssertEqual(unflagged, runs)
+        // The rows are the causal build's (the stand an absorbed fragment and two events), stamped retrospective.
+        let causal = ActivityContextIntervalBuilder.build(runs: runs, events: events)
         let retro = ActivityContextRetrospective.intervals(runs: runs, events: events)
-        let stand = retro.filter { $0.activityClass == .standing }
-        XCTAssertEqual(stand.count, 1, "\(retro.map { ($0.activityClass, $0.start, $0.end) })")
-        XCTAssertEqual(stand.first?.start, t + 300)
-        XCTAssertEqual(stand.first?.end, t + 310)
-        // The events are the decoder's, untouched; each row counts the ones inside it.
+        XCTAssertEqual(retro.map(\.activityClass), causal.map(\.activityClass))
+        XCTAssertEqual(retro.map(\.absorbedClasses), causal.map(\.absorbedClasses))
         XCTAssertEqual(retro.compactMap(\.transitionCount).reduce(0, +), 2)
-
-        // The same stand with no flagged change is a hedge inside one stillness, smoothed into it.
-        let unflagged = ActivityContextRetrospective.intervals(runs: runs, events: [])
-        XCTAssertFalse(unflagged.contains { $0.activityClass == .standing })
+        Self.assertPolicy(retro: retro, causal: causal)
     }
+
+    func testALieDownNextToSittingIsNeverRelabelledWithoutAFlaggedChange() {
+        let t = Self.t0
+        let lying = { (s: Int, e: Int) in Self.run(s, e, posture: [.recumbent: 0.75, .unknown: 0.25]) }
+        for runs in [[lying(t, t + 120), Self.sitting(t + 120, t + 900)],
+                     [Self.sitting(t, t + 780), lying(t + 780, t + 900)]] {
+            let causal = ActivityContextIntervalBuilder.build(runs: runs, events: [])
+            let retro = ActivityContextRetrospective.intervals(runs: runs, events: [])
+            XCTAssertEqual(retro.map(\.activityClass), causal.map(\.activityClass))
+            XCTAssertTrue(retro.contains { $0.activityClass == .lyingDown })
+            XCTAssertTrue(retro.contains { $0.activityClass == .sitting })
+            XCTAssertEqual(ActivityContextRetrospective.smooth(runs: runs, events: []), runs)
+            Self.assertPolicy(retro: retro, causal: causal)
+        }
+    }
+
+    /// The policy, per second: every retrospective posture claim is a causal claim of the same posture, and no
+    /// retrospective confidence exceeds the causal one.
+    static func assertPolicy(retro: [ActivityContextInterval], causal: [ActivityContextInterval],
+                             file: StaticString = #filePath, line: UInt = #line) {
+        let lookup = ActivityContextLookup(intervals: causal)
+        for iv in retro {
+            for ts in iv.start..<iv.end {
+                let c = lookup.interval(at: ts)
+                if let p = ActivityContextRetrospective.claimedPosture(iv.activityClass) {
+                    XCTAssertEqual(c.flatMap { ActivityContextRetrospective.claimedPosture($0.activityClass) }, p,
+                                   "new \(iv.activityClass) claim at \(ts)", file: file, line: line)
+                }
+                if let c { XCTAssertLessThanOrEqual(iv.confidence, c.confidence, "raised at \(ts)", file: file, line: line) }
+            }
+        }
+    }
+
+    func testPropertyRetrospectiveNeverAddsAPostureClaimOrRaisesAConfidence() {
+        var seed: UInt64 = 0x5eed
+        func rand() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double((seed >> 33) & 0xFFFFFF) / Double(0xFFFFFF)
+        }
+        let makers: [(Int, Int) -> ActivityContextRun] = [
+            Self.walk, Self.standingLikely, Self.unresolved, Self.sitting, Self.standing,
+            { Self.run($0, $1, posture: [.recumbent: 0.7, .unknown: 0.3]) },
+            { Self.run($0, $1, posture: [.seatedLikely: 0.5, .uprightStationary: 0.3, .unknown: 0.2],
+                       arm: [.deskLike: 0.8]) },
+            { Self.run($0, $1, posture: [.posturalTransition: 0.6, .unknown: 0.4]) },
+            { Self.run($0, $1, posture: [.seatedLikely: 0.8, .unknown: 0.2], inBed: true) },
+        ]
+        let kinds: [ActivityTransitionKind] = [.sitToStandLike, .standToSitLike, .walkStop, .lyingDownLike]
+        for _ in 0..<150 {
+            var runs: [ActivityContextRun] = []
+            var events: [ActivityTransitionEvent] = []
+            var t = Self.t0
+            for _ in 0..<(3 + Int(rand() * 12)) {
+                if rand() < 0.15 { t += 1 + Int(rand() * 30) }   // a gap, sometimes past the merge gap
+                let d = 5 * (1 + Int(rand() * 60))
+                runs.append(makers[Int(rand() * Double(makers.count)) % makers.count](t, t + d))
+                if rand() < 0.4 {
+                    let ts = t + Int(rand() * 8)
+                    events.append(ActivityTransitionEvent(kind: kinds[Int(rand() * Double(kinds.count)) % kinds.count],
+                                                          probability: 0.3 + 0.6 * rand(), ts: ts,
+                                                          onsetTs: ts - Int(rand() * 10)))
+                }
+                t += d
+            }
+            let causal = ActivityContextIntervalBuilder.build(runs: runs, events: events)
+            let retro = ActivityContextRetrospective.intervals(runs: runs, events: events)
+            Self.assertPolicy(retro: retro, causal: causal)
+            let claimed = { (ivs: [ActivityContextInterval]) in
+                ivs.filter { ActivityContextRetrospective.claimedPosture($0.activityClass) != nil }
+                    .reduce(0) { $0 + $1.durationSeconds }
+            }
+            XCTAssertLessThanOrEqual(claimed(retro), claimed(causal))
+            XCTAssertLessThanOrEqual(retro.count, causal.count)
+        }
+    }
+
 
     func testDeterministic() throws {
         let s = Self.walkThenStill
