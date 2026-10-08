@@ -71,7 +71,18 @@ public struct DayStretchLayout: Equatable, Sendable {
 
 /// The posture changes the decoder flagged, and which of them belong with a set of stretches.
 public enum PositionChanges {
-    /// Below this the decoder is guessing: the event is stored but not shown as having happened.
+    /// Below this an event is stored (with its probability, in the day's document and for every physiology
+    /// join) but not listed as having happened. A display choice, not a detection threshold, and the one the
+    /// decoder's label hysteresis uses to let a flagged change confirm a new label (labels are a view: stored
+    /// context no longer waits for them).
+    ///
+    /// Measured (WP2, D7 replays at hsmm-1.8): on FORTH-TRACE every postural event was a real, correctly directed
+    /// change at every probability (precision 1.0 from 0.1 up), and about 70 % of them are below 0.40, so the
+    /// probability is not a reliability score there. On capture-24 free living the probability does not separate
+    /// events near a labelled change from those inside a steady stretch either (8-12 % near a change in every
+    /// bin), and events between 0.1 and 0.4 add ~8 per hour inside steady sitting, lying and sleep, against ~4
+    /// per hour from 0.4 up. Those are mostly unlabelled shifts in a chair or in bed: real movement, too many to
+    /// list as "you got up". The list keeps 0.40; consumers that need every change read the stored events.
     public static let minimumProbability = 0.40
     /// How far outside a stretch an event can fall and still belong to it. A change of position happens at the
     /// edge between two stretches, so it is as much the end of one as the start of the next.
