@@ -357,12 +357,14 @@ public final class PlacementCloudSync: Sendable {
     }
 
     private static func isoDate(_ s: String) -> Date? {
-        ISO8601DateFormatter().date(from: s) ?? ISO8601DateFormatter().date(from: s + "Z")
+        isoFormatter.date(from: s) ?? isoFormatter.date(from: s + "Z")
     }
 
     static func isoUTC(_ date: Date) -> String {
-        ISO8601DateFormatter().string(from: date)
+        isoFormatter.string(from: date)
     }
+
+    private static let isoFormatter = ISO8601DateFormatter()
 }
 
 public enum PlacementSyncError: Error {

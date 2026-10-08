@@ -15,10 +15,15 @@ enum SentryMonitor {
         let dsn = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: "https:/$()/", with: "https://")
         guard !dsn.isEmpty else { return }
+        // A unit-test host reports its own test-induced stalls (XCTest runs the suite on the main thread):
+        // on 2026-10-08 that was 67 of the 122 issues in the project, none from a user's phone.
+        guard NSClassFromString("XCTestCase") == nil else { return }
 
         SentrySDK.start { options in
             options.dsn = dsn
-            #if DEBUG
+            #if targetEnvironment(simulator)
+            options.environment = "simulator"
+            #elseif DEBUG
             options.environment = "debug"
             #else
             options.environment = "production"
@@ -31,7 +36,13 @@ enum SentryMonitor {
             #endif
 
             options.enableCrashHandler = true
+            // Off in the simulator: UI tests drive it through XCTAutomationSupport accessibility snapshots,
+            // which stall the main thread for seconds (21 of the 122 issues on 2026-10-08).
+            #if targetEnvironment(simulator)
+            options.enableAppHangTracking = false
+            #else
             options.enableAppHangTracking = true
+            #endif
             options.appHangTimeoutInterval = hangThreshold
             // Report hangs that only delay some frames, not just full stalls, and app kills by the
             // watchdog. iOS-only: the pinned Sentry 9.30.0 binary framework exposes this option on
@@ -57,6 +68,15 @@ enum SentryMonitor {
             options.enablePreWarmedAppStartTracing = true
             #endif
             options.enableMetricKit = true
+            options.beforeSend = { event in
+                // A "hang" whose main thread is idle in its run loop is the tracker's, not the app's.
+                SentryHangFilter.shouldDrop(event) ? nil : event
+            }
+        }
+        // Which commit a report came from: the release name is the same for every phone build of a version.
+        let revision = (Bundle.main.object(forInfoDictionaryKey: "NOOPSourceRevision") as? String) ?? ""
+        if !revision.isEmpty {
+            SentrySDK.configureScope { $0.setTag(value: revision, key: "source_revision") }
         }
     }
 

@@ -86,6 +86,7 @@ public final class ImuSessionFileStore {
     func remove(id: String) {
         pending.keys.filter { $0.hasPrefix("\(id)/") }.forEach { pending[$0] = nil }
         seen.keys.filter { $0.hasPrefix(sessionDirectory(id).path) }.forEach { seen[$0] = nil }
+        segmentBuckets.keys.filter { $0.hasPrefix(sessionDirectory(id).path) }.forEach { segmentBuckets[$0] = nil }
         save(windows().filter { $0.id != id })
     }
     func prepareForRead(_ id: String) { flushSession(id) }
@@ -373,14 +374,14 @@ public final class ImuSessionFileStore {
         // the newest ts is the bucket still being appended.
         var newestBucket: Int64 = 0
         for url in files {
-            if let bucket = Self.segmentBucket(url) { newestBucket = max(newestBucket, bucket) }
+            if let bucket = segmentBucket(url) { newestBucket = max(newestBucket, bucket) }
         }
         if let newestPendingTs = pending.filter({ $0.key.hasPrefix("\(id)/") }).values
             .flatMap({ $0 }).map(\.ts).max() {
             newestBucket = max(newestBucket, Self.bucketStart(newestPendingTs))
         }
         for url in files {
-            guard let bucket = Self.segmentBucket(url) else { continue }
+            guard let bucket = segmentBucket(url) else { continue }
             // A bucket with still-buffered rows is not fully durable — keep it for the flush retry.
             if pending["\(id)/\(bucket)"]?.isEmpty == false { continue }
             // Nominal segment end (conservative: a partial file's real end is earlier).
@@ -396,7 +397,8 @@ public final class ImuSessionFileStore {
     /// still-buffered rows for that bucket (both belong to the same evicted data).
     private func deleteSegmentFile(_ url: URL, sessionId: String) {
         seen[url.path] = nil
-        if let bucket = Self.segmentBucket(url) { pending["\(sessionId)/\(bucket)"] = nil }
+        if let bucket = segmentBucket(url) { pending["\(sessionId)/\(bucket)"] = nil }
+        segmentBuckets[url.path] = nil
         try? FileManager.default.removeItem(at: url)
     }
 
@@ -498,26 +500,41 @@ public final class ImuSessionFileStore {
     /// A file whose header cannot be read is kept: better a wasted decode than a lost second.
     private func segmentFiles(_ id: String, overlapping from: Int64, _ to: Int64) -> [URL] {
         segmentFiles(id).filter { url in
-            guard let bucket = Self.segmentBucket(url) else { return true }
+            guard let bucket = segmentBucket(url) else { return true }
             return bucket + Self.segmentSeconds > from && bucket <= to
         }
     }
     /// The 30-minute bucket start a segment file belongs to, read from its 24-byte NOOPIMU2 header
     /// (magic 8 + bucket 8 + rate 4 + axes 4) — a cheap constant-time probe for eviction.
-    private static func segmentBucket(_ url: URL) -> Int64? {
+    ///
+    /// A segment's bucket is written once, when the file is created, so it is remembered per path: the eviction
+    /// sweep (every 5 minutes, on the BLE callback) and every upload pass's overlap filter used to open and read
+    /// the header of every file in the session each time, which on a phone holding a month of capture was
+    /// over a thousand opens on the main thread (a 0.6 s and a 2 s hang in Sentry on 2026-10-08).
+    private var segmentBuckets: [String: Int64] = [:]
+    private func segmentBucket(_ url: URL) -> Int64? {
+        if let known = segmentBuckets[url.path] { return known }
         guard let handle = try? FileHandle(forReadingFrom: url),
               let data = try? handle.read(upToCount: 16) else { return nil }
         try? handle.close()
         let bytes = [UInt8](data)
         guard bytes.count >= 16 else { return nil }
-        return Int64(bigEndianBytes: bytes, at: 8)
+        let bucket = Int64(bigEndianBytes: bytes, at: 8)
+        segmentBuckets[url.path] = bucket
+        return bucket
     }
     private func sessionBytes(_ id: String) -> Int64 {
         segmentFiles(id).reduce(Int64(0)) { $0 + Int64((try? $1.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
     }
     private func scan(_ url: URL) -> Set<Int64> { Set(decode((try? Data(contentsOf: url)) ?? Data()).map(\.ts)) }
     private static func bucketStart(_ ts: Int64) -> Int64 { ts >= 0 ? ts / segmentSeconds * segmentSeconds : ((ts - segmentSeconds + 1) / segmentSeconds) * segmentSeconds }
-    private static func utcName(_ ts: Int64) -> String { let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(secondsFromGMT: 0); f.dateFormat = "yyyyMMdd'T'HHmmss'Z'"; return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts))) }
+    /// One formatter for the process: `segmentFile` runs for every appended frame, and building a DateFormatter
+    /// (ICU pattern + locale setup) each time is a visible cost on the main thread in Sentry's hang traces.
+    private static let utcNameFormatter: DateFormatter = {
+        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = TimeZone(secondsFromGMT: 0)
+        f.dateFormat = "yyyyMMdd'T'HHmmss'Z'"; return f
+    }()
+    private static func utcName(_ ts: Int64) -> String { utcNameFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(ts))) }
     private func int32(_ bytes: [UInt8], _ offset: Int) -> Int { Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16 | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3]) }
     private func deflate(_ input: Data) -> Data? { let capacity = input.count + 128; var output = Data(count: capacity); let written = output.withUnsafeMutableBytes { dst in input.withUnsafeBytes { src in compression_encode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, capacity, src.bindMemory(to: UInt8.self).baseAddress!, input.count, nil, COMPRESSION_ZLIB) } }; guard written > 0 else { return nil }; output.count = written; return output }
     private func inflate(_ input: Data, size: Int) -> Data? { var output = Data(count: size); let written = output.withUnsafeMutableBytes { dst in input.withUnsafeBytes { src in compression_decode_buffer(dst.bindMemory(to: UInt8.self).baseAddress!, size, src.bindMemory(to: UInt8.self).baseAddress!, input.count, nil, COMPRESSION_ZLIB) } }; return written == size ? output : nil }
