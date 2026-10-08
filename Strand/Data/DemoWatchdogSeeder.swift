@@ -50,7 +50,7 @@ enum DemoWatchdogSeeder {
                                          y: -0.18 + (rng.nextDouble() - 0.5) * 0.004,
                                          z: 0.98, dynAccel: 0.004))
         }
-        try? await store.insert(Streams(hr: hr, rr: rr, gravity: gravity), deviceId: deviceId)
+        _ = try? await store.insert(Streams(hr: hr, rr: rr, gravity: gravity), deviceId: deviceId)
         NSLog("DemoWatchdogSeeder: seeded \(to - from) s of live streams for \(deviceId)")
     }
 

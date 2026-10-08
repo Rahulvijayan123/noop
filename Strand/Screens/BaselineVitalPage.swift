@@ -32,6 +32,8 @@ struct BaselineVitalPage: View {
     /// Local, not `store.showContextSheet`: Today and Monitor stay mounted together in the tab bar, and two
     /// sheets bound to one store flag would both try to present.
     @State private var dayLogPresented = false
+    /// "Usual by time of day": one evaluation per context for this vital's family, cached per refresh.
+    @State private var contextUsuals: [ContextUsual] = []
 
     /// Which usual the page draws and judges against. Not a calendar range: "This week" is the 7-night
     /// usual around the scored night, "60 days" the slow usual rebuilt week by week.
@@ -57,7 +59,11 @@ struct BaselineVitalPage: View {
     private func fmt(_ value: Double?) -> String? { value.map { MonitorLabels.number($0, unit: unit) } }
 
     /// Before the first load, or before the first score of this vital.
-    private var loading: Bool { !repo.loaded || store.evaluation == nil }
+    /// Also while the first real nights have arrived but not yet been scored (the page appeared before
+    /// them, on the store's demonstration tape, which is never drawn).
+    private var loading: Bool {
+        !repo.loaded || store.evaluation == nil || (appearedWithoutNights && !repo.days.isEmpty)
+    }
     /// No real nights: the store scores a labelled demonstration tape for an empty repository, which this
     /// page never draws.
     private var noNights: Bool { repo.loaded && repo.days.isEmpty }
@@ -229,13 +235,15 @@ struct BaselineVitalPage: View {
             }
             // A synced night has to move the usuals without leaving and re-entering the page.
             .onChangeCompat(of: repo.refreshSeq) { _ in
-                if appearedWithoutNights, !repo.days.isEmpty {
-                    appearedWithoutNights = false
-                    store.jumpToNewestNight(days: days)
-                }
-                store.rescore(days: days)
+                let firstNights = appearedWithoutNights && !repo.days.isEmpty
+                if firstNights { store.jumpToNewestNight(days: days) }
+                // Keep the vital this page shows: a sync must not swap a learning vital for a ready one
+                // under the reader (the first score on appear still prefers a ready vital).
+                store.rescore(days: days, preferReadySeries: false)
+                if firstNights { appearedWithoutNights = false }
             }
             .onChangeCompat(of: usual) { _ in selection = nil }
+            .task(id: contextUsualsKey) { refreshContextUsuals() }
             .sheet(isPresented: $dayLogPresented, onDismiss: { store.showContextSheet = false }) {
                 BaselineDayLogSheet(days: store.displayDays(from: repo.days))
                     .environmentObject(store)
@@ -291,6 +299,7 @@ struct BaselineVitalPage: View {
             }
         }
         if frozen, !noNights { treatmentSection }
+        if family != nil, !noNights { timeOfDaySection }
         StatGrid(noNights ? stats.map { StatItem($0.label, value: nil) } : stats, columns: 2, isLoading: loading)
         labelsSection
         AboutDisclosure("About \(store.shortTitle(for: series))", paragraphs: aboutParagraphs)
@@ -325,6 +334,114 @@ struct BaselineVitalPage: View {
         selection = nil
         if store.context != context { store.selectContext(context, days: days) }
         if store.series != next { store.selectSeries(next, days: days) }
+    }
+
+    // MARK: Usual by time of day
+
+    /// One context's usual for this vital: the band and the latest value it was judged on.
+    struct ContextUsual: Identifiable, Equatable {
+        let context: BaselineStore.ContextFilter
+        let series: LBSeries
+        let band: ClosedRange<Double>?
+        let latest: Double?
+        let nights: Int
+        var id: String { series.rawValue }
+    }
+
+    /// The same vital in each context, where the store has one (heart rate, HRV, SpO₂). Temperature and
+    /// breathing are night-only.
+    private var family: [(BaselineStore.ContextFilter, LBSeries)]? {
+        switch series {
+        case .sleepRHR, .awakeRestHR, .awakeActiveHR, .continuousHR:
+            return [(.sleep, .sleepRHR), (.rest, .awakeRestHR), (.active, .awakeActiveHR), (.allDay, .continuousHR)]
+        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn:
+            return [(.sleep, .sleepHRVLn), (.rest, .awakeRestHRVLn), (.active, .awakeActiveHRVLn), (.allDay, .continuousHRVLn)]
+        case .sleepSpO2Mean, .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean:
+            return [(.sleep, .sleepSpO2Mean), (.rest, .awakeRestSpO2Mean), (.active, .awakeActiveSpO2Mean),
+                    (.allDay, .continuousSpO2Mean)]
+        default:
+            return nil
+        }
+    }
+
+    private var contextUsualsKey: String {
+        "\(repo.refreshSeq)|\(store.asOf)|\(family?.first?.1.rawValue ?? "-")|\(repo.days.count)"
+    }
+
+    /// The existing Layer 1 evaluation, once per context, for display only (nothing is stored).
+    private func refreshContextUsuals() {
+        guard let family, !repo.days.isEmpty else {
+            contextUsuals = []
+            return
+        }
+        let tape = days
+        let asOf = store.asOf
+        contextUsuals = family.map { context, member in
+            let ev = LongitudinalBaseline.evaluate(asOf: asOf, series: member,
+                                                   observations: store.observations(from: tape, series: member),
+                                                   trial: LBTrialRequest.none)
+            let copy = ev.show7 ? ev.copy7 : (ev.showLong ? ev.copyLong : nil)
+            return ContextUsual(context: context, series: member,
+                                band: copy.map { min($0.bandLoDisplay, $0.bandHiDisplay)...max($0.bandLoDisplay, $0.bandHiDisplay) },
+                                latest: ev.todayNative, nights: ev.n7)
+        }
+    }
+
+    @ViewBuilder private var timeOfDaySection: some View {
+        let rows = contextUsuals
+        let values = rows.flatMap { row in [row.band?.lowerBound, row.band?.upperBound, row.latest].compactMap { $0 } }
+        let domain: ClosedRange<Double> = {
+            guard let lo = values.min(), let hi = values.max() else { return 0...1 }
+            let pad = max((hi - lo) * 0.08, minSpan * 0.1)
+            return (lo - pad)...(hi + pad)
+        }()
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Usual by time of day")
+            NoopCard(padding: 0) {
+                VStack(spacing: 0) {
+                    ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                        if index > 0 { NoopListDivider() }
+                        Button { pick(row.series, in: row.context) } label: {
+                            contextRow(row, domain: domain)
+                        }
+                        .buttonStyle(LiquidPressStyle())
+                    }
+                }
+            }
+            .loadingPlaceholder(rows.isEmpty)
+        }
+    }
+
+    private func contextRow(_ row: ContextUsual, domain: ClosedRange<Double>) -> some View {
+        let current = row.series == series && row.context == store.context
+        let need = max(0, LongitudinalBaseline.Params.n7Show - row.nights)
+        return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                Text(MonitorLabels.contextName(row.context))
+                    .font(StrandFont.body.weight(current ? .semibold : .regular))
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Spacer(minLength: NoopMetrics.space2)
+                Text(row.band.map { MonitorLabels.range(show($0.lowerBound), show($0.upperBound), unit: unit) }
+                     ?? "Learning · \(row.nights) of \(LongitudinalBaseline.Params.n7Show) \(row.context == .sleep ? "nights" : "days")")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(row.band == nil ? StrandPalette.textTertiary : StrandPalette.textSecondary)
+                    .monospacedDigit()
+                    .lineLimit(1)
+            }
+            if row.band != nil || row.latest != nil {
+                RangeStrip(domain: show(domain.lowerBound)...show(domain.upperBound),
+                           band: row.band.map { show($0.lowerBound)...show($0.upperBound) },
+                           marker: row.latest.map(show),
+                           markerColor: row.latest.flatMap { latest in row.band.map { $0.contains(latest) } } == false
+                               ? StrandPalette.statusWarning : StrandPalette.textPrimary)
+            }
+        }
+        .padding(.horizontal, NoopMetrics.cardPadding)
+        .padding(.vertical, NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint(need > 0 ? "" : "Shows this usual")
     }
 
     // MARK: Treatment

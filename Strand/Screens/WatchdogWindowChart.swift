@@ -134,7 +134,7 @@ struct WatchdogWindowChart: View {
                      ChartLegendItem(.line(StrandPalette.textSecondary, dashed: true), "Expected"),
                      ChartLegendItem(trace.provisional ? .hatched(StrandPalette.textTertiary) : .band(StrandPalette.textTertiary),
                                      trace.provisional ? "Usual range (learning)" : "Usual range")]
-        if trace.minutes.contains(where: \.outside) {
+        if !trace.provisional, trace.minutes.contains(where: \.outside) {
             items.append(ChartLegendItem(.point(StrandPalette.statusWarning), "Off usual"))
         }
         return items
@@ -296,8 +296,11 @@ struct WatchdogWindowChart: View {
         }
     }
 
+    /// Off-band minutes are coloured only against a trusted band: while the band is still being learned
+    /// Watchdog makes no call, so neither does the trace.
     private func color(of minute: WatchdogTrace.Minute) -> Color {
-        minute.offStrength.map(baselineOffColor) ?? lineColor
+        guard !trace.provisional else { return lineColor }
+        return minute.offStrength.map(baselineOffColor) ?? lineColor
     }
 
     /// Every reading of a sparse vital, a reading alone between two gaps, and every minute off the band.
@@ -305,7 +308,7 @@ struct WatchdogWindowChart: View {
         let readings = trace.readings
         if trace.pointsOnly { return readings }
         let counts = Dictionary(grouping: readings, by: \.run).mapValues(\.count)
-        return readings.filter { counts[$0.run] == 1 || $0.outside }
+        return readings.filter { counts[$0.run] == 1 || ($0.outside && !trace.provisional) }
     }
 
     private var accessibilitySummary: String {

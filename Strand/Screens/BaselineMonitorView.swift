@@ -66,7 +66,8 @@ struct BaselineMonitorView: View {
                 appearedWithoutNights = false
                 store.jumpToNewestNight(days: days)
             }
-            store.rescore(days: days)
+            // Keep the selected vital across a sync (a Baseline vital page may be open on it).
+            store.rescore(days: days, preferReadySeries: false)
             store.refreshVitalsCheck(days: repo.days)
         }
         .task {

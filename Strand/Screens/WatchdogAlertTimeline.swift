@@ -121,8 +121,8 @@ struct WatchdogAlertTimeline: View {
 
     private func chart(plotHeight: CGFloat) -> some View {
         let selectedDay = selection.map { Calendar.current.startOfDay(for: $0) }
-        // A five-minute alert would be a hairline on a 24-hour axis: every bar is at least 4 pt tall.
-        let minHours = 24 * 4 / max(plotHeight, 1)
+        // A five-minute alert would be a hairline on a 24-hour axis: every bar is at least 6 pt tall.
+        let minHours = 24 * 6 / max(plotHeight, 1)
         return Chart {
             SelectionRule(selectedDay, unit: .day)
             ForEach(bars) { bar in

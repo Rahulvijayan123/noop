@@ -734,7 +734,9 @@ private struct WatchdogEventRow: View {
     var body: some View {
         HStack(alignment: .center, spacing: NoopMetrics.space3) {
             Circle()
-                .fill(WatchdogEventCopy.tone(row.maxSeverity))
+                // The loading placeholder row draws a neutral dot: redaction does not hide a fill colour.
+                .fill(row.episodeId == "placeholder" ? StrandPalette.textTertiary.opacity(0.4)
+                                                      : WatchdogEventCopy.tone(row.maxSeverity))
                 .frame(width: 8, height: 8)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
