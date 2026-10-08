@@ -63,9 +63,23 @@ public struct ActivityPersonalClassScore: Codable, Equatable, Sendable {
     public var seconds: Int
     public var baselineRecall: Double
     public var personalRecall: Double
+    /// Share of THIS class's labelled seconds the published class claimed as a different mode, with the defaults
+    /// and with the profile. Pooled over every class a minority class can be wholly mis-claimed inside the pooled
+    /// guard (30 s of standing all called sitting is 2.4 pp of 1230 s), so the guard also holds per class. nil in a
+    /// validation stored before per-class scoring.
+    public var baselineWrongClaims: Double?
+    public var personalWrongClaims: Double?
 
-    public init(seconds: Int, baselineRecall: Double, personalRecall: Double) {
+    public init(seconds: Int, baselineRecall: Double, personalRecall: Double,
+                baselineWrongClaims: Double? = nil, personalWrongClaims: Double? = nil) {
         self.seconds = seconds; self.baselineRecall = baselineRecall; self.personalRecall = personalRecall
+        self.baselineWrongClaims = baselineWrongClaims; self.personalWrongClaims = personalWrongClaims
+    }
+
+    /// How much the profile raised this class's wrong-claim share (0 when it did not, or was not measured).
+    public var wrongClaimRise: Double {
+        guard let b = baselineWrongClaims, let p = personalWrongClaims else { return 0 }
+        return max(0, p - b)
     }
 }
 
@@ -107,6 +121,11 @@ public struct ActivityPersonalValidation: Codable, Equatable, Sendable {
 
     public var gain: Double { personalBalancedAccuracy - baselineBalancedAccuracy }
 
+    /// The largest rise in any validated class's own wrong-claim share (0 when none rose).
+    public var worstClassWrongClaimRise: Double {
+        classes.values.map(\.wrongClaimRise).max() ?? 0
+    }
+
     /// The largest recall loss of any validated class (0 when none got worse).
     public var worstRecallDrop: Double {
         classes.values.map { $0.baselineRecall - $0.personalRecall }.max().map { max(0, $0) } ?? 0
@@ -117,7 +136,10 @@ public struct ActivityPersonalProfile: Codable, Equatable, Sendable {
     /// 2: stationary modes never adapt a heart-rate level (D9-02), stationary modes carry the wearer's held
     /// forearm-orientation rows, and validation scores the published class with a wrong-claim guard. The app's
     /// refit fingerprint includes this, so profiles fitted under 1 are refit (and re-validated) once.
-    public static let currentVersion = "personal-profile-2"
+    /// 3: the wrong-claim guard also holds per validated class (`maxClassWrongClaimRise`), and validation runs on
+    /// hsmm-1.9. The refit fingerprint (`Repository.activityPersonalFingerprint`) carries this version and not the
+    /// decoder's, so without the bump a profile adopted under 2 would keep being used unchecked by either.
+    public static let currentVersion = "personal-profile-3"
     /// The modes a profile may adapt, by key: lying, sitting, standing, walking, brisk walking.
     public static let modeKeys = ["bedRest", "seated", "upright", "walk", "briskWalk"]
     static let adaptableModes: [BodyMode] = [.bedRest, .seated, .upright, .walk, .briskWalk]
@@ -234,8 +256,13 @@ public enum ActivityPersonalProfileFitter {
     /// Held-out balanced-accuracy gain a mode has to add to be kept.
     static let minStepGain = 0.005
     static let maxRecallDrop = 0.05
-    /// Rise in the share of labelled seconds claimed as the wrong mode a profile may cause.
+    /// Rise in the share of labelled seconds claimed as the wrong mode a profile may cause, pooled.
     static let maxWrongClaimRise = 0.03
+    /// The same rise within each validated class (`ActivityPersonalClassScore.wrongClaimRise`), the wrong-claim
+    /// twin of `maxRecallDrop`: a profile must not buy one mode's recall by mis-claiming another mode's seconds
+    /// (narrowing "seated" so a busy stand stops reading as sitting, while quiet sitting starts reading as
+    /// standing, or a quiet lie-down as sitting), however small that mode's share of the labelled seconds is.
+    static let maxClassWrongClaimRise = 0.05
     /// Seconds dropped at the start of a static label (the body is still settling into the state) and at
     /// its end (the next step's cue).
     static let settleSeconds = 3
@@ -245,8 +272,33 @@ public enum ActivityPersonalProfileFitter {
     /// `mBurst10`) still hold the previous state, so those seconds measure decoder latency, not the profile.
     static let changeSettleSeconds = 10
     static let transitionToleranceS = 5
-    /// A class needs this many held-out seconds to take part in the recall guard.
+    /// A class needs this many held-out seconds to take part in the recall guard and the per-class wrong-claim
+    /// guard. A rarer class is still counted in the pooled wrong-claim share (`maxWrongClaimRise`), where a few
+    /// seconds cannot hide a large rise: below this its own share is noise.
     static let minClassSeconds = 10
+
+    /// Every guard a held-out validation has to pass for a profile to be kept: no validated class loses more than
+    /// `maxRecallDrop` of its recall, the pooled wrong-claim share rises by at most `maxWrongClaimRise`, no
+    /// validated class's OWN wrong-claim share rises by more than `maxClassWrongClaimRise` (a minority class wholly
+    /// mis-claimed hides inside the pooled share), and transitions are found as often as before.
+    static func guardsHold(_ v: ActivityPersonalValidation) -> Bool {
+        let rate = { (hits: Int) in v.transitions > 0 ? Double(hits) / Double(v.transitions) : 0 }
+        return v.worstRecallDrop <= maxRecallDrop + 1e-9
+            && v.wrongClaimRise <= maxWrongClaimRise + 1e-9
+            && v.worstClassWrongClaimRise <= maxClassWrongClaimRise + 1e-9
+            && rate(v.personalTransitionHits) >= rate(v.baselineTransitionHits) - maxRecallDrop - 1e-9
+    }
+
+    /// The stationary postures (lying, sitting, standing) share the still wrist, so adapting any of them moves
+    /// where the others' seconds land: narrowing "seated" so a busy stand stops reading as sitting makes a quiet,
+    /// awake lie-down read as sitting instead. The per-class guard can only see that for a posture the held-out runs
+    /// labelled (at least `minClassSeconds`). So a profile that adapts a stationary posture is kept only when all
+    /// three were validated; otherwise the unvalidated posture's risk is unknown and the stationary adaptations are
+    /// refused (fail closed). Walking modes are not affected.
+    static let stationaryKeys: Set<String> = ["bedRest", "seated", "upright"]
+    static func validatesEveryStationaryPosture(_ v: ActivityPersonalValidation, adapting modes: Set<String>) -> Bool {
+        modes.isDisjoint(with: stationaryKeys) || stationaryKeys.allSatisfy { v.classes[$0] != nil }
+    }
 
     /// Fit, validate and decide. `config` is the wearer's decode config without a personal profile (one, if
     /// present, is ignored): the baseline the profile has to beat.
@@ -287,11 +339,8 @@ public enum ActivityPersonalProfileFitter {
             }
             return score(baseline: baseline, personal: personal)
         }
-        func holds(_ v: ActivityPersonalValidation) -> Bool {
-            let rate = { (hits: Int) in v.transitions > 0 ? Double(hits) / Double(v.transitions) : 0 }
-            return v.worstRecallDrop <= maxRecallDrop + 1e-9
-                && v.wrongClaimRise <= maxWrongClaimRise + 1e-9
-                && rate(v.personalTransitionHits) >= rate(v.baselineTransitionHits) - maxRecallDrop - 1e-9
+        let holds = { (v: ActivityPersonalValidation, modes: Set<String>) in
+            guardsHold(v) && validatesEveryStationaryPosture(v, adapting: modes)
         }
 
         // Backward elimination over the validated modes: drop a mode while the held-out result breaks a guard,
@@ -311,20 +360,21 @@ public enum ActivityPersonalProfileFitter {
             for mode in ActivityPersonalProfile.modeKeys where kept.contains(mode) {
                 let v = validate(kept.subtracting([mode]))
                 if let d = drop {
-                    let better = holds(v) != holds(d.v) ? holds(v) : net(v) > net(d.v) + 1e-9
+                    let ok = holds(v, kept.subtracting([mode])), dOK = holds(d.v, kept.subtracting([d.mode]))
+                    let better = ok != dOK ? ok : net(v) > net(d.v) + 1e-9
                     if !better { continue }
                 }
                 drop = (mode, v)
             }
             guard let drop else { break }
-            let cheap = holds(drop.v) && net(drop.v) >= net(validation) - minStepGain - 1e-9
-            guard !holds(validation) || cheap else { break }
+            let cheap = holds(drop.v, kept.subtracting([drop.mode])) && net(drop.v) >= net(validation) - minStepGain - 1e-9
+            guard !holds(validation, kept) || cheap else { break }
             kept.remove(drop.mode)
             validation = drop.v
         }
         if kept.isEmpty { validation = all }
 
-        let better = !kept.isEmpty && validation.gain >= minGain - 1e-9 && holds(validation)
+        let better = !kept.isEmpty && validation.gain >= minGain - 1e-9 && holds(validation, kept)
         let full = fitModes(baseline.flatMap(\.samples)).filter { kept.contains($0.key) }
         guard better, !full.isEmpty else {
             return ActivityPersonalFitResult(status: .notBetter, fittedAt: now, runs: usable.count,
@@ -616,19 +666,19 @@ public enum ActivityPersonalProfileFitter {
 
     static func score(baseline: [Replay], personal: [Replay]) -> ActivityPersonalValidation {
         var total: [BodyMode: Int] = [:], baseHit: [BodyMode: Int] = [:], persHit: [BodyMode: Int] = [:]
-        var baseWrong = 0, persWrong = 0
+        var baseWrong: [BodyMode: Int] = [:], persWrong: [BodyMode: Int] = [:]
         let wrong = { (s: Sample) in s.predicted != .unknown && s.predicted != s.truth }
         for r in baseline {
             for s in r.samples {
                 total[s.truth, default: 0] += 1
                 if s.predicted == s.truth { baseHit[s.truth, default: 0] += 1 }
-                if wrong(s) { baseWrong += 1 }
+                if wrong(s) { baseWrong[s.truth, default: 0] += 1 }
             }
         }
         for r in personal {
             for s in r.samples {
                 if s.predicted == s.truth { persHit[s.truth, default: 0] += 1 }
-                if wrong(s) { persWrong += 1 }
+                if wrong(s) { persWrong[s.truth, default: 0] += 1 }
             }
         }
         var classes: [String: ActivityPersonalClassScore] = [:]
@@ -637,8 +687,10 @@ public enum ActivityPersonalProfileFitter {
             guard let n = total[mode], n >= minClassSeconds else { continue }
             let b = Double(baseHit[mode] ?? 0) / Double(n)
             let p = Double(persHit[mode] ?? 0) / Double(n)
-            classes[mode.personalKey] = ActivityPersonalClassScore(seconds: n, baselineRecall: round4(b),
-                                                                   personalRecall: round4(p))
+            classes[mode.personalKey] = ActivityPersonalClassScore(
+                seconds: n, baselineRecall: round4(b), personalRecall: round4(p),
+                baselineWrongClaims: round4(Double(baseWrong[mode] ?? 0) / Double(n)),
+                personalWrongClaims: round4(Double(persWrong[mode] ?? 0) / Double(n)))
             baseRecalls.append(b); persRecalls.append(p)
         }
         let mean = { (xs: [Double]) in xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count) }
@@ -652,7 +704,7 @@ public enum ActivityPersonalProfileFitter {
             transitions: baseline.map(\.transitions).reduce(0, +),
             baselineTransitionHits: baseline.map(\.transitionHits).reduce(0, +),
             personalTransitionHits: personal.map(\.transitionHits).reduce(0, +),
-            baselineWrongClaims: round4(Double(baseWrong) / Double(labelled)),
-            personalWrongClaims: round4(Double(persWrong) / Double(labelled)))
+            baselineWrongClaims: round4(Double(baseWrong.values.reduce(0, +)) / Double(labelled)),
+            personalWrongClaims: round4(Double(persWrong.values.reduce(0, +)) / Double(labelled)))
     }
 }

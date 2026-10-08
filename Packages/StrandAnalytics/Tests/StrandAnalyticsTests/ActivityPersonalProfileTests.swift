@@ -63,10 +63,13 @@ final class ActivityPersonalProfileTests: XCTestCase {
 
     // MARK: Fit and adoption
 
-    func testTwoRunsAreEnoughToAdopt() {
+    /// Two runs are enough to validate (leave-one-out over two runs). This protocol labels no lying, so its
+    /// stationary adaptations are refused (personal-profile-3, `validatesEveryStationaryPosture`); the decision is
+    /// a validated refusal, not a request for more runs.
+    func testTwoRunsAreEnoughToValidate() {
         let result = ActivityPersonalProfileFitter.fit(runs: Self.runs(Wearer(), count: 2), config: ActivityDecoderConfig(),
                                                        now: 0)
-        XCTAssertEqual(result.status, .adopted)
+        XCTAssertNotEqual(result.status, .needsMoreRuns)
         XCTAssertEqual(result.validation?.runs, 2)
     }
 
@@ -122,27 +125,34 @@ final class ActivityPersonalProfileTests: XCTestCase {
         XCTAssertNil(result.profile)
     }
 
-    func testAPersonalProfileFixesTheWearersStandingOnHeldOutRuns() throws {
+    /// The wearer's own profile fixes their busy standing on held-out runs, and passes every per-class guard on
+    /// the classes it saw. It is still refused: the protocol labels no lying, and narrowing a stationary mode moves
+    /// where lying seconds land without any guard able to see it (personal-profile-3; on the calibration simulator
+    /// such a profile doubled the unseen day's wrong claims, the lie-down read as sitting).
+    func testAPersonalProfileFixesTheWearersStandingOnHeldOutRunsButNeedsLyingValidatedToBeAdopted() throws {
         let result = ActivityPersonalProfileFitter.fit(runs: Self.runs(Wearer(), count: 3),
                                                        config: ActivityDecoderConfig(), now: 1_770_000_000)
         let v = try XCTUnwrap(result.validation)
         let upright = try XCTUnwrap(v.classes["upright"])
-        XCTAssertEqual(result.status, .adopted, "validation: \(v)")
         XCTAssertGreaterThanOrEqual(v.gain, 0.03)
         XCTAssertGreaterThan(upright.personalRecall, upright.baselineRecall + 0.2,
                              "the defaults read busy standing as sitting; the wearer's own profile should not")
         XCTAssertLessThanOrEqual(v.worstRecallDrop, 0.05)
-        let profile = try XCTUnwrap(result.profile)
-        XCTAssertEqual(profile.sessionIds, ["session-0", "session-1", "session-2"])
-        XCTAssertNotNil(profile.modes["upright"])
-        XCTAssertEqual(profile.validation, v)
-        if case .adopted(let p) = result.outcome { XCTAssertEqual(p, profile) } else { XCTFail("outcome") }
+        XCTAssertTrue(ActivityPersonalProfileFitter.guardsHold(v), "validation: \(v)")
+        XCTAssertNil(v.classes["bedRest"], "no lying labelled")
+        XCTAssertFalse(ActivityPersonalProfileFitter.validatesEveryStationaryPosture(v, adapting: ["upright"]))
+        XCTAssertEqual(result.status, .notBetter, "validation: \(v)")
+        XCTAssertNil(result.profile)
     }
 
-    func testTheAdoptedProfileChangesWhatTheDecoderSays() throws {
+    func testAProfileChangesWhatTheDecoderSays() throws {
+        // The adaptation itself (as the fitter would build it from these runs), applied directly: the decoder reads
+        // the wearer's busy stand as standing. Adoption is the fitter's separate decision (above).
         let runs = Self.runs(Wearer(), count: 3)
-        let profile = try XCTUnwrap(ActivityPersonalProfileFitter.fit(runs: runs, config: ActivityDecoderConfig(),
-                                                                      now: 0).profile)
+        let samples = runs.flatMap { ActivityPersonalProfileFitter.replay($0, config: ActivityDecoderConfig()).samples }
+        let modes = ActivityPersonalProfileFitter.fitModes(samples)
+        XCTAssertNotNil(modes["upright"])
+        let profile = ActivityPersonalProfile(fittedAt: 0, sessionIds: runs.map(\.sessionId), modes: modes)
         var personal = ActivityDecoderConfig()
         personal.personalProfile = profile
         let fresh = Self.run(Wearer(), session: "fresh", seed: 99, start: 1_761_000_000)
@@ -267,7 +277,7 @@ final class ActivityPersonalProfileTests: XCTestCase {
                                                         hrRel: 0.2)
         let profile = ActivityPersonalProfile(fittedAt: 1, sessionIds: ["b", "a"], modes: ["upright": adjustment])
         XCTAssertEqual(profile.sessionIds, ["a", "b"])
-        XCTAssertEqual(profile.version, "personal-profile-2", "bumped with the INT-B fitter rules: an older profile is refit")
+        XCTAssertEqual(profile.version, "personal-profile-3", "bumped with the per-class wrong-claim guard: an older profile is refit")
         var config = ActivityDecoderConfig()
         config.personalProfile = profile
         XCTAssertEqual(config.cacheTag, ActivityDecoderConfig().cacheTag + "-pp\(profile.tag)")
