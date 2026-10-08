@@ -44,6 +44,8 @@ enum TabRoute: Hashable {
     case layer1
     /// Homepage Baseline ring. The usuals only.
     case baselineCharts
+    /// One Layer 1 vital's usuals page, by `LBSeries.rawValue` (a Monitor Baseline row).
+    case baselineVital(String)
     /// The hosted scoring pipeline's owner diagnostics (the Monitor tab's root before Layer 1).
     case pipelineDiagnostics
     /// One event, with the full list so its Recovery card can open the cross-event view.
@@ -88,10 +90,11 @@ extension View {
             case .hydration: HydrationView()
             case .coupled: CoupledView()
             case .medication: ComingSoonScreen(title: "Medication")
-            case .watchdog: WatchdogPlaceholderView()
+            case .watchdog: WatchdogPage()
             case .layer1: BaselineMonitorView()
-            case .baselineCharts: BaselineMonitorView(focus: .baseline)
-            case .pipelineDiagnostics: MonitorView()
+            case .baselineCharts: BaselineVitalPage()
+            case .baselineVital(let raw): BaselineVitalPage(seriesRaw: raw)
+            case .pipelineDiagnostics: PipelineDiagnosticsView()
             case .event(let event, let history): EventDetailView(event: event, history: history)
             case .allEvents(let events): AllEventsView(events: events)
             case .recoveryDetails(let event, let history): RecoveryDetailsView(event: event, history: history)

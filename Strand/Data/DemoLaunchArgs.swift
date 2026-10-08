@@ -37,6 +37,7 @@ enum DemoLaunch {
         case "watchdog": return .watchdog
         case "layer1": return .layer1
         case "baselineCharts": return .baselineCharts
+        case "baselineVital" where parts.count == 2: return .baselineVital(parts[1])
         case "pipelineDiagnostics": return .pipelineDiagnostics
         default: return nil
         }
