@@ -18,22 +18,19 @@ struct StorageView: View {
     @State private var lastCleanedSummary: String?
 
     var body: some View {
-        ScreenScaffold(title: "Storage",
-                       subtitle: "Where NOOP's on-device space is going, and a one-tap clean-up.") {
+        ScreenScaffold(title: "Storage") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 if loading && report == nil {
-                    StatePill("Measuring…", tone: .accent, pulsing: true)
-                        .staggeredAppear(index: 0)
+                    StatePill("Measuring…", tone: .accent)
                 } else if let report {
-                    breakdownCard(report).staggeredAppear(index: 0)
-                    cleanUpCard(report).staggeredAppear(index: 1)
+                    breakdownCard(report)
+                    cleanUpCard(report)
                 } else {
                     DataPendingNote(title: "Storage unavailable",
                                     message: "Couldn't read the local store right now. Try again in a moment.",
                                     symbol: "internaldrive")
-                        .staggeredAppear(index: 0)
                 }
-                explainerCard.staggeredAppear(index: 2)
+                explainerCard
             }
         }
         .task { await load() }
@@ -77,7 +74,7 @@ struct StorageView: View {
                     .foregroundStyle(StrandPalette.textPrimary)
                 Text(reclaimable > 0
                      ? "There's about \(Self.format(reclaimable)) of leftover import scratch space to reclaim. This never removes your imported data."
-                     : "Nothing to reclaim right now. NOOP already cleans up import scratch space automatically.")
+                     : "Nothing to reclaim right now. Nara already cleans up import scratch space automatically.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -106,7 +103,7 @@ struct StorageView: View {
     private var explainerCard: some View {
         DataPendingNote(
             title: "Why does this grow?",
-            message: "When you import an Apple Health or WHOOP export, iOS hands NOOP a private copy of the file. NOOP reads it, saves your data into the health database, then deletes the copy. Older builds didn't delete every copy. This screen reclaims any that were left behind.",
+            message: "When you import an Apple Health or WHOOP export, iOS hands Nara a private copy of the file. Nara reads it, saves your data into the health database, then deletes the copy. Older builds didn't delete every copy. This screen reclaims any that were left behind.",
             symbol: "questionmark.circle")
     }
 
