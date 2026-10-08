@@ -99,7 +99,7 @@ struct SleepTrendTiles: View {
             tile(key: "sleep_consistency", icon: "calendar", color: StrandPalette.restColor, label: "Consistency",
                  value: model?.consistency.latest.map(Self.whole), unit: "%",
                  state: model.flatMap { SleepTileCaption.state($0.consistency, unit: "%") }, tone: .neutral,
-                 trend: model?.consistency.series)
+                 trend: model?.consistency.series, opensDetail: false)
             tile(key: "restorative_pct", icon: "sparkles", color: StrandPalette.sleepREM, label: "Restorative",
                  value: model?.restorative.latest.map(Self.whole), unit: "%",
                  state: model.flatMap { SleepTileCaption.state($0.restorative, unit: "%") }, tone: .neutral,
@@ -113,11 +113,14 @@ struct SleepTrendTiles: View {
 
     @ViewBuilder
     private func tile(key: String, icon: String, color: Color, label: LocalizedStringKey, value: String?,
-                      unit: String?, state: String?, tone: StrandTone, trend: [Double]?) -> some View {
+                      unit: String?, state: String?, tone: StrandTone, trend: [Double]?,
+                      opensDetail: Bool = true) -> some View {
         let metricTile = MetricTile(icon: icon, iconColor: color, label: label, value: value, unit: unit,
                                     state: state, stateTone: tone, trend: trend.map { Array($0.suffix(14)) },
                                     reservesTrendSlot: true, isLoading: model == nil)
-        if model != nil {
+        // Consistency is computed from the nights on this device, but its metric page only fills from a WHOOP
+        // export, so it is not a link: a number that opens an empty page is worse than a number that does not open.
+        if model != nil, opensDetail {
             SleepRouteLink(route: .metricSourced(key: key, source: "my-whoop")) { metricTile }
                 .buttonStyle(StrandPressableButtonStyle())
         } else {
