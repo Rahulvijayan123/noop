@@ -1198,6 +1198,35 @@ extension WhoopStore {
                 t.add(column: "rrDiffCount", .integer).notNull().defaults(to: 0)
             }
         }
+        // v50-ppg-legacy-record-identity: Whoop-Nara builds ship under the same bundle id and re-key
+        // `ppgWaveformSample` to (deviceId, ts, recordIndex) with recordIndex NOT NULL (their
+        // v46/v48-ppg-record-identity). Once one of those builds has run, this build's
+        // `ON CONFLICT(deviceId, ts)` insert fails on every history chunk and backfill never acks.
+        // Restore this schema's (deviceId, ts) key, keeping the first-seen row per second (lowest rowid,
+        // the same rule the insert applies) with its rowid. A database that never ran those builds has
+        // no recordIndex column and is left untouched. Their other tables (syncJob, syncJournalEntry,
+        // backfillFrontier) are unread here and harmless, so they stay.
+        migrator.registerMigration("v50-ppg-legacy-record-identity") { db in
+            let columns = try db.columns(in: "ppgWaveformSample").map(\.name)
+            guard columns.contains("recordIndex") else { return }
+            try db.create(table: "ppgWaveformSample_v50") { t in
+                t.column("deviceId", .text).notNull()
+                t.column("ts", .integer).notNull()
+                t.column("samples", .blob).notNull()
+                t.column("burstIndex", .integer)
+                t.column("baseCode", .integer)
+                t.primaryKey(["deviceId", "ts"])
+            }
+            let burstIndex = columns.contains("burstIndex") ? "burstIndex" : "NULL"
+            let baseCode = columns.contains("baseCode") ? "baseCode" : "NULL"
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO ppgWaveformSample_v50 (rowid, deviceId, ts, samples, burstIndex, baseCode)
+                SELECT rowid, deviceId, ts, samples, \(burstIndex), \(baseCode) FROM ppgWaveformSample
+                ORDER BY rowid
+                """)
+            try db.drop(table: "ppgWaveformSample")
+            try db.rename(table: "ppgWaveformSample_v50", to: "ppgWaveformSample")
+        }
         return migrator
     }
 }

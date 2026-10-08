@@ -91,7 +91,7 @@ final class ActivityContextStoreTests: XCTestCase {
     }
 
     func testMigrationIsRegisteredLast() {
-        XCTAssertEqual(WhoopStore.makeMigrator().migrations.last, "v49-rr-diff-components")
+        XCTAssertEqual(WhoopStore.makeMigrator().migrations.last, "v50-ppg-legacy-record-identity")
     }
 
     // MARK: - Replace / read

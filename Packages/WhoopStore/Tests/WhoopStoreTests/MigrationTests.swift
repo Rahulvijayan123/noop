@@ -263,4 +263,63 @@ final class MigrationTests: XCTestCase {
             XCTAssertEqual(try Double.fetchOne(db, sql: "SELECT efficiency FROM dailyMetric WHERE day = '2026-01-02'"), 0.9)
         }
     }
+
+    /// v50 restores the (deviceId, ts) key on a `ppgWaveformSample` a Whoop-Nara build re-keyed to
+    /// (deviceId, ts, recordIndex), the exact shape found on a tester's phone where every history
+    /// chunk then failed with "ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint".
+    func testV50RestoresPpgWaveformKeyAfterWhoopNaraRecordIdentity() async throws {
+        let dbQueue = try DatabaseQueue()
+        try WhoopStore.makeMigrator().migrate(dbQueue, upTo: "v49-rr-diff-components")
+        try await dbQueue.write { db in
+            try db.execute(sql: """
+                DROP TABLE ppgWaveformSample;
+                CREATE TABLE "ppgWaveformSample" ("deviceId" TEXT NOT NULL, "ts" INTEGER NOT NULL,
+                  "samples" BLOB NOT NULL, "burstIndex" INTEGER, "recordIndex" INTEGER NOT NULL,
+                  "baseCode" INTEGER, PRIMARY KEY ("deviceId", "ts", "recordIndex"));
+                INSERT INTO ppgWaveformSample (rowid, deviceId, ts, samples, burstIndex, recordIndex, baseCode) VALUES
+                  (10, 'my-whoop', 100, x'01', 3, 7, 900),
+                  (11, 'my-whoop', 100, x'02', 4, 8, 901),
+                  (12, 'my-whoop', 101, x'03', NULL, 9, NULL);
+                """)
+        }
+
+        try WhoopStore.makeMigrator().migrate(dbQueue)
+
+        try await dbQueue.write { db in
+            XCTAssertEqual(try db.columns(in: "ppgWaveformSample").map(\.name),
+                           ["deviceId", "ts", "samples", "burstIndex", "baseCode"])
+            XCTAssertEqual(try db.primaryKey("ppgWaveformSample").columns, ["deviceId", "ts"])
+            let rows = try Row.fetchAll(db, sql: "SELECT rowid, ts, samples, burstIndex, baseCode FROM ppgWaveformSample ORDER BY ts")
+            XCTAssertEqual(rows.count, 2, "one row per second")
+            XCTAssertEqual(rows[0]["rowid"] as Int64?, 10, "the first-seen row for a second is kept, with its rowid")
+            XCTAssertEqual(rows[0]["samples"] as Data?, Data([0x01]))
+            XCTAssertEqual(rows[0]["burstIndex"] as Int?, 3)
+            XCTAssertEqual(rows[0]["baseCode"] as Int?, 900)
+            XCTAssertEqual(rows[1]["rowid"] as Int64?, 12)
+            try db.execute(sql: """
+                INSERT INTO ppgWaveformSample (deviceId, ts, samples, burstIndex, baseCode) VALUES ('my-whoop', 100, x'09', 1, 1)
+                ON CONFLICT(deviceId, ts) DO NOTHING
+                """)
+            XCTAssertEqual(try Data.fetchOne(db, sql: "SELECT samples FROM ppgWaveformSample WHERE ts = 100"), Data([0x01]))
+        }
+    }
+
+    /// v50 leaves this schema's own `ppgWaveformSample` (no recordIndex) and its rows exactly as they were.
+    func testV50LeavesNativePpgWaveformTableAlone() async throws {
+        let dbQueue = try DatabaseQueue()
+        try WhoopStore.makeMigrator().migrate(dbQueue, upTo: "v49-rr-diff-components")
+        try await dbQueue.write { db in
+            try db.execute(sql: "INSERT INTO ppgWaveformSample (deviceId, ts, samples) VALUES ('my-whoop', 100, x'01')")
+        }
+        let before = try await dbQueue.read { db in
+            try String.fetchOne(db, sql: "SELECT sql FROM sqlite_master WHERE name = 'ppgWaveformSample'")
+        }
+
+        try WhoopStore.makeMigrator().migrate(dbQueue)
+
+        try await dbQueue.read { db in
+            XCTAssertEqual(try String.fetchOne(db, sql: "SELECT sql FROM sqlite_master WHERE name = 'ppgWaveformSample'"), before)
+            XCTAssertEqual(try Int.fetchOne(db, sql: "SELECT COUNT(*) FROM ppgWaveformSample"), 1)
+        }
+    }
 }
