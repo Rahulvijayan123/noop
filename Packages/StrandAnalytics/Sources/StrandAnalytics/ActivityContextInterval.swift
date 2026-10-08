@@ -23,12 +23,13 @@ import WhoopProtocol
 //      context are merged (duration-weighted), so a seat/desk wording flip inside one situation is one row;
 //   2. a non-movement fragment shorter than `foldFragmentS` between two stretches of the same situation is
 //      absorbed, and the interval says so (`absorbedClasses`, `absorbedSeconds`): a sustained-state row stays
-//      stable without pretending the stand never happened. A MOVEMENT fragment is never folded away (a
-//      six-second walk to the kitchen is behaviour worth labelling, and the stand reminder cares about every
-//      second of it), and neither is an off-wrist or no-claim (`unknown`) fragment or one whose wear, sleep or
-//      in-bed context differs: absorbing those would assert a context the evidence never gave. The short changes
-//      themselves are kept as events (`ActivityContextDayDocument.events`, counted per row in
-//      `transitionCount`);
+//      stable without pretending the stand never happened. A brief light-activity reading (a reach, shifting in
+//      the chair, the burst of a stand-up and sit-down) is absorbed the same way. A GAIT, cycling or vigorous
+//      fragment is never folded away (a six-second walk to the kitchen is behaviour worth labelling, and the
+//      stand reminder cares about every second of it), and neither is an off-wrist or no-claim (`unknown`)
+//      fragment or one whose wear, sleep or in-bed context differs: absorbing those would assert a context the
+//      evidence never gave. The short changes themselves are kept as events (`ActivityContextDayDocument.events`,
+//      counted per row in `transitionCount`);
 //   3. intervals longer than `maxIntervalS` are cut into near-equal parts, so every row's statistics are
 //      local (a 15-minute HRV, not an eight-hour one) and "which interval contains t" is a bounded index
 //      range.
@@ -211,7 +212,8 @@ public enum ActivityContextIntervalBuilder {
     public struct Config: Equatable, Sendable {
         /// Largest gap between two runs of the same situation that still joins them.
         public var mergeGapS = 10
-        /// A non-movement stretch shorter than this, between two stretches of the same situation, is absorbed.
+        /// A still or light-activity stretch shorter than this, between two stretches of the same situation, is
+        /// absorbed (and recorded on the row that absorbs it).
         public var foldFragmentS = 10
         /// Longest single row; longer stretches are cut into near-equal parts.
         public var maxIntervalS = 900
@@ -473,10 +475,12 @@ public enum ActivityContextIntervalBuilder {
         var i = 0
         while i < merged.count {
             let cur = merged[i]
-            // Never absorbed: movement (behaviour worth its own row), off the wrist or no claim (absorbing would
-            // assert a context nobody measured), or a fragment in another wear / sleep / in-bed context.
-            let absorbable = !cur.activityClass.isMovement && cur.activityClass != .offWrist
-                && cur.activityClass != .unknown
+            // Never absorbed: gait, cycling or vigorous effort (behaviour worth its own row), off the wrist or no
+            // claim (absorbing would assert a context nobody measured), or a fragment in another wear / sleep /
+            // in-bed context. A light-activity blip inside a still stretch is the stretch's (until the label hold
+            // stopped hiding it, it never reached a row at all).
+            let kept: Set<ActivityClass> = [.offWrist, .unknown, .cycling, .vigorousActivity]
+            let absorbable = !cur.activityClass.isGait && !kept.contains(cur.activityClass)
             if cur.duration < config.foldFragmentS, absorbable,
                let prev = out.last, i + 1 < merged.count {
                 let next = merged[i + 1]

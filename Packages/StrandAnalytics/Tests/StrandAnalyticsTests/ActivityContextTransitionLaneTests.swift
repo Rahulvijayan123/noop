@@ -550,6 +550,20 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(iv.first?.settlingSeconds, 120, "two minutes from the stand-up, inside the row")
     }
 
+    func testABriefLightActivityBlipInsideSittingIsAbsorbedButAShortWalkIsNot() {
+        let moving: [LocomotionClass: Double] = [.other: 0.8, .stationary: 0.2]
+        let walking: [LocomotionClass: Double] = [.walking: 0.85, .stationary: 0.15]
+        let blip = ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated),
+                                                               run(120, 125, posture: [.unknown: 1], locomotion: moving),
+                                                               run(125, 240, posture: seated)])
+        XCTAssertEqual(blip.map(\.activityClass), [.sitting])
+        XCTAssertEqual(blip.first?.absorbedClasses, [.lightActivity])
+        let walk = ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated),
+                                                               run(120, 125, posture: [.unknown: 1], locomotion: walking),
+                                                               run(125, 240, posture: seated)])
+        XCTAssertEqual(walk.map(\.activityClass), [.sitting, .walking, .sitting])
+    }
+
     func testTheFoldNeverAbsorbsOffWristNoClaimOrAnotherContext() {
         let offWrist = run(120, 125, posture: [.unknown: 1], locomotion: [.unknown: 1], wear: .offWrist)
         let noClaim = run(120, 125, posture: [.unknown: 1], locomotion: [.unknown: 1], confidence: 0.1)
