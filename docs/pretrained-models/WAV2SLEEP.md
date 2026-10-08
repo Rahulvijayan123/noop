@@ -83,12 +83,13 @@ The request `input` reuses the PPG section the worker builds for `sensor.biomark
 ```json
 {"window": {"start_utc": 1780902000, "end_utc": 1780930801},
  "input_revision": "sha256:<object digests>",
- "ppg": {"native_rate_hz": 24, "units": "adc_counts",
+ "ppg": {"native_rate_hz": 25, "units": "adc_counts",
          "withheld_seconds": {"missing_ppg_anchor": 0},
          "segments": [{"start_unix": 1780902000, "duration_s": 300, "samples": [380412, "..."],
-                       "sample_count_per_second": 24, "run_id": "r-1",
-                       "config": {"stable": true, "identity": "burst=1;srcA=2;drvA=40", "known": true},
-                       "clock": {"verified": true, "source": "strap record ts"}}]}}
+                       "sample_count_per_second": 25, "run_id": "r-1",
+                       "config": {"stable": true, "identity": "srcA=2;drvA=40;led=green", "known": true},
+                       "clock": {"packet_timing_verified": true, "samples_per_second": 25,
+                                 "source": "...", "grid": "...", "endpoint": "..."}}]}}
 ```
 
 Rules:
@@ -100,8 +101,25 @@ Rules:
   run.
 - If no segment has a `run_id` (the legacy shape), the request is refused.
 
-`clock.verified` and `clock.source` are this adapter's reading of Spec 01's "native clock
-provenance". The inner names are reconciled at wiring time.
+The member names are the ones Spec 01 pinned in docs/model-integration/README.md, "PPG segments"
+(Spec 01 branch, commits ff143411e and 0fd8b94d3):
+
+- **Native rate.** It is what the request declares. `ppg.native_rate_hz` must be in
+  `SUPPORTED_NATIVE_RATES_HZ` = {24, 25}, and must equal every segment's `clock.samples_per_second`
+  and `sample_count_per_second`. Anchored v26 segments use 25 Hz (the anchor plus 24 deltas, with
+  the next record's anchor as the 26th point); 24 Hz is the earlier convention. Nothing downstream
+  assumes either value.
+- **Clock.** `clock.packet_timing_verified` must be `true`. `clock.source`, `grid` and `endpoint`
+  are provenance only: they are carried into the output and never gated on. A segment without
+  `clock` is the legacy shape.
+- **Configuration.** `config.identity` is `"unknown"` with `config.known = false` when the transport
+  cannot identify the configuration. That is withheld (`optical_config_unidentified`) because
+  channel, LED and polarity matter to this model.
+- **Runs.** A gap or an identity change inside one `run_id` splits the run there, never joins it,
+  and is counted as `ppg_run_id_discontinuity` in the diagnostics.
+
+The test `tests/test_wav2sleep_spec01_shape.py` feeds a segment shaped like Spec 01's golden
+envelope (`tests/wav2sleep_spec01_segment_shape.json`, provenance inside).
 
 Withheld reasons (`diagnostics.reason_detail` → wire `withheld_reason`):
 
@@ -113,12 +131,13 @@ Withheld reasons (`diagnostics.reason_detail` → wire `withheld_reason`):
 | `legacy_deltas_suspected` | `blocked_input` | every sample of a run fits i16 and the median is near zero (un-anchored deltas sent as samples) |
 | `no_ppg_segments` | `blocked_input` | no PPG segments arrived |
 | `missing_run_id` | `blocked_input` | no segment carries `run_id` (the legacy shape) |
-| `unverified_sample_clock` | `unverified` | a segment lacks `clock` or `clock.verified` is not `true` |
+| `unverified_sample_clock` | `unverified` | a segment lacks `clock`, or `clock.packet_timing_verified` is not `true` |
+| `clock_rate_mismatch` | `blocked_input` | `clock.samples_per_second` differs from `ppg.native_rate_hz` |
 | `optical_config_identity_missing` | `blocked_input` | `config.identity` is absent |
-| `optical_config_unknown` | `unverified` | `config.known` is not `true` |
+| `optical_config_unidentified` | `unverified` | `config.identity` is `"unknown"`, or `config.known` is not `true` |
 | `optical_config_changed` / `optical_config_changed_within_run` | `blocked_input` | `config.stable` is not `true`, or `config.identity` changes inside one `run_id` |
 | `noncontiguous_run` / `overlapping_segments` / `unsorted_segments` | `blocked_input` | a gap inside one `run_id`, overlapping pieces, or pieces out of time order |
-| `invalid_segment` / `unsupported_native_rate` | `blocked_input` | the sample count is not `duration_s × 24`, or the rate is not 24 |
+| `invalid_segment` / `unsupported_native_rate` | `blocked_input` | the sample count is not `duration_s × native_rate_hz`, or the declared rate is not in {24, 25} or differs from `sample_count_per_second` |
 | `nonfinite_samples` / `non_integer_samples` / `saturated_samples` | `blocked_input` | NaN or inf, fractional counts, or values on or beyond the signed 20-bit rails or flagged saturated |
 | `channel_not_admitted` / `derived_respiration_refused` | `blocked_input` | section 3 |
 | `night_too_long` | `blocked_input` | the window is longer than 10 h; nothing is silently truncated |
@@ -130,7 +149,8 @@ Withheld reasons (`diagnostics.reason_detail` → wire `withheld_reason`):
 
 Each contiguous run is one official "recording":
 
-1. Start at the run's first UTC 30-s boundary `t0`, using relative times `j/24.0`.
+1. Start at the run's first UTC 30-s boundary `t0`, using relative times `j/rate`, where `rate` is
+   the run's declared native rate (24 or 25).
 2. Stage `n = floor((t_last - t0)/30)` whole epochs. Epoch e uses the pinned grid points
    `(30e, 30(e+1)]`. Its last point is the next second's first native sample, so a run's final
    epoch is staged only when that sample belongs to the run.
