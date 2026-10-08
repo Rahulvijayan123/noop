@@ -20,6 +20,10 @@ public enum ActivityPhysiologyPhase: String, Equatable, Sendable {
     /// Far enough from any known transition that the reading describes the CURRENT behaviour, not the one
     /// before it.
     case steadyState = "steady_state"
+    /// No transition-event data was available for the span at all (no decoder output), so "no event in
+    /// the lookback" cannot be told apart from "events were never looked for". Never a resting baseline
+    /// observation. Distinct from a decoded span that simply had no events, which reads `steadyState`.
+    case unknown
 }
 
 public enum ActivityTransitionProximity {
@@ -42,5 +46,31 @@ public enum ActivityTransitionProximity {
         if s < transitionS { return .transition }
         if s < recoveryS { return .recovery }
         return .steadyState
+    }
+
+    /// Classify a WINDOW (not a moment): the phase of `[start, end)` is decided by the transition nearest
+    /// its START, because a transition anywhere inside the window mixes two behaviours into one reading.
+    ///
+    /// - `eventsAvailable == false` → `.unknown`: there was no event data to look at, so the absence of an
+    ///   event proves nothing. The nil-means-steady convention above applies only when the caller DID have
+    ///   decoded events for the span.
+    /// - `transitionsInWindow > 0` → `.transition`, however long the window ran after it.
+    /// - otherwise `phase(secondsSinceTransition:)` measured from the window start.
+    public static func windowPhase(secondsSinceTransitionAtStart: Int?, transitionsInWindow: Int,
+                                   eventsAvailable: Bool, transitionS: Int = defaultTransitionS,
+                                   recoveryS: Int = defaultRecoveryS) -> ActivityPhysiologyPhase {
+        guard eventsAvailable else { return .unknown }
+        if transitionsInWindow > 0 { return .transition }
+        return phase(secondsSinceTransition: secondsSinceTransitionAtStart, transitionS: transitionS,
+                     recoveryS: recoveryS)
+    }
+
+    /// Postural transitions (sit/stand/lie/get up) change the orthostatic load directly; locomotion
+    /// starts/stops are reported separately so a reader can tell "just sat down" from "just stopped walking".
+    public static func isPostural(_ kind: ActivityTransitionKind) -> Bool {
+        switch kind {
+        case .sitToStandLike, .standToSitLike, .lyingDownLike, .gettingUpLike: return true
+        case .walkStart, .walkStop, .runStart, .runStop: return false
+        }
     }
 }

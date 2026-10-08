@@ -21,6 +21,36 @@ enum CoachToolDisplayNames {
     }
 }
 
+/// The WATCHDOG signal lines of `get_baseline_status`, pure so they are testable without an executor.
+enum CoachWatchdogText {
+    /// One line per observed signal, each carrying what the Watchdog's own activity head said the wearer was
+    /// doing (D6-09): a heart rate of 104 vs an expected 72 reads very differently while walking than while
+    /// still, and the model must not mistake the first for stress. `activityLabel` is the head's label for
+    /// the LATEST minute of the scored window (`WatchdogResult.activityLabel` is the last per-minute label),
+    /// not a summary of the whole 30 minutes, so the line says exactly that.
+    static func signalLines(_ signals: [WatchdogSignalEvidence], activityLabel: String,
+                            activityDetail: String) -> [String] {
+        func fmt(_ v: Double) -> String { abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.1f", v) }
+        let label = activityLabel.isEmpty ? WatchdogActivityClass.unknown.rawValue : activityLabel
+        let doing = activityDetail.isEmpty || activityDetail == label ? label : "\(activityDetail) [\(label)]"
+        var lines: [String] = []
+        for s in signals {
+            guard let now = s.observed else { continue }
+            var line = "  \(s.name): \(fmt(now)) \(s.unit)"
+            if let usual = s.reconstructed ?? s.usual {
+                line += " vs expected \(fmt(usual))"
+                if s.rangeHalf > 0 { line += " ± \(fmt(s.rangeHalf))" }
+            }
+            if s.trustPct > 0 { line += " (trust \(s.trustPct)%)" }
+            line += label == WatchdogActivityClass.unknown.rawValue
+                ? "; activity unknown (the reading may be from movement)"
+                : "; activity in the latest minute: \(doing)"
+            lines.append(line)
+        }
+        return lines
+    }
+}
+
 /// The tools the model may call. Every read comes from the same rows the rest of the app shows, so the
 /// coach can never quote a number the user cannot find on screen.
 @MainActor
@@ -224,16 +254,8 @@ struct CoachToolExecutor {
                 lines.append("• Not scoring right now (\(reason.rawValue)). Do not infer a reading for this stretch.")
             } else {
                 lines.append("• \(r.headline) \(r.episodeLine)")
-                for s in r.signals {
-                    guard let now = s.observed else { continue }
-                    var line = "  \(s.name): \(fmt(now)) \(s.unit)"
-                    if let usual = s.reconstructed ?? s.usual {
-                        line += " vs expected \(fmt(usual))"
-                        if s.rangeHalf > 0 { line += " ± \(fmt(s.rangeHalf))" }
-                    }
-                    if s.trustPct > 0 { line += " (trust \(s.trustPct)%)" }
-                    lines.append(line)
-                }
+                lines += CoachWatchdogText.signalLines(r.signals, activityLabel: r.activityLabel,
+                                                       activityDetail: r.activityDetail)
                 if !r.contributing.isEmpty { lines.append("• Moving away from usual: " + r.contributing.joined(separator: ", ")) }
             }
         } else {

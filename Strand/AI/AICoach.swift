@@ -3,6 +3,7 @@ import Combine
 import Security
 import WhoopStore
 import StrandAnalytics
+import WhoopProtocol
 import StrandImport
 
 // MARK: - AI Coach (the one networked feature, strictly opt-in, bring-your-own-key)
@@ -979,19 +980,80 @@ final class AICoachEngine: ObservableObject {
     /// then summarised to a single number with `StressIndex.stressIndex(rr:)`. Returns nil when the
     /// store is unavailable or there are too few clean beats (the histogram needs >= 20), so the line is
     /// simply absent, never a fabricated value. Summary-only: the raw R-R never leaves the device.
+    ///
+    /// D6-09: the SI is computed only over beats the saved activity context places awake, on-wrist and
+    /// still (`stressIndexBeats`), so sleep, a run or a walk does not masquerade as the day's stress, and
+    /// only once there are at least `stressMinAwakeStillSeconds` of them; the line states that support and
+    /// how far the saved context reaches. When there is no saved context, or too little awake-still R-R, the
+    /// all-day value is still given but labelled as POOLED across sleep, rest and activity.
     func stressIndexLine() async -> String? {
         let cal = Calendar.current
         let from = Int(cal.startOfDay(for: Date()).timeIntervalSince1970)
         let to = Int(Date().timeIntervalSince1970)
         let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        let context = await repo.storedActivityContext(from: from, to: to)
+        return Self.stressIndexLine(rr: rr, context: context.intervals)
+    }
+
+    /// Which beats the coach's stress line is computed over.
+    enum StressIndexScope: Equatable {
+        /// Only beats inside awake, on-wrist, still stretches of the saved activity context, with the support
+        /// behind it: how many minutes of such beats, and how far the saved context reaches (beats after it
+        /// have no context and are left out).
+        case awakeStill(minutes: Int, contextThrough: Int)
+        /// Every beat since midnight: sleep, rest and activity mixed.
+        case pooled
+    }
+
+    /// Minimum awake-still R-R support (summed beat durations) before the stress line is presented as the
+    /// awake-still value; below it the pooled, labelled value is used. The SI histogram's own 20-beat floor
+    /// is ~15 s of beats, far too little to stand for "today's awake stress".
+    nonisolated static let stressMinAwakeStillSeconds = 300
+
+    /// Activity classes whose beats describe the wearer at rest and awake (the same still family the
+    /// activity context calls stationary), for the stress index.
+    nonisolated static let stressStillClasses: Set<ActivityClass> = [.lyingDown, .sitting, .sittingDesk, .standing,
+                                                         .stationary, .fidgeting]
+
+    /// The beats inside awake, on-wrist, still stretches of `context` (pure).
+    nonisolated static func stressIndexBeats(rr: [RRInterval], context: [ActivityContextInterval]) -> [RRInterval] {
+        guard !context.isEmpty else { return [] }
+        let lookup = ActivityContextLookup(intervals: context.filter {
+            stressStillClasses.contains($0.activityClass) && $0.sleep != .asleep && $0.wear == .onWrist
+        })
+        return rr.filter { lookup.interval(at: $0.ts) != nil }
+    }
+
+    /// The stress line from beats + context (pure): awake-still when there are at least
+    /// `stressMinAwakeStillSeconds` of such beats, stating that support and the context horizon; else pooled
+    /// and labelled so. nil when even the pooled beats are too few.
+    nonisolated static func stressIndexLine(rr: [RRInterval], context: [ActivityContextInterval],
+                                            timeZone: TimeZone = .current) -> String? {
+        let still = stressIndexBeats(rr: rr, context: context)
+        let stillSeconds = still.reduce(0) { $0 + max(0, $1.rrMs) } / 1000
+        if stillSeconds >= stressMinAwakeStillSeconds, let si = StressIndex.stressIndex(rr: still),
+           let horizon = context.map(\.end).max() {
+            return stressIndexSummary(si: si, scope: .awakeStill(minutes: stillSeconds / 60, contextThrough: horizon),
+                                      timeZone: timeZone)
+        }
         guard let si = StressIndex.stressIndex(rr: rr) else { return nil }
-        return Self.stressIndexSummary(si: si)
+        return stressIndexSummary(si: si, scope: .pooled)
     }
 
     /// Pure formatter for the derived stress line, kept separate so it is unit-testable without a store.
     /// One summary number, labelled, with a plain-English note that it's an autonomic-balance proxy.
-    static func stressIndexSummary(si: Double) -> String {
-        "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index over today's R-R; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
+    nonisolated static func stressIndexSummary(si: Double, scope: StressIndexScope = .pooled,
+                                               timeZone: TimeZone = .current) -> String {
+        let over: String
+        switch scope {
+        case let .awakeStill(minutes, contextThrough):
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "en_US_POSIX"); f.timeZone = timeZone; f.dateFormat = "HH:mm"
+            let through = f.string(from: Date(timeIntervalSince1970: TimeInterval(contextThrough)))
+            over = "over \(minutes) min of today's R-R while awake and still, activity context through \(through)"
+        case .pooled: over = "over all of today's R-R, pooled across sleep, rest and activity, so not a resting value"
+        }
+        return "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index \(over); higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
     }
 
     /// A SUMMARY-ONLY block of the new on-device signals, the user's strongest n-of-1 correlations
