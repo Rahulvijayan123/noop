@@ -76,7 +76,15 @@ only over contiguous pairs. Also computed, but not the headline number: SDNN (sa
 - HR-only nights (no motion spine) are used for HRV only when the day has no motion-staged session.
 - Stored as `DailyMetric.avgHrv` (ms). Also stored: `avgSdnn`, the mean of 5-minute SDNN segments over in-bed R-R (the SDNN index, not one whole-night SD).
 - **Hosted worker input.** A WHOOP 5 strap writes each beat on two transports (historical 5 and standard 7), so the worker keeps ONE transport per UTC hour (the fullest strap channel, lowest id on a tie) before scoring. Without that the over-count gate above withholds the night. Redundant `spo2Ibi` rows and `tsSuspect` rows are not read.
-- **Intraday series (hosted worker only).** The scoring snapshot's `daily.hrv_series` holds one RMSSD per **15-minute** slot of the local day (`{slot_s, points: [[slotStartUnix, rmssd, cleanBeats]]}`), recomputed on every re-score. A slot needs ≥ 60 clean beats, coverage ≤ the over-count ceiling, and the spot-reading rejection limit. Daytime wrist RMSSD is artifact-prone, so this series is informational and never feeds Charge or baselines.
+- **Intraday series (hosted worker only).** The scoring snapshot's `daily.hrv_series` holds one RMSSD per **15-minute** slot of the local day (`{slot_s, points: [[slotStartUnix, rmssd, cleanBeats]], context: [...]}`), recomputed on every re-score. A slot needs ≥ 60 clean beats, coverage ≤ the over-count ceiling, and the spot-reading rejection limit. Daytime wrist RMSSD is artifact-prone, so this series is informational and never feeds Charge or baselines.
+  - **Per-slot context (D6-14).** An additive `context` array has one entry per point, in the same order: `{slot_s, weak, reasons, moving_share, unknown_share, clean_coverage, post_activity}`.
+    - The shares come from the same full-support join as `contexts.hrv_slots` (`ActivityContextJoin.hrvSlotContexts`, section 9f), over the day's published activity epochs.
+    - `reasons` can hold three flags:
+      - `movement`: walking + running + other movement is ≥ 0.25 of the slot.
+      - `unknown_context`: the unknown share is ≥ 0.5.
+      - `sparse_beats`: clean beats × mean NN is under one third of the slot.
+    - A slot with any reason is `weak`. With no published epochs, every slot is `unknown_context`.
+    - Points are never dropped. The Today chart (`HrvSeriesChart`) draws a weak point hollow and faded, keeps it out of the line and the "Latest" value, and explains why in a caption. A snapshot without `context` renders as before.
 - **Dense series (hosted worker only).** `server_metric_series` holds RMSSD per **5-minute** bucket (≥ 45 clean beats, quiet wrist) for the app's "Through the day" card, next to the 15-minute slots above; see the backend runbook.
 
 ### What it does not do
@@ -478,48 +486,363 @@ When resting HR is known, VO₂max is estimated with Uth 2004, `15.3 × HRmax / 
 
 ---
 
-## 9. Activity class (what the wearer was doing)
+## 9. Activity class and measurement context (what the wearer was doing)
 
-**What it is.** One canonical, machine-readable label per moment (`ActivityClass`, taxonomy `act-class-2`) with a confidence, built on the ActivityContext decoder (`hsmm-1.3`, ontology `v2.0`). It is the label code and downstream systems branch on. The on-screen wording ("Desk sitting", "Brisk walking") stays a view for people. This is a behavioural context, not a medical measurement.
+**What it is.** One canonical, machine-readable label per moment (`ActivityClass`, taxonomy `act-class-4`) with a confidence, built on the ActivityContext decoder (`hsmm-1.9`, ontology `v2.0`). Code and downstream systems branch on this label. The on-screen wording ("Desk sitting", "Brisk walking") is a view for people. Decoded runs become stored intervals (`ctx-int-2`), and physiology joins to them by time. This is a behavioural context, not a medical measurement.
 
-### Input
+The same decoder runs in two places. The phone decodes each local day from its own streams (`ActivityContextCoordinator`). The worker decodes the day from the stored streams plus the activity service's window outputs and publishes the document to `public.activity_context_days` (`ActivityContextDays`).
 
-The decoder reads what the strap actually sends: gravity and dynamic acceleration, the cumulative step counter, heart rate (scaled by the profile's HRmax), the detected nights (each night's in-bed window and its staged sleep epochs, so lying awake in bed is awake and in bed, never asleep), logged workouts, and wrist-on / wrist-off events. When raw IMU covers the time, the HART motion encoder adds gait rhythm and a named activity. A WHOOP 5/MG records it on its own (one minute in every three by default, or continuously), the server runs HART over it (100 Hz resampled to 30 Hz, 4 s windows) and the phone fetches the windows back for its decoder, so they reach a stretch a few minutes after the strap's own streams do and the day is re-decoded when they arrive. HART tells stationary, walking, running and other movement apart; it does not tell sitting from standing or lying. Every five seconds it publishes three independent probability heads (posture, locomotion, arm behaviour) and never forces a class.
+### 9a. Sources, where they run, and who decides what
 
-### Classes
+| Source | Where it runs | Status in the code | What it contributes |
+|---|---|---|---|
+| Strap streams: gravity, dynamic acceleration, step counter, heart rate, wrist-off / wrist-on events | Phone and worker decoder | Always on | Movement shape, gait cadence, forearm orientation, the exertion level, wear |
+| Motion features (`imu-feat-2`, per window) | Activity service on the server, from raw IMU | On when raw IMU exists | Gyro RMS, jerk, cadence band. Dropped if the service's schema differs from the build's |
+| HART | Activity service on the server | On when raw IMU exists | 100 Hz raw IMU resampled to 30 Hz, 4 s windows on a 2 s hop. Per-window activity probabilities; when the service sends them, a fine 18-activity distribution. The phone fetches the windows back and re-decodes the day |
+| Inertia-1 motion heads | Worker only | Dormant. The decoder default is `motionHeads = nil`, and the phone never sets it. On the worker it runs only when `FRWHOOP_INERTIA_ENABLED` is on and a bundle is configured, in shadow or candidate mode, and writes to its own table (`activity_motion_heads_days`). Published day documents are byte-identical with or without it | Nothing in production output |
+| ElderNet gait | Worker (shadow or candidate, env-gated); phone decoder | The phone uses ElderNet windows as decoder evidence only from days the server ran in a non-shadow mode, with the pinned model version and weights digest (`GaitWindowStore.evidenceConfig`). The worker's published documents never use it | Walk vs brisk-walk split and gait metrics, under a shared accelerometer budget |
+| Transition expert | Activity service (optional `transition.json.gz` artifact) | Optional channel. Without the artifact the channel is absent and the decoder runs without it. Not deployed (status document) | Transition direction into the wrist direction memory, and the event `source` |
+| Sleep detection and staging | Phone and worker (section 2) | Always on | Sleep epochs and each night's in-bed window |
+| Personal profile | Phone decoder | On only after a profile is adopted (9e) | Adapted observation profiles |
+
+WHOOP 5/MG records raw IMU one minute in every three by default ("Part-time", `ActivityImuCapture`). "Continuous" and "Off" are the other modes. Without raw IMU, HART and the motion features are absent and the decoder works from the strap streams alone.
+
+**Who decides what.**
+
+- **Wear is a hard gate.** Wrist-off events give `off_wrist` at confidence 1, and going off the wrist resets the belief. Otherwise a second is `on_wrist` only when a valid pulse falls in the last 60 s (`wearPulseWindowS`, causal). Gravity, steps or IMU alone are not wear evidence, and a pulseless, implausibly still strap reads `unknown`.
+- **The sleep stager owns `sleeping`.** A second is `sleeping` only on a sleep epoch of a detected night. Awake inside a night's in-bed window is `lying_down` ("Resting in bed"), never asleep. The posture head's lean never overrides either.
+- **A posture claim needs posture evidence.** Elapsed stillness never decides sitting vs standing. Without evidence the state is `stationary`.
+- **Heart rate is not posture evidence.** All three stationary modes (bed rest, seated, upright) expect one relative heart-rate level (`stationaryHrRel` 0.08), and all four postural-transition modes expect one level (`transitionHrRel` 0.20). Heart rate therefore separates stationary from exertion only. A personal profile never adapts it per posture.
+- **Cycling is only claimed when something names it**: HART, or a cycling workout. It is never inferred from heart rate and stillness.
+
+### 9b. Decoder (`hsmm-1.9`)
+
+The decoder is a hidden semi-Markov model over 15 body modes: unknown, bed rest, seated, upright, walk, brisk walk, run, stairs, cycling, vehicle, other exercise, and four postural transitions (sit-to-stand, stand-to-sit, lying down, getting up). It runs a forward filter at 1 s resolution, so a state at time t uses evidence up to t only. Evidence is tempered (`evidenceTemperature` 0.35) because consecutive 1 s features overlap. A small arm-behaviour chain runs beside the body chain. A state is published every 5 s with three probability heads (posture, locomotion, arm behaviour) and never a forced class.
+
+**The dwell prior governs duration only.** Each mode has an Erlang duration prior and an exit distribution. These set how long a mode tends to last, not which posture it is. The seated / upright / recumbent split is bounded by a decaying memory of real posture evidence, held per source with its own cap (`ActivityContextModel.PostureEvidence`):
+
+| Posture evidence source | Cap toward seated / recumbent | Cap toward upright / not recumbent | Memory |
+|---|---|---|---|
+| Arm pattern (desk-like hands with a resting forearm) | ln 1.6 | ln 1.6 | 180 s |
+| Held forearm orientation (seated vs upright) | ln 1.4 | ln 1.4 | 180 s |
+| Direction of a shift (forearm axis at both ends) | ln 8 | ln 3 | 180 s |
+| Learned heads: HART fine sit/stand rows, Inertia posture, personal-profile channels | ln 3 | ln 3 | 180 s |
+| Held forearm orientation (recumbent) | ln 2.5 | ln 25 | 600 s |
+| Direction of a lie-down or get-up | ln 3 | ln 12 | 600 s |
+| Staged night (asleep, or awake in the in-bed window) | ln 200 | — | 600 s |
+
+Totals are capped again:
+
+- The seated-vs-upright total is capped at ln 8, or ln 12 with an adopted personal profile.
+- The upright side of the wrist-only sources together (arm, orientation, direction) is capped at ln 1.6.
+- With no posture evidence, the split may lean at most ln 1.25.
+- Recumbent may hold at most 0.12 of seated + upright without recumbent evidence. With a personal lying row, the orientation cap becomes ln 6.
+
+On its own, held orientation cannot produce a lying claim. Lying awake is claimed through the night source, the in-bed window or a lie-down's direction.
+
+**Avoiding double counting.**
+
+- Heart rate and the context gates never enter posture memory.
+- Wrist cues never enter the learned memory.
+- A logged workout is counted once, by the body chain and not by the arm-pattern channel.
+- An in-process ElderNet channel stands down whenever the gait-quality channel is present.
+- The posture-shift heuristic is discounted while the transition expert speaks.
+- Inertia and ElderNet terms share one accelerometer budget.
+
+**Gaps.** A data gap of 20–120 s flattens the belief toward the re-acquisition prior in proportion to its length. A gap of 120 s or more (`gapResetS`) resets it.
+
+### 9c. Transitions, events and runs
+
+**Direction.** A transition's direction comes from the forearm axis at both ends of the shift (`shiftDirection`):
+
+- Standing up lowers the hand, so the arm ends hanging.
+- Sitting down raises it.
+- Lying down ends with the forearm flat or the hand above the elbow.
+- Getting up starts there and leaves it.
+
+The forearm sign is calibrated from gait: at least 40 s of walking agreeing on a mean of at least 0.30. It is reset after a 3600 s gap. Until it is known, the axis is read unsigned.
+
+**Events.** Events are stored separately from states:
+
+- **Postural event.** Opens when the summed mass of the four transition modes reaches 0.20. It names the leading direction. Its probability follows the excursion up to its peak, so it is stored at peak probability. Until a published state shows it, its kind may change, with up to 3 s to settle. The inverse direction opens a second event once the first one's mass has fallen to 0.6 of its peak.
+- **Walk start and stop.** A walk starts at moving mass ≥ 0.6 and stops at ≤ 0.3.
+- **Run start and stop.** A run starts at running mass ≥ 0.55 and stops at ≤ 0.25.
+- **Stored fields.** Every event stores `ts` (the detection second), `probability`, `onsetTs` and `source`.
+  - `onsetTs` is the first second of the current rise: transition mass ≥ 0.05, or moving or running mass ≥ 0.2. For a stop, it is the second after the mass last stood at 0.5. It is never more than 10 s before `ts` (`maxOnsetLeadS`) and never after it.
+  - `source` is `hsmm`, or `transition_expert` if the expert spoke during the excursion.
+- **Where events go.** Events are written at every probability, to the day document and to `activityContextTransition`, keyed by (`ts`, kind). The 0.40 threshold (`PositionChanges.minimumProbability`) only decides which changes are listed to the wearer and which count for settling. It is not a detection threshold.
+
+**Runs.** Runs follow the per-state class (`ActivityClassifier.runKey`), without the display label's 10–30 s hysteresis:
+
+- Hand-pattern wording is folded into one body state. Desk vs quiet sitting, restless on a seated or upright body, and brisk vs ordinary walking each stay in one run.
+- A state joins a run when its heads are within 0.45 of the run's mean.
+- A boundary that a compatible event explains (detected within one 5 s tick) moves back to the event's onset, never later than it was.
+- A wear boundary moves to the off-wrist span's own second.
+- A one- or two-tick wobble next to a run of the same key is folded in. A short run of a different class stays.
+
+**Resume.** A resumed decode re-opens the last three raw runs and produces exactly the runs a decode from scratch would, at any offload cadence.
+
+**Short stands.** A 5–15 s stand is kept as events whatever happens to the state. The causal interval build absorbs still-family fragments shorter than 30 s (`stillDwellS`) into the surrounding still row. It records them on that row (`absorbedClasses`, `absorbedSeconds`, `transitionCount`), so in the causal intervals a 10 s stand survives as events, not as its own row.
+
+Replay results (measured, not code constants):
+
+- FORTH 10 s stands, 15 bouts (INT-B): the standing state was shown 12 of 15 times, the sit-to-stand event was kept 10–11 of 15 times, and both events appeared in order 3 of 15 times.
+- r1 replays:
+  - A 5 s stand flags only the stand-up.
+  - 10 s and 15 s stands flag both changes.
+  - With HART naming standing, a 15 s stand reads `standing` at about 0.62.
+
+### 9d. Classes, confidence and abstention
 
 Only classes the sensors can tell apart with reasonable confidence are in the taxonomy. `ActivityClass.capabilities` states the evidence and the limit of every one, and a test fails if a class is added without that statement.
 
 | Code | Established by | What it cannot tell apart |
 |---|---|---|
 | `off_wrist` | wrist-off events, loss of pulse contact (a hard gate, confidence 1) | a quiet strap on a table is never taken as on-wrist evidence |
-| `sleeping` | a sleep epoch of a detected night (the sleep stager's call) and stillness; the posture head's lean does not override it | naps outside a detected session read as `lying_down`; lying awake in bed is `lying_down`, not `sleeping` |
-| `lying_down` | awake inside a detected night's in-bed window ("Resting in bed"), or recumbent posture reached through a lying-down movement signature | no absolute wrist-orientation cue is used, so a quiet daytime lie-down is not seen |
-| `sitting`, `sitting_desk` | stationary wrist whose posture head leans seated; `sitting_desk` adds desk-like hand activity | the wrist cannot see body height: sitting vs standing is a likelihood, never a measurement |
-| `standing` | stationary wrist whose posture head leans upright | needs a committed upright lean, otherwise the state is `stationary` |
-| `stationary` | awake, on the wrist, no movement | deliberately unresolved between sitting and standing |
-| `fidgeting` | bursty low-amplitude movement without gait | tremor, restless legs and gesturing overlap |
+| `sleeping` | a sleep epoch of a detected night and stillness | naps outside a detected session read as lying down; lying awake in bed is `lying_down` |
+| `lying_down` | awake inside a detected night's in-bed window, a lie-down the forearm axis shows, or minutes of a held flat or raised quiet forearm | the held-orientation cue is weak and slow (a forearm flat on a lap looks the same), so a short daytime lie-down may read as stationary |
+| `sitting`, `sitting_desk` | stationary wrist whose posture head leans seated (a sit-down whose direction the forearm shows, desk-like hands); `sitting_desk` adds desk-like hand activity; a vehicle ride is `sitting` with detail `in_vehicle` | the wrist cannot see body height: sitting vs standing is a likelihood, never a measurement |
+| `standing` | stationary wrist whose posture head leans upright (a stand-up whose direction the forearm shows, an arm left hanging) | needs a committed upright lean, otherwise the state is `stationary` |
+| `stationary` | awake, still, posture not resolved | deliberately unresolved between sitting and standing |
+| `fidgeting` | bursty low-amplitude movement without gait ("Sitting, restless" / "Standing, restless") | tremor, restless legs and gesturing overlap |
 | `light_activity` | whole-body movement without a sustained gait, or a posture-change signature | chores, pacing and rearranging are not told apart |
-| `walking` | step cadence about 70-125/min with steady movement; stairs are reported as walking | confident gait needs the step counter (WHOOP 5/MG) or raw IMU rhythm; WHOOP 4.0 relies on movement shape |
-| `brisk_walking` | cadence about 105-150/min, higher intensity, raised heart rate | overlaps ordinary walking near 105-125/min (the runner-up says so) |
-| `running` | cadence about 135-210/min with high intensity | treadmill vs outdoor and pace |
-| `cycling` | only when the motion encoder or a cycling workout names it | never inferred from heart rate and stillness: pedalling leaves almost no wrist or step signature |
-| `vigorous_activity` | sustained heart rate of about 45% of reserve or more with vigorous arm movement and no gait, or a logged workout | the activity itself (rowing, lifting, HIIT, a ball sport) is not named |
-| `unknown` | conflicting or missing evidence; confidence 0 | carries no claim, the best guess is the runner-up |
+| `walking` | step-counter cadence 70–125/min with steady movement; stairs are reported as walking (detail `stairs`) | confident gait needs the step counter (WHOOP 5/MG) or raw IMU rhythm; WHOOP 4.0 relies on movement shape |
+| `brisk_walking` | cadence 105–150/min, higher intensity, raised heart rate | overlaps ordinary walking near 105–125/min (the runner-up says so) |
+| `running` | cadence 135–210/min with high intensity | treadmill vs outdoor and pace |
+| `cycling` | only when the motion encoder or a cycling workout names it | never inferred from heart rate and stillness |
+| `vigorous_activity` | sustained heart rate of about 45% of reserve or more with vigorous arm movement and no gait, or a logged workout | the activity itself is not named |
+| `unknown` | conflicting or missing evidence; confidence 0 | carries no claim; the best guess is the runner-up |
 
-### How a class and its confidence come out
+**How a class and its confidence come out.** The class is the display rules' reading of the heads at that instant. The confidence is the mass of that specific class. `familyConfidence` is the mass of its family: walking + brisk + stairs for the walking classes, seated for `sitting` and `sitting_desk`. The runner-up is the best alternative outside the family, reported when its mass is at least 0.02. `evidenceQuality` is the decoder's overall confidence (coverage, channel agreement, warm-up).
 
-The class is the display rules' reading of the three heads at that instant, without the label's 10-30 s hysteresis (a stored class must not lag the evidence it describes). The confidence is the belief mass of the body state the class names: seated for `sitting` and `sitting_desk` alike, the walking family for `walking` and `brisk_walking`, recumbent for `sleeping` and `lying_down`. The runner-up is the best alternative outside that family. `evidenceQuality` is the decoder's own overall confidence (sensor coverage, channel agreement, warm-up), so a confident class over thin evidence is visible as such.
+**Posture caps** (`ActivityClassifier`, D9-08):
 
-### Persisted intervals (`activityContextInterval`)
+- **Wrist-only cap: 0.75.** A `sitting`, `standing` or `fidgeting` claim carries at most `wristOnlyPostureConfidenceCap` (0.75).
+- **Learned cap: 0.85, only with agreement.** The cap rises to `learnedPostureConfidenceCap` (0.85) only when the decoder's learned posture memory agrees with the posture claimed.
+  - That memory holds HART's fine sit/stand rows, Inertia's posture head and an adopted profile's channels.
+  - It agrees when it leans the same way by at least ln 2 (`learnedPostureAgreementLogOdds`). The state then carries `learned_posture`.
+  - A learned source that disagrees, is undecided, or only spoke leaves the 0.75 cap.
+  - The transition expert never counts as agreement. Wrist cues never set it.
+  - HART reads the same IMU as the wrist cues, so the learned cap is softer and is never lifted.
+- **Restless claims carry one posture.** "Sitting, restless" and "Standing, restless" carry the mass of the posture they name, under the same cap, not seated + upright.
+- **Runs and stored intervals stay at the wrist cap.** A run keeps only the union of experts that spoke, not per-second agreement. So `classify(run:)`, the run's `class_confidence` and every stored interval's sitting or standing confidence stay ≤ 0.75.
+- **Vehicle mass is not capped.** The vehicle mass is added to `sitting` uncapped, because the encoder names it.
+- **No fitted calibration map exists.** The caps stand in for one.
 
-Decoded runs become timestamp-aligned intervals: one row says "from `startTs` to `endTs` (half-open) the wearer was `activityClass`, with this confidence". Neighbouring runs of the same class, sleep and wear state (gap of at most 10 s) merge, a non-movement fragment shorter than 10 s between two stretches of one situation is absorbed (a movement fragment is never folded away), and a stretch longer than 15 minutes is cut into near-equal parts so every row's statistics stay local.
+**Abstention.** A still wearer whose posture is unresolved is `stationary`. Conflicting or missing evidence is `unknown` at confidence 0. Neither is a guess.
 
-Beside the label each interval stores the measurements that have no per-timestamp row to join against: mean, min, max and slope of heart rate (slope needs 30 samples over 90 s), RMSSD with the clean beat count (at least 20 beats and 60 s, never during gait or exercise because motion corrupts beat timing), respiratory rate from RSA with its breath count (still wearer only, at least 6 breaths), step ticks and cadence (at least 20 s of stepping), motion intensity, and the head tops, sleep and wear state. A value that could not be measured is NULL, not zero.
+### 9e. Personal profile (`personal-profile-3`)
 
-Everything that is recorded per sample (heart rate, R-R, SpO2, skin temperature, respiration, gravity, steps) is **not copied**. It joins to its interval through the `*Ctx` SQL views (`hrSampleCtx`, `rrIntervalCtx`, `spo2SampleCtx`, `skinTempSampleCtx`, `respSampleCtx`, `gravitySampleCtx`, `stepSampleCtx`, `ppgHrSampleCtx`), which add `ctxClass`, `ctxConfidence`, `ctxRunnerUp`, `ctxEvidenceQuality`, `ctxPosture`, `ctxLocomotion`, `ctxArmBehavior`, `ctxSleep`, `ctxWear`, `ctxIntensity`, `ctxStartTs`, `ctxEndTs` by an as-of lookup on the interval table's primary key. A sample in a gap (strap off, stretch not decoded yet) still appears with NULL context. `activityContextDayClass` totals seconds per class per day. A derived time series (the per-minute energy estimate, intraday HRV or respiratory-rate buckets) is not copied or stored per interval either: it joins by its own bucket timestamp, in memory with `ActivityContextLookup` or from the store with `activityContextInterval(deviceId:at:)`.
+`ActivityPersonalProfileFitter` learns one wearer's observation profiles from their guided calibration runs.
 
-The tables are derived and regenerable. A day is written once it is closed and is re-checked while it is recent; the ledger row (`activityContextDay`) records the taxonomy, decoder and interval versions so a version bump re-derives stored days.
+**What it adapts.** Movement range, orientation-path range, arm-pattern and HART compatibility, and held forearm-orientation rows for the stationary modes. For walking modes it also adapts the relative heart-rate level. The adaptable modes are bed rest, seated, upright, walk and brisk walk.
+
+**How it fits.**
+
+- Each mode is shrunk toward the wearer's values with w = n/(n + 120 s).
+- A mode needs at least 60 labelled seconds, and the fit needs at least 2 runs.
+- It is validated leave-one-run-out on the published class: a hedged `stationary` second counts as a miss.
+
+**Adoption guards.** A profile is adopted only when the held-out balanced accuracy gains at least 0.03, and all of these hold:
+
+- no validated class loses more than 0.05 of its recall;
+- the pooled wrong-claim share rises by at most 0.03;
+- no validated class's own wrong-claim share rises by more than 0.05 (`maxClassWrongClaimRise`; a class needs 10 held-out seconds to be validated);
+- transitions are found as often as before, within 0.05;
+- a profile that adapts any stationary posture has all three of lying, sitting and standing validated (`validatesEveryStationaryPosture`). Otherwise its stationary adaptations are refused.
+
+Modes are dropped by backward elimination until the guards hold.
+
+**Refit.** The app's refit fingerprint carries the profile version but not the decoder version. Bumping `currentVersion` makes every adopted profile refit and re-validate once.
+
+### 9f. Measurement context: intervals and joins
+
+**Interval rows (`activityContextInterval`, `ctx-int-2`).** Runs become half-open `[startTs, endTs)` rows (`ActivityContextIntervalBuilder`).
+
+Folding rules:
+
+- **Merge.** Neighbours with the same class, sleep, wear and in-bed context merge across gaps of at most 10 s. A vehicle row never merges with a plain row of the same class.
+- **Light-activity and unknown fragments.** A light-activity or on-wrist `unknown` fragment shorter than 10 s between two stretches of one situation is absorbed.
+- **Still-family fragments.** Inside a still stretch, still-family fragments totalling under 30 s are absorbed.
+- **Never absorbed.** Gait, cycling, vigorous, off-wrist and in-vehicle fragments are never absorbed, and neither is a fragment whose wear, sleep or in-bed context differs.
+- **Splitting.** A stretch longer than 15 minutes (`maxIntervalS` 900) is cut into near-equal parts, so every row's statistics stay local.
+
+Per-row physiology (NULL when it could not be measured, never zero):
+
+| Field | Rule |
+|---|---|
+| `hrMean`, `hrMin`, `hrMax`, `hrSamples` | over the row |
+| `hrSlope` | ≥ 30 samples over ≥ 90 s, clamped to ±30 bpm/min |
+| `rmssd`, `rrBeats`, `rrDiffSqSumMs2`, `rrDiffCount` | row ≥ 60 s, ≥ 20 clean beats, on the wrist, not in a vehicle, mean motion intensity ≤ 0.40 (a motion gate, not a class list) |
+| `respRateBpm`, `respBreaths` | same gate, ≥ 6 breaths |
+| `stepTicks`, `cadenceSpm` | cadence needs ≥ 20 s of stepping |
+| `inBed`, `uncertainty`, `experts`, `transitionCount`, `absorbedClasses`, `absorbedSeconds`, `precededByGapS`, `precedingClass` | context of the row |
+| `detail`, `detailConfidence` | `in_vehicle`, `stairs` or `postural_transition` when it held most of the row |
+
+**Settled statistics.** Seconds within 120 s (`settlingS`) after a movement row ends are settling seconds. So are the seconds after a change of position or the end of a walk is flagged at ≥ 0.40. `settledFrom` marks where settling ends. `hrMeanSettled` and `rmssdSettled` (with their components) are computed over `[settledFrom, end)` when at least 60 s remain. An in-vehicle row never gets a rest statistic: no RMSSD, no breathing, no settled heart rate.
+
+**Per-sample joins.** Per-sample streams are not copied. They join through the `*Ctx` SQL views:
+
+- The views are `hrSampleCtx`, `rrIntervalCtx`, `ppgHrSampleCtx`, `spo2SampleCtx`, `skinTempSampleCtx`, `respSampleCtx`, `gravitySampleCtx` and `stepSampleCtx`, plus `spotHrvReadingCtx` for manual 60 s HRV readings.
+- Each view adds `ctxStartTs`, `ctxEndTs`, `ctxClass`, `ctxConfidence`, `ctxRunnerUp`, `ctxEvidenceQuality`, `ctxPosture`, `ctxLocomotion`, `ctxArmBehavior`, `ctxSleep`, `ctxWear`, `ctxIntensity`, `ctxDeviceId`, `ctxDecoderVersion`, `ctxProvisional`, `ctxInBed`, `ctxUncertainty` and `ctxDetail`.
+- The lookup is an as-of lookup on the interval of the day's owner (the ledger row).
+- A sample in a gap still appears, with NULL context.
+- `activityContextDayClass` totals seconds per class per day.
+- Derived series join by their own bucket timestamp, through `ActivityContextLookup` or `activityContextInterval(deviceId:at:)`.
+
+**Full-support joins (`ActivityContextJoin`, `join-2`).** These answer what the activity was over a measurement's whole support interval:
+
+- Every second of `[start, end)` is counted once. Abstained, unobserved and uncovered seconds count as unknown, so the shares plus `unknownShare` equal 1.
+- `low_coverage` fires at coverage ≤ 0.5. `unknown_motion` fires at an unknown share ≥ 0.5.
+- `recent_activity_s` is measured from the interval start (join-2; join-1 measured from the end).
+- Label changes across gaps of at most 10 s count as transitions.
+
+**HRV windows (`HRVWindowBuilder`).** These are fixed 5-minute canonical windows. 2-minute and 1-minute windows exist as separate populations that are never mixed. Activity is metadata on a window. Eligibility for a resting awake baseline fails closed:
+
+- no transition-event data at all, or not enough lookback, gives phase `unknown`;
+- a transition inside the window;
+- an unknown regime or wear (the regime needs 90% coverage);
+- less than 300 s after locomotion or 600 s after exercise;
+- more than 30% of beats rejected.
+
+On the phone the windows use the corrected activity lookup (user corrections overlaid) and the previous day's tail. Today they feed only a diagnostic line.
+
+**Server joins.** The worker attaches the C10 `daily.activity_context` document to the scoring snapshot. Its `contexts.hrv_slots` holds the full-support context of each 15-minute slot that published an HRV point. Each point of `daily.hrv_series` has a matching entry in `daily.hrv_series.context` (D6-14), described in section 1.
+
+### 9g. Causal and retrospective context; provisional and final
+
+**The decoder is causal.** Every stored causal row (`derivation = causal`) uses only evidence up to its own second.
+
+**Finality.** A day's ledger (`activityContextDay`) is `final` when two things hold:
+
+- it was decoded as a finished day, so time outside logged sleep reads as awake rather than unknown;
+- it was written at least 12 h after the day ended (`sleepSettleS`).
+
+Otherwise it is `provisional`. A provisional day is re-derived once it has been closed for 12 h, so it becomes final. `ctxProvisional` exposes the state on every joined sample.
+
+**Retrospective pass (`ActivityContextRetrospective`, `ctx-retro-1`).** This pass re-reads a final day's runs with a forward-backward smoother over each still segment:
+
+- **Hidden state.** Recumbent, seated or upright.
+- **Emission.** Each run's posture head, renormalised and tempered. Weight is one evidence unit per minute, capped at 120 s per run.
+- **Persistence.** A posture persists with switch probability 1 − exp(−d/3600 s).
+- **Supported boundaries.** At a boundary that a postural event of probability ≥ 0.40 explains (its onset-to-detection span within 5 s of the boundary), nothing carries across.
+- **Unchanged.** Only the posture head changes. Locomotion, arm, sleep, wear, in-bed and every event stay the decoder's.
+- **Stops.** A walk or run stop whose onset lies up to 30 s before the drawn boundary moves the boundary back.
+- **Short evidenced fragments.** The retrospective build keeps a short posture fragment that a flagged change explains as its own row (`keepEvidencedPostureFragments`). The causal build does not.
+
+`ActivityContextPersistence.retrospectiveIntervals` returns nothing unless the day is final.
+
+**Storage and reading modes.** Retrospective rows go to a separate table, `activityContextIntervalRetrospective`, with the same columns. Each row is stamped `derivation = retrospective`. The ledger's `retrospectiveVersion` names the smoother. An unknown derivation code reads as retrospective, so it never reaches a causal consumer.
+
+`activityContextIntervals(deviceId:from:to:reading:)` has three modes:
+
+- `.causal` reads the live table only.
+- `.retrospective` reads final days' smoothed rows only.
+- `.historical` serves a final day that holds retrospective rows from those rows, and every other day causally.
+
+The `*Ctx` views, `activityContextDayClass` and the default range read are causal.
+
+**Causal consumers never read retrospective rows.** These are the physiology-context engine (`Engine.causalView` drops retrospective decoder records), the HRV windows, the baselines and Watchdog.
+
+**A final day that returns to provisional.** `updateActivityContextDayStatus` deletes the day's retrospective rows and clears `retrospectiveVersion`. Writing retrospective rows for a provisional day throws.
+
+**Not wired yet.** The app does not write retrospective rows yet. `ActivityContextCoordinator` writes causal intervals only and does not pass `Candidate.retrospectiveVersion`, so the table stays empty and `.historical` reads return causal rows.
+
+### 9h. Context-conditioned baselines (physiology context)
+
+The physiology-context engine (`PhysiologyContext`, run by the worker's context lane) compares each day's values with references. All references are causal: the day's own and later values are dropped (`Engine.strictlyEarlier`).
+
+**References (`pc-reference-4`).**
+
+- **Daily value.** A stable-awake daily value needs at least 3 independent 5-minute windows.
+- **Views.** The recent view uses 7 days (minimum 3). The rolling view uses 28 days (minimum 7, ready at 14). The frozen view is the first 14 supported days of the regime.
+- **Strata.** Strata are shrunk toward the all-day parent with child weight n/(n + 7):
+  - time bands starting at 0, 6, 12 and 18 h;
+  - heart-rate-free gravity strata, `.posture_recumbent_likely` and `.posture_upright_likely`;
+  - context strata, `.ctx_seated`, `.ctx_recumbent_awake` and `.ctx_upright_stationary`.
+- **Fallback.** A stratum without enough support falls back to the parent.
+
+**Context strata gates** (`PostureEvidence.withContext`, `pc-posture-2`). A window keys a context stratum only when all of these hold:
+
+- a decoder run claims sitting, sitting at a desk, standing or lying down;
+- the claim's confidence is ≥ 0.8 (`contextMinConfidence`);
+- the decoder is `hsmm-1.8` or newer, compared numerically;
+- the second is outside the heart-rate-confirmed in-bed window;
+- one posture covers ≥ 90% of the support;
+- the forearm gravity reading does not contradict it (lying vs upright).
+
+Each stratum needs ≥ 3 windows on the day. `unknown` windows stay in the parent.
+
+**What this means today.** The worker reads a run's confidence from its `class_confidence`, which `classify(run:)` computes at the wrist-only cap. A stored sitting or standing run is therefore at most 0.75, below 0.8. So `.ctx_seated` and `.ctx_upright_stationary` currently always abstain with reason `context_confidence_below_floor`, and the parent reference is used.
+
+The one exception is a `sitting` run whose vehicle mass lifts it past 0.8. That mass is not capped, and `withContext` does not exclude in-vehicle runs. `.ctx_recumbent_awake` is not capped either, but its seconds inside the in-bed window are excluded, so it keys only on strong daytime recumbent evidence.
+
+Even with an agreeing learned source, the stored run confidence would stay at 0.75 until runs carry per-second agreement.
+
+**Predecessor regime after a strap change.** A device's references may borrow a previous device's history.
+
+The predecessor is compatible only when all of these hold:
+
+- same vendor and source kind;
+- same hardware family, positively identified on both rows (unknown is incompatible);
+- no known firmware difference (unknown firmware adds `predecessor_firmware_unknown`);
+- optical valid share within 0.25 (median of the last 14 days);
+- the same regime key per series.
+
+How the fallback applies:
+
+- **When.** The rolling view borrows only while own support is under 14 days. A stratum's parent borrows only while it is under 7.
+- **Predecessor history.** The predecessor needs at least 7 days of the series in its last 28, and its newest value no more than 56 days old.
+- **Statistics.** Center = w·own + (1 − w)·predecessor, with w = n/(n + 7). The predecessor scale is inflated ×1.5, and an offset of 0.5 × the inflated scale is added to the center's uncertainty.
+- **Status and reasons.** Status is always `provisional`. Reasons are `predecessor_regime` plus `predecessor_regime_only` or `pooled_toward_predecessor`. `predecessorScope` names the old device.
+- **Scope.** It never feeds the recent or frozen views, episodes, or the device's own history.
+
+Without a compatible predecessor there is no fallback, and the comparison carries reasons such as `predecessor_regime_incompatible`, `predecessor_family_differs`, `predecessor_family_unknown`, `predecessor_regime_insufficient` or `predecessor_regime_stale`.
+
+The worker identifies the hardware family per device row from its label. A bare "WHOOP" label is unknown, so the fallback abstains for such rows. Firmware is never known, so every borrowed reference says `predecessor_firmware_unknown`.
+
+**Eligibility and join.**
+
+- `pc-eligibility-4` counts a decoder transition event over its onset-to-detection span `[onsetTs, ts]`, not at the detection second only.
+- `pc-join-3` annotates a composition with an event when that span overlaps the support.
+- The worker keeps a day's events by `ts` within `[dayStart, dayEnd)`, whatever their onset (`ActivityContextDays.clippedToDay`).
+
+**Charge.** The Charge re-score uses a causal as-of baseline (`Baselines+AsOf.swift`). Night D is z-scored against a fold of nights strictly before D, and the fold restarts at a recalibration epoch or a regime change, so later nights cannot change a stored score.
+
+### 9i. Versions and provenance
+
+| Constant | Value | File |
+|---|---|---|
+| `ActivityClassVersions.taxonomy` | `act-class-4` | `ActivityContextClass.swift` |
+| `ActivityClassVersions.interval` | `ctx-int-2` | `ActivityContextClass.swift` |
+| `ActivityContextVersions.decoder` | `hsmm-1.9` | `ActivityContextOntology.swift` |
+| `ActivityContextVersions.ontology` / `.featureSchema` / `.schema` | `v2.0` / `imu-feat-2` / 2 | `ActivityContextOntology.swift` |
+| `ActivityContextRetrospective.version` | `ctx-retro-1` | `ActivityContextRetrospective.swift` |
+| `ActivityContextJoin.version` | `join-2` | `ActivityContextJoin.swift` |
+| `ActivityPersonalProfile.currentVersion` | `personal-profile-3` | `ActivityPersonalProfile.swift` |
+| PC eligibility / join / reference / posture | `pc-eligibility-4` / `pc-join-3` / `pc-reference-4` / `pc-posture-2` | `PhysiologyContext/PCEligibility.swift`, `PCIntervalAlgebra.swift`, `PCReferences.swift`, `PCPostureTransitions.swift` |
+| PC contract / engine / validity / change / sleep / exposure / exertion / functional / motion / wire | `pc-contract-1` / `pc-engine-1` / `pc-validity-2` / `pc-change-2` / `pc-sleep-2` / `pc-exposure-1` / `pc-exertion-1` / `pc-functional-2` / `pc-motion-1` / `pc-wire-1` | `PhysiologyContext/*` |
+| Worker lane tag | `d=hsmm-1.9;o=v2.0;f=imu-feat-2;s=2;t=act-class-4;n=ctx-int-2;i=5;c=…;l=…` (+ `m=`/`p=` for the raw-IMU lane), `versionsOrdinal` 2 | `Tools/CloudWorker/.../ActivityContextDays.swift` |
+| WhoopStore migrations | `v48-activity-context`, `v49-rr-diff-components`, `v50-activity-context-provenance` (adds the ledger provenance and finality columns, `derivation`, `retrospectiveVersion` and `activityContextIntervalRetrospective`) | `Packages/WhoopStore/.../Database.swift` |
+| Supabase migrations | `20261008100000_activity_context_current_lineage_and_versions`, `20261008100100_activity_context_epochs_day_revision_rows_index`, `20261008100200_activity_context_transitions_onset_source`, `20261008100400_bump_user_revision_skip_deleted_owner` | `supabase/migrations/` |
+
+**What a bump triggers.**
+
+- **Phone.** The ledger records the taxonomy, decoder, ontology, interval version, feature schema and config tag. A day whose ledger does not match the build is derived again (materializer rule 1).
+- **Worker.** The worker registers its lane tag with `versionsOrdinal`, and a new tag re-fingerprints the recent days. The registry refuses a lower ordinal, so an older build cannot take the registration back.
+- **Personal profile.** A version bump refits and re-validates the profile once.
+- **Physiology context.** A PC version change changes the policy fingerprint, so a re-run day stores a new revision. Nothing re-enqueues PC days on a policy change.
+
+**Historical rows keep their versions.** Stored days, documents and PC revisions keep the versions that produced them until they are re-derived. The tools' Python HSMM port is still `hsmm-1.6`.
+
+### 9j. Remaining sensor limits
+
+- A wrist cannot reliably separate sitting from standing in free living. The learned cap's own justification cites a HART fine sit/stand AUC of about 0.68 in free living, and wrist-only standing claims were right about 7% of the time on Capture-24 (code comments, `ActivityContextModel.swift`, `ActivityContextClass.swift`). The system says `stationary` when it cannot tell.
+- Lying awake vs sitting is weak in the daytime. Held forearm orientation alone is capped below a lying claim, so a short daytime lie-down may read as `stationary`.
+- Raw IMU is recorded one minute in three by default. HART, the motion features, the learned posture rows and any transition expert are absent the other two minutes.
+- Heart-rate circularity is guarded but not removed: heart rate has one level across postures, and the context strata refuse decoders older than `hsmm-1.8` and in-bed seconds. The in-bed window itself comes from the heart-rate-confirmed sleep detector.
+- Every threshold and prior above is an engineering default set on lab and free-living replays. None is fitted on labelled strap data, and no calibration map exists.
+- The transition expert is not deployed. Inertia is dormant, and ElderNet reaches the phone's decode only from non-shadow server days.
 
 ---
 
@@ -666,10 +989,26 @@ withheld and the existing invalidated hosted refresh is requested).
 | Calorie evaluation harness | `Tools/EnergyBench` |
 | Primary-session RHR shadow | `PrimarySessionRestingHR.swift` |
 | Live wiring (which flags are on) | `Strand/Data/IntelligenceEngine.swift`, `Strand/BLE/PuffinExperiment.swift` |
-| Activity class taxonomy + classifier | `ActivityContextClass.swift` |
-| Activity intervals + per-interval physiology | `ActivityContextInterval.swift`, `ActivityContextInterval+Store.swift`, `ActivityContextAggregate.swift` |
+| Activity class taxonomy, caps + classifier | `ActivityContextClass.swift` |
+| Activity decoder, body modes, posture-evidence caps, events | `ActivityContextDecoder.swift`, `ActivityContextModel.swift`, `ActivityContextOntology.swift` (versions, event fields) |
+| Day decode, wear rule, runs + boundary alignment | `ActivityContextTrack.swift` |
+| Event display / settling threshold | `PositionChanges` in `DayStretchLayout.swift` |
+| Personal profile | `ActivityPersonalProfile.swift`, `Strand/Data/Repository+ActivityContext.swift` (decoder config) |
+| Raw IMU capture mode | `Strand/Collect/ActivityImuCapture.swift` |
+| Activity intervals + per-interval physiology | `ActivityContextInterval.swift`, `ActivityContextInterval+Store.swift` (finality, retrospective rows), `ActivityContextAggregate.swift` |
+| Retrospective smoothing | `ActivityContextRetrospective.swift` |
+| Full-support joins | `ActivityContextJoin.swift` |
+| HRV windows | `HRVWindow.swift` |
 | When a day is written | `ActivityContextMaterialization.swift`, `Strand/Data/ActivityContextCoordinator.swift`, `Strand/Data/Repository+ActivityContextStore.swift` |
-| Stored context (tables, views) | `Packages/WhoopStore/Sources/WhoopStore/ActivityContextStore.swift`, `ActivityContextViews.swift`, migration `v48-activity-context` |
+| Stored context (tables, views, reading modes) | `Packages/WhoopStore/Sources/WhoopStore/ActivityContextStore.swift`, `ActivityContextViews.swift`, migrations `v48-activity-context`, `v50-activity-context-provenance` in `Database.swift` |
+| Physiology context (references, strata, predecessor regime, eligibility, join) | `Packages/StrandAnalytics/Sources/StrandAnalytics/PhysiologyContext/*` (`PCReferences.swift`, `PCPostureTransitions.swift`, `PCEligibility.swift`, `PCIntervalAlgebra.swift`, `PCEngine.swift`, `PCContract.swift`) |
+| Charge as-of baseline | `Baselines+AsOf.swift` |
+| Worker activity decode, lane tag, day event filter | `Tools/CloudWorker/Sources/frwhoop-worker/ActivityContextDays.swift`, `ActivityLane.swift` (C10 document, `contexts.hrv_slots`) |
+| Worker Inertia / ElderNet (shadow first) | `Tools/CloudWorker/Sources/frwhoop-worker/ActivityMotionHeads.swift`, `ActivityGaitQuality.swift`; phone side `Strand/Data/GaitWindowStore.swift` |
+| Worker physiology-context inputs (decoder runs, predecessor history, hardware family) | `Tools/CloudWorker/Sources/frwhoop-worker/ContextInputs.swift`, `ContextSQL.swift` |
+| Intraday HRV slots + per-slot context | `Tools/CloudWorker/Sources/frwhoop-worker/DayScoring.swift` (`hrvSlotReadings`, `hrvSlotContext`) |
+| Today HRV chart de-emphasis | `Strand/Screens/HrvSeriesChart.swift`, `HrvSlotQuality` in `Strand/Push/ServerScoreRepository.swift` |
+| Server activity-context migrations | `supabase/migrations/20261008100000_…`, `20261008100100_…`, `20261008100200_…`, `20261008100400_…` |
 | Stand reminder | `StandReminderEngine.swift`, `Strand/Data/InactivityPrefs.swift` |
 | Sleep analytics (document, groups, gates) | `SleepAnalyticsV1.swift` (contract), `SleepAnalyticsNormalization.swift`, `SleepAnalyticsContinuity.swift`, `SleepAnalyticsStageDynamics.swift`, `SleepAnalyticsMovement.swift`, `SleepAnalyticsThermal.swift`, `SleepAnalyticsPrv.swift`, `SleepAnalyticsComputation.swift` |
 | Sleep analytics worker attach | `Tools/CloudWorker/Sources/frwhoop-worker/SleepAnalyticsAttach.swift`, `DayScoring.swift` |
