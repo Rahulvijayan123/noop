@@ -54,7 +54,9 @@ Merge commits added this round, in first-parent order after the previous status 
 | `a3578736a` | `acx/r5-review`: independent review fixes, plus a DB test for the predecessor SQL |
 | `e2655bd97` | `acx/r3-app` round 3: HRV slots with pending context stay visible; wording |
 | `0364c811d` | `acx/r4-baselines` round 2: `ctx-retro-2`; predecessor quality read from the predecessor's own last 14 days; store records an empty smoothing result |
-| (final) | `acx/r3-app` round 4 and this document. See `git log -3` |
+| `7036e9515` | Docs: this document; `CURRENT_ALGORITHMS.md` for `ctx-retro-2`, `context_pending`, strata gates |
+| `b8f753e8a` | `acx/r3-app` round 4: every final day stamps the smoother version in the store (an empty result is recorded); UserDefaults marker removed |
+| (head) | This final status update. The packages, worker and migrations are unchanged since `0364c811d`, so the section-5 package, worker and DB results apply to the head |
 
 Agent reports with full detail are in `/Volumes/Untitled/Nara Whoop App V2/_acx-scratch/r-round/`
 (`r1-decoder`, `r2-server`, `r3-app`, `r4-baselines`, `r5-review` `-REPORT.md`). Benchmark outputs are in
@@ -202,8 +204,8 @@ No per-second latency profiling was done.
 | **CloudWorker, with a scratch DB** | **702** | 4 (3 opt-in profiling, 1 missing fixture dir) | **0** | `verify-final/wt-db.log` |
 | SQL `activity_context_contract.sql` | 39 PASS | | 0 | `verify-final/db-*.txt` |
 | SQL `account-deletion-revision-cascade.sql` and `account-deletion-retired-installation.sql` | pass | | 0 | same |
-| macOS `StrandTests` | see section 1 / r3 round 4 | 13 | 3 | `_acx-dd/r3-mac-results*.xcresult` |
-| iOS `NOOPiOS`, generic device, `CODE_SIGNING_ALLOWED=NO` | BUILD SUCCEEDED | | | r3 report |
+| macOS `StrandTests`, at `e6c3fb9bf` (= head minus docs) | 3193 | 13 | 3 (pre-existing on main; below) | `_acx-dd/r3-mac-results10-3.xcresult` (agent run) |
+| iOS `NOOPiOS`, generic device, `CODE_SIGNING_ALLOWED=NO`, at `e6c3fb9bf` | BUILD SUCCEEDED | | | r3 report, round 4 |
 
 The scratch DB:
 - ran on ports 54512–54514, Docker context `colima-cexi-compute`;
