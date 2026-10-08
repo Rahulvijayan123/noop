@@ -9,14 +9,25 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-// CircadianEngine.kt — on-device body-clock phase estimate + a jet-lag / shift-work LIGHT & SLEEP-TIMING plan.
-// Byte-for-byte mirror of Strand/Packages/StrandAnalytics/Sources/StrandAnalytics/CircadianEngine.swift.
+// CircadianEngine.kt — an OBSERVED HEART-RATE RHYTHM HEURISTIC + a jet-lag / shift-work LIGHT &
+// SLEEP-TIMING plan. Byte-for-byte mirror of
+// Strand/Packages/StrandAnalytics/Sources/StrandAnalytics/CircadianEngine.swift.
 //
-// INDEPENDENT implementation of published methods:
-//   • Single-component COSINOR (Halberg's cosine fit) over the rest-activity rhythm → acrophase + amplitude.
-//     The accelerometer rest-activity rhythm is the primary phase signal; the nightly skin-temperature
-//     minimum corroborates it (wrist skin temp runs broadly ANTI-phase to core temperature; CBTmin is the
-//     canonical phase marker ~2–3 h before habitual wake).
+// WHAT THIS IS — AND IS NOT (spec-02 §3). The only production caller pools per-hour MEAN HEART RATE over
+// the last ~14 days and fits a cosinor to it. The result is a description of when the wearer's heart rate
+// tends to run high and low across the day. It is NOT a measured temperature minimum, NOT melatonin onset
+// (DLMO), NOT the endogenous circadian clock and NOT a chronotype diagnosis: heart rate is strongly masked
+// by activity, posture, meals and sleep itself. [PhaseEstimate.tempMinHour] (the Swift twin's
+// `hrRhythmReferenceHour`; the Kotlin name is historical) is a FIXED 12-hour offset from the heart-rate
+// acrophase ([acrophaseAfterCbtMinHours]) — a heuristic anchor for the schedule comparison and the dial.
+// The MEASURED skin-temperature rhythm (mesor/amplitude/acrophase from actual converted skin temperature)
+// is a separate output produced by the Python sidecar
+// (`sleep_features.nights[main].thermal.observed_skin_temp_rhythm`) and is never mixed into this one.
+//
+// Methods:
+//   • Single-component COSINOR (Halberg's cosine fit): M + A·cos(2π(t − φ)/24) by ordinary least squares
+//     on cos/sin regressors, recovering mesor, amplitude and acrophase (the clock hour of the PEAK) of the
+//     hourly-mean heart-rate profile.
 //   • Phase-response-curve DIRECTION rule for the advisory: ADVANCE (eastward / earlier) → morning bright
 //     light, dim evenings, earlier sleep, stepped ~1 h/day; DELAY (westward / later) → the reverse.
 //
@@ -44,8 +55,8 @@ object CircadianEngine {
      * The relative test scales the requirement WITH resting HR, so the identical swing is accepted on one
      * body and refused on another: 5.5 bpm passes at a 55 bpm mesor and fails at 74.7. That is not a
      * judgement about the rhythm, it is a judgement about the baseline, and a measured wearer sat exactly
-     * there — 5.5 bpm on a 74.7 bpm mesor, acrophase 16.1 h implying a CBTmin near 04:06, a textbook phase
-     * rather than noise. [minRelativeAmplitude]'s own note called for precisely that observation ("a
+     * there — 5.5 bpm on a 74.7 bpm mesor with a coherent heart-rate acrophase at 16.1 h, a stable daily
+     * pattern rather than noise. [minRelativeAmplitude]'s own note called for precisely that observation ("a
      * wearer whose amplitude is disproportionately small for their mesor") before the shape could be
      * revisited.
      *
@@ -56,33 +67,45 @@ object CircadianEngine {
      * Mirrors the Swift twin exactly.
      */
     const val minAbsoluteAmplitudeBpm: Double = 4.5
+    /** Max clock-shift the planner steps per day (hours) — the well-established ~1 h/day re-entrainment rate. */
     const val maxShiftPerDayHours: Double = 1.0
+    /**
+     * Hours between the heuristic reference hour and the wake it implies. Borrowed from the textbook
+     * CBTmin-before-wake relation (~2–3 h); here it only places the schedule comparison and the dial's
+     * reference window. Nothing measures a temperature minimum. Name kept for parity with the Swift twin.
+     */
     const val cbtMinBeforeWakeHours: Double = 2.5
+    /**
+     * The FIXED offset from the heart-rate acrophase to the heuristic reference hour
+     * ([PhaseEstimate.tempMinHour] = acrophase − 12 h). A modelling convention, not a measurement: it is
+     * why the reference hour must never be presented as a temperature minimum. Name kept for parity.
+     */
     const val acrophaseAfterCbtMinHours: Double = 12.0
     /**
-     * Population-typical wake hour, used ONLY to place the chronotype reference point.
+     * Population-typical wake hour, used ONLY to place the [Chronotype] bucket's reference point.
      *
-     * [PhaseEstimate.offsetVsScheduleMinutes] compares the clock to the USER'S OWN schedule, so it cannot
-     * name a chronotype: someone reliably asleep 03:00-11:00 has an offset near zero and would read
-     * "intermediate" while being strongly evening-type. A named lean needs an ABSOLUTE phase, so it is
-     * bucketed from [PhaseEstimate.tempMinHour] against a population reference instead.
-     * Mirrors the Swift twin exactly.
+     * [PhaseEstimate.offsetVsScheduleMinutes] compares the rhythm to the USER'S OWN schedule, so it cannot
+     * place the heart-rate peak on the clock: someone reliably asleep 03:00-11:00 has an offset near zero
+     * while their heart rate peaks late in the day. The absolute bucket uses [PhaseEstimate.tempMinHour]
+     * (the heuristic reference hour) against this population reference instead. It describes heart-rate
+     * timing; it is not a chronotype test. Mirrors the Swift twin exactly.
      */
     const val chronotypeReferenceWakeHour: Double = 7.0
     /**
-     * Half-width of the "intermediate" band around the reference CBTmin, in hours.
+     * Half-width of the "intermediate" band around the reference hour, in hours.
      *
-     * Deliberately wide. `tempMinHour` is derived from an activity cosinor (`acrophase - 12 h`) unless a
-     * measured `observedTempMinHour` is supplied, and NO production caller supplies one today — so this is
-     * a lean inferred from movement, not a thermal measurement. A one-hour band either side keeps the
-     * three buckets coarse enough to be honest about that. Mirrors the Swift twin exactly.
+     * Deliberately wide. The reference hour is derived from an hourly-mean heart-rate cosinor
+     * (`acrophase - 12 h`), so this is a coarse reading of heart-rate timing, not a thermal measurement or
+     * a chronotype. A one-hour band either side keeps the three buckets coarse enough to be honest.
+     * Mirrors the Swift twin exactly.
      */
     const val chronotypeBandHours: Double = 1.0
 
     // ── Inputs ──
 
     /**
-     * One per-hour rest-activity sample: local clock hour (0..<24, may be fractional) + the rhythm signal.
+     * One per-hour rhythm sample: local clock hour (0..<24, may be fractional) + the rhythm signal. In
+     * production the signal is mean heart rate (bpm) — see below; the type name is historical.
      *
      * #982 — this said "motion volume". It has never been fed that: the only production caller pools
      * per-hour MEAN HEART RATE in bpm, and that is the right choice on this hardware (WHOOP 4.0 motion is
@@ -155,15 +178,36 @@ object CircadianEngine {
         SOLID("solid"),
     }
 
+    /** An OBSERVED HEART-RATE RHYTHM HEURISTIC estimate (see the file header for what it is not). */
     data class PhaseEstimate(
+        /**
+         * Heuristic reference clock hour in [0, 24): the heart-rate acrophase minus
+         * [acrophaseAfterCbtMinHours] (12 h). A heart-rate heuristic reference hour, NOT a measured
+         * temperature minimum, melatonin onset or endogenous clock phase — the Swift twin names it
+         * `hrRhythmReferenceHour`; the Kotlin name is historical. Anchors the schedule comparison and the
+         * dial's reference window.
+         */
         val tempMinHour: Double,
+        /**
+         * The cosinor acrophase of the hourly-mean HEART-RATE profile: the clock hour heart rate peaks.
+         * The one directly observed phase quantity here.
+         */
         val acrophaseHours: Double,
+        /**
+         * Signed minutes the heart-rate rhythm leads (−) or lags (+) the user's own sleep schedule.
+         * Positive = the rhythm runs LATER than the schedule implies.
+         */
         val offsetVsScheduleMinutes: Double,
         val confidence: PhaseConfidence,
         val note: String,
     )
 
-    /** Estimate the body-clock phase from a pooled activity profile and the user's habitual wake time. */
+    /**
+     * Describe the observed heart-rate rhythm from a pooled hourly-mean HR profile and the user's habitual
+     * wake time. [observedTempMinHour] is a legacy override with no production caller (the Swift twin
+     * deprecates it): mixing a temperature phase into this heart-rate heuristic is what spec-02 §3 forbids,
+     * and the measured skin-temperature phase is a separate output.
+     */
     fun estimatePhase(
         bins: List<ActivityBin>,
         daysObserved: Int,
@@ -183,9 +227,12 @@ object CircadianEngine {
                 "Your rhythm is hard to read right now - keep wearing it for a clearer picture.")
         }
 
+        // Heuristic reference hour = heart-rate acrophase − a FIXED 12 h (a convention, not a measurement).
         val derivedTempMin = wrap24(fit.acrophaseHours - acrophaseAfterCbtMinHours)
         val tempMinHour = observedTempMinHour ?: derivedTempMin
 
+        // The schedule comparison: where the reference hour sits against `habitualWakeHour −
+        // cbtMinBeforeWakeHours`, in signed minutes (+ = the heart-rate rhythm runs later than the schedule).
         val idealTempMin = wrap24(habitualWakeHour - cbtMinBeforeWakeHours)
         val offsetHours = signedHourDelta(idealTempMin, tempMinHour)
         val offsetMinutes = offsetHours * 60.0
@@ -194,18 +241,18 @@ object CircadianEngine {
         // [minAbsoluteAmplitudeBpm] alone is real but modest, and a smaller swing pins its acrophase less
         // tightly — so it stays WIDE. That matters because WIDE is what withholds [chronotype], which
         // names a category off exactly that acrophase: widening the readable gate should give more people
-        // a body clock, not give a thinner fit a firmer label.
+        // a rhythm reading, not give a thinner fit a firmer label.
         val confidence = if (daysObserved >= goodDaysForFit && relativeAmplitude >= minRelativeAmplitude) {
             PhaseConfidence.SOLID
         } else {
             PhaseConfidence.WIDE
         }
         val lean = when {
-            offsetMinutes > 20 -> "later (a night-owl lean)"
-            offsetMinutes < -20 -> "earlier (a morning-lark lean)"
-            else -> "well-aligned with your schedule"
+            offsetMinutes > 20 -> "runs later than your schedule suggests"
+            offsetMinutes < -20 -> "runs earlier than your schedule suggests"
+            else -> "lines up with your schedule"
         }
-        val note = "Your body clock looks $lean."
+        val note = "Your heart-rate rhythm $lean."
 
         return PhaseEstimate(tempMinHour, fit.acrophaseHours, offsetMinutes, confidence, note)
     }
@@ -244,7 +291,7 @@ object CircadianEngine {
         val magnitude = abs(shiftHours)
         if (magnitude < 0.5) {
             return JetLagPlan(ShiftDirection.NONE, 0.0, 0, emptyList(),
-                "No meaningful body-clock shift needed - you're about aligned.")
+                "No meaningful schedule shift needed - you're about aligned.")
         }
 
         val advancing = shiftHours > 0
@@ -299,45 +346,49 @@ object CircadianEngine {
     }
 
     /**
-     * A coarse, ABSOLUTE body-clock category: where the temperature minimum sits on the clock.
+     * A coarse, ABSOLUTE bucket of HEART-RATE timing: where [PhaseEstimate.tempMinHour] (the heuristic
+     * reference hour, heart-rate acrophase − 12 h) sits on the clock against [chronotypeAnchorHour]. The
+     * enum name is historical: this is NOT a chronotype assessment (no validated questionnaire or
+     * melatonin/temperature phase is involved) and user-facing copy words it as an earlier /
+     * mid-afternoon / later daily heart-rate peak.
      *
-     * NOT the "chronotype lean" wording used elsewhere. [estimatePhase] builds a `lean` string from
-     * [PhaseEstimate.offsetVsScheduleMinutes] ("a night-owl lean"), and the v5 skin-temp design spec
-     * defines chronotype lean as "earlier/later than your sleep schedule implies" — both RELATIVE to the
+     * NOT the schedule-relative wording used elsewhere. [estimatePhase] builds its `note` from
+     * [PhaseEstimate.offsetVsScheduleMinutes] ("runs later than your schedule suggests") — RELATIVE to the
      * wearer's own schedule. This is relative to the CLOCK, and the two genuinely disagree: a consistent
      * 03:00-11:00 sleeper is well-aligned by the relative read and EVENING by this one. Keep the
      * vocabularies disjoint in anything user-facing, or the two readings look like a contradiction (#1409).
      *
-     * Three buckets, not a score: the underlying phase estimate is an activity fit, and a finer grain
-     * would imply precision it does not have. Twin of Swift `CircadianEngine.Chronotype`.
+     * Three buckets, not a score: the underlying estimate is a heart-rate fit, and a finer grain would
+     * imply precision it does not have. Twin of Swift `CircadianEngine.Chronotype`.
      */
     enum class Chronotype(val raw: String) {
-        MORNING("morning"),          // CBTmin earlier than the population reference
+        MORNING("morning"),          // heart-rate peak earlier than the reference (before ~15:30)
         INTERMEDIATE("intermediate"),
-        EVENING("evening"),          // CBTmin later than the population reference
+        EVENING("evening"),          // heart-rate peak later than the reference (after ~17:30)
     }
 
     /**
-     * The reference CBTmin clock hour a lean is measured against: the population wake hour minus the same
-     * [cbtMinBeforeWakeHours] the phase estimator already uses, so the anchor moves with the engine's own
-     * model rather than being a second, independently-drifting constant.
+     * The reference hour the bucket is measured against: the population wake hour minus the same
+     * [cbtMinBeforeWakeHours] the estimator already uses, so the anchor moves with the engine's own model
+     * rather than being a second, independently-drifting constant.
      */
     val chronotypeAnchorHour: Double get() = wrap24(chronotypeReferenceWakeHour - cbtMinBeforeWakeHours)
 
-    /** A chronotype-ideal sleep window on the 24 h clock. Twin of the Swift tuple return. */
+    /** The sleep window the heart-rate rhythm heuristic suggests, on the 24 h clock. Twin of the Swift tuple return. */
     data class IdealSleepWindow(val bedHour: Double, val wakeHour: Double)
 
     /**
-     * The chronotype-ideal sleep window for a night of [durationHours], as clock hours.
+     * The sleep window the heart-rate rhythm heuristic suggests for a night of [durationHours], as clock
+     * hours.
      *
-     * Anchored on the temperature minimum: a well-entrained sleeper wakes about [cbtMinBeforeWakeHours]
-     * after CBTmin, so the ideal wake is `tempMinHour + cbtMinBeforeWakeHours` and the ideal bedtime is
-     * that minus the night's own length.
+     * Anchored on the heuristic reference hour ([tempMinHour], the Swift twin's `referenceHour`): the
+     * suggested wake is `tempMinHour + cbtMinBeforeWakeHours` and the suggested bedtime is that minus the
+     * night's own length. A heuristic reference, not a physiological "ideal".
      *
      * USING THE ACTUAL DURATION IS THE POINT. Giving the ideal arc the same length as the real one makes
      * the comparison purely about PHASE — did you sleep at the right TIME — so a short night reads as
      * aligned-but-short rather than as misaligned. Feeding a "needed" duration instead would fold two
-     * different failures into one arc and make a debt look like a body-clock problem.
+     * different failures into one arc and make a debt look like a timing problem.
      *
      * null for a non-positive or impossible duration; a window longer than a day cannot be placed on a
      * 24 h ring, and silently wrapping it would draw a full circle that means nothing.
@@ -350,10 +401,11 @@ object CircadianEngine {
     }
 
     /**
-     * Signed hours the ACTUAL sleep window sits later (+) or earlier (−) than the chronotype-ideal one.
+     * Signed hours the ACTUAL sleep window sits later (+) or earlier (−) than the window the heart-rate
+     * rhythm heuristic suggests. [tempMinHour] is the heuristic reference hour (Swift: `referenceHour`).
      *
-     * Deliberately NOT [PhaseEstimate.offsetVsScheduleMinutes]. That field compares the body clock to the
-     * wearer's own SCHEDULE; this compares the night actually slept to where the CLOCK wanted it. A dial
+     * Deliberately NOT [PhaseEstimate.offsetVsScheduleMinutes]. That field compares the rhythm to the
+     * wearer's own SCHEDULE; this compares the night actually slept to the heuristic's suggested window. A dial
      * that draws an actual arc against an ideal arc must caption itself with the distance between those
      * two arcs, or the number contradicts the picture — the two disagree exactly when someone keeps a
      * consistent schedule that does not suit their clock, which is the case the dial exists to show.
@@ -366,10 +418,11 @@ object CircadianEngine {
         signedHourDelta(wrap24(tempMinHour + cbtMinBeforeWakeHours), wrap24(actualWakeHour))
 
     /**
-     * Bucket an ABSOLUTE temperature-minimum clock hour into a lean.
+     * Bucket an ABSOLUTE heuristic reference hour into an earlier / mid / later heart-rate timing bucket.
+     * [tempMinHour] is the heuristic reference hour (Swift: `referenceHour`), not a temperature minimum.
      *
-     * Compared CIRCULARLY. A [tempMinHour] of 23:30 is five hours BEFORE the 04:30 anchor — a strong
-     * morning lean — and a naive `23.5 > 5.5` would call it evening instead. Pure, so the boundaries are
+     * Compared CIRCULARLY. A reference hour of 23:30 is five hours BEFORE the 04:30 anchor — an early
+     * heart-rate peak — and a naive `23.5 > 5.5` would call it late instead. Pure, so the boundaries are
      * assertable without building a fit.
      */
     fun chronotype(tempMinHour: Double): Chronotype {
@@ -380,7 +433,7 @@ object CircadianEngine {
     }
 
     /**
-     * The lean for a phase estimate, or null when the fit is not strong enough to name one.
+     * The heart-rate timing bucket for an estimate, or null when the fit is not strong enough to name one.
      *
      * Gated to [PhaseConfidence.SOLID] on purpose. WIDE is a real fit on thin data and is fine for the
      * continuous offset the card already shows, but a NAMED category reads as a fact about the person

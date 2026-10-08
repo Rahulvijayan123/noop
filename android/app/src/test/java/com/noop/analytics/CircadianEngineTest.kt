@@ -57,6 +57,23 @@ class CircadianEngineTest {
         assertEquals(4.5, est.tempMinHour, 1e-9)
     }
 
+    /** spec-02 §3: the engine's own copy never claims a body clock, chronotype, temperature minimum or
+     *  melatonin. Mirror of Swift `testEngineCopyMakesNoBodyClockClaims`. */
+    @Test fun engineCopyMakesNoBodyClockClaims() {
+        val banned = listOf("body clock", "body-clock", "chronotype", "night-owl", "lark", "temperature minimum",
+            "melatonin", "circadian clock", "cbt")
+        val notes = mutableListOf<String>()
+        for ((acro, wake) in listOf(16.0 to 7.0, 20.0 to 7.0, 12.0 to 9.0)) {
+            notes.add(CircadianEngine.estimatePhase(profile(60.0, 10.0, acro), 20, wake)!!.note)
+        }
+        notes.add(CircadianEngine.estimatePhase(profile(60.0, 10.0, 16.0), 2, 7.0)!!.note)
+        notes.add(CircadianEngine.planShift(0.1, 23.0, 7.0).note)
+        assertTrue(notes.any { it.contains("heart-rate rhythm") })
+        for (note in notes) {
+            for (word in banned) assertFalse("$note says $word", note.lowercase().contains(word))
+        }
+    }
+
     @Test fun eastwardAdvancePlanUsesMorningLight() {
         val plan = CircadianEngine.planShift(3.0, 23.0, 7.0)
         assertEquals(CircadianEngine.ShiftDirection.ADVANCE, plan.direction)
