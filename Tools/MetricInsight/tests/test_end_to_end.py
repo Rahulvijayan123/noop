@@ -115,9 +115,9 @@ def test_rhr_explained_end_to_end_then_served_from_cache(pg, stub, worker):
     insight = ready["insight"]
     assert insight["kind"] == "explained" and insight["data_through"] == "2026-10-06"
     assert insight["headline"] == "Resting heart rate 45 bpm on Oct 6"
-    # The app's Baseline call for the night, with the band its Monitor shows (the trusted week usual, 45.4-54.3).
+    # The app's Baseline call for the night, with the band its Monitor shows (the trusted week usual, 42.2-57.5).
     assert insight["observed"] == ["Your resting heart rate was 45 bpm on Oct 6.", "That is 3 bpm lower than on Oct 5.",
-                                   "That is below your usual range of 45-54 bpm."]
+                                   "That is within your usual range of 42-57 bpm."]
     assert insight["basis"]["nights"] == 7 and insight["basis"]["missing_nights"] == 1
     assert [c["id"] for c in insight["citations"]] and all(c["url"].startswith("https://pubmed") for c in insight["citations"])
     related = {r["metric"]: r for r in insight["related"]}

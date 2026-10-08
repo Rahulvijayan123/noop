@@ -46,7 +46,7 @@ Every owner read is a READ ONLY transaction as `authenticated` with the owner's 
 `get_server_score_snapshot_v2`). The inputs fingerprint (`internal.metric_insight_inputs`) covers everything these
 read, so an unchanged night is served from the cache and a changed one is re-analysed.
 
-**The person's usual** is the app's Baseline (Layer 1, `LongitudinalBaseline` v1.review), run here by `layer1.py`
+**The person's usual** is the app's Baseline (Layer 1, `LongitudinalBaseline` v2.clinical), run here by `layer1.py`
 on the server's nightly values and replayed over the whole history as the phone does: the week usual (the 7 nights
 before, 10 for HRV, newest weighted most) and the 60-day usual (nights T-60..T-8), each with its band, and the call
 the Home ring and the Monitor make for the night: *In range*, *Off usual* (above or below), *Learning* (no usual the

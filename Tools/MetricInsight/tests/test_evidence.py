@@ -45,15 +45,16 @@ def test_summary_gives_the_apps_usual_and_its_call_for_the_night():
     assert summary["latest"] == {"day": "2026-10-06", "value": 45}
     assert summary["previous"] == {"day": "2026-10-05", "value": 48, "change": -3}
     # Six earlier nights, all in the last week: the app trusts its week usual (weighted, newest most) and shows its
-    # band, 46-54 bpm; 45 bpm is outside it, below ("Off usual"). There is no 60-day usual yet (nights 8+ days old).
+    # band, 42-58 bpm (a predictive interval, wide on six nights); 45 bpm is inside it ("In range"). There is no
+    # 60-day usual yet (nights 8+ days old).
     baseline = summary["baseline"]
     assert baseline["usual"] == "week" and baseline["week"]["nights"] == 6 and baseline["usual_value"] == 50
-    assert (baseline["usual_low"], baseline["usual_high"]) == (46, 54) and baseline["long"] is None
+    assert (baseline["usual_low"], baseline["usual_high"]) == (42, 58) and baseline["long"] is None
     assert baseline["change_vs_usual"] == -5 and baseline["direction"] == "down"
-    assert baseline["call"] == {"state": "off", "app_label": "Off usual", "shown_usual": "this_week", "low": 46,
-                                "high": 54, "outside": ["this_week"], "side": "below"}
+    assert baseline["call"] == {"state": "in_range", "app_label": "In range", "shown_usual": "this_week", "low": 42,
+                                "high": 58, "outside": [], "side": None}
     assessment = summary["assessment"]
-    assert (assessment["basis"], assessment["state"], assessment["side"]) == ("app_baseline", "off", "below")
+    assert (assessment["basis"], assessment["state"], assessment["side"]) == ("app_baseline", "in_range", None)
     assert "change_detection" not in assessment
     assert summary["context_layer"] == {"available": False, "reason": "no_context_document"}
     assert summary["last_7_nights"] == {"measured": 7, "median": 50, "low": 45, "high": 53}
@@ -67,10 +68,10 @@ def test_the_60_day_usual_counts_once_the_app_trusts_it():
     rows[ANCHOR] = {"resting_hr_bpm": 60}
     summary = ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)
     # 13 nights 8-20 days old: the 60-day usual is computed, but the app does not trust it yet (13 of its 53
-    # nights); the week usual it trusts is the one shown, 47-55 bpm, and 60 bpm is above it.
+    # nights); the week usual it trusts is the one shown, 46-56 bpm, and 60 bpm is above it.
     base = summary["baseline"]
     assert base["long"]["nights"] == 13 and not base["long"]["shown_by_the_app"] and not base["long"]["established"]
-    assert base["usual"] == "week" and (base["usual_low"], base["usual_high"]) == (47, 55)
+    assert base["usual"] == "week" and (base["usual_low"], base["usual_high"]) == (46, 56)
     assert (summary["assessment"]["state"], summary["assessment"]["side"]) == ("off", "above")
     rows[ANCHOR] = {"resting_hr_bpm": 51}
     assert ev.metric_summary(scores(rows), RHR, ANCHOR, 90, None)["assessment"]["state"] == "in_range"
@@ -81,7 +82,7 @@ def test_the_60_day_usual_counts_once_the_app_trusts_it():
     summary = ev.metric_summary(scores(thin), RHR, ANCHOR, 90, None)
     assert summary["baseline"]["week"] is None and summary["baseline"]["usual"] == "long"
     assert summary["baseline"]["call"] == {"state": "off", "app_label": "Off usual", "shown_usual": "60_days",
-                                           "low": 53, "high": 59, "outside": ["60_days"], "side": "above"}
+                                           "low": 52, "high": 60, "outside": ["60_days"], "side": "above"}
 
 
 def test_context_layer_rules_match_the_app():
@@ -109,8 +110,9 @@ def test_context_layer_rules_match_the_app():
                 "episodes": episodes, "status": "available"}
     summary = ev.metric_summary(week(), RHR, ANCHOR, 90, document)
     assert summary["context_layer"]["reference"]["difference"] == -4
-    # The app's own call for the night leads; the context layer's change detection sits next to it.
-    assert summary["assessment"]["state"] == "off"
+    # The app's own call for the night leads (45 bpm is inside its week band); the context layer's change detection
+    # sits next to it.
+    assert summary["assessment"]["state"] == "in_range"
     assert summary["assessment"]["change_detection"] == {
         "state": "persistent_shift", "robust_distance": -2.3,
         "note": "the context layer's change detection against its personal reference"}
@@ -160,12 +162,17 @@ def test_the_apps_baseline_on_nightly_rows():
     assert long["low"] < long["center"] < long["high"]
     assert week_usual["nights"] == 7 and week_usual["shown_by_the_app"]
     assert base["call"]["state"] == "in_range" and base["call"]["shown_usual"] == "this_week" and base["value"] == 62
-    # The newest week never enters the 60-day usual, and nights far from an established usual barely train the
-    # week usual: it holds near the old level, so tonight's 62 bpm is still in range.
+    # The newest week never enters the 60-day usual: a week near 88 bpm opens a change episode and the app keeps the
+    # pre-change 60-day usual (same centre and band, built when the change was detected two nights ago, from the 51
+    # nights it then had). Nights far from an established usual barely train the week usual: it holds near the old
+    # level, so tonight's 62 bpm is still in range.
     jumped = dict(rows)
     jumped.update({anchor - timedelta(days=i): {"resting_hr_bpm": 88 + (i * 2) % 5} for i in range(1, 8)})
     moved = ev.app_baseline(jumped, "sleep_rhr", anchor, 0)
-    assert moved["long"] == long and moved["week"]["center"] < 70 and moved["call"]["state"] == "in_range"
+    assert not long["held_after_a_change"] and not long["slow_trend_detected"]
+    assert {k: moved["long"][k] for k in ("center", "low", "high")} == {k: long[k] for k in ("center", "low", "high")}
+    assert moved["long"]["held_after_a_change"] and moved["long"]["nights"] == 51
+    assert moved["week"]["center"] < 70 and moved["call"]["state"] == "in_range"
     # HRV on ln(RMSSD): the band is multiplicative, wider above than below; the week usual is 10 nights.
     hrv = {anchor - timedelta(days=i): {"hrv_rmssd_ms": 60.0 * (1 + 0.04 * ((i * 7) % 11 - 5))} for i in range(1, 61)}
     hrv[anchor] = {"hrv_rmssd_ms": 58.0}

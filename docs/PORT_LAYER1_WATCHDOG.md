@@ -47,7 +47,7 @@ G1–G9 that matter for the port are also restated in §8 of this file.
 | Engine | Question it answers | Source of truth | Must stay |
 |---|---|---|---|
 | **Charge / Effort / Rest** | Hosted (or local) night score | Nara `Baselines.swift` EWMA, worker, `AppModel.cloudScoringIsAuthoritative` | Untouched. Nara Liquid hero ring labeled **“Baseline”** is **Charge**, not Layer 1. |
-| **Layer 1** | What is usual over **days / nights**? | FRWHOOP `LongitudinalBaseline.swift` (`param_set = v1.review`) | Copied. Never averaged with Charge. |
+| **Layer 1** | What is usual over **days / nights**? | FRWHOOP `LongitudinalBaseline.swift` (`param_set = v2.clinical`) | Copied. Never averaged with Charge. |
 | **Watchdog** | Last **~30 minutes** vs felt-ill / safety / painted range | FRWHOOP `Watchdog.swift` + UniTS / TimesFM **students** | Copied. Six per-vital graphs stay separate. |
 | **F04 / F08 / F09** | Sidecars after `evaluate` / notify-sent | FRWHOOP add-on files + `ADDONS.md` | Copied as sidecars. Do not fold into `evaluate`. |
 

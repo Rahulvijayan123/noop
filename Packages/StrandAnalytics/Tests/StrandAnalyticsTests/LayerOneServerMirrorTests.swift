@@ -45,7 +45,7 @@ final class LayerOneServerMirrorTests: XCTestCase {
             let document: [String: Any] = [
                 "about": "Recorded by Packages/StrandAnalytics/Tests/StrandAnalyticsTests/LayerOneServerMirrorTests "
                     + "(LongitudinalBaseline.evaluate + vitalVerdict) for the cases in layer1_cases.json.",
-                "param_set": LongitudinalBaseline.Params.paramSet,
+                "param_set": LongitudinalBaseline.V2.paramSet,
                 "expected": actual,
             ]
             try JSONSerialization.data(withJSONObject: document, options: [.prettyPrinted, .sortedKeys])
@@ -53,7 +53,7 @@ final class LayerOneServerMirrorTests: XCTestCase {
             return
         }
         let recorded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
-        XCTAssertEqual(recorded["param_set"] as? String, LongitudinalBaseline.Params.paramSet,
+        XCTAssertEqual(recorded["param_set"] as? String, LongitudinalBaseline.V2.paramSet,
                        "Layer 1's param set changed: re-record and update the server port")
         let expected = try XCTUnwrap(recorded["expected"] as? [String: Any])
         XCTAssertEqual(Set(expected.keys), Set(actual.keys), "the cases changed: re-record")

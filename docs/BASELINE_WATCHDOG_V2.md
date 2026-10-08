@@ -431,6 +431,19 @@ What each step showed:
 
 ---
 
+## 9a. What is deployed, and what ships with the app
+
+**Live now (2026-10-08):**
+- VPS `frwhoop-anomaly`: TimesFM 3.0 + UniTS, owner account only (`FRWHOOP_ANOMALY_USERS`).
+- Production migration `20261007180000_anomaly_service`.
+- `scores` v21 with `/anomaly-candidates`. v20 was the metric-insights session's deploy; v21 adds only this route.
+
+These are additive. The installed phone does not read the new route yet, so nothing changes for it.
+
+**Ships together with the phone build that carries this branch:**
+- Layer 1 `v2.clinical`, and a Watchdog that runs no on-device model.
+- The MetricInsight server's Layer 1 port (`Tools/MetricInsight/src/nara_metric_insight/layer1.py`, pinned bit-exact to the app by `LayerOneServerMirrorTests` / `test_layer1.py`). Deploying it earlier would make the server's explanations disagree with a phone still on v1.
+
 ## 9. Limitations
 
 - **No clinical validation.** Every result is synthetic or from one person over ≤ 34 days. Thresholds are engineering choices with literature anchors (Apple HR notifications 10 min; SpO₂ 88 % oxygen threshold; Plews ln-RMSSD; PhysiologyContext CUSUM), not validated operating points. The synthetic events (3 users, 36 events) are the prototype's generator: read detection rates as relative, not as field sensitivity.
