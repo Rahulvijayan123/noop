@@ -105,6 +105,76 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertEqual(blind?.phase, .steadyState)
     }
 
+    func testTheDaysFirstHRVWindowsSeeAWalkOrWorkoutThatEndedBeforeMidnight() throws {
+        let dayStart = t0 + 86_400
+        func iv(_ s: Int, _ e: Int, _ c: ActivityClass) -> ActivityContextInterval {
+            ActivityContextInterval(start: dayStart + s, end: dayStart + e, activityClass: c, confidence: 0.8,
+                                    sleep: .awake, wear: .onWrist)
+        }
+        let day = [iv(0, 1_200, .sitting)]
+        let beats = stride(from: dayStart - 900, to: dayStart + 1_200, by: 1)
+            .map { RRInterval(ts: $0, rrMs: 1_000 + ($0 % 2) * 40) }
+        func firstWindow(_ intervals: [ActivityContextInterval]) throws -> HRVWindow {
+            try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: dayStart, dayEnd: dayStart + 300, rr: beats,
+                                                 activity: ActivityContextLookup(intervals: intervals),
+                                                 transitionEvents: []).first)
+        }
+        XCTAssertGreaterThanOrEqual(ActivityContextPersistence.hrvIntervalLookbackS, HRVWindowBuilder.Config().minSinceExerciseS)
+        let blind = try firstWindow(day)
+        XCTAssertTrue(blind.eligibleForBaseline, "nothing before the day: the window reads as steady rest")
+
+        // A run that ended 240 s before midnight: inside the 300 s locomotion gate.
+        let run = [iv(-900, -240, .running)]
+        let lookup = ActivityContextPersistence.hrvIntervals(day: day, previous: run, dayStart: dayStart)
+        XCTAssertEqual(lookup.map(\.start), [dayStart - ActivityContextPersistence.hrvIntervalLookbackS, dayStart],
+                       "the previous day's tail (cut to the lookback), then the day's own")
+        XCTAssertEqual(lookup.first?.end, dayStart - 240)
+        let afterRun = try firstWindow(lookup)
+        XCTAssertEqual(afterRun.secondsSinceLocomotion, 240)
+        XCTAssertFalse(afterRun.eligibleForBaseline, "240 s after a run is not rest")
+
+        // Vigorous exercise that ended 500 s before midnight: inside the 600 s exercise gate.
+        let workout = [iv(-2_000, -500, .vigorousActivity)]
+        let afterWorkout = try firstWindow(ActivityContextPersistence.hrvIntervals(day: day, previous: workout,
+                                                                                    dayStart: dayStart))
+        XCTAssertEqual(afterWorkout.secondsSinceExercise, 500)
+        XCTAssertFalse(afterWorkout.eligibleForBaseline)
+
+        // Anything earlier than the lookback, or overlapping the day's own rows, is left out of the lookup.
+        let lookback = ActivityContextPersistence.hrvIntervalLookbackS
+        let old = [iv(-lookback - 900, -lookback - 1, .running), iv(-100, 50, .walking)]
+        let trimmed = ActivityContextPersistence.hrvIntervals(day: day, previous: old, dayStart: dayStart)
+        XCTAssertEqual(trimmed.map { [$0.start - dayStart, $0.end - dayStart] }, [[-100, 0], [0, 1_200]])
+        XCTAssertEqual(ActivityContextPersistence.hrvIntervals(day: day, previous: [], dayStart: dayStart), day)
+    }
+
+    func testARowOpeningTheDaySettlesAfterTheWalkThatEndedJustBeforeMidnight() throws {
+        let dayStart = t0 + 86_400
+        let hr = (0..<600).map { HRSample(ts: dayStart + $0, bpm: $0 < 90 ? 95 : 70) }
+        let previous = [ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: dayStart - 30)]
+        let events = ActivityContextPersistence.hrvEvents(day: [], previous: previous, dayStart: dayStart)
+        let runs = [fixtureRun(.sitting, dayStart, dayStart + 600)]
+        let blind = try XCTUnwrap(ActivityContextIntervalBuilder.build(runs: runs, events: [], hr: hr).first)
+        XCTAssertEqual(blind.settlingSeconds, 0, "without the tail the row cannot see the walk")
+        let seen = try XCTUnwrap(ActivityContextIntervalBuilder.build(runs: runs, events: events, hr: hr).first)
+        XCTAssertEqual(seen.settlingSeconds, 90)
+        XCTAssertEqual(seen.settledFrom, dayStart + 90)
+        XCTAssertEqual(seen.hrMeanSettled, 70)
+        XCTAssertEqual(seen.transitionCount, 0, "the tail is an anchor, not an event inside the row")
+    }
+
+    func testTheTailFingerprintIsEmptyWithoutATailAndMovesWithIt() {
+        XCTAssertEqual(ActivityContextPersistence.tailFingerprint([]), "")
+        let a = ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: t0 - 30)
+        let b = ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.6, ts: t0 - 90)
+        let one = ActivityContextPersistence.tailFingerprint([a, b])
+        XCTAssertFalse(one.isEmpty)
+        XCTAssertEqual(ActivityContextPersistence.tailFingerprint([b, a]), one, "order does not matter")
+        XCTAssertNotEqual(ActivityContextPersistence.tailFingerprint([a]), one)
+        var moved = a; moved.probability = 0.5
+        XCTAssertNotEqual(ActivityContextPersistence.tailFingerprint([moved, b]), one)
+    }
+
     func testEveryClassAndContextCodeHasAStablePersistedForm() {
         // The stored strings are the enums' raw values; if one is renamed this fails before a database
         // full of the old spelling does.
@@ -313,6 +383,28 @@ final class ActivityContextPersistenceTests: XCTestCase {
         var early = a; early.settledFrom = t0 + 20
         XCTAssertEqual(ActivityContextPersistence.clipped([early], from: t0 + 40, to: t0 + 400).first?.settledFrom, t0 + 40)
         XCTAssertEqual(ActivityContextPersistence.clipped([early], from: t0, to: t0 + 400).first?.settledFrom, t0 + 20)
+        // A row settling for its first 120 s, with settled statistics over [+120, +600).
+        var afterWalk = ActivityContextInterval(start: t0, end: t0 + 600, activityClass: .sitting, confidence: 0.7,
+                                                hrSamples: 600, hrMean: 75)
+        afterWalk.settlingSeconds = 120; afterWalk.settledFrom = t0 + 120
+        afterWalk.hrMeanSettled = 70; afterWalk.hrSamplesSettled = 480
+        afterWalk.rmssdSettled = 50; afterWalk.rrDiffSqSumMs2Settled = 2_500 * 400; afterWalk.rrDiffCountSettled = 400
+        let transientOnly = ActivityContextPersistence.clipped([afterWalk], from: t0, to: t0 + 90).first
+        XCTAssertEqual(transientOnly?.settledFrom, t0 + 90)
+        XCTAssertEqual(transientOnly?.settlingSeconds, 90, "only the settling seconds inside the cut")
+        XCTAssertNil(transientOnly?.hrMeanSettled, "a cut holding none of the settled part has no settled statistics")
+        XCTAssertNil(transientOnly?.hrSamplesSettled)
+        XCTAssertNil(transientOnly?.rmssdSettled)
+        XCTAssertNil(transientOnly?.rrDiffSqSumMs2Settled)
+        XCTAssertNil(transientOnly?.rrDiffCountSettled)
+        XCTAssertEqual(transientOnly?.hrMean, 75, "the whole row's statistics stay as measured")
+        let settledOnly = ActivityContextPersistence.clipped([afterWalk], from: t0 + 300, to: t0 + 600).first
+        XCTAssertEqual(settledOnly?.settledFrom, t0 + 300)
+        XCTAssertEqual(settledOnly?.settlingSeconds, 0, "a cut after the settling holds none of it")
+        XCTAssertEqual(settledOnly?.hrMeanSettled, 70)
+        let tail = ActivityContextPersistence.clipped([afterWalk], from: t0, to: t0 + 400).first
+        XCTAssertEqual(tail?.settlingSeconds, 120)
+        XCTAssertEqual(tail?.rmssdSettled, 50)
     }
 
     func testContextFromSeveralOwnersMergesIntoOneNonOverlappingTimeline() {

@@ -145,9 +145,11 @@ public enum ActivityContextPersistence {
         return max(120, c.recoveryGuardS + c.eventDetectionLagS)
     }
 
-    /// The events the day's HRV windows are built with: the day's own, plus those of `previous` (the previous
-    /// day's, from its stored rows or its document) flagged in the `lookbackS` before `dayStart`. A second flagged
-    /// by both keeps the day's own reading.
+    /// The events the day's HRV windows and intervals are built with: the day's own, plus those of `previous` (the
+    /// previous day's, from its stored rows or its document) flagged in the `lookbackS` before `dayStart`. A second
+    /// flagged by both keeps the day's own reading. The interval build reads the tail only as settling anchors (a
+    /// row's `transitionCount` counts the events inside it), so a row that opens the day just after a walk or a
+    /// change of position still has its settling.
     public static func hrvEvents(day: [ActivityTransitionEvent], previous: [ActivityTransitionEvent], dayStart: Int,
                                  lookbackS: Int = hrvEventLookbackS) -> [ActivityTransitionEvent] {
         let own = Set(day.map { "\($0.ts)|\($0.kind.rawValue)" })
@@ -155,6 +157,32 @@ public enum ActivityContextPersistence {
             $0.ts >= dayStart - lookbackS && $0.ts < dayStart && !own.contains("\($0.ts)|\($0.kind.rawValue)")
         }
         return tail.sorted { ($0.ts, $0.kind.rawValue) < ($1.ts, $1.kind.rawValue) } + day
+    }
+
+    /// How far before a day's start the canonical HRV windows need the previous day's intervals: the longest of
+    /// `HRVWindowBuilder`'s "time since locomotion / exercise" gates, which read intervals, not events.
+    public static var hrvIntervalLookbackS: Int {
+        let c = HRVWindowBuilder.Config()
+        return max(c.minSinceExerciseS, c.minSinceLocomotionS, hrvEventLookbackS)
+    }
+
+    /// The intervals the day's HRV windows look up: the day's own, after the part of `previous` (the previous
+    /// day's stored rows) in the `lookbackS` before the day's first second, so the day's first windows see a walk
+    /// or a workout that ended just before midnight. Only for that lookup: the day's stored rows are its own.
+    public static func hrvIntervals(day: [ActivityContextInterval], previous: [ActivityContextInterval], dayStart: Int,
+                                    lookbackS: Int = hrvIntervalLookbackS) -> [ActivityContextInterval] {
+        let first = min(dayStart, day.map(\.start).min() ?? dayStart)
+        return clipped(previous, from: first - lookbackS, to: first) + day
+    }
+
+    /// The part of the input fingerprint that witnesses the previous day's tail events (`hrvEvents`), which a day's
+    /// stored rows now depend on (their settling): "" with no tail, so a day nothing came just before keeps the
+    /// fingerprint it had; otherwise each event's second, kind and probability.
+    public static func tailFingerprint(_ events: [ActivityTransitionEvent]) -> String {
+        guard !events.isEmpty else { return "" }
+        let sorted = events.sorted { ($0.ts, $0.kind.rawValue) < ($1.ts, $1.kind.rawValue) }
+        return "|tail:" + sorted.map { "\($0.ts):\($0.kind.rawValue):\(String(format: "%.3f", $0.probability))" }
+            .joined(separator: ",")
     }
 
     /// The part of `intervals` that belongs to `[from, to)`: whole intervals inside it, the crossing ones cut to
@@ -168,8 +196,18 @@ public enum ActivityContextPersistence {
             var cut = iv
             cut.start = max(iv.start, from)
             cut.end = min(iv.end, to)
-            // The settled part's start stays a second of the row (its statistics are kept as measured).
-            cut.settledFrom = iv.settledFrom.map { min(max($0, cut.start), cut.end) }
+            // The settled part's start stays a second of the row, and the settling seconds are only those that can
+            // lie inside the cut (`[cut.start, settledFrom)`). A cut that keeps none of the settled part has no
+            // settled statistics: they describe seconds it no longer holds. Otherwise they are kept as measured.
+            if let from = iv.settledFrom {
+                let settled = min(max(from, cut.start), cut.end)
+                cut.settledFrom = settled
+                cut.settlingSeconds = iv.settlingSeconds.map { min($0, max(0, settled - cut.start)) }
+                if settled >= cut.end {
+                    cut.hrMeanSettled = nil; cut.hrSamplesSettled = nil
+                    cut.rmssdSettled = nil; cut.rrDiffSqSumMs2Settled = nil; cut.rrDiffCountSettled = nil
+                }
+            }
             return cut
         }
     }
