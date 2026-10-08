@@ -43,8 +43,11 @@ consume a job's failure budget. The caller leaves the work pending and comes bac
 ## PPG segments sent to `sensor.biomarkers.v1`
 
 The worker builds `input.ppg.segments[]` (docs/sensor-biomarkers/CONTRACTS.md §4). Existing members
-are unchanged (`start_unix`, `duration_s`, `samples` as absolute ADC counts, 24 per second,
-`sample_count_per_second`, `config.stable`). New members, all optional on the wire so an older worker
+are unchanged in meaning (`start_unix`, `duration_s`, `samples` as absolute ADC counts at the native rate,
+`sample_count_per_second`, `config.stable`). The native rate is whatever the request declares: recorded v26
+packets show 25 distinct samples per record (the anchor plus 24 deltas, with the next record's anchor as the
+26th), so anchored v26 segments are sent at 25 Hz rather than the earlier 24-point convention; the evidence
+and the one-place switch are in [ppg-transport.md](ppg-transport.md). New members, all optional on the wire so an older worker
 and an older sidecar keep working, and always sent by this branch's worker:
 
 - `run_id` (string): the contiguous, configuration-compatible run the segment belongs to. Segments that
