@@ -1,0 +1,285 @@
+{
+ "observed_skin_temp_rhythm": {
+  "acrophase_h": 21.6419,
+  "acrophase_local_timezone": "America/New_York",
+  "acrophase_local_utc_offset_h": -4.0,
+  "acrophase_utc_h": 1.6419,
+  "amplitude_c": 0.7446,
+  "config": {
+   "amplitude_floor_c": 0.05,
+   "amplitude_min_se_ratio": 2.0,
+   "daytime_local_hours": [
+    6,
+    18
+   ],
+   "drift_min_days": 5,
+   "hour_min_valid_minutes": 30,
+   "hr_amplitude_floor_bpm": 1.0,
+   "l5_hours": 5,
+   "m10_hours": 10,
+   "max_acrophase_se_h": 1.5,
+   "max_daily_phase_circular_sd_h": 3.0,
+   "min_clock_shift_h": 0.5,
+   "realignment_min_days_after": 1,
+   "realignment_min_days_before": 2,
+   "rest_activity_day_coverage": 0.8,
+   "rest_activity_min_days": 5,
+   "sleep_midpoint_min_nights": 5
+  },
+  "conversion_identity": "whoop5-centidegree",
+  "coverage": {
+   "day_hours_supported": 108,
+   "days_with_data": 9,
+   "daytime_local_hours": [
+    6,
+    18
+   ],
+   "duplicate_bins_dropped": 3,
+   "duplicate_days_dropped": 0,
+   "invalid_timezone_days": [],
+   "night_hours_supported": 105,
+   "quadrants_observed": [
+    true,
+    true,
+    true,
+    true
+   ]
+  },
+  "daily_amplitude_c": 0.7961,
+  "days_evaluated": 9,
+  "fit_hours": 213,
+  "fit_quality": 0.8765,
+  "history_revision_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "is": 0.9628,
+  "iv": 0.078,
+  "iv_definition": "consecutive_valid_hour_pairs_across_midnight",
+  "iv_valid_pairs": 212,
+  "mesor_c": 33.5001,
+  "method_version": "skin-temp-rhythm-1",
+  "notes": [
+   "acrophase is skin-temperature acrophase, not DLMO or core-temperature minimum",
+   "Wrist skin temperature also follows room temperature, bedding, clothing and activity; the observed rhythm describes the wrist channel only and implies no endogenous clock phase, melatonin timing or cause.",
+   "is / iv here are TEMPERATURE regularity on hourly skin-temperature bins (local clock hours for IS; consecutive valid UTC hours across midnight for IV), not rest-activity regularity.",
+   "Uncertainty is the larger of the OLS delta-method SE and a delete-one-day jackknife; hourly residuals are autocorrelated, so the OLS SE alone would be optimistic."
+  ],
+  "phase_drift": {
+   "clock_changes": [
+    {
+     "day": "2026-10-05",
+     "from_offset_h": -7.0,
+     "from_timezone": "America/Los_Angeles",
+     "kind": "timezone",
+     "to_offset_h": -4.0,
+     "to_timezone": "America/New_York"
+    }
+   ],
+   "daily_phases": [
+    {
+     "acrophase_local_h": 20.0436,
+     "acrophase_utc_h": 3.0436,
+     "amplitude_c": 0.7958,
+     "day": "2026-10-01",
+     "hours": 24,
+     "timezone": "America/Los_Angeles",
+     "utc_offset_h": -7.0
+    },
+    {
+     "acrophase_local_h": 19.9908,
+     "acrophase_utc_h": 2.9908,
+     "amplitude_c": 0.7982,
+     "day": "2026-10-02",
+     "hours": 24,
+     "timezone": "America/Los_Angeles",
+     "utc_offset_h": -7.0
+    },
+    {
+     "acrophase_local_h": 19.9881,
+     "acrophase_utc_h": 2.9881,
+     "amplitude_c": 0.7994,
+     "day": "2026-10-03",
+     "hours": 24,
+     "timezone": "America/Los_Angeles",
+     "utc_offset_h": -7.0
+    },
+    {
+     "acrophase_local_h": 20.0188,
+     "acrophase_utc_h": 3.0188,
+     "amplitude_c": 0.7889,
+     "day": "2026-10-04",
+     "hours": 24,
+     "timezone": "America/Los_Angeles",
+     "utc_offset_h": -7.0
+    },
+    {
+     "acrophase_local_h": 21.9002,
+     "acrophase_utc_h": 1.9002,
+     "amplitude_c": 0.7815,
+     "day": "2026-10-05",
+     "hours": 21,
+     "timezone": "America/New_York",
+     "utc_offset_h": -4.0
+    },
+    {
+     "acrophase_local_h": 20.9437,
+     "acrophase_utc_h": 0.9437,
+     "amplitude_c": 0.8016,
+     "day": "2026-10-06",
+     "hours": 24,
+     "timezone": "America/New_York",
+     "utc_offset_h": -4.0
+    },
+    {
+     "acrophase_local_h": 19.9676,
+     "acrophase_utc_h": 23.9676,
+     "amplitude_c": 0.7885,
+     "day": "2026-10-07",
+     "hours": 24,
+     "timezone": "America/New_York",
+     "utc_offset_h": -4.0
+    },
+    {
+     "acrophase_local_h": 20.0747,
+     "acrophase_utc_h": 0.0747,
+     "amplitude_c": 0.7961,
+     "day": "2026-10-08",
+     "hours": 24,
+     "timezone": "America/New_York",
+     "utc_offset_h": -4.0
+    },
+    {
+     "acrophase_local_h": 19.8741,
+     "acrophase_utc_h": 23.8741,
+     "amplitude_c": 0.8018,
+     "day": "2026-10-09",
+     "hours": 24,
+     "timezone": "America/New_York",
+     "utc_offset_h": -4.0
+    }
+   ],
+   "days_used": 9,
+   "method": "ols_slope_of_unwrapped_daily_utc_acrophase_on_elapsed_utc_days",
+   "notes": [
+    "Drift is measured on elapsed UTC time; clock changes are relabelings and never count as physiological drift. Retrospective description only."
+   ],
+   "observed_realignment": {
+    "clock_change_day": "2026-10-05",
+    "clock_shift_h": 3.0,
+    "days_since_change": 4,
+    "definition": "fraction = observed UTC acrophase change / UTC change needed to keep the pre-change local acrophase; descriptive, no forecast",
+    "fraction_realigned": 1.0454,
+    "reasons": [],
+    "required_utc_shift_h": -3.0,
+    "status": "available",
+    "utc_phase_change_h": -3.1363
+   },
+   "reasons": [],
+   "span_days": 7.875,
+   "status": "available",
+   "utc_drift_h_per_day": -0.5016
+  },
+  "phase_relations": {
+   "hr_minus_temp": {
+    "a_h": 17.6677,
+    "a_label": "heart_rate_acrophase",
+    "a_utc_h": 21.6677,
+    "b_h": 21.6419,
+    "b_label": "skin_temp_acrophase",
+    "b_utc_h": 1.6419,
+    "difference_h": -3.9742,
+    "method": "circular_difference_of_independent_utc_phases",
+    "reasons": [],
+    "status": "available",
+    "support_days": 9
+   },
+   "sleep_midpoint_minus_temp": {
+    "a_h": 5.7222,
+    "a_label": "sleep_period_midpoint",
+    "a_utc_h": 9.7222,
+    "b_h": 21.6419,
+    "b_label": "skin_temp_acrophase",
+    "b_utc_h": 1.6419,
+    "difference_h": 8.0803,
+    "method": "circular_difference_of_independent_utc_phases",
+    "reasons": [],
+    "status": "available",
+    "support_days": 10
+   }
+  },
+  "phase_stability_h": 1.3637,
+  "phase_status": {
+   "reasons": [],
+   "status": "available"
+  },
+  "qualifying_days": 9,
+  "reasons": [],
+  "regularity_hours": 213,
+  "regularity_name": "temperature_regularity",
+  "residual_sd_c": 0.1996,
+  "status": "available",
+  "uncertainty": {
+   "acrophase_delta_se_h": 0.0995,
+   "acrophase_jackknife_se_h": 0.5069,
+   "acrophase_se_h": 0.5069,
+   "amplitude_delta_se_c": 0.0193,
+   "amplitude_jackknife_se_c": 0.0097,
+   "amplitude_se_c": 0.0193,
+   "method": "max(ols_delta_method, delete_one_day_jackknife)"
+  },
+  "weighting": "valid_minutes_per_hour"
+ },
+ "rest_activity_rhythm": {
+  "binarized": false,
+  "config": {
+   "amplitude_floor_c": 0.05,
+   "amplitude_min_se_ratio": 2.0,
+   "daytime_local_hours": [
+    6,
+    18
+   ],
+   "drift_min_days": 5,
+   "hour_min_valid_minutes": 30,
+   "hr_amplitude_floor_bpm": 1.0,
+   "l5_hours": 5,
+   "m10_hours": 10,
+   "max_acrophase_se_h": 1.5,
+   "max_daily_phase_circular_sd_h": 3.0,
+   "min_clock_shift_h": 0.5,
+   "realignment_min_days_after": 1,
+   "realignment_min_days_before": 2,
+   "rest_activity_day_coverage": 0.8,
+   "rest_activity_min_days": 5,
+   "sleep_midpoint_min_nights": 5
+  },
+  "count_threshold": null,
+  "days_used": 9,
+  "deferred": [
+   "lids",
+   "kra_kar",
+   "24h_align"
+  ],
+  "epoch_seconds": 3600,
+  "gate": ">= 5 days with movement supported in >= 80% of local hours (an hour needs >= 30 worn minutes with >= 30 one-second gravity adjacencies) and every 6-hour local quadrant observed",
+  "history_revision_digest": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "hours_used": 213,
+  "is": 1.0058,
+  "iv": 0.3424,
+  "iv_definition": "consecutive_valid_hour_pairs_across_midnight",
+  "iv_valid_pairs": 212,
+  "l5": 1.0,
+  "l5_start_h": 0.0,
+  "m10": 21.0,
+  "m10_start_h": 8.0,
+  "method_version": "rest-activity-1",
+  "movement_threshold_g": 0.01,
+  "notes": [
+   "Signal: seconds per minute whose 1 Hz gravity vector changed by at least the threshold from the previous second (an orientation-change proxy that only sees motion surviving the strap's 1 Hz downsample). It is not an activity count: no count threshold and no binarisation are applied.",
+   "Hours without worn movement evidence stay missing; activity-decoder labels never fill observation gaps.",
+   "LIDS, kRA/kAR and 24hAlign are deferred."
+  ],
+  "ra": 0.9091,
+  "reasons": [],
+  "signal": "gravity_movement_seconds_per_minute",
+  "status": "available",
+  "unit": "s/min"
+ }
+}

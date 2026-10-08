@@ -9,6 +9,7 @@ UTC time (bins are UTC-hour aligned, as the worker sends them).
 from __future__ import annotations
 
 import json
+import os
 import math
 import random
 import statistics
@@ -691,3 +692,83 @@ def test_compute_wires_rhythm_into_main_night_and_document_within_budget():
     assert ra["history_revision_digest"] == "d" * 64
     # generous: the 3 s route budget is shared with the whole night; rhythm must be small
     assert t_rhythm < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Producer -> app golden (decoded by StrandAnalytics SleepFeatureRhythmGoldenTests)
+# ---------------------------------------------------------------------------
+
+GOLDEN = os.path.join(os.path.dirname(__file__), "..", "..", "..", "Packages", "StrandAnalytics",
+                      "Tests", "StrandAnalyticsTests", "Goldens", "SleepFeatures",
+                      "spec02_rhythm_blocks.json")
+
+
+def golden_blocks() -> dict:
+    """A deterministic 9-day history with an eastward time-zone change, an HR rhythm,
+    sleep periods and full-day movement: every rhythm sub-block is populated."""
+    shifts = [0, 0, 0, 0, -1, -2, -3, -3, -3]
+    dates = days_range(FIRST, 9)
+    rng = random.Random(31)
+    days = [day_wire(d, LA if i < 4 else NY, temp_fn=cosine(33.5, 0.8, (3.0 + s) % 24),
+                     hr_fn=cosine(62.0, 6.0, (23.0 + s) % 24), mov_fn=_activity, noise=0.03,
+                     rng=rng, revision=50 + i)
+            for i, (d, s) in enumerate(zip(dates, shifts))]
+    hist = history_wire(days)
+    night = main_night(dates[-1], NY)
+    req = make_request(hist, nights=(night,), tz=NY,
+                       history_days=_history_days_with_nights(dates, 10.0))
+    return {"observed_skin_temp_rhythm": rhythm.observed_skin_temp_rhythm(req, night),
+            "rest_activity_rhythm": rhythm.rest_activity_rhythm(req)}
+
+
+def test_committed_rhythm_golden_matches_the_producer():
+    """The golden the Swift decoder test reads is exactly what this producer emits (regenerate
+    with FRWHOOP_WRITE_RHYTHM_GOLDEN=1 after checking a changed output is correct)."""
+    blocks = json.loads(json.dumps(golden_blocks(), allow_nan=False))
+    if os.environ.get("FRWHOOP_WRITE_RHYTHM_GOLDEN") == "1":
+        os.makedirs(os.path.dirname(GOLDEN), exist_ok=True)
+        with open(GOLDEN, "w") as f:
+            json.dump(blocks, f, indent=1, sort_keys=True)
+            f.write("\n")
+    committed = json.load(open(GOLDEN))
+    assert blocks == committed
+    t = blocks["observed_skin_temp_rhythm"]
+    assert t["status"] == "available"
+    assert t["phase_relations"]["hr_minus_temp"]["status"] == "available"
+    assert t["phase_relations"]["sleep_midpoint_minus_temp"]["status"] == "available"
+    assert t["phase_drift"]["observed_realignment"]["status"] == "available"
+    assert blocks["rest_activity_rhythm"]["status"] == "available"
+
+
+def test_parser_accepts_the_exact_worker_shape():
+    """The shape SleepFeatureRhythmHistory.assemble emits (rules with lists and strings,
+    per-day family/identity, null signals with 0 minutes) parses and computes."""
+    worker = {
+        "schema": "rhythm-history-1", "device_family": "whoop5",
+        "conversion_identity": "whoop5-centidegree", "bin_seconds": 3600,
+        "rules": {"rules_version": "rhythm-rules-1", "minute_min_distinct_seconds": 30,
+                  "worn_minute_min_hr_seconds": 30, "hr_plausible_bpm": [20, 250],
+                  "skin_temp_plausible_c": [28.0, 42.0], "movement_threshold_g": 0.01,
+                  "movement_minute_min_adjacencies": 30,
+                  "temp_minute_value": "median_of_in_band_seconds",
+                  "hour_temp_value": "median_of_valid_minute_medians",
+                  "hour_hr_value": "mean_of_valid_minute_means",
+                  "hour_movement_value": "60 * moving_adjacencies / eligible_adjacencies",
+                  "worn_evidence": "hr_seconds_in_minute"},
+        "revision_digest": "a" * 64,
+        "days": [{"day": "2026-09-10", "timezone": "UTC", "revision": 105,
+                  "day_start_utc": 1788998400, "day_end_utc": 1789084800,
+                  "device_family": "whoop5", "conversion_identity": "whoop5-centidegree",
+                  "bins": [{"start": 1788998400, "skin_temp_c": 33.02,
+                            "skin_temp_valid_minutes": 60, "hr_mean_bpm": 60.0,
+                            "hr_valid_minutes": 60, "movement_s_per_min": None,
+                            "movement_valid_minutes": 0}]}],
+    }
+    parsed = _parse_rhythm_history(worker)
+    b = parsed.days[0].bins[0]
+    assert b.skin_temp_c == 33.02 and b.movement_s_per_min is None and b.movement_valid_minutes == 0
+    assert parsed.days[0].device_family == "whoop5"
+    req = make_request(worker, nights=(main_night(date(2026, 9, 10), "UTC"),), tz="UTC")
+    block = rhythm.observed_skin_temp_rhythm(req, req.nights[0])
+    assert block["status"] == "withheld" and "insufficient_days" in block["reasons"]
+    assert rhythm.rest_activity_rhythm(req)["reasons"] == ["movement_history_absent"]
