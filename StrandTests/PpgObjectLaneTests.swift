@@ -26,7 +26,7 @@ final class PpgObjectLaneTests: XCTestCase {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("ppg-object-lane-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        ReceiverStub.reset()
+        PpgReceiverStub.reset()
     }
 
     override func tearDownWithError() throws {
@@ -134,7 +134,7 @@ final class PpgObjectLaneTests: XCTestCase {
         // that advertises 1.5 still negotiates 1.3 with it and every raw-IMU object is byte-identical.
         let off = makeTransport(offersPpgAnchor: false)
         let negotiated = try await negotiatedVersion(off)
-        XCTAssertEqual(ReceiverStub.requests.last?.request.value(forHTTPHeaderField: "noop-push-accept-version"),
+        XCTAssertEqual(PpgReceiverStub.requests.last?.request.value(forHTTPHeaderField: "noop-push-accept-version"),
                        "1.4,1.3,1.2,1.1,1.0")
         XCTAssertEqual(negotiated, "1.3")
     }
@@ -142,10 +142,10 @@ final class PpgObjectLaneTests: XCTestCase {
     func testFlagOnOffers15AndAnAdvertisingReceiverNegotiatesIt() async throws {
         let on = makeTransport(offersPpgAnchor: true)
         let negotiated = try await negotiatedVersion(on)
-        XCTAssertEqual(ReceiverStub.requests.last?.request.value(forHTTPHeaderField: "noop-push-accept-version"),
+        XCTAssertEqual(PpgReceiverStub.requests.last?.request.value(forHTTPHeaderField: "noop-push-accept-version"),
                        PushProtocol.capabilitiesAcceptVersions)
         XCTAssertEqual(negotiated, "1.5")
-        ReceiverStub.advertisesPpgAnchor = false
+        PpgReceiverStub.advertisesPpgAnchor = false
         let notAdvertised = try await negotiatedVersion(on)
         XCTAssertEqual(notAdvertised, "1.3", "a receiver without NOOP_PUSH_ADVERTISE_PPG_ANCHOR stays at 1.3")
     }
@@ -192,12 +192,12 @@ final class PpgObjectLaneTests: XCTestCase {
 
         let result = await coordinator.pushObjects(.ppgWaveformSample, deviceId: Self.cloudDeviceId, lane: lane)
         guard case .accepted = result else { return XCTFail("expected an accepted object, got \(result)") }
-        let sent = try XCTUnwrap(ReceiverStub.manifests.last)
+        let sent = try XCTUnwrap(PpgReceiverStub.manifests.last)
         for key in ["batchId", "objectId", "contentSha256", "startTs", "endTs", "sampleCount", "protocolVersion",
                     "uncompressedBytes", "compressedBytes", "stream", "deviceId", "sourceId"] {
             XCTAssertEqual(sent[key] as? NSObject, manifest[key] as? NSObject, key)
         }
-        let body = try XCTUnwrap(ReceiverStub.uploads.last)
+        let body = try XCTUnwrap(PpgReceiverStub.uploads.last)
         XCTAssertEqual(body.base64EncodedString(), golden["wire_base64"] as? String,
                        "the phone's wire bytes are the golden the receiver and the worker test against")
         XCTAssertEqual(hex(Data(SHA256.hash(data: body))), golden["wire_sha256"] as? String)
@@ -209,7 +209,7 @@ final class PpgObjectLaneTests: XCTestCase {
         XCTAssertEqual(cursor?.naturalKeyFingerprint, end["keySha256"] as? String)
         let again = await coordinator.pushObjects(.ppgWaveformSample, deviceId: Self.cloudDeviceId, lane: lane)
         guard case .noData = again else { return XCTFail("expected no data after the receipt, got \(again)") }
-        XCTAssertEqual(ReceiverStub.uploads.count, 1)
+        XCTAssertEqual(PpgReceiverStub.uploads.count, 1)
 
         // The decoded object still carries what the store had, and nothing it did not.
         let decoded = try PushBinaryCodec.unpackPpgRecords(try XCTUnwrap(Data(hexString: golden["decoded_hex"] as? String)))
@@ -312,9 +312,12 @@ final class PpgObjectLaneTests: XCTestCase {
         XCTAssertTrue(firstHalf.hasMore)
         let secondHalf = try await page(settled, after: records(firstHalf).last!.ts, limit: 60)
         XCTAssertEqual(records(secondHalf).map(\.ts), (60..<120).map { Int64(base + $0) })
-        // A newer second past the hour closes it at once, without waiting for the clock.
+        // A newer second past the hour closes it at once, without waiting out the settle delay.
+        let justPast = Int64(base) + PpgObjectSource.targetObjectWindowSeconds + 100
+        let unsettled = try await page(makeSource(store, now: justPast), after: 0)
+        XCTAssertTrue(unsettled.rows.isEmpty, "inside the settle delay with nothing newer: still held")
         store.rows.append(row(base + Int(PpgObjectSource.targetObjectWindowSeconds) + 5))
-        let closed = try await page(makeSource(store, now: Int64(base + 600)), after: 0)
+        let closed = try await page(makeSource(store, now: justPast), after: 0)
         XCTAssertEqual(records(closed).count, 120)
         XCTAssertTrue(closed.hasMore)
     }
@@ -338,7 +341,7 @@ final class PpgObjectLaneTests: XCTestCase {
                 CloudPushIdentity(ownerId: Self.ownerId, sourceId: Self.sourceId,
                                   tokenId: "33333333-3333-4333-8333-333333333333", uploadToken: "noop-test-token")
             },
-            session: ReceiverStub.session(),
+            session: PpgReceiverStub.session(),
             offersPpgAnchor: { offersPpgAnchor })
     }
 
@@ -366,7 +369,7 @@ private final class FakePpgStore: PpgObjectReading, @unchecked Sendable {
 /// A receiver over URLProtocol: negotiates like `negotiateProtocol` (1.5 first only while advertised), takes
 /// an object intent, the presigned PUT and the completion, and answers with a receipt for exactly the bytes
 /// it was sent, so the coordinator's own receipt validation runs.
-private final class ReceiverStub: URLProtocol {
+private final class PpgReceiverStub: URLProtocol {
     static var requests: [(request: URLRequest, body: Data?)] = []
     static var manifests: [[String: Any]] = []
     static var uploads: [Data] = []
@@ -378,7 +381,7 @@ private final class ReceiverStub: URLProtocol {
 
     static func session() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [ReceiverStub.self]
+        configuration.protocolClasses = [PpgReceiverStub.self]
         return URLSession(configuration: configuration)
     }
 
@@ -404,8 +407,10 @@ private final class ReceiverStub: URLProtocol {
         case ("POST", "/functions/v1/push/objects"):
             let manifest = (try? JSONSerialization.jsonObject(with: body ?? Data()) as? [String: Any]) ?? [:]
             Self.manifests.append(manifest)
-            response = ["type": "objectIntent", "protocolVersion": manifest["protocolVersion"] ?? "",
-                        "objectId": manifest["objectId"] ?? "", "objectKey": Self.objectKey(manifest),
+            let version = manifest["protocolVersion"] as? String ?? ""
+            let objectId = manifest["objectId"] as? String ?? ""
+            response = ["type": "objectIntent", "protocolVersion": version,
+                        "objectId": objectId, "objectKey": Self.objectKey(manifest),
                         "duplicate": false, "uploadUrl": "https://bucket.example/put-object",
                         "requiredHeaders": ["content-type": "application/octet-stream"]]
         case ("PUT", _):
@@ -413,24 +418,29 @@ private final class ReceiverStub: URLProtocol {
         default:
             let manifest = Self.manifests.last ?? [:]
             let wire = Self.uploads.last ?? Data()
-            response = ["type": "objectAck", "protocolVersion": manifest["protocolVersion"] ?? "",
-                        "objectId": manifest["objectId"] ?? "", "status": "ready",
-                        "objectKey": Self.objectKey(manifest), "duplicate": false,
-                        "durabilityReceipt": [
-                            "version": 1, "state": "verified_indexed",
-                            "receiptId": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-                            "ownerUserId": PpgObjectLaneTests.ownerId,
-                            "deviceId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
-                            "objectId": manifest["objectId"] ?? "", "batchId": manifest["batchId"] ?? "",
-                            "sourceId": manifest["sourceId"] ?? "", "stream": manifest["stream"] ?? "",
-                            "schemaVersion": PushProtocol.schemaVersion(stream: manifest["stream"] as? String ?? "",
-                                                                        protocolVersion: manifest["protocolVersion"] as? String ?? ""),
-                            "objectKey": Self.objectKey(manifest),
-                            "contentSha256": manifest["contentSha256"] ?? "",
-                            "wireSha256": Data(SHA256.hash(data: wire)).map { String(format: "%02x", $0) }.joined(),
-                            "compressedBytes": wire.count, "uncompressedBytes": manifest["uncompressedBytes"] ?? 0,
-                            "verifiedAt": "2026-10-08T00:00:00Z", "indexedAt": "2026-10-08T00:00:01Z",
-                        ]]
+            let stream = manifest["stream"] as? String ?? ""
+            let version = manifest["protocolVersion"] as? String ?? ""
+            let objectId = manifest["objectId"] as? String ?? ""
+            let key = Self.objectKey(manifest)
+            let wireSha: String = Data(SHA256.hash(data: wire)).map { String(format: "%02x", $0) }.joined()
+            var receipt: [String: Any] = ["version": 1, "state": "verified_indexed"]
+            receipt["receiptId"] = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+            receipt["ownerUserId"] = PpgObjectLaneTests.ownerId
+            receipt["deviceId"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+            receipt["objectId"] = objectId
+            receipt["batchId"] = manifest["batchId"] as? String ?? ""
+            receipt["sourceId"] = manifest["sourceId"] as? String ?? ""
+            receipt["stream"] = stream
+            receipt["schemaVersion"] = PushProtocol.schemaVersion(stream: stream, protocolVersion: version)
+            receipt["objectKey"] = key
+            receipt["contentSha256"] = manifest["contentSha256"] as? String ?? ""
+            receipt["wireSha256"] = wireSha
+            receipt["compressedBytes"] = wire.count
+            receipt["uncompressedBytes"] = manifest["uncompressedBytes"] as? Int ?? 0
+            receipt["verifiedAt"] = "2026-10-08T00:00:00Z"
+            receipt["indexedAt"] = "2026-10-08T00:00:01Z"
+            response = ["type": "objectAck", "protocolVersion": version, "objectId": objectId, "status": "ready",
+                        "objectKey": key, "duplicate": false, "durabilityReceipt": receipt]
         }
         let data = response.isEmpty ? Data() : ((try? JSONSerialization.data(withJSONObject: response)) ?? Data())
         let http = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: "HTTP/1.1", headerFields: nil)!
