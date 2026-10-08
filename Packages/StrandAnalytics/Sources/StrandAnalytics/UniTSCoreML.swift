@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(CoreML)
 import CoreML
 
 /// Process-wide UniTS Core ML session. Inference only; never trained on device.
@@ -149,3 +150,21 @@ final class UniTSCoreMLSession: @unchecked Sendable {
         }
     }
 }
+#else
+/// No Core ML on Linux (the frwhoop-worker build, which never runs the Watchdog). The session never has a model,
+/// so `UniTSRuntime` gets nil and uses its physics prior (`fallbackModelVersion`), as on a bundle without the
+/// compiled checkpoint.
+final class UniTSCoreMLSession: Sendable {
+    static let shared = UniTSCoreMLSession()
+
+    var isLoaded: Bool { false }
+
+    var declaresActivityInput: Bool { false }
+
+    func predict(occupancy: [Double], prompt: [Double], personalScale: [Double],
+                 observed: [[Double]], activity: [[Double]] = [],
+                 presentMask: [[Double]] = []) -> (hat: [[Double]], sigma: [[Double]])? {
+        nil
+    }
+}
+#endif
