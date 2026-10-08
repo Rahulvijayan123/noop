@@ -64,8 +64,8 @@ final class WatchdogNaraSignalContractTests: XCTestCase {
         XCTAssertFalse(result.liveOff)
     }
 
-    /// A walk's measured occupancy has to lift the HR usual. The class floor alone is a light bump.
-    func testWalkMotionRaisesTheHRUsualAndLeavesRHR() throws {
+    /// Walking minutes never feed the resting-HR stream; still minutes do.
+    func testWalkingLeavesRHREmptyAndStillFillsIt() throws {
         let now = 97_700_000
         let stillFeed = Watchdog.syntheticFeed(now: now, hr: 62, hrv: 44, temp: 33.0, resp: 14, motion: 0)
         let walkFeed = Watchdog.syntheticFeed(now: now, hr: 110, hrv: 20, temp: 33.2, resp: 18,
@@ -74,15 +74,6 @@ final class WatchdogNaraSignalContractTests: XCTestCase {
               case .success(let walk) = WatchdogWindowBuilder.build(walkFeed) else {
             return XCTFail("window")
         }
-        let stillOcc = WatchdogActivityRuntime.effortOccupancy(
-            motion: Array(repeating: 0.0, count: still.hr.count), logits: still.activityLogits)
-        let walkOcc = WatchdogActivityRuntime.effortOccupancy(
-            motion: Array(repeating: 0.70, count: walk.hr.count), logits: walk.activityLogits)
-        let stillHat = UniTSRuntime.reconstructHR(observed: still.hr, prompt: 62, occupancy: stillOcc)
-            .compactMap { $0 }.last ?? 0
-        let walkHat = UniTSRuntime.reconstructHR(observed: walk.hr, prompt: 62, occupancy: walkOcc)
-            .compactMap { $0 }.last ?? 0
-        XCTAssertGreaterThan(walkHat, stillHat + 8)
         XCTAssertTrue(walk.rhr.allSatisfy { $0 == nil })
         XCTAssertFalse(still.rhr.compactMap { $0 }.isEmpty)
     }
@@ -98,25 +89,5 @@ final class WatchdogNaraSignalContractTests: XCTestCase {
         XCTAssertTrue(win.rhr.allSatisfy { $0 == nil })
     }
 
-    /// A flat model heart-rate line is replaced by the short-term prior, the same door HRV and skin already use.
-    func testFlatModelHeartRateUsesTheShortTermPrior() {
-        let model = Array(repeating: Optional(58.0), count: 30)
-        let observed: [Double?] = Array(repeating: 72, count: 20) + Array(repeating: 110, count: 10)
-        let occ = Array(repeating: 0.0, count: 20) + Array(repeating: 0.70, count: 10)
-        let prior = UniTSRuntime.reconstructHR(observed: observed, prompt: 60, occupancy: occ)
-        let hat = UniTSRuntime.liveHrHat(model: model, prior: prior, observed: observed)
-        let rest = hat[10] ?? 0
-        let walk = hat.compactMap { $0 }.last ?? 0
-        XCTAssertGreaterThan(rest, 64)
-        XCTAssertLessThan(rest, 78)
-        XCTAssertGreaterThan(walk, rest + 8)
-    }
 
-    func testRestingHRCenterFollowsStillMinutes() {
-        let still = Array(repeating: Optional(74.0), count: 30)
-        let hat = UniTSRuntime.reconstructRHR(observed: still, prompt: 58)
-        let last = hat.compactMap { $0 }.last ?? 0
-        XCTAssertGreaterThan(last, 68)
-        XCTAssertLessThan(last, 76)
-    }
 }

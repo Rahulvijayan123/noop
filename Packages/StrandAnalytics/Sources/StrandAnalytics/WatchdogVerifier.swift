@@ -249,7 +249,12 @@ public enum WatchdogLiveReferences {
     /// established falls back to the pooled awake-rest series (never to a sleep series).
     public static func lookup(_ evaluations: [LBEvaluation], kind: WatchdogMinuteContextKind,
                               posture: LBPosture?, channel: String) -> WatchdogLiveReference? {
-        for s in series(kind: kind, posture: posture, channel: channel) {
+        lookup(evaluations, series: series(kind: kind, posture: posture, channel: channel))
+    }
+
+    /// First of `series` whose 60-day copy is established and not stale.
+    public static func lookup(_ evaluations: [LBEvaluation], series: [LBSeries]) -> WatchdogLiveReference? {
+        for s in series {
             guard let ev = evaluations.first(where: { $0.series == s }), ev.establishedLong, !ev.stale,
                   let copy = ev.copyLong else { continue }
             let between = copy.predictiveSpread ?? copy.spread

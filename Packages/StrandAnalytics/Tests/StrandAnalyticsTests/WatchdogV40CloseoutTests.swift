@@ -138,42 +138,6 @@ final class WatchdogV40CloseoutTests: XCTestCase {
         XCTAssertNotEqual(WatchdogForecastSource.student.rawValue, "official")
     }
 
-    func testHoldForecastKeepsEmitHorizon() throws {
-        WatchdogForecastRuntime.testPredict = .some(Array(repeating: Array(repeating: 90.0, count: 5), count: 6))
-        defer { WatchdogForecastRuntime.testPredict = nil }
-        let now = 99_000_000
-        let feed = Watchdog.syntheticFeed(now: now, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)
-        guard case .success(let win) = WatchdogWindowBuilder.build(feed) else {
-            return XCTFail("window")
-        }
-        let residual = try UniTSRuntime().reconstruct(win, prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14))
-        let first = WatchdogForecastRuntime().step(window: win, residual: residual,
-                                                  prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14),
-                                                  carry: .empty, nowUnix: now)
-        XCTAssertEqual(first.source, "inject")
-        XCTAssertEqual(first.horizonUnix, WatchdogForecastStep.horizonUnix(nowUnix: now))
-        var carry = WatchdogCarry.empty
-        carry.forecastStudentOk = true
-        carry.lastForecastUnix = now
-        carry.lastForecastSource = first.source
-        carry.lastForecastHR = first.nextHR
-        carry.lastForecastRHR = first.nextRHR
-        carry.lastForecastHRV = first.nextHRV
-        carry.lastForecastTemp = first.nextTemp
-        carry.lastForecastResp = first.nextResp
-        carry.lastForecastSpO2 = first.nextSpO2
-        carry.lastForecastHorizonUnix = first.horizonUnix
-        let held = WatchdogForecastRuntime().step(window: win, residual: residual,
-                                                 prompt: UniTSPrompt(hr: 58, hrv: 48, temp: 33.1, resp: 14),
-                                                 carry: carry, nowUnix: now + 20)
-        XCTAssertFalse(held.ranStudent)
-        XCTAssertEqual(held.horizonUnix, first.horizonUnix)
-        XCTAssertNotEqual(held.horizonUnix, WatchdogForecastStep.horizonUnix(nowUnix: now + 20))
-        let evaluated = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(hr: 58, rhr: 58, hrv: 48, temp: 33.1, resp: 14, spo2: 97),
-                                         nowUnix: now)
-        XCTAssertEqual(evaluated.carry.lastForecastHorizonUnix, first.horizonUnix)
-        XCTAssertNotEqual(evaluated.forecastSource, "official")
-    }
 
     func testBackcastMatchesHorizonNotLastPresent() {
         let start = 1_000_000
@@ -195,21 +159,6 @@ final class WatchdogV40CloseoutTests: XCTestCase {
         XCTAssertGreaterThan(naive, 0)
     }
 
-    func testPresentMaskMarksMissingMinutes() {
-        let now = 99_100_000
-        let feed = Watchdog.syntheticFeed(now: now, hr: 60, hrv: 40, temp: 33.2, resp: 14, motion: 0)
-        guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
-            return XCTFail("window")
-        }
-        win.temp = (0..<30).map { $0 == 0 ? 33.2 : nil }
-        win.maskStaleChannels()
-        let mask = UniTSRuntime.packPresentMask(win)
-        XCTAssertEqual(mask[3].reduce(0, +), 0, accuracy: 1e-9)
-        XCTAssertGreaterThan(mask[0].reduce(0, +), 0)
-        XCTAssertFalse(WatchdogForecastRuntime.wearerEarly(
-            pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 80, persistTicks: 2,
-            forecastSource: "student"))
-    }
 
     func testYesterdayConfounderOnlyWhileSleepOpen() {
         var ill = LBDayLog()

@@ -16,14 +16,8 @@ let package = Package(
         // DEBUG define and `-enable-testing` are unaffected, so assertions and `@testable import` still work.
         .target(name: "StrandAnalytics",
                 dependencies: ["WhoopProtocol", "WhoopStore"],
-                // Pre-compiled from `Models/*.mlpackage` (`xcrun coremlc compile … --deployment-target 16.0`).
-                // Shipping the .mlpackage made Xcode run coremlc in the build, which fails on volumes with
-                // ownership disabled (the external SSD this repo lives on), and renamed the bundle entry to
-                // .mlmodelc where the loaders were looking for .mlpackage.
-                resources: [
-                    .copy("Resources/UniTS_AD.mlmodelc"),
-                    .copy("Resources/TimesFM3_Student.mlmodelc"),
-                ],
+                // No bundled models: the on-device "UniTS" / "TimesFM" Core ML stand-ins were removed. The real
+                // TimesFM 3.0 and UniTS run on the VPS (Tools/AnomalyService) and reach the phone as candidates.
                 swiftSettings: [.unsafeFlags(["-O"], .when(configuration: .debug))]),
         // WhoopStore is declared on the TEST target as well as the library: the Oura respiration
         // scoring-exclusion tests assert on `OuraRespScale` (the seam that keeps the ring's 0x6A rows

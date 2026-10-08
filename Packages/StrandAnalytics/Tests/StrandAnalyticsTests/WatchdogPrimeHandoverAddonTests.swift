@@ -70,12 +70,11 @@ final class WatchdogPrimeHandoverAddonTests: XCTestCase {
         let pack = WatchdogClinicianExport.build(
             deviceId: "s", startUnix: 0, endUnix: 10, ledger: [],
             evaluations: [], dayLogs: [:], annotations: [], recovery: nil)
-        XCTAssertTrue(pack.versionLine.contains("student"))
-        XCTAssertFalse(pack.versionLine.lowercased().contains("official"))
-        XCTAssertTrue(pack.text.contains("student"))
-        XCTAssertFalse(pack.text.lowercased().contains("official"))
-        XCTAssertTrue(WatchdogConfig.modelVersion.contains("units-ad-coreml-v3"))
-        XCTAssertTrue(WatchdogConfig.forecastModelVersion.contains("timesfm3-student-v3"))
+        // The export says what the phone draws (the person's own baselines) and that no model runs on it.
+        XCTAssertTrue(pack.versionLine.contains("no on-device model"))
+        XCTAssertTrue(pack.versionLine.contains(WatchdogConfig.expectationVersion))
+        XCTAssertTrue(pack.text.contains("own established baselines"))
+        XCTAssertFalse(pack.text.lowercased().contains("student"))
     }
 
     func testExportKeepsTwoCopiesPrintedSeparately() {

@@ -13,11 +13,9 @@ final class WatchdogStatisticsContractTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        WatchdogForecastRuntime.testPredict = .some(nil)
     }
 
     override func tearDown() {
-        WatchdogForecastRuntime.testPredict = nil
         super.tearDown()
     }
 
@@ -52,48 +50,26 @@ final class WatchdogStatisticsContractTests: XCTestCase {
         XCTAssertEqual(WatchdogBand.stepMax, 0.02, accuracy: 1e-12)
         XCTAssertEqual(WatchdogBand.shouldCountMinute(nowUnix: 100, lastUnix: 90), false)
         XCTAssertTrue(WatchdogBand.shouldCountMinute(nowUnix: 120, lastUnix: 59))
-        XCTAssertEqual(WatchdogConfig.coreMLCheckpoint, "UniTS_AD.mlpackage")
-        XCTAssertEqual(WatchdogConfig.forecastModelVersion, "timesfm3-student-v3")
-        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, WatchdogConfig.forecastModelVersion)
-        XCTAssertTrue([WatchdogConfig.modelVersion, WatchdogConfig.fallbackModelVersion]
-            .contains(WatchdogConfig.modelVersion))
+        // No on-device model: expectations are the person's baselines; no forecast runs on the phone.
+        XCTAssertTrue(WatchdogConfig.expectationVersion.hasPrefix("baseline-"))
+        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, "none")
     }
 
-    // MARK: - Models: UniTS reconstructs; TimesFM forecasts only
+    // MARK: - No on-device model: expectation = baselines; forecast = server only
 
-    func testQuietStripUsesAReconstructorOnAllSixChannels() throws {
+    func testWithoutEstablishedBaselinesNothingIsDrawnOrScored() throws {
         let r = try evaluate(now: 80_000_000, hr: 58, motion: 0)
-        XCTAssertTrue(
-            r.modelVersion == WatchdogConfig.modelVersion
-                || r.modelVersion == WatchdogConfig.fallbackModelVersion,
-            r.modelVersion)
+        XCTAssertEqual(r.modelVersion, WatchdogConfig.expectationVersion)
         XCTAssertEqual(r.reconstructedHR.count, 30)
-        XCTAssertEqual(r.reconstructedRHR.count, 30)
-        XCTAssertEqual(r.reconstructedHRV.count, 30)
-        XCTAssertEqual(r.reconstructedTemp.count, 30)
-        XCTAssertEqual(r.reconstructedResp.count, 30)
-        XCTAssertEqual(r.reconstructedSpO2.count, 30)
-        XCTAssertTrue(r.reconstructedHR.contains { $0.isFinite })
+        XCTAssertTrue(r.reconstructedHR.allSatisfy { !$0.isFinite }, "no baseline yet → no expected line")
+        XCTAssertEqual(r.jointEnergy, 0, accuracy: 1e-12)
         XCTAssertEqual(r.fusedEnergy, r.jointEnergy, accuracy: 1e-12)
         XCTAssertEqual(WatchdogScores.fused(recon: 0.4, forecast: 9), 0.4, accuracy: 1e-12)
     }
 
-    func testTimesFMStudentRunsAtMostOncePerMinute() throws {
-        WatchdogForecastRuntime.testPredict = .some(onUsualCube())
-        let t0 = 80_100_000
-        let first = try evaluate(now: t0, hr: 58, motion: 0)
-        XCTAssertTrue(first.carry.forecastStudentOk)
-        XCTAssertEqual(first.carry.lastForecastUnix, t0)
-        let twenty = try evaluate(now: t0 + 20, hr: 58, motion: 0, previous: first.carry)
-        XCTAssertTrue(twenty.carry.forecastStudentOk)
-        XCTAssertEqual(twenty.carry.lastForecastUnix, t0, "second tick inside 60s must hold the cube")
-        let minute = try evaluate(now: t0 + 60, hr: 58, motion: 0, previous: twenty.carry)
-        XCTAssertEqual(minute.carry.lastForecastUnix, t0 + 60)
-    }
-
-    func testHoldForecastCannotOpenSevereOrNotify() throws {
-        WatchdogForecastRuntime.testPredict = .some(nil)
+    func testNoForecastRunsOnThePhoneAndNothingPagesFromOne() throws {
         let r = try evaluate(now: 80_200_000, hr: 58, motion: 0)
+        XCTAssertEqual(r.forecastSource, WatchdogForecastSource.none.rawValue)
         XCTAssertFalse(r.carry.forecastStudentOk)
         XCTAssertEqual(r.forecastEnergy, 0, accuracy: 1e-9)
         XCTAssertFalse(r.earlyFlag)
@@ -104,18 +80,6 @@ final class WatchdogStatisticsContractTests: XCTestCase {
         XCTAssertEqual(leaving, .withinLimits)
     }
 
-    func testStudentPathCanLookAheadButNeverPages() throws {
-        WatchdogForecastRuntime.testPredict = .some(leavingCube())
-        let t0 = 80_300_000
-        var last = try evaluate(now: t0, hr: 58, motion: 0)
-        last = try evaluate(now: t0 + 20, hr: 58, motion: 0, previous: last.carry)
-        last = try evaluate(now: t0 + 40, hr: 58, motion: 0, previous: last.carry)
-        XCTAssertTrue(last.earlyFlag || last.eventLabel == WatchdogEventLabel.forecastDriftOnly.rawValue,
-                      "label=\(last.eventLabel) early=\(last.earlyFlag) Jfc=\(last.forecastEnergy)")
-        XCTAssertNotEqual(last.severity, .severe)
-        XCTAssertFalse(last.shouldNotify)
-        XCTAssertFalse(WatchdogNotifyPolicy.extremeFamily(.forecastDriftOnly))
-    }
 
     // MARK: - Quality / wrist-off / safety
 
@@ -321,13 +285,16 @@ final class WatchdogStatisticsContractTests: XCTestCase {
             pathJ: 1.4, allowed: true, severity: .withinLimits, trustPct: 20, persistTicks: 2))
     }
 
-    func testQuietHalfHourWithoutLayer1IsACallableShortTermBaseline() throws {
+    /// Without an established Layer 1 baseline the window is never its own "short-term baseline": the reading
+    /// shows, nothing is expected, nothing is scored, nothing pages.
+    func testQuietHalfHourWithoutLayer1ShowsTheReadingAndExpectsNothing() throws {
         let r = try evaluate(now: 80_480_000, hr: 58, motion: 0)
-        XCTAssertGreaterThanOrEqual(r.trustPct, LongitudinalBaseline.trustHideThreshold)
         XCTAssertNotEqual(r.severity, .severe)
         XCTAssertFalse(r.shouldNotify)
         let hr = r.signals.first(where: { $0.name == "HR" })
-        XCTAssertGreaterThanOrEqual(hr?.trustPct ?? 0, LongitudinalBaseline.trustHideThreshold)
+        XCTAssertEqual(hr?.observed ?? 0, 58, accuracy: 1.5)
+        XCTAssertNil(hr?.reconstructed)
+        XCTAssertEqual(hr?.energy ?? -1, 0, accuracy: 1e-12)
     }
 
     func testPromptTrustFollowsTheHatSeriesNotTheMaxCopy() {

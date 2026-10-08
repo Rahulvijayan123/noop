@@ -11,11 +11,9 @@ final class WatchdogPreHandoffSweepTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        WatchdogForecastRuntime.testPredict = .some(nil)
     }
 
     override func tearDown() {
-        WatchdogForecastRuntime.testPredict = nil
         super.tearDown()
     }
 
@@ -251,10 +249,9 @@ final class WatchdogPreHandoffSweepTests: XCTestCase {
         XCTAssertEqual(held.signals.first(where: { $0.name == "Temp" })?.observed ?? -1, 33.1, accuracy: 0.01)
     }
 
-    func testStudentsAreNotOfficial() {
-        XCTAssertFalse(WatchdogConfig.modelVersion.lowercased().contains("official"))
-        XCTAssertFalse(WatchdogConfig.forecastModelVersion.lowercased().contains("official"))
-        XCTAssertTrue(WatchdogConfig.forecastModelVersion.contains("student"))
+    func testNoOnDeviceForecastStep() throws {
+        XCTAssertEqual(WatchdogForecastStep.empty.source, WatchdogForecastSource.none.rawValue)
+        XCTAssertFalse(WatchdogForecastStep.empty.studentOk)
     }
 
     // MARK: - Sidecars
@@ -272,7 +269,7 @@ final class WatchdogPreHandoffSweepTests: XCTestCase {
         XCTAssertTrue(ledger.isEmpty)
     }
 
-    func testExportKeepsTwoCopiesAndStudentBanner() {
+    func testExportKeepsTwoCopiesAndSaysNoOnDeviceModel() {
         let week = LBCopySnapshot(center: 61, spread: 3, centerDisplay: 61,
                                   bandLoDisplay: 55, bandHiDisplay: 67, n: 7,
                                   coverage: 40, version: "t", held: false)
@@ -291,8 +288,7 @@ final class WatchdogPreHandoffSweepTests: XCTestCase {
         let pack = WatchdogClinicianExport.build(
             deviceId: "s", startUnix: 0, endUnix: 10, ledger: [],
             evaluations: [ev], dayLogs: [:], annotations: [], recovery: nil)
-        XCTAssertTrue(pack.versionLine.contains("student"))
-        XCTAssertFalse(pack.versionLine.lowercased().contains("official"))
+        XCTAssertTrue(pack.versionLine.contains("no on-device model"))
         XCTAssertTrue(pack.copyLines.contains(where: { $0.contains("week") }))
         XCTAssertTrue(pack.copyLines.contains(where: { $0.contains("long") }))
     }

@@ -1,4 +1,4 @@
-# Baseline and Watchdog v2 (`v2.clinical` / `watchdog-v3.0`)
+# Baseline and Watchdog v2 (`v2.clinical` / `watchdog-v3.1`)
 
 Branch `feat/baseline-watchdog-rebuild-20261007`, cut from nara/main 3aa15d665. Audit and rebuild date: 2026-10-07.
 
@@ -108,9 +108,9 @@ The stored activity-context intervals: the existing HSMM decoder's class, postur
   - The within-day scale is a weighted MAD (≥ 3 intervals).
 - **Coverage gates.** Posture ≥ 15 min; walking ≥ 10 min; sleep HR ≥ 120 min.
 
-### Limitation
+### How the strata fill
 
-Wrist posture is the weakest inference. On capture24 the decoder's standing precision is 0.13. On the owner's 8 real days only "seated" days pass, so the lying and standing series will stay empty until the posture classifier improves. The strata are wired so they fill in as that happens, and the Watchdog falls back to the pooled awake-rest reference until a posture stratum is established.
+Each posture stratum fills from the person's own qualifying minutes: ≥ 15 minutes of steady-state, agreeing posture on a day, on enough days to establish the 60-day copy. The owner's first week was mostly seated, so only "seated" has filled so far; lying and standing fill as those postures accumulate. Until a stratum is established, the Watchdog uses the pooled awake-rest reference for that minute, never a sleep series.
 
 ---
 
@@ -173,6 +173,24 @@ The kinds are asleep / awake-still (with the decoder's posture when the stored i
 | withinLimits | Nothing open, or everything explained |
 
 A logged confounder day caps non-safety alerts at candidate. Escalation pushes key on the verified level (3 safety, 2 multi-source, 1 single source + model).
+
+### Expected values on the phone: the person's baselines, no model (`WatchdogExpectation.swift`)
+
+The phone runs **no model**. The bundled "UniTS" (`UniTS_AD`, a ~25k-parameter Core ML student plus a hand-coded physics prior and short-term trailing centers) and "TimesFM" (`TimesFM3_Student`, a forecast student) are deleted, with their Core ML assets, loaders and ~40 physics-prior constants.
+
+Each minute's expected value and spread is the person's own **established Layer 1 reference for that minute's context**:
+
+| Minute | HR / RHR | HRV | Temp | Resp | SpO₂ |
+|---|---|---|---|---|---|
+| asleep | sleep HR | — | sleep temp | sleep resp | sleep mean |
+| awake still (lying / sitting / standing) | posture stratum, else pooled awake rest | posture stratum, else pooled | — | — | awake-rest mean |
+| walking | walking HR | — | — | — | — |
+| vigorous, recovery (30 min / 10 min after walking), 2 min after a transition, unknown | — | — | — | — | — |
+
+- Spread = √(between-day² + within-day²) of that reference; HRV is drawn as e^c with half-width e^c·sinh(s).
+- "—" means nothing is drawn and nothing is scored. The **measured value always shows**.
+- Until a context's baseline is established (60-day copy), that context has no expected line. This is by design: the baseline has to be learned before it can be used, and nothing stands in for it in the meantime.
+- What is active from day one: the safety extremes (§4). Then, as baselines establish, the personal-deviation detector per context. On the VPS, TimesFM 3.0 and UniTS start flagging once their own per-user calibration has 96 windows per context (§5).
 
 ---
 
@@ -417,7 +435,8 @@ What each step showed:
 
 - **No clinical validation.** Every result is synthetic or from one person over ≤ 34 days. Thresholds are engineering choices with literature anchors (Apple HR notifications 10 min; SpO₂ 88 % oxygen threshold; Plews ln-RMSSD; PhysiologyContext CUSUM), not validated operating points. The synthetic events (3 users, 36 events) are the prototype's generator: read detection rates as relative, not as field sensitivity.
 - **Model warm-up is long.** The server models need 96 quarantined reference windows per context (about 1–2 weeks of sleep, 2–3 weeks of awake rest). Until then they abstain ("calibrating") and only the on-device detectors run.
-- **Wrist posture is weak.** The lying and standing strata will mostly be empty; real data so far only fill "seated".
+- **Baselines take time.** Nothing on the phone stands in for a model or a baseline. Each context's expected line appears once that baseline is established, and the server models need 1–2 weeks of nights and 2–3 weeks of awake rest. Until then only the safety extremes and the established contexts are active.
+- **Posture strata fill with use.** Each posture needs its own qualifying minutes on enough days; the owner's first week (mostly seated) filled "seated" first.
 - **WHOOP SpO₂** is a strap estimate during sleep, with ±3–4 % error.
 - **Personal deviations** alone (beat stream only) never alert without a second sensing path or the server models. If the VPS is down, only safety extremes can notify.
 - **The phone cannot read server candidates yet.** The `scores` route `/anomaly-candidates` is built and tested (30 route tests) but was not deployed: the deploy was blocked by this session's permissions. Deployed v19 equals this branch minus that route, so deploying it rolls nothing back:

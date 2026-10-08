@@ -5,7 +5,6 @@ import WhoopProtocol
 public enum WatchdogCalibration: Sendable {
     public static let version = "prior-untuned"
     public static let quietCoverage = 0.95
-    public static let coldStartGain = 2.5
     public static let tNote = 1.0
     public static let tActive = 1.6
     /// Spacing prior on WatchdogScores.severityJoint (clipped sum). Not wearer-fit.
@@ -16,23 +15,6 @@ public enum WatchdogCalibration: Sendable {
     public static let forecastAlpha = 0.5
     public static let maxEmptyMinutes = 6
     public static let forecastHorizon = 5
-
-    public static func sigmaScale(_ channel: WatchdogWindow.Channel) -> Double {
-        switch channel {
-        case .hr: return 1.0
-        case .rhr: return 1.0
-        case .hrv: return 1.0
-        case .temp: return 1.0
-        case .resp: return 1.0
-        case .spo2: return 1.0
-        case .motion: return 1.0
-        }
-    }
-
-    public static func applySigma(_ raw: [Double], channel: WatchdogWindow.Channel, coldStart: Bool) -> [Double] {
-        let g = (coldStart ? coldStartGain : 1.0) * sigmaScale(channel)
-        return raw.map { $0 * g }
-    }
 }
 
 public enum WatchdogPopulationPriors: Sendable {
@@ -386,15 +368,18 @@ public enum WatchdogNotifyPolicy: Sendable {
     }
 }
 
-/// Bundled Core ML is `student`. `official` is unused — convert is not on the phone.
+/// Where a forecast step came from. The phone runs no forecast model (`none`); `inject` is tests only. Forecast
+/// detection is the real TimesFM 3.0 on the VPS, which reaches the phone as server candidates, not as a cube.
+/// `student` / `hold` / `official` remain only so persisted carries from older builds still decode.
 public enum WatchdogForecastSource: String, Equatable, Sendable, Codable {
+    case none
     case student
     case hold
     case inject
     case official
 }
 
-/// One TimesFM (or hold-display) horizon. Wearer Early only when `source == official`.
+/// One forecast horizon. Always empty on the phone (`source == none`); the shape stays for persisted carries.
 public struct WatchdogForecastStep: Equatable, Sendable {
     public var energy: Double
     public var nextHR: [Double]
@@ -411,8 +396,8 @@ public struct WatchdogForecastStep: Equatable, Sendable {
 
     public static let empty = WatchdogForecastStep(
         energy: 0, nextHR: [], nextHRV: [], nextTemp: [], nextResp: [],
-        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false, source: "hold",
-        horizonUnix: [])
+        nextRHR: [], nextSpO2: [], ranStudent: false, studentOk: false,
+        source: WatchdogForecastSource.none.rawValue, horizonUnix: [])
 
     public static func horizonUnix(nowUnix: Int) -> [Int] {
         let h = WatchdogCalibration.forecastHorizon
@@ -448,13 +433,11 @@ public struct WatchdogForecastPathScore: Equatable, Sendable {
         labelJoint: 0, severityJoint: 0, hotChannels: 0, stepsAboveNote: 0, complete: false)
 }
 
-/// TimesFM-style on-device forecast student (patched causal decoder).
-/// Teacher recipe is google-research/timesfm (`google/timesfm-3.0-pytorch`);
-/// the App Store binary loads `TimesFM3_Student.mlpackage`, not the 330M weights.
+/// No on-device forecast. The bundled "TimesFM3_Student" Core ML stand-in was removed: forecasting is the real
+/// TimesFM 3.0 on the VPS (`Tools/AnomalyService`). `step` always returns an empty step, so path scores are zero
+/// and Early never shows; the helpers below stay for the result shape and for tests that inject a cube.
 public struct WatchdogForecastRuntime: Sendable {
-    public static let modelVersion = WatchdogConfig.forecastModelVersion
-    /// Test hook. `nil` = live Core ML. `.some(nil)` = force fail. `.some(cube)` = inject 6×5.
-    static var testPredict: [[Double]]??
+    public static let modelVersion = WatchdogForecastSource.none.rawValue
 
     public static let earlyTrustFloor = 35
 
@@ -464,112 +447,8 @@ public struct WatchdogForecastRuntime: Sendable {
                      nowUnix: Int = 0,
                      tail: WatchdogLiveTail? = nil,
                      skipForecast: Bool = false) -> WatchdogForecastStep {
-        _ = tail
-        let h = WatchdogCalibration.forecastHorizon
-        let skipStudent = skipForecast || (nowUnix > 0 && carry.forecastStudentOk
-            && carry.lastForecastUnix > 0
-            && (nowUnix - carry.lastForecastUnix) < 60
-            && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR, carry.lastForecastHRV,
-                                 carry.lastForecastTemp, carry.lastForecastResp, carry.lastForecastSpO2))
-        let emitHorizons = WatchdogForecastStep.persistHorizon(carry: carry, nowUnix: nowUnix, holding: skipStudent)
-        let backcastHorizons = WatchdogForecastStep.persistHorizon(carry: carry, nowUnix: nowUnix, holding: true)
-        var e = 0.0
-        if carry.forecastStudentOk {
-            e = max(e, Self.backcastEnergy(obs: window.hr, pred: carry.lastForecastHR,
-                                           scale: residual.scaleHR, startUnix: window.startUnix,
-                                           horizons: backcastHorizons))
-            e = max(e, Self.backcastEnergy(obs: window.hrv, pred: carry.lastForecastHRV,
-                                           scale: residual.scaleHRV, startUnix: window.startUnix,
-                                           horizons: backcastHorizons))
-            e = max(e, Self.backcastEnergy(obs: window.temp, pred: carry.lastForecastTemp,
-                                           scale: residual.scaleTemp, startUnix: window.startUnix,
-                                           horizons: backcastHorizons))
-            e = max(e, Self.backcastEnergy(obs: window.resp, pred: carry.lastForecastResp,
-                                           scale: residual.scaleResp, startUnix: window.startUnix,
-                                           horizons: backcastHorizons))
-            e = max(e, Self.backcastEnergy(obs: window.rhr, pred: carry.lastForecastRHR,
-                                           scale: residual.scaleRHR, startUnix: window.startUnix,
-                                           horizons: backcastHorizons))
-            e = max(e, Self.backcastEnergy(obs: window.spo2, pred: carry.lastForecastSpO2,
-                                           scale: residual.scaleSpO2, startUnix: window.startUnix,
-                                           horizons: backcastHorizons))
-        }
-
-        if skipStudent {
-            let src = skipForecast
-                ? (carry.lastForecastSource.isEmpty ? "hold" : carry.lastForecastSource)
-                : (carry.lastForecastSource.isEmpty ? "student" : carry.lastForecastSource)
-            return WatchdogForecastStep(energy: e, nextHR: carry.lastForecastHR, nextHRV: carry.lastForecastHRV,
-                                        nextTemp: carry.lastForecastTemp, nextResp: carry.lastForecastResp,
-                                        nextRHR: carry.lastForecastRHR, nextSpO2: carry.lastForecastSpO2,
-                                        ranStudent: false, studentOk: carry.forecastStudentOk
-                                            && Self.completeCube(carry.lastForecastHR, carry.lastForecastRHR,
-                                                                 carry.lastForecastHRV, carry.lastForecastTemp,
-                                                                 carry.lastForecastResp, carry.lastForecastSpO2),
-                                        source: src,
-                                        horizonUnix: emitHorizons)
-        }
-
-        func hold(_ hat: [Double?]) -> [Double] {
-            let last = hat.reversed().compactMap { $0 }.first ?? 0
-            return Array(repeating: last, count: h)
-        }
-        func fillHat(_ xs: [Double?], _ base: Double?) -> [Double] {
-            let seed = base ?? 0
-            var last = seed
-            return (0..<WatchdogConfig.seqLen).map { i in
-                if i < xs.count, let v = xs[i], v.isFinite {
-                    last = v
-                    return v
-                }
-                return last
-            }
-        }
-        let bases = UniTSRuntime.resolvedBases(window: window, prompt: prompt)
-        let history = [
-            fillHat(residual.reconstructedHR, bases[0]),
-            fillHat(residual.reconstructedRHR, bases[1]),
-            fillHat(residual.reconstructedHRV, bases[2]),
-            fillHat(residual.reconstructedTemp, bases[3]),
-            fillHat(residual.reconstructedResp, bases[4]),
-            fillHat(residual.reconstructedSpO2, bases[5])
-        ]
-        let occ = UniTSRuntime.occupancy(window)
-        let present = UniTSRuntime.packPresentMask(window)
-        let promptVec = [
-            bases[0] ?? WatchdogPopulationPriors.hr,
-            bases[1] ?? WatchdogPopulationPriors.rhr,
-            bases[2] ?? WatchdogPopulationPriors.hrv,
-            bases[3] ?? WatchdogPopulationPriors.temp,
-            bases[4] ?? WatchdogPopulationPriors.resp,
-            bases[5] ?? WatchdogPopulationPriors.spo2
-        ]
-        let predicted: [[Double]]?
-        var predictedSource = WatchdogForecastSource.student.rawValue
-        if let override = Self.testPredict {
-            predicted = override
-            predictedSource = WatchdogForecastSource.inject.rawValue
-        } else {
-            predicted = TimesFMStudentSession.shared.predict(
-                history: history, prompt: promptVec, occupancy: occ, presentMask: present)
-            predictedSource = WatchdogForecastSource.student.rawValue
-        }
-        if let forecast = predicted,
-           Self.completeCube(forecast) {
-            return WatchdogForecastStep(energy: e, nextHR: forecast[0], nextHRV: forecast[2],
-                                        nextTemp: forecast[3], nextResp: forecast[4],
-                                        nextRHR: forecast[1], nextSpO2: forecast[5],
-                                        ranStudent: true, studentOk: true, source: predictedSource,
-                                        horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
-        }
-        return WatchdogForecastStep(energy: e, nextHR: hold(residual.reconstructedHR),
-                                    nextHRV: hold(residual.reconstructedHRV),
-                                    nextTemp: hold(residual.reconstructedTemp),
-                                    nextResp: hold(residual.reconstructedResp),
-                                    nextRHR: hold(residual.reconstructedRHR),
-                                    nextSpO2: hold(residual.reconstructedSpO2),
-                                    ranStudent: false, studentOk: false, source: "hold",
-                                    horizonUnix: WatchdogForecastStep.horizonUnix(nowUnix: nowUnix))
+        _ = (window, residual, prompt, carry, nowUnix, tail, skipForecast)
+        return .empty
     }
 
     /// Score cube column `i` against the observation at `horizons[i]`, not the last present minutes.
@@ -659,7 +538,7 @@ public struct WatchdogForecastRuntime: Sendable {
                                          hotChannels: hot, stepsAboveNote: stepsAbove, complete: true)
     }
 
-    /// Corridor the path is leaving: last UniTS hat, then the live prompt. Not lastObs.
+    /// Corridor the path is leaving: last expectation, then the live prompt. Not lastObs.
     public static func pathCenter(residual: UniTSResidual, prompt: UniTSPrompt) -> [Double] {
         func last(_ xs: [Double?], _ fallback: Double) -> Double {
             xs.reversed().compactMap { $0 }.first ?? fallback
@@ -684,8 +563,8 @@ public struct WatchdogForecastRuntime: Sendable {
 
     public static func wearerEarly(pathJ: Double, allowed: Bool, severity: WatchdogSeverity,
                                    trustPct: Int, persistTicks: Int,
-                                   forecastSource: String = WatchdogForecastSource.student.rawValue) -> Bool {
-        // Student / hold cubes stay shadow. Inject is tests only. Official is unused.
+                                   forecastSource: String = WatchdogForecastSource.none.rawValue) -> Bool {
+        // Only an official forecast could ever show Early; the phone has none. Inject is tests only.
         guard forecastSource == WatchdogForecastSource.official.rawValue
                 || forecastSource == WatchdogForecastSource.inject.rawValue else { return false }
         guard allowed, severity != .severe, severity != .active else { return false }

@@ -145,7 +145,7 @@ public struct WatchdogWindow: Equatable, Sendable {
     }
 
     /// Drop a whole series when its last finite minute is older than that channel's clock.
-    /// Student UniTS / TimesFM never see a stale last pair as current.
+    /// A stale last reading is never scored as current.
     public mutating func maskStaleChannels() {
         func wipe(_ series: inout [Double?], channel: Int) {
             if !WatchdogQuality.channelFresh(series, startUnix: startUnix, nowUnix: nowUnix,

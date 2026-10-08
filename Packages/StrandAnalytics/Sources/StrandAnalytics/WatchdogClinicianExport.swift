@@ -17,16 +17,16 @@ public struct WatchdogClinicianExport: Equatable, Sendable, Codable {
     public var text: String
 
     public static let disclaimer =
-        "Not a medical device. Not a diagnosis. The expected lines drawn on the phone are hand-specified "
-        + "physiological priors with small learned corrections (on-device), not TimesFM or UniTS. Anomaly "
-        + "candidates from the server models (TimesFM 3.0 forecast, UniTS reconstruction) are listed with "
+        "Not a medical device. Not a diagnosis. The expected values drawn on the phone are this person's own "
+        + "established baselines for the context of each minute (asleep; lying, sitting or standing still; "
+        + "walking), not a model; where no baseline is established yet nothing is drawn. Anomaly candidates "
+        + "come only from the server models (TimesFM 3.0 forecast, UniTS reconstruction) and are listed with "
         + "their versions; every alert passed baseline, activity, sensor-quality, significance and "
         + "independence checks."
 
     public static func versionLine() -> String {
-        "\(WatchdogConfig.configVersion) · on-device prior \(WatchdogConfig.modelVersion) (not UniTS) · "
-            + "on-device forecast prior \(WatchdogConfig.forecastModelVersion) (not TimesFM) · "
-            + "Layer 1 \(LongitudinalBaseline.V2.paramSet)"
+        "\(WatchdogConfig.configVersion) · expected = personal baselines \(WatchdogConfig.expectationVersion) · "
+            + "no on-device model · Layer 1 \(LongitudinalBaseline.V2.paramSet)"
     }
 
     public static func build(deviceId: String, startUnix: Int, endUnix: Int,

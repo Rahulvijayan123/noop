@@ -12,11 +12,9 @@ final class WatchdogBaselineGapProbeTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        WatchdogForecastRuntime.testPredict = .some(nil)
     }
 
     override func tearDown() {
-        WatchdogForecastRuntime.testPredict = nil
         super.tearDown()
     }
 
@@ -220,9 +218,13 @@ final class WatchdogBaselineGapProbeTests: XCTestCase {
         XCTAssertFalse(r.liveOff)
     }
 
+    /// A still awake minute with established personal baselines (the band counts minutes it can draw against).
     private func still(now: Int, previous: WatchdogCarry) -> WatchdogResult {
+        // At the reference's awake-rest usual (68 bpm, ln-HRV 45 ms) so the band may learn from these minutes.
         Watchdog.evaluate(window: WatchdogWindowBuilder.build(
-            Watchdog.syntheticFeed(now: now, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)),
-                          prompt: prompt, nowUnix: now, previous: previous)
+            Watchdog.syntheticFeed(now: now, hr: 68, hrv: 45, temp: 33.1, resp: 14, motion: 0)),
+                          prompt: prompt, evaluations: Self.references, nowUnix: now, previous: previous)
     }
+
+    private static let references = WatchdogV2ScenarioTests.references()
 }

@@ -9,11 +9,9 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        WatchdogForecastRuntime.testPredict = .some(nil)
     }
 
     override func tearDown() {
-        WatchdogForecastRuntime.testPredict = nil
         super.tearDown()
     }
 
@@ -293,15 +291,11 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
         }
     }
 
-    func testStudentVersionStringsAreNotOfficial() {
-        XCTAssertTrue(WatchdogConfig.modelVersion.contains("student")
-                      || WatchdogConfig.modelVersion == "units-ad-coreml-v3")
-        XCTAssertTrue(WatchdogConfig.forecastModelVersion.contains("student"))
-        XCTAssertTrue(WatchdogConfig.modelVersion.contains("units-ad-coreml-v3"))
-        XCTAssertTrue(WatchdogConfig.forecastModelVersion.contains("timesfm3-student-v3"))
-        XCTAssertFalse(WatchdogConfig.modelVersion.lowercased().contains("official"))
-        XCTAssertFalse(WatchdogConfig.forecastModelVersion.lowercased().contains("official"))
-        XCTAssertNotEqual(WatchdogForecastSource.student.rawValue, "official")
+    func testThePhoneRunsNoModel() {
+        XCTAssertTrue(WatchdogConfig.expectationVersion.hasPrefix("baseline-"))
+        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, WatchdogForecastSource.none.rawValue)
+        XCTAssertNil(Bundle.allBundles.lazy.compactMap { $0.url(forResource: "UniTS_AD", withExtension: "mlmodelc") }.first)
+        XCTAssertNil(Bundle.allBundles.lazy.compactMap { $0.url(forResource: "TimesFM3_Student", withExtension: "mlmodelc") }.first)
     }
 
     func testShouldTrainUsualFalseIsTapeNoOp() {
@@ -318,9 +312,13 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
         XCTAssertEqual(tape.restHR.n, 0)
     }
 
+    /// A still awake minute with established personal baselines (the band counts minutes it can draw against).
     private func still(now: Int, previous: WatchdogCarry) -> WatchdogResult {
+        // At the reference's awake-rest usual (68 bpm, ln-HRV 45 ms) so the band may learn from these minutes.
         Watchdog.evaluate(window: WatchdogWindowBuilder.build(
-            Watchdog.syntheticFeed(now: now, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)),
-                          prompt: prompt, nowUnix: now, previous: previous)
+            Watchdog.syntheticFeed(now: now, hr: 68, hrv: 45, temp: 33.1, resp: 14, motion: 0)),
+                          prompt: prompt, evaluations: Self.references, nowUnix: now, previous: previous)
     }
+
+    private static let references = WatchdogV2ScenarioTests.references()
 }
