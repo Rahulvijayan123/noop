@@ -69,7 +69,7 @@ Deno.test('gait windows: newest row per day, unchanged days skipped, summary tri
     { day: '2026-10-05', mode: 'shadow', model_version: 'eldernet-437a38b', result_revision: 8, computed_at: '2026-10-05T10:00:00Z' },
     { day: '2026-10-05', mode: 'candidate', model_version: 'eldernet-437a38b', result_revision: 9, computed_at: '2026-10-05T12:00:00Z' },
   ], reads);
-  const res = await handleScoresRequest(get('days=2026-10-04,2026-10-05&known=2026-10-04:3'), { rest, cfg });
+  const res = await handleScoresRequest(get('days=2026-10-04,2026-10-05&known=2026-10-04:3&authority=1'), { rest, cfg });
   assertEquals(res.status, 200);
   const body = await res.json();
   const byDay = Object.fromEntries(body.days.map((d: any) => [d.day, d]));
@@ -91,7 +91,7 @@ Deno.test('gait windows: newest row per day, unchanged days skipped, summary tri
 
 Deno.test('gait windows: malformed queries are rejected before the database is asked', async () => {
   for (const query of ['', 'days=2026-13-45', 'days=2026-10-01,2026-10-02,2026-10-03,2026-10-04',
-    'days=2026-10-05&known=2026-10-04:3']) {
+    'days=2026-10-05&known=2026-10-04:3', 'days=2026-10-05&authority=yes', 'days=2026-10-05&authority=0']) {
     const reads: string[] = [];
     const res = await handleScoresRequest(get(query), { rest: fakeRest([], reads), cfg });
     assertEquals(res.status, 400, query);
@@ -114,7 +114,7 @@ Deno.test('gait windows: every row carries its release and input revision, never
     { day: '2026-10-05', mode: 'candidate', model_version: 'eldernet-437a38b', result_revision: 9,
       computed_at: '2026-10-05T12:00:00Z', release_mode: 'candidate', input_revision: 7, authority: pinned },
   ];
-  const res = await handleScoresRequest(get('days=2026-10-03,2026-10-04,2026-10-05'), { rest: fakeRest(rows, []), cfg });
+  const res = await handleScoresRequest(get('days=2026-10-03,2026-10-04,2026-10-05&authority=1'), { rest: fakeRest(rows, []), cfg });
   assertEquals(res.status, 200);
   const byDay = Object.fromEntries((await res.json()).days.map((d: any) => [d.day, d]));
   assertEquals(byDay['2026-10-03'].release_mode, 'candidate');
@@ -133,7 +133,7 @@ Deno.test('gait windows: every row carries its release and input revision, never
     assert(d.release_mode !== 'production' && d.authority?.release_mode !== 'production');
   }
   // An unchanged day still says its release.
-  const again = await handleScoresRequest(get('days=2026-10-05&known=2026-10-05:9'), { rest: fakeRest(rows, []), cfg });
+  const again = await handleScoresRequest(get('days=2026-10-05&known=2026-10-05:9&authority=1'), { rest: fakeRest(rows, []), cfg });
   const [unchanged] = (await again.json()).days;
   assertEquals(unchanged.unchanged, true);
   assertEquals(unchanged.release_mode, 'candidate');
@@ -147,8 +147,40 @@ Deno.test('gait windows: an unknown or inconsistent stored release reads as shad
     { day: '2026-10-05', mode: 'candidate', model_version: 'eldernet-437a38b', result_revision: 9,
       computed_at: '2026-10-05T12:00:00Z', release_mode: 'production' },
   ];
-  const res = await handleScoresRequest(get('days=2026-10-04,2026-10-05'), { rest: fakeRest(rows, []), cfg });
+  const res = await handleScoresRequest(get('days=2026-10-04,2026-10-05&authority=1'), { rest: fakeRest(rows, []), cfg });
   const byDay = Object.fromEntries((await res.json()).days.map((d: any) => [d.day, d]));
   assertEquals(byDay['2026-10-04'].release_mode, 'shadow');
   assertEquals(byDay['2026-10-05'].release_mode, 'shadow');
+});
+
+Deno.test('gait windows: a phone without the authority capability gets its walking card but no decoder model', async () => {
+  // The phone built before the release policy installs any row whose `model` digest checks out as PRODUCTION gait
+  // evidence (hard-coded pins, `release_mode` ignored). Every row here is shadow or candidate, so it must get the
+  // windows and the summary for its walking card, and nothing it can build a model from.
+  const rows: Row[] = [
+    { day: '2026-10-04', mode: 'shadow', model_version: 'eldernet-437a38b', result_revision: 3,
+      computed_at: '2026-10-04T23:00:00Z', release_mode: 'shadow' },
+    { day: '2026-10-05', mode: 'candidate', model_version: 'eldernet-437a38b', result_revision: 9,
+      computed_at: '2026-10-05T12:00:00Z', release_mode: 'candidate', authority: { release_mode: 'candidate' } },
+  ];
+  const legacy = await handleScoresRequest(get('days=2026-10-04,2026-10-05'), { rest: fakeRest(rows, []), cfg });
+  assertEquals(legacy.status, 200);
+  const old = Object.fromEntries((await legacy.json()).days.map((d: any) => [d.day, d]));
+  for (const day of ['2026-10-04', '2026-10-05']) {
+    assertEquals(old[day].model, undefined, day);
+    assertEquals(old[day].identity, undefined, day);
+    assertEquals(old[day].authority, undefined, day);
+    assertEquals(old[day].windows.format, 'gait-windows-1', 'the walking card keeps its windows');
+    assertEquals(old[day].summary.gait.cadence_spm, 108, 'and its day summary');
+    assertEquals(old[day].result_revision, day === '2026-10-04' ? '3' : '9');
+  }
+  // The same rows to a phone that applies the policy itself: the model and the authority block are sent.
+  const aware = await handleScoresRequest(get('days=2026-10-04,2026-10-05&authority=1'), { rest: fakeRest(rows, []), cfg });
+  const now = Object.fromEntries((await aware.json()).days.map((d: any) => [d.day, d]));
+  for (const day of ['2026-10-04', '2026-10-05']) {
+    assertEquals(now[day].model.model_id, 'eldernet', day);
+    assertEquals(now[day].identity.weights_digest, 'b'.repeat(64), day);
+    assertEquals(now[day].windows, old[day].windows);
+  }
+  assertEquals(now['2026-10-05'].authority.release_mode, 'candidate');
 });

@@ -338,14 +338,8 @@ public actor ServerScoreRepository {
         guard let endpoint else { throw ReadError.notConfigured }
         guard let identity = identity() else { throw ReadError.missingIdentity }
         guard !days.isEmpty else { return [] }
-        var components = URLComponents(url: endpoint.appendingPathComponent("activity-windows"),
-                                       resolvingAgainstBaseURL: false)
-        var items = [URLQueryItem(name: "deviceId", value: deviceId),
-                     URLQueryItem(name: "days", value: days.joined(separator: ","))]
-        let held = days.compactMap { day in known[day].map { "\(day):\($0)" } }
-        if !held.isEmpty { items.append(URLQueryItem(name: "known", value: held.joined(separator: ","))) }
-        components?.queryItems = items
-        guard let url = components?.url else { throw ReadError.malformed("activity-windows endpoint") }
+        guard let url = Self.windowsURL(endpoint: endpoint, route: "activity-windows", days: days, deviceId: deviceId,
+                                        known: known) else { throw ReadError.malformed("activity-windows endpoint") }
         let body = try await get(url: url, identity: identity)
         return Self.activityWindowsDays(from: body)
     }
@@ -413,20 +407,33 @@ public actor ServerScoreRepository {
         public var identity: [String: String]? = nil
     }
 
+    /// The release-authority capability this build declares on the window routes (`authority=1`): it applies the
+    /// shared release policy itself, so the server may send expert rows below production with their model. Without
+    /// it the server withholds anything an older build would turn into decoder evidence
+    /// (docs/model-integration/activity-authority.md, "Older phones").
+    static let windowsAuthorityCapability = "1"
+
+    /// `GET scores/<route>?deviceId=…&days=…[&known=…]&authority=1`.
+    static func windowsURL(endpoint: URL, route: String, days: [String], deviceId: String,
+                           known: [String: String]) -> URL? {
+        var components = URLComponents(url: endpoint.appendingPathComponent(route), resolvingAgainstBaseURL: false)
+        var items = [URLQueryItem(name: "deviceId", value: deviceId),
+                     URLQueryItem(name: "days", value: days.joined(separator: ","))]
+        let held = days.compactMap { day in known[day].map { "\(day):\($0)" } }
+        if !held.isEmpty { items.append(URLQueryItem(name: "known", value: held.joined(separator: ","))) }
+        items.append(URLQueryItem(name: "authority", value: windowsAuthorityCapability))
+        components?.queryItems = items
+        return components?.url
+    }
+
     /// ElderNet's per-window output for up to three UTC days (same `known` rule as `activityWindows`).
     public func gaitWindows(days: [String], deviceId: String,
                             known: [String: String] = [:]) async throws -> [GaitWindowsDay] {
         guard let endpoint else { throw ReadError.notConfigured }
         guard let identity = identity() else { throw ReadError.missingIdentity }
         guard !days.isEmpty else { return [] }
-        var components = URLComponents(url: endpoint.appendingPathComponent("gait-windows"),
-                                       resolvingAgainstBaseURL: false)
-        var items = [URLQueryItem(name: "deviceId", value: deviceId),
-                     URLQueryItem(name: "days", value: days.joined(separator: ","))]
-        let held = days.compactMap { day in known[day].map { "\(day):\($0)" } }
-        if !held.isEmpty { items.append(URLQueryItem(name: "known", value: held.joined(separator: ","))) }
-        components?.queryItems = items
-        guard let url = components?.url else { throw ReadError.malformed("gait-windows endpoint") }
+        guard let url = Self.windowsURL(endpoint: endpoint, route: "gait-windows", days: days, deviceId: deviceId,
+                                        known: known) else { throw ReadError.malformed("gait-windows endpoint") }
         let body = try await get(url: url, identity: identity)
         return Self.gaitWindowsDays(from: body)
     }

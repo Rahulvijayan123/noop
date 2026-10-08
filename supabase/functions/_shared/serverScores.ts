@@ -141,11 +141,27 @@ export function parseActivityWindowsQuery(params: URLSearchParams) {
       known.set(m[1], m[2]);
     }
   }
-  return { days, known };
+  // `authority=1`: the caller applies the shared release policy itself (ActivityExpertSelection), so it may be sent
+  // expert rows below production with everything needed to decode them. Without it (every phone built before the
+  // policy) nothing below production is sent in a form that build turns into decoder evidence.
+  const rawAuthority = params.get('authority');
+  if (rawAuthority != null && !/^[1-9][0-9]{0,2}$/.test(rawAuthority)) throw fail('invalid_authority', 400);
+  return { days, known, authorityAware: rawAuthority != null };
 }
 
-export async function readActivityWindows({ rest, userId, deviceId, days, known }: {
+/**
+ * A `hart-windows-1` object for a caller without the authority capability: the HART-embedded ElderNet columns
+ * (`g_*`, no release of their own, so shadow) are left out, because such a build adds them to its decoder input as
+ * gait-expert evidence. HART's own windows, features, fine labels and transition columns are unchanged.
+ */
+export function legacyHartWindows(windows: unknown): unknown {
+  if (!windows || typeof windows !== 'object' || Array.isArray(windows)) return windows;
+  return Object.fromEntries(Object.entries(windows as Record<string, unknown>).filter(([k]) => !k.startsWith('g_')));
+}
+
+export async function readActivityWindows({ rest, userId, deviceId, days, known, authorityAware = false }: {
   rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
+  authorityAware?: boolean;
 }) {
   const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}&algorithm_version=eq.${ACTIVITY_WINDOWS_ALGORITHM}`;
   const heads = await rest.select('activity_encoder_windows', `${owner}&day=in.(${days.join(',')})`
@@ -166,7 +182,8 @@ export async function readActivityWindows({ rest, userId, deviceId, days, known 
     // A republish between the two reads makes the body newer than its head; the body's revision is the one
     // that describes the windows sent.
     return body
-      ? { ...h, ...authority, result_revision: String(body.result_revision), windows: body.windows }
+      ? { ...h, ...authority, result_revision: String(body.result_revision),
+        windows: authorityAware ? body.windows : legacyHartWindows(body.windows) }
       : { ...h, ...authority, result_revision: String(h.result_revision), unchanged: true };
   });
 }
@@ -240,8 +257,9 @@ const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,
  * full row adds the model identity and the producer's authority block (null on older rows), which a client feeds
  * to the shared selection policy (ActivityExpertSelection) rather than trusting.
  */
-export async function readGaitWindows({ rest, userId, deviceId, days, known }: {
+export async function readGaitWindows({ rest, userId, deviceId, days, known, authorityAware = false }: {
   rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
+  authorityAware?: boolean;
 }) {
   const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}`;
   const rows = await rest.select('activity_gait_windows_days',
@@ -263,6 +281,25 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known }: {
       + 'weights_digest,upstream_commit,preprocessing_version'))?.[0];
     if (!body) continue;
     const bodyRelease = expertReleaseMode(body);
+    // A caller without the authority capability (a phone built before the policy) installs any row that names a
+    // model whose digest checks out as production gait evidence, whatever its mode. No row here is production, so
+    // such a caller gets the windows and the day summary (its walking card) but no model, identity or authority
+    // block: it stores nothing for its decoder and decodes on HART alone.
+    if (!authorityAware) {
+      out.push({
+        ...head,
+        release_mode: bodyRelease,
+        input_revision: String(body.input_revision),
+        result_revision: String(body.result_revision),
+        summary: {
+          gait: body.summary?.gait ?? null,
+          mean_gait_prob: body.summary?.mean_gait_prob ?? null,
+          windows_omitted: body.summary?.windows_omitted === true,
+        },
+        windows: body.windows ?? null,
+      });
+      continue;
+    }
     out.push({
       ...head,
       // The body's own release and revision describe the windows sent (a republish between the reads).
