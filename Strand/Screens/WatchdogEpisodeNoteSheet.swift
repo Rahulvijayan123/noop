@@ -17,41 +17,58 @@ struct WatchdogEpisodeNoteSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    Text("What was going on when that alert fired? Skipping is fine. It is not the same as “no symptoms,” and it does not change your usual.")
-                        .font(StrandFont.body)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    field("Symptoms (optional)") {
-                        TextField("Leave blank if you skip", text: $symptoms)
-                            .textFieldStyle(.roundedBorder)
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    Text("What was going on?")
+                        .font(StrandFont.title2)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    field("Symptoms") {
+                        TextField("Optional", text: $symptoms)
+                            .font(StrandFont.body)
+                            .textFieldStyle(.plain)
+                            .padding(.horizontal, NoopMetrics.space3)
+                            .frame(minHeight: NoopMetrics.controlHeight)
+                            .background(NoopInsetSurface())
                     }
                     field("Exertion") {
                         chipRow([WatchdogAnnotationExertion.rest, .light, .hard],
-                                selection: $exertion, label: { $0.rawValue })
+                                selection: $exertion, label: MonitorLabels.exertion)
                     }
                     field("Stress") {
                         chipRow([WatchdogAnnotationStress.low, .high],
-                                selection: $stress, label: { $0.rawValue })
+                                selection: $stress, label: MonitorLabels.stress)
                     }
-                    field("Illness (note only, not the daily log)") {
+                    field("Illness") {
                         chipRow([WatchdogAnnotationIllness.feltOff, .not],
-                                selection: $illness, label: {
-                                    $0 == .feltOff ? "Felt off" : "Not ill"
-                                })
+                                selection: $illness, label: MonitorLabels.illness)
                     }
-                    field("Strap / sensor") {
+                    field("Strap") {
                         chipRow([WatchdogAnnotationSensor.loose, .charging, .justOn, .other],
-                                selection: $sensor, label: {
-                                    switch $0 {
-                                    case .loose: return "Loose"
-                                    case .charging: return "Charging"
-                                    case .justOn: return "Just on"
-                                    case .other: return "Other"
-                                    }
-                                })
+                                selection: $sensor, label: MonitorLabels.sensor)
                     }
-                    NoopButton("Save note", systemImage: "checkmark") {
+                    Text("Skipping is fine. It is not the same as “no symptoms”, and a note does not change your usual or the daily log.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.vertical, NoopMetrics.space4)
+            }
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle("After the alert")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Not now") {
+                        if let pending = store.pendingEpisodeNote {
+                            store.saveEpisodeNote(pending.skipped(), deviceId: deviceId)
+                        }
+                        onClose()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
                         guard let pending = store.pendingEpisodeNote else {
                             onClose()
                             return
@@ -65,18 +82,7 @@ struct WatchdogEpisodeNoteSheet: View {
                         store.saveEpisodeNote(saved, deviceId: deviceId)
                         onClose()
                     }
-                }
-                .padding(NoopMetrics.cardInnerSpacing)
-            }
-            .navigationTitle("After the alert")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Not now") {
-                        if let pending = store.pendingEpisodeNote {
-                            store.saveEpisodeNote(pending.skipped(), deviceId: deviceId)
-                        }
-                        onClose()
-                    }
+                    .fontWeight(.semibold)
                 }
             }
         }
@@ -85,31 +91,24 @@ struct WatchdogEpisodeNoteSheet: View {
         #endif
     }
 
-    private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private func field<Content: View>(_ title: LocalizedStringKey, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             Text(title)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
             content()
         }
     }
 
+    /// One optional choice: tapping the selected chip clears it.
     private func chipRow<T: Equatable>(_ values: [T], selection: Binding<T?>,
                                        label: @escaping (T) -> String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: NoopMetrics.space2) {
             ForEach(Array(values.enumerated()), id: \.offset) { _, value in
                 let on = selection.wrappedValue == value
-                Button(label(value)) {
+                MonitorChip(title: label(value), selected: on) {
                     selection.wrappedValue = on ? nil : value
                 }
-                .font(StrandFont.caption.weight(.semibold))
-                .padding(.horizontal, 10)
-                .padding(.vertical, 6)
-                .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(on ? StrandPalette.statusPositive.opacity(0.18) : StrandPalette.surfaceInset)
-                )
-                .foregroundStyle(StrandPalette.textPrimary)
             }
         }
     }

@@ -39,6 +39,7 @@ enum DemoLaunch {
         case "watchdog": return .watchdog
         case "layer1": return .layer1
         case "baselineCharts": return .baselineCharts
+        case "baselineVital" where parts.count == 2: return .baselineVital(parts[1])
         case "pipelineDiagnostics": return .pipelineDiagnostics
         // The Events tab's pages, against the sample events the tab shows: `event:first` (the event the tab
         // features), `event:<id>` (`event:ev-1`), `allEvents`, `recoveryDetails:first`.
