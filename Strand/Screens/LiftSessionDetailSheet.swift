@@ -45,10 +45,12 @@ struct LiftSessionDetailSheet: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Session", subtitle: subtitle) {
+        ScreenScaffold(title: "Session", dateLine: dateLine) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 if !loaded {
-                    ComingSoon(what: "Reading the session…", symbol: "dumbbell")
+                    StatGrid([StatItem("Volume", value: nil), StatItem("Session load", value: nil),
+                              StatItem("Effort", value: nil)], columns: 3, isLoading: true)
+                    WorkoutRowsPlaceholder(count: 3)
                 } else {
                     figuresSection
                     exercisesSection
@@ -56,8 +58,11 @@ struct LiftSessionDetailSheet: View {
                         muscleSection
                         rpeSection
                     }
-                    footnote
-                    NoopButton("Edit sets", systemImage: "pencil", kind: .secondary) { editing = true }
+                    NoopButton("Edit sets", systemImage: "pencil", kind: .secondary, fullWidth: true) { editing = true }
+                    AboutDisclosure("About these figures", paragraphs: [
+                        String(localized: "Lifting figures are worked out from the sets above. Effort stays measured from heart rate and is never derived from weights and reps."),
+                        String(localized: "Counted from the muscles you assigned each exercise: direct sets count once, indirect ones count as a half — the method the reference figures were derived under. An estimate from your own labels, not something measured off your body."),
+                    ])
                     deleteSection
                 }
             }
@@ -124,39 +129,31 @@ struct LiftSessionDetailSheet: View {
         dismiss()
     }
 
-    private var subtitle: LocalizedStringKey {
+    /// "Push day · 6 Oct 2026 at 18:40".
+    private var dateLine: String {
         let date = Date(timeIntervalSince1970: TimeInterval(session.startTs))
             .formatted(date: .abbreviated, time: .shortened)
         if let name = session.programName, !name.isEmpty {
             return "\(name) · \(date)"
         }
-        return "\(date)"
+        return date
     }
 
     // MARK: - The session figures
 
     private var figuresSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("This session", overline: "Figures")
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: NoopMetrics.rowSpacing)],
-                      alignment: .leading, spacing: NoopMetrics.rowSpacing) {
-                // Weight x reps, summed. Exact, but only meaningful against the SAME program run
-                // again: 100 kg of leg press is not 100 kg of squat, so the total across different
-                // exercises compares nothing. The per-exercise figure below, with its delta against
-                // last time, is the form that answers "am I progressing" — this one is the tally.
-                tile(String(localized: "Volume"),
-                     LiftFormat.weight(LiftMetrics.volumeLoadKg(performed), system: unitSystem),
-                     String(localized: "\(workingSetCount) working sets · compare when you repeat this program"))
-
-                tile(String(localized: "Session load"),
-                     sessionLoadText,
-                     sessionLoadCaption)
-
-                tile(String(localized: "Effort"),
-                     workout?.strain.map { LiftFormat.trim($0) } ?? "—",
-                     String(localized: "measured from heart rate"))
-            }
-        }
+        // Weight x reps, summed. Exact, but only meaningful against the SAME program run again: 100 kg of
+        // leg press is not 100 kg of squat, so the total across different exercises compares nothing. The
+        // per-exercise figure below, with its delta against last time, is the form that answers "am I
+        // progressing" — this one is the tally.
+        StatGrid([
+            StatItem(String(localized: "Volume"),
+                     value: LiftFormat.weight(LiftMetrics.volumeLoadKg(performed), system: unitSystem),
+                     detail: String(localized: "\(workingSetCount) working sets")),
+            StatItem(String(localized: "Session load"), value: sessionLoadText, detail: sessionLoadCaption),
+            StatItem(String(localized: "Effort"), value: workout?.strain.map { LiftFormat.trim($0) },
+                     detail: String(localized: "measured from heart rate")),
+        ], columns: 2)
     }
 
     /// The sets that were performed. A set at zero reps was discarded or skipped: it stays in the store
@@ -185,29 +182,11 @@ struct LiftSessionDetailSheet: View {
         return String(localized: "RPE \(LiftFormat.trim(rpe)) × \(LiftFormat.trim(minutes)) min")
     }
 
-    private func tile(_ label: String, _ value: String, _ caption: String) -> some View {
-        NoopCard(padding: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(label).strandOverline()
-                Text(value)
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.6)
-                Text(caption)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(2)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
     // MARK: - Per exercise, with every set
 
     private var exercisesSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Exercises", overline: "As performed")
+            SectionHeader("Exercises")
             if performed.isEmpty {
                 NoopCard {
                     Text("No sets were performed. Discarded sets stay under Edit sets as zeros you can fill in.")
@@ -242,7 +221,7 @@ struct LiftSessionDetailSheet: View {
 
                 HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.gap) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Best set").strandOverline()
+                        Text("Best set").strandLabel()
                         Text(bestSetText(summary))
                             .font(StrandFont.bodyNumber)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -256,7 +235,7 @@ struct LiftSessionDetailSheet: View {
                     }
                     Spacer(minLength: 0)
                     VStack(alignment: .trailing, spacing: 2) {
-                        Text("Volume").strandOverline()
+                        Text("Volume").strandLabel()
                         Text(LiftFormat.weight(summary.volumeKg, system: unitSystem))
                             .font(StrandFont.bodyNumber)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -337,7 +316,7 @@ struct LiftSessionDetailSheet: View {
         let counts = LiftMetrics.muscleCounts(performed)
         let ordered = LiftMuscle.ordered.filter { (counts.fractional[$0] ?? 0) > 0 }
         return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sets per muscle", overline: "This session · estimated")
+            SectionHeader("Sets per muscle", trailing: String(localized: "Estimate"))
             if ordered.isEmpty {
                 NoopCard {
                     Text("None of these exercises has a muscle group yet. Add one on the exercise and every future session counts toward it.")
@@ -356,17 +335,12 @@ struct LiftSessionDetailSheet: View {
                                 Spacer(minLength: 0)
                                 Text(LiftFormat.trim(counts.fractional[muscle] ?? 0))
                                     .font(StrandFont.bodyNumber)
-                                    .foregroundStyle(StrandPalette.effortColor)
+                                    .foregroundStyle(StrandPalette.textPrimary)
                                 Text(componentText(counts, muscle))
                                     .font(StrandFont.caption)
                                     .foregroundStyle(StrandPalette.textTertiary)
                             }
                         }
-                        Text("Counted from the muscles you assigned each exercise: direct sets count once, indirect ones count as a half — the method the reference figures were derived under. An estimate from your own labels, not something measured off your body.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 4)
                     }
                 }
             }
@@ -387,7 +361,7 @@ struct LiftSessionDetailSheet: View {
     private var rpeSection: some View {
         let p = LiftMetrics.rpeProfile(performed)
         return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("How hard it felt", overline: "RPE")
+            SectionHeader("How hard it felt")
             NoopCard {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
@@ -417,13 +391,6 @@ struct LiftSessionDetailSheet: View {
                 }
             }
         }
-    }
-
-    private var footnote: some View {
-        Text("Lifting figures are worked out from the sets above. Effort stays measured from heart rate and is never derived from weights and reps.")
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Load

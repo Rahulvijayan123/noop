@@ -57,18 +57,8 @@ struct StretchVerdictBadge: View {
     var body: some View {
         if let feedback {
             let right = feedback.verdict == .correct
-            let tint = right ? StrandPalette.statusPositive : StrandPalette.statusWarning
-            HStack(spacing: 4) {
-                Image(systemName: right ? "checkmark.circle.fill" : "xmark.circle.fill")
-                Text(text(for: feedback, right: right))
-                    .lineLimit(1)
-            }
-            .font(StrandFont.caption.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(tint.opacity(0.14)))
-            .accessibilityElement(children: .combine)
+            StatePill("\(text(for: feedback, right: right))", tone: right ? .positive : .warning, showsDot: false)
+                .fixedSize()
         }
     }
 
@@ -119,18 +109,20 @@ struct StretchDetailSheet: View {
         feedback.feedback(kind: target.kind, start: target.start, end: target.end)
     }
 
+    @State private var hrSelection: Date?
+
     var body: some View {
         NavigationStack {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                        header
-                        signalsCard
-                        modelCard.id(Anchor.model)
+                    VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                        signals
                         validationCard.id(Anchor.validation)
                         zoomButton
+                        howItWasRead.id(Anchor.model)
                     }
-                    .padding(NoopMetrics.space4)
+                    .padding(.horizontal, NoopMetrics.screenHPadding)
+                    .padding(.vertical, NoopMetrics.space4)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 #if DEBUG
@@ -142,6 +134,10 @@ struct StretchDetailSheet: View {
                 #endif
             }
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle(Text(target.presentation.title))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { finish() }
@@ -156,113 +152,131 @@ struct StretchDetailSheet: View {
         .onDisappear { persistIfNoteChanged() }
     }
 
-    // MARK: Header
-
-    private var header: some View {
-        let p = target.presentation
+    /// "2:14 PM – 2:31 PM · 17 min".
+    private var spanLine: String {
         let from = Date(timeIntervalSince1970: TimeInterval(target.start))
         let to = Date(timeIntervalSince1970: TimeInterval(target.end))
         let seconds = target.durationSeconds < 300
-        return HStack(alignment: .top, spacing: 12) {
-            Image(systemName: p.symbol)
-                .font(.system(size: 20, weight: .semibold))
-                .foregroundStyle(p.color)
-                .frame(width: 44, height: 44)
-                .background(Circle().fill(p.color.opacity(0.16)))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(p.title)
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("\(StretchFormat.clock(from, seconds: seconds)) – \(StretchFormat.clock(to, seconds: seconds)) · \(StretchFormat.duration(target.durationSeconds))")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .monospacedDigit()
-                Text(target.kind == .activityContext
-                     ? String(localized: "Read by the activity model")
-                     : String(localized: "Worked out from the strap's own signals"))
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            Spacer(minLength: 0)
-        }
+        return "\(StretchFormat.clock(from, seconds: seconds)) – \(StretchFormat.clock(to, seconds: seconds)) · \(StretchFormat.duration(target.durationSeconds))"
     }
 
     // MARK: What the strap recorded
 
-    private var signalsCard: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-            Text("What the strap recorded")
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textPrimary)
-            switch load {
-            case .loading:
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Reading this stretch…")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                .frame(maxWidth: .infinity, minHeight: 80)
-            case .failed:
-                Text("This stretch could not be read from the strap's stored data.")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            case .ready(let detail):
-                if detail.hasSignal {
-                    signals(detail)
-                } else {
-                    Text("The strap recorded nothing in this stretch.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-            }
-        }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
+    private var detail: StretchDetail? {
+        if case .ready(let d) = load { return d }
+        return nil
     }
 
+    /// The readout (the stretch's average, or the slice under the finger), the heart-rate slices with their
+    /// low-to-high range, wrist movement and the step counter on the same time axis, and the figures.
+    /// Every frame is drawn at its final size while the stretch is read.
     @ViewBuilder
-    private func signals(_ d: StretchDetail) -> some View {
-        let columns = [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)]
-        LazyVGrid(columns: columns, spacing: 10) {
-            if let avg = d.avgHr {
-                StatTile(title: String(localized: "Heart rate"), value: "\(avg)",
-                         unit: "bpm", caption: d.minHr.flatMap { lo in d.maxHr.map { "\(lo)–\($0) bpm" } })
-            }
-            if let mean = d.meanMotionG {
-                StatTile(title: String(localized: "Wrist movement"), value: String(format: "%.2f", mean), unit: "g",
-                         caption: d.peakMotionG.map { String(localized: "Peak \(String(format: "%.2f", $0)) g") })
-            }
-            if let ticks = d.stepTicks {
-                let perSecond = Double(ticks) / Double(max(1, d.durationSeconds))
-                StatTile(title: String(localized: "Step counter"), value: "\(ticks)", unit: nil,
-                         caption: ticks == 0
-                            ? String(localized: "No steps counted")
-                            : String(localized: "About \(String(format: "%.1f", perSecond)) a second"))
-            }
-            StatTile(title: String(localized: "Heart rate coverage"),
-                     value: "\(Int((d.hrCoverage * 100).rounded()))", unit: "%",
-                     caption: String(localized: "of the seconds"))
+    private var signals: some View {
+        let d = detail
+        let isLoading: Bool = { if case .loading = load { return true }; return false }()
+        let hrSamples = d.map(Self.hrSamples) ?? []
+        ValueReadout(hrReadout(d, samples: hrSamples), isScrubbing: hrSelection != nil, isLoading: isLoading)
+        NoopCard {
+            IntradayChart(samples: hrSamples, bucketSeconds: max(1, d?.binSeconds ?? 30), legend: [],
+                          state: isLoading ? .loading
+                            : (hrSamples.isEmpty ? .empty(emptyText) : .ready),
+                          window: window(d),
+                          y: ChartValueAxis(unit: "bpm", domain: .fitted(minSpan: 20)),
+                          selection: $hrSelection, height: NoopMetrics.chartHeightSecondary,
+                          accessibilityTitle: String(localized: "Heart rate over the stretch"))
         }
+        if let d, d.bins.contains(where: { $0.motionG != nil }) || (d.stepTicks ?? 0) > 0 {
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    if d.bins.contains(where: { $0.motionG != nil }) {
+                        Text("Wrist movement").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+                        SliceBars(detail: d, tint: StrandPalette.metricCyan, unit: "g", decimals: 2,
+                                  selection: $hrSelection) { $0.motionG }
+                    }
+                    if (d.stepTicks ?? 0) > 0 {
+                        Text("Step counter ticks").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+                        SliceBars(detail: d, tint: StrandPalette.metricPurple, unit: nil, decimals: 0,
+                                  selection: $hrSelection) { $0.stepTicks.map(Double.init) }
+                    }
+                }
+            }
+        }
+        StatGrid(stats(d), columns: 2, isLoading: isLoading)
+    }
 
-        let slice = StretchFormat.duration(d.binSeconds)
-        Text("Each bar or point covers \(slice).")
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
+    private var emptyText: String {
+        if case .failed = load { return String(localized: "This stretch could not be read from the strap's stored data.") }
+        return String(localized: "The strap recorded nothing in this stretch.")
+    }
 
-        if d.bins.contains(where: { $0.avgHr != nil }) {
-            SliceTitle(String(localized: "Heart rate"))
-            HeartRateSlices(detail: d)
+    private func window(_ d: StretchDetail?) -> ClosedRange<Date> {
+        let start = d?.start ?? target.start, end = d?.end ?? target.end
+        return Date(timeIntervalSince1970: TimeInterval(start))...Date(timeIntervalSince1970: TimeInterval(max(end, start + 1)))
+    }
+
+    /// One sample per slice at its middle: the slice's average with its lowest and highest as the envelope.
+    /// A slice with no heart rate is left out, so the line breaks across it.
+    static func hrSamples(_ d: StretchDetail) -> [IntradayChart.Sample] {
+        d.bins.compactMap { b in
+            guard let avg = b.avgHr else { return nil }
+            return IntradayChart.Sample(time: Date(timeIntervalSince1970: TimeInterval(b.start) + Double(b.durationSeconds) / 2),
+                                        value: Double(avg), low: b.minHr.map(Double.init), high: b.maxHr.map(Double.init))
         }
-        if d.bins.contains(where: { $0.motionG != nil }) {
-            SliceTitle(String(localized: "Wrist movement"))
-            SliceBars(detail: d, tint: StrandPalette.metricCyan) { $0.motionG }
+    }
+
+    private func hrReadout(_ d: StretchDetail?, samples: [IntradayChart.Sample]) -> ReadoutContent {
+        if let hrSelection, let s = ChartSelection.sample(for: hrSelection, in: samples) {
+            let range = s.low.flatMap { lo in s.high.map { "\(Int(lo))–\(Int($0)) bpm" } }
+            return .intraday(s, unit: "bpm", format: { "\(Int($0.rounded()))" }, context: range)
         }
-        if (d.stepTicks ?? 0) > 0 {
-            SliceTitle(String(localized: "Step counter ticks"))
-            SliceBars(detail: d, tint: StrandPalette.accent) { $0.stepTicks.map(Double.init) }
+        return ReadoutContent(dateLine: spanLine, value: d?.avgHr.map { "\($0)" }, unit: "bpm",
+                              context: d.flatMap { d in d.minHr.flatMap { lo in d.maxHr.map { "\(lo)–\($0) bpm" } } })
+    }
+
+    private func stats(_ d: StretchDetail?) -> [StatItem] {
+        var items: [StatItem] = []
+        let mean = d?.meanMotionG
+        items.append(StatItem(String(localized: "Wrist movement"), value: mean.map { String(format: "%.2f", $0) },
+                              unit: "g",
+                              detail: d?.peakMotionG.map { String(localized: "Peak \(String(format: "%.2f", $0)) g") }))
+        let ticks = d?.stepTicks
+        items.append(StatItem(String(localized: "Step counter"), value: ticks.map { "\($0)" },
+                              detail: ticks.map { t in
+                                  t == 0 ? String(localized: "No steps counted")
+                                         : String(localized: "About \(String(format: "%.1f", Double(t) / Double(max(1, d?.durationSeconds ?? 1)))) a second")
+                              }))
+        items.append(StatItem(String(localized: "Heart rate coverage"),
+                              value: d.map { "\(Int(($0.hrCoverage * 100).rounded()))" }, unit: "%",
+                              detail: String(localized: "of the seconds")))
+        items.append(StatItem(String(localized: "Slice"), value: d.map { StretchFormat.duration($0.binSeconds) }))
+        return items
+    }
+
+    // MARK: How this was read
+
+    /// The model's reasoning, one tap down: what it based the label on, the strap's own reading of the same
+    /// time, the runs inside the stretch, and how the answer is used.
+    private var howItWasRead: some View {
+        AboutDisclosure("How this was read", initiallyExpanded: isDemoModelAnchor) {
+            modelCard
+            Text(target.kind == .activityContext
+                 ? String(localized: "Read by the activity model")
+                 : String(localized: "Worked out from the strap's own signals"))
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+            Text("Your answer is saved with this stretch and what the model saw, and helps tune it.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    private var isDemoModelAnchor: Bool {
+        #if DEBUG
+        return Self.demoAnchor == .model
+        #else
+        return false
+        #endif
     }
 
     // MARK: What the model said
@@ -275,21 +289,19 @@ struct StretchDetailSheet: View {
             case .strap(let s): strapModel(s)
             }
         }
-        .padding(NoopMetrics.space3)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
     }
 
     @ViewBuilder
     private func activityModel(_ e: ActivityEpisode) -> some View {
         let tint = ActivityFamily.of(e.label).color
-        Text("What the model made of it")
-            .font(StrandFont.headline)
-            .foregroundStyle(StrandPalette.textPrimary)
         HStack(spacing: 10) {
             Text("Confidence")
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
+            if e.confidence < 0.55 {
+                StatePill("Low confidence", tone: .warning, showsDot: false).fixedSize()
+            }
             Spacer(minLength: 8)
             ProbabilityBar(value: e.confidence, tint: tint)
             Text("\(Int((e.confidence * 100).rounded()))%")
@@ -301,11 +313,6 @@ struct StretchDetailSheet: View {
         HeadBlock(title: String(localized: "Posture"), rows: HeadBlock.rows(e.posture, name: \.displayName), tint: tint)
         HeadBlock(title: String(localized: "Movement"), rows: HeadBlock.rows(e.locomotion, name: \.displayName), tint: tint)
         HeadBlock(title: String(localized: "Arm"), rows: HeadBlock.rows(e.armBehavior, name: \.displayName), tint: tint)
-        if e.confidence < 0.55 {
-            Text("Conflicting or thin evidence here, so treat this as a guess.")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
         ActivityExpertsBlock(summary: .over(start: e.start, end: e.end, runs: input.runs))
         let strap = StretchOverlap.strapStates(over: e.start, e.end, segments: input.segments)
         if !strap.isEmpty {
@@ -317,9 +324,6 @@ struct StretchDetailSheet: View {
 
     @ViewBuilder
     private func strapModel(_ s: DayStateSegment) -> some View {
-        Text("How this was worked out")
-            .font(StrandFont.headline)
-            .foregroundStyle(StrandPalette.textPrimary)
         Text(s.basisText)
             .font(StrandFont.subhead)
             .foregroundStyle(StrandPalette.textSecondary)
@@ -402,56 +406,49 @@ struct StretchDetailSheet: View {
     // MARK: Verdict
 
     private var validationCard: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-            Text("Is this right?")
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text("Your answer is saved with this stretch and what the model saw, and helps tune it.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("Is this right?")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
 
-            HStack(spacing: 10) {
-                verdictButton(.correct, title: String(localized: "Yes, that's right"),
-                              symbol: "checkmark.circle.fill", tint: StrandPalette.statusPositive)
-                verdictButton(.incorrect, title: String(localized: "No, it was wrong"),
-                              symbol: "xmark.circle.fill", tint: StrandPalette.statusWarning)
-            }
+                HStack(spacing: NoopMetrics.space2) {
+                    verdictButton(.correct, title: "Yes, that's right", symbol: "checkmark")
+                    verdictButton(.incorrect, title: "No, it was wrong", symbol: "xmark")
+                }
 
-            if verdict == .incorrect {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("What was it?")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 120), spacing: 8, alignment: .leading)],
-                              alignment: .leading, spacing: 8) {
-                        ForEach(StretchCorrection.allCases, id: \.self) { c in
-                            correctionChip(c)
+                if verdict == .incorrect {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                        Text("What was it?").strandLabel()
+                        LazyVGrid(columns: [GridItem(.adaptive(minimum: 132), spacing: NoopMetrics.space2, alignment: .leading)],
+                                  alignment: .leading, spacing: NoopMetrics.space2) {
+                            ForEach(StretchCorrection.allCases, id: \.self) { c in
+                                correctionChip(c)
+                            }
                         }
                     }
                 }
-            }
 
-            if verdict != nil {
-                VStack(alignment: .leading, spacing: 8) {
-                    TextField("Add a note (optional)", text: $note, axis: .vertical)
-                        .lineLimit(1...4)
-                        .font(StrandFont.body)
-                        .textFieldStyle(.plain)
-                        .padding(12)
-                        .background(RoundedRectangle(cornerRadius: 12, style: .continuous).fill(StrandPalette.surfaceInset))
-                    if noteIsDirty {
-                        NoopButton("Save note", kind: .secondary, fullWidth: true) { persist() }
+                if verdict != nil {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                        TextField("Add a note (optional)", text: $note, axis: .vertical)
+                            .lineLimit(1...4)
+                            .font(StrandFont.body)
+                            .textFieldStyle(.plain)
+                            .padding(NoopMetrics.space3)
+                            .background(NoopInsetSurface())
+                        if noteIsDirty {
+                            NoopButton("Save note", kind: .secondary, fullWidth: true) { persist() }
+                        }
+                        saveStatus
                     }
-                    saveStatus
                 }
             }
         }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
     }
 
-    private func verdictButton(_ value: StretchVerdict, title: String, symbol: String, tint: Color) -> some View {
+    /// The selected answer is the filled (primary) button; the other stays secondary.
+    private func verdictButton(_ value: StretchVerdict, title: LocalizedStringKey, symbol: String) -> some View {
         let selected = verdict == value
         return Button {
             withAnimation(StrandMotion.interactive) {
@@ -460,43 +457,25 @@ struct StretchDetailSheet: View {
             }
             persist()
         } label: {
-            HStack(spacing: 6) {
-                Image(systemName: symbol)
-                Text(title)
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
-                    .multilineTextAlignment(.leading)
-            }
-            .font(StrandFont.subhead.weight(.semibold))
-            .foregroundStyle(selected ? StrandPalette.goldDeepText : tint)
-            .frame(maxWidth: .infinity, minHeight: 44)
-            .padding(.horizontal, 8)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(selected ? tint : tint.opacity(0.12)))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(tint.opacity(selected ? 0 : 0.35), lineWidth: 1))
+            Label(title, systemImage: symbol)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NoopButtonStyle(selected ? .primary : .secondary, fullWidth: true))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func correctionChip(_ c: StretchCorrection) -> some View {
         let selected = correction == c
-        let tint = StrandPalette.accent
         return Button {
             withAnimation(StrandMotion.interactive) { correction = selected ? nil : c }
             persist()
         } label: {
             Text(c.title)
-                .font(StrandFont.subhead)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-                .foregroundStyle(selected ? StrandPalette.goldDeepText : StrandPalette.textPrimary)
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, minHeight: 38)
-                .background(Capsule().fill(selected ? tint : StrandPalette.surfaceInset))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NoopButtonStyle(selected ? .primary : .secondary, fullWidth: true))
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
@@ -601,129 +580,38 @@ struct StretchDetailSheet: View {
 
 // MARK: Pieces
 
-private struct StatTile: View {
-    let title: String
-    let value: String
-    let unit: String?
-    let caption: String?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(StrandFont.caption.weight(.semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .textCase(.uppercase)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(value)
-                    .font(StrandFont.rounded(24))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .monospacedDigit()
-                if let unit {
-                    Text(unit)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-            }
-            Text(caption ?? " ")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(StrandPalette.surfaceInset))
-    }
-}
-
-private struct SliceTitle: View {
-    let text: String
-    init(_ text: String) { self.text = text }
-    var body: some View {
-        Text(text)
-            .font(StrandFont.subhead.weight(.semibold))
-            .foregroundStyle(StrandPalette.textSecondary)
-            .padding(.top, 4)
-    }
-}
-
-private func date(_ ts: Int) -> Date { Date(timeIntervalSince1970: TimeInterval(ts)) }
-
-private extension View {
-    func sliceTimeAxis(_ detail: StretchDetail) -> some View {
-        let style: Date.FormatStyle = detail.durationSeconds < 900
-            ? Date.FormatStyle().hour().minute().second()
-            : Date.FormatStyle().hour().minute()
-        return self
-            .chartXScale(domain: date(detail.start)...date(max(detail.end, detail.start + 1)))
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: detail.durationSeconds < 900 ? 3 : 4)) { _ in
-                    AxisGridLine()
-                    AxisValueLabel(format: style)
-                }
-            }
-    }
-}
-
-/// Heart rate over the stretch: the average of each slice, with its lowest-to-highest range behind it.
-private struct HeartRateSlices: View {
-    let detail: StretchDetail
-
-    var body: some View {
-        let points = detail.bins.compactMap { b -> (id: Int, mid: Date, avg: Int, lo: Int, hi: Int)? in
-            guard let avg = b.avgHr, let lo = b.minHr, let hi = b.maxHr else { return nil }
-            return (b.start, date(b.start + b.durationSeconds / 2), avg, lo, hi)
-        }
-        let low = (points.map(\.lo).min() ?? 40) - 5
-        let high = (points.map(\.hi).max() ?? 120) + 5
-        Chart {
-            ForEach(points, id: \.id) { p in
-                AreaMark(x: .value("Time", p.mid), yStart: .value("Lowest", p.lo), yEnd: .value("Highest", p.hi))
-                    .foregroundStyle(StrandPalette.metricRose.opacity(0.18))
-                    .interpolationMethod(.monotone)
-            }
-            ForEach(points, id: \.id) { p in
-                LineMark(x: .value("Time", p.mid), y: .value("Average", p.avg))
-                    .foregroundStyle(StrandPalette.metricRose)
-                    .interpolationMethod(.monotone)
-            }
-            ForEach(points.count <= 24 ? points : [], id: \.id) { p in
-                PointMark(x: .value("Time", p.mid), y: .value("Average", p.avg))
-                    .foregroundStyle(StrandPalette.metricRose)
-                    .symbolSize(18)
-            }
-        }
-        .chartYScale(domain: low...high)
-        .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
-        .sliceTimeAxis(detail)
-        .frame(height: 130)
-        .accessibilityLabel(Text("Heart rate over the stretch"))
-    }
-}
-
-/// One value per slice as a bar spanning the slice.
+/// One value per slice as a bar spanning the slice, on the stretch's clock axis with the unit on the value
+/// axis. The selection is shared with the heart-rate chart above, so one scrub reads all three.
 private struct SliceBars: View {
     let detail: StretchDetail
     let tint: Color
+    let unit: String?
+    let decimals: Int
+    @Binding var selection: Date?
     let value: (StretchBin) -> Double?
 
     var body: some View {
-        let bars = detail.bins.compactMap { b -> (id: Int, from: Date, to: Date, v: Double)? in
-            value(b).map { (b.start, date(b.start), date(b.end), $0) }
+        let bars = detail.bins.compactMap { b -> (id: Int, from: Date, to: Date, mid: Date, v: Double)? in
+            value(b).map { (b.start, Self.date(b.start), Self.date(b.end),
+                            Date(timeIntervalSince1970: TimeInterval(b.start) + Double(b.durationSeconds) / 2), $0) }
         }
-        let top = max(0.05, (bars.map(\.v).max() ?? 0) * 1.15)
+        let window = Self.date(detail.start)...Self.date(max(detail.end, detail.start + 1))
+        let axis = ChartValueAxis(unit: unit, domain: .fitted(minSpan: decimals > 0 ? 0.05 : 2, includeZero: true),
+                                  tickCount: 2, format: ChartValueAxis.decimals(decimals))
+        let yLayout = axis.layout(for: bars.map(\.v))
+        let picked = selection.flatMap { s in bars.first { $0.from <= s && s < $0.to } }
         Chart {
             ForEach(bars, id: \.id) { b in
                 BarMark(xStart: .value("From", b.from), xEnd: .value("To", b.to), y: .value("Value", b.v))
-                    .foregroundStyle(tint)
+                    .foregroundStyle(tint.opacity(picked == nil || picked?.id == b.id ? 1 : NaraChartStyle.dimmedOpacity))
             }
+            SelectionRule(selection, unit: nil)
         }
-        .chartYScale(domain: 0...top)
-        .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
-        .sliceTimeAxis(detail)
-        .frame(height: 90)
+        .naraChartAxes(x: ChartAxis.layout(window, style: .hours, target: 4), y: yLayout)
+        .chartScrub(xs: bars.map(\.mid), selection: $selection)
+        .frame(height: 72)
         .accessibilityLabel(Text("Readings over the stretch"))
     }
+
+    private static func date(_ ts: Int) -> Date { Date(timeIntervalSince1970: TimeInterval(ts)) }
 }

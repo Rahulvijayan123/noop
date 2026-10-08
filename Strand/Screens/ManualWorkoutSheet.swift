@@ -111,92 +111,121 @@ struct ManualWorkoutSheet: View {
     }
 
     var body: some View {
-        #if os(macOS)
-        formContent
-            .padding(NoopMetrics.space6)
-            .frame(width: 420)
-            .background(NoopChromeSurface())
-            // Lets the user dismiss the decimal pad (which has no return key) and reach Cancel/Add.
-            .keyboardDoneToolbar($focusedField)
-        #else
-        // #450 raised the sheet to .large so the keyboard had room, but the body was still a bare
-        // fixed-height VStack — with no ScrollView to absorb the squeeze, iOS's own keyboard-avoidance
-        // had no choice but to rigidly shift the WHOLE block up to keep the focused Sport field clear
-        // of the keyboard. That shift could push the header + Sport field (and the top of its floating
-        // suggestion overlay) off the top of the screen entirely — "recents still clip" — and could also
-        // carry the footer's Add/Cancel row up into the same band where the system's own keyboard
-        // "Done" accessory renders, producing the floating Fertig/Hinzufügen overlap. Wrapping in a
-        // ScrollView gives keyboard-avoidance somewhere to scroll INSTEAD of rigidly displacing fixed
-        // content, so nothing needs to leave its own bounds to stay clear of the keyboard.
-        ScrollView {
+        NavigationStack {
+            #if os(macOS)
             formContent
                 .padding(NoopMetrics.space6)
+                .frame(width: 420)
+                .navigationTitle(title)
+                .toolbar { toolbarItems }
+                // Lets the user dismiss the decimal pad (which has no return key) and reach Cancel/Add.
+                .keyboardDoneToolbar($focusedField)
+            #else
+            // #450 raised the sheet to .large so the keyboard had room. The form scrolls so that iOS's
+            // keyboard-avoidance has somewhere to scroll INSTEAD of rigidly displacing fixed content,
+            // which once pushed the Sport field (and the top of its floating suggestion overlay) off the
+            // top of the screen. Cancel and Add live in the navigation bar, clear of the keyboard's own
+            // Done accessory.
+            ScrollView {
+                formContent
+                    .padding(.horizontal, NoopMetrics.screenHPadding)
+                    .padding(.vertical, NoopMetrics.space4)
+            }
+            // #697/#horizontal-swipe parity, see ScreenScaffold.
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            .scrollDismissesKeyboard(.interactively)
+            // A fixed 420pt is right for the free-floating macOS sheet, but on iPhone it's wider than
+            // the screen (#185). iOS fills the presented sheet's width.
+            .frame(maxWidth: .infinity)
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { toolbarItems }
+            // Lets the user dismiss the decimal pad (which has no return key).
+            .keyboardDoneToolbar($focusedField)
+            #endif
         }
-        // #697/#horizontal-swipe parity, see ScreenScaffold.
-        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-        .scrollDismissesKeyboard(.interactively)
-        // A fixed 420pt is right for the free-floating macOS sheet, but on iPhone it's wider than
-        // the screen, so the Avg HR/Calories row, the Start DatePicker and the footer ran off the
-        // right edge (#185, same fix as WhatsNewView/ScoringGuideView). iOS fills the presented
-        // sheet's width and sizes to content height instead.
-        .frame(maxWidth: .infinity)
+        #if os(iOS)
         .noopSheetPresentation(largeFirst: true)
-        .background(NoopChromeSurface())
-        // Lets the user dismiss the decimal pad (which has no return key) and reach Cancel/Add.
-        .keyboardDoneToolbar($focusedField)
         #endif
     }
 
+    private var title: LocalizedStringKey { editing == nil ? "Add workout" : "Edit workout" }
+
+    @ToolbarContentBuilder
+    private var toolbarItems: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) {
+            Button("Cancel") { dismiss() }
+        }
+        ToolbarItem(placement: .confirmationAction) {
+            Button(editing == nil ? "Add" : "Save") { save() }
+                .disabled(builtRow == nil)
+                .accessibilityLabel(editing == nil ? "Add workout" : "Save workout")
+        }
+    }
+
     private var formContent: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space5) {
-            header
-            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            NoopCard {
                 field(String(localized: "Sport")) {
                     sportPicker
                 }
-                // Raise the Sport field above the following rows so its floating suggestion dropdown
-                // (an overlay, see `sportPicker`) draws ON TOP of Start / End / Duration, not behind them.
-                .zIndex(1)
-                field(String(localized: "Start")) {
-                    DatePicker("", selection: startBinding, in: ...Date(),
-                               displayedComponents: [.date, .hourAndMinute])
-                        .labelsHidden()
-                        .accessibilityLabel("Start date and time")
-                }
-                field(String(localized: "End")) {
-                    DatePicker("", selection: $end, in: ...Date(),
-                               displayedComponents: [.date, .hourAndMinute])
-                        .labelsHidden()
-                        .accessibilityLabel("End date and time")
-                }
-                field(String(localized: "Duration")) {
-                    HStack(spacing: 12) {
+            }
+            // Raise the Sport card above the following cards so its floating suggestion dropdown (an
+            // overlay, see `sportPicker`) draws ON TOP of Start / End / Duration, not behind them.
+            .zIndex(1)
+            NoopCard(padding: 0) {
+                VStack(spacing: 0) {
+                    formRow(String(localized: "Start")) {
+                        DatePicker("", selection: startBinding, in: ...Date(),
+                                   displayedComponents: [.date, .hourAndMinute])
+                            .labelsHidden()
+                            .accessibilityLabel("Start date and time")
+                    }
+                    NoopListDivider()
+                    formRow(String(localized: "End")) {
+                        DatePicker("", selection: $end, in: ...Date(),
+                                   displayedComponents: [.date, .hourAndMinute])
+                            .labelsHidden()
+                            .accessibilityLabel("End date and time")
+                    }
+                    NoopListDivider()
+                    formRow(String(localized: "Duration")) {
                         Stepper(value: durationBinding, in: 1...(24 * 60), step: 5) {
                             Text(durationLabel)
-                                .font(StrandFont.number(16))
-                                .foregroundStyle(StrandPalette.effortBright)
+                                .font(StrandFont.bodyNumber)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
                         }
                         .accessibilityLabel("Duration in minutes")
                     }
                 }
-                field(String(localized: "Distance")) {
-                    numberInput(String(localized: "optional"), text: $distanceText, unit: distanceUnit, field: .distance)
-                        .accessibilityLabel("Distance, optional")
-                }
-                HStack(spacing: 14) {
-                    field(String(localized: "Avg HR")) {
+            }
+            NoopCard(padding: 0) {
+                VStack(spacing: 0) {
+                    formRow(String(localized: "Distance")) {
+                        numberInput(String(localized: "optional"), text: $distanceText, unit: distanceUnit, field: .distance)
+                            .accessibilityLabel("Distance, optional")
+                    }
+                    NoopListDivider()
+                    formRow(String(localized: "Avg HR")) {
                         numberInput(String(localized: "optional"), text: $avgHrText, unit: "bpm", field: .avgHr)
                             .accessibilityLabel("Average heart rate in beats per minute, optional")
                     }
-                    field(String(localized: "Calories")) {
+                    NoopListDivider()
+                    formRow(String(localized: "Calories")) {
                         numberInput(String(localized: "optional"), text: $kcalText, unit: "kcal", field: .calories)
                             .accessibilityLabel("Calories in kilocalories, optional")
                     }
                 }
             }
-            if let validationNote { noteRow(validationNote) }
-            if avgHrEditedNote { noteRow(String(localized: "Avg HR is shown as typed. The HR graph, zones and Effort stay from the recorded session.")) }
-            footer
+            // An empty sport needs no notice: the field is first, and Add stays disabled until it is filled.
+            if let validationNote, !sport.trimmingCharacters(in: .whitespaces).isEmpty {
+                InlineNotice(validationNote, tone: .warning)
+            }
+            if avgHrEditedNote {
+                InlineNotice(String(localized: "Avg HR is shown as typed. The HR graph, zones and Effort stay from the recorded session."))
+            }
         }
     }
 
@@ -233,9 +262,8 @@ struct ManualWorkoutSheet: View {
             .font(StrandFont.body)
             .foregroundStyle(StrandPalette.textPrimary)
             .focused($sportFocused)
-            .padding(.horizontal, 12).padding(.vertical, 9)
+            .padding(.horizontal, NoopMetrics.space3).padding(.vertical, NoopMetrics.space2 + 2)
             .background(StrandPalette.surfaceInset, in: inputShape)
-            .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
             .accessibilityLabel("Sport")
             // The suggestion list FLOATS below the field as an overlay instead of sitting inline in the
             // form. Inline it was the only height-flexible element, so on iPhone with the keyboard up
@@ -262,12 +290,12 @@ struct ManualWorkoutSheet: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 if showRecentSports {
-                    Text("Recent").strandOverline()
+                    Text("Recent").strandLabel()
                         .padding(.horizontal, 12).padding(.top, 8)
                     ForEach(recentSports, id: \.self) { name in
                         suggestionRow(name, isDistance: WorkoutCatalog.sport(named: name)?.isDistanceSport == true)
                     }
-                    Text("All activities").strandOverline()
+                    Text("All activities").strandLabel()
                         .padding(.horizontal, 12).padding(.top, 8)
                 }
                 ForEach(sportSuggestions) { sp in
@@ -288,8 +316,7 @@ struct ManualWorkoutSheet: View {
         #endif
         .frame(height: min(max(suggestionsHeight, 1), 168))
         .onPreferenceChange(SuggestionsHeightKey.self) { suggestionsHeight = $0 }
-        .background(StrandPalette.surfaceInset, in: inputShape)
-        .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+        .background(NoopPanelSurface(cornerRadius: NoopMetrics.insetRadius, elevated: true))
     }
 
     /// One tappable suggestion row — shared by the #297 Recent block and the full catalogue list.
@@ -316,82 +343,56 @@ struct ManualWorkoutSheet: View {
         .accessibilityLabel("Pick \(name)")
     }
 
-    // MARK: - Sections
+    // MARK: - Fields
 
-    private var header: some View {
-        HStack(alignment: .top, spacing: 12) {
-            // A small Effort-world glyph so the sheet reads as part of the workouts (amber) world.
-            Image(systemName: "figure.run")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(StrandPalette.effortColor)
-                .frame(width: 30, height: 30)
-                .background(StrandPalette.effortColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(editing == nil ? "Add Workout" : "Edit Workout")
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text(editing == nil
-                     ? "Log a session you tracked elsewhere."
-                     : "Adjust this session's details.")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
-            Spacer(minLength: 0)
-        }
-    }
-
-    private var footer: some View {
-        HStack(spacing: NoopMetrics.space3) {
-            NoopButton("Cancel", kind: .tertiary) { dismiss() }
-            Spacer()
-            NoopButton(editing == nil ? "Add" : "Save", systemImage: "checkmark", kind: .primary) {
-                save()
-            }
-            .disabled(builtRow == nil)
-            .accessibilityLabel(editing == nil ? "Add workout" : "Save workout")
-        }
-    }
-
+    /// A labelled field (the Sport text field and its suggestions).
     private func field<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(label).strandOverline()
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            Text(label).strandLabel()
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// One form row: the label leading, the control trailing, at the list-row height.
+    private func formRow<Content: View>(_ label: String, @ViewBuilder _ content: () -> Content) -> some View {
+        HStack(spacing: NoopMetrics.space3) {
+            Text(label)
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .fixedSize()
+            Spacer(minLength: NoopMetrics.space2)
+            content()
+        }
+        .padding(.horizontal, NoopMetrics.cardPadding)
+        .padding(.vertical, NoopMetrics.space1)
+        .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight)
+    }
+
     private func numberInput(_ placeholder: String, text: Binding<String>, unit: String, field: NumberField) -> some View {
-        HStack(spacing: 6) {
+        HStack(spacing: NoopMetrics.space2) {
             TextField(placeholder, text: text)
                 .textFieldStyle(.plain)
                 .font(StrandFont.bodyNumber)
                 .foregroundStyle(StrandPalette.textPrimary)
+                .multilineTextAlignment(.trailing)
                 // Numeric entry → decimal pad on iOS (digits + "."), not the QWERTY default; no-op on macOS.
                 .numericKeyboard()
                 .focused($focusedField, equals: field)
-            Text(unit).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+            Text(unit).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
         }
-        .padding(.horizontal, 12).padding(.vertical, 9)
-        // Fill the field column so the Avg HR / Calories boxes share an identical width — left to
-        // their intrinsic size the two boxes rendered unequal (the "bpm"/"kcal" units differ in
-        // length), so the side-by-side row read as lopsided (#234).
-        .frame(maxWidth: .infinity)
-        .background(StrandPalette.surfaceInset, in: inputShape)
-        .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
-    }
-
-    private func noteRow(_ text: String) -> some View {
-        Text(text)
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.statusWarning)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityLabel(text)
+        .padding(.horizontal, NoopMetrics.space3)
+        .padding(.vertical, NoopMetrics.space2)
+        // One width for the three boxes so the column of values lines up (#234).
+        .frame(width: 150)
+        .background(NoopInsetSurface())
     }
 
     // MARK: - Validation / build
 
-    private var inputShape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
+    private var inputShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: NoopMetrics.insetRadius, style: .continuous)
+    }
 
     /// Moving the START keeps the workout's LENGTH and carries the end with it, which is what correcting
     /// "this began an hour earlier" means. Computed from the old start before it is reassigned.
@@ -420,9 +421,9 @@ struct ManualWorkoutSheet: View {
     private var durationLabel: String {
         let durationMin = durationBinding.wrappedValue
         let h = durationMin / 60, m = durationMin % 60
-        if h > 0 && m > 0 { return "\(h)h \(m)m" }
-        if h > 0 { return "\(h)h" }
-        return "\(m)m"
+        if h > 0 && m > 0 { return String(localized: "\(h) h \(m) m") }
+        if h > 0 { return String(localized: "\(h) h") }
+        return String(localized: "\(m) min")
     }
 
     /// Parsed avg-HR — nil for blank, an out-of-band sentinel handled by buildManualRow otherwise.

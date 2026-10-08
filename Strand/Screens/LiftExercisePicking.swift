@@ -55,7 +55,7 @@ struct LiftExerciseSuggestionLabel: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "arrow.up.left")
-                .font(.system(size: 10, weight: .semibold))
+                .font(StrandFont.icon(.inline))
                 .foregroundStyle(StrandPalette.textTertiary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.name)
@@ -81,11 +81,11 @@ struct LiftMusclePicker: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Muscles", overline: "Counted once per exercise")
+            SectionHeader("Muscles")
             NoopCard {
                 VStack(alignment: .leading, spacing: 14) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Primary").strandOverline()
+                        Text("Primary").strandLabel()
                         Menu {
                             Button("Not classified") { primary = nil }
                             ForEach(LiftMuscle.Region.allCases, id: \.self) { region in
@@ -104,7 +104,7 @@ struct LiftMusclePicker: View {
                                                      : StrandPalette.textPrimary)
                                 Spacer(minLength: 0)
                                 Image(systemName: "chevron.up.chevron.down")
-                                    .font(.system(size: 10, weight: .semibold))
+                                    .font(StrandFont.icon(.inline))
                                     .foregroundStyle(StrandPalette.textTertiary)
                             }
                             .contentShape(Rectangle())
@@ -113,7 +113,7 @@ struct LiftMusclePicker: View {
                     }
 
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Also works (counted as half a set)").strandOverline()
+                        Text("Also works (counted as half a set)").strandLabel()
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)],
                                   alignment: .leading, spacing: 8) {
                             ForEach(LiftMuscle.allCases, id: \.self) { muscle in

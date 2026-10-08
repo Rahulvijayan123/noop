@@ -39,17 +39,16 @@ struct LiftLogView: View {
     private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
 
     var body: some View {
-        ScreenScaffold(
-            title: "Lift Log",
-            subtitle: "Build a program once, then tap through it at the gym. Kept on \(Platform.deviceNounPhrase).",
-            onRefresh: { await load() }
-        ) {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                headerCard
-                programsSection
-                weekSection
-                historySection
-            }
+        ScreenScaffold(title: "Lift log", titleDisplay: .navigationBar, onRefresh: { await load() }) {
+            programsSection
+            weekSection
+            historySection
+            AboutDisclosure("About the lift log", paragraphs: [
+                String(localized: "Build a program once, then tap through it at the gym. Kept on \(Platform.deviceNounPhrase)."),
+                String(localized: "Lifting adds volume and set counts. It never changes your Effort, which stays measured from heart rate."),
+                String(localized: "A program is a name and an ordered list of exercises with your targets — working sets, reps, weight, rest and your own technique note."),
+                String(localized: "Counted from the muscles you assigned each exercise: direct sets count once, indirect ones half. The tick is about 4 sets a week — below that, studies across GROUPS of people stop reliably detecting growth. It is a research reference, not a target for you, and above it gains continue with strongly diminishing returns and no clear ceiling, so the bar has no \"full\"."),
+            ])
         }
         // Also on a saved session: the session sheet lives above this screen and cannot tell it
         // directly, and a save does not always bump `refreshSeq`.
@@ -67,118 +66,73 @@ struct LiftLogView: View {
         }
     }
 
-    // MARK: - Header
-
-    private var headerCard: some View {
-        NoopCard(tint: StrandPalette.effortColor) {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                HStack(spacing: NoopMetrics.rowSpacing) {
-                    Image(systemName: "dumbbell.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(StrandPalette.effortColor)
-                        .frame(width: 30, height: 30)
-                        .background(StrandPalette.effortColor.opacity(0.14),
-                                    in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Your log book")
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Programs, sessions and per-set history")
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
-                    Spacer(minLength: 0)
-                }
-                Text("Lifting adds volume and set counts. It never changes your Effort, which stays measured from heart rate.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
     // MARK: - Programs
 
     private var programsSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Programs", overline: "Saved")
+            SectionHeader("Programs")
 
             if !loaded {
-                ComingSoon(what: "Reading your programs…", symbol: "dumbbell")
+                WorkoutRowsPlaceholder(count: 2)
             } else if programs.isEmpty {
-                emptyState
+                Text("No programs yet")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textTertiary)
             } else {
-                ForEach(programs, id: \.id) { program in
-                    programRow(program)
+                NoopCard(padding: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(programs.enumerated()), id: \.element.id) { index, program in
+                            if index > 0 { NoopListDivider() }
+                            programRow(program)
+                        }
+                    }
                 }
             }
 
-            HStack(spacing: NoopMetrics.rowSpacing) {
-                Button {
+            HStack(spacing: NoopMetrics.gap) {
+                NoopButton("New program", systemImage: "plus", kind: .secondary, fullWidth: true) {
                     editing = ProgramEditTarget(id: "new", program: nil)
-                } label: {
-                    Label("New program", systemImage: "plus")
                 }
-                .buttonStyle(NoopButtonStyle(.secondary))
-
                 // Filling a dozen exercise lines by hand on a phone is the most tedious thing in the
                 // feature; a spreadsheet on a computer does it in a couple of minutes.
-                Button {
+                NoopButton("Import", systemImage: "tablecells", kind: .secondary, fullWidth: true) {
                     importing = true
-                } label: {
-                    Label("Import", systemImage: "tablecells")
                 }
-                .buttonStyle(NoopButtonStyle(.secondary))
             }
         }
     }
 
-    private var emptyState: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("No programs yet")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("A program is a name and an ordered list of exercises with your targets — working sets, reps, weight, rest and your own technique note.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
+    /// One program: its name and note (a tap edits it), and Start.
     private func programRow(_ program: LiftProgramRow) -> some View {
-        NoopCard {
-            HStack(spacing: NoopMetrics.gap) {
-                Button {
-                    editing = ProgramEditTarget(id: program.id, program: program)
-                } label: {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(program.name)
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        if let note = program.note, !note.isEmpty {
-                            Text(note)
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .lineLimit(3)
-                        }
-                        Text("Tap to edit")
+        HStack(spacing: NoopMetrics.gap) {
+            Button {
+                editing = ProgramEditTarget(id: program.id, program: program)
+            } label: {
+                VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                    Text(program.name)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(1)
+                    if let note = program.note, !note.isEmpty {
+                        Text(note)
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
+                            .lineLimit(2)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
-
-                Button(session.isActive ? "Running" : "Start") { Task { await start(program) } }
-                    .buttonStyle(.noopPrimary)
-                    .frame(maxWidth: 110)
-                    .accessibilityLabel("Start this program")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .accessibilityHint(Text("Edit this program"))
+
+            NoopButton(session.isActive ? "Running" : "Start", kind: .primary) { Task { await start(program) } }
+                .fixedSize()
+                .accessibilityLabel("Start this program")
         }
+        .padding(.horizontal, NoopMetrics.cardPadding)
+        .padding(.vertical, NoopMetrics.space2)
+        .frame(minHeight: NoopMetrics.listRowMinHeight)
     }
 
     // MARK: - Start a session
@@ -223,27 +177,18 @@ struct LiftLogView: View {
     private var weekSection: some View {
         let ordered = LiftMuscle.ordered.filter { (weekCounts[$0] ?? 0) > 0 }
         return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sets per muscle", overline: "Last 7 days · estimated")
+            SectionHeader("Sets per muscle", trailing: String(localized: "Last 7 days"))
             if ordered.isEmpty {
-                NoopCard {
-                    Text("Once you've logged a session, this shows how many sets each muscle got this week, against what the research associates with growth.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Text("Once you've logged a session, this shows how many sets each muscle got this week, against what the research associates with growth.")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 NoopCard {
-                    VStack(alignment: .leading, spacing: NoopMetrics.rowSpacing) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.space3) {
                         ForEach(ordered, id: \.self) { muscle in
                             muscleBar(muscle, sets: weekCounts[muscle] ?? 0)
                         }
-                        // The band is named and sourced, never phrased as a target NOOP sets for
-                        // anyone: this is not a medical device and does not prescribe.
-                        Text("Counted from the muscles you assigned each exercise: direct sets count once, indirect ones half. The tick is about 4 sets a week — below that, studies across GROUPS of people stop reliably detecting growth. It is a research reference, not a target for you, and above it gains continue with strongly diminishing returns and no clear ceiling, so the bar has no \"full\".")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.top, 2)
                     }
                 }
             }
@@ -276,20 +221,23 @@ struct LiftLogView: View {
         let tick = min(1.0, floor / Self.weeklySetsBarSpan)
 
         return VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
                 Text(muscle.displayName)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 Spacer(minLength: 0)
                 // Deliberately NOT a success colour. There is no success point to signal, and a
                 // green number is exactly what made four sets read as an achievement.
                 Text(LiftFormat.trim(sets))
-                    .font(StrandFont.captionNumber)
+                    .font(StrandFont.bodyNumber)
                     .foregroundStyle(StrandPalette.textPrimary)
+                Text("sets")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
             }
             GeometryReader { geo in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(StrandPalette.surfaceRaised)
+                    Capsule().fill(StrandPalette.surfaceInset)
                     Capsule()
                         // Muted below the floor — below it growth is not reliably detectable, which
                         // is worth showing — and the ordinary accent above it. Never a "done" colour.
@@ -315,43 +263,28 @@ struct LiftLogView: View {
 
     private var historySection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sessions", overline: "Recent")
+            SectionHeader("Sessions")
             if history.isEmpty {
-                NoopCard {
-                    Text("Finished sessions land here, with every set you logged.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
+                Text("Finished sessions land here, with every set you logged.")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textTertiary)
             } else {
-                ForEach(history, id: \.id) { session in
-                    Button {
-                        viewing = SessionDetailTarget(id: session.id, session: session)
-                    } label: {
-                        historyRow(session)
+                NoopCard(padding: 0) {
+                    VStack(spacing: 0) {
+                        ForEach(Array(history.enumerated()), id: \.element.id) { index, session in
+                            if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                            Button {
+                                viewing = SessionDetailTarget(id: session.id, session: session)
+                            } label: {
+                                NoopListRow(icon: "dumbbell", iconColor: StrandPalette.effortColor,
+                                            title: "\(session.programName ?? String(localized: "Session"))",
+                                            subtitle: Date(timeIntervalSince1970: TimeInterval(session.startTs))
+                                                .formatted(date: .abbreviated, time: .shortened))
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
-                    .buttonStyle(.plain)
                 }
-            }
-        }
-    }
-
-    private func historyRow(_ session: LiftSessionRow) -> some View {
-        NoopCard {
-            HStack(spacing: NoopMetrics.gap) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(session.programName ?? String(localized: "Session"))
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text(Date(timeIntervalSince1970: TimeInterval(session.startTs))
-                            .formatted(date: .abbreviated, time: .shortened))
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-                Spacer(minLength: 0)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .accessibilityHidden(true)
             }
         }
     }
