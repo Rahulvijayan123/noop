@@ -304,7 +304,11 @@ struct CoachChatView: View {
                                     phaseLabel: message.isStreaming ? vm.phase.label : "",
                                     onRetry: message.didStall ? { vm.retryStalled() } : nil,
                                     followUps: isLast && !vm.isGenerating ? lastFollowUps : [],
-                                    onFollowUp: { vm.send($0) })
+                                    onFollowUp: { vm.send($0) },
+                                    onCardSend: { text, state, submitted in
+                                        vm.sendFromCard(text, messageId: message.id, state: state, submitted: submitted)
+                                    },
+                                    onCardState: { vm.cardStateChanged($0, messageId: message.id) })
                             .id(message.id)
                     }
                     Color.clear.frame(height: 1).id("bottom")

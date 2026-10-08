@@ -719,6 +719,8 @@ enum DemoScreens {
         case "settings": return AnyView(SettingsView())
         case "liquidglass": return AnyView(NavigationStack { LiquidGlassSettingsView() })
         case "coach":    return AnyView(CoachDemoHost())
+        case "genui":    return AnyView(CoachGenUIDemoScreen(page: 1))
+        case "genui2":   return AnyView(CoachGenUIDemoScreen(page: 2))
         case "chargebreakdown": return AnyView(ChargeBreakdownDemoHost())
         case "devices":  return AnyView(DevicesView())
         case "strap":    return AnyView(StrapConnectionDemoScreen())

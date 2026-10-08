@@ -21,6 +21,11 @@ AemiSDR — https://github.com/Aemi-Studio/AemiSDR
   Used for: the iOS Liquid Glass backdrop blur and lens. Vendored in Packages/AemiSDR; see VENDORED.md
   there for the changes from upstream.
 
+OpenUI — https://github.com/thesysdev/openui
+  License: MIT (Packages/OpenUILang/LICENSE), Copyright (c) Thesys Inc.
+  Used for: Sana's interactive cards. Packages/OpenUILang is a Swift port of its OpenUI Lang core
+  (@openuidev/lang-core); see PORTED.md there for the upstream commit and the differences.
+
 The MIT license (an option for every component above) is permissive: these components may be used, modified, and
 redistributed (including commercially) on their own terms. When they are used as
 part of NOOP's combined work, the combined work as a whole is governed by NOOP's

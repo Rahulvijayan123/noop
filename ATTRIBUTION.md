@@ -196,6 +196,9 @@ remains available as a fallback.
 - **AemiSDR** (`Aemi-Studio/AemiSDR`, MIT or MPL-2.0, Aemi Studio) — the backdrop blur and Metal lens behind the
   iOS Liquid Glass look (Settings → Display → Liquid Glass). Vendored in `Packages/AemiSDR`; its `VENDORED.md`
   lists the changes from upstream.
+- **OpenUI** (`thesysdev/openui`, MIT, Thesys Inc.) — the OpenUI Lang format behind Sana's interactive cards
+  (plans, checklists, forms, timers). `Packages/OpenUILang` is a Swift port of its `@openuidev/lang-core`; its
+  `PORTED.md` lists the upstream commit and the differences.
 
 NOOP contains no WHOOP proprietary code, binaries, firmware, logos, or assets, and
 performs no DRM circumvention. It operates only with the user's own device and data.

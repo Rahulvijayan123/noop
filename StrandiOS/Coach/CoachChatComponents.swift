@@ -1,5 +1,6 @@
 import ImageIO
 import MarkdownUI
+import OpenUILang
 import StrandDesign
 import SwiftUI
 import UIKit
@@ -85,6 +86,9 @@ struct CoachBubble: View {
     var onRetry: (() -> Void)?
     var followUps: [String] = []
     var onFollowUp: (String) -> Void = { _ in }
+    /// A card's button or form: (message, card state, what was submitted) → whether it was sent.
+    var onCardSend: (String, [String: Value], String?) -> Bool = { _, _, _ in false }
+    var onCardState: ([String: Value]) -> Void = { _ in }
     @State private var containerWidth: CGFloat = 560
     /// Set once this bubble has shown the loading mosaic, so the visual that follows dissolves out of it.
     /// Visuals restored from history never saw it and appear plainly.
@@ -92,9 +96,26 @@ struct CoachBubble: View {
 
     private var maxBubbleWidth: CGFloat { min(containerWidth * 0.82, 560) }
     private var isUser: Bool { message.role == .user }
-    private var hasText: Bool { !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    /// The answer's prose and its interactive card: split out of the streaming text, or from `meta.ui` once saved.
+    private var parts: (prose: String, card: String?, after: String) {
+        guard !isUser else { return (message.content, nil, "") }
+        if message.isStreaming {
+            let split = CoachGenUI.split(message.content, streaming: true)
+            return (split.before, split.source, split.after)
+        }
+        if let ui = message.ui { return (ui.contentIsSummary == true ? "" : message.content, ui.source, "") }
+        return (message.content, nil, "")
+    }
+
+    private static func trimmed(_ s: String) -> String { s.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
+        let parts = self.parts
+        let prose = Self.trimmed(parts.prose)
+        let after = Self.trimmed(parts.after)
+        let card = parts.card.flatMap { Self.trimmed($0).isEmpty ? nil : $0 }
+        let cardPlacesVisual = card.map { $0.contains("Visual(") } ?? false
         HStack(alignment: .top, spacing: 8) {
             if isUser {
                 Spacer(minLength: 0)
@@ -108,26 +129,21 @@ struct CoachBubble: View {
                     CoachThinkingTrace(message: message, phase: phase, phaseLabel: phaseLabel)
                         .frame(maxWidth: maxBubbleWidth, alignment: .leading)
                 }
-                if hasText { textBubble }
-                if !isUser, !message.isStreaming {
-                    if message.vizPhase == .generating {
-                        CoachVizGeneratingView()
-                            .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                            .transition(.opacity)
-                    } else if let viz = message.viz {
-                        Group {
-                            CoachVizView(viz: viz)
-                                .equatable()
-                        }
-                        .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) {
-                            vizWasGenerating = false
-                        }
+                if !prose.isEmpty { textBubble(prose) }
+                if let card {
+                    CoachGenUICard(source: card, streaming: message.isStreaming, persisted: message.ui?.state,
+                                   submitted: message.ui?.submitted,
+                                   interactive: !message.isStreaming && !message.didStall && !message.blocked,
+                                   visual: cardPlacesVisual ? AnyView(visual) : nil,
+                                   onSend: onCardSend, onStateChange: onCardState)
                         .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                        .transition(.opacity)
-                    }
                 }
+                if !after.isEmpty { textBubble(after) }
+                if !isUser, !message.isStreaming, !cardPlacesVisual { visual }
                 if !isUser, message.didStall, let onRetry { retryButton(onRetry) }
-                if !isUser, !message.isStreaming, !message.didStall, hasText, !followUps.isEmpty { followUpList }
+                if !isUser, !message.isStreaming, !message.didStall, !prose.isEmpty || card != nil, !followUps.isEmpty {
+                    followUpList
+                }
             }
 
             if !isUser { Spacer(minLength: 0) }
@@ -138,6 +154,26 @@ struct CoachBubble: View {
         .onPreferenceChange(CoachBubbleWidthKey.self) { containerWidth = $0 }
         .onAppear { if message.vizPhase == .generating { vizWasGenerating = true } }
         .onChange(of: message.vizPhase) { _, phase in if phase == .generating { vizWasGenerating = true } }
+    }
+
+    /// The fact-checked visual: the img-fx mosaic while it is designed, then the chart dissolving out of it.
+    @ViewBuilder
+    private var visual: some View {
+        if message.vizPhase == .generating {
+            CoachVizGeneratingView()
+                .frame(maxWidth: maxBubbleWidth, alignment: .leading)
+                .transition(.opacity)
+        } else if let viz = message.viz {
+            Group {
+                CoachVizView(viz: viz)
+                    .equatable()
+            }
+            .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) {
+                vizWasGenerating = false
+            }
+            .frame(maxWidth: maxBubbleWidth, alignment: .leading)
+            .transition(.opacity)
+        }
     }
 
     private var avatar: some View {
@@ -192,10 +228,10 @@ struct CoachBubble: View {
         }
     }
 
-    private var textBubble: some View {
+    private func textBubble(_ text: String) -> some View {
         Group {
             if isUser {
-                Text(message.content)
+                Text(text)
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.surfaceBase)
                     .multilineTextAlignment(.leading)
@@ -203,7 +239,7 @@ struct CoachBubble: View {
                     .padding(.vertical, 10)
                     .background(StrandPalette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             } else {
-                Markdown(message.content)
+                Markdown(text)
                     .markdownTheme(.strand)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 14)
@@ -214,11 +250,11 @@ struct CoachBubble: View {
         .textSelection(.enabled)
         .frame(maxWidth: maxBubbleWidth, alignment: isUser ? .trailing : .leading)
         .contextMenu {
-            Button { UIPasteboard.general.string = message.content } label: { Label("Copy", systemImage: "doc.on.doc") }
-            ShareLink(item: message.content) { Label("Share", systemImage: "square.and.arrow.up") }
+            Button { UIPasteboard.general.string = text } label: { Label("Copy", systemImage: "doc.on.doc") }
+            ShareLink(item: text) { Label("Share", systemImage: "square.and.arrow.up") }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(isUser ? "You said: \(message.content)" : "Sana said: \(message.content)")
+        .accessibilityLabel(isUser ? "You said: \(text)" : "Sana said: \(text)")
     }
 
     private func retryButton(_ action: @escaping () -> Void) -> some View {

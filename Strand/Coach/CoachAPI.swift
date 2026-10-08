@@ -99,18 +99,21 @@ struct CoachMessageMeta: Codable, Equatable, Sendable {
     var blocked: Bool? = nil
     /// What the vision model saw in the photo this question carried (≤ 1,200 characters).
     var imageContext: String? = nil
+    /// The interactive card generated with this answer (`CoachGenUI`).
+    var ui: CoachGeneratedUI? = nil
 
     init(toolNames: [String]? = nil, viz: CoachViz? = nil, hadImage: Bool? = nil, followUps: [String]? = nil,
-         blocked: Bool? = nil, imageContext: String? = nil) {
+         blocked: Bool? = nil, imageContext: String? = nil, ui: CoachGeneratedUI? = nil) {
         self.toolNames = toolNames
         self.viz = viz
         self.hadImage = hadImage
         self.followUps = followUps
         self.blocked = blocked
         self.imageContext = imageContext
+        self.ui = ui
     }
 
-    private enum CodingKeys: String, CodingKey { case toolNames, viz, hadImage, followUps, blocked, imageContext }
+    private enum CodingKeys: String, CodingKey { case toolNames, viz, hadImage, followUps, blocked, imageContext, ui }
 
     /// Field by field, so one malformed value (an old visual shape, say) never drops the rest of the meta.
     init(from decoder: Decoder) throws {
@@ -121,6 +124,7 @@ struct CoachMessageMeta: Codable, Equatable, Sendable {
         followUps = c.lossy([String].self, .followUps)
         blocked = c.lossy(Bool.self, .blocked)
         imageContext = c.lossy(String.self, .imageContext)
+        ui = c.lossy(CoachGeneratedUI.self, .ui)
     }
 
     /// `newer` over `self`, field by field: a non-nil field wins, so a re-save that only carries the visual
@@ -129,7 +133,8 @@ struct CoachMessageMeta: Codable, Equatable, Sendable {
         guard let newer else { return self }
         return CoachMessageMeta(toolNames: newer.toolNames ?? toolNames, viz: newer.viz ?? viz,
                                 hadImage: newer.hadImage ?? hadImage, followUps: newer.followUps ?? followUps,
-                                blocked: newer.blocked ?? blocked, imageContext: newer.imageContext ?? imageContext)
+                                blocked: newer.blocked ?? blocked, imageContext: newer.imageContext ?? imageContext,
+                                ui: newer.ui ?? ui)
     }
 }
 

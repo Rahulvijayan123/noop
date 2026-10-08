@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import OpenUILang
 import WhoopStore
 
 // CoachChatViewModel — the Sana conversation: safety screens, the photo pipeline, the streaming tool loop, the
@@ -59,6 +60,9 @@ struct CoachChatMessage: Identifiable, Equatable {
     var blocked = false
     /// What the vision model saw in this question's photo (at most 1,200 characters).
     var imageContext: String?
+    /// The interactive card this answer generated, with its saved state (`CoachGenUI`). While the answer streams
+    /// the program is still inside `content`.
+    var ui: CoachGeneratedUI?
 
     init(id: UUID = UUID(), role: Role, content: String, isStreaming: Bool = false, imageData: Data? = nil) {
         self.id = id
@@ -85,13 +89,15 @@ struct CoachChatMessage: Identifiable, Equatable {
         followUps = meta?.followUps
         blocked = meta?.blocked ?? false
         imageContext = meta?.imageContext
+        ui = meta?.ui
         createdAt = CoachDates.parse(row.createdAt) ?? Date(timeIntervalSince1970: 0)
     }
 
     /// Everything known about the message, so a re-save never blanks a field an earlier save carried.
     var meta: CoachMessageMeta {
         CoachMessageMeta(toolNames: toolNames.isEmpty ? nil : toolNames, viz: viz, hadImage: hadImage ? true : nil,
-                         followUps: followUps, blocked: blocked ? true : nil, imageContext: imageContext)
+                         followUps: followUps, blocked: blocked ? true : nil, imageContext: imageContext, ui: ui)
+            .fittingServerLimit()
     }
 
     func stored(threadId: String, threadTitle: String? = nil) -> CoachStoredMessage {
@@ -111,6 +117,7 @@ struct CoachChatMessage: Identifiable, Equatable {
         out.followUps = server.followUps ?? followUps
         out.blocked = blocked || server.blocked
         out.imageContext = server.imageContext ?? imageContext
+        out.ui = server.ui ?? ui
         out.createdAt = server.createdAt
         return out
     }
@@ -179,7 +186,8 @@ final class CoachChatViewModel: ObservableObject {
     var canSwitchThreads: Bool { !isGenerating }
 
     static let maxToolRounds = 4
-    private static let toolRoundTokens = 1_200
+    /// A round that offers tools may still turn out to be the answer, interactive card included.
+    private static let toolRoundTokens = 2_000
     private static let answerTokens = 4_096
     private static let historyWindow = CoachContextPrompt.historyWindow
     private static let historyAssistantChars = 2_500
@@ -233,6 +241,9 @@ final class CoachChatViewModel: ObservableObject {
     /// Background work tied to one answer, with the thread it belongs to so deleting the thread cancels it.
     private var visualTasks: [UUID: (thread: String, task: Task<Void, Never>)] = [:]
     private var followUpTasks: [UUID: (thread: String, task: Task<Void, Never>)] = [:]
+    /// Debounced saves of a card's state while the user moves its inputs.
+    private var cardStateTasks: [UUID: Task<Void, Never>] = [:]
+    private static let cardStateDebounce: TimeInterval = 1.2
 
     /// Changes whenever the open thread does, so a late page for the previous thread is dropped.
     private var openToken = UUID()
@@ -685,6 +696,42 @@ final class CoachChatViewModel: ObservableObject {
         return CoachFollowUps.forAnswer(message.content)
     }
 
+    // MARK: Interactive cards
+
+    /// A card's button or form submit: sends `text` as the user's next message and saves the card with its state
+    /// and, when `submitted` names a form or button, marks it sent. False when nothing was sent (a reply is still
+    /// generating), so the card stays as it was.
+    @discardableResult
+    func sendFromCard(_ text: String, messageId: UUID, state: [String: Value], submitted: String?) -> Bool {
+        guard !isGenerating, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        cardStateTasks[messageId]?.cancel()
+        cardStateTasks[messageId] = nil
+        updateMessage(messageId, in: threadKey, persist: true) { m in
+            guard var ui = m.ui else { return }
+            ui.state = state.isEmpty ? nil : state
+            if let submitted, ui.submitted?.contains(submitted) != true {
+                ui.submitted = (ui.submitted ?? []) + [submitted]
+            }
+            m.ui = ui
+        }
+        return send(text)
+    }
+
+    /// A card's inputs changed: the state is saved once they settle.
+    func cardStateChanged(_ state: [String: Value], messageId: UUID) {
+        let thread = threadKey
+        cardStateTasks[messageId]?.cancel()
+        cardStateTasks[messageId] = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.cardStateDebounce * 1_000_000_000))
+            guard let self, !Task.isCancelled else { return }
+            self.cardStateTasks[messageId] = nil
+            self.updateMessage(messageId, in: thread, persist: true) { m in
+                guard m.ui != nil, m.ui?.state ?? [:] != state else { return }
+                m.ui?.state = state.isEmpty ? nil : state
+            }
+        }
+    }
+
     /// An outside question never carries the composer's state (a photo attached and not sent, say).
     private func sendInNewChat(_ text: String) {
         if !messages.isEmpty || threadOnServer { startNewChat() } else { clearThreadUI() }
@@ -759,11 +806,11 @@ final class CoachChatViewModel: ObservableObject {
             let context = CoachTurnContext(manifest: manifest, memories: memories, coverage: coverage(repo),
                                            messageCount: count, isFirstTurn: turn.isFirstTurn,
                                            currentThreadId: turn.threadId, refs: refs)
-            system = CoachPrompt.system(context: context, imageContext: imageContext, userAge: userAge)
+            system = CoachPrompt.system(context: context, imageContext: imageContext, userAge: userAge, interactiveUI: true)
         } else {
             if memoriesStale { await refreshMemories() }
             guard !Task.isCancelled else { return }
-            system = CoachPrompt.system(memories: memories, imageContext: imageContext, userAge: userAge)
+            system = CoachPrompt.system(memories: memories, imageContext: imageContext, userAge: userAge, interactiveUI: true)
         }
         var wire = [CoachWireMessage(role: "system", content: system)]
         wire += history(before: id)
@@ -881,7 +928,10 @@ final class CoachChatViewModel: ObservableObject {
             case .user: return CoachWireMessage(role: "user", content: m.content)
             case .assistant:
                 let limit = Self.historyAssistantChars
-                return CoachWireMessage(role: "assistant", content: m.content.count > limit ? String(m.content.prefix(limit)) + "…" : m.content)
+                let prose = m.ui?.contentIsSummary == true ? "" : m.content
+                var text = prose.count > limit ? String(prose.prefix(limit)) + "…" : prose
+                if let ui = m.ui { text += (text.isEmpty ? "" : "\n\n") + CoachGenUI.historyMarker(ui) }
+                return CoachWireMessage(role: "assistant", content: text)
             }
         }
     }
@@ -923,9 +973,9 @@ final class CoachChatViewModel: ObservableObject {
         guard turn.threadId == threadKey, let idx = index(turn.assistantId) else { return }
         messages[idx].isStreaming = false
 
-        let body = CoachVisualEvidence.stripTextCharts(CoachAPI.stripThinking(messages[idx].content))
+        let done = CoachGenUI.finish(CoachAPI.stripThinking(messages[idx].content), userAge: userAge)
         var answer: String?
-        if body.isEmpty {
+        if done.content.isEmpty {
             if messages[idx].didStall {
                 messages[idx].content = "Sana didn't finish answering."
             } else {
@@ -935,11 +985,11 @@ final class CoachChatViewModel: ObservableObject {
                 return
             }
         } else {
-            let screen = CoachSafety.screenOutput(body, userAge: userAge)
-            messages[idx].content = screen.text
+            messages[idx].content = done.content
+            messages[idx].ui = done.ui
             messages[idx].toolNames = toolNames
             messages[idx].createdAt = max(now(), (message(turn.userId)?.createdAt ?? .distantPast).addingTimeInterval(0.005))
-            if screen.clean, !messages[idx].didStall { answer = screen.text }
+            if done.clean, !messages[idx].didStall { answer = done.answerText }
         }
         guard !messages[idx].didStall, let user = message(turn.userId) else {
             saveLocalMessages()

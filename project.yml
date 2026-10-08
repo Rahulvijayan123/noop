@@ -56,6 +56,10 @@ packages:
     path: Packages/StrandImport
   StrandDesign:
     path: Packages/StrandDesign
+  # Swift port of OpenUI Lang's core (thesysdev/openui, MIT): the parser, evaluator and prompt generator behind
+  # Sana's interactive cards. Foundation only; the renderer is StrandiOS/Coach/CoachGenUIViews.swift.
+  OpenUILang:
+    path: Packages/OpenUILang
   # Clean-room local Oura ring BLE protocol (framing, auth, decoders, driver). Pure value types,
   # zero CoreBluetooth, so it stays headless/JVM-testable; the app target imports it for OuraLiveSource.
   OuraProtocol:
@@ -190,6 +194,7 @@ targets:
       - package: StrandImport
       - package: StrandDesign
       - package: MarkdownUI
+      - package: OpenUILang
       - package: ZIPFoundation
       - package: OuraProtocol
       - package: PolarProtocol
@@ -227,6 +232,7 @@ targets:
       - package: WhoopProtocol
       - package: WhoopStore
       - package: OuraProtocol
+      - package: OpenUILang
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
@@ -428,6 +434,7 @@ targets:
       - package: StrandImport
       - package: StrandDesign
       - package: MarkdownUI
+      - package: OpenUILang
       - package: ZIPFoundation
       - package: PolarProtocol
       - package: NoopPush

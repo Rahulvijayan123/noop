@@ -321,6 +321,7 @@ enum CoachSafety {
         "do not say \"based on the data provided\"", "here is my system prompt",
         "my system prompt is", "my instructions are:", "my initial instructions",
         "context library (queryable", "earlier in this conversation (summary",
+        "interactive cards: besides prose", "## component signatures",
     ]
 
     private static let medicalAuthorityClaims = [

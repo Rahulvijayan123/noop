@@ -84,8 +84,11 @@ enum CoachPrompt {
 
     /// The single-thread prompt: the first eight memories as given. Its output is fixed; an old server, which has no
     /// context routes, keeps getting exactly this.
-    static func system(memories: [CoachMemory], imageContext: String, userAge: Int?, now: Date = Date()) -> String {
-        var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint, dateContext(now: now)]
+    /// `interactiveUI` adds the generative-UI block (`CoachGenUI.promptBlock`) after the tool guidance, inside the
+    /// static prefix.
+    static func system(memories: [CoachMemory], imageContext: String, userAge: Int?, now: Date = Date(),
+                       interactiveUI: Bool = false) -> String {
+        var parts = staticPrefix(userAge: userAge, interactiveUI: interactiveUI) + [dateContext(now: now)]
         if !memories.isEmpty {
             parts.append(rememberedBlock(lines: memories.prefix(8).map { "• [\($0.topic)] \($0.content)" }))
         }
@@ -96,11 +99,18 @@ enum CoachPrompt {
     /// The context-aware prompt (`docs/COACH_MEMORY.md` §7.4): the same fixed prefix, then the ranked memories, the
     /// summary of a long thread's older turns, and the context library manifest, which names what exists and which
     /// tool inspects it without loading any of it.
-    static func system(context: CoachTurnContext, imageContext: String, userAge: Int?, now: Date = Date()) -> String {
-        var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint, dateContext(now: now)]
+    static func system(context: CoachTurnContext, imageContext: String, userAge: Int?, now: Date = Date(),
+                       interactiveUI: Bool = false) -> String {
+        var parts = staticPrefix(userAge: userAge, interactiveUI: interactiveUI) + [dateContext(now: now)]
         parts += CoachContextPrompt.blocks(context, userAge: userAge)
         if !imageContext.isEmpty { parts.append(imageBlock(imageContext)) }
         return parts.joined(separator: "\n\n")
+    }
+
+    private static func staticPrefix(userAge: Int?, interactiveUI: Bool) -> [String] {
+        var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint]
+        if interactiveUI { parts.append(CoachGenUI.promptBlock) }
+        return parts
     }
 
     static func rememberedBlock(lines: [String]) -> String {
