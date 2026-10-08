@@ -411,7 +411,8 @@ struct BackfillContinuation {
     }
 
     /// `stillConnected`: link up + command channel usable. `strapNewestTs`: newest record the strap holds
-    /// (GET_DATA_RANGE). `ourFrontierTs`: newest record WE'VE persisted (max HR ts). `wallNowUnix`: the
+    /// (GET_DATA_RANGE). `ourFrontierTs`: newest record WE'VE persisted (max HR ts, live rows included).
+    /// `sessionNewestPersistedTs`: newest row the just-ended session itself persisted. `wallNowUnix`: the
     /// REAL wall clock at decision time (#928 future-clock plausibility check; passed in so the predicate
     /// stays pure). `lastTrimAdvanced`: the just-ended session moved the trim cursor. `consecutiveCount`:
     /// auto-continues already done this connection. Returns true to immediately re-kick beginBackfill;
@@ -421,6 +422,7 @@ struct BackfillContinuation {
                                    ourFrontierTs: Int?,
                                    wallNowUnix: Int,
                                    persistedSensorRows: Bool = false,
+                                   sessionNewestPersistedTs: Int? = nil,
                                    lastTrimAdvanced: Bool,
                                    consecutiveCount: Int,
                                    maxAutoContinues: Int = defaultMaxAutoContinues,
@@ -450,6 +452,15 @@ struct BackfillContinuation {
         let futureDated = isFutureDatedNewest(strapNewestTs, wallNowUnix: wallNowUnix,
                                               futureSkewSeconds: futureSkewSeconds)
         let plausibleNewest = futureDated ? nil : strapNewestTs
+        // 3c: the pass reached the present. A strap that is worn keeps banking, so every pass of a caught-up
+        // strap persists its last few seconds and 2b below re-kicked it: at the minute cadence that was one to
+        // five extra offloads after nearly every sync, around the clock. When the newest row this pass
+        // persisted is within `behindGapSeconds` of the wall clock there is no backlog behind it, whatever the
+        // trim did. A deep oldest-first backlog persists OLD rows until its last pass, so it still drains back
+        // to back. nil (not known, or nothing timestamped) keeps the rules below.
+        if !futureDated, let reached = sessionNewestPersistedTs, wallNowUnix - reached <= behindGapSeconds {
+            return false
+        }
         // 2a: the strap reports newer data than we hold — reliable WHEN its clock epoch is sane.
         if let newest = plausibleNewest, let frontier = ourFrontierTs, (newest - frontier) > behindGapSeconds {
             return true
@@ -1550,7 +1561,18 @@ public final class BLEManager: NSObject, ObservableObject {
                                 enableRawCapture: enableRawCapture,
                                 log: { [weak self] s in self?.log(s) },
                                 rejectedSink: { [weak self] frames, trim, family in
-                                    self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
+                                    await self?.archiveRejectedFrames(frames, trim: trim, family: family) ?? true
+                                },
+                                // The raw v20/v21 sample shares the archive but not the reject counters,
+                                // which drive the "couldn't be decoded" sync status.
+                                rawSampleSink: { [weak self] frames, trim, family in
+                                    guard let archive = self?.rejectedHistoryArchive else { return true }
+                                    // Off the main actor, like the reject archive above.
+                                    let outcome = await Task.detached(priority: .utility) {
+                                        archive.archive(frames, trim: trim, family: family)
+                                    }.value
+                                    if case .failed = outcome { return false }
+                                    return true
                                 },
                                 onChunk: { [weak self] decoded, console in
                                     if decoded { self?.state.decodedChunksThisSession += 1 }
@@ -1868,6 +1890,7 @@ public final class BLEManager: NSObject, ObservableObject {
         // re-add and leaving a stale key behind for a strap the user removed. Re-latching costs the same
         // five refusals it always did, so a strap that genuinely cannot bond is no worse off.
         HelloSuppressionStore.setSuppressed(releasedUUID, false)
+        SuppressedHelloRetry.clear(releasedUUID)
         bondGiveUp.reset()
         autoReconnectPausedForBondLoop = false
         bondLoopPausedAt = nil
@@ -2349,6 +2372,70 @@ public final class BLEManager: NSObject, ObservableObject {
         log("Raw-data session: stopped + flushed")
     }
 
+    /// True only while `stopUnexpectedRealtimeImu` is issuing its two stop writes, so `send()` admits them.
+    private var imuFailSafeStopInFlight = false
+    /// True only while the activity capture is issuing its lean writes (105/107/108), so `send()` admits them.
+    private var leanRawCaptureInFlight = false
+    private var leanRawCaptureLogged = false
+    /// When the last LIVE (non-offload) raw-IMU frame arrived; the IMU-only arm is verified against it.
+    private var lastLiveImuFrameAt: Date?
+    /// The IMU-only arm awaiting verification, keyed by when it was sent.
+    private var imuOnlyArmPendingSince: Date?
+    /// Set when an IMU-only arm produced no live IMU: this process falls back to the shared raw start.
+    private var imuOnlyArmFailed = false
+    private var imuOnlyArmVerifiedLogged = false
+
+    /// Shared raw start (81) + live IMU (106): the hardware-verified arm. Raw collection holds its own
+    /// request, so the strap banks BOTH raw optical (v20) and raw IMU (v21) to flash whatever per-sensor
+    /// saving says (confirmed on a 5/MG 2026-10-07: 107/105 off were acknowledged and banking continued).
+    /// Live optical (108) is still switched off, since nothing reads it.
+    private func armSharedRaw() {
+        send(.startRawData, payload: [0x01], writeType: .withResponse)
+        send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+        if ActivityImuCapture.leanRawCapture() {
+            leanRawCaptureInFlight = true
+            for w in ActivityImuCapture.leanRawCaptureCommands {
+                send(w.command, payload: w.payload, writeType: .withResponse)
+            }
+            leanRawCaptureInFlight = false
+        }
+    }
+
+    /// IMU-only arm: the per-sensor IMU collection request (105 on) + live IMU (106), with NO shared raw
+    /// start, so optical collection is never requested and its 2140 B per second never reaches flash. The
+    /// IMU itself is still banked (105 is collection-with-saving), which is the gap-filler for link drops.
+    /// Unproven on hardware, so it verifies itself: no live IMU frame within `imuOnlyVerifySeconds` and this
+    /// process falls back to `armSharedRaw` for good.
+    private func armImuOnly(now: Date) {
+        leanRawCaptureInFlight = true
+        send(.toggleIMUSaving, payload: [0x01, 0x01], writeType: .withResponse)
+        leanRawCaptureInFlight = false
+        send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+        if !leanRawCaptureLogged {
+            leanRawCaptureLogged = true
+            log("Activity motion: IMU-only arm (105 IMU collection + 106 live IMU, no raw start) so the strap does not collect raw optical")
+        }
+        imuOnlyArmPendingSince = now
+        DispatchQueue.main.asyncAfter(deadline: .now() + ActivityImuCapture.imuOnlyVerifySeconds) { [weak self] in
+            self?.verifyImuOnlyArm(armedAt: now)
+        }
+    }
+
+    private func verifyImuOnlyArm(armedAt: Date) {
+        guard imuOnlyArmPendingSince == armedAt, activityImuInFlight, state.connected else { return }
+        imuOnlyArmPendingSince = nil
+        if let last = lastLiveImuFrameAt, last >= armedAt {
+            if !imuOnlyArmVerifiedLogged {
+                imuOnlyArmVerifiedLogged = true
+                log("Activity motion: IMU-only arm verified - live IMU is flowing without the raw start")
+            }
+            return
+        }
+        imuOnlyArmFailed = true
+        log("Activity motion: IMU-only arm produced no live IMU in \(Int(ActivityImuCapture.imuOnlyVerifySeconds))s - falling back to the raw start (81) for this session")
+        armSharedRaw()
+    }
+
     /// Stop a realtime IMU producer left armed after a crash, lost stop write, or another client.
     private func stopUnexpectedRealtimeImu(_ frame: [UInt8], isOffload: Bool, now: Date = Date()) {
         guard selectedModel.deviceFamily == .whoop5, !isOffload, frame.count > 8,
@@ -2357,8 +2444,14 @@ public final class BLEManager: NSObject, ObservableObject {
               now.timeIntervalSince(rawCaptureStoppedAt) >= 3,
               now.timeIntervalSince(unexpectedImuStopAt) >= 30 else { return }
         unexpectedImuStopAt = now
+        // The send() allowlist admits raw-data commands only while a capture flag is set, and this path runs
+        // exactly when none is, so without its own admission both writes were dropped ("no WHOOP 5/MG framing")
+        // and the strap kept streaming AND banking raw records: after a drop mid-window it carried on through
+        // the whole time away, about 3.4 KB per second of extra history to offload later.
+        imuFailSafeStopInFlight = true
         send(.stopRawData, payload: [0x01], writeType: .withResponse)
         send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
+        imuFailSafeStopInFlight = false
         log("Raw IMU fail-safe: unexpected realtime packet type \(frame[8]) while capture was off; stop requested")
     }
 
@@ -2404,14 +2497,24 @@ public final class BLEManager: NSObject, ObservableObject {
         if want && !activityImuInFlight {
             // Same hardware-verified arm as a Raw Data session: START_RAW_DATA, then the IMU selector.
             activityImuInFlight = true
-            send(.startRawData, payload: [0x01], writeType: .withResponse)
-            send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+            if ActivityImuCapture.leanRawCapture() && !imuOnlyArmFailed {
+                armImuOnly(now: now)
+            } else {
+                armSharedRaw()
+            }
         } else if !want && activityImuInFlight {
             // Stop while the flag still admits the writes, then release it.
             if !UserDefaults.standard.bool(forKey: "enableRawCapture") {
                 send(.stopRawData, payload: [0x01], writeType: .withResponse)
                 send(.toggleIMUMode, payload: [0x01, 0x00], writeType: .withResponse)
+                if ActivityImuCapture.leanRawCapture() {
+                    // 82 clears the per-sensor requests too; this makes the IMU-only arm's own request explicit.
+                    leanRawCaptureInFlight = true
+                    send(.toggleIMUSaving, payload: [0x01, 0x00], writeType: .withResponse)
+                    leanRawCaptureInFlight = false
+                }
             }
+            imuOnlyArmPendingSince = nil
             activityImuInFlight = false
             rawCaptureStoppedAt = now
         }
@@ -2509,6 +2612,14 @@ public final class BLEManager: NSObject, ObservableObject {
                 // user-started capture window is in flight; normal sync never enables this gate.
                 || ((rawCaptureInFlight || activityImuInFlight) && (command == .startRawData
                     || command == .stopRawData || command == .toggleIMUMode))
+                // Lean raw capture: the three saving/optical-live OFF writes, and only their off body.
+                || (leanRawCaptureInFlight && payload == [0x01, 0x00]
+                    && (command == .enableOpticalData || command == .toggleOpticalLive
+                        || command == .toggleIMUSaving))
+                || (leanRawCaptureInFlight && command == .toggleIMUSaving && payload == [0x01, 0x01])
+                // The raw-IMU fail-safe's STOP only (never a start): see `stopUnexpectedRealtimeImu`.
+                || (imuFailSafeStopInFlight && (command == .stopRawData
+                    || (command == .toggleIMUMode && payload.last == 0x00)))
                 // SET_CONFIG / SET_FF_VALUE (120), ENABLE direction — the R22 deep-stream unlock. Allowed
                 // only while the deep-data experiment is opted in, and only for a KEY and a VALUE the gate
                 // recognises: one of the sixteen R22 flags carrying that key's own enable value. The clause
@@ -2982,6 +3093,8 @@ public final class BLEManager: NSObject, ObservableObject {
         // A session that only drained a previous owner's records counts too: the strap's trim advanced and more
         // may remain, and without this the drain would stop after one pass and then back off as if empty.
         let persistedSensorRows = (backfiller?.sessionRowsPersisted ?? 0) > 0 || drainedRecords > 0
+        // Snapshotted with it, for the same reason: how far this session's own rows reached.
+        let sessionNewestPersistedTs = backfiller?.sessionNewestPersistedTs
         if persistedSensorRows { consecutiveEmptyOffloads = 0 }
         else if consecutiveAutoContinues == 0 { consecutiveEmptyOffloads += 1 }
         if reason == "HISTORY_COMPLETE" {
@@ -3176,7 +3289,8 @@ public final class BLEManager: NSObject, ObservableObject {
             // Snapshotting `> 0` = the auto-continue can't disagree with the empty verdict, and a dup-only
             // re-offload (0 new rows) stops instead of spinning on already-synced data.
             maybeAutoContinueBackfill(trimAdvanced: trimAdvanced,
-                                      persistedSensorRows: persistedSensorRows)
+                                      persistedSensorRows: persistedSensorRows,
+                                      sessionNewestPersistedTs: sessionNewestPersistedTs)
         }
     }
 
@@ -3191,7 +3305,8 @@ public final class BLEManager: NSObject, ObservableObject {
     /// `trimAdvanced` is the spin-detector signal computed in exitBackfilling (did this session move the
     /// trim cursor vs the previous one) — passed in because exitBackfilling has already advanced
     /// `lastSessionEndTrim` past the comparison point by the time this Task runs.
-    private func maybeAutoContinueBackfill(trimAdvanced: Bool, persistedSensorRows: Bool) {
+    private func maybeAutoContinueBackfill(trimAdvanced: Bool, persistedSensorRows: Bool,
+                                           sessionNewestPersistedTs: Int?) {
         // Cheap pre-checks first (no Task if we already know we won't continue): still connected, under
         // the cap, and the trim moved. The frontier read only happens when those already hold.
         guard state.connected, state.bonded else { return }
@@ -3239,6 +3354,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 ourFrontierTs: frontier,
                 wallNowUnix: wallNow,
                 persistedSensorRows: persistedSensorRows,
+                sessionNewestPersistedTs: sessionNewestPersistedTs,
                 lastTrimAdvanced: trimAdvanced,
                 consecutiveCount: count) else {
                 // #1012: name the stop honestly when the future-clock gate is what ended the chain —
@@ -3286,8 +3402,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// counters that drive the honest sync status. Returns false ONLY on a genuine write failure,
     /// which makes the Backfiller hold the cursor/ack so the strap re-sends the chunk (no data loss
     /// either way). Frames carry sensor payloads, not identifiers — no serials/MACs are archived.
-    private func archiveRejectedFrames(_ frames: [[UInt8]], trim: UInt32, family: DeviceFamily) -> Bool {
-        switch rejectedHistoryArchive.archive(frames, trim: trim, family: family) {
+    ///
+    /// The file work runs off the main actor and is awaited, so the Backfiller still acks only after it. A full
+    /// archive is read, re-evicted and atomically rewritten (about 5 MB), and every append is fsynced; both used
+    /// to happen on the main thread inside the offload.
+    private func archiveRejectedFrames(_ frames: [[UInt8]], trim: UInt32, family: DeviceFamily) async -> Bool {
+        let archive = rejectedHistoryArchive
+        let outcome = await Task.detached(priority: .utility) {
+            archive.archive(frames, trim: trim, family: family)
+        }.value
+        switch outcome {
         case .written(let count):
             state.rejectedFramesThisSession += count
             return true
@@ -4934,6 +5058,24 @@ public final class BLEManager: NSObject, ObservableObject {
         keepAliveTimer = t
     }
 
+    /// #1635 follow-up: give a SUPPRESSED 5/MG one more handshake on a link that has held steady, on the
+    /// `SuppressedHelloRetry` backoff. Without it a strap latched by a run of radio drops kept history sync
+    /// off until the user found the Connect button. A genuine ack clears the latch in `didWriteValueFor`.
+    private func retrySuppressedHelloIfDue(now: Date = Date()) {
+        guard selectedModel.deviceFamily == .whoop5, !didBond, clientHelloWriteAt == nil,
+              let p = peripheral, let c = cmdCharacteristic, let since = linkUpSince,
+              let hello = selectedModel.deviceFamily.clientHello else { return }
+        let id = p.identifier.uuidString
+        guard HelloSuppressionStore.suppressed(id) else { return }
+        let upSeconds = Double(DispatchTime.now().uptimeNanoseconds &- since.uptimeNanoseconds) / 1_000_000_000
+        guard SuppressedHelloRetry.isDue(now: now, linkUpSeconds: upSeconds,
+                                         nextRetryAt: SuppressedHelloRetry.nextRetryAt(id)) else { return }
+        SuppressedHelloRetry.noteAttempt(id, now: now)
+        log("WHOOP 5/MG: retrying the CLIENT_HELLO on a link that has held for \(Int(upSeconds))s (automatic retry \(SuppressedHelloRetry.attempts(id)); the handshake was switched off after earlier drops).")
+        clientHelloWriteAt = now
+        p.writeValue(Data(hello), for: c, type: .withResponse)
+    }
+
     private func keepAliveFire() {
         // #1635: a SUPPRESSED 5/MG never bonds, so a bare `didBond` gate switches this whole timer off for
         // exactly the link that now stays up for hours - taking the liveness watchdog below with it and
@@ -4980,6 +5122,8 @@ public final class BLEManager: NSObject, ObservableObject {
             lastRssiReadAt = Date()
             p.readRSSI()
         }
+
+        retrySuppressedHelloIfDue()
 
         // The watchdog above is the whole of the keep-alive an unbonded 5/MG can use. Everything below
         // sends puffin-framed work that needs the encrypted bond.
@@ -5092,7 +5236,13 @@ public final class BLEManager: NSObject, ObservableObject {
         // live HR lapses. Feed the already-tracked future-dated signal into BackfillPolicy, which SKIPS
         // the .strap/.periodic triggers entirely for such a strap (the .connect pass still re-checks it).
         let clockUntrusted = BackfillContinuation.isFutureDatedNewest(strapNewestTs, wallNowUnix: Int(now))
-        guard BackfillPolicy.shouldRun(trigger: trigger, now: now, lastBackfillAt: last,
+        // Off screen a strap event waits out the periodic floor, not the 90 s event floor. Every EVENT counts
+        // as "may have new data" (FrameRouter), battery levels and the strap's answers to our own realtime and
+        // raw-capture toggles included, and the raw-IMU duty cycle alone produces several in a few minutes, so
+        // the background offload ran every few minutes instead of on its cadence. The strap banks days of
+        // history, and the next foreground asks for a sync at once.
+        let policyTrigger: BackfillTrigger = (trigger == .strap && !Platform.appIsOnScreen) ? .periodic : trigger
+        guard BackfillPolicy.shouldRun(trigger: policyTrigger, now: now, lastBackfillAt: last,
                                        // #battery: back off on EITHER a console-only streak (clock-lost) OR a
                                        // plain empty-offload streak incl. idle-timeout stalls — the latter is
                                        // what stops the 15-min poll spinning on a caught-up strap.
@@ -5102,6 +5252,9 @@ public final class BLEManager: NSObject, ObservableObject {
             log("Backfill: \(trigger) skipped (rate-limited; last \(last.map { Int(now - $0) } ?? -1)s ago)")
             return
         }
+        // For the sync banner, which holds back automatic syncs but not one the user asked for. An auto-continue
+        // carries on the sync before it.
+        if trigger != .autoContinue { state.backfillRequestedByUser = trigger == .manual }
         if beginBackfill() {
             UserDefaults.standard.set(now, forKey: BLEManager.backfillLastAtKey)
         }
@@ -5920,9 +6073,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // toggle that already reads "on" from a PRIOR build's grant may not carry over — the
         // message needs to tell the user to re-toggle it, not just check that it's on.
         #if os(macOS)
-        state.lastSyncError = "NOOP isn't allowed to use Bluetooth. Open System Settings → Privacy & Security → Bluetooth — if NOOP is already listed there, toggle it off and back on (a new NOOP build needs a fresh grant), then quit and reopen NOOP."
+        state.lastSyncError = "Nara isn't allowed to use Bluetooth. Open System Settings → Privacy & Security → Bluetooth. If Nara is already listed, turn it off and back on, then quit and reopen Nara."
         #else
-        state.lastSyncError = "NOOP isn't allowed to use Bluetooth. Open iPhone Settings → NOOP → Bluetooth — if it's already on, toggle it off and back on, then quit and reopen NOOP."
+        state.lastSyncError = "Nara isn't allowed to use Bluetooth. Open iPhone Settings → Nara → Bluetooth. If it's already on, turn it off and back on, then quit and reopen Nara."
         #endif
         log("Bluetooth permission not granted (unauthorized) — cannot scan or connect")
         radioStateErrorShown = true
@@ -6342,6 +6495,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
                 state.append(log: rejects, domain: .connection)
             }
         }
+        // Read before the clear: the unanswered-hello check further down needs to know whether this link
+        // carried traffic, or whether it was a radio drop that would have happened with or without a hello.
+        let linkInboundFrames = inboundFrames
         // Clear the tally with the link, so a second teardown for the same drop cannot re-report it.
         inboundFrames = 0; inboundBytes = 0; cmdChannelFrames = 0
         rssiReads = 0; rssiWorstDbm = nil; rssiSumDbm = 0
@@ -6451,8 +6607,17 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // Read it HERE, while `clientHelloWriteAt` and `didBond` are both still valid, and feed it in
         // through the same split the auth path uses. `countsAsBondRefusal` gates on family, so a 4.0 (which
         // bonds cleanly) can never latch the suppression.
+        // Only a drop that the hello plausibly caused counts. At the edge of range links come up, carry
+        // nothing and die on the supervision timeout with or without a hello; counting those latched the
+        // suppression on straps that pair fine, which turned a walk out of range into "history sync off".
+        let helloOutstandingMs = clientHelloWriteAt.map { Int(Date().timeIntervalSince($0) * 1000) }
+        let helloEvidence = helloUnansweredIsEvidence(helloOutstandingMs: helloOutstandingMs,
+                                                      inboundFramesOnLink: linkInboundFrames)
+        if let ms = helloOutstandingMs, !helloEvidence, !didBond, selectedModel.deviceFamily == .whoop5 {
+            log("WHOOP 5/MG: CLIENT_HELLO was unanswered when the link dropped after \(ms)ms with \(linkInboundFrames) inbound frame(s) - a radio drop, not counted as the strap refusing the handshake.")
+        }
         if countsAsBondRefusal(isAuthRefusalStatus: false,
-                               helloUnacked: clientHelloWriteAt != nil,
+                               helloUnacked: helloEvidence,
                                alreadyBonded: didBond,
                                family: selectedModel.deviceFamily) {
             recordWhoop5BondRefusal(authRefusal: false,
@@ -6995,7 +7160,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     // counting silently; recordRefusal() below stays false (latched), so no epitaph spam.
                     log("WHOOP 5/MG: bond still refused during a paused-state probe (streak \(bondRefusalStreak)) - the give-up stays latched")
                 } else if bondRefusalStreak >= 2 {
-                    state.pairingHint = "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP."
+                    state.pairingHint = "Nara can see your strap, but it won't pair. It's probably still paired with the official WHOOP app, or held by an old Bluetooth pairing. Fully close the WHOOP app, tap the strap until its lights flash blue, and if it's listed in Bluetooth settings, forget it there. Then connect again."
                     log("WHOOP 5/MG: bond refused \(bondRefusalStreak)× with no successful bond — the strap is refusing the encrypted link (WHOOP app holds it, or a stale iOS pairing). Surfacing pairing-mode + forget-device guidance (#78).")
                 } else {
                     log("WHOOP 5/MG: bond write refused (insufficient) — retrying once; will surface pairing-mode guidance if it persists (#78).")
@@ -7076,6 +7241,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // #1635: the handshake demonstrably works on this strap - drop the latch so a later
                 // transient failure starts from a clean slate rather than inheriting an old verdict.
                 HelloSuppressionStore.setSuppressed(peripheral.identifier.uuidString, false)
+                SuppressedHelloRetry.clear(peripheral.identifier.uuidString)
                 bondGiveUp.reset()
                 state.bonded = true
                 state.encryptedBond = true   // genuine encrypted bond (not the live-HR shortcut) — #69
@@ -7790,6 +7956,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     // append; the store gates on the exact 1244-byte shape, so this is a no-op for any
                     // non-IMU frame). Mirror of Android's `recordGroundTruthImuFrame`
                     // (WhoopBleClient.kt:8019), which also records every completed live frame.
+                    if !isOffload, Whoop5RawImu.rawColumns(frame) != nil { lastLiveImuFrameAt = Date() }
                     collector?.recordGroundTruthImu(frame)
                     // NOTE: we deliberately do NOT feed live 5/MG REALTIME_DATA into the Collector's
                     // full ingest (HR/RR ingestion) here — the rationale above stands: for a 5/MG the

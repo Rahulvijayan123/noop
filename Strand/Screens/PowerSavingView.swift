@@ -116,7 +116,7 @@ struct PowerSavingView: View {
                         .toggleStyle(.switch)
                         .tint(StrandPalette.accent)
                         .onChangeCompat(of: freshSyncEnabled) { _ in model.applyPowerSaving() }
-                        Text("With cloud scoring on, a WHOOP 5.0 or MG hands Nara its history about once a minute, so steps, calories and respiratory rate stay current instead of arriving in batches every few minutes. Live heart rate is unaffected either way. Low refresh overrides this, and Power saving slows it while the strap's battery is low. Nothing is lost if you turn it off: the strap banks everything and hands it over later.")
+                        Text("With cloud scoring on and Nara open, a WHOOP 5.0 or MG hands Nara its history about once a minute, so steps, calories and respiratory rate stay current instead of arriving in batches every few minutes. In the background it syncs every 15 minutes, and opening the app syncs at once. Live heart rate is unaffected either way. Low refresh overrides this, and Power saving slows it while the strap's battery is low. Nothing is lost if you turn it off: the strap banks everything and hands it over later.")
                             .font(StrandFont.caption)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)

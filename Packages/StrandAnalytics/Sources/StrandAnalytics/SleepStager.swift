@@ -86,6 +86,14 @@ public enum SleepStager {
 
     /// Per-sample gravity change (g) at/below which a sample is "still".
     public static let gravityStillThresholdG: Double = 0.01
+    /// With dense gravity, detection calls a sample still only when orientation sits on a plateau: within
+    /// `stillPlateauToleranceG` of the orientation this many seconds before AND after. At 1 Hz, slow awake
+    /// movement (standing, getting ready) changes gravity under 0.01 g per sample, so the per-sample test
+    /// read it as still; over 10 s it drifts past the tolerance. A roll-over in sleep costs only its own
+    /// seconds plus this span either side, where a longer span would charge every turn a full minute.
+    public static let stillPlateauSpanS: Int = 10
+    /// Orientation change (g) across `stillPlateauSpanS` at/below which a dense sample is on a plateau.
+    public static let stillPlateauToleranceG: Double = 0.03
     /// Rolling stillness window (minutes).
     public static let stillWindowMin: Int = 15
     /// Fraction of still samples to call the window-center "sleep".
@@ -357,6 +365,33 @@ public enum SleepStager {
         return deltas
     }
 
+    /// Per-record "still" for detection. Where records exist `stillPlateauSpanS`…2×`stillPlateauSpanS`
+    /// before and after, still = orientation within `stillPlateauToleranceG` of both and the per-record
+    /// `deltas` also within it. Elsewhere (sparser cadence, data edges, gaps) it is the original
+    /// per-record test, deltas < `gravityStillThresholdG`, so ≥ 60 s cadence is unchanged.
+    static func plateauStill(_ grav: [GravitySample], _ deltas: [Double]) -> [Bool] {
+        func dist(_ a: GravitySample, _ b: GravitySample) -> Double {
+            let dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z
+            return (dx * dx + dy * dy + dz * dz).squareRoot()
+        }
+        var out: [Bool] = []
+        out.reserveCapacity(grav.count)
+        var back = 0, fwd = 0
+        for (i, r) in grav.enumerated() {
+            while back + 1 < i && grav[back + 1].ts <= r.ts - stillPlateauSpanS { back += 1 }
+            if fwd < i { fwd = i }
+            while fwd + 1 < grav.count && grav[fwd].ts < r.ts + stillPlateauSpanS { fwd += 1 }
+            let backAge = r.ts - grav[back].ts, fwdAge = grav[fwd].ts - r.ts
+            let span = stillPlateauSpanS ... 2 * stillPlateauSpanS
+            if i > 0 && span.contains(backAge) && span.contains(fwdAge) {
+                out.append(max(deltas[i], dist(grav[back], r), dist(grav[fwd], r)) < stillPlateauToleranceG)
+            } else {
+                out.append(deltas[i] < gravityStillThresholdG)
+            }
+        }
+        return out
+    }
+
     /// Median spacing between consecutive timestamps, restricted to (0, 300 s).
     static func medianIntervalS(_ times: [Int]) -> Double {
         guard times.count >= 2 else { return defaultIntervalS }
@@ -381,11 +416,13 @@ public enum SleepStager {
     /// Used to detect clumped/sparse gravity where the dropouts themselves are the signal: a few
     /// long dropouts in otherwise-dense (clumped) motion keep the MEDIAN gap small but still break
     /// runs, so the largest gap — not the median — is the right signal (#28).
-    static func largestGapS(_ times: [Int]) -> Double {
+    static func largestGapS(_ times: [Int], wristOff: [(start: Int, end: Int)] = []) -> Double {
         guard times.count >= 2 else { return 0 }
         var mx = 0.0
         for i in 0..<(times.count - 1) {
-            let g = Double(times[i + 1] - times[i])
+            let a = times[i], b = times[i + 1]
+            let off = wristOff.reduce(0) { $0 + max(0, min(b, $1.end) - max(a, $1.start)) }
+            let g = Double(max(0, b - a - off))
             if g > mx { mx = g }
         }
         return mx
@@ -397,8 +434,11 @@ public enum SleepStager {
     /// median) catches CLUMPED motion — dense bursts split by a few long dropouts, the typical
     /// WHOOP 4.0 backfill (#28) — whose median gap stays small yet which still hides run-breaking
     /// gaps. Requires a real HR span to compare against — with no/degenerate HR the dense path is
-    /// kept (false), so a 4.0 with absent HR is never reclassified as sparse.
-    static func isGravitySparse(_ grav: [GravitySample], hr: [HRSample]) -> Bool {
+    /// kept (false), so a 4.0 with absent HR is never reclassified as sparse. Time inside `wristOff` is
+    /// not a dropout: a dense strap taken off for a shower recorded nothing because nothing was worn,
+    /// and counting that gap flipped every such day's whole window onto the sparse bridges.
+    static func isGravitySparse(_ grav: [GravitySample], hr: [HRSample],
+                                wristOff: [(start: Int, end: Int)] = []) -> Bool {
         if grav.count < 2 || hr.count < 2 { return false }
         let hrSpan = Double(hr[hr.count - 1].ts - hr[0].ts)
         if hrSpan <= 0 { return false }
@@ -408,7 +448,7 @@ public enum SleepStager {
         // the gravity-only spine shreds the night on. The largest gap catches what a median would
         // miss (largest ≥ median, so this subsumes the old median check). Flagging sparse only
         // ENABLES buildRuns' HR-vouched bridge — a real wake (HR above the sleep band) still breaks.
-        return largestGapS(grav.map { $0.ts }) > Double(maxGapMin * 60)
+        return largestGapS(grav.map { $0.ts }, wristOff: wristOff) > Double(maxGapMin * 60)
     }
 
     /// True when HR stays in the sleep band (≤ baseline × hrSleepBandMult) across (a, b], used to
@@ -430,7 +470,7 @@ public enum SleepStager {
     }
 
     /// Per-record sleep flags from a rolling fraction of "still" samples.
-    static func classifyStill(_ grav: [GravitySample], _ deltas: [Double]) -> [Bool] {
+    static func classifyStill(_ grav: [GravitySample], _ deltas: [Double], still: [Bool]? = nil) -> [Bool] {
         let n = grav.count
         if n < 2 { return [Bool](repeating: false, count: n) }
         let half = windowSize(grav.map { $0.ts }) / 2
@@ -439,7 +479,7 @@ public enum SleepStager {
         // the main thread, froze the app into ANRs after a few nights of 1 Hz history). Identical output.
         var stillPrefix = [Int](repeating: 0, count: n + 1)
         for i in 0..<n {
-            stillPrefix[i + 1] = stillPrefix[i] + (deltas[i] < gravityStillThresholdG ? 1 : 0)
+            stillPrefix[i + 1] = stillPrefix[i] + ((still?[i] ?? (deltas[i] < gravityStillThresholdG)) ? 1 : 0)
         }
         var flags: [Bool] = []
         flags.reserveCapacity(n)
@@ -1399,10 +1439,10 @@ public enum SleepStager {
         // where gravity is clumped (~25% coverage), so the gravity-only spine fragments the night.
         // ONLY when sparse do the three robustness branches engage; a dense 4.0 night is `false`
         // here and follows the exact original path (byte-identical).
-        let sparse = isGravitySparse(grav, hr: hrS)
+        let sparse = isGravitySparse(grav, hr: hrS, wristOff: wristOff)
 
         let deltas = gravityDeltas(grav)
-        let flags = classifyStill(grav, deltas)
+        let flags = classifyStill(grav, deltas, still: plateauStill(grav, deltas))
         var runs = buildRuns(grav, flags, sparse: sparse, hr: hrS, baseline: baseline)
         runs = mergePeriods(runs)
         let minSleepS = minSleepMin * 60

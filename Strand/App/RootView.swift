@@ -341,6 +341,12 @@ struct RootView: View {
             }
             if dest != nil { router.requestedDestination = nil }
         }
+        // The Today and Monitor gears ask for Settings; on the Mac that is the Settings sidebar item.
+        .onChangeCompat(of: router.settingsRequested) { requested in
+            guard requested else { return }
+            selection = .settings
+            router.settingsRequested = false
+        }
         .sheet(item: $engineSheet) { dest in
             NavigationStack {
                 Group {

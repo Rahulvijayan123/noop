@@ -734,17 +734,8 @@ private struct BondedStep: View {
 private struct ProfileStep: View {
     @EnvironmentObject private var profile: ProfileStore
 
-    // The stored profile is always SI. Body measurements and exercise distance can follow the regional
-    // conventions independently; an unset distance choice follows the body choice for compatibility.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
-    private var distanceUnitSystem: UnitSystem {
-        UnitPrefs.resolveDistance(system: unitSystem, override: distanceSystemRaw)
-    }
-    private var distanceSystemBinding: Binding<String> {
-        Binding(get: { distanceUnitSystem.rawValue }, set: { distanceSystemRaw = $0 })
-    }
+    // The stored profile is always SI; Nara shows US units (pounds, feet and inches) everywhere.
+    private let unitSystem = UnitSystem.imperial
 
     private let sexes: [(String, String)] = [
         ("male", String(localized: "Male")), ("female", String(localized: "Female")),
@@ -774,32 +765,6 @@ private struct ProfileStep: View {
                                 ForEach(sexes, id: \.0) { key, label in
                                     Text(label).tag(key)
                                 }
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                        }
-
-                        Divider().overlay(StrandPalette.hairline)
-
-                        // Keep the two choices explicit here: "Metric/Imperial" alone cannot describe
-                        // common mixed conventions such as Canadian pounds with kilometres.
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Body measurements").strandOverline()
-                            Picker("Body measurements", selection: $unitSystemRaw) {
-                                Text("Metric").tag(UnitSystem.metric.rawValue)
-                                Text("Imperial").tag(UnitSystem.imperial.rawValue)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                        }
-
-                        Divider().overlay(StrandPalette.hairline)
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Exercise distance & pace").strandOverline()
-                            Picker("Exercise distance & pace", selection: distanceSystemBinding) {
-                                Text("Kilometres").tag(UnitSystem.metric.rawValue)
-                                Text("Miles").tag(UnitSystem.imperial.rawValue)
                             }
                             .pickerStyle(.segmented)
                             .labelsHidden()
@@ -1089,7 +1054,7 @@ private struct AppearanceStep: View {
     }
     var body: some View {
         StepShell(title: String(localized: "Make it yours"),
-                  subtitle: String(localized: "Choose how NOOP looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
+                  subtitle: String(localized: "Choose how Nara looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
             VStack(spacing: 28) {
                 Image(systemName: "circle.lefthalf.filled")
                     .font(.system(size: 44, weight: .regular))

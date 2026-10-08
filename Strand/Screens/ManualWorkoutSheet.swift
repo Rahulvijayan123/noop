@@ -41,11 +41,11 @@ struct ManualWorkoutSheet: View {
     @State private var distanceText: String
 
     /// Exercise-distance choice. Unset follows the original combined setting for existing installs.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(
-            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
             override: distanceSystemRaw)
     }
     private var distanceUnit: String { UnitFormatter.distanceUnit(distanceUnitSystem) }
@@ -91,7 +91,7 @@ struct ManualWorkoutSheet: View {
         // (buildManualRow then re-stores exactly what's shown). @AppStorage isn't usable pre-init, so read
         // the same key directly.
         let bodySystem = UnitSystem(
-            rawValue: UserDefaults.standard.string(forKey: UnitPrefs.systemKey) ?? "") ?? .metric
+            rawValue: UserDefaults.standard.string(forKey: UnitPrefs.systemKey) ?? "") ?? .imperial
         let sys = UnitPrefs.resolveDistance(
             system: bodySystem,
             override: UserDefaults.standard.string(forKey: UnitPrefs.distanceSystemKey) ?? "")

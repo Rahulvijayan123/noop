@@ -450,7 +450,7 @@ struct TrendsReportSheet: View {
     // The same three keys every other screen reads, so the exported page agrees with what the user
     // has been looking at all month (#1637). Temperature has its own override on top of the
     // length/mass system, which is why both are needed to resolve it.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
 
@@ -460,7 +460,7 @@ struct TrendsReportSheet: View {
     /// the engine) and the metric cards (rendered by the page). Both surfaces must be handed the
     /// SAME value or the document contradicts itself.
     private var units: ReportDisplayUnits {
-        let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        let system = UnitSystem(rawValue: unitSystemRaw) ?? .imperial
         let temp = UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
         let scale = UnitPrefs.resolveEffortScale(effortScaleRaw)
         // Name the canonical constant rather than deriving it from `effortValue(1.0,)`: the report

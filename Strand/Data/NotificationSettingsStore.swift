@@ -101,8 +101,10 @@ final class NotificationSettingsStore: ObservableObject {
         static let prefs      = "notif.appPrefs"
     }
 
+    private var syncSubscription: AnyCancellable?
+
     init() {
-        masterEnabled     = d.object(forKey: K.master) as? Bool ?? false  // opt-in, default OFF
+        masterEnabled     = Self.storedMaster(UserDefaults.standard)
         onlyWhenWorn      = d.object(forKey: K.worn) as? Bool ?? true
         quietHoursEnabled = d.object(forKey: K.quiet) as? Bool ?? false
         quietStartMinutes = d.object(forKey: K.quietStart) as? Int ?? 22 * 60   // 22:00
@@ -126,7 +128,17 @@ final class NotificationSettingsStore: ObservableObject {
             seeded[app.id] = AppAlertPref(enabled: false, pattern: app.category.defaultPattern)
         }
         prefs = seeded
+        // The master switch is one of the settings that follow the account (`SettingsCloudSync`).
+        syncSubscription = NotificationCenter.default.publisher(for: .syncedSettingsDidApply)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let stored = Self.storedMaster(self.d)
+                if self.masterEnabled != stored { self.masterEnabled = stored }
+            }
     }
+
+    /// Wrist alerts are opt-in: off until turned on.
+    private static func storedMaster(_ d: UserDefaults) -> Bool { d.object(forKey: K.master) as? Bool ?? false }
 
     // MARK: Per-app access
 

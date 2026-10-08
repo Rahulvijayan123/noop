@@ -36,8 +36,8 @@ struct LiftSessionDetailSheet: View {
     /// Session RPE as stored now. The edit sheet can correct it, and the session load must follow.
     @State private var sessionRpe: Double?
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
 
     private var durationSec: Int {
         guard let end = session.endTs else { return 0 }

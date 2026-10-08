@@ -59,6 +59,21 @@ enum Platform {
     static var deviceNounPhrase: String { String(localized: "this \(deviceNoun)") }
 }
 
+// MARK: - Foreground
+
+extension Platform {
+    /// Whether the app is on screen. Read from UIKit rather than the cloud runtime's flag, which is only set by
+    /// scene-phase changes and so stays at its default (active) through a Bluetooth relaunch. Always true on
+    /// macOS, where the Mac app has no background lifecycle.
+    @MainActor static var appIsOnScreen: Bool {
+        #if os(iOS)
+        UIApplication.shared.applicationState == .active
+        #else
+        true
+        #endif
+    }
+}
+
 // MARK: - Opening URLs
 
 /// Cross-platform "open this URL with the system" helper. Used for `mailto:` and `shortcuts://`.

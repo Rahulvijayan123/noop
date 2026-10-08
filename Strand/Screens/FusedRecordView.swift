@@ -204,10 +204,10 @@ private struct FusedMetricRowView: View {
 
     // Each screen resolves °C/°F for itself (TodayView, FullDayChartView, MetricExplorerView do the
     // same); the fused row used to print a hardcoded "°C" and was the last reader here ignoring it.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw)
     }
 
@@ -380,10 +380,10 @@ private struct ContributorRow: View {
 
     // Each screen resolves °C/°F for itself (TodayView, FullDayChartView, MetricExplorerView do the
     // same); the fused row used to print a hardcoded "°C" and was the last reader here ignoring it.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw)
     }
 

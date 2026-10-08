@@ -33,6 +33,7 @@ GATEWAY_PORT="${NARA_E2E_GATEWAY_PORT:-54431}"
 S3_PORT="${NARA_E2E_S3_PORT:-54432}"
 PUSH_PORT="${NARA_E2E_PUSH_PORT:-54441}"
 SCORES_PORT="${NARA_E2E_SCORES_PORT:-54442}"
+COACH_PORT="${NARA_E2E_COACH_PORT:-54443}"
 WORKER_BIN="${NARA_E2E_WORKER_BIN:-$REPO/Tools/CloudWorker/.build/debug/frwhoop-worker}"
 RUN="$WORK/run"
 DENO="${DENO:-deno}"
@@ -194,16 +195,21 @@ up() {
     NOOP_ENROLLMENT_PEPPER="$PEPPER"
     WORKER_SECRET="$WORKER_SECRET"
   )
-  say "starting the push and scores functions"
+  say "starting the push, scores and coach functions"
   spawn push "$RUN/push.log" env "${fn_env[@]}" DENO_SERVE_ADDRESS="tcp:127.0.0.1:$PUSH_PORT" \
     "$DENO" run -A --no-lock "$REPO/supabase/functions/push/index.ts"
   spawn scores "$RUN/scores.log" env "${fn_env[@]}" DENO_SERVE_ADDRESS="tcp:127.0.0.1:$SCORES_PORT" \
     "$DENO" run -A --no-lock "$REPO/supabase/functions/scores/index.ts"
+  # Coach serves the Settings profile route (/coach/profile). No model key is configured, so chat calls fail
+  # closed; the profile and memory routes only need the database.
+  spawn coach "$RUN/coach.log" env "${fn_env[@]}" DENO_SERVE_ADDRESS="tcp:127.0.0.1:$COACH_PORT" \
+    "$DENO" run -A --no-lock "$REPO/supabase/functions/coach/index.ts"
 
   say "starting the gateway on :$GATEWAY_PORT"
   spawn gateway "$RUN/gateway.log" env \
     E2E_GATEWAY_PORT="$GATEWAY_PORT" E2E_S3_PORT="$S3_PORT" E2E_KONG_URL="http://127.0.0.1:$API_PORT" \
     E2E_PUSH_URL="http://127.0.0.1:$PUSH_PORT" E2E_SCORES_URL="http://127.0.0.1:$SCORES_PORT" \
+    E2E_COACH_URL="http://127.0.0.1:$COACH_PORT" \
     E2E_MAIL_DIR="$WORK/mail" "$DENO" run -A --no-lock "$HERE/gateway.ts"
   wait_http "http://127.0.0.1:$GATEWAY_PORT/__e2e/health" 40
 
@@ -239,7 +245,7 @@ EOF
 }
 
 down() {
-  for n in worker gateway scores push smtp; do stop_pidfile "$RUN/$n.pid"; done
+  for n in worker gateway coach scores push smtp; do stop_pidfile "$RUN/$n.pid"; done
   if [ -d "$WORK/supabase" ]; then
     supabase stop --workdir "$WORK" --no-backup >&2 || true
   fi

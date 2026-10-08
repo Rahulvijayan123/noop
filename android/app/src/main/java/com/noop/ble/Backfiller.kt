@@ -14,6 +14,7 @@ import com.noop.protocol.HistoricalMeta
 import com.noop.protocol.classifyHistoricalMeta
 import com.noop.protocol.decodeHistorical
 import com.noop.protocol.extractHistoricalStreams
+import com.noop.protocol.isIntactWhoop5RawSensorRecord
 import com.noop.protocol.isEmptyRecordFrame
 import com.noop.protocol.rejectedHistoricalRecords
 import java.io.IOException
@@ -103,6 +104,12 @@ class Backfiller(
      * do not wire an archive (no archive → nothing to preserve → proceed).
      */
     private val rejectedSink: (frames: List<ByteArray>, trim: Long) -> Boolean = { _, _ -> true },
+    /**
+     * Archives the rolling sample of intact v20/v21 raw records ([RAW_SENSOR_ARCHIVE_SAMPLE_BUDGET] per
+     * session). Separate from [rejectedSink] because these decode fine: they are a corpus for the channel
+     * mapping work, not lost data, and a failed write never holds the ack. Twin of Swift `rawSampleSink`.
+     */
+    private val rawSampleSink: (frames: List<ByteArray>, trim: Long) -> Boolean = { _, _ -> true },
     /**
      * The (device, wall) clock reference. type-47 records carry their OWN real unix timestamp so
      * the offset is a no-op for them; this is supplied only for the REALTIME_RAW_DATA fallback and
@@ -313,6 +320,9 @@ class Backfiller(
      *  per-version cap could hold dumps back indefinitely. Reset in begin. Twin of Swift `spo2Examined`. */
     private var spo2Examined = 0
 
+    /** Intact v20/v21 raw records this session may still add to the archive. Reset in begin. */
+    private var rawSensorArchiveBudget = RAW_SENSOR_ARCHIVE_SAMPLE_BUDGET
+
     /**
      * #547: logged once per session the first time the #547 ingest gate drops an implausible-timestamp
      * record (a bad strap clock/flash emitting far-past / year-2027-spike / future-dated `unix` values).
@@ -379,6 +389,7 @@ class Backfiller(
         spo2Dumped = 0
         spo2DumpedByVersion.clear()
         spo2Examined = 0
+        rawSensorArchiveBudget = RAW_SENSOR_ARCHIVE_SAMPLE_BUDGET
         loggedImplausibleClock = false
         sessionDroppedImplausible = 0
         sessionUnhandledPacketTypes.clear()   // #891: a second offload must re-log its first sighting
@@ -639,9 +650,13 @@ class Backfiller(
             // insert below but ALWAYS before the ack (#1006, Swift-order parity — see the archive block
             // for why insert goes first). The WHOOP4 happy path (zero rejects) is unchanged.
             val rejected = rejectedHistoricalRecords(frames, family)
+            // Intact v20/v21 raw records are sensor data the strap banked, even though they yield no rows,
+            // so a chunk made only of them is not console output.
+            val rawSensor = if (family == DeviceFamily.WHOOP5) frames.filter { isIntactWhoop5RawSensorRecord(it) }
+                else emptyList()
             // #77 family: decoded no rows AND no genuine rejects ⇒ pure console output. Tally it so a
             // completed-but-empty offload (strap not banking) is distinguishable from a caught-up sync.
-            if (decoded.isEmpty && rejected.isEmpty()) onConsoleChunk()
+            if (decoded.isEmpty && rejected.isEmpty() && rawSensor.isEmpty()) onConsoleChunk()
             if (rejected.isNotEmpty()) {
                 log(
                     "Backfill: WARNING ${rejected.size} record frame(s) decoded to 0 rows " +
@@ -747,6 +762,13 @@ class Backfiller(
             // archive-full case, which returns true) — hold the cursor/ack so the strap re-sends the
             // chunk next offload. The decoded rows are already durable, so that re-send's insert is an
             // idempotent no-op while the archive retries. No data loss either way.
+            if (rawSensorArchiveBudget > 0 && rawSensor.isNotEmpty()) {
+                val sample = rawSensor.take(rawSensorArchiveBudget)
+                rawSensorArchiveBudget -= sample.size
+                if (!rawSampleSink(sample, trim)) {
+                    log("Backfill: could not archive the raw v20/v21 sample (trim=$trim) - not holding the ack for it.")
+                }
+            }
             if (rejected.isNotEmpty() && !rejectedSink(rejected, trim)) {
                 log("Backfill: rejected-frame archive failed (trim=$trim) — holding ack so the strap re-sends.")
                 persistStalled = true   // #57
@@ -852,6 +874,10 @@ class Backfiller(
          * give the dump its context. The complete records are always in the reject archive.
          */
         internal const val REJECT_HEX_DUMP_BUDGET = 24
+
+        /** Intact v20/v21 raw records archived per session as a mapping sample. Twin of Swift
+         *  `Backfiller.rawSensorArchiveSampleBudget`. */
+        internal const val RAW_SENSOR_ARCHIVE_SAMPLE_BUDGET = 8
 
         /**
          * #891: the dump line for the first frame of an unmapped packet type. Byte-identical to the Swift
