@@ -1,0 +1,701 @@
+-- Metric insights: the cached, AI-written explanation shown on a key metric's detail screen (the metrics of
+-- docs/METRIC_INSIGHTS.md), and the queue the insight worker (Tools/MetricInsight) drains. Additive only: two new tables and
+-- new functions. Nothing here writes to a scoring, context, series or noop_* table, so an insight failure can
+-- never block scoring, uploads or the metric screen itself (the app draws the value and the chart from its own
+-- data and treats the explanation as optional).
+--
+-- Tables (both owner-cascading):
+--   metric_insight_jobs   queue, one row per (user, metric); service role only
+--   metric_insights       one immutable row per published analysis; the current one has superseded_at NULL
+--
+-- Caching: an analysis is keyed by an input fingerprint (internal.metric_insight_inputs): the scores of the 90
+-- days ending at the metric's latest measured night (or complete day), the night vitals of every earlier night,
+-- the hosted day values the metric reads (their snapshot revisions), the context documents (that day and the day
+-- before, and the calm awake heart rate over the window), ElderNet gait for steps, the hosted day snapshots and
+-- activity documents around the night, the exposure events around it and the coach memory the worker may read. Changing what the worker does with
+-- them (prompt, tools, validator) must bump internal.metric_insight_version() so cached analyses are redone. The scores
+-- route calls metric_insight_request_v1 when the detail screen opens: an insight whose fingerprint matches is
+-- served as is (no model call); otherwise the job is queued, and the previous insight is served marked stale
+-- until the new one lands. Nothing is queued for a user who never opens the screen.
+--
+-- Bounds: at most 8 claims per (user, metric) per UTC day; a request older than 6 h is no longer claimed (it
+-- is re-armed by the next request); 3 consecutive failures dead-letter the inputs until they change.
+--
+-- Privileges: RLS on both tables; clients (authenticated) may only SELECT their own insights, nothing on the
+-- queue; anon nothing. Every function is SECURITY DEFINER with an empty search_path and EXECUTE revoked from
+-- public, anon and authenticated (Supabase's default privileges grant EXECUTE on new functions, so the revokes
+-- are load-bearing); the public RPCs are granted to service_role only, except metric_insight_day_values_v1, the
+-- owner's own hosted day values (auth.uid(); the worker reads them as the owner). Helpers live in `internal`.
+--
+-- Safe to re-run. Rollback: drop the functions below, then the two tables; nothing else depends on them.
+begin;
+set local lock_timeout = '5s';
+set local statement_timeout = '60s';
+
+-- ---------------------------------------------------------------------------------------------------------
+-- 1. Tables
+-- ---------------------------------------------------------------------------------------------------------
+
+-- Same lease/fence shape as physiology_context_jobs: a request with new inputs bumps input_revision; a worker
+-- holds a lease token and its publish completes the job only while its revision is still the current one.
+create table if not exists public.metric_insight_jobs (
+  user_id uuid not null references auth.users(id) on delete cascade,
+  metric text not null check (metric in ('resting_hr', 'hrv_rmssd', 'hrv_sdnn', 'skin_temp', 'resp_rate', 'spo2', 'heart_rate', 'steps', 'calories')),
+  input_revision bigint not null default 1 check (input_revision >= 1),
+  completed_revision bigint not null default 0 check (completed_revision >= 0),
+  -- The latest requested inputs: set by the request, re-stamped at every claim.
+  fingerprint text not null check (fingerprint ~ '^[0-9a-f]{64}$'),
+  anchor_day date,
+  lease_token uuid,
+  lease_until timestamptz,
+  -- The inputs the leased run analyses (stamped by the claim). The publish keys the insight by these, not by
+  -- `fingerprint`, which a request may move on while the run is in flight.
+  lease_fingerprint text check (lease_fingerprint is null or lease_fingerprint ~ '^[0-9a-f]{64}$'),
+  lease_anchor_day date,
+  consecutive_failures integer not null default 0 check (consecutive_failures >= 0),
+  dead_letter boolean not null default false,
+  not_before timestamptz not null default clock_timestamp(),
+  dirty_at timestamptz not null default clock_timestamp(),
+  requested_at timestamptz not null default clock_timestamp(),
+  -- Claims on runs_day (UTC), for the daily bound.
+  runs_day date,
+  runs_count integer not null default 0 check (runs_count >= 0),
+  last_claimed_at timestamptz,
+  last_completed_at timestamptz,
+  last_duration_ms bigint,
+  last_error text,
+  last_worker text,
+  last_outcome text,
+  claim_count bigint not null default 0,
+  success_count bigint not null default 0,
+  lease_expiry_count bigint not null default 0,
+  primary key (user_id, metric),
+  check ((lease_token is null) = (lease_until is null)),
+  check (completed_revision <= input_revision)
+);
+create index if not exists metric_insight_jobs_due
+  on public.metric_insight_jobs (dirty_at)
+  where completed_revision < input_revision and not dead_letter;
+create unique index if not exists metric_insight_jobs_token
+  on public.metric_insight_jobs (lease_token) where lease_token is not null;
+
+create table if not exists public.metric_insights (
+  id bigint generated by default as identity primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  metric text not null check (metric in ('resting_hr', 'hrv_rmssd', 'hrv_sdnn', 'skin_temp', 'resp_rate', 'spo2', 'heart_rate', 'steps', 'calories')),
+  -- The metric's latest measured day the analysis covered (the app's "through <day>").
+  anchor_day date,
+  input_fingerprint text not null check (input_fingerprint ~ '^[0-9a-f]{64}$'),
+  job_revision bigint not null check (job_revision >= 1),
+  analysis_version text not null check (analysis_version ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'),
+  model text check (model is null or char_length(model) between 1 and 200),
+  kind text not null check (kind in ('explained', 'insufficient_data')),
+  -- What the app renders: {headline, observed[], interpretation[], uncertainty[], related[], basis}.
+  insight jsonb not null check (jsonb_typeof(insight) = 'object'),
+  -- The deterministic evidence the text was checked against (never sent to the app).
+  evidence jsonb not null default '{}'::jsonb check (jsonb_typeof(evidence) = 'object'),
+  citations jsonb not null default '[]'::jsonb check (jsonb_typeof(citations) = 'array'),
+  created_at timestamptz not null default clock_timestamp(),
+  superseded_at timestamptz
+);
+create unique index if not exists metric_insights_current
+  on public.metric_insights (user_id, metric) where superseded_at is null;
+create index if not exists metric_insights_history
+  on public.metric_insights (user_id, metric, id desc);
+
+-- ---------------------------------------------------------------------------------------------------------
+-- 2. Row-level security and table privileges
+-- ---------------------------------------------------------------------------------------------------------
+
+alter table public.metric_insight_jobs enable row level security;
+revoke all on public.metric_insight_jobs from public, anon, authenticated;
+grant all on public.metric_insight_jobs to service_role;
+drop policy if exists metric_insight_jobs_service on public.metric_insight_jobs;
+create policy metric_insight_jobs_service on public.metric_insight_jobs
+  for all to service_role using (true) with check (true);
+
+alter table public.metric_insights enable row level security;
+revoke all on public.metric_insights from public, anon, authenticated;
+grant all on public.metric_insights to service_role;
+grant select on public.metric_insights to authenticated;
+drop policy if exists metric_insights_service on public.metric_insights;
+create policy metric_insights_service on public.metric_insights
+  for all to service_role using (true) with check (true);
+drop policy if exists metric_insights_select_own on public.metric_insights;
+create policy metric_insights_select_own on public.metric_insights
+  for select to authenticated using ((select auth.uid()) = user_id);
+
+revoke all on sequence public.metric_insights_id_seq from public, anon, authenticated;
+grant usage, select on sequence public.metric_insights_id_seq to service_role;
+
+-- ---------------------------------------------------------------------------------------------------------
+-- 3. Internal helpers
+-- ---------------------------------------------------------------------------------------------------------
+
+-- The analysis contract. Part of every fingerprint, so changing it re-analyses everybody on their next visit.
+create or replace function internal.metric_insight_version() returns text
+language sql immutable set search_path = '' as $$
+  select 'metric-insight-1'::text
+$$;
+
+-- The context row the worker reads for a day: the retrospective document when it exists, else the live one, of
+-- the device that produced the day's score.
+create or replace function internal.metric_insight_context_document(p_user uuid, p_device uuid, p_day date)
+returns jsonb language sql stable security definer set search_path = '' as $$
+  select d.document from public.physiology_context_days d
+   where d.user_id = p_user and d.device_id = p_device and d.day = p_day and d.superseded_by is null
+   order by (d.mode = 'retrospective') desc
+   limit 1
+$$;
+
+-- A JSON number as a number; anything else (absent, null, a string, a boolean) is no value, never zero.
+create or replace function internal.metric_insight_number(p jsonb)
+returns double precision language sql immutable set search_path = '' as $$
+  select case when pg_catalog.jsonb_typeof(p) = 'number' then (p #>> '{}')::double precision end
+$$;
+
+-- A context document's daily value of one series (e.g. calm awake heart rate, heart_rate.stable_awake_5min).
+create or replace function internal.metric_insight_daily_value(p_document jsonb, p_series text)
+returns double precision language sql immutable set search_path = '' as $$
+  select internal.metric_insight_number(x -> 'value')
+    from pg_catalog.jsonb_array_elements(case when pg_catalog.jsonb_typeof(p_document -> 'daily_values') = 'array'
+                                              then p_document -> 'daily_values' else '[]'::jsonb end) x
+   where x ->> 'series_key' = p_series
+   limit 1
+$$;
+
+-- The hosted day values a key-metric explanation reads (docs/METRIC_INSIGHTS.md): steps, the day's energy (its
+-- total, which the app's Calories metric shows, and its parts) and the strap's SpO2 estimate, from the latest
+-- snapshot of each day's selected scoring device, the snapshot server_daily_scores and the hosted read path use.
+create or replace function internal.metric_insight_day_values(p_user uuid, p_from date, p_to date)
+returns table (day date, steps double precision, total_kcal double precision, energy jsonb,
+               spo2_candidate_pct double precision, spo2_candidate_samples integer, result_revision bigint)
+language sql stable security definer set search_path = '' as $$
+  select g.d::date,
+         internal.metric_insight_number(snap.daily -> 'steps'),
+         coalesce(internal.metric_insight_number(snap.daily -> 'activeKcalEst'),
+                  internal.metric_insight_number(snap.daily -> 'energy' -> 'total_kcal')),
+         case when pg_catalog.jsonb_typeof(snap.daily -> 'energy') = 'object' then pg_catalog.jsonb_strip_nulls(
+           pg_catalog.jsonb_build_object(
+             'total_kcal', snap.daily -> 'energy' -> 'total_kcal', 'resting_kcal', snap.daily -> 'energy' -> 'resting_kcal',
+             'active_kcal', snap.daily -> 'energy' -> 'active_kcal', 'workout_kcal', snap.daily -> 'energy' -> 'workout_kcal',
+             'sedentary_min', snap.daily -> 'energy' -> 'sedentary_min', 'light_min', snap.daily -> 'energy' -> 'light_min',
+             'moderate_min', snap.daily -> 'energy' -> 'moderate_min', 'high_min', snap.daily -> 'energy' -> 'high_min',
+             'coverage_min', snap.daily -> 'energy' -> 'coverage_min', 'gap_min', snap.daily -> 'energy' -> 'gap_min',
+             'confidence', snap.daily -> 'energy' -> 'confidence',
+             'workouts', case when pg_catalog.jsonb_typeof(snap.daily -> 'energy' -> 'workouts') = 'array'
+                              then pg_catalog.jsonb_array_length(snap.daily -> 'energy' -> 'workouts') end)) end,
+         internal.metric_insight_number(snap.daily -> 'spo2_candidate_pct'),
+         internal.metric_insight_number(snap.daily -> 'spo2_candidate_samples')::integer,
+         snap.result_revision
+    from pg_catalog.generate_series(p_from::timestamp, p_to::timestamp, interval '1 day') g(d)
+    cross join (select a.algorithm_version from public.scoring_algorithms_v2 a where a.active limit 1) v
+    cross join lateral (select public.selected_scoring_device_v2(p_user, g.d::date, v.algorithm_version) as device) sel
+    join lateral (select x.payload -> 'daily' as daily, x.result_revision from public.scoring_snapshots_v2 x
+                   where x.user_id = p_user and x.device_id = sel.device and x.day = g.d::date
+                     and x.algorithm_version = v.algorithm_version
+                   order by x.result_revision desc limit 1) snap on pg_catalog.jsonb_typeof(snap.daily) = 'object'
+$$;
+
+-- The owner's own day values (the worker reads them as the owner; RLS keeps the snapshots service-only).
+create or replace function public.metric_insight_day_values_v1(p_from date, p_to date)
+returns table (day date, steps double precision, total_kcal double precision, energy jsonb,
+               spo2_candidate_pct double precision, spo2_candidate_samples integer, result_revision bigint)
+language plpgsql stable security definer set search_path = '' as $$
+begin
+  if auth.uid() is null then
+    raise exception 'authentication_required' using errcode = '42501';
+  end if;
+  if p_from is null or p_to is null or p_to < p_from or p_to - p_from > 400 then
+    raise exception 'invalid_range' using errcode = '22023';
+  end if;
+  return query select * from internal.metric_insight_day_values(auth.uid(), p_from, p_to);
+end $$;
+
+-- The metric's latest measured day (a day whose value is NULL is not measured, never zero) and the inputs
+-- fingerprint (sha256, hex). Nothing is returned when the metric has never been measured.
+create or replace function internal.metric_insight_inputs(p_user uuid, p_metric text)
+returns table (anchor_day date, fingerprint text)
+language plpgsql stable security definer set search_path = '' as $$
+declare
+  v_anchor date;
+  v_device uuid;
+  v_zone text;
+  v_today date;
+  v_doc jsonb;
+  v_previous jsonb;
+  v_lo bigint;
+  v_hi bigint;
+  v_version text := (select a.algorithm_version from public.scoring_algorithms_v2 a where a.active limit 1);
+begin
+  v_zone := internal.physiology_context_zone(p_user);
+  v_today := (pg_catalog.clock_timestamp() at time zone v_zone)::date;
+  if p_metric in ('resting_hr', 'hrv_rmssd', 'hrv_sdnn', 'skin_temp', 'resp_rate') then
+    -- A night (keyed by the day it ends): the latest one whose value is measured.
+    select s.day into v_anchor
+      from public.server_daily_scores s
+     where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1'
+       and (case p_metric when 'resting_hr' then s.resting_hr_bpm when 'hrv_rmssd' then s.hrv_rmssd_ms
+              when 'hrv_sdnn' then s.hrv_sdnn_ms when 'skin_temp' then s.skin_temp_c
+              when 'resp_rate' then s.resp_rate_bpm end) is not null
+     order by s.day desc
+     limit 1;
+  elsif p_metric = 'spo2' then
+    -- A night of the strap's SpO2 estimate (a hosted snapshot value): the latest of the last 120 days.
+    select max(v.day) into v_anchor from internal.metric_insight_day_values(p_user, v_today - 6, v_today) v
+     where v.spo2_candidate_pct is not null;
+    if v_anchor is null then
+      select max(v.day) into v_anchor from internal.metric_insight_day_values(p_user, v_today - 119, v_today - 7) v
+       where v.spo2_candidate_pct is not null;
+    end if;
+  elsif p_metric in ('steps', 'calories') then
+    -- A day: the latest COMPLETE local day with a value (today is still running), within 120 days.
+    select max(v.day) into v_anchor from internal.metric_insight_day_values(p_user, v_today - 7, v_today - 1) v
+     where (case p_metric when 'steps' then v.steps else v.total_kcal end) is not null;
+    if v_anchor is null then
+      select max(v.day) into v_anchor from internal.metric_insight_day_values(p_user, v_today - 120, v_today - 8) v
+       where (case p_metric when 'steps' then v.steps else v.total_kcal end) is not null;
+    end if;
+  elsif p_metric = 'heart_rate' then
+    -- Calm awake heart rate: the context layer's daily value of a complete local day, within 120 days.
+    select max(d.day) into v_anchor from public.physiology_context_days d
+     where d.user_id = p_user and d.superseded_by is null and d.day between v_today - 120 and v_today - 1
+       and internal.metric_insight_daily_value(d.document, 'heart_rate.stable_awake_5min') is not null;
+  end if;
+  if v_anchor is null then
+    return;
+  end if;
+  -- The scoring device of the analysed day (its context documents, snapshots and gait): the day's own score row,
+  -- else the latest one before it (the worker resolves it the same way).
+  select s.source_device_id into v_device
+    from public.server_daily_scores s
+   where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1' and s.day <= v_anchor
+     and s.source_device_id is not null
+   order by s.day desc
+   limit 1;
+  v_lo := extract(epoch from ((v_anchor - 14)::timestamp at time zone v_zone))::bigint;
+  v_hi := extract(epoch from ((v_anchor + 1)::timestamp at time zone v_zone))::bigint;
+  -- The whole selected document: the worker reads many of its sections (comparisons, episodes, availability,
+  -- sleep, exertion, bouts, daily values, exposure categories), and a republish of any of them is new input.
+  -- And the day before: the movement that came before the anchor night (a night is scored on the day it ends).
+  if v_device is not null then
+    v_doc := internal.metric_insight_context_document(p_user, v_device, v_anchor);
+    v_previous := internal.metric_insight_context_document(p_user, v_device, v_anchor - 1);
+  end if;
+  return query select v_anchor, encode(pg_catalog.sha256(convert_to(
+    internal.metric_insight_version() || E'\n' || p_user::text || E'\n' || p_metric
+    || E'\nanchor:' || to_char(v_anchor, 'YYYY-MM-DD') || E'\nzone:' || v_zone
+    || E'\nscores:' || coalesce((
+         select string_agg((to_jsonb(s) - array['provenance', 'computed_at', 'created_at', 'updated_at'])::text,
+                           E'\n' order by s.day)
+           from public.server_daily_scores s
+          where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1'
+            and s.day between v_anchor - 89 and v_anchor), '')
+    -- The usual and its call (the app's Baseline) replay every earlier night: their night vitals are input too.
+    || E'\nhistory:' || coalesce((
+         select md5(string_agg((s.day, s.resting_hr_bpm, s.hrv_rmssd_ms, s.skin_temp_c, s.resp_rate_bpm,
+                                s.spo2_pct)::text, E'\n' order by s.day))
+           from public.server_daily_scores s
+          where s.user_id = p_user and s.algorithm_version = 'frwhoop-server-1' and s.day < v_anchor - 89), '')
+    -- Hosted day values (steps, energy, the SpO2 estimate), 400 days for the steps usual's replay: each day's
+    -- snapshot revisions (a rescored day is new input) without reading the payloads.
+    || E'\nday_values:' || case when p_metric in ('spo2', 'steps', 'calories', 'heart_rate') then coalesce((
+         select string_agg(n.day::text || ':' || n.device_id::text || ':' || n.revision::text, ','
+                           order by n.day, n.device_id)
+           from (select x.day, x.device_id, max(x.result_revision) as revision from public.scoring_snapshots_v2 x
+                  where x.user_id = p_user and x.algorithm_version = v_version
+                    and x.day between v_anchor - 399 and v_anchor
+                  group by x.day, x.device_id) n), '') else '-' end
+    -- Calm awake heart rate over the window: the context documents' revisions.
+    || E'\ncalm_hr:' || case when p_metric in ('heart_rate', 'steps', 'calories') then coalesce((
+         select string_agg(d.day::text || ':' || d.mode || ':' || d.context_revision::text, ',' order by d.day, d.mode)
+           from public.physiology_context_days d
+          where d.user_id = p_user and d.device_id = v_device and d.superseded_by is null
+            and d.day between v_anchor - 119 and v_anchor), '') else '-' end
+    -- ElderNet gait of the day and the month before (UTC rows; the local day spans two).
+    || E'\ngait:' || case when p_metric = 'steps' then coalesce((
+         select string_agg(g.day::text || ':' || g.model_version || ':' || g.mode || ':' || g.result_revision::text,
+                           ',' order by g.day, g.model_version, g.mode)
+           from public.activity_gait_windows_days g
+          where g.user_id = p_user and g.device_id = v_device and g.day between v_anchor - 30 and v_anchor + 1), '')
+         else '-' end
+    || E'\ncontext:' || coalesce(md5(v_doc::text), '-') || ':' || coalesce(md5(v_previous::text), '-')
+    -- The hosted day snapshots of the night's two days (HRV slots, their activity composition, sleep sessions):
+    -- the latest result of the active algorithm, as get_server_score_snapshot_v2 serves it.
+    || E'\nsnapshots:' || coalesce((
+         select string_agg(x.day::text || ':' || md5(x.payload::text), ',' order by x.day)
+           from (select distinct on (n.day) n.day, n.payload from public.scoring_snapshots_v2 n
+                  where n.user_id = p_user and n.device_id = v_device and n.day between v_anchor - 1 and v_anchor
+                    and n.algorithm_version = (select a.algorithm_version from public.scoring_algorithms_v2 a
+                                                where a.active)
+                  order by n.day, n.result_revision desc) x), '')
+    -- The decoded activity documents around the night (activity_context_runs reads them; UTC days).
+    || E'\nactivity:' || coalesce((
+         select string_agg(c.day::text || ':' || c.algorithm_version || ':' || md5(c.document::text), ','
+                           order by c.day, c.algorithm_version)
+           from public.activity_context_days c
+          where c.user_id = p_user and c.device_id = v_device and c.day between v_anchor - 2 and v_anchor + 1), '')
+    || E'\nexposures:' || coalesce((
+         select string_agg(e.event_id || ':' || e.revision::text, ',' order by e.event_id collate "C")
+           from public.exposure_events e
+          where e.owner = p_user and e.occurred_start < v_hi and e.occurred_end > v_lo), '')
+    || E'\nmemory:' || coalesce((
+         select string_agg(m.id::text || ':' || m.importance::text || ':' || md5(m.topic || E'\n' || m.content), ','
+                           order by m.id)
+           from (select x.id, x.importance, x.topic, x.content from public.coach_memory_items x
+                  where x.user_id = p_user order by x.importance desc, x.created_at desc, x.id limit 12) m), ''),
+    'UTF8')), 'hex');
+end $$;
+
+-- The app-facing view of one insight row. The stored insight object carries the text; the row's own columns
+-- win over any key of the same name in it.
+create or replace function internal.metric_insight_json(r public.metric_insights, p_stale boolean)
+returns jsonb language sql stable set search_path = '' as $$
+  select r.insight || jsonb_build_object(
+    'id', r.id,
+    'metric', r.metric,
+    'kind', r.kind,
+    'generated_at', r.created_at,
+    'analysis_version', r.analysis_version,
+    'data_through', r.anchor_day,
+    'stale', p_stale,
+    'citations', r.citations)
+$$;
+
+-- A JSON array of at most p_max strings, each 1..p_len characters.
+create or replace function internal.metric_insight_is_text_list(p jsonb, p_max integer, p_len integer)
+returns boolean language sql immutable set search_path = '' as $$
+  select coalesce(jsonb_typeof(p) = 'array' and jsonb_array_length(p) <= p_max
+    and not exists (select 1 from jsonb_array_elements(p) x(v)
+                     where jsonb_typeof(x.v) <> 'string' or char_length(x.v #>> '{}') not between 1 and p_len), false)
+$$;
+
+-- ---------------------------------------------------------------------------------------------------------
+-- 4. RPCs
+-- ---------------------------------------------------------------------------------------------------------
+
+-- The scores route's call when a metric detail screen opens. Returns
+--   {status: ready|pending|unavailable, metric, insight (or null), retry_after_s (pending), reason (unavailable)}
+-- ready        the current insight matches the inputs; no work is queued
+-- pending      the job is queued or running; `insight` is the previous one marked stale, if any
+-- unavailable  reason no_measured_data (nothing to explain), analysis_failed (these inputs dead-lettered) or
+--              daily_limit; `insight` is the previous one marked stale, if any
+create or replace function public.metric_insight_request_v1(p_user uuid, p_metric text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_anchor date;
+  v_fp text;
+  v_current public.metric_insights;
+  v_has_current boolean;
+  v_stale jsonb;
+  j public.metric_insight_jobs;
+  v_has_job boolean;
+  v_capped boolean;
+  v_today date := (pg_catalog.now() at time zone 'UTC')::date;
+  v_now timestamptz := pg_catalog.clock_timestamp();
+begin
+  if auth.uid() is not null and auth.uid() is distinct from p_user then
+    raise exception 'cross_user_caller' using errcode = '42501';
+  end if;
+  if p_user is null then
+    raise exception 'invalid_arguments' using errcode = '22023';
+  end if;
+  if p_metric is null or p_metric not in ('resting_hr', 'hrv_rmssd', 'hrv_sdnn', 'skin_temp', 'resp_rate', 'spo2', 'heart_rate', 'steps', 'calories') then
+    raise exception 'invalid_metric' using errcode = '22023';
+  end if;
+  if exists (select 1 from public.noop_account_retirements x where x.user_id = p_user) then
+    raise exception 'account_retired' using errcode = '42501';
+  end if;
+
+  select i.anchor_day, i.fingerprint into v_anchor, v_fp from internal.metric_insight_inputs(p_user, p_metric) i;
+  select * into v_current from public.metric_insights m
+   where m.user_id = p_user and m.metric = p_metric and m.superseded_at is null;
+  v_has_current := found;
+  if v_anchor is null then
+    return jsonb_build_object('status', 'unavailable', 'metric', p_metric, 'reason', 'no_measured_data',
+      'insight', null);
+  end if;
+  if v_has_current and v_current.input_fingerprint = v_fp then
+    return jsonb_build_object('status', 'ready', 'metric', p_metric,
+      'insight', internal.metric_insight_json(v_current, false));
+  end if;
+  v_stale := case when v_has_current then internal.metric_insight_json(v_current, true) end;
+
+  select * into j from public.metric_insight_jobs q where q.user_id = p_user and q.metric = p_metric for update;
+  v_has_job := found;
+  -- At the daily bound nothing new is claimed; a run already in flight still finishes.
+  v_capped := v_has_job and j.runs_day = v_today and j.runs_count >= 8
+    and (j.lease_until is null or j.lease_until <= v_now);
+  if v_has_job and j.fingerprint = v_fp then
+    if j.dead_letter then
+      return jsonb_build_object('status', 'unavailable', 'metric', p_metric, 'reason', 'analysis_failed',
+        'insight', v_stale);
+    end if;
+    if j.completed_revision < j.input_revision and not v_capped then
+      update public.metric_insight_jobs q set requested_at = v_now
+       where q.user_id = p_user and q.metric = p_metric;
+      return jsonb_build_object('status', 'pending', 'metric', p_metric, 'insight', v_stale,
+        'retry_after_s', greatest(5, least(60, ceil(extract(epoch from (j.not_before - v_now)))::integer)));
+    end if;
+  end if;
+  if v_capped then
+    return jsonb_build_object('status', 'unavailable', 'metric', p_metric, 'reason', 'daily_limit',
+      'insight', v_stale);
+  end if;
+
+  insert into public.metric_insight_jobs as q (user_id, metric, fingerprint, anchor_day)
+  values (p_user, p_metric, v_fp, v_anchor)
+  on conflict (user_id, metric) do update set
+    input_revision = q.input_revision + 1,
+    fingerprint = excluded.fingerprint,
+    anchor_day = excluded.anchor_day,
+    consecutive_failures = 0,
+    dead_letter = false,
+    not_before = v_now,
+    dirty_at = v_now,
+    requested_at = v_now;
+  return jsonb_build_object('status', 'pending', 'metric', p_metric, 'insight', v_stale, 'retry_after_s', 10);
+end $$;
+
+-- One due job under a fresh lease: the longest-waiting inputs first (dirty_at; a poll does not move a job up),
+-- FOR UPDATE SKIP LOCKED. Requests nobody repeated for 6 h and owners at their daily bound are skipped; retired
+-- owners are never handed out. Re-stamps the fingerprint
+-- and anchor as of the claim, which is what the published insight is keyed by.
+create or replace function public.metric_insight_claim_v1(p_worker text, p_lease_seconds integer default 300)
+returns table (user_id uuid, metric text, input_revision bigint, lease_token uuid, lease_until timestamptz,
+  anchor_day date, fingerprint text, timezone_id text, analysis_version text, claim_count bigint)
+language plpgsql security definer set search_path = '' as $$
+#variable_conflict use_column
+declare
+  j public.metric_insight_jobs;
+  v_today date := (pg_catalog.now() at time zone 'UTC')::date;
+  v_anchor date;
+  v_fp text;
+begin
+  if p_lease_seconds is null or p_lease_seconds < 30 or p_lease_seconds > 3600 then
+    raise exception 'invalid_lease' using errcode = '22023';
+  end if;
+  if p_worker is null or p_worker !~ '^[A-Za-z0-9._:@/-]{1,128}$' then
+    raise exception 'invalid_worker' using errcode = '22023';
+  end if;
+  select q.* into j from public.metric_insight_jobs q
+   where q.completed_revision < q.input_revision and not q.dead_letter
+     and q.not_before <= pg_catalog.clock_timestamp()
+     and q.requested_at > pg_catalog.clock_timestamp() - interval '6 hours'
+     and (q.lease_until is null or q.lease_until <= pg_catalog.clock_timestamp())
+     and (q.runs_day is distinct from v_today or q.runs_count < 8)
+     and not exists (select 1 from public.noop_account_retirements x where x.user_id = q.user_id)
+   order by q.dirty_at, q.user_id, q.metric
+   for update of q skip locked limit 1;
+  if not found then
+    return;
+  end if;
+  select i.anchor_day, i.fingerprint into v_anchor, v_fp from internal.metric_insight_inputs(j.user_id, j.metric) i;
+  return query
+  update public.metric_insight_jobs q set
+    lease_token = gen_random_uuid(),
+    lease_until = pg_catalog.clock_timestamp() + make_interval(secs => p_lease_seconds),
+    last_claimed_at = pg_catalog.clock_timestamp(),
+    claim_count = q.claim_count + 1,
+    lease_expiry_count = q.lease_expiry_count + case when q.lease_token is null then 0 else 1 end,
+    runs_count = case when q.runs_day = v_today then q.runs_count + 1 else 1 end,
+    runs_day = v_today,
+    last_worker = p_worker,
+    fingerprint = coalesce(v_fp, q.fingerprint),
+    anchor_day = v_anchor,
+    lease_fingerprint = coalesce(v_fp, q.fingerprint),
+    lease_anchor_day = v_anchor
+  where q.user_id = j.user_id and q.metric = j.metric
+  returning q.user_id, q.metric, q.input_revision, q.lease_token, q.lease_until, q.lease_anchor_day, q.lease_fingerprint,
+    internal.physiology_context_zone(q.user_id), internal.metric_insight_version(), q.claim_count;
+end $$;
+
+create or replace function public.metric_insight_renew_v1(p_token uuid, p_lease_seconds integer default 300)
+returns boolean language plpgsql security definer set search_path = '' as $$
+begin
+  if p_lease_seconds is null or p_lease_seconds < 30 or p_lease_seconds > 3600 then
+    raise exception 'invalid_lease' using errcode = '22023';
+  end if;
+  update public.metric_insight_jobs q set
+    lease_until = pg_catalog.clock_timestamp() + make_interval(secs => p_lease_seconds)
+  where q.lease_token = p_token and q.lease_until > pg_catalog.clock_timestamp();
+  return found;
+end $$;
+
+-- A failed attempt under a live lease. Same revision: backoff min(1800, 30 * 2^failures) seconds and a dead
+-- letter at the 3rd consecutive failure (cleared by the next request with changed inputs). Different revision:
+-- a clean release, due at once. A lost or expired lease changes nothing.
+-- Returns {status: failed|released|lease_lost|lease_expired, consecutive_failures, dead_letter, not_before}.
+create or replace function public.metric_insight_fail_v1(p_token uuid, p_revision bigint, p_error text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  j public.metric_insight_jobs;
+begin
+  select * into j from public.metric_insight_jobs q where q.lease_token = p_token for update;
+  if not found then
+    return jsonb_build_object('status', 'lease_lost');
+  end if;
+  if j.lease_until <= pg_catalog.clock_timestamp() then
+    return jsonb_build_object('status', 'lease_expired');
+  end if;
+  if p_revision is distinct from j.input_revision then
+    update public.metric_insight_jobs q set lease_token = null, lease_until = null,
+      not_before = pg_catalog.clock_timestamp(), consecutive_failures = 0, last_outcome = 'released'
+    where q.user_id = j.user_id and q.metric = j.metric
+    returning * into j;
+    return jsonb_build_object('status', 'released', 'consecutive_failures', j.consecutive_failures,
+      'dead_letter', j.dead_letter, 'not_before', j.not_before);
+  end if;
+  update public.metric_insight_jobs q set
+    consecutive_failures = q.consecutive_failures + 1,
+    dead_letter = (q.consecutive_failures + 1 >= 3),
+    not_before = pg_catalog.clock_timestamp()
+      + make_interval(secs => least(1800, 30 * power(2, least(q.consecutive_failures, 10)))::integer),
+    last_error = left(coalesce(p_error, 'unspecified'), 2000),
+    last_outcome = 'failed',
+    lease_token = null, lease_until = null
+  where q.user_id = j.user_id and q.metric = j.metric
+  returning * into j;
+  return jsonb_build_object('status', 'failed', 'consecutive_failures', j.consecutive_failures,
+    'dead_letter', j.dead_letter, 'not_before', j.not_before);
+end $$;
+
+-- Fenced publication of one analysis. Payload:
+--   {kind: explained|insufficient_data, analysis_version, model (or null), duration_ms,
+--    insight: {headline, observed[], interpretation[], uncertainty[], related[], basis{}}, evidence{}, citations[]}
+-- Outcomes ({applied, insight_id, reason}):
+--   lease_lost / lease_expired   nothing written
+--   owner_retired                the lease is released; nothing written
+--   published                    new current row (the previous one superseded; superseded rows beyond the 20
+--                                newest of the (user, metric) are deleted); the job is completed
+--   published_superseded         the same, but a request queued changed inputs while the worker ran: the row is
+--                                keyed by the claim's inputs (lease_fingerprint), so it is served stale, and the
+--                                job stays due
+-- A malformed payload raises (22023, invalid_metric_insight_*) and writes nothing.
+create or replace function public.metric_insight_publish_v1(p_token uuid, p_revision bigint, p_payload jsonb)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  j public.metric_insight_jobs;
+  v_insight jsonb := p_payload -> 'insight';
+  v_kind text := p_payload ->> 'kind';
+  v_version text := p_payload ->> 'analysis_version';
+  v_model text := p_payload ->> 'model';
+  v_evidence jsonb := coalesce(p_payload -> 'evidence', '{}'::jsonb);
+  v_citations jsonb := coalesce(p_payload -> 'citations', '[]'::jsonb);
+  v_duration bigint := internal.physiology_context_json_int(p_payload -> 'duration_ms');
+  v_now timestamptz := pg_catalog.clock_timestamp();
+  v_id bigint;
+  v_current boolean;
+begin
+  if p_token is null or p_revision is null then
+    raise exception 'invalid_arguments' using errcode = '22023';
+  end if;
+  if p_payload is null or jsonb_typeof(p_payload) <> 'object' or octet_length(p_payload::text) > 262144 then
+    raise exception 'invalid_metric_insight_payload' using errcode = '22023';
+  end if;
+  if v_kind is null or v_kind not in ('explained', 'insufficient_data') then
+    raise exception 'invalid_metric_insight_kind' using errcode = '22023';
+  end if;
+  if v_version is null or v_version !~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+     or (p_payload ? 'model' and jsonb_typeof(p_payload -> 'model') not in ('string', 'null'))
+     or (v_model is not null and char_length(v_model) not between 1 and 200) then
+    raise exception 'invalid_metric_insight_version' using errcode = '22023';
+  end if;
+  if v_insight is null or jsonb_typeof(v_insight) <> 'object'
+     or jsonb_typeof(v_insight -> 'headline') <> 'string'
+     or char_length(v_insight ->> 'headline') not between 1 and 240
+     or not internal.metric_insight_is_text_list(v_insight -> 'observed', 6, 400)
+     or not internal.metric_insight_is_text_list(v_insight -> 'interpretation', 6, 400)
+     or not internal.metric_insight_is_text_list(v_insight -> 'uncertainty', 6, 400)
+     or coalesce(jsonb_typeof(v_insight -> 'related'), 'array') <> 'array'
+     or jsonb_array_length(coalesce(v_insight -> 'related', '[]'::jsonb)) > 8
+     or coalesce(jsonb_typeof(v_insight -> 'basis'), 'object') <> 'object' then
+    raise exception 'invalid_metric_insight_text' using errcode = '22023';
+  end if;
+  if jsonb_typeof(v_evidence) <> 'object' or jsonb_typeof(v_citations) <> 'array'
+     or jsonb_array_length(v_citations) > 8
+     or exists (select 1 from jsonb_array_elements(v_citations) c(v) where jsonb_typeof(c.v) <> 'object') then
+    raise exception 'invalid_metric_insight_citations' using errcode = '22023';
+  end if;
+
+  select * into j from public.metric_insight_jobs q where q.lease_token = p_token for update;
+  if not found then
+    return jsonb_build_object('applied', false, 'insight_id', null, 'reason', 'lease_lost');
+  end if;
+  if j.lease_until <= v_now then
+    return jsonb_build_object('applied', false, 'insight_id', null, 'reason', 'lease_expired');
+  end if;
+  if exists (select 1 from public.noop_account_retirements x where x.user_id = j.user_id) then
+    update public.metric_insight_jobs q set lease_token = null, lease_until = null, last_outcome = 'owner_retired'
+     where q.user_id = j.user_id and q.metric = j.metric;
+    return jsonb_build_object('applied', false, 'insight_id', null, 'reason', 'owner_retired');
+  end if;
+  v_current := p_revision = j.input_revision;
+
+  update public.metric_insights m set superseded_at = v_now
+   where m.user_id = j.user_id and m.metric = j.metric and m.superseded_at is null;
+  insert into public.metric_insights (user_id, metric, anchor_day, input_fingerprint, job_revision,
+    analysis_version, model, kind, insight, evidence, citations, created_at)
+  values (j.user_id, j.metric, j.lease_anchor_day, coalesce(j.lease_fingerprint, j.fingerprint), p_revision,
+    v_version, v_model, v_kind,
+    v_insight, v_evidence, v_citations, v_now)
+  returning id into v_id;
+  delete from public.metric_insights m
+   where m.user_id = j.user_id and m.metric = j.metric and m.superseded_at is not null
+     and m.id not in (select k.id from public.metric_insights k
+                       where k.user_id = j.user_id and k.metric = j.metric and k.superseded_at is not null
+                       order by k.id desc limit 20);
+
+  update public.metric_insight_jobs q set
+    completed_revision = case when v_current then p_revision else q.completed_revision end,
+    consecutive_failures = 0,
+    not_before = v_now,
+    lease_token = null, lease_until = null,
+    last_completed_at = v_now,
+    last_duration_ms = v_duration,
+    last_error = null,
+    last_outcome = case when v_current then 'published' else 'published_superseded' end,
+    success_count = q.success_count + 1
+  where q.user_id = j.user_id and q.metric = j.metric;
+  return jsonb_build_object('applied', true, 'insight_id', v_id,
+    'reason', case when v_current then 'published' else 'published_superseded' end);
+end $$;
+
+-- ---------------------------------------------------------------------------------------------------------
+-- 5. Privileges
+-- ---------------------------------------------------------------------------------------------------------
+
+revoke all on function internal.metric_insight_version() from public, anon, authenticated, service_role;
+revoke all on function internal.metric_insight_context_document(uuid, uuid, date)
+  from public, anon, authenticated, service_role;
+revoke all on function internal.metric_insight_inputs(uuid, text) from public, anon, authenticated, service_role;
+revoke all on function internal.metric_insight_number(jsonb) from public, anon, authenticated, service_role;
+revoke all on function internal.metric_insight_daily_value(jsonb, text) from public, anon, authenticated, service_role;
+revoke all on function internal.metric_insight_day_values(uuid, date, date) from public, anon, authenticated, service_role;
+revoke all on function public.metric_insight_day_values_v1(date, date) from public, anon;
+grant execute on function public.metric_insight_day_values_v1(date, date) to authenticated;
+revoke all on function internal.metric_insight_json(public.metric_insights, boolean)
+  from public, anon, authenticated, service_role;
+revoke all on function internal.metric_insight_is_text_list(jsonb, integer, integer)
+  from public, anon, authenticated, service_role;
+
+revoke all on function public.metric_insight_request_v1(uuid, text) from public, anon, authenticated;
+revoke all on function public.metric_insight_claim_v1(text, integer) from public, anon, authenticated;
+revoke all on function public.metric_insight_renew_v1(uuid, integer) from public, anon, authenticated;
+revoke all on function public.metric_insight_fail_v1(uuid, bigint, text) from public, anon, authenticated;
+revoke all on function public.metric_insight_publish_v1(uuid, bigint, jsonb) from public, anon, authenticated;
+
+grant execute on function public.metric_insight_request_v1(uuid, text) to service_role;
+grant execute on function public.metric_insight_claim_v1(text, integer) to service_role;
+grant execute on function public.metric_insight_renew_v1(uuid, integer) to service_role;
+grant execute on function public.metric_insight_fail_v1(uuid, bigint, text) to service_role;
+grant execute on function public.metric_insight_publish_v1(uuid, bigint, jsonb) to service_role;
+
+comment on table public.metric_insight_jobs is
+  'Metric insight queue: one job per (user, metric), queued by metric_insight_request_v1 when inputs changed. Fenced like physiology_context_jobs (input_revision/completed_revision, lease token, backoff, dead letter at 3, 8 claims per UTC day). Service role only.';
+comment on table public.metric_insights is
+  'AI-written metric explanations, one immutable row per published analysis keyed by its input fingerprint; superseded_at IS NULL marks the current row, the 20 newest superseded rows are kept as the owner''s analysis history. Written only by metric_insight_publish_v1.';
+comment on function public.metric_insight_request_v1(uuid, text) is
+  'The scores route''s insight read: {status: ready|pending|unavailable, metric, insight, retry_after_s, reason}. Queues an analysis only when the inputs fingerprint changed.';
+
+commit;

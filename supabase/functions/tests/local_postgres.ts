@@ -11,8 +11,8 @@ const decoder = new TextDecoder();
 
 export async function startLocalPostgres({ scalarProjections = false, auxiliaryIdentity = false,
   appendCompatibility = false, installationLifecycle = false, objectRepresentations = false,
-  authProvisioning = false, statementTimeoutMs = 0 }:
-  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; statementTimeoutMs?: number } = {}) {
+  authProvisioning = false, statementTimeoutMs = 0, fullChain = false }:
+  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; statementTimeoutMs?: number; fullChain?: boolean } = {}) {
   if (!Number.isInteger(statementTimeoutMs) || statementTimeoutMs < 0 || statementTimeoutMs > 600000) {
     throw new Error("invalid_fixture_statement_timeout");
   }
@@ -58,7 +58,7 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
       create role postgres nologin; create role anon nologin; create role authenticated nologin;
       create role service_role nologin bypassrls; create role authenticator login noinherit;
       grant anon,authenticated,service_role to authenticator;
-      create schema auth; create schema extensions;
+      create schema auth; create schema extensions;${fullChain ? ' create schema realtime;' : ''}
       create publication supabase_realtime;
       create table auth.users (id uuid primary key, raw_user_meta_data jsonb default '{}'::jsonb, email text);
       create function auth.uid() returns uuid language sql stable as $$
@@ -101,6 +101,22 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
     migrations.push('20260922020000_async_object_verification.sql');
     if (objectRepresentations) migrations.push('20260923180000_object_representation_identity.sql');
     if (authProvisioning) migrations.push('20261004120000_supabase_auth_installation_provisioning.sql');
+    // fullChain: every migration in order instead of the list above, for suites whose tables sit at the end of
+    // the chain. pg_cron is not available here (its two migrations are skipped), and the intake durability
+    // migration runs right after the scoring durability one it depends on, as in production.
+    if (fullChain) {
+      const directory = new URL('../../migrations/', import.meta.url);
+      const names: string[] = [];
+      for await (const entry of Deno.readDir(directory)) if (entry.isFile && entry.name.endsWith('.sql')) names.push(entry.name);
+      const skipped = new Set(['20260911140000_scheduled_workers_pg_cron.sql',
+        '20260930235500_expand_scoring_invalidations_cron.sql', '20260921060000_production_intake_durability.sql']);
+      migrations.length = 0;
+      for (const name of names.sort()) {
+        if (skipped.has(name)) continue;
+        migrations.push(name);
+        if (name === '20260918010000_production_scoring_durability.sql') migrations.push('20260921060000_production_intake_durability.sql');
+      }
+    }
     for (const migration of migrations) {
       const file = new URL(`../../migrations/${migration}`, import.meta.url);
       await run(`${bin}/psql`, ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', base, '-U', 'edge_test', '-d', 'postgres', '-f', decodeURIComponent(file.pathname)]);

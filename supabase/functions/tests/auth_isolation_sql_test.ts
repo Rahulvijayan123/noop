@@ -183,6 +183,12 @@ const SERVICE_ONLY_FUNCTIONS = [
   "physiology_context_history_read_v1",
   "record_exposure_event_v1",
   "exposure_events_read_v1",
+  // Metric insights (20261008000000_metric_insights.sql): the scores route's request and the insight worker's queue.
+  "metric_insight_request_v1",
+  "metric_insight_claim_v1",
+  "metric_insight_renew_v1",
+  "metric_insight_fail_v1",
+  "metric_insight_publish_v1",
 ];
 
 Deno.test({

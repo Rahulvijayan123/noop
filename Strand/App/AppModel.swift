@@ -476,6 +476,7 @@ final class AppModel: ObservableObject {
         cloudJobsRan = nil   // a sign-in after this, even to the same account, runs its jobs at once
         IntradaySeriesStore.shared.reset()
         PhysiologyContextStore.shared.reset()
+        MetricInsightStore.shared.reset()   // metric explanations read with the ended account's credential
         ActivityEncoderWindowStore.shared.reset()
         SensorBiomarkerStore.shared.reset()
         activityWindowsSyncedAt = nil
